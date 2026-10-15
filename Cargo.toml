@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/reef-vcs/reef"
+homepage = "https://github.com/reef-vcs/reef"
