@@ -1,11 +1,22 @@
 [package]
 name = "reef-daemon"
-description = "Placeholder for the Reef daemon. Reef is version control built for a world where AI agents write most of the code; the project is in its design phase."
+description = "Reef daemon: the local service that owns snapshots, workspaces, leases, and the typed API. Reef is version control built for a world where AI agents write most of the code."
 readme = "README.md"
-keywords = ["vcs", "version-control", "agents"]
+keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "reef-daemon"
+path = "src/main.rs"
+
+[dependencies]
+reef-lib.workspace = true
