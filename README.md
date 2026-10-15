@@ -49,6 +49,10 @@ Reef targets the open ecosystem, not one organization's monorepo. The hub is a p
 
 Non-goals: replacing GitHub or any review platform, running builds or tests, or being a hosted service.
 
+## Design
+
+The full design document is at [docs/design.md](docs/design.md).
+
 ## Contributing
 
 The project is at the design stage. Issues and discussion are welcome. Code contributions will make sense once phase one has a skeleton.
