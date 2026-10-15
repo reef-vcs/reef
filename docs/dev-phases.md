@@ -27,7 +27,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R0.01 | Workspace layout and crate roles | Settle the Cargo workspace: `reef-lib` (data model, workspaces, merge), `reef-daemon` (service, API), `reef-vcs` (the `reef` binary and umbrella). Document crate boundaries in a short ADR. | S | |
+| R0.01 | Workspace layout and crate roles | Settle the Cargo workspace: `reef-lib` (data model, workspaces, merge), `reef-daemon` (service, API), `reef-vcs` (the `reef` binary and umbrella), and an unpublished `reef-testing` (synthetic repository generator, fixtures) that published crates reach only as a dev-dependency. Document crate boundaries in a short ADR. | S | |
 | R0.02 | Toolchain pinning and dev tooling | `rust-toolchain.toml`, a `justfile` or equivalent for build, test, lint, and bench, rustfmt and clippy config, pre-commit hook. | S | R0.01 |
 | R0.03 | CI on macOS and Linux | GitHub Actions matrix: build, test, clippy, fmt. Cache cargo. Fail on warnings. | S | R0.02 |
 | R0.04 | jj-lib embedding spike | Pin a jj-lib version. Open an existing jj repo, snapshot the working copy, list changes, read the op log, undo one op. Record what jj-lib exposes and what it does not in an ADR. | M | R0.01 |

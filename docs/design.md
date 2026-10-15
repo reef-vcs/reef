@@ -154,7 +154,7 @@ Agents talk only to the local daemon. The daemon owns snapshots, workspaces, mer
 
 ### Storage
 
-A Merkle tree of directories and files hashed with BLAKE3, which parallelizes across cores. Per-directory hashes make comparing two snapshots of a monorepo O(changed subtrees). Large files use content-defined chunking so near-duplicate blobs across speculative branches share storage. The local store is a cache in front of the remote store: a new workspace pulls metadata and fetches file content on first read. Language servers and build tools walk whole trees and would defeat lazy fetch, so a repository can declare sparse profiles and prefetch hints that materialize the subtrees a task will touch.
+A Merkle tree of directories and files hashed with BLAKE3, which parallelizes across cores, in Reef's own backend from phase four; until then the objects are jj's git objects with SHA-1 identities, as the data model section states. Per-directory hashes make comparing two snapshots of a monorepo O(changed subtrees). Large files use content-defined chunking so near-duplicate blobs across speculative branches share storage. The local store is a cache in front of the remote store: a new workspace pulls metadata and fetches file content on first read. Language servers and build tools walk whole trees and would defeat lazy fetch, so a repository can declare sparse profiles and prefetch hints that materialize the subtrees a task will touch.
 
 Status is answered from an incrementally maintained index fed by filesystem notifications, never from a tree walk. The index is a proper embedded database rather than a flat file, so it stays consistent across concurrent agents on the same machine. The index can be marked stale, for example after a watcher overflow, and a full walk rebuilds it; the walk is the fallback, not the path.
 
@@ -213,7 +213,7 @@ Reef holds state in four places, and only two of them need protecting.
 | State | Where | Authoritative | Rebuilt from |
 | --- | --- | --- | --- |
 | Objects, snapshots, changes, operation log | The jj repository on the local machine, or the store | Yes | Nothing. This is the history. |
-| Reef metadata: workspace records, leases, evidence index, provenance | SQLite next to the repository, or Postgres on the store | Yes, except leases | Leases expire and are reissued |
+| Reef metadata: workspace records, leases, evidence index, provenance | SQLite in the daemon state directory, every row keyed by repository, or Postgres on the store | Yes, except leases | Leases expire and are reissued |
 | Evidence artifacts: logs and build outputs | The artifact store, with its own retention | Yes, within retention | Re-running the executor |
 | Workspaces, base caches, status index, symbol index | Local disk | No | The store, by materialization or re-indexing |
 
@@ -275,7 +275,7 @@ Rust end to end for the core, reusing existing open source components for the he
 | Hashing | [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) in Reef's own backend; git SHA-1 while on jj's git backend | Parallel, fast on large trees, reference implementation in Rust. The switch comes with the store in phase four. |
 | Chunking | FastCDC | Content-defined chunking so near-duplicate blobs share storage. |
 | Git interop | [gitoxide](https://github.com/GitoxideLabs/gitoxide) | Pure Rust git with a native wire protocol. No shelling out, no libgit2. Jujutsu is already migrating to it. |
-| Local metadata, index, leases, op log | SQLite | Durable, queryable, one file, readable from every language. The query layer gets SQL for free. |
+| Local metadata, leases, and indexes over the operation log and symbols | SQLite | Durable, queryable, one database per daemon keyed by repository, readable from every language. jj's operation log stays authoritative in the repository; SQLite indexes it. The query layer gets SQL for free. |
 | Local object cache | Packfile-style files on disk, indexed in SQLite | Simple and inspectable, no second database engine. |
 | Filesystem watching | notify crate, [Watchman](https://facebook.github.io/watchman/) as optional backend | notify covers inotify and FSEvents. Watchman scales better on large monorepos and jj already supports it. |
 | Workspace materialization | overlayfs and reflinks via syscalls, APFS clonefile, NFS via [nfsserve](https://github.com/xetdata/nfsserve), FUSE via fuser, virtiofsd for microVMs | Each backend is a thin layer over syscalls. nfsserve is a pure Rust NFS server and is the macOS path, since EdenFS found FUSE too fragile there. |
@@ -413,4 +413,4 @@ Build on Jujutsu's data model and crates rather than starting clean. Each phase 
 5. **Structural merge.** Tree-sitter based merge for Python, TypeScript, Go, and Rust, with measured fallback rates guiding which languages come next.
 6. **Protocol specification and conformance suite.** Published once the first four phases have stabilized in practice, so alternative implementations can exist.
 
-The decision to make first is whether phase one is a contribution to Jujutsu itself or a separate project that depends on it. A separate project moves faster and can later upstream what fits.
+Reef is a separate project that depends on jj-lib, not a contribution to Jujutsu itself. A separate project moves faster, and generic improvements are upstreamed as they prove out. The technology section records the decision.
