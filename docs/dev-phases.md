@@ -194,6 +194,9 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.29 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
 | R3.30 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.06, R3.12 |
 | R3.31 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.12 |
+| R3.32 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Rendered in the proposal view. | M | R3.05, R3.29 |
+| R3.33 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.20 |
+| R3.34 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.06, R3.09 |
 
 ### Workstream: conflicts
 

@@ -14,7 +14,7 @@ Git was designed for a few dozen humans making a few commits a day. Agents break
 - **Most work is speculative.** An agent tries several approaches and keeps one. Branching, snapshotting, and discarding must be nearly free.
 - **The consumer of history is also an agent.** Tokens are a performance metric. A diff that costs 40k tokens to read is slow no matter how fast it computed.
 - **Conflicts are routine.** Two agents editing the same file at once is the normal case. A conflict that halts an agent in a modal state halts the fleet.
-- **Trust shifts from author to evidence.** No human can review every line. A change must carry proof of which tests ran on exactly this tree.
+- **Trust shifts from author to evidence.** No human can review every line. A change must carry verifiable evidence of which tests ran on exactly this tree.
 - **Git ceremony is waste.** Staging areas, detached HEADs, and parsing porcelain output burn tokens and cause errors. Agents want a typed API.
 
 Git worktrees, the current answer to agent isolation, make the problem concrete: every worktree is a full copy, its dependency directories dwarf the source, it has no owner and no expiry, and it holds the only copy of uncommitted work, so nobody dares delete one.

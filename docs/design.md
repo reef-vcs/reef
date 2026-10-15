@@ -18,7 +18,7 @@ Git was designed for a few dozen humans making a few commits a day. Agents break
 - **Most work is speculative.** An agent tries several approaches and keeps one. Branching, snapshotting, and discarding must be nearly free, and discarded work must clean itself up.
 - **The consumer of history is also an agent.** Tokens are a performance metric. A unified diff that costs 40k tokens to read is slow regardless of how fast it computed.
 - **Conflicts are routine.** Two agents editing the same file at once is the normal case, not the exception. A conflict that halts the agent in a modal state halts the fleet.
-- **Trust shifts from author to evidence.** No human can review every line of agent output. A change must carry proof: which tests ran on exactly this tree, what the build produced, which task and instruction caused it.
+- **Trust shifts from author to evidence.** No human can review every line of agent output. A change must carry verifiable evidence: which tests ran on exactly this tree, what the build produced, which task and instruction caused it.
 - **Git ceremony is pure waste.** Staging areas, detached HEADs, interactive rebase, and parsing porcelain output burn tokens and cause errors. Agents want a typed API, not a shell dialect.
 
 ### Worktrees in particular
@@ -177,6 +177,12 @@ Landing then rebases onto the current head. A rebase produces a new tree hash, s
 
 If the rebase does not commute, the proposal returns to its owner with a conflict object, or to the resolver queue if the owner's session has ended. This is a merge queue inside the version control system rather than one bolted onto CI.
 
+### What evidence proves
+
+Evidence is a verifiable claim, not a formal proof. A proof in Reef is a chain of five links, and the landing gate checks each one: a claim bound to an exact tree hash; an attestation signing that claim in a standard envelope; an attestor that repository policy trusts, which excludes the submitting agent signing its own test run; policy satisfaction, where the required evidence kinds for the touched paths are all present; and coverage, where the symbol-level diff and per-target evidence show which changed symbols the checks exercised. The proposal view renders this chain, and the reviewer's question becomes whether the chain is good enough for this change rather than what the lines do.
+
+Two gaps remain and are stated rather than hidden. Tests prove the code does what the tests check, not that it does what was intended. Reef puts intent first in the proposal view so the reviewer judges whether the evidence bears on it, which is a smaller judgment than reading the diff but still a human one. And an agent that writes both the code and its tests produces circular evidence. Three mitigations, all expressible in policy, close most of that gap. Test changes are shown as their own thing in the proposal view, so a deleted assertion is as visible as a new function. A behavioral diff evidence kind has the executor run the suite on the base tree and on the proposal and attest to what changed in outcomes: newly passing, newly failing, added, and removed tests, so a change that goes green by removing tests shows as removed tests. And for designated paths, policy can require tests to come from a different change than the code, or require human sign-off on test changes even when code changes need none.
+
 ### CI load
 
 Agents overrun conventional CI because every push triggers a full pipeline and nothing deduplicates or batches. Reef removes most of that load structurally. Local snapshots never trigger anything; only proposals are tested. The landing queue tests a batch head rather than each proposal. Evidence is keyed by tree hash, so an identical tree is never tested twice. Evidence transfer rules skip cheap checks after a commuting rebase, and build caches keyed by tree hash make the remaining runs incremental.
@@ -238,7 +244,7 @@ GitHub's interface is organized around commits, branches, and pull requests beca
 
 ### What humans do
 
-**Approve, not read.** The review surface opens on intent, then evidence, then diff, in that order. Intent is the task, the agent's summary, and the instruction that produced the change. Evidence is a panel showing which checks ran on which tree, who attested, whether policy is satisfied, and which changed symbols are covered by tests that ran. The diff defaults to a symbol-level summary with affected call sites and expands to lines on demand. Most approvals never reach the line view.
+**Approve, not read.** The review surface opens on intent, then evidence, then diff, in that order. Intent is the task, the agent's summary, and the instruction that produced the change. Evidence is a panel showing which checks ran on which tree, who attested, whether policy is satisfied, which changed symbols are covered by tests that ran, what the tests themselves changed, and how outcomes differ from the base tree. The diff defaults to a symbol-level summary with affected call sites and expands to lines on demand. Most approvals never reach the line view.
 
 **Review stacks, not commits.** A task decomposed into several changes shows as one proposal with the decomposition visible. The reviewer accepts the proposal or a prefix of its stack. Comments are addressed to the originating agent and resume its session, so a review comment is an instruction rather than a note for a human to act on later.
 
