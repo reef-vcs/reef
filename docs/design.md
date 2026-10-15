@@ -43,6 +43,7 @@ Git worktrees are the current answer to agent isolation, and they fail in five w
 - Changes carry signed, verifiable evidence of tests and builds.
 - A typed local API with structured output. Agents never parse text.
 - Token-efficient views of state and history, including symbol-level diffs.
+- State changes are observable in real time by subscription, by humans and agents alike. Nothing polls.
 - Fully local operation with no server, plus federation between self-hosted stores.
 - Lossless enough git interop that one developer can adopt it on an existing GitHub project.
 
@@ -188,6 +189,8 @@ Each snapshot carries the agent identity, model, session, originating task, and 
 
 The daemon exposes a typed protocol over a local socket with structured responses. The CLI and the MCP server are thin clients of the same API, so an agent and a human see identical state. Every call is idempotent where possible and returns the operation log entry it created, so a client can undo exactly what it did.
 
+**Subscriptions.** The operation log is the event stream. The daemon and the store expose a streaming subscription filtered by repository, change, workspace, or agent, and clients render deltas rather than polling. Presence is a second, ephemeral channel over the same connection: an agent running tests, an agent editing in a directory, a lease heartbeat, a batch's progress through its checks. Presence is never persisted, so the log stays an audit trail and liveness stays cheap. Agents use both channels the same way humans do, waiting for a proposal to land or for a reviewer's instruction instead of polling. Because the log is complete, any live view can be replayed from any point in time.
+
 ## Technology choices
 
 Rust end to end for the core, reusing existing open source components for the heavy pieces. The case for Rust is where the ecosystem already is: Jujutsu, gitoxide, tree-sitter bindings, BLAKE3, and Meta's Mononoke are all Rust, so any other language means rewriting or wrapping most of the foundation.
@@ -204,7 +207,7 @@ Rust end to end for the core, reusing existing open source components for the he
 | Workspace materialization | overlayfs and reflinks via syscalls, APFS clonefile, NFS via [nfsserve](https://github.com/xetdata/nfsserve), FUSE via fuser, virtiofsd for microVMs | Each backend is a thin layer over syscalls. nfsserve is a pure Rust NFS server and is the macOS path, since EdenFS found FUSE too fragile there. |
 | Structural merge | [tree-sitter](https://tree-sitter.github.io/), starting from [Mergiraf](https://mergiraf.org) | Mergiraf is an existing Rust structural merge tool on tree-sitter with per-language rules. Extend it rather than start over. |
 | Symbol model for queries and diffs | [SCIP](https://github.com/sourcegraph/scip), tree-sitter tags as fallback | Cross-language symbol identity that survives moves. Indexers exist for the main languages. |
-| Daemon API | gRPC over a Unix socket with [tonic](https://github.com/hyperium/tonic), protobuf schemas | Typed, streaming, and codegen produces the Python and TypeScript SDKs from one schema. |
+| Daemon API | gRPC over a Unix socket with [tonic](https://github.com/hyperium/tonic), protobuf schemas | Typed, streaming, and codegen produces the Python and TypeScript SDKs from one schema. Server streaming carries subscriptions to native clients; the web UI gets the same streams over gRPC-web or a WebSocket bridge. |
 | MCP server | [rmcp](https://github.com/modelcontextprotocol/rust-sdk), the official Rust MCP SDK | A thin client of the gRPC API so agents and humans see the same state. |
 | Evidence and provenance | [in-toto](https://in-toto.io) attestations in DSSE envelopes, sigstore-rs, ed25519 session keys | Standard formats that existing supply chain tooling already verifies. |
 | Policy language | [CEL](https://cel.dev) via cel-rust | Non-Turing-complete, auditable, fast to evaluate at landing. Rego is the fallback if policies grow large. |
@@ -257,6 +260,26 @@ Two surfaces over the same API, so a human and an agent always see identical sta
 
 The app shows and acts on repository state. It is not an agent runner. Agent runtimes integrate through the API and the MCP server, and an app that launched agents on tasks would be a different product with a different competitive set. Editors integrate through the same API if their vendors or the community want it; Reef ships no editor extensions. The desktop shell follows the web UI, since a desktop app carries its own costs in code signing, auto-update, and three platforms, and is only worth wrapping once the triage inbox has real proposals and landings to show.
 
+### Live by default
+
+Both surfaces subscribe to the operation log and the presence channel and never fetch on a timer. Live interfaces fail in predictable ways at fleet scale, so five rules apply everywhere.
+
+- **One state color per object, used everywhere.** Draft, proposed, queued, testing, landed, failed, conflicted. A proposal looks the same in the inbox, the smartlog, and the pipeline.
+- **Motion only for state change.** A thing animates when it moves between states and is otherwise still. Pulsing, spinners, and decorative activity are banned because at scale they become noise.
+- **Nothing reorders under your cursor.** The inbox updates live but holds position while you read. New items arrive behind a visible count you accept.
+- **Every live element links to its cause.** Anything that just changed opens its operation log entry and the agent that produced it.
+- **Coalesce, never drop.** Thousands of events a minute are batched into frames and summarized in the feed, and the counts are always right.
+
+Five views are live.
+
+| View | Shows | Why it matters |
+| --- | --- | --- |
+| Map | The repository tree as a surface with agent activity shown spatially: which directories are hot now and which workspaces are where | Two agents in the same area are visible before they conflict, so the interface warns while avoiding the conflict is still cheap |
+| Smartlog | Stacks and changes as a graph, updating as agents snapshot, propose, and land | The shape of work in flight at a glance |
+| Landing pipeline | Queued, batched, testing, landed or bisecting, with batches as visible units | Where a proposal is and what is blocking it |
+| Fleet panel | Each agent with its workspace, current change, lease health, and presence | Who is doing what, and what is stuck |
+| Activity feed | The coalesced log with a scrubber to replay any period | Also the digest of what happened since you last looked |
+
 ### What stays headless
 
 Everything agents do: creating and reclaiming workspaces, snapshotting, submitting, responding to review comments, resolving assigned conflicts, querying history, rebasing. Agents never see the interface. The design rule is that no state exists that the interface can show and the API cannot, and no action exists in the interface that is not one API call, so an agent could do anything a human does.
@@ -300,6 +323,7 @@ Every piece of this design exists somewhere. The contribution is combining them 
 - **macOS has no overlayfs.** APFS clones give copy-on-write at the file level but require materializing a snapshot once per machine. FUSE on macOS is fragile. Measuring real workspace creation times on both platforms is early work.
 - **Lease tuning is a product decision.** Too short and a slow agent loses its workspace mid-task. Too long and disk fills. The snapshot-on-expiry design makes a wrong choice recoverable, but defaults still matter.
 - **Semantic diffs need a stable symbol model.** Symbol-level queries across languages need a shared notion of a symbol and its location that survives renames and moves. Tree-sitter gives syntax, not semantics, so some of this will be heuristic.
+- **Event volume and interface stability at fleet scale.** Hundreds of agents produce thousands of operations and presence updates a minute. Subscriptions must filter server-side, batch into frames, and summarize without losing counts, and the interface must stay stable under a reader's cursor while all of that arrives. The map's conflict warning depends on presence data that is deliberately not persisted, so its accuracy degrades exactly when the fleet is busiest.
 - **What is the unit of review?** Humans today review branches. If agents produce many small changes with evidence attached, review may shift to intent and evidence rather than lines. The system should support both without deciding for the team.
 - **Who runs the public stores?** The protocol allows anyone to host, but the ecosystem needs at least one reliable public store for the git interop story to be credible. This is a sustainability question more than a technical one.
 
