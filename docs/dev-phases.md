@@ -50,6 +50,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Two workspaces on the same change work without interfering.
 - A shared dependency store is mounted read-only into every workspace and verified against a lockfile hash.
 - Works on macOS and Linux with the same CLI.
+- Two hundred workspaces with active watchers on one machine, with a write reaching the store as a snapshot within five seconds at that load.
+- A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
 
 ### Workstream: workspace model and daemon skeleton
 
@@ -80,17 +82,18 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R1.13 | Lease manager | Heartbeat RPC, expiry loop, configurable lease length and grace. On expiry: final snapshot, op log entry, reclaim. Daemon restart preserves leases and applies a grace period before reclaiming anything. | M | R1.04, R1.11 |
 | R1.14 | Local-only snapshot marking | Snapshots taken by the watcher are marked local and never exported or pushed until a change is explicitly published. | S | R1.11 |
 | R1.15 | Garbage collection | Reclaim snapshots unreferenced by any change and older than the undo window. Reclaim base cache entries no workspace uses. Report what was freed. | M | R1.13 |
+| R1.16 | Local backup and restore | Daemon backup operation per the design's durability section: hold the write lock briefly, SQLite online backup, copy immutable object and operation files, operation heads last. A standalone quiesce RPC with pause and resume so a filesystem snapshot can be taken between them. Restore loads from a copy, keeps workspace records, rematerializes directories on demand, and treats every lease as expired with a grace period. `reef backup` and `reef restore`. Round-trip test with agents writing during the backup. | M | R1.13, R1.15 |
 
 ### Workstream: shared stores and agent integration
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R1.16 | Workspace spec file | `reef.toml` in the repo declaring shared stores to mount, build output paths to keep out of snapshots, and lease defaults. | S | R1.01 |
-| R1.17 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.16, R1.06, R1.07 |
-| R1.18 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.13 |
-| R1.19 | CLI for workspaces | `reef ws create`, `list`, `release`, `gc`, `inspect`, with JSON output when stdout is not a terminal. Thin client of the daemon. | M | R1.04, R1.15 |
-| R1.20 | Crash and reclaim integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. | M | R1.13, R1.17 |
-| R1.21 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.19 |
+| R1.17 | Workspace spec file | `reef.toml` in the repo declaring shared stores to mount, build output paths to keep out of snapshots, and lease defaults. | S | R1.01 |
+| R1.18 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.17, R1.06, R1.07 |
+| R1.19 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.13 |
+| R1.20 | CLI for workspaces | `reef ws create`, `list`, `release`, `gc`, `inspect`, with JSON output when stdout is not a terminal. Thin client of the daemon. | M | R1.04, R1.15 |
+| R1.21 | Crash, reclaim, and load integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. Run 200 workspaces with active watchers on one machine on both platforms, measure write-to-snapshot latency against the phase target, and record inotify and thread pool limits hit. | M | R1.13, R1.18 |
+| R1.22 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.20 |
 
 ---
 
@@ -102,7 +105,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 - The CLI is a thin client with no direct jj-lib access.
 - An MCP server exposes the same operations as the API.
-- A client can subscribe to the operation log and presence channel and receive events within 100 ms.
+- A client can subscribe to the operation log and presence channel and receive events within 100 ms, and that holds with 500 subscribers on one daemon at 1,000 operations per minute.
 - Symbol-level diffs work for Python, TypeScript, Go, and Rust.
 - A local web UI shows the smartlog, workspaces, and fleet panel live.
 - Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output.
@@ -146,6 +149,12 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R2.18 | Smartlog view | Stacks and changes as a live graph. | M | R2.17 |
 | R2.19 | Workspaces and fleet panel | Workspaces with owner, lease, disk, and presence. Agents and their current change. | M | R2.17, R2.09 |
 | R2.20 | Activity feed with scrubber | Coalesced operation feed, counts always correct, replay via the scrubber. | M | R2.11, R2.17 |
+
+### Workstream: scale
+
+| ID | Title | Scope | Size | Depends on |
+| --- | --- | --- | --- | --- |
+| R2.21 | Subscription load test and broker | A load generator that opens N subscribers and drives M operations per minute through the daemon, measuring delivery latency per event. Run at the phase target of 500 subscribers and 1,000 operations per minute. Put a broker between the operation log and the streams, in-process first, so fan-out does not read the log per subscriber; the broker is the same component the store reuses in phase four. Publish results with the benchmarks. | M | R2.09 |
 
 ---
 
@@ -236,6 +245,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Landing runs on the store with the same guarantees as phase three.
 - A repository round-trips to git and back with landed history intact and change IDs stable across two importers.
 - The web UI runs hosted on the store with authentication.
+- A store backup taken while agents are active restores with no dangling blob reference, and garbage collection cannot remove a blob younger than the backup retention window.
+- One store serves 1,000 concurrent agents at 10,000 operations per minute with p99 API latency under 200 ms, and 50 agents proposing against one repository do not grow the landing queue without bound.
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
@@ -252,6 +263,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R4.11 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.10 |
 | R4.12 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.10, R3.15 |
 | R4.13 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog. Can start during phase two. | M | R2.05 |
+| R4.14 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
+| R4.15 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.21, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.07, R2.21 |
 
 ---
 

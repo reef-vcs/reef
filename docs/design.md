@@ -205,6 +205,49 @@ The daemon exposes a typed protocol over a local socket with structured response
 
 **Subscriptions.** The operation log is the event stream. The daemon and the store expose a streaming subscription filtered by repository, change, workspace, or agent, and clients render deltas rather than polling. Presence is a second, ephemeral channel over the same connection: an agent running tests, an agent editing in a directory, a lease heartbeat, a batch's progress through its checks. Presence is never persisted, so the log stays an audit trail and liveness stays cheap. Agents use both channels the same way humans do, waiting for a proposal to land or for a reviewer's instruction instead of polling. Because the log is complete, any live view can be replayed from any point in time.
 
+### Durability and backup
+
+Reef holds state in four places, and only two of them need protecting.
+
+| State | Where | Authoritative | Rebuilt from |
+| --- | --- | --- | --- |
+| Objects, snapshots, changes, operation log | The jj repository on the local machine, or the store | Yes | Nothing. This is the history. |
+| Reef metadata: workspace records, leases, evidence index, provenance | SQLite next to the repository, or Postgres on the store | Yes, except leases | Leases expire and are reissued |
+| Evidence artifacts: logs and build outputs | The artifact store, with its own retention | Yes, within retention | Re-running the executor |
+| Workspaces, base caches, status index, symbol index | Local disk | No | The store, by materialization or re-indexing |
+
+Workspaces are caches by design, so losing a machine's working directories loses nothing that was snapshotted.
+
+**Local backup.** The daemon exposes a backup operation that produces a consistent copy of a repository's authoritative state without stopping agents for long. It holds the write lock briefly, copies SQLite through its online backup API, copies the object and operation files, which are immutable and content-addressed and so can be copied without a lock, and copies the operation heads last, so the backup never references an operation it does not contain. Restore points a daemon at the copy: workspace records are kept, their directories are rematerialized on demand, and leases are treated as expired with a grace period, so nothing is reclaimed on the first tick after a restore. A filesystem snapshot of the state directory on APFS or btrfs is an acceptable substitute; the daemon exposes the quiesce step on its own so a snapshot can be taken between pause and resume.
+
+**Local-only work is the exposed state.** Watcher snapshots stay on the machine until a change is published. That is the right privacy choice, and it means an agent's unpublished work lives on one disk. The mitigations are the backup operation above, publishing early to a private store, and the fact that each snapshot is small. There is no plan to replicate unpublished snapshots automatically.
+
+**Store backup.** Blobs and operations are immutable and content-addressed; metadata in Postgres references them by hash. The rule is blobs first, then metadata: an object storage backup taken before the database backup can contain unreferenced extras but never a dangling reference. Point-in-time recovery for Postgres and versioning on the object bucket cover the two layers with standard tooling. Garbage collection must never delete a blob younger than the backup retention window, or a restored database can reference a blob that is gone. The retention window is a store setting and GC reads it.
+
+**Federation is the warm copy.** A store that tracks another store holds its changes, evidence, and provenance with signatures intact, so a fork store is a replica that also serves reads. A team that wants durability beyond backups runs a second store that tracks the first.
+
+**Git export is the backup of last resort.** The landed projection exported to git survives the loss of every Reef component, and it loses exactly what git cannot represent: conflicts, evidence, provenance, and the operation log. This is stated so nobody mistakes a git mirror for a full backup.
+
+**Keys.** Session keys are short-lived and never backed up; a restore invalidates them and agents re-request. Operator identity in the keyless Sigstore pattern has no long-lived key to lose. A store's own signing identity, used at landing, is the one key that must be backed up alongside the metadata.
+
+### Scale
+
+Everything is keyed by repository and there are no cross-repository transactions, so a store shards by assigning repositories to database instances, and the API tier is stateless and scales horizontally without change. The local daemon scales vertically only: one process owns one machine's workspaces, which is the right unit, and its limits are measured rather than assumed. The places that bind, in the order a growing fleet meets them:
+
+- **The local daemon.** One filesystem watcher per workspace, bounded by inotify limits on Linux; one SQLite writer; jj-lib does blocking I/O inside async functions, so the daemon runs it on a dedicated thread pool. Hundreds of workspaces per machine is the target, and the Watchman backend exists for the point where per-workspace watchers stop scaling.
+- **Subscription fan-out on the store.** Thousands of long-lived streams need a broker between the operation log and the connections, not database notifications. Presence has the same shape and lives in the same broker, in memory only.
+- **Landing is serialized per repository.** One head, one queue. Throughput is batch size times batch rate, which is why the landing gate batches, computes the minimal check set, and transfers cheap evidence. Sharding the queue by commuting regions is a later step that depends on structural merge.
+- **The symbol index is the largest store**, since indexers produce output per snapshot. It is keyed by file content hash so unchanged files share entries across snapshots.
+- **One very large repository is the hard case**, because its landing head and operation log do not shard. The design names FoundationDB as the metadata store if one store must serve a monorepo at that scale.
+
+Initial capacity targets. Each is measured by a load test ticket in its phase and revised from the measurement.
+
+| Phase | Target |
+| --- | --- |
+| 1 | 200 workspaces with active watchers on one machine, with a write reaching the store as a snapshot within 5 seconds at that load |
+| 2 | 500 subscribers on one daemon receiving 1,000 operations per minute, each delivered within 100 ms |
+| 4 | One store serving 1,000 concurrent agents across repositories at 10,000 operations per minute with p99 API latency under 200 ms, and 50 agents proposing against one repository without the landing queue growing without bound |
+
 ## Technology choices
 
 Rust end to end for the core, reusing existing open source components for the heavy pieces. The case for Rust is where the ecosystem already is: Jujutsu, gitoxide, tree-sitter bindings, BLAKE3, and Meta's Mononoke are all Rust, so any other language means rewriting or wrapping most of the foundation.
