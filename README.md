@@ -51,7 +51,7 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 
 ## Design
 
-The full design document is at [docs/design.md](docs/design.md).
+The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md).
 
 ## Contributing
 
