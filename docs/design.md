@@ -177,6 +177,14 @@ Landing then rebases onto the current head. A rebase produces a new tree hash, s
 
 If the rebase does not commute, the proposal returns to its owner with a conflict object, or to the resolver queue if the owner's session has ended. This is a merge queue inside the version control system rather than one bolted onto CI.
 
+### CI load
+
+Agents overrun conventional CI because every push triggers a full pipeline and nothing deduplicates or batches. Reef removes most of that load structurally. Local snapshots never trigger anything; only proposals are tested. The landing queue tests a batch head rather than each proposal. Evidence is keyed by tree hash, so an identical tree is never tested twice. Evidence transfer rules skip cheap checks after a commuting rebase, and build caches keyed by tree hash make the remaining runs incremental.
+
+The landing gate goes further by requesting the minimum set of checks that satisfies policy. It knows the symbol-level diff, the evidence already cached for ancestors and siblings, and the check kinds policy requires, so it asks the executor for only the targets the change can affect. Evidence kinds are fine-grained enough that a passing test target on a tree is one object, so partial results compose instead of forcing full reruns. Policy sets compute budgets per proposal, per agent, and per repository, and a proposal that exhausts its budget surfaces in the triage inbox rather than running up a bill. Proposals a human is waiting on are scheduled before proposals an agent is waiting on.
+
+Running the jobs stays outside Reef. Sandboxing, hermetic builds, remote execution, and runner fleets are an established domain, and Reef sits on top of it through the evidence format and the executor protocol. Scheduling is Reef's, execution is the executor's, and the protocol between them is what Reef must get right.
+
 ### Query layer
 
 History is a database. Agents ask structured questions such as which changes touched a given symbol in the last week and what their test outcomes were, and receive structured rows. Diffs are available at the symbol level as well as the line level, which is both more useful to an agent and far cheaper in tokens than a unified diff.

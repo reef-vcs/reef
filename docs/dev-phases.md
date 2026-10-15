@@ -190,6 +190,10 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.12 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.11, R3.05 |
 | R3.13 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.12 |
 | R3.14 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.11 |
+| R3.28 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.12, R2.14 |
+| R3.29 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
+| R3.30 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.06, R3.12 |
+| R3.31 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.12 |
 
 ### Workstream: conflicts
 
