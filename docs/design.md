@@ -209,6 +209,8 @@ Rust end to end for the core, reusing existing open source components for the he
 | Evidence and provenance | [in-toto](https://in-toto.io) attestations in DSSE envelopes, sigstore-rs, ed25519 session keys | Standard formats that existing supply chain tooling already verifies. |
 | Policy language | [CEL](https://cel.dev) via cel-rust | Non-Turing-complete, auditable, fast to evaluate at landing. Rego is the fallback if policies grow large. |
 | Remote store | Rust service, Postgres for metadata, S3-compatible object storage for blobs, the same gRPC protocol as the daemon | Mononoke's shape. Postgres suffices for an open ecosystem store; FoundationDB only if one store must serve a Google-scale monorepo. |
+| Web UI | React and TypeScript, one codebase served by the daemon and by remote stores | The same application renders local and shared views, so the two cannot drift. Generated gRPC-web client from the protobuf schemas. |
+| Desktop app | [Tauri 2](https://tauri.app) | Rust backend links or supervises the daemon, binaries around 10 MB, native webview. Electron is the fallback if webview inconsistencies across platforms bite; the shell is cheap to swap because the UI is a web app. |
 | CLI | clap | Emits JSON by default when stdout is not a terminal. |
 
 **Build on jj-lib, not a fork of the jj binary.** The library is designed to be embedded and its maintainers want it used that way. Forking the CLI would carry UX decisions aimed at humans. Generic improvements such as the gitoxide migration and Watchman support go upstream; workspaces, leases, evidence, and the daemon stay in this project.
@@ -246,13 +248,14 @@ GitHub's interface is organized around commits, branches, and pull requests beca
 
 ### Where it lives
 
-Three surfaces over the same API, so a human and an agent always see identical state.
+Two surfaces over the same API, so a human and an agent always see identical state. Both render one web application, so they cannot drift.
 
 | Surface | Role | Model |
 | --- | --- | --- |
-| Local web UI served by the daemon | Your stacks, your workspaces, what agents are doing in your repository right now. No server required. | Sapling's Interactive Smartlog |
-| IDE panel | Stack and conflict views inside VS Code or JetBrains, with agent changes landing into your workspace visible as they happen. Where human-authored changes are made; they look identical to agent changes everywhere else. | jj and Sapling IDE extensions |
-| Hosted review UI on the remote store | Shared review, triage inbox, audit, and fleet operation. Anyone running a store runs this. | GitHub, Phabricator |
+| Web UI | One codebase that runs in a browser against the local daemon (your stacks, your workspaces, what agents are doing in your repository now) or against a remote store (shared review, triage inbox, audit, fleet operation). Anyone running a store serves it. | Sapling's Interactive Smartlog, GitHub |
+| Desktop app | A thin shell around the web UI, built with Tauri 2 so the Rust daemon ships inside it. Adds what only a native app can: OS notifications for the needs-you-now bucket, a menu bar view of fleet state, a bundled auto-updating daemon, one window for local and remote, and deep links from a notification or chat message to the exact proposal or conflict. | GitHub Desktop, Linear |
+
+The app shows and acts on repository state. It is not an agent runner. Agent runtimes integrate through the API and the MCP server, and an app that launched agents on tasks would be a different product with a different competitive set. Editors integrate through the same API if their vendors or the community want it; Reef ships no editor extensions. The desktop shell follows the web UI, since a desktop app carries its own costs in code signing, auto-update, and three platforms, and is only worth wrapping once the triage inbox has real proposals and landings to show.
 
 ### What stays headless
 
@@ -306,7 +309,7 @@ Build on Jujutsu's data model and crates rather than starting clean. Each phase 
 
 1. **Leased copy-on-write workspaces over Jujutsu.** A daemon that creates workspaces via overlayfs or APFS clones, snapshots on a watcher, heartbeats leases, and reclaims expired workspaces with a final snapshot. Shared dependency store mounting. This can ship as a standalone tool against existing jj repositories.
 2. **Typed API and MCP server.** Structured status, snapshot, diff, log, and undo over a local socket, with the CLI rewritten as a client. Symbol-level diffs for the first supported languages. This is where agent token waste drops sharply.
-3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that verifies evidence and rebases. Works against a self-hosted store or, in degraded form, against a git remote with evidence kept locally.
+3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that verifies evidence and rebases. Works against a self-hosted store or, in degraded form, against a git remote with evidence kept locally. The web UI's triage inbox ships here, and the desktop shell follows once the inbox has real proposals and landings to show.
 4. **Shared lazy object store.** A store server speaking the native protocol, with lazy fetch into the local cache and federation between stores. Full clones become optional.
 5. **Structural merge.** Tree-sitter based merge for Python, TypeScript, Go, and Rust, with measured fallback rates guiding which languages come next.
 6. **Protocol specification and conformance suite.** Published once the first four phases have stabilized in practice, so alternative implementations can exist.
