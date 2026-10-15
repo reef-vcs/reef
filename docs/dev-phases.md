@@ -159,6 +159,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A proposal with forged or untrusted evidence is refused with a structured reason.
 - A batch containing one failing change bisects to the culprit and lands the rest.
 - A stack lands as a prefix when a later change fails.
+- Amending the bottom change of a stack rebases the changes above it, preserves their IDs, and leaves a conflict object on any that no longer applies.
 - A conflict is resolved by an agent, enters the proposal flow, and lands under tier one policy.
 - The triage inbox shows the needs-you-now bucket live, and the desktop app notifies on it.
 
@@ -180,46 +181,47 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.07 | Policy simulation | Evaluate a proposed policy against recent landings and report what it would have blocked. API and CLI. | S | R3.06 |
 | R3.08 | Change lifecycle states | Draft, proposed, queued, landed, declined, withdrawn, superseded, recorded as operations. Transitions in the API. | M | R2.03 |
 | R3.09 | Stacks | Dependency edges on changes. Propose, review, and land a stack as one unit with prefix landing. | M | R3.08 |
-| R3.10 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.08, R2.12 |
+| R3.10 | Dependent change lifecycle | A dependent proposed while its dependency is still proposed is a separate, linked proposal ordered by the edge at landing. Amending a dependency rebases dependents, preserving their IDs, and attaches a conflict object where the rebase does not apply. A declined or withdrawn dependency returns each dependent to its owner or the resolver queue with a conflict object; a superseded one rebases dependents onto the superseding change. | M | R3.09, R3.12 |
+| R3.11 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.08, R2.12 |
 
 ### Workstream: landing
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.11 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. | L | R3.06, R3.08 |
-| R3.12 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.11, R3.05 |
-| R3.13 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.12 |
-| R3.14 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.11 |
-| R3.28 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.12, R2.14 |
-| R3.29 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
-| R3.30 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.06, R3.12 |
-| R3.31 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.12 |
-| R3.32 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Rendered in the proposal view. | M | R3.05, R3.29 |
-| R3.33 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.20 |
-| R3.34 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.06, R3.09 |
+| R3.12 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. | L | R3.06, R3.08 |
+| R3.13 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.12, R3.05 |
+| R3.14 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.13 |
+| R3.15 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.12 |
+| R3.16 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.13, R2.14 |
+| R3.17 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
+| R3.18 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.06, R3.13 |
+| R3.19 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.13 |
+| R3.20 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Rendered in the proposal view. | M | R3.05, R3.17 |
+| R3.21 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.28 |
+| R3.22 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.06, R3.09 |
 
 ### Workstream: conflicts
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.15 | Conflict objects in the API | Expose jj-lib's stored conflicts as structured records with base, sides, and each side's provenance. | M | R3.04 |
-| R3.16 | Resolver assignment and queue | Assign to the originating agent of the later change by default. Resolver queue with priority for conflicts whose owner's session has ended. | M | R3.15 |
-| R3.17 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Resolutions enter the proposal flow marked as resolutions. | M | R3.16, R3.06 |
-| R3.18 | Intent conflict escalation | Heuristics and an agent-facing prompt for detecting that two sides disagree on what to build, escalating to ask-first regardless of policy. | M | R3.17 |
-| R3.19 | Backpressure | Refuse a second unresolved conflict ancestor without policy approval. | S | R3.17 |
+| R3.23 | Conflict objects in the API | Expose jj-lib's stored conflicts as structured records with base, sides, and each side's provenance. | M | R3.04 |
+| R3.24 | Resolver assignment and queue | Assign to the originating agent of the later change by default. Resolver queue with priority for conflicts whose owner's session has ended. | M | R3.23 |
+| R3.25 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Resolutions enter the proposal flow marked as resolutions. | M | R3.24, R3.06 |
+| R3.26 | Intent conflict escalation | Heuristics and an agent-facing prompt for detecting that two sides disagree on what to build, escalating to ask-first regardless of policy. | M | R3.25 |
+| R3.27 | Backpressure | Refuse a second unresolved conflict ancestor without policy approval. | S | R3.25 |
 
 ### Workstream: human interface
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.20 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.08, R2.14, R2.17 |
-| R3.21 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.20, R2.08 |
-| R3.22 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.12, R2.17 |
-| R3.23 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.15, R2.17 |
-| R3.24 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.09, R2.17 |
-| R3.25 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.15 |
-| R3.26 | Desktop shell | Tauri 2 app wrapping the web UI: bundled daemon, OS notifications for needs-you-now, menu bar fleet state, deep links, auto-update. macOS first. | L | R3.21 |
-| R3.27 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.26 |
+| R3.28 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.08, R2.14, R2.17 |
+| R3.29 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.28, R2.08 |
+| R3.30 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.13, R2.17 |
+| R3.31 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.23, R2.17 |
+| R3.32 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.09, R2.17 |
+| R3.33 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.15 |
+| R3.34 | Desktop shell | Tauri 2 app wrapping the web UI: bundled daemon, OS notifications for needs-you-now, menu bar fleet state, deep links, auto-update. macOS first. | L | R3.29 |
+| R3.35 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.34 |
 
 ---
 
@@ -243,12 +245,12 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R4.04 | Sparse profiles and prefetch hints | Repository-declared profiles that prefetch the subtrees a task will touch, so language servers and build tools do not defeat lazy fetch. | M | R4.03 |
 | R4.05 | Publish and fetch proposals with evidence | Push a proposed change, its stack, evidence, and provenance to a store. Fetch others' proposals. | M | R4.02, R3.08 |
 | R4.06 | Store authentication and authorization | Identity via the same operator identities as phase three. Per-repository roles. | M | R4.02, R3.03 |
-| R4.07 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.05, R3.12 |
+| R4.07 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.05, R3.13 |
 | R4.08 | Federation | A store tracks another store. Proposals and evidence flow between them with signatures intact. | L | R4.07 |
-| R4.09 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. | M | R4.06, R3.21 |
+| R4.09 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. | M | R4.06, R3.29 |
 | R4.10 | Git wire protocol via gitoxide | Fetch and push against git remotes natively. No shelling out. | L | R0.04 |
 | R4.11 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.10 |
-| R4.12 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.10, R3.14 |
+| R4.12 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.10, R3.15 |
 | R4.13 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog. Can start during phase two. | M | R2.05 |
 
 ---
@@ -266,7 +268,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R5.01 | Merge engine interface | Tiered merge pipeline with a result type that is either a merged tree or a conflict object. Pluggable tiers. | M | R3.15 |
+| R5.01 | Merge engine interface | Tiered merge pipeline with a result type that is either a merged tree or a conflict object. Pluggable tiers. | M | R3.23 |
 | R5.02 | Patch commutation tier | Detect disjoint hunks and merge without inspection. Property-based tests for commutation. | M | R5.01 |
 | R5.03 | Mergiraf integration | Structural merge as a tier. Vendor or depend on Mergiraf, map its output into Reef's conflict objects. | L | R5.01 |
 | R5.04 | Generated file drivers | Lockfile driver that merges manifests and regenerates for npm, pnpm, Cargo, Go modules, uv, and others declared in the workspace spec. | M | R5.01 |
