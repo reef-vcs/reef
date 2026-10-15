@@ -38,7 +38,7 @@ Reef builds on [Jujutsu](https://github.com/jj-vcs/jj)'s data model and Rust cra
 
 1. **Leased copy-on-write workspaces.** A daemon that creates workspaces via overlayfs or APFS clones, snapshots on a filesystem watcher, heartbeats leases, and reclaims expired workspaces with a final snapshot. Shared dependency store mounting. Ships as a standalone tool against existing jj repositories. This alone removes the worktree problem.
 2. **Typed API and MCP server.** Structured status, snapshot, diff, log, and undo over a local socket, with the CLI as a client. Symbol-level diffs for the first supported languages.
-3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that batches rebased proposals, runs checks on the batch head, and bisects on failure.
+3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that batches rebased proposals, runs checks on the batch head, and bisects on failure. The triage inbox ships here as a web UI, then as a desktop app and as iOS and Android apps, so a human can steer and approve agents from anywhere.
 4. **Shared lazy object store.** A store server speaking the native protocol, with lazy fetch into the local cache and federation between stores.
 5. **Structural merge.** Tree-sitter based merge, starting from [Mergiraf](https://mergiraf.org), for Python, TypeScript, Go, and Rust.
 6. **Protocol specification and conformance suite.** Published once the first four phases have stabilized, so alternative implementations can exist.

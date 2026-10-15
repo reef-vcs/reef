@@ -113,6 +113,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A local web UI shows the smartlog, workspaces, and fleet panel live.
 - Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output.
 - Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk.
+- A daemon in a VM is reachable from another machine over TLS with a token, serving the same API and web UI.
 
 ### Workstream: API
 
@@ -125,41 +126,42 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R2.05 | CLI as thin client | Rewrite all CLI commands over the gRPC API. Remove jj-lib from the binary crate. | M | R2.02, R2.03 |
 | R2.06 | Python SDK | Generated from the schema, published to PyPI as `reef-vcs`, with a thin idiomatic wrapper. | S | R2.01 |
 | R2.07 | TypeScript SDK | Generated from the schema, published to npm, with a thin wrapper. | S | R2.01 |
+| R2.08 | Remote daemon access | A second listener for the same gRPC services and the web UI over TCP with TLS and a bearer token, off by default and enabled by configuration or `reef daemon --remote`. Token issuance and rotation through the CLI. The Unix socket stays the local path and the remote listener never serves it without authentication. This is how a phone or another laptop reaches a daemon running in a cloud VM before a store exists. Threat model reviewed under RX.01. | M | R2.01, R1.04 |
 
 ### Workstream: live state
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.08 | Operation log subscription | Server-streaming RPC filtered by repository, change, workspace, or agent. Resume from a given operation. Server-side batching into frames. | M | R2.02 |
-| R2.09 | Presence channel | Ephemeral presence over the same connection: agent activity, workspace being edited, lease heartbeats, long-running operation progress. Never persisted. | M | R2.08 |
-| R2.10 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically. A presence API for agents that want to report finer activity. | S | R2.09 |
-| R2.11 | Replay | Reconstruct any live view at a past point from the operation log. Drives the scrubber in the UI. | M | R2.08 |
+| R2.09 | Operation log subscription | Server-streaming RPC filtered by repository, change, workspace, or agent. Resume from a given operation. Server-side batching into frames. | M | R2.02 |
+| R2.10 | Presence channel | Ephemeral presence over the same connection: agent activity, workspace being edited, lease heartbeats, long-running operation progress. Never persisted. | M | R2.09 |
+| R2.11 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically. A presence API for agents that want to report finer activity. | S | R2.10 |
+| R2.12 | Replay | Reconstruct any live view at a past point from the operation log. Drives the scrubber in the UI. | M | R2.09 |
 
 ### Workstream: agent surface
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.12 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`. | M | R2.05 |
-| R2.13 | Symbol index ingestion | Accept SCIP indexes and tree-sitter tag output per snapshot. Store symbol locations keyed by snapshot. | L | R2.02 |
-| R2.14 | Symbol-level diff | `diff --symbols`: which symbols changed, added, or removed, and which call sites are affected. Line-level on expand. | M | R2.13 |
-| R2.15 | Query layer | SQL-backed queries over changes, operations, and symbols: changes touching a symbol in a window, by agent, by outcome. Exposed through the API. | M | R2.13 |
-| R2.16 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results. | S | R2.14 |
+| R2.13 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`. | M | R2.05 |
+| R2.14 | Symbol index ingestion | Accept SCIP indexes and tree-sitter tag output per snapshot. Store symbol locations keyed by snapshot. | L | R2.02 |
+| R2.15 | Symbol-level diff | `diff --symbols`: which symbols changed, added, or removed, and which call sites are affected. Line-level on expand. | M | R2.14 |
+| R2.16 | Query layer | SQL-backed queries over changes, operations, and symbols: changes touching a symbol in a window, by agent, by outcome. Exposed through the API. | M | R2.14 |
+| R2.17 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results. | S | R2.15 |
 
 ### Workstream: web UI v0
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.17 | Web UI scaffold | React and TypeScript app, served by the daemon, gRPC-web or WebSocket bridge for streams, state-color system from the design doc. | M | R2.08 |
-| R2.18 | Smartlog view | Stacks and changes as a live graph. | M | R2.17 |
-| R2.19 | Workspaces and fleet panel | Workspaces with owner, lease, disk, and presence. Agents and their current change. | M | R2.17, R2.09 |
-| R2.20 | Activity feed with scrubber | Coalesced operation feed, counts always correct, replay via the scrubber. | M | R2.11, R2.17 |
+| R2.18 | Web UI scaffold | React and TypeScript app, served by the daemon, gRPC-web or WebSocket bridge for streams, state-color system from the design doc. | M | R2.09 |
+| R2.19 | Smartlog view | Stacks and changes as a live graph. | M | R2.18 |
+| R2.20 | Workspaces and fleet panel | Workspaces with owner, lease, disk, and presence. Agents and their current change. | M | R2.18, R2.10 |
+| R2.21 | Activity feed with scrubber | Coalesced operation feed, counts always correct, replay via the scrubber. | M | R2.12, R2.18 |
 
 ### Workstream: scale
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.21 | Subscription load test and broker | A load generator that opens N subscribers and drives M operations per minute through the daemon, measuring delivery latency per event. Run at the phase target of 500 subscribers and 1,000 operations per minute. Put a broker between the operation log and the streams, in-process first, so fan-out does not read the log per subscriber; the broker is the same component the store reuses in phase four. Publish results with the benchmarks. | M | R2.09 |
-| R2.22 | Incremental status index | Status answered from an index in SQLite that the watcher maintains per workspace, never from a tree walk: path, size, mtime, content hash when known, and dirty flag, updated from filesystem events and reconciled on snapshot. The status service reads the index and falls back to jj-lib's walk only when the index is marked stale, for example after a watcher overflow. Measured against jj-lib's walk on the large synthetic repository. | M | R2.02, R1.13 |
+| R2.22 | Subscription load test and broker | A load generator that opens N subscribers and drives M operations per minute through the daemon, measuring delivery latency per event. Run at the phase target of 500 subscribers and 1,000 operations per minute. Put a broker between the operation log and the streams, in-process first, so fan-out does not read the log per subscriber; the broker is the same component the store reuses in phase four. Publish results with the benchmarks. | M | R2.10 |
+| R2.23 | Incremental status index | Status answered from an index in SQLite that the watcher maintains per workspace, never from a tree walk: path, size, mtime, content hash when known, and dirty flag, updated from filesystem events and reconciled on snapshot. The status service reads the index and falls back to jj-lib's walk only when the index is marked stale, for example after a watcher overflow. Measured against jj-lib's walk on the large synthetic repository. | M | R2.02, R1.13 |
 
 ---
 
@@ -178,6 +180,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - The triage inbox shows the needs-you-now bucket live, and the desktop app notifies on it.
 - An agent's help request appears in the needs-you-now bucket and the human's reply resumes the agent's session.
 - Landed history is pushed to an ordinary git remote while evidence, provenance, and conflicts stay local.
+- A human on a phone receives a needs-you-now notification, opens the proposal, and approves it.
 
 ### Workstream: evidence and identity
 
@@ -199,7 +202,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.09 | Change lifecycle states | Draft, proposed, queued, landed, declined, withdrawn, superseded, recorded as operations. Transitions in the API. | M | R2.03 |
 | R3.10 | Stacks | Dependency edges on changes. Propose, review, and land a stack as one unit with prefix landing. | M | R3.09 |
 | R3.11 | Dependent change lifecycle | A dependent proposed while its dependency is still proposed is a separate, linked proposal ordered by the edge at landing. Amending a dependency rebases dependents, preserving their IDs, and attaches a conflict object where the rebase does not apply. A declined or withdrawn dependency returns each dependent to its owner or the resolver queue with a conflict object; a superseded one rebases dependents onto the superseding change. | M | R3.10, R3.13 |
-| R3.12 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.09, R2.12 |
+| R3.12 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.09, R2.13 |
 
 ### Workstream: landing
 
@@ -209,8 +212,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.14 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.13, R3.06 |
 | R3.15 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.14 |
 | R3.16 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.13 |
-| R3.17 | Degraded landing to a git remote | After a local landing, push the landed projection to a configured git remote through jj-lib's git support, so a team on GitHub sees landed history while evidence, provenance, and conflicts stay local. Refuses to push a conflicted change. This is the "degraded form against a git remote" the roadmap promises for phase three; the native wire protocol hardening is R4.12. | M | R3.16 |
-| R3.18 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.14, R2.14 |
+| R3.17 | Degraded landing to a git remote | After a local landing, push the landed projection to a configured git remote through jj-lib's git support, so a team on GitHub sees landed history while evidence, provenance, and conflicts stay local. Refuses to push a conflicted change. This is the "degraded form against a git remote" the roadmap promises for phase three; the native wire protocol hardening is R4.14. | M | R3.16 |
+| R3.18 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.14, R2.15 |
 | R3.19 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
 | R3.20 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.07, R3.14 |
 | R3.21 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.14 |
@@ -233,16 +236,17 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.31 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.09, R2.14, R2.17 |
-| R3.32 | Help requests from agents | An operation an agent calls to ask for a human: a reason, the change or conflict it concerns, what it tried, and an optional question. Recorded in the operation log, exposed through the API, CLI, and as an MCP tool, and resolved by a human reply that resumes the agent's session the way an instruction does. This is what produces the "agent asking for help" entries in the needs-you-now bucket. | S | R2.12, R3.12 |
-| R3.33 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.31, R3.32, R2.08 |
-| R3.34 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.14, R2.17 |
-| R3.35 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.25, R2.17 |
-| R3.36 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.09, R2.17 |
-| R3.37 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.15 |
-| R3.38 | File browser with time axis and symbol search | Browse the tree at any snapshot, scrub along the operation log, and search by symbol using the symbol index. Each file links to its audit view. | M | R2.17, R2.13, R3.37 |
+| R3.31 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.09, R2.15, R2.18 |
+| R3.32 | Help requests from agents | An operation an agent calls to ask for a human: a reason, the change or conflict it concerns, what it tried, and an optional question. Recorded in the operation log, exposed through the API, CLI, and as an MCP tool, and resolved by a human reply that resumes the agent's session the way an instruction does. This is what produces the "agent asking for help" entries in the needs-you-now bucket. | S | R2.13, R3.12 |
+| R3.33 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.31, R3.32, R2.09 |
+| R3.34 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.14, R2.18 |
+| R3.35 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.25, R2.18 |
+| R3.36 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.10, R2.18 |
+| R3.37 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.16 |
+| R3.38 | File browser with time axis and symbol search | Browse the tree at any snapshot, scrub along the operation log, and search by symbol using the symbol index. Each file links to its audit view. | M | R2.18, R2.14, R3.37 |
 | R3.39 | Desktop shell | Tauri 2 app wrapping the web UI: bundled daemon, OS notifications for needs-you-now, menu bar fleet state, deep links, auto-update. macOS first. | L | R3.33 |
-| R3.40 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.39 |
+| R3.40 | Mobile shell and push notifications | The Tauri 2 shell built for iOS and Android with no bundled daemon, connecting to a remote daemon or, later, a store. Inbox, proposal view, help requests, instruction replies, and sign-offs laid out for phone width. Web Push from the daemon's remote listener for the needs-you-now bucket, with deep links into the exact proposal or conflict. Store-routed notifications arrive with R4.13. | L | R3.39, R3.33, R2.08 |
+| R3.41 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.39 |
 
 ---
 
@@ -258,6 +262,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A repository round-trips to git and back with landed history intact and change IDs stable across two importers.
 - The web UI runs hosted on the store with authentication.
 - A store backup taken while agents are active restores with no dangling blob reference, and garbage collection cannot remove a blob younger than the backup retention window.
+- A daemon in ephemeral mode on a VM that is reclaimed mid-task loses no work: its drafts are in the store and the change resumes on a new machine.
+- A sign-off from the hosted UI on a phone is signed with a store-issued identity and satisfies policy.
 - One store serves 1,000 concurrent agents at 10,000 operations per minute with p99 API latency under 200 ms, and 50 agents proposing against one repository do not grow the landing queue without bound.
 
 | ID | Title | Scope | Size | Depends on |
@@ -269,16 +275,18 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R4.05 | Sparse profiles and prefetch hints | Repository-declared profiles that prefetch the subtrees a task will touch, so language servers and build tools do not defeat lazy fetch. | M | R4.04 |
 | R4.06 | Lazy-fetch workspace backends | Workspace backends that materialize on first read instead of up front: NFS loopback via nfsserve on macOS, FUSE via fuser on Linux, and virtiofs for sandboxed microVMs, each implementing the backend trait from R1.02 and passing the conformance suite. Reads fall through to the lazy fetch cache. | L | R4.04, R1.11 |
 | R4.07 | Publish and fetch proposals with evidence | Push a proposed change, its stack, evidence, and provenance to a store. Fetch others' proposals. | M | R4.02, R3.09 |
-| R4.08 | Store authentication and authorization | Identity via the same operator identities as phase three. Per-repository roles. | M | R4.02, R3.03 |
-| R4.09 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.07, R3.14 |
-| R4.10 | Federation | A store tracks another store. Proposals and evidence flow between them with signatures intact. | L | R4.09 |
-| R4.11 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. | M | R4.08, R3.33 |
-| R4.12 | Git wire protocol hardening via gitoxide | Fetch and push against git remotes natively through gitoxide, which jj-lib already uses, with no subprocess path: SSH and HTTPS authentication, credential helpers, large-repository performance, partial clones, and retries. R3.17 delivers the first push; this makes it production grade. | L | R3.17 |
-| R4.13 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.12 |
-| R4.14 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.12, R3.16 |
-| R4.15 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog. Can start during phase two. | M | R2.05 |
-| R4.16 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
-| R4.17 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.21, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.09, R2.21 |
+| R4.08 | Private draft changes and ephemeral daemon mode | Changes on the store carry a visibility: private drafts are visible only to the owner and never enter the landing queue until proposed. A daemon started in ephemeral mode streams every watcher snapshot to the store as a private draft and keeps its leases, workspace records, and operation log entries there, so a new machine resumes the change from the last snapshot. Draft retention and garbage collection on the store. Amends the local-only rule from R1.16 for this mode only. | L | R4.07, R1.16, R1.04 |
+| R4.09 | Store authentication and authorization | Identity via the same operator identities as phase three. Per-repository roles. | M | R4.02, R3.03 |
+| R4.10 | Store-issued session keys | The store issues short-lived session keys bound to an operator identity for humans acting from a device with no daemon, so sign-offs from the hosted web UI or the mobile app are signed and satisfy policy the same way a daemon-issued key would. Revocation, and the same key format and verification path as R3.03. | M | R4.09, R3.03 |
+| R4.11 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.07, R3.14 |
+| R4.12 | Federation | A store tracks another store. Proposals and evidence flow between them with signatures intact. | L | R4.11 |
+| R4.13 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. Push notifications routed through the store to the mobile shell, replacing the daemon-sourced Web Push from R3.40 when a store is present. | M | R4.09, R3.33, R3.40 |
+| R4.14 | Git wire protocol hardening via gitoxide | Fetch and push against git remotes natively through gitoxide, which jj-lib already uses, with no subprocess path: SSH and HTTPS authentication, credential helpers, large-repository performance, partial clones, and retries. R3.17 delivers the first push; this makes it production grade. | L | R3.17 |
+| R4.15 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.14 |
+| R4.16 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.14, R3.16 |
+| R4.17 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog, and App Store and Play Store distribution for the mobile shell from R3.40, including signing, review submission, and update cadence. Can start during phase two; the mobile part waits for R3.40. | M | R2.05, R3.40 |
+| R4.18 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
+| R4.19 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.22, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.11, R2.22 |
 
 ---
 
@@ -300,7 +308,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R5.03 | Mergiraf integration | Structural merge as a tier. Vendor or depend on Mergiraf, map its output into Reef's conflict objects. | L | R5.01 |
 | R5.04 | Generated file drivers | Lockfile driver that merges manifests and regenerates for npm, pnpm, Cargo, Go modules, uv, and others declared in the workspace spec. | M | R5.01 |
 | R5.05 | Formatting before hashing | Opt-in per repository: run the declared formatter before snapshotting so whitespace churn never reaches merge. | S | R1.13 |
-| R5.06 | Fallback telemetry | Count tier outcomes per language and surface them in the query layer and the fleet panel. | S | R5.03, R2.15 |
+| R5.06 | Fallback telemetry | Count tier outcomes per language and surface them in the query layer and the fleet panel. | S | R5.03, R2.16 |
 | R5.07 | Agent-pattern merge corpus | Collect real overlapping-insertion cases from agent output and use them as the regression suite for tuning rules. | M | R5.03 |
 | R5.08 | Language rule tuning | Per-language passes for Python, TypeScript, Go, and Rust against the corpus. One ticket per language once R5.07 exists. | M each | R5.07 |
 
@@ -318,8 +326,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R6.01 | Daemon API specification | Normative description of every service, message, and error, derived from the protobuf schema plus semantics the schema cannot express. | L | R4.15 |
-| R6.02 | Store protocol specification | Same for the store protocol and federation. | L | R4.10 |
+| R6.01 | Daemon API specification | Normative description of every service, message, and error, derived from the protobuf schema plus semantics the schema cannot express. | L | R4.17 |
+| R6.02 | Store protocol specification | Same for the store protocol and federation. | L | R4.12 |
 | R6.03 | Evidence and policy specification | Attestation format, trust model, policy language surface, and the executor protocol from R3.05. | M | R3.07, R3.05 |
 | R6.04 | Conformance suite | Black-box tests against any daemon or store endpoint. Reference implementations pass in CI. | L | R6.01, R6.02 |
 | R6.05 | Governance documents | Decision process, spec change process, maintainer roles, security disclosure policy. | S | |
@@ -346,7 +354,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 
 1. Phase 0 in full.
 2. Phase 1 in full. This is the first public release and the first thing anyone can use.
-3. Phase 2 API and live state workstreams, then the agent surface, then web UI v0. R4.15 release engineering runs alongside.
+3. Phase 2 API and live state workstreams, then the agent surface, then web UI v0. R4.17 release engineering runs alongside.
 4. Phase 3 evidence and policy first, then landing, then conflicts, then the human interface. The desktop shell is last in the phase.
 5. Phase 4 store and lazy fetch first, then landing on the store, then federation, then git interop hardening.
 6. Phase 5 can start its merge engine interface and commutation tier during phase 3, since they only depend on conflict objects.

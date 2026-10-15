@@ -53,6 +53,7 @@ Git worktrees are the current answer to agent isolation, and they fail in five w
 - Running builds or tests. The system defines the attestation format and the executor is external.
 - A hosted service. The reference implementation is a daemon and a protocol anyone can run.
 - Structural merge for every language at launch. We start with the languages agents write most and fall back cleanly.
+- Running agents. Reef never starts an agent or holds the prompt that started one. Agent runtimes integrate through the API and the MCP server, whether they run on a laptop or in the cloud, and Reef is where their work is seen, steered, and approved.
 
 ## Design principles
 
@@ -93,7 +94,7 @@ Five object kinds, all content-addressed and stored in one Merkle structure. Thr
 
 A workspace is a materialized directory an agent can run tools in. It is a cache of a snapshot, never the source of truth, and it is designed so that orphaned workspaces cannot exist.
 
-**Always snapshotted.** The daemon snapshots the working copy on every API call and on a short timer, driven by filesystem notifications. Dirty state always exists in the store within seconds of being written. Deleting a workspace therefore loses nothing, which is what makes automatic cleanup safe. These snapshots stay on the machine. Only a change that an agent or human explicitly publishes leaves it, so half-written edits never reach a shared store.
+**Always snapshotted.** The daemon snapshots the working copy on every API call and on a short timer, driven by filesystem notifications. Dirty state always exists in the store within seconds of being written. Deleting a workspace therefore loses nothing, which is what makes automatic cleanup safe. These snapshots stay on the machine. Only a change that an agent or human explicitly publishes leaves it, so half-written edits never reach a shared store. The one exception is a daemon running in ephemeral mode on a disposable machine, which streams its snapshots to the store as private drafts; see Deployment topologies.
 
 **Leased.** Every workspace records an owner, the change it is working on, a purpose string, and a lease that the agent's session must heartbeat. When the lease lapses, the daemon takes a final snapshot, records it in the operation log, and reclaims the directory. An agent that crashes leaves a snapshot and a log entry, not a directory.
 
@@ -197,11 +198,11 @@ History is a database. Agents ask structured questions such as which changes tou
 
 ### Provenance
 
-Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key. The daemon issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern, so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
+Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key. The daemon, or the store for a human acting from a device with no daemon, issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern, so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
 
 ### API
 
-The daemon exposes a typed protocol over a local socket with structured responses. The CLI and the MCP server are thin clients of the same API, so an agent and a human see identical state. Every call is idempotent where possible and returns the operation log entry it created, so a client can undo exactly what it did.
+The daemon exposes a typed protocol over a local socket with structured responses, and optionally over TLS with token authentication so a daemon on a remote machine can be reached by the same clients. The CLI and the MCP server are thin clients of the same API, so an agent and a human see identical state. Every call is idempotent where possible and returns the operation log entry it created, so a client can undo exactly what it did.
 
 **Subscriptions.** The operation log is the event stream. The daemon and the store expose a streaming subscription filtered by repository, change, workspace, or agent, and clients render deltas rather than polling. Presence is a second, ephemeral channel over the same connection: an agent running tests, an agent editing in a directory, a lease heartbeat, a batch's progress through its checks. Presence is never persisted, so the log stays an audit trail and liveness stays cheap. Agents use both channels the same way humans do, waiting for a proposal to land or for a reviewer's instruction instead of polling. Because the log is complete, any live view can be replayed from any point in time.
 
@@ -220,7 +221,7 @@ Workspaces are caches by design, so losing a machine's working directories loses
 
 **Local backup.** The daemon exposes a backup operation that produces a consistent copy of a repository's authoritative state without stopping agents for long. It holds the write lock briefly, copies SQLite through its online backup API, copies the object and operation files, which are immutable and content-addressed and so can be copied without a lock, and copies the operation heads last, so the backup never references an operation it does not contain. Restore points a daemon at the copy: workspace records are kept, their directories are rematerialized on demand, and leases are treated as expired with a grace period, so nothing is reclaimed on the first tick after a restore. A filesystem snapshot of the state directory on APFS or btrfs is an acceptable substitute; the daemon exposes the quiesce step on its own so a snapshot can be taken between pause and resume.
 
-**Local-only work is the exposed state.** Watcher snapshots stay on the machine until a change is published. That is the right privacy choice, and it means an agent's unpublished work lives on one disk. The mitigations are the backup operation above, publishing early to a private store, and the fact that each snapshot is small. There is no plan to replicate unpublished snapshots automatically.
+**Local-only work is the exposed state on a laptop.** Watcher snapshots stay on the machine until a change is published. That is the right privacy choice for a machine the human owns, and it means an agent's unpublished work lives on one disk. The mitigations are the backup operation above, publishing early to a private store, and the fact that each snapshot is small. On a disposable machine the rule inverts: a daemon in ephemeral mode streams every snapshot to the store as a private draft, visible only to its owner, so reclaiming the machine loses nothing.
 
 **Store backup.** Blobs and operations are immutable and content-addressed; metadata in Postgres references them by hash. The rule is blobs first, then metadata: an object storage backup taken before the database backup can contain unreferenced extras but never a dangling reference. Point-in-time recovery for Postgres and versioning on the object bucket cover the two layers with standard tooling. Garbage collection must never delete a blob younger than the backup retention window, or a restored database can reference a blob that is gone. The retention window is a store setting and GC reads it.
 
@@ -247,6 +248,22 @@ Initial capacity targets. Each is measured by a load test ticket in its phase an
 | 1 | 200 workspaces with active watchers on one machine, with a write reaching the store as a snapshot within 5 seconds at that load |
 | 2 | 500 subscribers on one daemon receiving 1,000 operations per minute, each delivered within 100 ms |
 | 4 | One store serving 1,000 concurrent agents across repositories at 10,000 operations per minute with p99 API latency under 200 ms, and 50 agents proposing against one repository without the landing queue growing without bound |
+
+### Deployment topologies
+
+The daemon does not care where it runs, and the human does not have to be on the machine the agents use. Three shapes are supported, and the protocol is the same in all of them.
+
+| Topology | Where the daemon runs | Where the human is | Source of truth |
+| --- | --- | --- | --- |
+| Laptop | On the human's machine, reached over a local socket | The same machine, or a phone reaching the daemon's remote listener | The local store, optionally syncing to a shared store |
+| Cloud VM | Inside the VM an agent runtime provisions, in ephemeral mode, pointed at a store | Anywhere, through the hosted web UI or the mobile app | The store; the VM holds only a cache and streams drafts up |
+| Host and microVMs | On the host, serving snapshots into sandboxed guests over virtiofs or NFS and holding every lease | Anywhere, as above | The host daemon's store or a shared store |
+
+**Ephemeral mode.** A daemon started with the ephemeral flag assumes its machine can disappear at any moment. Every snapshot it takes is streamed to the store as a private draft on the agent's change, visible only to the change's owner and never to the landing queue until proposed. Leases, workspace records, and the operation log entries it creates live in the store as well, so a new machine can resume the same change from the last snapshot. Nothing else about the daemon changes: the same API, the same watcher, the same backends.
+
+**The human surface follows the store, not the daemon.** Before a store exists, a daemon can expose its API and web UI over TLS with a token so a phone or another laptop can reach it directly. Once a store exists, the hosted web UI and the mobile app talk to the store, which knows every daemon's state through the operation log and presence. Sign-offs from a device with no daemon are signed with a session key the store issues against the human's operator identity, so provenance and policy work the same whether the approval came from a desk or a phone.
+
+**What Reef still does not do.** It does not provision the VM, start the agent, or hold the prompt. The runtime that does those things integrates through the API and the MCP server, and a runtime that runs in the cloud needs nothing from Reef beyond a daemon in its VM and credentials for a store.
 
 ## Technology choices
 
@@ -314,6 +331,7 @@ Two surfaces over the same API, so a human and an agent always see identical sta
 | --- | --- | --- |
 | Web UI | One codebase that runs in a browser against the local daemon (your stacks, your workspaces, what agents are doing in your repository now) or against a remote store (shared review, triage inbox, audit, fleet operation). Anyone running a store serves it. | Sapling's Interactive Smartlog, GitHub |
 | Desktop app | A thin shell around the web UI, built with Tauri 2 so the Rust daemon ships inside it. Adds what only a native app can: OS notifications for the needs-you-now bucket, a menu bar view of fleet state, a bundled auto-updating daemon, one window for local and remote, and deep links from a notification or chat message to the exact proposal or conflict. | GitHub Desktop, Linear |
+| Mobile app | The same Tauri 2 shell built for iOS and Android, with no bundled daemon. It carries the parts of the interface a human needs while away from a desk: the triage inbox, the proposal view, help requests and instruction replies, and sign-offs, all at phone width, with push notifications delivered through the daemon's remote listener or the store. The map, smartlog, and pipeline views stay on larger screens. | Linear, GitHub mobile |
 
 The app shows and acts on repository state. It is not an agent runner. Agent runtimes integrate through the API and the MCP server, and an app that launched agents on tasks would be a different product with a different competitive set. Editors integrate through the same API if their vendors or the community want it; Reef ships no editor extensions. The desktop shell follows the web UI, since a desktop app carries its own costs in code signing, auto-update, and three platforms, and is only worth wrapping once the triage inbox has real proposals and landings to show.
 
@@ -390,7 +408,7 @@ Build on Jujutsu's data model and crates rather than starting clean. Each phase 
 
 1. **Leased copy-on-write workspaces over Jujutsu.** A daemon that creates workspaces via overlayfs or APFS clones, snapshots on a watcher, heartbeats leases, and reclaims expired workspaces with a final snapshot. Shared dependency store mounting. This can ship as a standalone tool against existing jj repositories.
 2. **Typed API and MCP server.** Structured status, snapshot, diff, log, and undo over a local socket, with the CLI rewritten as a client. Symbol-level diffs for the first supported languages. This is where agent token waste drops sharply.
-3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that verifies evidence and rebases. Works against a self-hosted store or, in degraded form, against a git remote with evidence kept locally. The web UI's triage inbox ships here, and the desktop shell follows once the inbox has real proposals and landings to show.
+3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that verifies evidence and rebases. Works against a self-hosted store or, in degraded form, against a git remote with evidence kept locally. The web UI's triage inbox ships here, and the desktop shell follows once the inbox has real proposals and landings to show, with iOS and Android apps from the same Tauri shell so a human can triage, answer, and approve from a phone while agents run in the cloud.
 4. **Shared lazy object store.** A store server speaking the native protocol, with lazy fetch into the local cache and federation between stores. Full clones become optional.
 5. **Structural merge.** Tree-sitter based merge for Python, TypeScript, Go, and Rust, with measured fallback rates guiding which languages come next.
 6. **Protocol specification and conformance suite.** Published once the first four phases have stabilized in practice, so alternative implementations can exist.
