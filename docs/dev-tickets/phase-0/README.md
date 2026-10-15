@@ -9,9 +9,9 @@ Source of truth for scope: [`docs/dev-phases.md`](../../dev-phases.md) (Phase 0 
 | R0.01 | [R0.01-workspace-layout.md](R0.01-workspace-layout.md) | S | nothing | R0.02, R0.04, R0.05, R0.09 |
 | R0.02 | [R0.02-toolchain-and-dev-tooling.md](R0.02-toolchain-and-dev-tooling.md) | S | R0.01 | R0.03 |
 | R0.03 | [R0.03-ci.md](R0.03-ci.md) | S | R0.02 | R0.06 (artifact upload) |
-| R0.04 | [R0.04-jj-lib-spike.md](R0.04-jj-lib-spike.md) | M | R0.01 | R0.06, R1.01, R1.11 |
-| R0.05 | [R0.05-synthetic-repo-generator.md](R0.05-synthetic-repo-generator.md) | S | R0.01 | R0.06, R1.10 |
-| R0.06 | [R0.06-benchmark-harness.md](R0.06-benchmark-harness.md) | S | R0.04, R0.05 | R1.10, RX.06 |
+| R0.04 | [R0.04-jj-lib-spike.md](R0.04-jj-lib-spike.md) | M | R0.01 | R0.06, R1.01, R1.13 |
+| R0.05 | [R0.05-synthetic-repo-generator.md](R0.05-synthetic-repo-generator.md) | S | R0.01 | R0.06, R1.12 |
+| R0.06 | [R0.06-benchmark-harness.md](R0.06-benchmark-harness.md) | S | R0.04, R0.05 | R1.12, RX.06 |
 | R0.07 | [R0.07-adr-directory.md](R0.07-adr-directory.md) | S | nothing | ADRs written by R0.01, R0.04, R0.08, R0.09 |
 | R0.08 | [R0.08-contributor-docs.md](R0.08-contributor-docs.md) | S | nothing (R0.02 for accuracy of the setup section) | |
 | R0.09 | [R0.09-error-and-logging-conventions.md](R0.09-error-and-logging-conventions.md) | S | R0.01 | R1.03 |
@@ -46,7 +46,7 @@ These were settled while writing the briefs. Do not re-open them inside a ticket
 | Errors | `thiserror` 2 enums in libraries, `anyhow` only in `main.rs` files and test code | R0.09 |
 | Logging | `tracing` + `tracing-subscriber`; `REEF_LOG` filter env var; JSON when stderr is not a terminal | R0.09 |
 | Benchmarks | criterion 0.8, benches live in `crates/reef-lib/benches/` | R0.06 |
-| ADR numbering | Four digits, assigned in this folder so parallel tickets do not collide: 0001 ADR process, 0002 jj-lib, 0003 SQLite, 0004 gRPC/tonic, 0005 Tauri, 0006 CEL, 0007 crate layout, 0008 jj-lib embedding findings, 0009 errors and logging, 0010 DCO | R0.07 and others |
+| ADR numbering | Four digits, assigned in this folder so parallel tickets do not collide: 0001 ADR process, 0002 jj-lib, 0003 SQLite, 0004 gRPC/tonic, 0005 Tauri, 0006 CEL, 0007 crate layout, 0008 jj-lib embedding findings, 0009 errors and logging, 0010 DCO, 0011 hash function and object backend by phase | R0.07 and others |
 | Commit style | Imperative sentence-case subject, no trailing period, no conventional-commit prefix, body explains why. Matches existing history. | R0.08 |
 | Contributor license | DCO sign-off, not a CLA | R0.08 |
 

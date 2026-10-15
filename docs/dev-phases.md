@@ -6,7 +6,7 @@ This document breaks the design into phases and the phases into tickets. Each ti
 
 **How to read the tables**
 
-- **ID** is stable and should go in the issue title, for example `R1.04 overlayfs backend`.
+- **ID** goes in the issue title, for example `R1.09 overlayfs backend`. IDs become stable once a phase's tickets are filed as issues; until then, inserting a ticket renumbers the rest of its phase and this document is the only place the numbers live.
 - **Size** is a rough estimate for one engineer with heavy agent assistance: S is up to two days, M is up to a week, L is two to three weeks. Anything bigger is split.
 - **Depends on** lists tickets that must land first. Tickets with no dependencies inside a phase can run in parallel.
 - Workstreams group tickets that one person would naturally own.
@@ -33,7 +33,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R0.04 | jj-lib embedding spike | Pin a jj-lib version. Open an existing jj repo, snapshot the working copy, list changes, read the op log, undo one op. Record what jj-lib exposes and what it does not in an ADR. | M | R0.01 |
 | R0.05 | Synthetic repository generator | A tool that generates a repo with N files, configurable depth and file sizes, plus a few large binaries, for benchmarks and tests. | S | R0.01 |
 | R0.06 | Benchmark harness | Criterion setup with one benchmark that snapshots the synthetic repo. Results published as CI artifacts. | S | R0.04, R0.05 |
-| R0.07 | ADR directory and template | `docs/adr/` with a template. Backfill ADRs for the choices already made in design.md: jj-lib, SQLite, gRPC, Tauri, CEL. | S | |
+| R0.07 | ADR directory and template | `docs/adr/` with a template. Backfill ADRs for the choices already made in design.md: jj-lib, SQLite, gRPC, Tauri, CEL, and the hash function and object backend by phase (git backend with SHA-1 through phase three, a Reef backend with BLAKE3 and chunked blobs from phase four). | S | |
 | R0.08 | Contributor docs | `CONTRIBUTING.md`, issue and PR templates, code of conduct, DCO or CLA decision. | S | |
 | R0.09 | Error and logging conventions | Choose error types (`thiserror` in lib, `anyhow` at edges), `tracing` setup, structured log format. Document in an ADR. | S | R0.01 |
 
@@ -50,6 +50,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Two workspaces on the same change work without interfering.
 - A shared dependency store is mounted read-only into every workspace and verified against a lockfile hash.
 - Works on macOS and Linux with the same CLI.
+- A workspace moves to another change without losing its lease or leaving a directory behind.
 - Two hundred workspaces with active watchers on one machine, with a write reaching the store as a snapshot within five seconds at that load.
 - A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
 
@@ -57,43 +58,45 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R1.01 | Workspace schema in SQLite | Tables for workspaces (id, owner, change ID, purpose, backend, path, lease expiry, created, last snapshot), leases, and reclaim log. Migrations. | S | R0.04 |
+| R1.01 | Repository and workspace schema in SQLite | One SQLite database per machine under the daemon state directory. Tables for repositories (id, root path, jj repo path, registered at), workspaces (id, repository id, owner, change ID, purpose, backend, path, lease expiry, created, last snapshot), leases, and reclaim log. Every table carries a repository id; the daemon serves many repositories. Owner is an opaque string the client supplies, `user@host:pid` by default from `reef ws run`, and is replaced by the session identity from R3.03 without a schema change. Migrations. | S | R0.04 |
 | R1.02 | Materialization backend trait | `Backend` trait: materialize a snapshot at a path, capture the writable layer as a tree, tear down. Capability detection per platform and filesystem. | S | R1.01 |
 | R1.03 | Daemon skeleton over a Unix socket | Long-running `reef-daemon` with tonic gRPC over a Unix socket, health check, graceful shutdown, single-instance lock, structured logs. | M | R0.09 |
-| R1.04 | Workspace service: create, list, release | gRPC methods and protobuf messages for creating a workspace on a change, listing with owner and lease state, releasing. Protobuf schema lives in `reef-daemon/proto`. | M | R1.02, R1.03 |
+| R1.04 | Daemon configuration and state directory layout | Where the daemon keeps its state (`$XDG_STATE_HOME/reef` or platform equivalent, overridable), the socket path, the SQLite database, per-repository subdirectories for base caches and materialized workspaces, and log files. A `config.toml` with lease defaults, watcher settings, log options, and the backup retention window from the design's durability section, with environment overrides and a `reef config show` that prints the effective configuration. Repositories are registered by path; jj user configuration is not read. | S | R1.03, R0.09 |
+| R1.05 | Workspace service: create, list, release | gRPC methods and protobuf messages for creating a workspace on a change, listing with owner and lease state, releasing. Every request names a registered repository. Protobuf schema lives in `reef-daemon/proto`. | M | R1.02, R1.03 |
+| R1.06 | Move a workspace between changes | Point an existing workspace at a different change without tearing it down: final snapshot of the current change, then the backend swaps the base to the target change's snapshot and keeps the writable layer empty. The lease and owner carry over. Refuses if the workspace has an unsnapshotted write in flight. API, CLI (`reef ws move`), and a conformance test per backend. | S | R1.05, R1.13 |
 
 ### Workstream: materialization backends
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R1.05 | Plain copy fallback backend | Full copy materialization. Exists so every platform works and as the baseline for benchmarks. | S | R1.02 |
-| R1.06 | APFS clone backend (macOS) | Materialize a base snapshot once per machine, then `clonefile` per file into the workspace. Base cache keyed by snapshot hash with eviction. | M | R1.02 |
-| R1.07 | overlayfs backend (Linux) | Read-only lower from a materialized base, writable upper per workspace. Handle unprivileged mounts via user namespaces; fall back to fuse-overlayfs where kernel overlayfs is unavailable. | L | R1.02 |
-| R1.08 | Reflink backend (btrfs, XFS) | `FICLONE` per file. Shares the base cache with the APFS backend. | S | R1.06 |
-| R1.09 | Backend conformance tests | One test suite every backend must pass: materialize, modify, capture, tear down, large files, symlinks, permissions, case sensitivity. | M | R1.05 |
-| R1.10 | Workspace creation benchmarks | Time and disk for 1, 20, and 100 workspaces per backend on the synthetic repo. Published from CI on both platforms. | S | R1.09, R0.06 |
+| R1.07 | Plain copy fallback backend | Full copy materialization. Exists so every platform works and as the baseline for benchmarks. | S | R1.02 |
+| R1.08 | APFS clone backend (macOS) | Materialize a base snapshot once per machine, then `clonefile` per file into the workspace. Base cache keyed by snapshot hash with eviction. | M | R1.02 |
+| R1.09 | overlayfs backend (Linux) | Read-only lower from a materialized base, writable upper per workspace. Handle unprivileged mounts via user namespaces; fall back to fuse-overlayfs where kernel overlayfs is unavailable. | L | R1.02 |
+| R1.10 | Reflink backend (btrfs, XFS) | `FICLONE` per file. Shares the base cache with the APFS backend. | S | R1.08 |
+| R1.11 | Backend conformance tests | One test suite every backend must pass: materialize, modify, capture, tear down, large files, symlinks, permissions, case sensitivity. | M | R1.07 |
+| R1.12 | Workspace creation benchmarks | Time and disk for 1, 20, and 100 workspaces per backend on the synthetic repo. Published from CI on both platforms. | S | R1.11, R0.06 |
 
 ### Workstream: snapshotting and leases
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R1.11 | Watcher-driven snapshots | `notify` watcher per workspace with debounce. Capture the writable layer and snapshot through jj-lib. Ignore rules from the repo plus a Reef-specific ignore file. | M | R1.04, R0.04 |
-| R1.12 | Watchman backend (optional) | Use Watchman when present for large repos. Same interface as the notify watcher. | M | R1.11 |
-| R1.13 | Lease manager | Heartbeat RPC, expiry loop, configurable lease length and grace. On expiry: final snapshot, op log entry, reclaim. Daemon restart preserves leases and applies a grace period before reclaiming anything. | M | R1.04, R1.11 |
-| R1.14 | Local-only snapshot marking | Snapshots taken by the watcher are marked local and never exported or pushed until a change is explicitly published. | S | R1.11 |
-| R1.15 | Garbage collection | Reclaim snapshots unreferenced by any change and older than the undo window. Reclaim base cache entries no workspace uses. Report what was freed. | M | R1.13 |
-| R1.16 | Local backup and restore | Daemon backup operation per the design's durability section: hold the write lock briefly, SQLite online backup, copy immutable object and operation files, operation heads last. A standalone quiesce RPC with pause and resume so a filesystem snapshot can be taken between them. Restore loads from a copy, keeps workspace records, rematerializes directories on demand, and treats every lease as expired with a grace period. `reef backup` and `reef restore`. Round-trip test with agents writing during the backup. | M | R1.13, R1.15 |
+| R1.13 | Watcher-driven snapshots | `notify` watcher per workspace with debounce. Capture the writable layer and snapshot through jj-lib. Ignore rules from the repo plus a Reef-specific ignore file. | M | R1.05, R0.04 |
+| R1.14 | Watchman backend (optional) | Use Watchman when present for large repos. Same interface as the notify watcher. | M | R1.13 |
+| R1.15 | Lease manager | Heartbeat RPC, expiry loop, configurable lease length and grace. On expiry: final snapshot, op log entry, reclaim. Daemon restart preserves leases and applies a grace period before reclaiming anything. | M | R1.05, R1.13 |
+| R1.16 | Local-only snapshot marking | Snapshots taken by the watcher are marked local and never exported or pushed until a change is explicitly published. | S | R1.13 |
+| R1.17 | Garbage collection | Reclaim snapshots unreferenced by any change and older than the undo window. Reclaim base cache entries no workspace uses. Report what was freed. | M | R1.15 |
+| R1.18 | Local backup and restore | Daemon backup operation per the design's durability section: hold the write lock briefly, SQLite online backup, copy immutable object and operation files, operation heads last. A standalone quiesce RPC with pause and resume so a filesystem snapshot can be taken between them. Restore loads from a copy, keeps workspace records, rematerializes directories on demand, and treats every lease as expired with a grace period. `reef backup` and `reef restore`. Round-trip test with agents writing during the backup. | M | R1.04, R1.15, R1.17 |
 
 ### Workstream: shared stores and agent integration
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R1.17 | Workspace spec file | `reef.toml` in the repo declaring shared stores to mount, build output paths to keep out of snapshots, and lease defaults. | S | R1.01 |
-| R1.18 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.17, R1.06, R1.07 |
-| R1.19 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.13 |
-| R1.20 | CLI for workspaces | `reef ws create`, `list`, `release`, `gc`, `inspect`, with JSON output when stdout is not a terminal. Thin client of the daemon. | M | R1.04, R1.15 |
-| R1.21 | Crash, reclaim, and load integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. Run 200 workspaces with active watchers on one machine on both platforms, measure write-to-snapshot latency against the phase target, and record inotify and thread pool limits hit. | M | R1.13, R1.18 |
-| R1.22 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.20 |
+| R1.19 | Workspace spec file | `reef.toml` in the repo declaring shared stores to mount, build output paths to keep out of snapshots, and lease defaults. | S | R1.01 |
+| R1.20 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.19, R1.08, R1.09 |
+| R1.21 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.15 |
+| R1.22 | CLI for workspaces | `reef ws create`, `list`, `release`, `gc`, `inspect`, with JSON output when stdout is not a terminal. Thin client of the daemon. | M | R1.05, R1.17 |
+| R1.23 | Crash, reclaim, and load integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. Run 200 workspaces with active watchers on one machine on both platforms, measure write-to-snapshot latency against the phase target, and record inotify and thread pool limits hit. | M | R1.15, R1.20 |
+| R1.24 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.22 |
 
 ---
 
@@ -109,12 +112,13 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Symbol-level diffs work for Python, TypeScript, Go, and Rust.
 - A local web UI shows the smartlog, workspaces, and fleet panel live.
 - Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output.
+- Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk.
 
 ### Workstream: API
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.01 | Core protobuf schema | Messages and services for status, snapshot, diff, log, changes, undo, and workspaces. Versioned. Reviewed as an API, not generated from code. | M | R1.04 |
+| R2.01 | Core protobuf schema | Messages and services for status, snapshot, diff, log, changes, undo, and workspaces. Versioned. Reviewed as an API, not generated from code. | M | R1.05 |
 | R2.02 | Status, log, and change services | Implement the read side of the schema over jj-lib. Structured, paginated responses. | M | R2.01 |
 | R2.03 | Snapshot, describe, and undo services | The write side: snapshot now, set change description, undo an operation, with each response returning the op log entry created. | M | R2.01 |
 | R2.04 | Virtual workspace API | Read a file at a snapshot, apply an edit, receive a new snapshot hash, without materializing a directory. | M | R2.03 |
@@ -155,6 +159,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R2.21 | Subscription load test and broker | A load generator that opens N subscribers and drives M operations per minute through the daemon, measuring delivery latency per event. Run at the phase target of 500 subscribers and 1,000 operations per minute. Put a broker between the operation log and the streams, in-process first, so fan-out does not read the log per subscriber; the broker is the same component the store reuses in phase four. Publish results with the benchmarks. | M | R2.09 |
+| R2.22 | Incremental status index | Status answered from an index in SQLite that the watcher maintains per workspace, never from a tree walk: path, size, mtime, content hash when known, and dirty flag, updated from filesystem events and reconciled on snapshot. The status service reads the index and falls back to jj-lib's walk only when the index is marked stale, for example after a watcher overflow. Measured against jj-lib's walk on the large synthetic repository. | M | R2.02, R1.13 |
 
 ---
 
@@ -171,6 +176,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Amending the bottom change of a stack rebases the changes above it, preserves their IDs, and leaves a conflict object on any that no longer applies.
 - A conflict is resolved by an agent, enters the proposal flow, and lands under tier one policy.
 - The triage inbox shows the needs-you-now bucket live, and the desktop app notifies on it.
+- An agent's help request appears in the needs-you-now bucket and the human's reply resumes the agent's session.
+- Landed history is pushed to an ordinary git remote while evidence, provenance, and conflicts stay local.
 
 ### Workstream: evidence and identity
 
@@ -180,57 +187,62 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.02 | Evidence artifact store | Separate store for logs and build artifacts with a retention policy. Local implementation first. | M | R3.01 |
 | R3.03 | Session keys and operator identity | Daemon issues short-lived ed25519 session keys bound to an operator or CI identity. Revocation. Sigstore keyless as an identity option. | L | R3.01 |
 | R3.04 | Provenance records | Agent identity, model, session, task reference, instruction hash, signed with the session key, attached to snapshots. API and CLI to read them. | M | R3.03 |
-| R3.05 | Trusted executor reference implementation | Runs a declared command on a tree hash in a sandbox, signs the result as evidence. Usable locally and in CI. | L | R3.01, R3.03 |
+| R3.05 | Executor protocol | The contract between the landing gate and an executor, written down before the reference implementation: a request names a tree hash, the check targets to run, the evidence kinds expected, and a budget; a response is a set of signed evidence objects plus artifacts; progress streams over the presence channel. Protobuf messages in the daemon schema. This is the protocol the design says Reef must get right so that sandboxing and remote execution stay outside Reef. | M | R3.01, R2.01 |
+| R3.06 | Trusted executor reference implementation | Implements the executor protocol: runs a declared command on a tree hash in a sandbox, signs the result as evidence. Usable locally and in CI. | L | R3.05, R3.03 |
 
 ### Workstream: policy and proposals
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.06 | Policy file and CEL evaluation | `reef-policy.cel` or similar in the repo: trusted attestors, required evidence kinds, size limits, forbidden paths, sign-off areas, conflict tiers, attempt caps. Evaluated with `cel-rust`. | M | R3.01 |
-| R3.07 | Policy simulation | Evaluate a proposed policy against recent landings and report what it would have blocked. API and CLI. | S | R3.06 |
-| R3.08 | Change lifecycle states | Draft, proposed, queued, landed, declined, withdrawn, superseded, recorded as operations. Transitions in the API. | M | R2.03 |
-| R3.09 | Stacks | Dependency edges on changes. Propose, review, and land a stack as one unit with prefix landing. | M | R3.08 |
-| R3.10 | Dependent change lifecycle | A dependent proposed while its dependency is still proposed is a separate, linked proposal ordered by the edge at landing. Amending a dependency rebases dependents, preserving their IDs, and attaches a conflict object where the rebase does not apply. A declined or withdrawn dependency returns each dependent to its owner or the resolver queue with a conflict object; a superseded one rebases dependents onto the superseding change. | M | R3.09, R3.12 |
-| R3.11 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.08, R2.12 |
+| R3.07 | Policy file and CEL evaluation | `reef-policy.cel` or similar in the repo: trusted attestors, required evidence kinds, size limits, forbidden paths, sign-off areas, conflict tiers, attempt caps. Evaluated with `cel-rust`. | M | R3.01 |
+| R3.08 | Policy simulation | Evaluate a proposed policy against recent landings and report what it would have blocked. API and CLI. | S | R3.07 |
+| R3.09 | Change lifecycle states | Draft, proposed, queued, landed, declined, withdrawn, superseded, recorded as operations. Transitions in the API. | M | R2.03 |
+| R3.10 | Stacks | Dependency edges on changes. Propose, review, and land a stack as one unit with prefix landing. | M | R3.09 |
+| R3.11 | Dependent change lifecycle | A dependent proposed while its dependency is still proposed is a separate, linked proposal ordered by the edge at landing. Amending a dependency rebases dependents, preserving their IDs, and attaches a conflict object where the rebase does not apply. A declined or withdrawn dependency returns each dependent to its owner or the resolver queue with a conflict object; a superseded one rebases dependents onto the superseding change. | M | R3.10, R3.13 |
+| R3.12 | Comments as instructions | Comment objects on proposals, marked as note or instruction. An instruction resumes the originating agent's session through a webhook or the MCP server and shows estimated cost before running. | M | R3.09, R2.12 |
 
 ### Workstream: landing
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.12 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. | L | R3.06, R3.08 |
-| R3.13 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.12, R3.05 |
-| R3.14 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.13 |
-| R3.15 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.12 |
-| R3.16 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.13, R2.14 |
-| R3.17 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
-| R3.18 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.06, R3.13 |
-| R3.19 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.13 |
-| R3.20 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Rendered in the proposal view. | M | R3.05, R3.17 |
-| R3.21 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.28 |
-| R3.22 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.06, R3.09 |
+| R3.13 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. | L | R3.07, R3.09 |
+| R3.14 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.13, R3.06 |
+| R3.15 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.14 |
+| R3.16 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.13 |
+| R3.17 | Degraded landing to a git remote | After a local landing, push the landed projection to a configured git remote through jj-lib's git support, so a team on GitHub sees landed history while evidence, provenance, and conflicts stay local. Refuses to push a conflicted change. This is the "degraded form against a git remote" the roadmap promises for phase three; the native wire protocol hardening is R4.12. | M | R3.16 |
+| R3.18 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.14, R2.14 |
+| R3.19 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
+| R3.20 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.07, R3.14 |
+| R3.21 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.14 |
+| R3.22 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Rendered in the proposal view. | M | R3.06, R3.19 |
+| R3.23 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.31 |
+| R3.24 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.07, R3.10 |
 
 ### Workstream: conflicts
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.23 | Conflict objects in the API | Expose jj-lib's stored conflicts as structured records with base, sides, and each side's provenance. | M | R3.04 |
-| R3.24 | Resolver assignment and queue | Assign to the originating agent of the later change by default. Resolver queue with priority for conflicts whose owner's session has ended. | M | R3.23 |
-| R3.25 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Resolutions enter the proposal flow marked as resolutions. | M | R3.24, R3.06 |
-| R3.26 | Intent conflict escalation | Heuristics and an agent-facing prompt for detecting that two sides disagree on what to build, escalating to ask-first regardless of policy. | M | R3.25 |
-| R3.27 | Backpressure | Refuse a second unresolved conflict ancestor without policy approval. | S | R3.25 |
+| R3.25 | Conflict objects in the API | Expose jj-lib's stored conflicts as structured records with base, sides, and each side's provenance. | M | R3.04 |
+| R3.26 | Agent-scoped undo | Undo scoped to the operations an agent performed on its own changes, per the data model: an agent cannot undo another agent's operation without policy approval. Undoing an operation that another change has built on does not rewrite that change; it attaches a conflict object naming the undone operation to the dependent for its owner to resolve. Extends R2.03. | M | R3.25, R2.03 |
+| R3.27 | Resolver assignment and queue | Assign to the originating agent of the later change by default. Resolver queue with priority for conflicts whose owner's session has ended. | M | R3.25 |
+| R3.28 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Resolutions enter the proposal flow marked as resolutions. | M | R3.27, R3.07 |
+| R3.29 | Intent conflict escalation | Heuristics and an agent-facing prompt for detecting that two sides disagree on what to build, escalating to ask-first regardless of policy. | M | R3.28 |
+| R3.30 | Backpressure | Refuse a second unresolved conflict ancestor without policy approval. | S | R3.28 |
 
 ### Workstream: human interface
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.28 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.08, R2.14, R2.17 |
-| R3.29 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.28, R2.08 |
-| R3.30 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.13, R2.17 |
-| R3.31 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.23, R2.17 |
-| R3.32 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.09, R2.17 |
-| R3.33 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.15 |
-| R3.34 | Desktop shell | Tauri 2 app wrapping the web UI: bundled daemon, OS notifications for needs-you-now, menu bar fleet state, deep links, auto-update. macOS first. | L | R3.29 |
-| R3.35 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.34 |
+| R3.31 | Proposal view | Intent, then evidence, then symbol-level diff with expand to lines. Accept, decline, comment. | L | R3.09, R2.14, R2.17 |
+| R3.32 | Help requests from agents | An operation an agent calls to ask for a human: a reason, the change or conflict it concerns, what it tried, and an optional question. Recorded in the operation log, exposed through the API, CLI, and as an MCP tool, and resolved by a human reply that resumes the agent's session the way an instruction does. This is what produces the "agent asking for help" entries in the needs-you-now bucket. | S | R2.12, R3.12 |
+| R3.33 | Triage inbox | Needs you now, watching, landed since you last looked. Live, with position held under the cursor and a visible new-items count. | M | R3.31, R3.32, R2.08 |
+| R3.34 | Landing pipeline view | Queued, batched, testing, landed or bisecting, with batches as units. | M | R3.14, R2.17 |
+| R3.35 | Conflict view | Base and both sides with provenance, resolver status, tier, attempts, and manual takeover. | M | R3.25, R2.17 |
+| R3.36 | Map view with conflict warning | Repository tree as a surface with presence-driven activity, warning when two agents work in the same area. | L | R2.09, R2.17 |
+| R3.37 | Audit and explain | For a line or symbol: task, agent, instruction, evidence, landing. Two history views. | M | R3.04, R2.15 |
+| R3.38 | File browser with time axis and symbol search | Browse the tree at any snapshot, scrub along the operation log, and search by symbol using the symbol index. Each file links to its audit view. | M | R2.17, R2.13, R3.37 |
+| R3.39 | Desktop shell | Tauri 2 app wrapping the web UI: bundled daemon, OS notifications for needs-you-now, menu bar fleet state, deep links, auto-update. macOS first. | L | R3.33 |
+| R3.40 | Desktop shell on Linux and Windows | Platform ports, signing, and packaging. Windows depends on a workspace backend decision. | L | R3.39 |
 
 ---
 
@@ -251,20 +263,22 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R4.01 | Store protocol | Protobuf services for objects, changes, evidence, subscriptions, and landing between a daemon and a store. Versioned and documented. | M | R2.01 |
-| R4.02 | Store server | Rust service, Postgres metadata, S3-compatible blob storage, the store protocol over gRPC. Docker image. | L | R4.01 |
-| R4.03 | Lazy fetch client cache | Daemon fetches trees on demand and blobs on first read, with a local cache and eviction. | L | R4.01 |
-| R4.04 | Sparse profiles and prefetch hints | Repository-declared profiles that prefetch the subtrees a task will touch, so language servers and build tools do not defeat lazy fetch. | M | R4.03 |
-| R4.05 | Publish and fetch proposals with evidence | Push a proposed change, its stack, evidence, and provenance to a store. Fetch others' proposals. | M | R4.02, R3.08 |
-| R4.06 | Store authentication and authorization | Identity via the same operator identities as phase three. Per-repository roles. | M | R4.02, R3.03 |
-| R4.07 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.05, R3.13 |
-| R4.08 | Federation | A store tracks another store. Proposals and evidence flow between them with signatures intact. | L | R4.07 |
-| R4.09 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. | M | R4.06, R3.29 |
-| R4.10 | Git wire protocol via gitoxide | Fetch and push against git remotes natively. No shelling out. | L | R0.04 |
-| R4.11 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.10 |
-| R4.12 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.10, R3.15 |
-| R4.13 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog. Can start during phase two. | M | R2.05 |
-| R4.14 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
-| R4.15 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.21, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.07, R2.21 |
+| R4.02 | Store server | Rust service, Postgres metadata, S3-compatible blob storage, the store protocol over gRPC. Health and readiness endpoints and operational metrics in Prometheus format. Docker image. | L | R4.01 |
+| R4.03 | Reef object backend for jj-lib | A jj-lib `Backend` implementation over Reef's own object format: BLAKE3 identities, FastCDC-chunked blobs, packfile-style files on disk indexed in SQLite as the local cache, and the store protocol as the remote. Replaces the git backend for repositories that opt in or that are created against a store. Change IDs are unaffected. Migration of an existing git-backed repository rewrites commit identities once and records the mapping. | L | R4.01, R0.04 |
+| R4.04 | Lazy fetch client cache | Daemon fetches trees on demand and blobs on first read, with a local cache and eviction. | L | R4.03 |
+| R4.05 | Sparse profiles and prefetch hints | Repository-declared profiles that prefetch the subtrees a task will touch, so language servers and build tools do not defeat lazy fetch. | M | R4.04 |
+| R4.06 | Lazy-fetch workspace backends | Workspace backends that materialize on first read instead of up front: NFS loopback via nfsserve on macOS, FUSE via fuser on Linux, and virtiofs for sandboxed microVMs, each implementing the backend trait from R1.02 and passing the conformance suite. Reads fall through to the lazy fetch cache. | L | R4.04, R1.11 |
+| R4.07 | Publish and fetch proposals with evidence | Push a proposed change, its stack, evidence, and provenance to a store. Fetch others' proposals. | M | R4.02, R3.09 |
+| R4.08 | Store authentication and authorization | Identity via the same operator identities as phase three. Per-repository roles. | M | R4.02, R3.03 |
+| R4.09 | Landing service on the store | Move the landing service from local to the store. Executor integration over the network. | L | R4.07, R3.14 |
+| R4.10 | Federation | A store tracks another store. Proposals and evidence flow between them with signatures intact. | L | R4.09 |
+| R4.11 | Hosted web UI | Serve the web UI from the store with authentication, pointing at store subscriptions. | M | R4.08, R3.33 |
+| R4.12 | Git wire protocol hardening via gitoxide | Fetch and push against git remotes natively through gitoxide, which jj-lib already uses, with no subprocess path: SSH and HTTPS authentication, credential helpers, large-repository performance, partial clones, and retries. R3.17 delivers the first push; this makes it production grade. | L | R3.17 |
+| R4.13 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.12 |
+| R4.14 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.12, R3.16 |
+| R4.15 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog. Can start during phase two. | M | R2.05 |
+| R4.16 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
+| R4.17 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.21, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.09, R2.21 |
 
 ---
 
@@ -281,11 +295,11 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R5.01 | Merge engine interface | Tiered merge pipeline with a result type that is either a merged tree or a conflict object. Pluggable tiers. | M | R3.23 |
+| R5.01 | Merge engine interface | Tiered merge pipeline with a result type that is either a merged tree or a conflict object. Pluggable tiers. | M | R3.25 |
 | R5.02 | Patch commutation tier | Detect disjoint hunks and merge without inspection. Property-based tests for commutation. | M | R5.01 |
 | R5.03 | Mergiraf integration | Structural merge as a tier. Vendor or depend on Mergiraf, map its output into Reef's conflict objects. | L | R5.01 |
 | R5.04 | Generated file drivers | Lockfile driver that merges manifests and regenerates for npm, pnpm, Cargo, Go modules, uv, and others declared in the workspace spec. | M | R5.01 |
-| R5.05 | Formatting before hashing | Opt-in per repository: run the declared formatter before snapshotting so whitespace churn never reaches merge. | S | R1.11 |
+| R5.05 | Formatting before hashing | Opt-in per repository: run the declared formatter before snapshotting so whitespace churn never reaches merge. | S | R1.13 |
 | R5.06 | Fallback telemetry | Count tier outcomes per language and surface them in the query layer and the fleet panel. | S | R5.03, R2.15 |
 | R5.07 | Agent-pattern merge corpus | Collect real overlapping-insertion cases from agent output and use them as the regression suite for tuning rules. | M | R5.03 |
 | R5.08 | Language rule tuning | Per-language passes for Python, TypeScript, Go, and Rust against the corpus. One ticket per language once R5.07 exists. | M each | R5.07 |
@@ -304,9 +318,9 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R6.01 | Daemon API specification | Normative description of every service, message, and error, derived from the protobuf schema plus semantics the schema cannot express. | L | R4.13 |
-| R6.02 | Store protocol specification | Same for the store protocol and federation. | L | R4.08 |
-| R6.03 | Evidence and policy specification | Attestation format, trust model, policy language surface. | M | R3.06 |
+| R6.01 | Daemon API specification | Normative description of every service, message, and error, derived from the protobuf schema plus semantics the schema cannot express. | L | R4.15 |
+| R6.02 | Store protocol specification | Same for the store protocol and federation. | L | R4.10 |
+| R6.03 | Evidence and policy specification | Attestation format, trust model, policy language surface, and the executor protocol from R3.05. | M | R3.07, R3.05 |
 | R6.04 | Conformance suite | Black-box tests against any daemon or store endpoint. Reference implementations pass in CI. | L | R6.01, R6.02 |
 | R6.05 | Governance documents | Decision process, spec change process, maintainer roles, security disclosure policy. | S | |
 | R6.06 | Second-implementer guide | What a minimal conformant client and store need. Written by attempting one. | M | R6.04 |
@@ -324,7 +338,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 | RX.03 | Opt-in telemetry | Anonymous usage and performance metrics with a clear opt-in. Needed to measure fallback rates and token savings in the wild. | M | Phase 2 |
 | RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases. | M | Phase 1 release |
 | RX.05 | Windows support decision | Whether and how to support Windows workspaces. No copy-on-write primitive comparable to APFS or overlayfs; options are ReFS block cloning, a VFS, or Linux-only via WSL. ADR. | S | Phase 1 |
-| RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.10 run in CI with a threshold that fails the build. | S | Phase 1 |
+| RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.12 run in CI with a threshold that fails the build. | S | Phase 1 |
 
 ---
 
@@ -332,7 +346,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 
 1. Phase 0 in full.
 2. Phase 1 in full. This is the first public release and the first thing anyone can use.
-3. Phase 2 API and live state workstreams, then the agent surface, then web UI v0. R4.13 release engineering runs alongside.
+3. Phase 2 API and live state workstreams, then the agent surface, then web UI v0. R4.15 release engineering runs alongside.
 4. Phase 3 evidence and policy first, then landing, then conflicts, then the human interface. The desktop shell is last in the phase.
 5. Phase 4 store and lazy fetch first, then landing on the store, then federation, then git interop hardening.
 6. Phase 5 can start its merge engine interface and commutation tier during phase 3, since they only depend on conflict objects.

@@ -67,7 +67,7 @@ Git worktrees are the current answer to agent isolation, and they fail in five w
 
 ## Data model
 
-Five object kinds, all content-addressed with BLAKE3 and stored in one Merkle structure.
+Five object kinds, all content-addressed and stored in one Merkle structure. Through phase three the objects live in Jujutsu's git backend, so tree, blob, and snapshot identities are git SHA-1 hashes; Reef's own backend with BLAKE3 identities and chunked blobs arrives with the shared store in phase four, and change IDs, which are random rather than derived from content, are unaffected by the switch.
 
 | Object | Identity | Holds | Mutable |
 | --- | --- | --- | --- |
@@ -149,13 +149,13 @@ flowchart TB
     REMOTE <-- round-trip --> GIT
 ```
 
-Agents talk only to the local daemon. The daemon owns snapshots, workspaces, merging, and queries, and syncs lazily with a remote store that gates landing on signed evidence from a trusted executor.
+Agents talk only to the local daemon. The daemon owns snapshots, workspaces, merging, and queries, and syncs lazily with a remote store that gates landing on signed evidence from a trusted executor. One daemon runs per machine and serves every repository registered with it; all of its state is keyed by repository, and it keeps its own configuration and state directory rather than reading Jujutsu's user configuration.
 
 ### Storage
 
 A Merkle tree of directories and files hashed with BLAKE3, which parallelizes across cores. Per-directory hashes make comparing two snapshots of a monorepo O(changed subtrees). Large files use content-defined chunking so near-duplicate blobs across speculative branches share storage. The local store is a cache in front of the remote store: a new workspace pulls metadata and fetches file content on first read. Language servers and build tools walk whole trees and would defeat lazy fetch, so a repository can declare sparse profiles and prefetch hints that materialize the subtrees a task will touch.
 
-Status is answered from an incrementally maintained index fed by filesystem notifications, never from a tree walk. The index is a proper embedded database rather than a flat file, so it stays consistent across concurrent agents on the same machine.
+Status is answered from an incrementally maintained index fed by filesystem notifications, never from a tree walk. The index is a proper embedded database rather than a flat file, so it stays consistent across concurrent agents on the same machine. The index can be marked stale, for example after a watcher overflow, and a full walk rebuilds it; the walk is the fallback, not the path.
 
 ### Merge engine
 
@@ -189,7 +189,7 @@ Agents overrun conventional CI because every push triggers a full pipeline and n
 
 The landing gate goes further by requesting the minimum set of checks that satisfies policy. It knows the symbol-level diff, the evidence already cached for ancestors and siblings, and the check kinds policy requires, so it asks the executor for only the targets the change can affect. Evidence kinds are fine-grained enough that a passing test target on a tree is one object, so partial results compose instead of forcing full reruns. Policy sets compute budgets per proposal, per agent, and per repository, and a proposal that exhausts its budget surfaces in the triage inbox rather than running up a bill. Proposals a human is waiting on are scheduled before proposals an agent is waiting on.
 
-Running the jobs stays outside Reef. Sandboxing, hermetic builds, remote execution, and runner fleets are an established domain, and Reef sits on top of it through the evidence format and the executor protocol. Scheduling is Reef's, execution is the executor's, and the protocol between them is what Reef must get right.
+Running the jobs stays outside Reef. Sandboxing, hermetic builds, remote execution, and runner fleets are an established domain, and Reef sits on top of it through the evidence format and the executor protocol. Scheduling is Reef's, execution is the executor's, and the protocol between them is what Reef must get right: a request names a tree hash, the targets to check, the evidence kinds expected, and a budget; a response is signed evidence plus artifacts; progress streams over the presence channel. The protocol is written down before the reference executor is built, so other executors can be built against it.
 
 ### Query layer
 
@@ -255,7 +255,7 @@ Rust end to end for the core, reusing existing open source components for the he
 | Component | Choice | Why |
 | --- | --- | --- |
 | Data model, snapshots, op log, conflicts | [jj-lib](https://github.com/jj-vcs/jj) | Already implements working copy as commit, change IDs, the operation log, and stored conflicts. Apache 2.0 and designed to be embedded. |
-| Hashing | [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) | Parallel, fast on large trees, reference implementation in Rust. |
+| Hashing | [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) in Reef's own backend; git SHA-1 while on jj's git backend | Parallel, fast on large trees, reference implementation in Rust. The switch comes with the store in phase four. |
 | Chunking | FastCDC | Content-defined chunking so near-duplicate blobs share storage. |
 | Git interop | [gitoxide](https://github.com/GitoxideLabs/gitoxide) | Pure Rust git with a native wire protocol. No shelling out, no libgit2. Jujutsu is already migrating to it. |
 | Local metadata, index, leases, op log | SQLite | Durable, queryable, one file, readable from every language. The query layer gets SQL for free. |
@@ -291,7 +291,7 @@ GitHub's interface is organized around commits, branches, and pull requests beca
 
 **Review stacks, not commits.** A task decomposed into several changes shows as one proposal with the decomposition visible. The reviewer accepts the proposal or a prefix of its stack. Comments are addressed to the originating agent and resume its session, so a review comment is an instruction rather than a note for a human to act on later.
 
-**Handle exceptions.** A triage inbox is the home page, not a feed. It has three buckets: needs you now (policy requires sign-off, a conflict nobody owns, an agent asking for help, a batch that failed bisect), watching (proposals you asked for, in flight), and landed since you last looked (a digest, not a list). Attention is the scarce resource and routing it is the interface's main job.
+**Handle exceptions.** A triage inbox is the home page, not a feed. It has three buckets: needs you now (policy requires sign-off, a conflict nobody owns, an agent asking for help through an explicit help request that records what it tried and what it needs, a batch that failed bisect), watching (proposals you asked for, in flight), and landed since you last looked (a digest, not a list). Attention is the scarce resource and routing it is the interface's main job.
 
 **Approve resolutions, not perform them.** Agents resolve conflicts. A conflict object is assigned automatically to a resolver, by default the originating agent of the later change, which sees base, both sides, and the task and instruction behind each. The resolution is a new snapshot that enters the normal proposal flow with its evidence, marked as a resolution so the reviewer sees both sides' provenance. Policy sets the tier per area: resolve and land, resolve and require approval, or ask before attempting. The resolver escalates to asking on its own when the two sides disagree about what to build rather than how, since that is a product decision. Policy caps attempts per conflict so a hard one cannot loop. A human can still take a conflict over and resolve it by hand, but that is the exception.
 
