@@ -60,6 +60,8 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 
 The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and the current phase's tickets have implementation briefs under [docs/dev-tickets](docs/dev-tickets/phase-0/README.md).
 
+Architecture decisions are recorded in [docs/adr](docs/adr/README.md).
+
 ## Contributing
 
 The project is at the design stage. Issues and discussion are welcome. Code contributions will make sense once phase one has a skeleton.
