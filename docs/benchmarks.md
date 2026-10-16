@@ -45,11 +45,13 @@ Each benchmark takes 10 samples. The measurement time is 10 s for `small`, 30 s 
 
 Pull requests do not run them, but `just build` compiles them (`--all-targets`), so they cannot rot.
 
-Each job uploads an artifact named `bench-<os>-<preset>-<commit sha>`, kept for 90 days, holding `bench-results.txt` and criterion's `target/criterion/` directory. Download one with:
+Each job uploads an artifact named `bench-<os>-<preset>-<commit sha>-<run id>`, kept for 90 days, holding `bench-results.txt` and criterion's `target/criterion/` directory. The run id is there because one commit can be benchmarked more than once with the same preset, for example by the push to `main` and a manual run. Download the artifacts for a commit with:
 
 ```sh
-gh run download --name "bench-ubuntu-24.04-medium-$(git rev-parse HEAD)"
+gh run download --pattern "bench-ubuntu-24.04-medium-$(git rev-parse HEAD)-*"
 ```
+
+Each matching artifact lands in its own directory. Pass a run id (`gh run download <run id> --pattern ...`) to take just one run.
 
 Open `target/criterion/report/index.html` from the artifact for criterion's HTML reports, one per benchmark under `snapshot/<preset>/<name>/report/`.
 

@@ -52,7 +52,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: bench-${{ matrix.os }}-${{ env.REEF_BENCH_PRESET }}-${{ github.sha }}
+          # The run id keeps a push run and a manual run of the same commit and preset apart.
+          name: bench-${{ matrix.os }}-${{ env.REEF_BENCH_PRESET }}-${{ github.sha }}-${{ github.run_id }}
           path: |
             bench-results.txt
             target/criterion/
