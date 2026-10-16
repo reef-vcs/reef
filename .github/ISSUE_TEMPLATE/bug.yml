@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in Reef does not work as documented
+labels: [bug]
+body:
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line describing the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened, and what you expected
+      description: What Reef did, and what you expected it to do instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: The smallest sequence of commands that shows the bug.
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - other
+  - type: input
+    id: version
+    attributes:
+      label: Reef version or commit
+      placeholder: "0.0.0 or a commit hash"
+  - type: input
+    id: jj-version
+    attributes:
+      label: jj version, if relevant
+      description: Output of `jj --version`, when the bug involves a jj repository or the jj CLI.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. `REEF_LOG=debug` gives more detail. This is rendered as code, so no backticks are needed.
+      render: shell

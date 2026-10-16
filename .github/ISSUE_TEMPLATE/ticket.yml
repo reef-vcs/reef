@@ -1,0 +1,59 @@
+name: Ticket
+description: Track a ticket from docs/dev-phases.md
+title: "[ID] Title"
+labels: [ticket]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        One issue per row of the phase tables in `docs/dev-phases.md`. Replace the title with the ticket's ID and name, for example `[R1.05] Workspace service: create, list, release`, and add the phase label.
+  - type: input
+    id: ticket-id
+    attributes:
+      label: Ticket ID
+      placeholder: R1.05
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+        - "4"
+        - "5"
+        - "6"
+        - cross-cutting
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Copied from the ticket's row in docs/dev-phases.md.
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      options:
+        - S
+        - M
+        - L
+  - type: input
+    id: depends-on
+    attributes:
+      label: Depends on
+      placeholder: "R1.01, R1.04"
+  - type: input
+    id: brief
+    attributes:
+      label: Ticket brief
+      description: Link to the brief in docs/dev-tickets/, if one exists.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: From the brief, or written here when there is no brief.

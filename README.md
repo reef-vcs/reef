@@ -68,7 +68,7 @@ Benchmarks, what they measure, and their baseline numbers are in [docs/benchmark
 
 ## Contributing
 
-The project is at the design stage. Issues and discussion are welcome. Code contributions will make sense once phase one has a skeleton.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, and the DCO sign-off every commit needs. Open tickets are the issues labeled [`phase-0`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-0).
 
 ## License
 

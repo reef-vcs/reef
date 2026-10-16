@@ -21,5 +21,5 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0007](0007-crate-layout.md) | Crate layout | accepted |
 | [0008](0008-jj-lib-embedding-findings.md) | jj-lib embedding findings | accepted |
 | [0009](0009-error-and-logging-conventions.md) | Error and logging conventions | accepted |
-| 0010 | DCO instead of CLA (R0.08) | reserved |
+| [0010](0010-dco-instead-of-cla.md) | DCO instead of CLA | accepted |
 | [0011](0011-hash-and-object-backend-by-phase.md) | Hash function and object backend by phase | accepted |

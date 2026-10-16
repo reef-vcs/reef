@@ -1,0 +1,33 @@
+name: Feature or design proposal
+description: Propose a feature or a change to the design
+labels: [proposal]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or wrong today, and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you propose, and the alternatives you considered.
+    validations:
+      required: true
+  - type: input
+    id: design-section
+    attributes:
+      label: design.md section
+      description: The section of docs/design.md this touches, if any.
+      placeholder: "e.g. Workspaces"
+  - type: dropdown
+    id: needs-adr
+    attributes:
+      label: Does this need an ADR?
+      description: Choices of dependency, protocol, storage format, on-disk layout, or public API shape need one (docs/adr/README.md).
+      options:
+        - "yes"
+        - "no"
+        - unsure
