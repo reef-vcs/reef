@@ -631,7 +631,7 @@ impl Repo {
     }
 
     /// Reads the commit with this full id.
-    async fn commit_by_id(&self, id: &CommitIdHex) -> Result<Commit, CommitLookupError> {
+    pub(crate) async fn commit_by_id(&self, id: &CommitIdHex) -> Result<Commit, CommitLookupError> {
         let commit_id = CommitId::try_from_hex(id.as_str())
             .filter(|commit_id| commit_id.as_bytes().len() == self.repo.store().commit_id_length())
             .ok_or_else(|| CommitLookupError::InvalidId(id.clone()))?;

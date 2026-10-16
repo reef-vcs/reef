@@ -9,6 +9,7 @@
 //! and moves a `Repo` between threads by ownership or behind a `Mutex`, never
 //! shares one through an `Arc` alone (ADR 0008, R1.03).
 
+pub mod materialize;
 pub mod oplog;
 pub mod repo;
 pub mod settings;
@@ -16,6 +17,7 @@ pub mod snapshot;
 pub mod undo;
 pub mod workspace;
 
+pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeStateReadError};
 pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
     Repo,

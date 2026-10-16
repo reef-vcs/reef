@@ -137,6 +137,7 @@ reclaims(id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id TEXT NOT NULL, workspace_
          reason TEXT NOT NULL CHECK (reason IN ('released','expired','gc','restore')),
          final_op_id TEXT, snapshot_taken INTEGER NOT NULL, freed_bytes INTEGER, at INTEGER NOT NULL, detail TEXT)
 base_cache(repo_id TEXT NOT NULL, tree_id TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL,
+           files INTEGER NOT NULL,                                                            -- added by R1.02
            created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, PRIMARY KEY (repo_id, tree_id))   -- R1.02
 snapshots(op_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, workspace_id TEXT NOT NULL, commit_id TEXT NOT NULL,
           change_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('watcher','explicit','final','move','shutdown')),

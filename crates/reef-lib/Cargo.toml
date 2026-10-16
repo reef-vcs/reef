@@ -23,6 +23,7 @@ bench = false
 [dependencies]
 jj-lib.workspace = true
 gix.workspace = true
+prost.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

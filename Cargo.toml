@@ -23,6 +23,9 @@ jj-lib = "=0.46.0"
 # Only to name gix::hash::Kind when creating repositories (`Repo::init_internal_git` and test
 # fixtures); jj-lib does not re-export gix. Must match the gix version jj-lib depends on exactly.
 gix = { version = "=0.88.0", default-features = false }
+# Only to decode jj-lib's own protobuf messages (`tree_state`, R1.02); jj-lib does not
+# re-export prost. Same major as jj-lib's.
+prost = "0.14"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
@@ -40,6 +43,10 @@ tempfile = "3"
 camino = "1"
 # Daemon metadata (ADR 0003): bundled so every platform runs the same SQLite; `backup` for R1.18.
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+# Materialization backends (R1.02): stat-only walks for disk usage, and statfs/statvfs for the
+# backend probe. Later backend tickets add nix features (mount, signal, process).
+walkdir = "2"
+nix = { version = "0.31", features = ["fs"] }
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

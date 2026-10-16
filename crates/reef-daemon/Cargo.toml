@@ -29,7 +29,11 @@ rand.workspace = true
 serde.workspace = true
 time.workspace = true
 anyhow.workspace = true          # main.rs only
+walkdir.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+reef-testing.workspace = true
+pollster.workspace = true
