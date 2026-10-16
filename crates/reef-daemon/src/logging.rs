@@ -5,12 +5,24 @@
 //! Logs go to stderr. `REEF_LOG` (falling back to `RUST_LOG`, then `info`)
 //! is an [`EnvFilter`] directive. `REEF_LOG_FORMAT` is `auto`, `pretty`, or
 //! `json`; `auto` means pretty when stderr is a terminal and JSON otherwise.
+//!
+//! The daemon also writes [`LogOptions::file`], always as JSON lines, through
+//! the same filter: `<state>/logs/daemon.log.<YYYY-MM-DD>`, rotated daily
+//! (UTC), keeping the [`LogOptions::keep_days`] most recent files. Older
+//! files are pruned when the log opens and at each rotation. The file is
+//! written by a background thread through `tracing-appender`'s non-blocking
+//! writer, which drops lines rather than block when its buffer (128,000
+//! lines) is full; that is acceptable for a diagnostic log. Stderr is
+//! written synchronously and never drops.
 
 use std::ffi::OsString;
 use std::io::IsTerminal as _;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use reef_lib::error::{Classify, ErrorKind};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::ParseError;
 use tracing_subscriber::fmt;
@@ -27,15 +39,43 @@ pub const FALLBACK_LOG_ENV: &str = "RUST_LOG";
 pub const LOG_FORMAT_ENV: &str = "REEF_LOG_FORMAT";
 /// The filter used when neither variable is set.
 pub const DEFAULT_FILTER: &str = "info";
+/// The daemon log's file name before the date suffix.
+pub const LOG_FILE_PREFIX: &str = "daemon.log";
+/// How many daily log files are kept by default (`log.keep_days`).
+pub const DEFAULT_KEEP_DAYS: u32 = 7;
 
 /// What to log and how to format it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogOptions {
     /// An [`EnvFilter`] directive such as `info` or `reef_lib=debug`.
     /// `None` means [`DEFAULT_FILTER`].
     pub filter: Option<String>,
-    /// The output format.
+    /// The output format on stderr.
     pub format: LogFormat,
+    /// A JSON log file, such as `<state>/logs/daemon.log`, rotated daily
+    /// into `daemon.log.<date>`. `None` logs to stderr only.
+    pub file: Option<PathBuf>,
+    /// How many daily files of [`LogOptions::file`] to keep, at least 1.
+    pub keep_days: u32,
+}
+
+impl Default for LogOptions {
+    fn default() -> Self {
+        Self {
+            filter: None,
+            format: LogFormat::default(),
+            file: None,
+            keep_days: DEFAULT_KEEP_DAYS,
+        }
+    }
+}
+
+/// Keeps the log file's writer thread alive; dropping it flushes the lines
+/// still buffered. Hold it until the process exits.
+#[must_use = "dropping the guard stops the log file writer"]
+#[derive(Debug)]
+pub struct LoggingGuard {
+    _file: Option<WorkerGuard>,
 }
 
 /// How log lines are written.
@@ -89,6 +129,24 @@ pub enum LoggingError {
     /// A global subscriber was already installed.
     #[error("failed to install the log subscriber")]
     AlreadySet(#[source] TryInitError),
+    /// The log directory could not be created.
+    #[error("create log directory {}", path.display())]
+    LogDir {
+        /// The directory.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The log file could not be opened.
+    #[error("open log file {}", path.display())]
+    File {
+        /// The log file, before its date suffix.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: InitError,
+    },
 }
 
 impl Classify for LoggingError {
@@ -98,6 +156,7 @@ impl Classify for LoggingError {
                 ErrorKind::InvalidArgument
             }
             Self::AlreadySet(_) => ErrorKind::Internal,
+            Self::File { .. } | Self::LogDir { .. } => ErrorKind::Io,
         }
     }
 }
@@ -125,12 +184,16 @@ impl LogOptions {
             Some(format) => format.parse()?,
             None => LogFormat::Auto,
         };
-        Ok(Self { filter, format })
+        Ok(Self {
+            filter,
+            format,
+            ..Self::default()
+        })
     }
 }
 
 /// Installs the global subscriber. Returns an error if one is already set.
-pub fn init(opts: &LogOptions) -> Result<(), LoggingError> {
+pub fn init(opts: &LogOptions) -> Result<LoggingGuard, LoggingError> {
     let directive = opts.filter.as_deref().unwrap_or(DEFAULT_FILTER);
     let filter =
         EnvFilter::builder()
@@ -165,14 +228,60 @@ pub fn init(opts: &LogOptions) -> Result<(), LoggingError> {
             .with_writer(std::io::stderr);
         (None, Some(layer))
     };
+    let (file_layer, file_guard) = match &opts.file {
+        Some(path) => {
+            let (writer, guard) =
+                tracing_appender::non_blocking(open_log_file(path, opts.keep_days)?);
+            let layer = fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(false)
+                .with_target(true)
+                .with_timer(UtcTime::rfc_3339())
+                .with_writer(writer);
+            (Some(layer), Some(guard))
+        }
+        None => (None, None),
+    };
     tracing_subscriber::registry()
         .with(filter)
         .with(json_layer)
         .with(pretty_layer)
+        .with(file_layer)
         .try_init()
         .map_err(LoggingError::AlreadySet)?;
     tracing::debug!("logging initialized");
-    Ok(())
+    Ok(LoggingGuard { _file: file_guard })
+}
+
+/// Opens `path`'s directory as a daily-rotated appender named after `path`'s
+/// file name, creating the directory, and prunes all but the `keep_days`
+/// most recent files.
+fn open_log_file(
+    path: &std::path::Path,
+    keep_days: u32,
+) -> Result<RollingFileAppender, LoggingError> {
+    let error = |source| LoggingError::File {
+        path: path.to_owned(),
+        source,
+    };
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let prefix = path
+        .file_name()
+        .map_or_else(|| LOG_FILE_PREFIX.into(), |name| name.to_string_lossy());
+    // tracing-appender prunes before it creates the directory, and prints
+    // to stderr if the directory is missing.
+    std::fs::create_dir_all(dir).map_err(|source| LoggingError::LogDir {
+        path: dir.to_owned(),
+        source,
+    })?;
+    RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(prefix)
+        .max_log_files(usize::try_from(keep_days.max(1)).unwrap_or(usize::MAX))
+        .build(dir)
+        .map_err(error)
 }
 
 #[cfg(test)]
@@ -212,6 +321,32 @@ mod tests {
         let err = options(&[(LOG_FORMAT_ENV, "yaml")]).unwrap_err();
         assert!(matches!(err, LoggingError::InvalidFormat(ref v) if v == "yaml"));
         assert_eq!(err.kind(), ErrorKind::InvalidArgument);
+    }
+
+    #[test]
+    fn opening_the_log_creates_its_dir_and_keeps_the_newest_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        for day in ["2020-01-01", "2020-01-02", "2020-01-03"] {
+            std::fs::write(dir.join(format!("{LOG_FILE_PREFIX}.{day}")), "{}\n").unwrap();
+        }
+        std::fs::write(dir.join("unrelated.txt"), "").unwrap();
+        let _appender = open_log_file(&dir.join(LOG_FILE_PREFIX), 2).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        // Today's file is created and counts toward the two kept.
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert_eq!(names[0], "daemon.log.2020-01-03", "{names:?}");
+        assert!(names[1].starts_with("daemon.log.20") && names[1] != names[0]);
+        assert_eq!(names[2], "unrelated.txt");
+
+        let fresh = tmp.path().join("new").join("logs");
+        let _appender = open_log_file(&fresh.join(LOG_FILE_PREFIX), 0).unwrap();
+        assert!(fresh.is_dir());
     }
 
     #[cfg(unix)]

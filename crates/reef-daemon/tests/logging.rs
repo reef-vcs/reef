@@ -1,5 +1,7 @@
 //! `reef_daemon::logging` as the `reef-daemon` binary uses it (R0.09). Each
-//! test runs the binary with a controlled environment and reads its stderr.
+//! test runs the binary on a fresh state directory with a controlled
+//! environment until its socket is bound, stops it with SIGTERM, and reads
+//! its stderr.
 
 #![allow(
     clippy::unwrap_used,
@@ -7,17 +9,15 @@
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
-use std::process::{Command, Output};
+mod common;
 
+use std::process::Output;
+
+use common::run_binary;
 use serde_json::Value;
 
 fn run(vars: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_reef-daemon"));
-    for var in ["REEF_LOG", "RUST_LOG", "REEF_LOG_FORMAT", "NO_COLOR"] {
-        command.env_remove(var);
-    }
-    command.envs(vars.iter().copied());
-    let output = command.output().unwrap();
+    let (output, _state) = run_binary(vars);
     assert!(output.stdout.is_empty(), "logs go to stderr only");
     output
 }
@@ -26,18 +26,27 @@ fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
 
-fn first_json_line(output: &Output) -> Value {
+/// Every stderr line as JSON, and the `daemon started` event.
+fn json_events(output: &Output) -> (Vec<Value>, Value) {
     assert!(output.status.success(), "{}", stderr(output));
-    let text = stderr(output);
-    let line = text.lines().next().expect("a log line");
-    serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+    let events: Vec<Value> = stderr(output)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+        })
+        .collect();
+    let started = events
+        .iter()
+        .find(|event| event["message"] == "daemon started")
+        .cloned()
+        .expect("a start event");
+    (events, started)
 }
 
-fn assert_starting_event(event: &Value) {
+fn assert_started_event(event: &Value) {
     assert_eq!(event["level"], "INFO");
-    assert_eq!(event["message"], "starting");
     assert_eq!(event["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(event["target"], "reef_daemon");
+    assert_eq!(event["target"], "reef_daemon::daemon");
     let timestamp = event["timestamp"].as_str().expect("timestamp string");
     assert!(
         timestamp.ends_with('Z') && timestamp.contains('T'),
@@ -47,12 +56,12 @@ fn assert_starting_event(event: &Value) {
 
 #[test]
 fn json_format() {
-    assert_starting_event(&first_json_line(&run(&[("REEF_LOG_FORMAT", "json")])));
+    assert_started_event(&json_events(&run(&[("REEF_LOG_FORMAT", "json")])).1);
 }
 
 #[test]
 fn auto_format_is_json_when_stderr_is_a_pipe() {
-    assert_starting_event(&first_json_line(&run(&[])));
+    assert_started_event(&json_events(&run(&[])).1);
 }
 
 #[test]
@@ -60,11 +69,14 @@ fn pretty_format() {
     let output = run(&[("REEF_LOG_FORMAT", "pretty")]);
     assert!(output.status.success());
     let text = stderr(&output);
-    let line = text.lines().next().expect("a log line");
+    let line = text
+        .lines()
+        .find(|line| line.contains("daemon started"))
+        .expect("a start line");
     assert!(serde_json::from_str::<Value>(line).is_err(), "{line}");
-    assert!(line.contains("INFO") && line.contains("starting"), "{line}");
+    assert!(line.contains("INFO"), "{line}");
     assert!(
-        !line.contains('\x1b'),
+        !text.contains('\x1b'),
         "no colour when stderr is not a terminal"
     );
 }

@@ -1,13 +1,8 @@
-//! Entry point for the Reef daemon. R1.03 replaces this with the real service.
+//! Entry point for the Reef daemon; the body is [`reef_daemon::run_main`].
 
-use anyhow::Context as _;
-use reef_daemon::logging::{self, LogOptions};
+use clap::Parser as _;
+use reef_daemon::DaemonArgs;
 
 fn main() -> anyhow::Result<()> {
-    LogOptions::from_env()
-        .and_then(|opts| logging::init(&opts))
-        .context("initialize logging")?;
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
-    // R1.03 replaces the rest.
-    Ok(())
+    reef_daemon::run_main(DaemonArgs::parse())
 }

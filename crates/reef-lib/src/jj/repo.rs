@@ -298,6 +298,12 @@ impl Repo {
         self.workspace.workspace_name().as_str()
     }
 
+    /// The repository as loaded, which is `Send + Sync` and may be shared
+    /// with other threads (ADR 0012); it does not follow later reloads.
+    pub fn readonly(&self) -> Arc<ReadonlyRepo> {
+        Arc::clone(&self.repo)
+    }
+
     /// The operation the repository is currently loaded at.
     pub fn op_id(&self) -> OperationIdHex {
         OperationIdHex::of(self.repo.op_id())

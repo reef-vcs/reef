@@ -16,15 +16,15 @@ rust-version = "1.97.1"
 # Internal
 reef-lib = { path = "crates/reef-lib", version = "0.0.0" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.0.0" }
-reef-testing = { path = "crates/reef-testing" }
+reef-testing = { path = "crates/reef-testing", version = "0.0.0" }   # unpublished; see reef-daemon's `testing` feature
 
 # Core
 jj-lib = "=0.46.0"
 # Only to name gix::hash::Kind when creating repositories (`Repo::init_internal_git` and test
 # fixtures); jj-lib does not re-export gix. Must match the gix version jj-lib depends on exactly.
 gix = { version = "=0.88.0", default-features = false }
-# Only to decode jj-lib's own protobuf messages (`tree_state`, R1.02); jj-lib does not
-# re-export prost. Same major as jj-lib's.
+# Decodes jj-lib's own protobuf messages (`tree_state`, R1.02; jj-lib does not re-export prost)
+# and the daemon API's generated code (R1.03). Same major as jj-lib's and tonic-prost's.
 prost = "0.14"
 thiserror = "2"
 anyhow = "1"
@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt",
 time = { version = "0.3", features = ["formatting", "macros"] }   # RFC 3339 timestamps for the JSON log layer (R0.09)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "net", "signal"] }
 pollster = "1"
 futures = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
@@ -47,6 +47,19 @@ rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 # backend probe. Later backend tickets add nix features (mount, signal, process).
 walkdir = "2"
 nix = { version = "0.31", features = ["fs"] }
+# The daemon's gRPC API over a Unix socket (R1.03, ADR 0012). `tonic-prost-build` is fed a
+# descriptor set compiled by `protox`, so neither CI nor contributors need `protoc`.
+tonic = "0.14"
+tonic-prost = "0.14"
+prost-types = "0.14"
+tonic-prost-build = "0.14"
+protox = "0.10"
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = "0.7"                 # CancellationToken for shutdown
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+tracing-appender = "0.2"           # the daily-rotated daemon log file
+etcetera = "0.11"                  # platform state directories
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }
