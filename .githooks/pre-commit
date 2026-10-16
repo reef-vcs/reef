@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Installed by `just setup` (git config core.hooksPath .githooks).
+# Skip with REEF_SKIP_HOOKS=1 or `git commit --no-verify`.
+set -euo pipefail
+if [[ "${REEF_SKIP_HOOKS:-0}" == "1" ]]; then exit 0; fi
+cd "$(git rev-parse --show-toplevel)"
+cargo fmt --all -- --check
+# cargo fmt only sees files reachable from a crate root and reads the working tree, so also
+# check the staged content of every staged Rust file. `rustfmt --check` exits 0 on stdin even
+# when it prints a diff, so compare the staged content with rustfmt's output instead.
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' |
+    while IFS= read -r -d '' f; do
+        if ! git show ":$f" | rustfmt --config-path rustfmt.toml | cmp -s - <(git show ":$f"); then
+            echo "unformatted (staged): $f; run cargo fmt and git add it" >&2
+            exit 1
+        fi
+    done
+cargo clippy --workspace --all-targets --all-features -- -D warnings

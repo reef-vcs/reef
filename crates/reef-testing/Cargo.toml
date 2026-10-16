@@ -4,6 +4,7 @@ description = "Test fixtures and dev tooling for Reef. Not published."
 publish = false
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
