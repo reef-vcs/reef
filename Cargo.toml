@@ -38,6 +38,8 @@ rand = "0.10"
 rand_chacha = "0.10"
 tempfile = "3"
 camino = "1"
+# Daemon metadata (ADR 0003): bundled so every platform runs the same SQLite; `backup` for R1.18.
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }
