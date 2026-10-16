@@ -64,6 +64,8 @@ The full design document is at [docs/design.md](docs/design.md). The work is bro
 
 Architecture decisions are recorded in [docs/adr](docs/adr/README.md).
 
+Benchmarks, what they measure, and their baseline numbers are in [docs/benchmarks.md](docs/benchmarks.md).
+
 ## Contributing
 
 The project is at the design stage. Issues and discussion are welcome. Code contributions will make sense once phase one has a skeleton.

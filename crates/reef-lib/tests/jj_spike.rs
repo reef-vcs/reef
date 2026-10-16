@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
+use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::snapshot::{ChangeKind, ChangedPath, SnapshotError, UntrackedReasonKind};
@@ -81,6 +82,33 @@ async fn open_internal_git_repo() {
     assert_eq!(heads[0].description, "");
     assert!(repo.repo_path().ends_with(".jj/repo"));
     assert!(!dir.path().join(".git").exists());
+}
+
+#[tokio::test]
+async fn init_internal_git_creates_an_openable_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "existing.txt", "here before init\n");
+
+    let created = Repo::init_internal_git(dir.path(), &settings())
+        .await
+        .unwrap();
+    assert_fresh_op_log(&created.op_log(10).await.unwrap());
+    assert!(!dir.path().join(".git").exists());
+
+    let mut repo = open(dir.path()).await;
+    assert_eq!(repo.op_id(), created.op_id());
+    assert_eq!(repo.changed_paths_in_wc().await.unwrap(), []);
+    assert!(repo.snapshot("test").await.unwrap().changed);
+    assert_eq!(
+        repo.changed_paths_in_wc().await.unwrap(),
+        [changed("existing.txt", ChangeKind::Added)]
+    );
+
+    let err = Repo::init_internal_git(dir.path(), &settings())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.kind(), ErrorKind::AlreadyExists, "{err}");
 }
 
 #[tokio::test]

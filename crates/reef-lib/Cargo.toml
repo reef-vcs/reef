@@ -15,8 +15,14 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# The lib has no #[bench] functions. Without this, `cargo bench -p reef-lib -- <criterion args>`
+# also hands the arguments to the lib's libtest harness, which rejects them.
+[lib]
+bench = false
+
 [dependencies]
 jj-lib.workspace = true
+gix.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -25,6 +31,10 @@ tracing.workspace = true
 reef-testing.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
-gix.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "snapshot"
+harness = false

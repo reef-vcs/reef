@@ -37,8 +37,13 @@ deny:
 deny-advisories:
     cargo deny check advisories
 
+# Benchmarks on the REEF_BENCH_PRESET synthetic repo (default medium). See docs/benchmarks.md.
 bench *ARGS:
-    cargo bench --workspace "$@"
+    cargo bench --workspace --bench '*' "$@"
+
+# Quick local benchmark on the small preset.
+bench-quick:
+    REEF_BENCH_PRESET=small cargo bench --workspace --bench '*' -- --sample-size 10 --warm-up-time 1 --measurement-time 5
 
 # Generate a synthetic repo under target/synth/<preset> (idempotent). Presets: small, medium, large, xl.
 synth preset="large":
