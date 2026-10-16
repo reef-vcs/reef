@@ -16,6 +16,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+jj-lib.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 reef-testing.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+gix.workspace = true

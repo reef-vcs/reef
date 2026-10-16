@@ -19,7 +19,10 @@ reef-daemon = { path = "crates/reef-daemon", version = "0.0.0" }
 reef-testing = { path = "crates/reef-testing" }
 
 # Core
-jj-lib = "=0.46.0"            # R0.04 turns this on in reef-lib
+jj-lib = "=0.46.0"
+# Only to name gix::hash::Kind when creating test fixtures; jj-lib does not re-export gix.
+# Must match the gix version jj-lib depends on exactly.
+gix = { version = "=0.88.0", default-features = false }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"

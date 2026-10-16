@@ -7,3 +7,5 @@
 //! depend on this crate; it depends on neither.
 //!
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
+
+pub mod jj;
