@@ -7,3 +7,8 @@
 //! depend on this crate; it depends on neither.
 //!
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
+
+/// Scratch: an un-allowed `println!` that CI must reject.
+pub fn scratch_print() {
+    println!("scratch");
+}
