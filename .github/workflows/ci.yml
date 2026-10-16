@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_WARNINGS: deny
+  RUSTDOCFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: extractions/setup-just@v4
+      - run: just fmt-check
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - uses: extractions/setup-just@v4
+      - run: just deny
+      - run: just deny-advisories
+        continue-on-error: true
+
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: extractions/setup-just@v4
+      - name: Lint
+        run: just lint
+      - name: Build
+        run: just build
+      - name: Test
+        run: just test
+      - name: Docs
+        run: just doc
+
+  ci-ok:
+    name: CI passed
+    if: always()
+    needs: [fmt, deny, check]
+    runs-on: ubuntu-24.04
+    steps:
+      # Results go through env rather than being spliced into the script, so the JSON's quotes
+      # cannot break the shell.
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+          FMT: ${{ needs.fmt.result }}
+          DENY: ${{ needs.deny.result }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          echo "$NEEDS"
+          [[ "$FMT" == "success" && "$DENY" == "success" && "$CHECK" == "success" ]]
