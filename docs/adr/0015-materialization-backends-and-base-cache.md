@@ -24,7 +24,7 @@ This ADR does not cover any primitive's details (R1.07 to R1.10, ADR 0016 (R1.09
 
 ## Consequences
 
-- A tree is written once per machine, whatever the number of workspaces on it. The first workspace on a new tree pays a full check-out (0.8 s for the 1,014-file `small` preset in a debug build; the `large` figure is in the R1.02 PR), later ones pay only the backend's primitive.
+- A tree is written once per machine, whatever the number of workspaces on it. The first workspace on a new tree pays a full check-out (40.5 s for the 100,014-file `large` preset in a release build on an M2 Max, measured for R1.02), later ones pay only the backend's primitive.
 - The first snapshot of a new workspace is a scan with no hashing, provided the backend kept mtimes and sizes. A backend that cannot keep them is still correct, only slower: the fallback is `locked_wc.reset`, which makes the next snapshot rehash every file.
 - Backends are small: they move bytes and never touch jj. Adding one is an arm in `backend_for`, a probe, and the conformance suite.
 - `DiskUsage` is an estimate: overlay backends count the upper directory's allocated blocks; clone and copy backends count the allocated blocks of files whose mtime or size differs from the base's `tree_state`, by a stat-only walk. Phase targets are measured by free-space deltas instead.
