@@ -60,6 +60,11 @@ pub const META_CREATED_AT: &str = "created_at";
 pub const META_MIGRATION_PREFIX: &str = "migration:";
 
 /// The daemon's metadata database.
+///
+/// The lock is not reentrant: a `Db` method called from inside
+/// `Db::with` or `Db::in_transaction` deadlocks. Code that needs several
+/// statements in one transaction calls the `*_in(&Transaction, ..)` helpers
+/// the query modules export, as [`Db::insert_workspace_with_lease`] does.
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -190,6 +195,8 @@ impl Db {
             source,
         };
         let conn = Connection::open(path).map_err(open)?;
+        // Before switching to WAL, which needs a lock another process may hold.
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(open)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(open)?;
         Self::init(conn, path)
@@ -244,7 +251,8 @@ impl Db {
         self.with(|conn| conn.pragma_query_value(None, "user_version", |row| row.get(0)))
     }
 
-    /// Runs `f` on the connection under the lock.
+    /// Runs `f` on the connection under the lock. `f` must not call another
+    /// `Db` method (see [`Db`]).
     pub(crate) fn with<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, rusqlite::Error>,
@@ -253,7 +261,8 @@ impl Db {
     }
 
     /// Runs `f` in an immediate transaction under the lock, committing if it
-    /// returns `Ok` and rolling back otherwise.
+    /// returns `Ok` and rolling back otherwise. `f` must not call another
+    /// `Db` method; it uses the `*_in` helpers on `tx` instead (see [`Db`]).
     pub(crate) fn in_transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, DbError>,

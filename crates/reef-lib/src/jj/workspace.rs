@@ -21,6 +21,7 @@ use jj_lib::file_util::PathError;
 use jj_lib::index::IndexError;
 use jj_lib::local_working_copy::LocalWorkingCopy;
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
+use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
 use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _};
 use jj_lib::transaction::TransactionCommitError;
@@ -30,6 +31,10 @@ use jj_lib::workspace_store::WorkspaceStoreError;
 
 use super::repo::{ChangeIdHex, CommitIdHex, OpenError, OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
+
+/// The prefix of every jj workspace name Reef creates, `reef-<id>`
+/// (ADR 0014). Reef forgets only workspaces named with it.
+pub const REEF_WORKSPACE_PREFIX: &str = "reef-";
 
 /// Where a new workspace's working-copy commit starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,8 +227,12 @@ pub enum ForgetWorkspaceError {
     /// The view has no working-copy commit for this workspace name.
     #[error("workspace {0} not found")]
     NoSuchWorkspace(String),
-    /// The name is this [`Repo`]'s own workspace, such as the user's
-    /// `default`, which Reef never forgets.
+    /// The name does not start with [`REEF_WORKSPACE_PREFIX`]: it is the
+    /// user's `default` or another workspace Reef did not create, which Reef
+    /// never forgets.
+    #[error("cannot forget workspace {0}, which is not a Reef workspace")]
+    NotReefWorkspace(String),
+    /// The name is this [`Repo`]'s own workspace.
     #[error("cannot forget workspace {0}, which this repository was opened from")]
     CurrentWorkspace(String),
     /// The working-copy commit could not be abandoned.
@@ -244,7 +253,7 @@ impl Classify for ForgetWorkspaceError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::NoSuchWorkspace(_) => ErrorKind::NotFound,
-            Self::CurrentWorkspace(_) => ErrorKind::InvalidArgument,
+            Self::NotReefWorkspace(_) | Self::CurrentWorkspace(_) => ErrorKind::InvalidArgument,
             Self::Edit(error) => classify_by_source(error),
             Self::Backend(error) => classify_by_source(error),
             Self::Commit(error) => classify_by_source(error),
@@ -291,6 +300,15 @@ impl Repo {
     /// change with several visible commits is
     /// [`ResolveError::DivergentChange`]; a change with only hidden commits
     /// does not match. Commit id prefixes match hidden commits too.
+    ///
+    /// # Warning
+    ///
+    /// A bookmark whose name is all hex digits (`cafe`), or all letters `k`
+    /// to `z` (`works`), is tried as an id prefix first, so it resolves to
+    /// the matching change or commit if there is one, and an ambiguous
+    /// prefix is an error without falling back to the bookmark. The brief
+    /// (R1.01) fixes this order; such a bookmark is reachable only while no
+    /// id starts with its name.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn resolve_revision(&self, text: &str) -> Result<Resolved, ResolveError> {
         self.resolve_revision_unlogged(text)
@@ -369,9 +387,14 @@ impl Repo {
     /// This [`Repo`] adopts the new operation, as [`Repo::snapshot`] does.
     /// The working copy starts with the empty tree recorded, whatever is on
     /// disk: the caller seeds its state from a base (R1.05) or calls
-    /// [`Repo::reset_to`]. If a step after the operation fails, the
-    /// operation stands and the caller cleans up with
-    /// [`Repo::forget_workspace`].
+    /// [`Repo::reset_to`].
+    ///
+    /// If writing the working-copy state or registering the workspace
+    /// fails after the operation is committed, the state directory is
+    /// removed but the operation stands: the view keeps a working-copy
+    /// commit for `name`, and the caller cleans up with
+    /// [`Repo::forget_workspace`]. A failure before the operation leaves
+    /// nothing behind.
     #[tracing::instrument(
         skip_all,
         fields(repo = %self.workspace_root().display(), path = %root.display())
@@ -407,7 +430,9 @@ impl Repo {
             ));
         }
         // jj's workspace store wants the root absolute and normalized like the
-        // repository path, and `Workspace::new` canonicalizes it the same way.
+        // repository path, and `Workspace::new` canonicalizes it the same way
+        // (with `dunce`, which differs from `std::fs::canonicalize` only on
+        // Windows).
         let root = std::fs::canonicalize(root).map_err(|source| CreateWorkspaceError::Root {
             path: root.to_owned(),
             source,
@@ -440,16 +465,41 @@ impl Repo {
         };
 
         let op_id = self.repo.op_id().clone();
+        let attached = self.attach_new_workspace(&name, &root, state_dir, &op_id);
+        let workspace = match attached {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                // The operation stands; only the half-written state goes.
+                std::fs::remove_dir_all(state_dir).ok();
+                return Err(error);
+            }
+        };
+        let repo = Repo {
+            workspace,
+            repo: self.repo.clone(),
+        };
+        Ok((repo, OperationIdHex::of(&op_id)))
+    }
+
+    /// The steps of [`Repo::create_workspace`] after its operation: the
+    /// working-copy state, the jj `Workspace`, and its registration.
+    fn attach_new_workspace(
+        &self,
+        name: &WorkspaceNameBuf,
+        root: &Path,
+        state_dir: &Path,
+        op_id: &OperationId,
+    ) -> Result<Workspace, CreateWorkspaceError> {
         let working_copy = LocalWorkingCopy::init(
             self.repo.store().clone(),
-            root.clone(),
+            root.to_owned(),
             state_dir.to_owned(),
             op_id.clone(),
             name.clone(),
             self.workspace.settings(),
         )?;
         let workspace = Workspace::new(
-            &root,
+            root,
             self.repo_path().to_owned(),
             Box::new(working_copy),
             self.workspace.repo_loader().clone(),
@@ -457,12 +507,8 @@ impl Repo {
         self.repo
             .loader()
             .workspace_store()
-            .add(&name, workspace.workspace_root())?;
-        let repo = Repo {
-            workspace,
-            repo: self.repo.clone(),
-        };
-        Ok((repo, OperationIdHex::of(&op_id)))
+            .add(name, workspace.workspace_root())?;
+        Ok(workspace)
     }
 
     /// Reopens a workspace made by [`Repo::create_workspace`], after a
@@ -483,15 +529,28 @@ impl Repo {
         if !state_dir.join("checkout").is_file() {
             return Err(WorkspaceLoadError::NoWorkspaceHere(state_dir.to_owned()).into());
         }
+        // As in `create_workspace`: one canonical root for the working copy and
+        // the workspace. `std::fs::canonicalize` and the `dunce` crate jj uses
+        // in `Workspace::new` differ only on Windows (UNC prefixes).
+        let root = std::fs::canonicalize(root).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                WorkspaceLoadError::NoWorkspaceHere(root.to_owned())
+            } else {
+                WorkspaceLoadError::Path(PathError {
+                    path: root.to_owned(),
+                    source,
+                })
+            }
+        })?;
         let working_copy = LocalWorkingCopy::load(
             self.repo.store().clone(),
-            root.to_owned(),
+            root.clone(),
             state_dir.to_owned(),
             self.workspace.settings(),
         )
         .map_err(WorkspaceLoadError::from)?;
         let workspace = Workspace::new(
-            root,
+            &root,
             self.repo_path().to_owned(),
             Box::new(working_copy),
             self.workspace.repo_loader().clone(),
@@ -508,7 +567,9 @@ impl Repo {
     /// head, and not referenced elsewhere) and its entry in jj's workspace
     /// store. Records one operation with `description`, which this [`Repo`]
     /// adopts. The workspace's directory and state directory are not
-    /// touched.
+    /// touched. Only names starting with [`REEF_WORKSPACE_PREFIX`] can be
+    /// forgotten, whichever workspace's [`Repo`] calls this, so the user's
+    /// `default` is safe.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn forget_workspace(
         &mut self,
@@ -528,6 +589,9 @@ impl Repo {
         name: &str,
         description: &str,
     ) -> Result<OperationIdHex, ForgetWorkspaceError> {
+        if !name.starts_with(REEF_WORKSPACE_PREFIX) {
+            return Err(ForgetWorkspaceError::NotReefWorkspace(name.to_owned()));
+        }
         if name == self.workspace_name() {
             return Err(ForgetWorkspaceError::CurrentWorkspace(name.to_owned()));
         }

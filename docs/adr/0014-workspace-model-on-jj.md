@@ -29,6 +29,7 @@ We will make every Reef workspace a jj workspace with its own working-copy commi
 - jj's working-copy lock file lives in the state directory, so two daemons cannot share one state directory, which R1.03's single-instance lock already prevents.
 - A Reef workspace's working copy is fresh only relative to the operation it last recorded. Reopening it after other workspaces wrote operations gives a stale working copy, which R1.13's staleness policy resolves.
 - If jj-lib changes `LocalWorkingCopy::init` or `Workspace::new`, only `reef_lib::jj` changes ([0008](0008-jj-lib-embedding-findings.md)'s seam).
+- The records that describe Reef workspaces (registered repositories, workspace and lease rows, the reclaim log, and their ids) are the daemon's inventory, not part of the version-control data model that [0007](0007-crate-layout.md) places in `reef-lib`. They live in `reef_daemon::model`, next to the SQLite store that holds them.
 
 ## Alternatives considered
 

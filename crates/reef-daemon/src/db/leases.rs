@@ -73,79 +73,95 @@ fn missing_or_ended(tx: &Transaction<'_>, id: LeaseId) -> DbError {
     }
 }
 
+/// The lease tick's query. Its `WHERE` and `ORDER BY` repeat the expression
+/// of the `leases_unended_grace_end` index so SQLite searches that index
+/// rather than scanning; ordering by `expires_at` alone would make it scan
+/// `leases_unended_expires_at` instead.
+fn expired_sql() -> String {
+    format!(
+        "SELECT {COLUMNS} FROM leases
+         WHERE ended_at IS NULL AND expires_at + grace_ms < ?1
+         ORDER BY expires_at + grace_ms, id"
+    )
+}
+
+/// [`Db::issue_lease`] inside the caller's transaction.
+pub(crate) fn issue_lease_in(tx: &Transaction<'_>, l: &LeaseRecord) -> Result<(), DbError> {
+    let state: WorkspaceState = tx
+        .query_row(
+            "SELECT state FROM workspaces WHERE id = ?1",
+            [l.workspace_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::NotFound {
+            what: "workspace",
+            id: l.workspace_id.as_hex(),
+        })?;
+    if state != WorkspaceState::Active {
+        return Err(DbError::Conflict {
+            what: "workspace",
+            id: l.workspace_id.as_hex(),
+            reason: "is not active",
+        });
+    }
+    let unended = tx
+        .query_row(
+            "SELECT 1 FROM leases WHERE workspace_id = ?1 AND ended_at IS NULL",
+            [l.workspace_id],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if unended.is_some() {
+        return Err(DbError::Conflict {
+            what: "workspace",
+            id: l.workspace_id.as_hex(),
+            reason: "already has an unended lease",
+        });
+    }
+    let taken = tx
+        .query_row("SELECT 1 FROM leases WHERE id = ?1", [l.id], |_| Ok(()))
+        .optional()?;
+    if taken.is_some() {
+        return Err(DbError::AlreadyExists {
+            what: WHAT,
+            id: l.id.as_hex(),
+        });
+    }
+    tx.execute(
+        &format!(
+            "INSERT INTO leases({COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ),
+        params![
+            l.id,
+            l.repo_id,
+            l.workspace_id,
+            l.owner,
+            l.issued_at,
+            l.expires_at,
+            l.last_heartbeat_at,
+            duration_millis(l.length),
+            duration_millis(l.grace),
+            l.ended_at,
+            l.end_reason,
+        ],
+    )?;
+    tx.execute(
+        "UPDATE workspaces SET lease_id = ?2 WHERE id = ?1",
+        params![l.workspace_id, l.id],
+    )?;
+    Ok(())
+}
+
 impl Db {
     /// Issues a lease on its workspace, in one transaction: inserts the
     /// lease and points `workspaces.lease_id` at it. The workspace must
     /// exist and be `active` ([`DbError::NotFound`], [`DbError::Conflict`]),
-    /// and must not already hold an unended lease ([`DbError::Conflict`]).
+    /// and must not already hold an unended lease ([`DbError::Conflict`];
+    /// a unique partial index also guarantees this).
     pub fn issue_lease(&self, l: &LeaseRecord) -> Result<(), DbError> {
-        self.in_transaction(|tx| {
-            let state: WorkspaceState = tx
-                .query_row(
-                    "SELECT state FROM workspaces WHERE id = ?1",
-                    [l.workspace_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| DbError::NotFound {
-                    what: "workspace",
-                    id: l.workspace_id.as_hex(),
-                })?;
-            if state != WorkspaceState::Active {
-                return Err(DbError::Conflict {
-                    what: "workspace",
-                    id: l.workspace_id.as_hex(),
-                    reason: "is not active",
-                });
-            }
-            let unended = tx
-                .query_row(
-                    "SELECT 1 FROM leases WHERE workspace_id = ?1 AND ended_at IS NULL",
-                    [l.workspace_id],
-                    |_| Ok(()),
-                )
-                .optional()?;
-            if unended.is_some() {
-                return Err(DbError::Conflict {
-                    what: "workspace",
-                    id: l.workspace_id.as_hex(),
-                    reason: "already has an unended lease",
-                });
-            }
-            let taken = tx
-                .query_row("SELECT 1 FROM leases WHERE id = ?1", [l.id], |_| Ok(()))
-                .optional()?;
-            if taken.is_some() {
-                return Err(DbError::AlreadyExists {
-                    what: WHAT,
-                    id: l.id.as_hex(),
-                });
-            }
-            tx.execute(
-                &format!(
-                    "INSERT INTO leases({COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-                ),
-                params![
-                    l.id,
-                    l.repo_id,
-                    l.workspace_id,
-                    l.owner,
-                    l.issued_at,
-                    l.expires_at,
-                    l.last_heartbeat_at,
-                    duration_millis(l.length),
-                    duration_millis(l.grace),
-                    l.ended_at,
-                    l.end_reason,
-                ],
-            )?;
-            tx.execute(
-                "UPDATE workspaces SET lease_id = ?2 WHERE id = ?1",
-                params![l.workspace_id, l.id],
-            )?;
-            Ok(())
-        })
+        self.in_transaction(|tx| issue_lease_in(tx, l))
     }
 
     /// The lease with this id, ended or not.
@@ -218,14 +234,11 @@ impl Db {
     }
 
     /// Unended leases whose grace has run out by `cutoff`
-    /// (`expires_at + grace_ms < cutoff`), soonest expiry first.
+    /// (`expires_at + grace_ms < cutoff`), the one whose grace ran out first
+    /// first.
     pub fn leases_expired_before(&self, cutoff: Timestamp) -> Result<Vec<LeaseRecord>, DbError> {
         self.with(|conn| {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM leases
-                 WHERE ended_at IS NULL AND expires_at + grace_ms < ?1
-                 ORDER BY expires_at, id"
-            ))?;
+            let mut stmt = conn.prepare(&expired_sql())?;
             stmt.query_map([cutoff], from_row)?.collect()
         })
     }
@@ -400,6 +413,63 @@ mod tests {
         db.end_lease(early.id, Timestamp(1_600), LeaseEnd::Expired)
             .unwrap();
         assert_eq!(expired(3_000), [late.id], "ended leases are skipped");
+    }
+
+    #[test]
+    fn workspace_and_first_lease_insert_together() {
+        let db = Db::open_in_memory().unwrap();
+        let record = repo("aaaa000000000001", "/src/app");
+        db.insert_repository(&record).unwrap();
+        let mut ws = workspace(record.id, "bbbb000000000001", "/ws/1");
+        ws.lease_id = Some("cccc00000000000f".parse().unwrap());
+        let l = lease(record.id, ws.id, "cccc000000000001");
+        db.insert_workspace_with_lease(&ws, &l).unwrap();
+        assert_eq!(db.workspace(ws.id).unwrap().lease_id, Some(l.id));
+        assert_eq!(db.active_lease(ws.id).unwrap(), Some(l.clone()));
+
+        // The lease insert fails (its id is taken): no workspace row is left.
+        let second = workspace(record.id, "bbbb000000000002", "/ws/2");
+        let reused = lease(record.id, second.id, "cccc000000000001");
+        let error = db
+            .insert_workspace_with_lease(&second, &reused)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            db.workspace(second.id).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn expired_query_searches_the_grace_end_index() {
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = db
+            .with(|conn| {
+                let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", expired_sql()))?;
+                stmt.query_map([0], |row| row.get(3))?.collect()
+            })
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.starts_with("SEARCH leases USING INDEX leases_unended_grace_end")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn unended_leases_are_unique_per_workspace_in_the_schema() {
+        let (db, repo_id, ws, _) = fixture();
+        db.issue_lease(&lease(repo_id, ws, "cccc000000000001"))
+            .unwrap();
+        let bypass = db.with(|conn| {
+            conn.execute(
+                "INSERT INTO leases(id, repo_id, workspace_id, owner, issued_at, expires_at,
+                                    last_heartbeat_at, length_ms, grace_ms)
+                 VALUES ('cccc000000000002', ?1, ?2, 'x', 0, 0, 0, 0, 0)",
+                params![repo_id, ws],
+            )
+        });
+        assert!(bypass.is_err(), "the unique partial index refuses it");
     }
 
     #[test]

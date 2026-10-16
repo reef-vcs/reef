@@ -3,10 +3,13 @@
 use std::path::PathBuf;
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension as _, Row, params};
+use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
+use super::leases::issue_lease_in;
 use super::{Db, DbError, normalize_prefix, path_text, unique_match};
-use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
+use crate::model::{
+    Attention, LeaseRecord, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState,
+};
 
 const WHAT: &str = "workspace";
 
@@ -59,64 +62,90 @@ fn exists(conn: &Connection, sql: &str, value: &str) -> rusqlite::Result<bool> {
         .map(|found| found.is_some())
 }
 
+/// [`Db::insert_workspace`] inside the caller's transaction.
+pub(crate) fn insert_workspace_in(
+    tx: &Transaction<'_>,
+    w: &WorkspaceRecord,
+) -> Result<(), DbError> {
+    let path = path_text(&w.path)?;
+    let state_dir = path_text(&w.state_dir)?;
+    if !exists(
+        tx,
+        "SELECT 1 FROM repositories WHERE id = ?1",
+        &w.repo_id.as_hex(),
+    )? {
+        return Err(DbError::NotFound {
+            what: "repository",
+            id: w.repo_id.as_hex(),
+        });
+    }
+    if exists(tx, "SELECT 1 FROM workspaces WHERE id = ?1", &w.id.as_hex())? {
+        return Err(DbError::AlreadyExists {
+            what: WHAT,
+            id: w.id.as_hex(),
+        });
+    }
+    if exists(tx, "SELECT 1 FROM workspaces WHERE path = ?1", path)? {
+        return Err(DbError::AlreadyExists {
+            what: "workspace path",
+            id: path.to_owned(),
+        });
+    }
+    tx.execute(
+        &format!(
+            "INSERT INTO workspaces({COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17)"
+        ),
+        params![
+            w.id,
+            w.repo_id,
+            w.owner,
+            w.purpose,
+            w.change_id,
+            w.commit_id,
+            w.base_tree_id,
+            w.backend,
+            path,
+            state_dir,
+            w.lease_id,
+            w.state,
+            w.divergent,
+            w.attention,
+            w.created_at,
+            w.last_snapshot_at,
+            w.last_snapshot_op,
+        ],
+    )?;
+    Ok(())
+}
+
 impl Db {
     /// Records a new workspace. Its repository must exist
     /// ([`DbError::NotFound`]); its id and path must be unused
-    /// ([`DbError::AlreadyExists`]). A workspace is normally inserted with
-    /// `lease_id: None` and then leased with [`Db::issue_lease`].
+    /// ([`DbError::AlreadyExists`]). A workspace is normally inserted with its
+    /// first lease by [`Db::insert_workspace_with_lease`].
     pub fn insert_workspace(&self, w: &WorkspaceRecord) -> Result<(), DbError> {
-        let path = path_text(&w.path)?;
-        let state_dir = path_text(&w.state_dir)?;
+        self.in_transaction(|tx| insert_workspace_in(tx, w))
+    }
+
+    /// Records a new workspace and issues its first lease in one
+    /// transaction: the row is inserted with `lease_id` NULL (whatever
+    /// `w.lease_id` says), then the lease, then the pointer, so the
+    /// `workspaces.lease_id ↔ leases.workspace_id` cycle never fails a
+    /// foreign key. If any step fails, neither row is written.
+    pub fn insert_workspace_with_lease(
+        &self,
+        w: &WorkspaceRecord,
+        l: &LeaseRecord,
+    ) -> Result<(), DbError> {
+        let unleased = WorkspaceRecord {
+            lease_id: None,
+            ..w.clone()
+        };
         self.in_transaction(|tx| {
-            if !exists(
-                tx,
-                "SELECT 1 FROM repositories WHERE id = ?1",
-                &w.repo_id.as_hex(),
-            )? {
-                return Err(DbError::NotFound {
-                    what: "repository",
-                    id: w.repo_id.as_hex(),
-                });
-            }
-            if exists(tx, "SELECT 1 FROM workspaces WHERE id = ?1", &w.id.as_hex())? {
-                return Err(DbError::AlreadyExists {
-                    what: WHAT,
-                    id: w.id.as_hex(),
-                });
-            }
-            if exists(tx, "SELECT 1 FROM workspaces WHERE path = ?1", path)? {
-                return Err(DbError::AlreadyExists {
-                    what: "workspace path",
-                    id: path.to_owned(),
-                });
-            }
-            tx.execute(
-                &format!(
-                    "INSERT INTO workspaces({COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                             ?16, ?17)"
-                ),
-                params![
-                    w.id,
-                    w.repo_id,
-                    w.owner,
-                    w.purpose,
-                    w.change_id,
-                    w.commit_id,
-                    w.base_tree_id,
-                    w.backend,
-                    path,
-                    state_dir,
-                    w.lease_id,
-                    w.state,
-                    w.divergent,
-                    w.attention,
-                    w.created_at,
-                    w.last_snapshot_at,
-                    w.last_snapshot_op,
-                ],
-            )?;
-            Ok(())
+            insert_workspace_in(tx, &unleased)?;
+            issue_lease_in(tx, l)
         })
     }
 

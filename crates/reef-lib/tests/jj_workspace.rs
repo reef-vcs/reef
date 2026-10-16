@@ -417,9 +417,28 @@ async fn forget_workspace_removes_pointer_and_abandons_empty() {
     assert_eq!(again.kind(), ErrorKind::NotFound);
     let own = fx.main.forget_workspace("default", "").await.unwrap_err();
     assert!(
-        matches!(own, ForgetWorkspaceError::CurrentWorkspace(_)),
+        matches!(own, ForgetWorkspaceError::NotReefWorkspace(_)),
         "{own:?}"
     );
+    assert_eq!(own.kind(), ErrorKind::InvalidArgument);
+}
+
+#[tokio::test]
+async fn forget_refuses_default_from_a_reef_workspace() {
+    let (mut fx, commit) = Fixture::with_files().await;
+    let (mut ws, _, _) = fx.create("reef-x", StartPoint::NewOn(commit)).await;
+
+    let error = ws.forget_workspace("default", "").await.unwrap_err();
+    assert!(
+        matches!(error, ForgetWorkspaceError::NotReefWorkspace(_)),
+        "{error:?}"
+    );
+    let error = ws.forget_workspace("reef-x", "").await.unwrap_err();
+    assert!(
+        matches!(error, ForgetWorkspaceError::CurrentWorkspace(_)),
+        "{error:?}"
+    );
+    assert!(fx.wc_names().await.contains("default"));
 }
 
 // 7
@@ -546,12 +565,15 @@ async fn two_workspaces_same_change_both_snapshot() {
 /// directory is not a jj repository.
 #[tokio::test]
 async fn jj_cli_lists_reef_workspace() {
-    if std::process::Command::new("jj")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    // The workspace store format and `workspace list` output are checked
+    // against the jj-lib version Reef embeds; another CLI may differ.
+    let Ok(version) = std::process::Command::new("jj").arg("--version").output() else {
         println!("skipped: jj not on PATH");
+        return;
+    };
+    let version = String::from_utf8_lossy(&version.stdout).into_owned();
+    if !version.trim().starts_with("jj 0.46.") {
+        println!("skipped: jj CLI is {:?}, not 0.46.x", version.trim());
         return;
     }
     let (mut fx, commit) = Fixture::with_files().await;

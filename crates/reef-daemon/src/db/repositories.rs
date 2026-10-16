@@ -104,10 +104,11 @@ impl Db {
         })
     }
 
-    /// Forgets a repository and every row that names it: its workspaces,
-    /// leases, and reclaim log. [`DbError::Conflict`] while any of its
-    /// workspaces is `active` or `releasing`, since those still have a
-    /// directory on disk.
+    /// Forgets a repository with its workspace and lease rows, which the
+    /// foreign keys require. Its `reclaims` rows are kept: they are the audit
+    /// log R1.17 keeps, and `reclaims.repo_id` has no foreign key.
+    /// [`DbError::Conflict`] while any of its workspaces is `active` or
+    /// `releasing`, since those still have a directory on disk.
     pub fn delete_repository(&self, id: RepoId) -> Result<(), DbError> {
         self.in_transaction(|tx| {
             let exists = tx
@@ -140,7 +141,6 @@ impl Db {
             )?;
             tx.execute("DELETE FROM leases WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM workspaces WHERE repo_id = ?1", [id])?;
-            tx.execute("DELETE FROM reclaims WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })
@@ -261,7 +261,7 @@ pub(crate) mod tests {
     #[test]
     fn delete_refuses_while_a_workspace_is_live() {
         use crate::db::workspaces::tests::workspace;
-        use crate::model::WorkspaceState;
+        use crate::model::{ReclaimReason, ReclaimRecord, WorkspaceState};
 
         let db = Db::open_in_memory().unwrap();
         let record = repo("aaaa000000000001", "/src/app");
@@ -275,7 +275,24 @@ pub(crate) mod tests {
 
         db.set_workspace_state(ws.id, WorkspaceState::Reclaimed)
             .unwrap();
+        db.insert_reclaim(&ReclaimRecord {
+            id: 0,
+            repo_id: record.id,
+            workspace_id: ws.id,
+            reason: ReclaimReason::Expired,
+            final_op_id: None,
+            snapshot_taken: false,
+            freed_bytes: None,
+            at: Timestamp(3_000),
+            detail: None,
+        })
+        .unwrap();
         db.delete_repository(record.id).unwrap();
+        assert_eq!(
+            db.reclaims(Some(record.id), 10).unwrap().len(),
+            1,
+            "the reclaim log outlives the repository"
+        );
         assert_eq!(
             db.repository(record.id).unwrap_err().kind(),
             ErrorKind::NotFound

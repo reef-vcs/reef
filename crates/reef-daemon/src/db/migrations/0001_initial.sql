@@ -28,7 +28,12 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- daemon_instan
 
 -- Listing a repository's workspaces by state (ws list, the lease manager, GC).
 CREATE INDEX workspaces_repo_state ON workspaces(repo_id, state);
--- The lease tick's expiry scan, over unended leases only.
+-- Unended leases by expiry: the restart-grace extension (R1.15).
 CREATE INDEX leases_unended_expires_at ON leases(expires_at) WHERE ended_at IS NULL;
+-- The lease tick's scan for leases past expiry plus grace. The expression must
+-- match the query's for SQLite to use it.
+CREATE INDEX leases_unended_grace_end ON leases((expires_at + grace_ms)) WHERE ended_at IS NULL;
+-- At most one unended lease per workspace, as a database guarantee.
+CREATE UNIQUE INDEX leases_one_unended_per_workspace ON leases(workspace_id) WHERE ended_at IS NULL;
 -- The reclaim log, newest first, per repository.
 CREATE INDEX reclaims_repo_at ON reclaims(repo_id, at);
