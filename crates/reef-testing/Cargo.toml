@@ -12,6 +12,17 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+clap.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+anyhow.workspace = true          # binary edge only
+thiserror.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "reef-synth"
+path = "src/bin/reef_synth.rs"   # exception to the one-main rule: reef-testing may grow several tools

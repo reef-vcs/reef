@@ -68,3 +68,12 @@ unimplemented = "warn"
 
 [profile.release]
 debug = 1          # keep symbols for profiling benches
+
+# Generating synthetic trees dominates test time in debug builds (46 s for the large preset
+# unoptimized, about 10 s optimized), so the generator and its RNG are optimized even in dev.
+[profile.dev.package.reef-testing]
+opt-level = 3
+[profile.dev.package.rand_chacha]
+opt-level = 3
+[profile.dev.package.ppv-lite86]
+opt-level = 3
