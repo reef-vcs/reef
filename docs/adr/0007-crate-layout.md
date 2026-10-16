@@ -8,7 +8,7 @@
 
 The workspace started as three placeholder crates, `reef-vcs`, `reef-lib`, and `reef-daemon`, published at 0.0.0 only to reserve the names on crates.io. None had a defined role.
 
-The design's [Architecture](../design.md#architecture) section fixes the process boundaries: agents talk to a local daemon over a typed API; the daemon owns snapshots, workspaces, merge, and queries; the CLI and the MCP server are thin clients (design principle 8, "API first, CLI second"). The crate boundaries should follow the process boundaries so that a thin client cannot reach around the API into the data model.
+The design's [Architecture](../design.md#architecture) section fixes the process boundaries: agents talk to a local daemon over a typed API; the daemon owns snapshots, workspaces, merge, and queries; the CLI and the MCP server are thin clients (design principle 8, "API first, CLI second"). The crate boundaries should follow the process boundaries, so that what the service owns and what a client may touch are visible in the dependency graph. The graph alone does not stop the CLI from using the data model: `reef-vcs` depends on and re-exports `reef-lib`. Keeping the CLI a thin client is enforced by review and by R2.05.
 
 Benchmarks in `reef-lib` and integration tests in the daemon both need the same synthetic repository generator and fixtures (R0.05, R0.06). That code must be shared without being published and without creating a dependency cycle.
 
@@ -27,7 +27,7 @@ The workspace uses edition 2024, declares every third-party version once in `[wo
 
 ## Consequences
 
-- A change to the data model touches `reef-lib` only; the daemon and CLI pick it up through the API.
+- A change to the data model is made in `reef-lib`. The daemon links it directly; clients see it only as far as the API exposes it.
 - The daemon binary and the CLI binary cannot share code except through `reef-daemon` as a library. That is acceptable: the CLI is a thin client by design principle 8, and R2.05 removes jj-lib from the CLI's direct reach.
 - Publishing requires path dependencies to carry versions, so internal entries in `[workspace.dependencies]` carry `version`. Until a real release, `cargo publish --dry-run` for `reef-daemon` and `reef-vcs` verifies against the empty 0.0.0 placeholders on crates.io; once they use their siblings the dry run needs `--no-verify`, and a release bumps all three versions together (R4.17).
 - A bare `cargo build` skips `reef-testing`; CI and anything that needs it pass `--workspace`.
@@ -35,7 +35,7 @@ The workspace uses edition 2024, declares every third-party version once in `[wo
 
 ## Alternatives considered
 
-**Single crate.** One crate with library and binaries. Rejected: every binary would compile jj-lib and its dependencies, and nothing would stop the CLI from reaching into jj-lib directly, which R2.05 explicitly forbids.
+**Single crate.** One crate with library and binaries. Rejected: every binary and test would compile jj-lib and its dependencies, and there would be no seam at which R2.05 can remove jj-lib from the CLI's direct use.
 
 **A separate `reef-proto` crate.** A crate holding the generated protocol types, shared by daemon and clients. Deferred to R2.01, when there is a schema to put in it.
 

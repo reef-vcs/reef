@@ -2,6 +2,11 @@
 //! `reef-vcs` → `reef-daemon` → `reef-lib`, with `reef-testing` standing
 //! apart so any crate can dev-depend on it. See ADR 0007.
 
+#![allow(
+    clippy::expect_used,
+    reason = "test helpers outside #[test] fns; a panic is the failure report"
+)]
+
 use std::path::Path;
 use std::process::Command;
 
@@ -93,11 +98,11 @@ fn reef_daemon_does_not_depend_on_reef_vcs() {
 }
 
 #[test]
-fn reef_testing_has_no_normal_reef_dependency() {
+fn reef_testing_has_no_non_dev_reef_dependency() {
     let metadata = metadata();
     let reef_deps: Vec<_> = dependencies(&metadata, "reef-testing")
         .into_iter()
-        .filter(|(dep, kind)| dep.starts_with("reef-") && kind == "normal")
+        .filter(|(dep, kind)| dep.starts_with("reef-") && kind != "dev")
         .collect();
     assert!(
         reef_deps.is_empty(),
