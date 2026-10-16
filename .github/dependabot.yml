@@ -15,4 +15,6 @@ updates:
       cargo-minor:
         update-types: ["minor", "patch"]
     ignore:
-      - dependency-name: jj-lib   # bumped deliberately, see ADR 0002 and ADR 0008
+      # jj-lib is bumped deliberately, see ADR 0002 and ADR 0008. This also silences Dependabot
+      # security PRs for it; `just deny-advisories` in CI is the signal for jj-lib advisories.
+      - dependency-name: jj-lib

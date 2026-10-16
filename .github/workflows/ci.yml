@@ -7,7 +7,8 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR pushes stop; every commit on main keeps its result and saves its cache.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,10 +27,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
       - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
       - run: just fmt-check
 
   deny:
@@ -38,11 +43,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19
       - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
       - run: just deny
       - run: just deny-advisories
         continue-on-error: true
@@ -57,11 +66,15 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9
       - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
       - name: Lint
         run: just lint
       - name: Build
@@ -73,9 +86,12 @@ jobs:
 
   ci-ok:
     name: CI passed
+    # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
+    # job must run and fail when anything it needs was cancelled.
     if: always()
     needs: [fmt, deny, check]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       # Results go through env rather than being spliced into the script, so the JSON's quotes
       # cannot break the shell.
