@@ -116,6 +116,10 @@ async fn failure_is_logged_once_with_its_chain_in_the_span() {
     );
     assert_eq!(event["span"]["name"], "open");
     assert_eq!(
+        event["target"], "reef_lib::jj::repo",
+        "the entry point's module, so per-module filters cover it"
+    );
+    assert_eq!(
         event["span"]["path"],
         dir.path().display().to_string().as_str()
     );

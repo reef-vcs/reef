@@ -78,15 +78,22 @@ pub fn classify_by_source(error: &(dyn Error + 'static)) -> ErrorKind {
 
 /// Displays an error followed by each of its sources, separated by `: `.
 /// Logs record errors through this, because error messages do not repeat
-/// their source's message.
+/// their source's message. Some foreign errors do, by displaying their
+/// source's text as their own; a source whose text equals the previous one's
+/// is skipped.
 pub struct ErrorChain<'a>(pub &'a (dyn Error + 'static));
 
 impl fmt::Display for ErrorChain<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)?;
+        let mut previous = self.0.to_string();
+        f.write_str(&previous)?;
         let mut source = self.0.source();
         while let Some(error) = source {
-            write!(f, ": {error}")?;
+            let text = error.to_string();
+            if text != previous {
+                write!(f, ": {text}")?;
+                previous = text;
+            }
             source = error.source();
         }
         Ok(())
@@ -120,6 +127,16 @@ mod tests {
             "failed to open repo: failed to read the state: disk says no"
         );
         assert_eq!(ErrorChain(&Outer::Bare).to_string(), "no cause");
+    }
+
+    #[test]
+    fn chain_skips_a_source_that_repeats_its_parent() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("{0}")]
+        struct Echo(#[source] io::Error);
+
+        let echo = Echo(io::Error::other("disk says no"));
+        assert_eq!(ErrorChain(&echo).to_string(), "disk says no");
     }
 
     #[test]

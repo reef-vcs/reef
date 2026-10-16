@@ -4,14 +4,12 @@
 //! (`tracing::info!`). Events are structured: the message is a short lowercase
 //! phrase and the data goes in fields named from [`fields`]. Every public
 //! async entry point opens a span with `#[tracing::instrument(skip_all,
-//! fields(..))]` and reports a returned error once, through [`log_failure`];
+//! fields(..))]` and reports a returned error once, through
+//! [`log_failure!`](crate::log_failure);
 //! code beneath it returns errors without logging them. Libraries only emit;
 //! `reef_daemon::logging` installs the subscriber.
 
-use std::error::Error;
 use std::time::Instant;
-
-use crate::error::{Classify, ErrorChain};
 
 /// The field names events and spans may use. `tracing`'s macros take field
 /// names as identifiers, so these constants cannot be passed to them; they
@@ -63,18 +61,27 @@ pub fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Logs a failed operation's error with its source chain, in the `error`
+/// Logs a failed operation's error, a reference to a type implementing
+/// [`Classify`](crate::error::Classify), with its source chain in the `error`
 /// field: at `warn` when the caller can act on it (see
 /// [`ErrorKind::is_caller_error`](crate::error::ErrorKind::is_caller_error)),
 /// at `error` otherwise. Called once, by the entry point that opened the
 /// operation's span, so the event carries the span's identifying fields.
-pub fn log_failure<E: Error + Classify + 'static>(error: &E) {
-    let chain = ErrorChain(error);
-    if error.kind().is_caller_error() {
-        tracing::warn!(error = %chain, "operation failed");
-    } else {
-        tracing::error!(error = %chain, "operation failed");
-    }
+///
+/// A macro rather than a function so the event's target and location are the
+/// entry point's, and a filter such as `reef_lib::jj=warn` covers its
+/// failures. The calling crate must depend on `tracing`.
+#[macro_export]
+macro_rules! log_failure {
+    ($error:expr) => {{
+        let error = $error;
+        let chain = $crate::error::ErrorChain(error);
+        if $crate::error::Classify::kind(error).is_caller_error() {
+            ::tracing::warn!(error = %chain, "operation failed");
+        } else {
+            ::tracing::error!(error = %chain, "operation failed");
+        }
+    }};
 }
 
 #[cfg(test)]
@@ -135,12 +142,12 @@ mod tests {
     /// Every field name declared by an event macro or `instrument` attribute
     /// in `source`, plus every level macro not called as `tracing::<level>!`.
     fn scan(source: &str) -> (Vec<String>, Vec<String>) {
-        let (mut names, mut unqualified) = (Vec::new(), Vec::new());
+        let (mut names, mut unchecked) = (Vec::new(), Vec::new());
         for level in LEVELS {
             let call = format!("{level}!(");
             for (at, _) in source.match_indices(&call) {
                 if !source[..at].ends_with("tracing::") {
-                    unqualified.push(call.clone());
+                    unchecked.push(call.clone());
                     continue;
                 }
                 for arg in args(&source[at + call.len()..]) {
@@ -168,7 +175,19 @@ mod tests {
                 }
             }
         }
-        (names, unqualified)
+        // Spellings the scan above cannot check: generic event and span
+        // macros, whose first argument is a level or name, and an imported
+        // `instrument` attribute. Split so this file does not match itself.
+        for call in [
+            concat!("event", "!("),
+            concat!("span", "!("),
+            concat!("#[", "instrument("),
+        ] {
+            for _ in source.match_indices(call) {
+                unchecked.push(call.to_owned());
+            }
+        }
+        (names, unchecked)
     }
 
     fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -188,12 +207,23 @@ mod tests {
         let source = format!(
             "tracing::{}!(op_id = %id, %path, target: \"t\", \"msg {{x}}\", x = 1);\n\
              #[tracing::{}(skip_all, fields(repo = %r.display(), size_bytes))]\n\
-             {}!(\"bare\");",
-            "info", "instrument", "warn",
+             {}!(\"bare\");\n\
+             tracing::{}!(Level::INFO, op_id = 1);\n\
+             let s = tracing::info_{}!(\"s\");\n\
+             #[{}(skip_all)]",
+            "info", "instrument", "warn", "event", "span", "instrument",
         );
-        let (names, unqualified) = scan(&source);
+        let (names, unchecked) = scan(&source);
         assert_eq!(names, ["op_id", "path", "repo", "size_bytes"]);
-        assert_eq!(unqualified, [format!("{}!(", "warn")]);
+        assert_eq!(
+            unchecked,
+            [
+                format!("{}!(", "warn"),
+                format!("{}!(", "event"),
+                format!("{}!(", "span"),
+                format!("#[{}(", "instrument"),
+            ]
+        );
     }
 
     /// Field names drift silently, and log consumers key on them, so every
@@ -207,7 +237,7 @@ mod tests {
         );
         let mut checked = 0;
         for file in files {
-            let (names, unqualified) = scan(&fs::read_to_string(&file).unwrap());
+            let (names, unchecked) = scan(&fs::read_to_string(&file).unwrap());
             for name in &names {
                 assert!(
                     allowed(name),
@@ -217,8 +247,9 @@ mod tests {
                 );
             }
             assert!(
-                unqualified.is_empty(),
-                "{}: call {unqualified:?} as tracing::<level>! so this test sees it",
+                unchecked.is_empty(),
+                "{}: {unchecked:?} cannot be checked; use tracing::<level>! and \
+                 #[tracing::instrument]",
                 file.display()
             );
             checked += names.len();

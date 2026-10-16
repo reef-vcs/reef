@@ -9,7 +9,6 @@ use jj_lib::op_walk::walk_ancestors;
 
 use super::repo::{OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
-use crate::telemetry::log_failure;
 
 /// One operation in the log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +57,9 @@ impl Repo {
     /// ancestors, newest first by end time.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn op_log(&self, limit: usize) -> Result<Vec<OpEntry>, OpLogError> {
-        self.op_log_unlogged(limit).await.inspect_err(log_failure)
+        self.op_log_unlogged(limit)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
     }
 
     async fn op_log_unlogged(&self, limit: usize) -> Result<Vec<OpEntry>, OpLogError> {

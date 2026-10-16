@@ -48,6 +48,8 @@ impl Classify for SettingsError {
         match self {
             // The layer is generated here with escaped values; failing to parse it is a bug.
             Self::Parse(_) => ErrorKind::Internal,
+            // `Repo::open` takes caller-built `UserSettings`, so a bad value read back
+            // from them is the caller's input.
             Self::Get(_) | Self::ByteSize(_) => ErrorKind::InvalidArgument,
         }
     }

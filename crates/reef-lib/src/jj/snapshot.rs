@@ -16,7 +16,7 @@ use jj_lib::working_copy::{SnapshotOptions, UntrackedReason, WorkingCopyStateErr
 use super::repo::{CommitIdHex, OperationIdHex, ReadError, Repo};
 use super::settings::{SettingsError, max_new_file_size};
 use crate::error::{Classify, ErrorKind, classify_by_source};
-use crate::telemetry::{elapsed_ms, log_failure};
+use crate::telemetry::elapsed_ms;
 
 /// Why a new file was left untracked by a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,7 +173,7 @@ impl Repo {
     pub async fn snapshot(&mut self, description: &str) -> Result<SnapshotOutcome, SnapshotError> {
         self.snapshot_unlogged(description)
             .await
-            .inspect_err(log_failure)
+            .inspect_err(|error| crate::log_failure!(error))
     }
 
     /// [`Repo::snapshot`] without its span or failure event, for operations
@@ -292,7 +292,7 @@ impl Repo {
     pub async fn changed_paths_in_wc(&self) -> Result<Vec<ChangedPath>, DiffError> {
         self.changed_paths_in_wc_unlogged()
             .await
-            .inspect_err(log_failure)
+            .inspect_err(|error| crate::log_failure!(error))
     }
 
     async fn changed_paths_in_wc_unlogged(&self) -> Result<Vec<ChangedPath>, DiffError> {

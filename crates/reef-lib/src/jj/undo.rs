@@ -9,7 +9,6 @@ use jj_lib::working_copy::CheckoutError;
 use super::repo::{OperationIdHex, ReadError, Repo};
 use super::snapshot::SnapshotError;
 use crate::error::{Classify, ErrorKind, classify_by_source};
-use crate::telemetry::log_failure;
 
 /// Description prefix jj uses for undo operations; `jj undo` reads it to
 /// walk an undo stack.
@@ -97,7 +96,10 @@ impl Repo {
     /// updated.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn undo_last(&mut self) -> Result<UndoOutcome, UndoError> {
-        let outcome = self.undo_last_unlogged().await.inspect_err(log_failure)?;
+        let outcome = self
+            .undo_last_unlogged()
+            .await
+            .inspect_err(|error| crate::log_failure!(error))?;
         tracing::info!(op_id = %outcome.new_op, "operation undone");
         Ok(outcome)
     }

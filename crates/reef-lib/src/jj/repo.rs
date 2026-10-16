@@ -15,7 +15,6 @@ use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
 
 use crate::error::{Classify, ErrorKind, classify_by_source};
-use crate::telemetry::log_failure;
 
 macro_rules! hex_id {
     ($(#[$doc:meta])* $name:ident) => {
@@ -158,7 +157,7 @@ impl Repo {
     pub async fn open(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
         let repo = Self::open_unlogged(path, settings)
             .await
-            .inspect_err(log_failure)?;
+            .inspect_err(|error| crate::log_failure!(error))?;
         tracing::debug!(
             repo = %repo.workspace_root().display(),
             op_id = %repo.op_id(),
@@ -227,7 +226,7 @@ impl Repo {
             .reload_at_head()
             .await
             .map_err(OpenError::from)
-            .inspect_err(log_failure)?;
+            .inspect_err(|error| crate::log_failure!(error))?;
         tracing::debug!(op_id = %self.op_id(), "repository reloaded");
         Ok(())
     }
