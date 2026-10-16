@@ -17,8 +17,9 @@ use super::{GITIGNORE, IGNORED_DIRS, SIZE_SIGMA, Spec, SynthError, content, name
 /// How often progress is reported when stderr is a terminal.
 const PROGRESS_EVERY: usize = 10_000;
 
-/// Ignored files per ignored directory, roughly; at most [`MAX_IGNORED_DIRS`].
+/// Ignored files per ignored directory, roughly.
 const IGNORED_FILES_PER_DIR: u64 = 500;
+/// Upper bound on ignored directories, however many ignored files there are.
 const MAX_IGNORED_DIRS: u64 = 8;
 
 /// The whole tree, decided before anything touches the disk.
@@ -58,6 +59,8 @@ pub(crate) struct Symlink {
     rel: String,
     /// Relative to the symlink's directory, `/` separators.
     target: String,
+    /// The target's path relative to the root.
+    pub(crate) points_to: String,
 }
 
 impl Dir {
@@ -115,31 +118,34 @@ pub(crate) fn plan(spec: &Spec, rng: &mut SynthRng) -> Plan {
     // Directories: breadth-first, Poisson(fan_out) children per directory
     // above max_depth, until there is one directory per files_per_dir files.
     // If the frontier runs dry first, sweep the eligible directories again.
+    // `eligible` lists the directories above max_depth in plan order; the
+    // root is always one when max_depth > 0, so the loop terminates.
     #[allow(clippy::cast_precision_loss, reason = "file counts are far below 2^53")]
     let wanted = to_u64(spec.files as f64 / spec.files_per_dir).max(1);
     let wanted = if spec.max_depth == 0 { 1 } else { wanted };
+    let mut eligible = vec![0];
     let mut cursor = 0;
     while len_u64(dirs.len()) < wanted {
-        if cursor == dirs.len() {
+        if cursor == eligible.len() {
             cursor = 0;
         }
-        let parent = cursor;
+        let parent = eligible[cursor];
         cursor += 1;
-        if dirs[parent].depth >= spec.max_depth {
-            continue;
-        }
         for _ in 0..poisson(rng, spec.fan_out) {
             if len_u64(dirs.len()) >= wanted {
                 break;
             }
-            add_dir(&mut dirs, parent, names::dir_name(rng));
+            let child = add_dir(&mut dirs, parent, names::dir_name(rng));
+            if dirs[child].depth < spec.max_depth {
+                eligible.push(child);
+            }
         }
     }
     let regular_dirs = dirs.len();
 
     // Text files: Poisson(files_per_dir) per directory in plan order, in as
     // many sweeps as it takes to place exactly spec.files.
-    let mut files = Vec::with_capacity(usize::try_from(spec.files).unwrap_or(0));
+    let mut files = Vec::new();
     let mut remaining = spec.files;
     while remaining > 0 {
         for dir in &mut dirs[..regular_dirs] {
@@ -198,6 +204,7 @@ pub(crate) fn plan(spec: &Spec, rng: &mut SynthRng) -> Plan {
             symlinks.push(Symlink {
                 rel: dirs[dir].child(&name),
                 target: relative(&dirs[dir].rel, target),
+                points_to: target.clone(),
             });
         }
     }
@@ -254,8 +261,8 @@ fn relative(from: &str, target: &str) -> String {
     parts.join("/")
 }
 
-/// Writes the plan under `root`, which must exist and be empty, drawing file
-/// contents from `rng`. Returns the total bytes of regular files written.
+/// Writes the plan under `root`, which must exist and hold nothing but the
+/// partial marker, drawing file contents from `rng`. Returns the total bytes of regular files written.
 pub(crate) fn write(root: &Path, plan: &Plan, rng: &mut SynthRng) -> Result<u64, SynthError> {
     for dir in &plan.dirs[1..] {
         let path = root.join(&dir.rel);

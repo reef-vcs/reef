@@ -143,6 +143,8 @@ fn summary(manifest: &Manifest) -> serde_json::Value {
     json!({
         "files": manifest.files,
         "dirs": manifest.dirs,
+        "ignored_files": manifest.ignored_files,
+        "symlinks": manifest.symlinks,
         "bytes": manifest.bytes,
         "mib": (mib * 10.0).round() / 10.0,
         "binaries": manifest.binaries,

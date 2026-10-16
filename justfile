@@ -45,7 +45,8 @@ synth preset="large":
     cargo run -p reef-testing --bin reef-synth --release -- gen --out "target/synth/$1" --preset "$1" --seed 42
 
 # SHA-256 over the small seed-1 tree's files and symlinks. Must print the same digest on every
-# platform; CI's synth-determinism job compares macOS and Linux.
+# platform and match crates/reef-testing/synth-small-seed1.sha256; CI's synth-determinism job
+# checks both.
 synth-digest:
     cargo run -q -p reef-testing --bin reef-synth -- gen --out target/synth/determinism --preset small --seed 1 --force >/dev/null
     cd target/synth/determinism && { find . -type f | LC_ALL=C sort | xargs shasum -a 256; find . -type l | LC_ALL=C sort | while read -r link; do echo "$link -> $(readlink "$link")"; done; } | shasum -a 256 | cut -d' ' -f1

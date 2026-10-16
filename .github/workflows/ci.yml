@@ -83,25 +83,8 @@ jobs:
         run: just test
       - name: Docs
         run: just doc
-
-  # The synthetic repo generator must write byte-identical trees on every platform (R0.05).
-  synth:
-    name: synth ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: extractions/setup-just@v4
-        with:
-          just-version: "1"
-      - name: Digest of the small seed-1 tree
+      # The synthetic repo generator must write byte-identical trees on every platform (R0.05).
+      - name: Synth digest
         run: just synth-digest | tee "digest-${{ matrix.os }}.txt"
       - uses: actions/upload-artifact@v7
         with:
@@ -109,19 +92,27 @@ jobs:
           path: digest-${{ matrix.os }}.txt
           retention-days: 7
 
+  # Every platform's digest must equal the pinned one, so an output change that is the same on
+  # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.
   synth-determinism:
     name: synth determinism
-    needs: synth
+    needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: crates/reef-testing/synth-small-seed1.sha256
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           pattern: synth-digest-*
           merge-multiple: true
       - run: |
-          head digest-*.txt
-          [[ "$(cat digest-*.txt | sort -u | wc -l)" -eq 1 ]]
+          head digest-*.txt crates/reef-testing/synth-small-seed1.sha256
+          [[ "$(ls digest-*.txt | wc -l)" -eq 2 ]]
+          [[ "$(cat digest-*.txt crates/reef-testing/synth-small-seed1.sha256 | sort -u | wc -l)" -eq 1 ]]
 
   ci-ok:
     name: CI passed

@@ -123,10 +123,15 @@ impl Spec {
         }
     }
 
-    /// Checks the parameters that would otherwise loop forever or produce
-    /// nonsense.
+    /// Checks the parameters that would otherwise loop forever, exhaust
+    /// memory, or produce nonsense. The upper bounds are far beyond any
+    /// preset; they exist so a typo is an error rather than a hang.
     pub fn validate(&self) -> Result<(), SynthError> {
+        const GIB: u64 = 1024 * 1024 * 1024;
         let invalid = |reason: &str| Err(SynthError::InvalidSpec(reason.to_owned()));
+        if self.files > 100_000_000 {
+            return invalid("files must be at most 100,000,000");
+        }
         if !(0.1..=1e6).contains(&self.fan_out) {
             return invalid("fan_out must be between 0.1 and 1e6");
         }
@@ -138,6 +143,18 @@ impl Spec {
         }
         if self.max_text_size < self.median_size {
             return invalid("max_text_size must be at least median_size");
+        }
+        if self.max_text_size > GIB {
+            return invalid("max_text_size must be at most 1 GiB");
+        }
+        if self.binaries > 10_000 {
+            return invalid("binaries must be at most 10,000");
+        }
+        if self.binary_size > 4 * GIB {
+            return invalid("binary_size must be at most 4 GiB");
+        }
+        if self.symlinks > 1_000_000 {
+            return invalid("symlinks must be at most 1,000,000");
         }
         if !(0.0..=1.0).contains(&self.ignored_fraction) {
             return invalid("ignored_fraction must be between 0 and 1");
@@ -171,6 +188,13 @@ pub struct Manifest {
     pub files: u64,
     /// Directories below the root, ignored ones included.
     pub dirs: u64,
+    /// Files inside ignored directories (`target/`, `node_modules/`).
+    #[serde(default)]
+    pub ignored_files: u64,
+    /// Symlinks to text files. Planned on every platform, written only on
+    /// Unix.
+    #[serde(default)]
+    pub symlinks: u64,
     /// Total size of every regular file except the manifest.
     pub bytes: u64,
     /// Binary files, relative to the root with `/` separators, sorted by
@@ -178,8 +202,14 @@ pub struct Manifest {
     pub binaries: Vec<PathBuf>,
     /// Text files outside ignored directories, relative to the root with `/`
     /// separators, sorted by path component. These are the only files
-    /// [`mutate`] touches.
+    /// [`mutate`] touches. Component order differs from byte order:
+    /// `a/b.rs` sorts before `a.rs`.
     pub text_files: Vec<PathBuf>,
+    /// Text files that symlinks point to, sorted by path component, without
+    /// duplicates. [`mutate`] modifies these but never deletes them, so no
+    /// symlink dangles.
+    #[serde(default)]
+    pub symlink_targets: Vec<PathBuf>,
     /// [`GENERATOR_VERSION`] at generation time.
     pub generator_version: u32,
     /// How many times [`mutate`] has changed the tree. A mutated tree no
@@ -235,13 +265,24 @@ pub enum SynthError {
     #[error("no {MANIFEST_FILE} under {0}")]
     NoManifest(PathBuf),
     /// [`mutate`] was asked to touch more text files than exist.
-    #[error("asked to modify and delete {requested} text files but only {available} exist")]
+    #[error(
+        "asked to modify {modify} and delete {delete} text files, but only {available} exist \
+         and {protected} of the unmodified ones are symlink targets, which are never deleted"
+    )]
     NotEnoughFiles {
-        /// Files to modify plus files to delete.
-        requested: u64,
+        /// Files to modify.
+        modify: u32,
+        /// Files to delete.
+        delete: u32,
         /// Text files in the manifest.
         available: u64,
+        /// Symlink targets among the files not picked for modification.
+        protected: u64,
     },
+    /// The tree was left half-written by an interrupted [`generate`];
+    /// regenerate it before mutating.
+    #[error("{0} holds an incomplete tree; run generate again")]
+    Incomplete(PathBuf),
     /// A file system operation failed.
     #[error("I/O error at {path}")]
     Io {
@@ -300,21 +341,28 @@ pub fn generate(root: &Path, spec: &Spec, seed: u64, force: bool) -> Result<Mani
 
     let mut text_files = Vec::new();
     let mut binaries = Vec::new();
+    let mut ignored_files = 0;
     for file in &plan.files {
         match file.kind {
             tree::Kind::Text => text_files.push(file.rel.clone()),
             tree::Kind::Binary => binaries.push(file.rel.clone()),
-            tree::Kind::Ignored => {}
+            tree::Kind::Ignored => ignored_files += 1,
         }
     }
+    let mut symlink_targets =
+        sorted_paths(plan.symlinks.iter().map(|l| l.points_to.clone()).collect());
+    symlink_targets.dedup();
     let manifest = Manifest {
         spec,
         seed,
         files: text_files.len() as u64,
         dirs: plan.dirs.len() as u64 - 1,
+        ignored_files,
+        symlinks: plan.symlinks.len() as u64,
         bytes,
         binaries: sorted_paths(binaries),
         text_files: sorted_paths(text_files),
+        symlink_targets,
         generator_version: GENERATOR_VERSION,
         mutations: 0,
     };
@@ -339,35 +387,37 @@ pub fn load_manifest(root: &Path) -> Result<Option<Manifest>, SynthError> {
 /// Changes text files in the tree under `root` deterministically for `seed`
 /// and updates the manifest.
 ///
-/// Picks `ops.modify + ops.delete` distinct text files from the manifest;
-/// the first `modify` get one line appended or replaced, the rest are
-/// deleted. `ops.add` new text files go into directories that already hold
-/// text files. The same tree, seed, and ops always give the same result.
+/// Picks `ops.modify` text files from the manifest and appends or replaces
+/// one line in each, creates `ops.add` new text files in directories that
+/// already hold text files, and deletes `ops.delete` other text files,
+/// never a symlink target. The same tree, seed, and ops always give the
+/// same result. With all three counts zero it changes nothing, not even the
+/// manifest.
 pub fn mutate(root: &Path, seed: u64, ops: MutateOps) -> Result<Mutation, SynthError> {
     let mut manifest = load_manifest(root)?.ok_or_else(|| SynthError::NoManifest(root.into()))?;
-    let available = manifest.text_files.len();
-    let (modify, delete) = (ops.modify as usize, ops.delete as usize);
-    if modify + delete > available {
-        return Err(SynthError::NotEnoughFiles {
-            requested: u64::from(ops.modify) + u64::from(ops.delete),
-            available: available as u64,
-        });
+    if root.join(PARTIAL_FILE).exists() {
+        return Err(SynthError::Incomplete(root.into()));
     }
+    if ops == MutateOps::default() {
+        return Ok(Mutation::default());
+    }
+
+    // Pick everything before touching the disk.
+    let mut rng = SynthRng::seed_from_u64(seed);
+    let (to_modify, to_delete) = pick(&mut rng, &manifest, ops)?;
 
     // Mark the tree as mutated before touching it, so an interrupted run is
     // never mistaken for a pristine tree.
     manifest.mutations += 1;
     write_manifest(root, &manifest)?;
 
-    let mut rng = SynthRng::seed_from_u64(seed);
-    let picks = sample(&mut rng, available, modify + delete);
     let mut bytes = manifest.bytes;
     let mut mutation = Mutation::default();
 
-    for &i in &picks[..modify] {
+    for &i in &to_modify {
         let rel = manifest.text_files[i].clone();
         let (old, new) = modify_file(&mut rng, &root.join(&rel))?;
-        bytes = bytes - old + new;
+        bytes = bytes.saturating_sub(old) + new;
         mutation.modified.push(rel);
     }
 
@@ -400,14 +450,14 @@ pub fn mutate(root: &Path, seed: u64, ops: MutateOps) -> Result<Mutation, SynthE
         mutation.added.push(PathBuf::from(rel));
     }
 
-    for &i in &picks[modify..] {
+    for &i in &to_delete {
         let rel = manifest.text_files[i].clone();
         let path = root.join(&rel);
         let len = fs::symlink_metadata(&path)
             .map_err(|e| SynthError::io(&path, e))?
             .len();
         remove(&path)?;
-        bytes -= len.min(bytes);
+        bytes = bytes.saturating_sub(len);
         mutation.deleted.push(rel);
     }
 
@@ -429,6 +479,45 @@ pub fn mutate(root: &Path, seed: u64, ops: MutateOps) -> Result<Mutation, SynthE
     mutation.added.sort_unstable();
     mutation.deleted.sort_unstable();
     Ok(mutation)
+}
+
+/// Indices into `manifest.text_files` of the files to modify and to delete.
+/// Modified files come from all text files; deleted ones from the rest,
+/// minus symlink targets.
+fn pick(
+    rng: &mut SynthRng,
+    manifest: &Manifest,
+    ops: MutateOps,
+) -> Result<(Vec<usize>, Vec<usize>), SynthError> {
+    let available = manifest.text_files.len();
+    let not_enough = |protected: usize| SynthError::NotEnoughFiles {
+        modify: ops.modify,
+        delete: ops.delete,
+        available: available as u64,
+        protected: protected as u64,
+    };
+    let modify = ops.modify as usize;
+    if modify > available {
+        return Err(not_enough(0));
+    }
+    let to_modify = sample(rng, available, modify);
+    let targets: HashSet<&PathBuf> = manifest.symlink_targets.iter().collect();
+    let picked: HashSet<usize> = to_modify.iter().copied().collect();
+    let unpicked: Vec<usize> = (0..available).filter(|i| !picked.contains(i)).collect();
+    let deletable: Vec<usize> = unpicked
+        .iter()
+        .copied()
+        .filter(|&i| !targets.contains(&manifest.text_files[i]))
+        .collect();
+    let delete = ops.delete as usize;
+    if delete > deletable.len() {
+        return Err(not_enough(unpicked.len() - deletable.len()));
+    }
+    let to_delete: Vec<usize> = sample(rng, deletable.len(), delete)
+        .into_iter()
+        .map(|i| deletable[i])
+        .collect();
+    Ok((to_modify, to_delete))
 }
 
 /// Appends a line to the file or replaces one of its lines, so its content

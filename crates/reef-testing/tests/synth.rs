@@ -116,7 +116,7 @@ fn counts_match_spec() {
     let tree = walk(dir.path());
 
     let mut text = BTreeSet::new();
-    let (mut binaries, mut ignored, mut symlinks, mut dirs) = (0, 0, 0, 0);
+    let (mut binaries, mut ignored, mut symlinks, mut dirs) = (0, 0u32, 0, 0);
     for (rel, entry) in &tree {
         match entry {
             Entry::Dir => dirs += 1,
@@ -140,6 +140,8 @@ fn counts_match_spec() {
     assert_eq!(binaries, spec.binaries);
     assert_eq!(manifest.binaries.len() as u64, u64::from(spec.binaries));
     assert_eq!(manifest.dirs, dirs);
+    assert_eq!(manifest.ignored_files, u64::from(ignored));
+    assert_eq!(manifest.symlinks, u64::from(spec.symlinks));
     if cfg!(unix) {
         assert_eq!(symlinks, spec.symlinks);
     }
@@ -291,6 +293,71 @@ fn mutate_refuses_more_files_than_exist() {
 }
 
 #[test]
+fn mutate_never_deletes_symlink_targets() {
+    let dir = tempdir();
+    let manifest = gen_into(&dir, Preset::Small, 1);
+    assert_ne!(manifest.symlink_targets, Vec::<PathBuf>::new());
+    let deletable = u32::try_from(manifest.text_files.len() - manifest.symlink_targets.len())
+        .expect("small preset");
+    let all = MutateOps {
+        modify: 0,
+        add: 0,
+        delete: deletable,
+    };
+    let mutation = mutate(dir.path(), 7, all).expect("delete every non-target");
+    assert_eq!(mutation.deleted.len(), deletable as usize);
+    for target in &manifest.symlink_targets {
+        assert!(dir.path().join(target).is_file(), "{}", target.display());
+    }
+    let one_more = MutateOps {
+        modify: 0,
+        add: 0,
+        delete: 1,
+    };
+    assert!(matches!(
+        mutate(dir.path(), 7, one_more),
+        Err(SynthError::NotEnoughFiles { .. })
+    ));
+    #[cfg(unix)]
+    for (rel, entry) in walk(dir.path()) {
+        if let Entry::Symlink(_) = entry {
+            assert!(dir.path().join(&rel).exists(), "{rel} dangles");
+        }
+    }
+}
+
+#[test]
+fn empty_mutate_changes_nothing() {
+    let dir = tempdir();
+    let manifest = gen_into(&dir, Preset::Small, 1);
+    let mutation = mutate(dir.path(), 7, MutateOps::default()).expect("mutate");
+    assert_eq!(mutation, synth::Mutation::default());
+    let after = synth::load_manifest(dir.path())
+        .expect("load")
+        .expect("manifest");
+    assert_eq!(after, manifest, "still counts as pristine");
+}
+
+#[test]
+fn mutate_refuses_an_incomplete_tree() {
+    let dir = tempdir();
+    gen_into(&dir, Preset::Small, 1);
+    fs::write(dir.path().join(".reef-synth.partial"), b"").expect("marker");
+    let ops = MutateOps {
+        modify: 1,
+        add: 0,
+        delete: 0,
+    };
+    assert!(matches!(
+        mutate(dir.path(), 7, ops),
+        Err(SynthError::Incomplete(_))
+    ));
+    let manifest = gen_into(&dir, Preset::Small, 1);
+    assert!(!dir.path().join(".reef-synth.partial").exists());
+    assert_eq!(manifest.mutations, 0);
+}
+
+#[test]
 fn regenerate_skips_when_manifest_matches() {
     let dir = tempdir();
     let spec = Spec::preset(Preset::Small);
@@ -364,6 +431,18 @@ fn rejects_invalid_specs() {
     let dir = tempdir();
     let mut spec = Spec::preset(Preset::Small);
     spec.fan_out = 0.0;
+    assert!(matches!(
+        generate(dir.path(), &spec, 1, false),
+        Err(SynthError::InvalidSpec(_))
+    ));
+    let mut spec = Spec::preset(Preset::Small);
+    spec.files = u64::MAX;
+    assert!(matches!(
+        generate(dir.path(), &spec, 1, false),
+        Err(SynthError::InvalidSpec(_))
+    ));
+    let mut spec = Spec::preset(Preset::Small);
+    spec.binary_size = u64::MAX;
     assert!(matches!(
         generate(dir.path(), &spec, 1, false),
         Err(SynthError::InvalidSpec(_))

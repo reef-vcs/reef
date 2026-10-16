@@ -15,10 +15,10 @@ Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` 
 - nested directories (breadth-first, a Poisson number of subdirectories per directory around `fan_out`, up to `max_depth`);
 - text files of pseudo-source (lines of 20 to 80 characters built from an embedded word list) with log-normal sizes around `median_size`, capped at `max_text_size`, and extensions weighted towards code (`.rs .py .ts .go .md .json .toml .yaml .txt`);
 - a few large incompressible binaries (`.bin .png .wasm`), 8 MiB each by default, larger than jj's default 1 MiB `max_new_file_size`, so benchmarks must set that limit explicitly;
-- ignored `target/` and `node_modules/` directories holding 2% as many files again;
+- ignored `target/` and `node_modules/` directories holding 2% as many files again: one per 500 ignored files, at most 8, the first always `target/` at the root (so `small` and `medium` have just that one, `large` has 4);
 - relative symlinks to text files (not on Windows) and executables (mode 0755 on Unix);
 - a root `.gitignore` listing `target/`, `node_modules/`, and the manifest;
-- a manifest, `.reef-synth.json`, with the spec, the seed, the counts, and the sorted list of text files.
+- a manifest, `.reef-synth.json`, with the spec, the seed, every count (text files, directories, ignored files, symlinks, binaries, bytes), and the sorted lists of text files, binaries, and symlink targets. Lists are sorted by path component, which differs from byte order: `a/b.rs` sorts before `a.rs`.
 
 No version control is set up. `reef-testing` cannot depend on jj-lib, so callers (R0.06 for benchmarks) initialize the repository around the tree.
 
@@ -35,7 +35,7 @@ let changed = synth::mutate(root, 7, MutateOps { modify: 50, add: 0, delete: 0 }
 
 `generate` returns immediately, without touching the disk, if `root` already holds an unmutated tree for the same spec, seed, and generator version; pass `force` to rewrite it anyway. Otherwise it clears `root` first, but only if `root` is missing, empty, or a tree it wrote (one with a manifest). It refuses to clear any other directory.
 
-`mutate` picks text files from the manifest, appends or replaces one line in each of `modify` files, creates `add` new files in directories that already hold text files, deletes `delete` files, and updates the manifest. The three returned lists are disjoint. A mutated tree no longer counts as matching its spec, so the next `generate` rewrites it.
+`mutate` picks text files from the manifest, appends or replaces one line in each of `modify` files, creates `add` new files in directories that already hold text files, deletes `delete` other files, and updates the manifest. The three returned lists are disjoint. It never deletes a symlink target, so no symlink dangles. A mutated tree no longer counts as matching its spec, so the next `generate` rewrites it; a call with all three counts zero changes nothing, manifest included. It refuses a tree left incomplete by an interrupted `generate`.
 
 ### `reef-synth`
 
@@ -70,6 +70,6 @@ Measured on an Apple M2 Max (APFS, macOS 27.0.1) with a release build, seed 42:
 
 ### Determinism
 
-The same spec and seed produce byte-identical trees, symlinks included, on every platform. All randomness comes from one `rand_chacha::ChaCha8Rng` seeded with `seed_from_u64(seed)` and drawn in a fixed order. The integer and float draws are implemented in `synth/dist.rs` with basic IEEE 754 arithmetic only, never with libm's `exp` or `ln` (whose results differ between macOS and glibc) and never with `rand`'s distributions (whose output may change between `rand` releases). On Windows the symlinks are planned but not written, so everything else still matches. CI's `synth-determinism` job compares the `just synth-digest` output from macOS and Linux on every push.
+The same spec and seed produce byte-identical trees, symlinks included, on every platform. All randomness comes from one `rand_chacha::ChaCha8Rng` seeded with `seed_from_u64(seed)` and drawn in a fixed order. The integer and float draws are implemented in `synth/dist.rs` with basic IEEE 754 arithmetic only, never with libm's `exp` or `ln` (whose results differ between macOS and glibc) and never with `rand`'s distributions (whose output may change between `rand` releases). On Windows the symlinks are planned but not written, so everything else still matches. CI's `synth-determinism` job checks that the `just synth-digest` output on macOS and on Linux both equal the digest pinned in `synth-small-seed1.sha256`, on every push.
 
-**`generator_version` rule.** `GENERATOR_VERSION` in `synth/mod.rs` is stored in every manifest. Bump it in any change that alters the tree written for an existing `(Spec, seed)`: the word list, the extension weights, the size distribution, the order of draws, or anything else. A tree whose manifest has another version is regenerated rather than reused.
+**`generator_version` rule.** `GENERATOR_VERSION` in `synth/mod.rs` is stored in every manifest. Bump it in any change that alters the tree written for an existing `(Spec, seed)`: the word list, the extension weights, the size distribution, the order of draws, or anything else. In the same change, update `synth-small-seed1.sha256` to the new `just synth-digest` output; CI fails until both are done, even when the new output is identical on every platform. A tree whose manifest has another version is regenerated rather than reused.
