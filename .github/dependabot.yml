@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: ["minor", "patch"]
+    ignore:
+      # jj-lib is bumped deliberately, see ADR 0002 and ADR 0008. This also silences Dependabot
+      # security PRs for it; `just deny-advisories` in CI is the signal for jj-lib advisories.
+      - dependency-name: jj-lib

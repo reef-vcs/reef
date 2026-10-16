@@ -1,5 +1,7 @@
 # Reef
 
+[![CI](https://github.com/reef-vcs/reef/actions/workflows/ci.yml/badge.svg)](https://github.com/reef-vcs/reef/actions/workflows/ci.yml)
+
 **Version control built for a world where AI agents write most of the code.**
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.

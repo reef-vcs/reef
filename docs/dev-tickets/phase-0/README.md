@@ -51,6 +51,10 @@ These were settled while writing the briefs. Do not re-open them inside a ticket
 | Commit style | Imperative sentence-case subject, no trailing period, no conventional-commit prefix, body explains why. Matches existing history. | R0.08 |
 | Contributor license | DCO sign-off, not a CLA | R0.08 |
 
+## Follow-ups
+
+- **Branch protection on `main` (from R0.03).** `main` requires the `CI passed` check, which succeeds only when the `rustfmt`, `cargo deny`, `ubuntu-24.04`, and `macos-15` jobs all succeed. The rule is applied by hand in the repository settings (Settings, Branches), not through the API. Move this note to `CONTRIBUTING.md` when R0.08 creates it.
+
 ## Ticket file format
 
 Each ticket has: Context, Decisions, Deliverables (file by file), Implementation notes, Acceptance criteria, Verification, Out of scope, Risks. Acceptance criteria are written so an agent can check each one mechanically before opening the PR.
