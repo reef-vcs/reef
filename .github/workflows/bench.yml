@@ -48,7 +48,9 @@ jobs:
         run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-results.txt
       - name: Fixture summary
         run: cat target/bench-fixtures/*/.reef-synth.json | jq -c '{files,dirs,bytes}' || true
+      # Also after a failed run: partial results and reports help explain the failure.
       - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
         with:
           name: bench-${{ matrix.os }}-${{ env.REEF_BENCH_PRESET }}-${{ github.sha }}
           path: |

@@ -57,6 +57,8 @@ Release build, `timing_report` in `jj_spike.rs`, Apple M2 Max (12 cores, 32 GB),
 | `op_log(100)` | 3.7 ms |
 | `undo_last`, including its no-op snapshot | 39.2 ms |
 
+R0.06 added the first full snapshot of the `large` synthetic preset (100,000 text files plus 3 binaries of 8 MiB and 10 symlinks, 369 MB, seed 42), from the benchmark fixture build on the same machine: **24.9 s**, not counting the 7.8 s it took to generate the tree. A no-op snapshot of that tree takes 146 ms. Incremental numbers per preset are in [docs/benchmarks.md](../benchmarks.md).
+
 Scanning a 10,000-file tree with nothing changed costs about 11 ms. A one-file change adds about 35 ms, mostly in committing the operation and saving the working-copy state; that phase was not split further. Saving the state is O(tracked files): `TreeState::save` serializes every file's state into `.jj/working_copy/tree_state` on each snapshot. This is well within the phase one target of a snapshot within 5 seconds, but it is the first place to profile if per-snapshot latency on large trees matters.
 
 ### jj-lib types that leak through `reef_lib::jj`

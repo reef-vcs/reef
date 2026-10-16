@@ -198,7 +198,7 @@ impl Repo {
             .map_err(InitError::from)
             .inspect_err(|error| crate::log_failure!(error))?;
         let repo = Self { workspace, repo };
-        tracing::debug!(
+        tracing::info!(
             repo = %repo.workspace_root().display(),
             op_id = %repo.op_id(),
             "repository created"

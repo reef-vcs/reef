@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use jj_lib::settings::UserSettings;
+use reef_lib::error::ErrorChain;
 use reef_lib::jj::Repo;
 use reef_lib::jj::settings::{Identity, user_settings_with_max_new_file_size};
 use reef_testing::synth::{self, GENERATOR_VERSION, Preset, Spec};
@@ -107,7 +108,7 @@ fn preset_name(preset: Preset) -> &'static str {
 
 #[allow(
     clippy::print_stderr,
-    reason = "the first-snapshot time is reported to whoever runs the benches"
+    reason = "fixture build times are reported to whoever runs the benches"
 )]
 fn build(preset: Preset) -> Fixture {
     let name = preset_name(preset);
@@ -125,13 +126,15 @@ fn build(preset: Preset) -> Fixture {
 
     let reusable =
         fs::read_to_string(&ready).is_ok_and(|text| text == stamp) && root.join(".jj").is_dir();
-    if reusable {
-        // An interrupted run can leave mutations that were never snapshotted;
-        // record them now so every benchmark starts from a clean tree.
-        let mut repo = open_root(&root, &rt);
-        rt.block_on(repo.snapshot("bench: clean up after an earlier run"))
-            .expect("snapshot the reused fixture");
-    } else {
+    // An interrupted run can leave mutations that were never snapshotted;
+    // record them now so every benchmark starts from a clean tree. If that
+    // fails (a run killed between publishing an operation and saving the
+    // working copy leaves it stale), the fixture is rebuilt.
+    let reused = reusable
+        && clean_up(&root, &rt)
+            .inspect_err(|error| eprintln!("bench fixture: rebuilding {name}: {error}"))
+            .is_ok();
+    if !reused {
         remove(&ready);
         // A mutated or half-built tree is regenerated, and its `.jj` with it.
         match fs::remove_dir_all(&root) {
@@ -148,9 +151,9 @@ fn build(preset: Preset) -> Fixture {
             manifest.bytes,
             started.elapsed().as_secs_f64()
         );
-        rt.block_on(Repo::init_internal_git(&root, &settings()))
+        let mut repo = rt
+            .block_on(Repo::init_internal_git(&root, &settings()))
             .expect("create the fixture repository");
-        let mut repo = open_root(&root, &rt);
         let started = Instant::now();
         let outcome = rt
             .block_on(repo.snapshot("bench: first snapshot"))
@@ -186,17 +189,24 @@ fn open_root(root: &Path, rt: &tokio::runtime::Runtime) -> Repo {
         .expect("open the fixture repository")
 }
 
-/// Cargo's target directory: the nearest ancestor of the bench executable
-/// holding the `CACHEDIR.TAG` cargo writes there, which also covers
-/// `CARGO_TARGET_DIR` and `--target` layouts.
+/// Opens a reused fixture and snapshots whatever an earlier run left.
+fn clean_up(root: &Path, rt: &tokio::runtime::Runtime) -> Result<(), String> {
+    rt.block_on(async {
+        let mut repo = Repo::open(root, &settings())
+            .await
+            .map_err(|error| ErrorChain(&error).to_string())?;
+        repo.snapshot("bench: clean up after an earlier run")
+            .await
+            .map_err(|error| ErrorChain(&error).to_string())?;
+        Ok(())
+    })
+}
+
+/// Cargo's target directory, wherever `CARGO_TARGET_DIR` or `--target-dir`
+/// put it: the parent of the `tmp` directory cargo names for bench targets.
 fn target_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("locate the bench executable");
-    exe.ancestors()
-        .find(|dir| dir.join("CACHEDIR.TAG").is_file())
-        .map_or_else(
-            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-            Path::to_owned,
-        )
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    tmp.parent().unwrap_or(tmp).to_owned()
 }
 
 fn remove(path: &Path) {

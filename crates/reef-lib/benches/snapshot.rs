@@ -128,8 +128,15 @@ fn bench_open(
     fixture: &Fixture,
     rt: &tokio::runtime::Runtime,
 ) {
+    let settings = common::settings();
     let id = BenchmarkId::new(fixture.preset_name(), "open");
-    group.bench_function(id, |b| b.iter(|| fixture.open(rt)));
+    group.bench_function(id, |b| {
+        // Dropping the `Repo` is not part of opening it.
+        b.iter_with_large_drop(|| {
+            rt.block_on(Repo::open(&fixture.root, &settings))
+                .expect("open the fixture repository")
+        });
+    });
 }
 
 /// A snapshot of an unchanged tree: the scan cost of finding that nothing
