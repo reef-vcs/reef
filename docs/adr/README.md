@@ -23,3 +23,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0009](0009-error-and-logging-conventions.md) | Error and logging conventions | accepted |
 | [0010](0010-dco-instead-of-cla.md) | DCO instead of CLA | accepted |
 | [0011](0011-hash-and-object-backend-by-phase.md) | Hash function and object backend by phase | accepted |
+| [0014](0014-workspace-model-on-jj.md) | Workspace model on jj | accepted |

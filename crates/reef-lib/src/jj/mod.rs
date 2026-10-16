@@ -14,7 +14,12 @@ pub mod repo;
 pub mod settings;
 pub mod snapshot;
 pub mod undo;
+pub mod workspace;
 
 pub use repo::{
-    ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, Repo,
+    ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
+    Repo,
+};
+pub use workspace::{
+    CreateWorkspaceError, ForgetWorkspaceError, ResolveError, Resolved, ResolvedVia, StartPoint,
 };
