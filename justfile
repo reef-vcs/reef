@@ -1,4 +1,5 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
+set positional-arguments
 
 default:
     @just --list
@@ -15,7 +16,7 @@ build:
 
 # Unit and integration tests via nextest when present, else cargo test. Doctests always via cargo test.
 test *ARGS:
-    if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace {{ARGS}}; else cargo test --workspace {{ARGS}}; fi
+    if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace "$@"; else cargo test --workspace "$@"; fi
     cargo test --workspace --doc
 
 lint:
@@ -37,7 +38,7 @@ deny-advisories:
     cargo deny check advisories
 
 bench *ARGS:
-    cargo bench --workspace {{ARGS}}
+    cargo bench --workspace "$@"
 
 # Everything CI runs, in CI order.
 ci: fmt-check lint build test doc deny
