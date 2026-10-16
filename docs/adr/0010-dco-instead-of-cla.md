@@ -6,7 +6,7 @@
 
 ## Context
 
-Reef is licensed under Apache 2.0 and targets the open ecosystem rather than one organization: the hub is a protocol anyone can host, and the goal is alternative implementations and many contributors. There is no company or foundation behind the project, so there is no legal entity that could hold the rights a contributor license agreement grants. Contributions are expected to come from many small contributors, each sending a few changes, and from agents working on someone's behalf. Any per-contributor paperwork is friction paid on every first contribution.
+Reef is licensed under Apache 2.0 and targets the open ecosystem rather than one organization: the hub is a protocol anyone can host, and the goal is alternative implementations and many contributors. There is no company or foundation behind the project to hold the rights a contributor license agreement grants. The single maintainer could hold them personally, but rights over every contribution held by one person is a poor fit for a project that wants other implementations and hosts. Contributions are expected to come from many small contributors, each sending a few changes, and from agents working on someone's behalf. Any per-contributor paperwork is friction paid on every first contribution.
 
 The project still needs a record of where each contribution came from. Provenance is Reef's own thesis: a change should carry evidence of where it came from rather than relying on who pushed it. A repository that cannot say who certified its own contents would contradict that.
 
@@ -32,6 +32,6 @@ This covers code, documentation, and everything else committed to this repositor
 
 ## Alternatives considered
 
-**CLA via CLA Assistant.** Contributors sign an agreement once, granting a project entity a broad license or assigning copyright. It would make relicensing possible, but it needs an entity to grant the rights to, which Reef does not have, and it adds a legal step before a first pull request. Agents cannot sign agreements, so every agent-authored PR would still depend on a human's signature. It lost on friction and on having no counterparty.
+**CLA via CLA Assistant.** Contributors sign an agreement once, granting a project entity a broad license or assigning copyright. It would make relicensing possible, but it needs an organization to grant the rights to, which Reef does not have, and it adds a legal step before a first pull request. Agents cannot sign agreements, so every agent-authored PR would still depend on a human's signature. It lost on friction and on having no counterparty.
 
 **Do nothing.** Rely on Apache 2.0 section 5 alone, with no per-commit statement. It is the lowest friction, but leaves the provenance of each contribution unrecorded, which contradicts the project's own thesis that changes carry evidence of where they came from.

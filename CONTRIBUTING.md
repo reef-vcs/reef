@@ -14,7 +14,7 @@ macOS and Linux are supported. Windows is not yet; whether and how to support it
 # Install rustup from https://rustup.rs. rust-toolchain.toml pins the toolchain,
 # and rustup installs it on the first cargo command.
 cargo install just --locked
-just setup   # installs the git hooks, cargo-nextest, and cargo-deny
+just setup   # installs the git hooks and the cargo tools CI uses (nextest, deny)
 just ci      # everything CI runs, in CI order
 ```
 
@@ -34,7 +34,7 @@ just ci      # everything CI runs, in CI order
 
 ## Commit messages
 
-Follow the style already in the log:
+Follow the subject style already in the log, plus the trailers and ticket line below:
 
 - Subject in the imperative mood and sentence case, with no trailing period and no `feat:`-style prefix, under 72 characters.
 - A blank line, then a body that explains why the change was made rather than restating the diff, wrapped at 72 columns.
@@ -62,14 +62,14 @@ needs numbers before the daemon exists. reef-lib gets a criterion bench
 that builds a reef_testing::synth tree with a jj repo under
 target/bench-fixtures/ and times seven operations.
 
-Signed-off-by: Ada Contributor <ada@example.com>
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Signed-off-by: Ada Contributor <ada@example.com>
 ```
 
 ## Code conventions
 
 - **Errors and logging** follow [ADR 0009](docs/adr/0009-error-and-logging-conventions.md): `thiserror` enums that implement `Classify` in libraries, `anyhow` only in `main.rs` and tests, `tracing` events with field names from `reef_lib::telemetry::fields`.
-- **Lints** are set once in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic plus a few stricter lints) and CI denies warnings. Every `allow`, in `Cargo.toml` or in code, carries a comment giving its reason. `clippy.toml` relaxes `unwrap`, `expect`, `dbg!`, and printing in tests only.
+- **Lints** are set once in `[workspace.lints]` in the root `Cargo.toml` (clippy pedantic plus a few stricter lints) and CI denies warnings. Every `allow` carries its reason: `reason = "..."` in the attribute in code, a trailing comment in `Cargo.toml`. `clippy.toml` relaxes `unwrap`, `expect`, `dbg!`, and printing in tests only.
 - **Visibility** is `pub(crate)` by default. Make an item `pub` only when another crate needs it; the `unreachable_pub` lint catches the rest.
 - **Docs** on every public item. `missing_docs` is on, and `just doc` builds with `-D warnings` and private items.
 - **Tests**: unit tests sit next to the code in a `#[cfg(test)] mod tests`; integration tests go in the crate's `tests/` directory; benchmarks go in `benches/` (see [docs/benchmarks.md](docs/benchmarks.md)).
@@ -95,7 +95,7 @@ Sign off with `git commit -s`, which appends:
 Signed-off-by: Your Name <you@example.com>
 ```
 
-using `user.name` and `user.email` from your git config. Use your real name. The DCO check on each PR fails if any commit lacks a sign-off. To fix it:
+using `user.name` and `user.email` from your git config. Use your real name. The DCO check also requires the sign-off to match the commit's author name and email, so a mismatched `user.email` is the usual cause of a failing check. The DCO check on each PR fails if any commit lacks a sign-off. To fix it:
 
 ```sh
 git commit --amend -s --no-edit       # the last commit
