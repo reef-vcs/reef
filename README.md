@@ -4,7 +4,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: design phase. Nothing here runs yet. See the roadmap below for what comes first.
+> Status: Phase 0 (foundations) is in progress. Nothing user-facing runs yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-0/README.md); see the roadmap below for what comes after.
 
 ## Why
 
@@ -48,6 +48,13 @@ Reef builds on [Jujutsu](https://github.com/jj-vcs/jj)'s data model and Rust cra
 Reef targets the open ecosystem, not one organization's monorepo. The hub is a protocol anyone can host, trust is declared per repository, and git interop is the adoption path: one person on a team should be able to use Reef against an ordinary GitHub repository nobody else has heard of.
 
 Non-goals: replacing GitHub or any review platform, running builds or tests, or being a hosted service.
+
+## Repository layout
+
+- `crates/reef-lib`: core library. Data model, jj-lib embedding, workspaces, merge, queries.
+- `crates/reef-daemon`: the local service and the `reef-daemon` binary.
+- `crates/reef-vcs`: the `reef` binary and an umbrella library re-exporting the two above.
+- `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.
 
 ## Design
 

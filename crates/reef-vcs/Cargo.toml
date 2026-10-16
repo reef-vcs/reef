@@ -1,11 +1,23 @@
 [package]
 name = "reef-vcs"
-description = "Reef: version control built for a world where AI agents write most of the code. Placeholder release; the project is in its design phase."
+description = "Reef: version control built for a world where AI agents write most of the code. Provides the `reef` binary and re-exports the Reef library and daemon crates."
 readme = "README.md"
-keywords = ["vcs", "version-control", "agents"]
-categories = ["development-tools"]
+keywords = ["vcs", "version-control", "agents", "jujutsu"]
+categories = ["development-tools", "command-line-utilities"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "reef"
+path = "src/main.rs"
+
+[dependencies]
+reef-lib.workspace = true
+reef-daemon.workspace = true
