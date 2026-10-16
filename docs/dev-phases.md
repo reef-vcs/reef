@@ -1,6 +1,6 @@
 # Reef development phases
 
-*Companion to [design.md](design.md). Last updated 2026-10-15.*
+*Companion to [design.md](design.md). Last updated 2026-10-16.*
 
 This document breaks the design into phases and the phases into tickets. Each ticket row is meant to become one issue. Phases map to GitHub milestones, and a phase's exit criteria are the milestone's acceptance test.
 
@@ -59,10 +59,10 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R1.01 | Repository and workspace schema in SQLite | One SQLite database per machine under the daemon state directory. Tables for repositories (id, root path, jj repo path, registered at), workspaces (id, repository id, owner, change ID, purpose, backend, path, lease expiry, created, last snapshot), leases, and reclaim log. Every table carries a repository id; the daemon serves many repositories. Owner is an opaque string the client supplies, `user@host:pid` by default from `reef ws run`, and is replaced by the session identity from R3.03 without a schema change. Migrations. | S | R0.04 |
-| R1.02 | Materialization backend trait | `Backend` trait: materialize a snapshot at a path, capture the writable layer as a tree, tear down. Capability detection per platform and filesystem. | S | R1.01 |
+| R1.02 | Materialization backend trait and base cache | `Backend` trait: materialize a base at a path, report disk usage, swap the base, tear down. jj-lib's working copy scans the merged directory itself, so backends capture nothing. Capability detection per platform and filesystem. Base cache: a tree materialized once per machine through jj-lib, keyed by tree id, that every backend materializes from. | M | R1.01 |
 | R1.03 | Daemon skeleton over a Unix socket | Long-running `reef-daemon` with tonic gRPC over a Unix socket, health check, graceful shutdown, single-instance lock, structured logs. | M | R0.09 |
 | R1.04 | Daemon configuration and state directory layout | Where the daemon keeps its state (`$XDG_STATE_HOME/reef` or platform equivalent, overridable), the socket path, the SQLite database, per-repository subdirectories for base caches and materialized workspaces, and log files. A `config.toml` with lease defaults, watcher settings, log options, and the backup retention window from the design's durability section, with environment overrides and a `reef config show` that prints the effective configuration. Repositories are registered by path; jj user configuration is not read. | S | R1.03, R0.09 |
-| R1.05 | Workspace service: create, list, release | gRPC methods and protobuf messages for creating a workspace on a change, listing with owner and lease state, releasing. Every request names a registered repository. Protobuf schema lives in `reef-daemon/proto`. | M | R1.02, R1.03 |
+| R1.05 | Workspace service: create, list, release | gRPC methods and protobuf messages for registering, listing, and forgetting repositories, and for creating a workspace on a change, listing with owner and lease state, inspecting, snapshotting, and releasing. Every request names a registered repository. Protobuf schema lives in `reef-daemon/proto`. | M | R1.02, R1.03 |
 | R1.06 | Move a workspace between changes | Point an existing workspace at a different change without tearing it down: final snapshot of the current change, then the backend swaps the base to the target change's snapshot and keeps the writable layer empty. The lease and owner carry over. Refuses if the workspace has an unsnapshotted write in flight. API, CLI (`reef ws move`), and a conformance test per backend. | S | R1.05, R1.13 |
 
 ### Workstream: materialization backends
@@ -70,8 +70,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R1.07 | Plain copy fallback backend | Full copy materialization. Exists so every platform works and as the baseline for benchmarks. | S | R1.02 |
-| R1.08 | APFS clone backend (macOS) | Materialize a base snapshot once per machine, then `clonefile` per file into the workspace. Base cache keyed by snapshot hash with eviction. | M | R1.02 |
-| R1.09 | overlayfs backend (Linux) | Read-only lower from a materialized base, writable upper per workspace. Handle unprivileged mounts via user namespaces; fall back to fuse-overlayfs where kernel overlayfs is unavailable. | L | R1.02 |
+| R1.08 | APFS clone backend (macOS) | One `clonefile` of the base cache entry for the whole tree, per-file clones as the fallback, and incremental base materialization by cloning the nearest existing base. Eviction is R1.17. | M | R1.02 |
+| R1.09 | overlayfs backend (Linux) | Read-only lower from a materialized base, writable upper per workspace. Kernel overlayfs when the daemon has `CAP_SYS_ADMIN`, fuse-overlayfs otherwise. User namespaces are not used in this phase: their mounts are invisible outside the namespace. | L | R1.02 |
 | R1.10 | Reflink backend (btrfs, XFS) | `FICLONE` per file. Shares the base cache with the APFS backend. | S | R1.08 |
 | R1.11 | Backend conformance tests | One test suite every backend must pass: materialize, modify, capture, tear down, large files, symlinks, permissions, case sensitivity. | M | R1.07 |
 | R1.12 | Workspace creation benchmarks | Time and disk for 1, 20, and 100 workspaces per backend on the synthetic repo. Published from CI on both platforms. | S | R1.11, R0.06 |
