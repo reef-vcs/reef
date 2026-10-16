@@ -27,6 +27,8 @@ pub mod fields {
     pub const OP_ID: &str = "op_id";
     /// A commit id.
     pub const COMMIT_ID: &str = "commit_id";
+    /// A tree, by its base cache key (`jj::materialize::tree_key`).
+    pub const TREE_ID: &str = "tree_id";
     /// The agent a request came from.
     pub const AGENT_ID: &str = "agent_id";
     /// A workspace lease.
@@ -47,6 +49,7 @@ pub mod fields {
         CHANGE_ID,
         OP_ID,
         COMMIT_ID,
+        TREE_ID,
         AGENT_ID,
         LEASE_ID,
         BACKEND,

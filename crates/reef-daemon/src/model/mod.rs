@@ -298,6 +298,28 @@ pub struct ReclaimRecord {
     pub detail: Option<String>,
 }
 
+/// One base cache entry: a tree materialized under the repository's
+/// `bases/` directory (R1.02). Its jj `tree_state` is in the sibling
+/// directory `<path>.state`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseCacheRecord {
+    /// The repository the tree belongs to.
+    pub repo_id: RepoId,
+    /// The base cache key: the tree id in hex, or a conflicted tree's ids
+    /// joined with `+` (`reef_lib::jj::materialize::tree_key`).
+    pub tree_id: String,
+    /// The materialized directory, `<state>/repos/<repo-id>/bases/<tree-id>`.
+    pub path: PathBuf,
+    /// Total size of its files as jj recorded them.
+    pub bytes: u64,
+    /// Number of files and symlinks in it.
+    pub files: u64,
+    /// When it was materialized.
+    pub created_at: Timestamp,
+    /// When a workspace was last materialized from it.
+    pub last_used_at: Timestamp,
+}
+
 /// A point in time as Unix milliseconds UTC, the form SQLite stores. Shown as
 /// RFC 3339 at the edges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

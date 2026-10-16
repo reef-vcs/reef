@@ -1,5 +1,6 @@
 //! The daemon's metadata database (ADR 0003): registered repositories,
-//! workspaces, leases, and the reclaim log, in one SQLite file per machine.
+//! workspaces, leases, the reclaim log, and the base cache, in one SQLite
+//! file per machine.
 //!
 //! [`Db`] owns one connection behind a [`std::sync::Mutex`]; every method
 //! takes the lock for one short statement or transaction, so `&Db` can be
@@ -22,6 +23,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension as _, Transaction, Trans
 
 use crate::model::{Timestamp, ids::ID_HEX_LEN};
 
+mod base_cache;
 mod leases;
 mod reclaims;
 mod repositories;
@@ -32,8 +34,13 @@ mod workspaces;
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
-const MIGRATIONS: &[(&str, &str)] =
-    &[("0001_initial", include_str!("migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_initial", include_str!("migrations/0001_initial.sql")),
+    (
+        "0002_base_cache",
+        include_str!("migrations/0002_base_cache.sql"),
+    ),
+];
 
 /// The schema version (`user_version`) of a fully migrated database: the
 /// number of migrations.
@@ -456,8 +463,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 1);
-        assert_eq!(SCHEMA_VERSION, 1);
+        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(SCHEMA_VERSION, 2);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -465,7 +472,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 1);
+        assert_eq!(db.schema_version().unwrap(), 2);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -508,7 +515,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 1
+                    supported: 2
                 }
             ),
             "{error:?}"
@@ -522,13 +529,37 @@ mod tests {
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
         let applied = db.with(applied_migrations).unwrap();
-        assert_eq!(applied, ["0001_initial"]);
+        assert_eq!(applied, ["0001_initial", "0002_base_cache"]);
         // A newer daemon applied a migration this binary does not have, without
         // raising the count past ours (it may lack one of ours).
         db.set_meta("migration:0099_future", "0").unwrap();
         drop(db);
         let error = Db::open(&path).err().unwrap();
         assert!(matches!(error, DbError::TooNew { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_version_one_database_gains_the_base_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATIONS[0].1).unwrap();
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('migration:0001_initial', '0')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(
+            db.with(applied_migrations).unwrap(),
+            ["0001_initial", "0002_base_cache"]
+        );
+        let repo = "aaaa000000000001".parse().unwrap();
+        assert_eq!(db.bases(repo).unwrap().len(), 0);
     }
 
     #[test]
