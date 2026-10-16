@@ -67,17 +67,19 @@ The number is criterion's estimate of the median time per iteration in nanosecon
 
 ## Baseline
 
-Medium preset (10,014 tracked files, 59 MB), median time per iteration from `bench-results.txt`. The CI columns are the first `bench.yml` run, [38936744617](https://github.com/reef-vcs/reef/actions/runs/38936744617) at commit `1cde75e`, run from the R0.06 branch because `workflow_dispatch` only works once the workflow is on `main`. Runner hardware is GitHub's published spec for public repositories. The local column is a run of the same code for comparison.
+Medium preset (10,014 tracked files, 59 MB), median time per iteration from `bench-results.txt`. The CI columns are run [38938632308](https://github.com/reef-vcs/reef/actions/runs/38938632308) at commit `3352127`, run from the R0.06 branch because `workflow_dispatch` only works once the workflow is on `main`. Runner hardware is GitHub's published spec for public repositories. The local column is a run of the same code for comparison.
 
 | Benchmark | `ubuntu-24.04` (x64, 4 vCPU, 16 GB) | `macos-15` (arm64 M1, 3 vCPU, 7 GB) | Apple M2 Max, 12 cores, 32 GB, macOS 27.0.1, APFS |
 | --- | ---: | ---: | ---: |
-| `noop` | 16.1 ms | 22.8 ms | 15.9 ms |
-| `modify_1` | 47.3 ms | 49.2 ms | 54.2 ms |
-| `modify_50` | 65.4 ms | 113.0 ms | 97.4 ms |
-| `modify_500` | 210.1 ms | 526.1 ms | 302.8 ms |
-| `add_50` | 67.5 ms | 124.1 ms | 104.9 ms |
-| `op_log_100` | 0.77 ms | 1.30 ms | 1.71 ms |
-| `open` | 0.36 ms | 0.43 ms | 0.52 ms |
-| First snapshot of the fixture (stderr, once) | 1.9 s | 5.2 s | 2.8 s |
+| `noop` | 18.1 ms | 24.4 ms | 15.7 ms |
+| `modify_1` | 27.3 ms | 58.9 ms | 53.7 ms |
+| `modify_50` | 50.9 ms | 129.4 ms | 95.1 ms |
+| `modify_500` | 201.2 ms | 610.6 ms | 304.8 ms |
+| `add_50` | 54.0 ms | 135.7 ms | 106.7 ms |
+| `op_log_100` | 0.85 ms | 1.66 ms | 1.68 ms |
+| `open` | 0.42 ms | 0.48 ms | 0.49 ms |
+| First snapshot of the fixture (stderr, once) | 2.2 s | 5.2 s | 2.6 s |
 
-Every benchmark scales with the tree as well as with the change. A no-op snapshot scans all 10,014 files (about 630,000 files per second on the M2 Max), and even a one-file change costs about 50 ms, mostly in committing the operation and saving the working-copy state, and ADR 0008 found that saving the state is O(tracked files). On the `large` preset (100,014 files) on the M2 Max, `noop` takes 146 ms, `modify_1` 194 ms, and the first snapshot 24.9 s. Those are the costs Phase 1's watcher-driven snapshots have to remove.
+The runners are as noisy as warned above. An earlier run of nearly the same code ([38936744617](https://github.com/reef-vcs/reef/actions/runs/38936744617), which still timed settings construction inside `open`) measured `ubuntu-24.04` `modify_1` at 47.3 ms and `macos-15` `modify_500` at 526 ms.
+
+Every benchmark scales with the tree as well as with the change. A no-op snapshot scans all 10,014 files (about 640,000 files per second on the M2 Max), and even a one-file change costs 27 to 59 ms, mostly in committing the operation and saving the working-copy state, and ADR 0008 found that saving the state is O(tracked files). On the `large` preset (100,014 files) on the M2 Max, `noop` takes 146 ms, `modify_1` 194 ms, and the first snapshot 24.9 s. Those are the costs Phase 1's watcher-driven snapshots have to remove.

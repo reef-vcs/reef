@@ -4,7 +4,7 @@ name: Benchmarks
 # (RX.06). PRs do not run the benches; ci.yml compiles them through `just build`.
 on:
   push:
-    branches: [main, r0.06-benchmark-harness]   # TEMPORARY: baseline run for R0.06; revert before merge
+    branches: [main]
   schedule:
     - cron: "17 6 * * 1"     # Mondays 06:17 UTC: large preset
   workflow_dispatch:
