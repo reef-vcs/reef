@@ -2,6 +2,8 @@
 
 *Design document. Last updated 2026-10-15.*
 
+Architecture decisions are recorded in [docs/adr](adr/README.md).
+
 ## Summary
 
 Reef is a proposed open source version control system built for a world where AI agents author most code. The name is the metaphor: a durable structure built by countless small organisms. It keeps git's content-addressed Merkle storage but replaces git's working model with one suited to many concurrent, speculative, token-constrained authors: the working copy is always a snapshot, changes have stable identities that survive rewrites, conflicts are storable objects rather than blocking states, every operation is undoable, and each change carries signed evidence of the tests and builds run against it.
