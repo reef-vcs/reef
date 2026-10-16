@@ -26,7 +26,7 @@ The decisions already made in design.md are backfilled as ADRs 0002 to 0006 and 
 
 - A contributor asking "why" about a dependency, protocol, or format has one place to look, and a reversal has to be written down as a new ADR that supersedes the old one.
 - Writing an ADR is a cost on every significant decision. The template is kept short to keep that cost low.
-- design.md and the ADRs can drift. Backfilled ADRs must not contradict design.md, and a later change to a decision updates both.
+- design.md and the ADRs can drift. Backfilled ADRs must not contradict design.md, and a later change to a decision is a new ADR that supersedes the old one, with design.md updated to match.
 - The hand-maintained index can fall out of date; review catches that, since every ADR PR touches it.
 
 ## Alternatives considered

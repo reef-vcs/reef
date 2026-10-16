@@ -10,7 +10,7 @@ Backfilled from design.md; decision predates this record.
 
 Reef's [data model](../design.md#data-model) needs four things before anything agent-specific can be built: the working copy as a snapshot, stable change IDs that survive rewrites, an operation log with undo, and conflicts stored as data. Jujutsu implements all four in jj-lib, an Apache 2.0 Rust library designed to be embedded ([Technology choices](../design.md#technology-choices)).
 
-The design's [Roadmap](../design.md#roadmap) asked whether Reef should be a contribution to Jujutsu or a separate project. Jujutsu does not do copy-on-write materialization, leases, shared dependency stores, evidence, or a typed API ([Workspaces](../design.md#workspaces)), and those are Reef's reason to exist.
+Jujutsu lacks copy-on-write materialization, leases, shared dependency stores, and the virtual workspace API ([Workspaces](../design.md#workspaces)), as well as evidence, a typed API, and a lazy store ([Prior art](../design.md#prior-art)). Those are Reef's reason to exist. The [Roadmap](../design.md#roadmap) records whether Reef is a contribution to Jujutsu or a separate project.
 
 ## Decision
 
@@ -30,7 +30,7 @@ We will build Reef as a separate project that depends on `jj-lib` as a library. 
 
 ## Alternatives considered
 
-**Fork jj-cli.** Gets a working tool on day one. Rejected: the CLI carries user-experience decisions aimed at humans, and a fork diverges fast and has to be kept in sync by hand.
+**Fork jj-cli.** Gets a working tool on day one *(addition)*. Rejected: the CLI carries user-experience decisions aimed at humans, and a fork diverges fast and has to be kept in sync by hand *(addition: the maintenance cost)*.
 
 **Build a new store on gitoxide directly.** Full control of the format. Rejected: it means rewriting change IDs, the operation log, and stored conflicts, which is years of work jj has already done *(addition)*.
 

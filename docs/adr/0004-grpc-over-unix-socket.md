@@ -12,7 +12,7 @@ Agents talk only to the local daemon, and the CLI and MCP server are thin client
 
 ## Decision
 
-We will expose the daemon API as gRPC with protobuf schemas, implemented with `tonic` and `prost`.
+We will expose the daemon API as gRPC with protobuf schemas, implemented with `tonic` (and `prost`, its protobuf codegen *(addition)*).
 
 - Schemas live in `crates/reef-daemon/proto/` from R1.05 onward and are versioned and reviewed as an API, not generated from code (R2.01).
 - The daemon listens on a Unix domain socket. Filesystem permissions on the socket are the first access control *(addition)*.
@@ -23,7 +23,7 @@ We will expose the daemon API as gRPC with protobuf schemas, implemented with `t
 ## Consequences
 
 - Codegen keeps the SDKs in sync with the daemon, and no client parses text.
-- Every schema change is an API change and goes through review, which is a real, intended cost.
+- Every schema change is an API change and goes through review.
 - The Windows transport, named pipes or Windows' own Unix domain sockets, is open and tied to the Windows decision in RX.05 *(addition)*.
 - The remote store speaks the same protocol, so clients do not care which they are talking to.
 
