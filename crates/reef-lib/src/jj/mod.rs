@@ -15,4 +15,6 @@ pub mod settings;
 pub mod snapshot;
 pub mod undo;
 
-pub use repo::{ChangeIdHex, ChangeSummary, CommitIdHex, OpenError, OperationIdHex, Repo};
+pub use repo::{
+    ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, Repo,
+};

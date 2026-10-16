@@ -58,6 +58,22 @@ impl Classify for SettingsError {
 /// Builds jj-lib settings from jj-lib's defaults plus Reef's identity and
 /// snapshot limits.
 pub fn user_settings(identity: &Identity) -> Result<UserSettings, SettingsError> {
+    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE)
+}
+
+/// [`user_settings`] with [`MAX_NEW_FILE_SIZE_KEY`] set to `bytes` instead of
+/// the default. Zero means no limit.
+pub fn user_settings_with_max_new_file_size(
+    identity: &Identity,
+    bytes: u64,
+) -> Result<UserSettings, SettingsError> {
+    build_settings(identity, &bytes.to_string())
+}
+
+fn build_settings(
+    identity: &Identity,
+    max_new_file_size: &str,
+) -> Result<UserSettings, SettingsError> {
     let mut config = StackedConfig::with_defaults();
     let layer = ConfigLayer::parse(
         ConfigSource::User,
@@ -65,7 +81,7 @@ pub fn user_settings(identity: &Identity) -> Result<UserSettings, SettingsError>
             "user.name = {}\nuser.email = {}\n{MAX_NEW_FILE_SIZE_KEY} = {}\n",
             toml_string(&identity.name),
             toml_string(&identity.email),
-            toml_string(DEFAULT_MAX_NEW_FILE_SIZE),
+            toml_string(max_new_file_size),
         ),
     )?;
     config.add_layer(layer);
@@ -140,5 +156,17 @@ mod tests {
         .unwrap();
         assert_eq!(settings.user_name(), "A \"quoted\" \\ name");
         assert_eq!(max_new_file_size(&settings).unwrap(), 1 << 20);
+    }
+
+    #[test]
+    fn max_new_file_size_override() {
+        let identity = Identity {
+            name: "Bench".into(),
+            email: "bench@example.com".into(),
+        };
+        let settings = user_settings_with_max_new_file_size(&identity, 16 << 20).unwrap();
+        assert_eq!(max_new_file_size(&settings).unwrap(), 16 << 20);
+        let settings = user_settings_with_max_new_file_size(&identity, 0).unwrap();
+        assert_eq!(max_new_file_size(&settings).unwrap(), u64::MAX);
     }
 }

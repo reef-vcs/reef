@@ -26,7 +26,7 @@
 - Hooks or events for "snapshot taken" or "operation written".
 - Parent-directory search for `.jj`: `Workspace::load` only looks in the given directory. jj-cli's `find_workspace_dir` does the search, and `Repo::open` copies it.
 - Per-workspace locking is a file lock at `.jj/working_copy/working_copy.lock`.
-- The `testing` feature only serves jj's own tests. There is no `testutils` crate on crates.io, and fixtures are built with `init_internal_git` and `init_colocated_git`. Naming the hash kind for those needs `gix` as a direct dev-dependency, pinned to jj-lib's `=0.88.0`, because jj-lib does not re-export `gix`.
+- The `testing` feature only serves jj's own tests. There is no `testutils` crate on crates.io, and fixtures are built with `init_internal_git` and `init_colocated_git`. Naming the hash kind for those needs `gix` as a direct dependency, pinned to jj-lib's `=0.88.0`, because jj-lib does not re-export `gix`. (It was a dev-dependency until R0.06 added `Repo::init_internal_git`.)
 
 ### Gotchas
 
@@ -57,6 +57,8 @@ Release build, `timing_report` in `jj_spike.rs`, Apple M2 Max (12 cores, 32 GB),
 | `op_log(100)` | 3.7 ms |
 | `undo_last`, including its no-op snapshot | 39.2 ms |
 
+R0.06 added the first full snapshot of the `large` synthetic preset (100,000 text files plus 3 binaries of 8 MiB and 10 symlinks, 369 MB, seed 42), from the benchmark fixture build on the same machine: **24.9 s**, not counting the 7.8 s it took to generate the tree. A no-op snapshot of that tree takes 146 ms. Incremental numbers per preset are in [docs/benchmarks.md](../benchmarks.md).
+
 Scanning a 10,000-file tree with nothing changed costs about 11 ms. A one-file change adds about 35 ms, mostly in committing the operation and saving the working-copy state; that phase was not split further. Saving the state is O(tracked files): `TreeState::save` serializes every file's state into `.jj/working_copy/tree_state` on each snapshot. This is well within the phase one target of a snapshot within 5 seconds, but it is the first place to profile if per-snapshot latency on large trees matters.
 
 ### jj-lib types that leak through `reef_lib::jj`
@@ -64,7 +66,7 @@ Scanning a 10,000-file tree with nothing changed costs about 11 ms. A one-file c
 - `UserSettings`: `settings::user_settings` returns it and `Repo::open` takes it. R1.03 wraps it in the daemon's config.
 - `Commit`: `Repo::wc_commit` returns it, and through `Commit::tree()` also `MergedTree`.
 - `ConfigGetError`, re-exported from `reef_lib::jj::settings`.
-- jj-lib error types as variants or `#[source]` inside Reef's error enums: `ConfigLoadError`, `WorkspaceLoadError`, `RepoLoaderError`, `GitIgnoreError`, `WorkingCopyStateError`, `working_copy::SnapshotError`, `BackendError`, `RewriteRootCommit`, `TransactionCommitError`, `OpStoreError`, `CheckoutError`.
+- jj-lib error types as variants or `#[source]` inside Reef's error enums: `ConfigLoadError`, `WorkspaceInitError` (since R0.06), `WorkspaceLoadError`, `RepoLoaderError`, `GitIgnoreError`, `WorkingCopyStateError`, `working_copy::SnapshotError`, `BackendError`, `RewriteRootCommit`, `TransactionCommitError`, `OpStoreError`, `CheckoutError`.
 
 Ids (`OperationIdHex`, `CommitIdHex`, `ChangeIdHex`), `ChangeSummary`, `SnapshotOutcome`, `ChangedPath`, `OpEntry`, and `UndoOutcome` are Reef types. R1.01 settles the id types for storage; R2.01 wraps everything that crosses the API.
 

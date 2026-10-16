@@ -12,7 +12,7 @@ use jj_lib::default_backend_factories::{
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::{Workspace, WorkspaceLoadError};
+use jj_lib::workspace::{Workspace, WorkspaceInitError, WorkspaceLoadError};
 
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
@@ -107,6 +107,15 @@ pub enum OpenError {
     Repo(#[from] RepoLoaderError),
 }
 
+/// Failure to create a jj repository.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum InitError {
+    /// The repository could not be created.
+    #[error("failed to create the jj repository")]
+    Init(#[from] WorkspaceInitError),
+}
+
 /// Failure to read a commit from the store.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -129,6 +138,15 @@ impl Classify for OpenError {
             Self::CurrentDir { .. } => ErrorKind::Io,
             Self::Load(error) => classify_by_source(error),
             Self::Repo(error) => classify_by_source(error),
+        }
+    }
+}
+
+impl Classify for InitError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Init(WorkspaceInitError::DestinationExists(_)) => ErrorKind::AlreadyExists,
+            Self::Init(error) => classify_by_source(error),
         }
     }
 }
@@ -162,6 +180,28 @@ impl Repo {
             repo = %repo.workspace_root().display(),
             op_id = %repo.op_id(),
             "repository opened"
+        );
+        Ok(repo)
+    }
+
+    /// Creates a jj repository backed by an internal git store (in
+    /// `.jj/repo/store/git`, with SHA-1 object ids) in the existing directory
+    /// `path`, with one empty working-copy commit, and opens it. Files already
+    /// in `path` are not snapshotted.
+    #[tracing::instrument(skip_all, fields(path = %path.display()))]
+    pub async fn init_internal_git(
+        path: &Path,
+        settings: &UserSettings,
+    ) -> Result<Self, InitError> {
+        let (workspace, repo) = Workspace::init_internal_git(settings, path, gix::hash::Kind::Sha1)
+            .await
+            .map_err(InitError::from)
+            .inspect_err(|error| crate::log_failure!(error))?;
+        let repo = Self { workspace, repo };
+        tracing::info!(
+            repo = %repo.workspace_root().display(),
+            op_id = %repo.op_id(),
+            "repository created"
         );
         Ok(repo)
     }
