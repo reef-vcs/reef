@@ -6,6 +6,7 @@ keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools", "command-line-utilities"]
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

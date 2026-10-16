@@ -10,6 +10,7 @@ license = "Apache-2.0"
 repository = "https://github.com/reef-vcs/reef"
 homepage = "https://github.com/reef-vcs/reef"
 authors = ["Reef contributors"]
+rust-version = "1.97.1"
 
 [workspace.dependencies]
 # Internal
@@ -40,6 +41,27 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Allowed pedantic lints, with reasons. Keep this list short and justified.
+module_name_repetitions = "allow"   # `workspace::WorkspaceId` is the clearer name
+must_use_candidate = "allow"        # too noisy on plain getters
+missing_errors_doc = "allow"        # error enums are documented at the type, not every fn
+missing_panics_doc = "allow"        # panics are bugs; documenting them legitimizes them
+# Lints we turn up beyond pedantic.
+unwrap_used = "warn"                # clippy.toml allows it in tests
+expect_used = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"               # binaries opt out per-module with a comment
+print_stderr = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [profile.release]
 debug = 1          # keep symbols for profiling benches
