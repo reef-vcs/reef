@@ -60,10 +60,10 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | --- | --- | --- | --- | --- |
 | R1.01 | Repository and workspace schema in SQLite | One SQLite database per machine under the daemon state directory. Tables for repositories (id, root path, jj repo path, registered at), workspaces (id, repository id, owner, change ID, purpose, backend, path, lease expiry, created, last snapshot), leases, and reclaim log. Every table carries a repository id; the daemon serves many repositories. Owner is an opaque string the client supplies, `user@host:pid` by default from `reef ws run`, and is replaced by the session identity from R3.03 without a schema change. Migrations. | S | R0.04 |
 | R1.02 | Materialization backend trait and base cache | `Backend` trait: materialize a base at a path, report disk usage, swap the base, tear down. jj-lib's working copy scans the merged directory itself, so backends capture nothing. Capability detection per platform and filesystem. Base cache: a tree materialized once per machine through jj-lib, keyed by tree id, that every backend materializes from. | M | R1.01 |
-| R1.03 | Daemon skeleton over a Unix socket | Long-running `reef-daemon` with tonic gRPC over a Unix socket, health check, graceful shutdown, single-instance lock, structured logs. | M | R0.09 |
+| R1.03 | Daemon skeleton over a Unix socket | Long-running `reef-daemon` with tonic gRPC over a Unix socket, health check, graceful shutdown, single-instance lock, structured logs. | M | R1.01, R0.09 |
 | R1.04 | Daemon configuration and state directory layout | Where the daemon keeps its state (`$XDG_STATE_HOME/reef` or platform equivalent, overridable), the socket path, the SQLite database, per-repository subdirectories for base caches and materialized workspaces, and log files. A `config.toml` with lease defaults, watcher settings, log options, and the backup retention window from the design's durability section, with environment overrides and a `reef config show` that prints the effective configuration. Repositories are registered by path; jj user configuration is not read. | S | R1.03, R0.09 |
 | R1.05 | Workspace service: create, list, release | gRPC methods and protobuf messages for registering, listing, and forgetting repositories, and for creating a workspace on a change, listing with owner and lease state, inspecting, snapshotting, and releasing. Every request names a registered repository. Protobuf schema lives in `reef-daemon/proto`. | M | R1.02, R1.03 |
-| R1.06 | Move a workspace between changes | Point an existing workspace at a different change without tearing it down: final snapshot of the current change, then the backend swaps the base to the target change's snapshot and keeps the writable layer empty. The lease and owner carry over. Refuses if the workspace has an unsnapshotted write in flight. API, CLI (`reef ws move`), and a conformance test per backend. | S | R1.05, R1.13 |
+| R1.06 | Move a workspace between changes | Point an existing workspace at a different change without tearing it down: final snapshot of the current change, then the backend swaps the base to the target change's snapshot and keeps the writable layer empty. The lease and owner carry over. Refuses if the workspace has an unsnapshotted write in flight. API, CLI (`reef ws move`), and a conformance test per backend. | S | R1.05, R1.13, R1.11 |
 
 ### Workstream: materialization backends
 
@@ -74,7 +74,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R1.09 | overlayfs backend (Linux) | Read-only lower from a materialized base, writable upper per workspace. Kernel overlayfs when the daemon has `CAP_SYS_ADMIN`, fuse-overlayfs otherwise. User namespaces are not used in this phase: their mounts are invisible outside the namespace. | L | R1.02 |
 | R1.10 | Reflink backend (btrfs, XFS) | `FICLONE` per file. Shares the base cache with the APFS backend. | S | R1.08 |
 | R1.11 | Backend conformance tests | One test suite every backend must pass: materialize, modify, capture, tear down, large files, symlinks, permissions, case sensitivity. | M | R1.07 |
-| R1.12 | Workspace creation benchmarks | Time and disk for 1, 20, and 100 workspaces per backend on the synthetic repo. Published from CI on both platforms. | S | R1.11, R0.06 |
+| R1.12 | Workspace creation benchmarks | Time and disk for 1, 20, and 100 workspaces per backend on the synthetic repo. Published from CI on both platforms. | S | R1.11, R1.05, R0.06 |
 
 ### Workstream: snapshotting and leases
 
@@ -84,19 +84,19 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R1.14 | Watchman backend (optional) | Use Watchman when present for large repos. Same interface as the notify watcher. | M | R1.13 |
 | R1.15 | Lease manager | Heartbeat RPC, expiry loop, configurable lease length and grace. On expiry: final snapshot, op log entry, reclaim. Daemon restart preserves leases and applies a grace period before reclaiming anything. | M | R1.05, R1.13 |
 | R1.16 | Local-only snapshot marking | Snapshots taken by the watcher are marked local and never exported or pushed until a change is explicitly published. | S | R1.13 |
-| R1.17 | Garbage collection | Reclaim snapshots unreferenced by any change and older than the undo window. Reclaim base cache entries no workspace uses. Report what was freed. | M | R1.15 |
-| R1.18 | Local backup and restore | Daemon backup operation per the design's durability section: hold the write lock briefly, SQLite online backup, copy immutable object and operation files, operation heads last. A standalone quiesce RPC with pause and resume so a filesystem snapshot can be taken between them. Restore loads from a copy, keeps workspace records, rematerializes directories on demand, and treats every lease as expired with a grace period. `reef backup` and `reef restore`. Round-trip test with agents writing during the backup. | M | R1.04, R1.15, R1.17 |
+| R1.17 | Garbage collection | Reclaim snapshots unreferenced by any change and older than the undo window. Reclaim base cache entries no workspace uses. Report what was freed. `reef ws gc`, added to the CLI skeleton from R1.22. | M | R1.15, R1.16, R1.22 |
+| R1.18 | Local backup and restore | Daemon backup operation per the design's durability section: hold the write lock briefly, SQLite online backup, copy immutable object and operation files, operation heads last. A standalone quiesce RPC with pause and resume so a filesystem snapshot can be taken between them. Restore loads from a copy, keeps workspace records, rematerializes directories on demand, and treats every lease as expired with a grace period. `reef backup` and `reef restore`. Round-trip test with agents writing during the backup. | M | R1.04, R1.15, R1.16, R1.17, R1.22 |
 
 ### Workstream: shared stores and agent integration
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R1.19 | Workspace spec file | `reef.toml` in the repo declaring shared stores to mount, build output paths to keep out of snapshots, and lease defaults. | S | R1.01 |
-| R1.20 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.19, R1.08, R1.09 |
-| R1.21 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.15 |
-| R1.22 | CLI for workspaces | `reef ws create`, `list`, `release`, `gc`, `inspect`, with JSON output when stdout is not a terminal. Thin client of the daemon. | M | R1.05, R1.17 |
+| R1.20 | Shared dependency store mounting | Mount or link declared stores into workspaces read-only. Verify against a lockfile hash before mounting. Daemon-only writes. | M | R1.19, R1.08, R1.09, R1.05, R1.13, R1.22 |
+| R1.21 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.05, R1.15, R1.22 |
+| R1.22 | CLI for workspaces | `reef ws create`, `list`, `release`, `inspect`, daemon lifecycle, repository registration, and `reef completions <shell>`, with JSON output when stdout is not a terminal. Thin client of the daemon. Subcommands owned by later tickets (`ws gc` is R1.17's) exist as stubs until those land. | M | R1.04, R1.05 |
 | R1.23 | Crash, reclaim, and load integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. Run 200 workspaces with active watchers on one machine on both platforms, measure write-to-snapshot latency against the phase target, and record inotify and thread pool limits hit. | M | R1.15, R1.20 |
-| R1.24 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.22 |
+| R1.24 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.18, R1.20, R1.21, R1.22 |
 
 ---
 
