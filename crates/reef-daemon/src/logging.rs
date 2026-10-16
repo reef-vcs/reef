@@ -8,8 +8,8 @@
 //!
 //! The daemon also writes [`LogOptions::file`], always as JSON lines, through
 //! the same filter: `<state>/logs/daemon.log.<YYYY-MM-DD>`, rotated daily
-//! (UTC), keeping the [`LogOptions::keep_days`] most recent files. Older
-//! files are pruned when the log opens and at each rotation. The file is
+//! (UTC), keeping the [`LogOptions::keep_days`] most recently created
+//! files. Older files are pruned when the log opens and at each rotation. The file is
 //! written by a background thread through `tracing-appender`'s non-blocking
 //! writer, which drops lines rather than block when its buffer (128,000
 //! lines) is full; that is acceptable for a diagnostic log. Stderr is
@@ -334,8 +334,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("logs");
         std::fs::create_dir(&dir).unwrap();
+        // tracing-appender orders files by creation time (the date in the
+        // name only where the filesystem has no birth time), so create them
+        // apart, oldest first, as daily rotation would.
         for day in ["2020-01-01", "2020-01-02", "2020-01-03"] {
             std::fs::write(dir.join(format!("{LOG_FILE_PREFIX}.{day}")), "{}\n").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         std::fs::write(dir.join("unrelated.txt"), "").unwrap();
         let _appender = open_log_file(&dir.join(LOG_FILE_PREFIX), 2).unwrap();
