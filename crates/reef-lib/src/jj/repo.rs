@@ -14,6 +14,9 @@ use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
 
+use crate::error::{Classify, ErrorKind, classify_by_source};
+use crate::telemetry::log_failure;
+
 macro_rules! hex_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -117,6 +120,29 @@ pub enum ReadError {
     Backend(#[from] BackendError),
 }
 
+impl Classify for OpenError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NotAJjRepo(_)
+            | Self::Load(
+                WorkspaceLoadError::NoWorkspaceHere(_) | WorkspaceLoadError::RepoDoesNotExist(_),
+            ) => ErrorKind::NotFound,
+            Self::CurrentDir { .. } => ErrorKind::Io,
+            Self::Load(error) => classify_by_source(error),
+            Self::Repo(error) => classify_by_source(error),
+        }
+    }
+}
+
+impl Classify for ReadError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NoWorkingCopyCommit(_) => ErrorKind::NotFound,
+            Self::Backend(error) => classify_by_source(error),
+        }
+    }
+}
+
 /// An open jj workspace and its repository, loaded at some operation.
 pub struct Repo {
     pub(crate) workspace: Workspace,
@@ -128,7 +154,20 @@ impl Repo {
     /// for `.jj` the way the `jj` CLI does, and loads the repository at its
     /// head operation. Divergent operation heads are merged on load. A
     /// relative `path` is resolved against the current directory.
+    #[tracing::instrument(skip_all, fields(path = %path.display()))]
     pub async fn open(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
+        let repo = Self::open_unlogged(path, settings)
+            .await
+            .inspect_err(log_failure)?;
+        tracing::debug!(
+            repo = %repo.workspace_root().display(),
+            op_id = %repo.op_id(),
+            "repository opened"
+        );
+        Ok(repo)
+    }
+
+    async fn open_unlogged(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
         let absolute = std::path::absolute(path).map_err(|source| OpenError::CurrentDir {
             path: path.to_owned(),
             source,
@@ -181,8 +220,15 @@ impl Repo {
 
     /// Reloads the repository at the current head operation, picking up
     /// operations written by other processes or other [`Repo`] values.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn reload_at_head(&mut self) -> Result<(), OpenError> {
-        self.repo = self.repo.reload_at_head().await?;
+        self.repo = self
+            .repo
+            .reload_at_head()
+            .await
+            .map_err(OpenError::from)
+            .inspect_err(log_failure)?;
+        tracing::debug!(op_id = %self.op_id(), "repository reloaded");
         Ok(())
     }
 

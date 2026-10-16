@@ -21,3 +21,10 @@ path = "src/main.rs"
 
 [dependencies]
 reef-lib.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true          # main.rs only
+
+[dev-dependencies]
+serde_json.workspace = true

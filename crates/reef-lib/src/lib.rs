@@ -8,4 +8,6 @@
 //!
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
 
+pub mod error;
 pub mod jj;
+pub mod telemetry;

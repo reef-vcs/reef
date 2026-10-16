@@ -8,6 +8,8 @@ use jj_lib::working_copy::CheckoutError;
 
 use super::repo::{OperationIdHex, ReadError, Repo};
 use super::snapshot::SnapshotError;
+use crate::error::{Classify, ErrorKind, classify_by_source};
+use crate::telemetry::log_failure;
 
 /// Description prefix jj uses for undo operations; `jj undo` reads it to
 /// walk an undo stack.
@@ -61,6 +63,23 @@ pub enum UndoError {
     Checkout(#[from] CheckoutError),
 }
 
+impl Classify for UndoError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::RootOperation
+            | Self::MergeOperation
+            | Self::WorkspaceNotInRestoredView(_)
+            | Self::Checkout(CheckoutError::ConcurrentCheckout) => ErrorKind::Conflict,
+            Self::Snapshot(error) => error.kind(),
+            Self::Read(error) => error.kind(),
+            Self::OpStore(error) => classify_by_source(error),
+            Self::Commit(error) => classify_by_source(error),
+            Self::Backend(error) => classify_by_source(error),
+            Self::Checkout(error) => classify_by_source(error),
+        }
+    }
+}
+
 impl Repo {
     /// Snapshots the working copy, then restores the view of the head
     /// operation's parent and checks the restored working-copy commit out on
@@ -76,8 +95,15 @@ impl Repo {
     /// The undo operation is recorded before the checkout. If the checkout
     /// fails, the operation stands and the working copy is stale until it is
     /// updated.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn undo_last(&mut self) -> Result<UndoOutcome, UndoError> {
-        let snapshot = self.snapshot("snapshot working copy").await?;
+        let outcome = self.undo_last_unlogged().await.inspect_err(log_failure)?;
+        tracing::info!(op_id = %outcome.new_op, "operation undone");
+        Ok(outcome)
+    }
+
+    async fn undo_last_unlogged(&mut self) -> Result<UndoOutcome, UndoError> {
+        let snapshot = self.snapshot_unlogged("snapshot working copy").await?;
         let snapshotted = snapshot.changed.then_some(snapshot.op_id);
 
         let target = self.repo.operation().clone();
