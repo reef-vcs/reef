@@ -201,8 +201,10 @@ fn log_file_is_json_lines() {
 #[test]
 fn binary_runs_and_stops_on_sigterm() {
     let tmp = short_tempdir();
-    let socket = tmp.path().join("daemon.sock");
-    let mut child = daemon_command(tmp.path(), &[]).spawn().unwrap();
+    // Not created beforehand: the binary creates it, privately.
+    let state = tmp.path().join("state");
+    let socket = state.join("daemon.sock");
+    let mut child = daemon_command(&state, &[]).spawn().unwrap();
     assert!(
         wait_for_socket(&mut child, &socket),
         "the daemon exited early"
@@ -213,6 +215,8 @@ fn binary_runs_and_stops_on_sigterm() {
         client.status().await.unwrap()
     });
     assert_eq!(status.pid, child.id());
+    assert_eq!(mode(&state), 0o700, "state directory");
+    assert_eq!(mode(&state.join("logs")), 0o700, "log directory");
     assert_eq!(status.socket, socket.display().to_string());
     let output = terminate(child);
     assert_eq!(

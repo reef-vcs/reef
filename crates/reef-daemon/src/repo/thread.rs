@@ -156,7 +156,7 @@ fn run(mut head: RepoHead, rx: &mpsc::Receiver<Message>) {
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         tracing::warn!(
-                            max_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                            waited_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
                             "repository thread pause hit its deadline; resuming"
                         );
                     }

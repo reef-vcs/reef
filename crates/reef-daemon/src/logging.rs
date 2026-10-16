@@ -17,6 +17,7 @@
 
 use std::ffi::OsString;
 use std::io::IsTerminal as _;
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -271,11 +272,16 @@ fn open_log_file(
         .file_name()
         .map_or_else(|| LOG_FILE_PREFIX.into(), |name| name.to_string_lossy());
     // tracing-appender prunes before it creates the directory, and prints
-    // to stderr if the directory is missing.
-    std::fs::create_dir_all(dir).map_err(|source| LoggingError::LogDir {
-        path: dir.to_owned(),
-        source,
-    })?;
+    // to stderr if the directory is missing. Logs are private like the rest
+    // of the state directory.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|source| LoggingError::LogDir {
+            path: dir.to_owned(),
+            source,
+        })?;
     RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)

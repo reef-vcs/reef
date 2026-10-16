@@ -213,8 +213,8 @@ impl Classify for StartError {
 #[derive(Debug)]
 pub struct Daemon;
 
-/// A running daemon. Dropping it without [`DaemonHandle::join`] begins
-/// shutdown without waiting for it.
+/// A running daemon. Dropping it, or a [`DaemonHandle::join`] future that
+/// has not finished, begins shutdown without waiting for it.
 #[derive(Debug)]
 pub struct DaemonHandle {
     state: Arc<AppState>,
@@ -309,9 +309,10 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        if self.task.is_some() {
-            self.state.shutdown.cancel();
-        }
+        // Unconditional: `join` takes the task when first polled, so a join
+        // future dropped early (a timeout) must still stop the daemon.
+        // Cancelling a stopped daemon's token is a no-op.
+        self.state.shutdown.cancel();
     }
 }
 
@@ -326,7 +327,11 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         let repo = record.id;
         match tokio::task::spawn_blocking(move || cache.sweep_incomplete()).await {
             Ok(Ok(removed)) if !removed.is_empty() => {
-                tracing::info!(%repo, removed = removed.len(), "swept incomplete base cache entries");
+                tracing::info!(
+                    %repo,
+                    removed_count = removed.len(),
+                    "swept incomplete base cache entries"
+                );
             }
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
@@ -396,7 +401,11 @@ async fn bind(socket: &Path) -> Result<UnixListener, StartError> {
     let listener = UnixListener::bind(socket).map_err(error)?;
     // The state directory is 0700 already; this also covers a socket outside
     // it (`REEF_SOCKET`, `$XDG_RUNTIME_DIR`).
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
+    if let Err(e) = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        remove_if_present(socket);
+        return Err(error(e));
+    }
     Ok(listener)
 }
 
@@ -444,7 +453,7 @@ async fn supervise(
 
 /// Creates `dir` and missing parents with mode `0700`. An existing
 /// directory is left as it is.
-fn create_private_dir(dir: &Path) -> Result<(), StartError> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<(), StartError> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

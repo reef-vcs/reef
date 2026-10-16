@@ -34,7 +34,6 @@ tracing-appender.workspace = true
 rusqlite.workspace = true
 rand.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true

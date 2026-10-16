@@ -180,7 +180,8 @@ impl RepoHandle {
         self.call(move |head| pollster::block_on(f(head)))
     }
 
-    /// Pauses the thread after the jobs already sent, for at most `max`:
+    /// Pauses the thread after the jobs already sent, until at most `max`
+    /// from now (time spent waiting for those jobs counts against `max`):
     /// the returned future resolves once they have run and the thread is
     /// blocked. Jobs sent meanwhile wait. Dropping the [`PauseGuard`]
     /// resumes the thread; after `max` it resumes by itself with a warning.

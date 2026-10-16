@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::config::{Config, PathOverrides, Paths};
-use crate::daemon::{Daemon, StartError};
+use crate::daemon::{Daemon, StartError, create_private_dir};
 use crate::lock::LockError;
 use crate::logging::{self, LogOptions};
 
@@ -42,6 +42,9 @@ pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
     })
     .context("resolve the daemon's paths")?;
     let config = Config::new(paths, log);
+    // Before logging, which creates `<state>/logs` and would otherwise create
+    // the state directory with the default mode.
+    create_private_dir(&config.paths.state_dir).context("start the daemon")?;
     let _logging = logging::init(&config.log).context("initialize logging")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
