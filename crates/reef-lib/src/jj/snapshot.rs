@@ -9,12 +9,14 @@ use jj_lib::backend::BackendError;
 use jj_lib::gitignore::{GitIgnoreError, GitIgnoreFile};
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::repo::{Repo as _, RewriteRootCommit};
-use jj_lib::repo_path::RepoPath;
+use jj_lib::repo_path::{RepoPath, RepoPathBuf};
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::{SnapshotOptions, UntrackedReason, WorkingCopyStateError};
 
 use super::repo::{CommitIdHex, OperationIdHex, ReadError, Repo};
 use super::settings::{SettingsError, max_new_file_size};
+use crate::error::{Classify, ErrorKind, classify_by_source};
+use crate::telemetry::elapsed_ms;
 
 /// Why a new file was left untracked by a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +101,24 @@ pub enum SnapshotError {
     Commit(#[from] TransactionCommitError),
 }
 
+impl Classify for SnapshotError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Stale { .. } | Self::RootCommit(_) => ErrorKind::Conflict,
+            Self::Settings(error) => error.kind(),
+            Self::Read(error) => error.kind(),
+            Self::Snapshot(jj_lib::working_copy::SnapshotError::InvalidUtf8SymlinkTarget {
+                ..
+            }) => ErrorKind::InvalidArgument,
+            Self::Ignores(error) => classify_by_source(error),
+            Self::WorkingCopyState(error) => classify_by_source(error),
+            Self::Snapshot(error) => classify_by_source(error),
+            Self::Backend(error) => classify_by_source(error),
+            Self::Commit(error) => classify_by_source(error),
+        }
+    }
+}
+
 /// How a path differs between two trees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
@@ -131,6 +151,15 @@ pub enum DiffError {
     Backend(#[from] BackendError),
 }
 
+impl Classify for DiffError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Read(error) => error.kind(),
+            Self::Backend(error) => classify_by_source(error),
+        }
+    }
+}
+
 impl Repo {
     /// Snapshots the working copy into this workspace's working-copy commit
     /// and records an operation marked as a snapshot, following jj-cli's
@@ -140,7 +169,20 @@ impl Repo {
     /// New files above `snapshot.max-new-file-size` are left untracked and
     /// reported in [`SnapshotOutcome::untracked`]. Files already tracked are
     /// always snapshotted. A stale working copy is an error, not recovered.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn snapshot(&mut self, description: &str) -> Result<SnapshotOutcome, SnapshotError> {
+        self.snapshot_unlogged(description)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    /// [`Repo::snapshot`] without its span or failure event, for operations
+    /// that snapshot as one of their steps and report failures themselves.
+    pub(crate) async fn snapshot_unlogged(
+        &mut self,
+        description: &str,
+    ) -> Result<SnapshotOutcome, SnapshotError> {
+        let begun = Instant::now();
         let max_new_file_size = max_new_file_size(self.workspace.settings())?;
         let base_ignores = self.base_ignores()?;
         let repo = self.repo.clone();
@@ -175,25 +217,18 @@ impl Repo {
         };
         let (new_tree, snapshot_stats) = locked_ws.locked_wc().snapshot(&options).await?;
         let scan = start.elapsed();
-        let untracked = snapshot_stats
-            .untracked_paths
-            .into_iter()
-            .map(|(path, reason)| {
-                let kind = match reason {
-                    UntrackedReason::FileTooLarge { size, max_size } => {
-                        UntrackedReasonKind::FileTooLarge { size, max_size }
-                    }
-                    UntrackedReason::FileNotAutoTracked => UntrackedReasonKind::NotAutoTracked,
-                };
-                (path.as_internal_file_string().to_owned(), kind)
-            })
-            .collect();
+        let untracked = untracked(snapshot_stats.untracked_paths);
 
         if new_tree.tree_ids_and_labels() == wc_commit.tree().tree_ids_and_labels() {
             // Nothing to record, but save the working-copy state anyway, as
             // jj-cli does, so refreshed file metadata is not rescanned.
             let commit_start = Instant::now();
             locked_ws.finish(repo.op_id().clone()).await?;
+            tracing::debug!(
+                op_id = %repo.op_id(),
+                elapsed_ms = elapsed_ms(begun),
+                "working copy unchanged"
+            );
             return Ok(SnapshotOutcome {
                 changed: false,
                 op_id: OperationIdHex::of(repo.op_id()),
@@ -230,6 +265,12 @@ impl Repo {
         self.repo = new_repo;
         locked_ws.finish(new_op_id).await?;
         let commit = commit_start.elapsed();
+        tracing::info!(
+            op_id = %self.repo.op_id(),
+            commit_id = %CommitIdHex::of(new_wc_commit.id()),
+            elapsed_ms = elapsed_ms(begun),
+            "snapshot taken"
+        );
 
         let outcome = SnapshotOutcome {
             changed: true,
@@ -247,7 +288,14 @@ impl Repo {
 
     /// Paths that differ between the working-copy commit and its parent, in
     /// path order. Reflects the last snapshot, not the files on disk.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn changed_paths_in_wc(&self) -> Result<Vec<ChangedPath>, DiffError> {
+        self.changed_paths_in_wc_unlogged()
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    async fn changed_paths_in_wc_unlogged(&self) -> Result<Vec<ChangedPath>, DiffError> {
         let wc_commit = self.wc_commit()?;
         let parent_tree = wc_commit.parent_tree(self.repo.as_ref()).await?;
         let wc_tree = wc_commit.tree();
@@ -299,6 +347,31 @@ impl Repo {
             git_backend.git_repo_path().join("info").join("exclude"),
         )
     }
+}
+
+/// Reef's form of the paths a snapshot left untracked, warning if there are any.
+fn untracked(
+    paths: impl IntoIterator<Item = (RepoPathBuf, UntrackedReason)>,
+) -> Vec<(String, UntrackedReasonKind)> {
+    let untracked: Vec<_> = paths
+        .into_iter()
+        .map(|(path, reason)| {
+            let kind = match reason {
+                UntrackedReason::FileTooLarge { size, max_size } => {
+                    UntrackedReasonKind::FileTooLarge { size, max_size }
+                }
+                UntrackedReason::FileNotAutoTracked => UntrackedReasonKind::NotAutoTracked,
+            };
+            (path.as_internal_file_string().to_owned(), kind)
+        })
+        .collect();
+    if !untracked.is_empty() {
+        tracing::warn!(
+            untracked_count = untracked.len(),
+            "new files left untracked"
+        );
+    }
+    untracked
 }
 
 fn xdg_config_home(home: Option<&std::path::Path>) -> Option<PathBuf> {

@@ -20,6 +20,6 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0006](0006-cel-for-policy.md) | CEL for repository policy | accepted |
 | [0007](0007-crate-layout.md) | Crate layout | accepted |
 | [0008](0008-jj-lib-embedding-findings.md) | jj-lib embedding findings | accepted |
-| 0009 | Error and logging conventions (R0.09) | reserved |
+| [0009](0009-error-and-logging-conventions.md) | Error and logging conventions | accepted |
 | 0010 | DCO instead of CLA (R0.08) | reserved |
 | [0011](0011-hash-and-object-backend-by-phase.md) | Hash function and object backend by phase | accepted |

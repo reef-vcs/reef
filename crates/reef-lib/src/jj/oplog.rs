@@ -8,6 +8,7 @@ use jj_lib::op_store::OpStoreError;
 use jj_lib::op_walk::walk_ancestors;
 
 use super::repo::{OperationIdHex, Repo};
+use crate::error::{Classify, ErrorKind, classify_by_source};
 
 /// One operation in the log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,10 +44,25 @@ pub enum OpLogError {
     OpStore(#[from] OpStoreError),
 }
 
+impl Classify for OpLogError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::OpStore(error) => classify_by_source(error),
+        }
+    }
+}
+
 impl Repo {
     /// Up to `limit` operations from the loaded head back through its
     /// ancestors, newest first by end time.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn op_log(&self, limit: usize) -> Result<Vec<OpEntry>, OpLogError> {
+        self.op_log_unlogged(limit)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    async fn op_log_unlogged(&self, limit: usize) -> Result<Vec<OpEntry>, OpLogError> {
         let mut ops =
             std::pin::pin!(walk_ancestors(std::slice::from_ref(self.repo.operation())).take(limit));
         let mut entries = Vec::new();

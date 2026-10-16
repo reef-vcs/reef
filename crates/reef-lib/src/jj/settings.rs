@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use jj_lib::config::{ConfigLayer, ConfigLoadError, ConfigSource, StackedConfig};
 use jj_lib::settings::UserSettings;
 
+use crate::error::{Classify, ErrorKind};
+
 pub use jj_lib::config::ConfigGetError;
 
 /// Config key holding the largest new file a snapshot starts tracking.
@@ -39,6 +41,18 @@ pub enum SettingsError {
     /// A byte size value was not a number with an optional unit.
     #[error("invalid byte size {0:?}; expected a number with an optional B, KiB, MiB, or GiB unit")]
     ByteSize(String),
+}
+
+impl Classify for SettingsError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            // The layer is generated here with escaped values; failing to parse it is a bug.
+            Self::Parse(_) => ErrorKind::Internal,
+            // `Repo::open` takes caller-built `UserSettings`, so a bad value read back
+            // from them is the caller's input.
+            Self::Get(_) | Self::ByteSize(_) => ErrorKind::InvalidArgument,
+        }
+    }
 }
 
 /// Builds jj-lib settings from jj-lib's defaults plus Reef's identity and
