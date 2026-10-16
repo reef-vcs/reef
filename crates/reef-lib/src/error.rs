@@ -49,6 +49,24 @@ impl ErrorKind {
     }
 }
 
+impl ErrorKind {
+    /// The CLI's exit code for a command that failed with this kind: 2 for
+    /// `InvalidArgument`, 3 `NotFound`, 4 `AlreadyExists`, 5 `Conflict`, 6
+    /// `Unavailable`, 7 `PermissionDenied`, 8 `Io`, 1 `Internal`.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            Self::InvalidArgument => 2,
+            Self::NotFound => 3,
+            Self::AlreadyExists => 4,
+            Self::Conflict => 5,
+            Self::Unavailable => 6,
+            Self::PermissionDenied => 7,
+            Self::Io => 8,
+            Self::Internal => 1,
+        }
+    }
+}
+
 /// Implemented by every error type that crosses a crate boundary.
 pub trait Classify {
     /// The error's classification.

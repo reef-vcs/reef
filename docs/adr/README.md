@@ -24,5 +24,6 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0010](0010-dco-instead-of-cla.md) | DCO instead of CLA | accepted |
 | [0011](0011-hash-and-object-backend-by-phase.md) | Hash function and object backend by phase | accepted |
 | [0012](0012-daemon-process-model-and-threading.md) | Daemon process model and threading | accepted |
+| [0013](0013-daemon-state-directory-and-configuration.md) | Daemon state directory and configuration | accepted |
 | [0014](0014-workspace-model-on-jj.md) | Workspace model on jj | accepted |
 | [0015](0015-materialization-backends-and-base-cache.md) | Materialization backends and the base cache | accepted |

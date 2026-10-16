@@ -1,8 +1,13 @@
 //! jj-lib settings built from Reef's own configuration, not from jj's.
 //!
 //! jj's user config files (`~/.config/jj/config.toml` and friends) are
-//! deliberately not read. The daemon will have its own configuration, and a
-//! user's jj config must not change how Reef snapshots.
+//! deliberately not read. The daemon has its own configuration (ADR 0013),
+//! and a user's jj config must not change how Reef snapshots.
+//!
+//! The daemon builds its settings with [`user_settings_from_spec`], which
+//! also records the machine's hostname and user name on every operation.
+//! [`user_settings`] and [`user_settings_with_max_new_file_size`] leave both
+//! empty, as jj-lib does; tests and benchmarks use them.
 
 use std::fmt::Write as _;
 
@@ -26,6 +31,20 @@ pub struct Identity {
     pub name: String,
     /// Email address, as in `user.email`.
     pub email: String,
+}
+
+/// Everything [`user_settings_from_spec`] sets.
+#[derive(Clone, Copy, Debug)]
+pub struct SettingsSpec<'a> {
+    /// Author and committer of the commits Reef writes.
+    pub identity: &'a Identity,
+    /// The largest new file a snapshot starts tracking, in bytes. Zero means
+    /// no limit.
+    pub max_new_file_size: u64,
+    /// Recorded as `operation.hostname` in every operation's metadata.
+    pub operation_hostname: &'a str,
+    /// Recorded as `operation.username` in every operation's metadata.
+    pub operation_username: &'a str,
 }
 
 /// Failure to build [`UserSettings`].
@@ -56,9 +75,9 @@ impl Classify for SettingsError {
 }
 
 /// Builds jj-lib settings from jj-lib's defaults plus Reef's identity and
-/// snapshot limits.
+/// snapshot limits. `operation.hostname` and `operation.username` stay empty.
 pub fn user_settings(identity: &Identity) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE)
+    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE, "", "")
 }
 
 /// [`user_settings`] with [`MAX_NEW_FILE_SIZE_KEY`] set to `bytes` instead of
@@ -67,21 +86,37 @@ pub fn user_settings_with_max_new_file_size(
     identity: &Identity,
     bytes: u64,
 ) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, &bytes.to_string())
+    build_settings(identity, &bytes.to_string(), "", "")
+}
+
+/// The daemon's settings: everything in `spec`, including the operation
+/// hostname and user name jj-lib otherwise records as empty.
+pub fn user_settings_from_spec(spec: &SettingsSpec<'_>) -> Result<UserSettings, SettingsError> {
+    build_settings(
+        spec.identity,
+        &spec.max_new_file_size.to_string(),
+        spec.operation_hostname,
+        spec.operation_username,
+    )
 }
 
 fn build_settings(
     identity: &Identity,
     max_new_file_size: &str,
+    operation_hostname: &str,
+    operation_username: &str,
 ) -> Result<UserSettings, SettingsError> {
     let mut config = StackedConfig::with_defaults();
     let layer = ConfigLayer::parse(
         ConfigSource::User,
         &format!(
-            "user.name = {}\nuser.email = {}\n{MAX_NEW_FILE_SIZE_KEY} = {}\n",
+            "user.name = {}\nuser.email = {}\n{MAX_NEW_FILE_SIZE_KEY} = {}\n\
+             operation.hostname = {}\noperation.username = {}\n",
             toml_string(&identity.name),
             toml_string(&identity.email),
             toml_string(max_new_file_size),
+            toml_string(operation_hostname),
+            toml_string(operation_username),
         ),
     )?;
     config.add_layer(layer);
@@ -98,7 +133,10 @@ pub fn max_new_file_size(settings: &UserSettings) -> Result<u64, SettingsError> 
     }
 }
 
-fn parse_byte_size(text: &str) -> Result<u64, SettingsError> {
+/// Parses a byte size: a non-negative integer with an optional `B`, `KiB`,
+/// `MiB`, or `GiB` unit, such as `1MiB` or `512 KiB`. The one parser for
+/// sizes in jj settings, the daemon's `config.toml`, and CLI flags.
+pub fn parse_byte_size(text: &str) -> Result<u64, SettingsError> {
     let err = || SettingsError::ByteSize(text.to_owned());
     let trimmed = text.trim();
     let split = trimmed
@@ -156,6 +194,28 @@ mod tests {
         .unwrap();
         assert_eq!(settings.user_name(), "A \"quoted\" \\ name");
         assert_eq!(max_new_file_size(&settings).unwrap(), 1 << 20);
+    }
+
+    #[test]
+    fn spec_sets_operation_identity() {
+        let identity = Identity {
+            name: "Reef".into(),
+            email: "reef@host.example".into(),
+        };
+        let settings = user_settings_from_spec(&SettingsSpec {
+            identity: &identity,
+            max_new_file_size: 2 << 20,
+            operation_hostname: "host.example",
+            operation_username: "agent \"one\"",
+        })
+        .unwrap();
+        assert_eq!(settings.operation_hostname(), "host.example");
+        assert_eq!(settings.operation_username(), "agent \"one\"");
+        assert_eq!(settings.user_email(), "reef@host.example");
+        assert_eq!(max_new_file_size(&settings).unwrap(), 2 << 20);
+        let plain = user_settings(&identity).unwrap();
+        assert_eq!(plain.operation_hostname(), "");
+        assert_eq!(plain.operation_username(), "");
     }
 
     #[test]

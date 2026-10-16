@@ -23,11 +23,13 @@ pub struct OpEntry {
     pub start: SystemTime,
     /// When the operation ended.
     pub end: SystemTime,
-    /// Host recorded by the writer; empty for operations Reef writes until the
-    /// daemon sets `operation.hostname`.
+    /// Host recorded by the writer: the machine's hostname for operations
+    /// the daemon writes, empty for settings built without a
+    /// [`SettingsSpec`](super::settings::SettingsSpec).
     pub hostname: String,
-    /// User recorded by the writer; empty for operations Reef writes until the
-    /// daemon sets `operation.username`.
+    /// User recorded by the writer: the OS user for operations the daemon
+    /// writes, empty for settings built without a
+    /// [`SettingsSpec`](super::settings::SettingsSpec).
     pub username: String,
     /// Whether the operation only snapshotted the working copy.
     pub is_snapshot: bool,

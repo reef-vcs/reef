@@ -38,14 +38,14 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::UserSettings;
-use reef_lib::jj::settings::{SettingsError, user_settings};
+use reef_lib::jj::settings::SettingsError;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::BaseCache;
-use crate::config::{Config, ConfigError, default_identity};
+use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::lock::{InstanceLock, LockError};
 use crate::model::RepositoryRecord;
@@ -234,7 +234,7 @@ impl Daemon {
                 source,
             }
         })?;
-        let settings = match user_settings(&default_identity()) {
+        let settings = match config.jj_settings() {
             Ok(settings) => settings,
             Err(error) => {
                 remove_if_present(&paths.pid);

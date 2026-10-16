@@ -37,7 +37,7 @@ serde.workspace = true
 time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true
-nix = { workspace = true, features = ["hostname"] }   # the default identity's host
+nix = { workspace = true, features = ["hostname", "user"] }   # the default identity and jj's operation.hostname/username
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
@@ -50,6 +50,8 @@ clap.workspace = true
 pollster.workspace = true
 futures.workspace = true
 etcetera.workspace = true
+toml.workspace = true
+humantime-serde.workspace = true
 tempfile = { workspace = true, optional = true }
 reef-testing = { workspace = true, optional = true }
 
@@ -65,4 +67,4 @@ tempfile.workspace = true
 reef-testing.workspace = true
 pollster.workspace = true
 tokio.workspace = true
-nix = { workspace = true, features = ["signal"] }   # SIGTERM in the binary test
+nix = { workspace = true, features = ["signal", "hostname"] }   # SIGTERM in the binary test; the hostname check
