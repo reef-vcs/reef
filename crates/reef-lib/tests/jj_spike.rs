@@ -15,7 +15,7 @@ use jj_lib::workspace::Workspace;
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::snapshot::{ChangeKind, ChangedPath, SnapshotError, UntrackedReasonKind};
-use reef_lib::jj::undo::UNDO_OP_DESC_PREFIX;
+use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
 use reef_lib::jj::{OpenError, Repo};
 
 const MIB: usize = 1 << 20;
@@ -108,6 +108,38 @@ async fn open_from_subdirectory() {
         repo.workspace_root().canonicalize().unwrap(),
         dir.path().canonicalize().unwrap()
     );
+}
+
+#[tokio::test]
+async fn open_relative_path() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let sub = dir.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    // A path relative to the test's current directory, without changing it
+    // (the current directory is shared by every test in the process).
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative = std::path::PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(sub.strip_prefix("/").unwrap());
+    assert!(relative.is_relative());
+
+    let repo = open(&relative).await;
+    assert!(repo.workspace_root().is_absolute());
+    assert_eq!(
+        repo.workspace_root().canonicalize().unwrap(),
+        dir.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn repo_is_send() {
+    // The daemon moves a `Repo` onto a blocking thread (see `reef_lib::jj`).
+    // The futures are not `Send` and `Repo` is not `Sync`; ADR 0008.
+    fn assert_send<T: Send>() {}
+    assert_send::<Repo>();
 }
 
 #[tokio::test]
@@ -233,6 +265,7 @@ async fn undo_restores_previous_view_and_disk() {
     let snapshot = repo.snapshot("test").await.unwrap();
 
     let outcome = repo.undo_last().await.unwrap();
+    assert_eq!(outcome.snapshotted, None);
     assert_eq!(outcome.undone, snapshot.op_id);
     assert_eq!(outcome.restored_to, before);
     let head = &repo.op_log(1).await.unwrap()[0];
@@ -248,6 +281,45 @@ async fn undo_restores_previous_view_and_disk() {
     let after = repo.snapshot("test").await.unwrap();
     assert!(!after.changed);
     assert_eq!(after.op_id, outcome.new_op);
+}
+
+#[tokio::test]
+async fn undo_snapshots_unsaved_edits_first() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let mut repo = open(dir.path()).await;
+    write(dir.path(), "a.txt", "v1\n");
+    let first = repo.snapshot("test").await.unwrap();
+    write(dir.path(), "a.txt", "v2\n");
+
+    let outcome = repo.undo_last().await.unwrap();
+    let snapshotted = outcome
+        .snapshotted
+        .clone()
+        .expect("the v2 edit was snapshotted");
+    assert_eq!(outcome.undone, snapshotted);
+    assert_eq!(outcome.restored_to, first.op_id);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "v1\n"
+    );
+    // The edit is not lost: its snapshot is still in the operation log.
+    let ops = repo.op_log(10).await.unwrap();
+    assert!(ops.iter().any(|op| op.id == snapshotted && op.is_snapshot));
+}
+
+#[tokio::test]
+async fn undo_refuses_to_remove_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let mut repo = open(dir.path()).await;
+    let before = repo.op_id();
+
+    let err = repo.undo_last().await.err().unwrap();
+    assert!(matches!(err, UndoError::WorkspaceNotInRestoredView(name) if name == "default"));
+    assert_eq!(repo.op_id(), before, "nothing was written");
+    write(dir.path(), "a.txt", "hello\n");
+    assert!(repo.snapshot("test").await.unwrap().changed);
 }
 
 #[tokio::test]

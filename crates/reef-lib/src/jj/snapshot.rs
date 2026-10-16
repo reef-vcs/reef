@@ -35,7 +35,8 @@ pub enum UntrackedReasonKind {
 /// How long each phase of a snapshot took.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotTiming {
-    /// Walking the working copy and hashing changed files.
+    /// Locking the working copy, loading its saved state, reading the
+    /// working-copy commit, walking the files, and hashing changed ones.
     pub scan: Duration,
     /// Writing the new working-copy commit and rebasing its descendants.
     pub write: Duration,
@@ -222,12 +223,17 @@ impl Repo {
 
         let commit_start = Instant::now();
         let new_repo = tx.commit(description).await?;
-        locked_ws.finish(new_repo.op_id().clone()).await?;
+        // The operation is published once committed. Adopt it before saving the
+        // working-copy state, so that if saving fails the next snapshot reports
+        // `Stale` instead of building a divergent operation on the old one.
+        let new_op_id = new_repo.op_id().clone();
+        self.repo = new_repo;
+        locked_ws.finish(new_op_id).await?;
         let commit = commit_start.elapsed();
 
         let outcome = SnapshotOutcome {
             changed: true,
-            op_id: OperationIdHex::of(new_repo.op_id()),
+            op_id: OperationIdHex::of(self.repo.op_id()),
             wc_commit: CommitIdHex::of(new_wc_commit.id()),
             untracked,
             stats: SnapshotTiming {
@@ -236,7 +242,6 @@ impl Repo {
                 commit,
             },
         };
-        self.repo = new_repo;
         Ok(outcome)
     }
 

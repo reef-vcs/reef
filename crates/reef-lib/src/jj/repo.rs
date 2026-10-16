@@ -87,6 +87,16 @@ pub enum OpenError {
     /// Neither the path nor any of its ancestors contains a `.jj` directory.
     #[error("no jj repository at {0} or any parent directory")]
     NotAJjRepo(PathBuf),
+    /// A relative path could not be made absolute because the current
+    /// directory is unavailable.
+    #[error("failed to resolve {path} against the current directory")]
+    CurrentDir {
+        /// The path as given.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The workspace exists but could not be loaded.
     #[error("failed to load the jj workspace")]
     Load(#[from] WorkspaceLoadError),
@@ -116,11 +126,16 @@ pub struct Repo {
 impl Repo {
     /// Opens the jj workspace containing `path`, searching parent directories
     /// for `.jj` the way the `jj` CLI does, and loads the repository at its
-    /// head operation. Divergent operation heads are merged on load.
+    /// head operation. Divergent operation heads are merged on load. A
+    /// relative `path` is resolved against the current directory.
     pub async fn open(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
+        let absolute = std::path::absolute(path).map_err(|source| OpenError::CurrentDir {
+            path: path.to_owned(),
+            source,
+        })?;
         // jj-lib's default workspace loader only looks in the given directory;
         // the parent search is jj-cli's `find_workspace_dir`.
-        let root = path
+        let root = absolute
             .ancestors()
             .find(|dir| dir.join(".jj").is_dir())
             .ok_or_else(|| OpenError::NotAJjRepo(path.to_owned()))?;

@@ -30,11 +30,11 @@
 
 ### Gotchas
 
-- **Async with blocking I/O inside.** The futures are runtime-agnostic, but the I/O inside them blocks, and sync helpers such as `Store::get_commit` call `pollster::block_on` themselves. The daemon must run jj-lib on a dedicated thread pool or `spawn_blocking` (R1.03).
-- **Stale working copies are the caller's job.** `Repo::snapshot` returns `Stale` whenever the working copy's operation differs from the loaded one. jj-cli is more lenient: when the working copy is *newer* than the loaded repo (another process snapshotted), it silently reloads at the working copy's operation. R1.13 must choose between that and reloading at head.
+- **Async, but not `Send`, and blocking inside.** jj-lib holds trait objects without `Send` bounds across awaits (`dyn OpHeadsStoreLock`, `dyn MutableIndex`, boxed index and working-copy loading futures), so none of `Repo`'s futures are `Send`, and `WorkingCopy` is `Send` but not `Sync`, so `Repo` is `Send` but not `Sync`. The I/O inside the futures blocks, and sync helpers such as `Store::get_commit` (used by `Repo::wc_commit` and `Repo::heads`) call `pollster::block_on` themselves. A tokio daemon cannot `tokio::spawn` these calls: it drives them on a dedicated thread, for example `spawn_blocking(move || pollster::block_on(..))`, and moves a `Repo` by ownership or behind a `Mutex`, never shares it through an `Arc` alone (R1.03). `tests/jj_spike.rs` asserts `Repo: Send` so a jj-lib bump that breaks even that is caught.
+- **Stale working copies are the caller's job.** `Repo::snapshot` returns `Stale` whenever the working copy's operation differs from the loaded one. jj-cli is more lenient: when the working copy is *newer* than the loaded repo (another process snapshotted), it silently reloads at the working copy's operation. It is also stricter in a second way: when the repo has advanced but the working-copy tree is unchanged, jj-lib's `check_stale` reports `Fresh`, while `Repo::snapshot` reports `Stale`. R1.13 must choose between jj-cli's policy and reloading at head.
 - **Nothing comes from the user's jj config unless we pass it.** `max_new_file_size`, ignores, and identity are all supplied. jj-lib's defaults leave `operation.hostname` and `operation.username` empty, so operations Reef writes record neither until the daemon sets them.
-- **Lock discipline.** jj-lib writes `.jj/working_copy/` on `finish`, so two processes on one working copy need jj's lock discipline. `undo_last` must always call `check_out`, even when the working-copy commit is unchanged, or the next snapshot sees a stale working copy.
-- **Undo semantics.** `undo_last` restores the parent's view except git refs and git `HEAD`, as jj-cli does. It does not walk jj's undo stack, refuse operations from another workspace, or reset git `HEAD` in colocated repos (R2.03). A file changed on disk since the last snapshot is overwritten by the checkout, so callers snapshot first.
+- **Lock discipline.** jj-lib writes `.jj/working_copy/` on `finish`, separately from publishing the operation, so two processes on one working copy need jj's lock discipline, and a failed `finish` after a published operation leaves the working copy stale (`Repo::snapshot` adopts the new operation first so the next call reports it). `undo_last` must always call `check_out`, even when the working-copy commit is unchanged, or the next snapshot sees a stale working copy.
+- **Undo semantics.** `undo_last` snapshots first, as `jj undo` does, so edits made since the last snapshot are recorded (and then undone) rather than silently overwritten by the checkout. It restores the parent's view except git refs and git `HEAD`, as jj-cli does, and refuses to undo past the workspace's creation, where the restored view has no working-copy commit for it. It does not walk jj's undo stack, refuse operations from another workspace, or reset git `HEAD` in colocated repos (R2.03). The undo operation is recorded before the checkout, so a failed checkout leaves a stale working copy.
 - **Divergent operation heads** are merged silently on `load_at_head` (a "reconcile divergent operations" operation).
 - **Colocated repos.** jj-cli imports and exports git refs around snapshots and creates a new commit when the working-copy commit is immutable. The spike does neither, so Reef and `jj` can disagree about bookmarks in a colocated repo (likely fix: Reef runs `git::import_refs` on open, R1).
 - **Build cost.** `cargo build -p reef-lib` with jj-lib and gix takes 21 s cold (debug, 12-core M2 Max).
@@ -46,24 +46,25 @@ Release build, `timing_report` in `jj_spike.rs`, Apple M2 Max (12 cores, 32 GB),
 
 | Step | Time |
 | --- | --- |
-| open | 0.9 ms |
-| first snapshot (10,000 new files) | 2,146 ms |
-| no-op snapshot | 11.1 ms |
-| snapshot, 50 files modified | 59.6 ms |
-| snapshot, 1 file modified (mean of 100) | 46.5 ms |
-| of which: scan | 11.8 ms |
-| of which: write commit and rebase | 5.6 ms |
-| of which: commit operation and save working-copy state | 28.9 ms |
-| `op_log(100)` | 2.3 ms |
-| `undo_last` | 25.5 ms |
+| open | 0.8 ms |
+| first snapshot (10,000 new files) | 2,152 ms |
+| no-op snapshot | 11.2 ms |
+| snapshot, 50 files modified | 59.4 ms |
+| snapshot, 1 file modified (mean of 100) | 47.7 ms |
+| of which: scan | 11.9 ms |
+| of which: write commit and rebase | 5.7 ms |
+| of which: commit operation and save working-copy state | 29.9 ms |
+| `op_log(100)` | 3.7 ms |
+| `undo_last`, including its no-op snapshot | 39.2 ms |
 
 Scanning a 10,000-file tree with nothing changed costs about 11 ms. A one-file change adds about 35 ms, mostly in committing the operation and saving the working-copy state; that phase was not split further. Saving the state is O(tracked files): `TreeState::save` serializes every file's state into `.jj/working_copy/tree_state` on each snapshot. This is well within the phase one target of a snapshot within 5 seconds, but it is the first place to profile if per-snapshot latency on large trees matters.
 
 ### jj-lib types that leak through `reef_lib::jj`
 
 - `UserSettings`: `settings::user_settings` returns it and `Repo::open` takes it. R1.03 wraps it in the daemon's config.
-- `Commit`: `Repo::wc_commit` returns it.
-- jj-lib error types, as `#[source]` inside Reef's error enums (`WorkspaceLoadError`, `RepoLoaderError`, `SnapshotError`, `BackendError`, `TransactionCommitError`, `OpStoreError`, `CheckoutError`).
+- `Commit`: `Repo::wc_commit` returns it, and through `Commit::tree()` also `MergedTree`.
+- `ConfigGetError`, re-exported from `reef_lib::jj::settings`.
+- jj-lib error types as variants or `#[source]` inside Reef's error enums: `ConfigLoadError`, `WorkspaceLoadError`, `RepoLoaderError`, `GitIgnoreError`, `WorkingCopyStateError`, `working_copy::SnapshotError`, `BackendError`, `RewriteRootCommit`, `TransactionCommitError`, `OpStoreError`, `CheckoutError`.
 
 Ids (`OperationIdHex`, `CommitIdHex`, `ChangeIdHex`), `ChangeSummary`, `SnapshotOutcome`, `ChangedPath`, `OpEntry`, and `UndoOutcome` are Reef types. R1.01 settles the id types for storage; R2.01 wraps everything that crosses the API.
 

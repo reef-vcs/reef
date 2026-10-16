@@ -7,6 +7,7 @@ use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::CheckoutError;
 
 use super::repo::{OperationIdHex, ReadError, Repo};
+use super::snapshot::SnapshotError;
 
 /// Description prefix jj uses for undo operations; `jj undo` reads it to
 /// walk an undo stack.
@@ -15,6 +16,9 @@ pub const UNDO_OP_DESC_PREFIX: &str = "undo: restore to operation ";
 /// Result of [`Repo::undo_last`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UndoOutcome {
+    /// The snapshot operation taken first because the working copy had
+    /// changes; `undone` is then this operation. `None` if nothing changed.
+    pub snapshotted: Option<OperationIdHex>,
     /// The operation that was undone.
     pub undone: OperationIdHex,
     /// The operation whose view was restored.
@@ -33,6 +37,13 @@ pub enum UndoError {
     /// The head operation merges divergent heads; jj refuses these too.
     #[error("cannot undo a merge operation")]
     MergeOperation,
+    /// The operation being restored predates this workspace, so undoing would
+    /// remove the workspace's working-copy commit. Nothing was written.
+    #[error("cannot undo past the creation of workspace {0}")]
+    WorkspaceNotInRestoredView(String),
+    /// Snapshotting the working copy before the undo failed.
+    #[error("failed to snapshot the working copy before undo")]
+    Snapshot(#[from] SnapshotError),
     /// An operation or view could not be read.
     #[error("failed to read the operation log")]
     OpStore(#[from] OpStoreError),
@@ -51,14 +62,24 @@ pub enum UndoError {
 }
 
 impl Repo {
-    /// Restores the view of the current head operation's parent and checks the
-    /// restored working-copy commit out on disk.
+    /// Snapshots the working copy, then restores the view of the head
+    /// operation's parent and checks the restored working-copy commit out on
+    /// disk.
     ///
-    /// This is "restore to parent operation" only: unlike `jj undo` it does not
-    /// skip over earlier undos, refuse operations from other workspaces, or
-    /// reset git `HEAD` in colocated repos (R2.03). Snapshot first; files
-    /// changed on disk since the last snapshot are overwritten by the checkout.
+    /// As with `jj undo`, the snapshot comes first, so edits made since the
+    /// last snapshot are recorded before the checkout replaces them; if there
+    /// were any, the undo undoes that snapshot and the edits stay reachable in
+    /// the operation log. This is "restore to parent operation" only: unlike
+    /// `jj undo` it does not skip over earlier undos, refuse operations from
+    /// other workspaces, or reset git `HEAD` in colocated repos (R2.03).
+    ///
+    /// The undo operation is recorded before the checkout. If the checkout
+    /// fails, the operation stands and the working copy is stale until it is
+    /// updated.
     pub async fn undo_last(&mut self) -> Result<UndoOutcome, UndoError> {
+        let snapshot = self.snapshot("snapshot working copy").await?;
+        let snapshotted = snapshot.changed.then_some(snapshot.op_id);
+
         let target = self.repo.operation().clone();
         let mut parents = target.parents().await?;
         let parent = match parents.len() {
@@ -69,6 +90,12 @@ impl Repo {
         let old_wc_commit = self.wc_commit()?;
 
         let restored = parent.view().await?;
+        let workspace_name = self.workspace.workspace_name();
+        if restored.get_wc_commit_id(workspace_name).is_none() {
+            return Err(UndoError::WorkspaceNotInRestoredView(
+                workspace_name.as_str().to_owned(),
+            ));
+        }
         let mut tx = self.repo.start_transaction();
         tx.set_workspace_name(self.workspace.workspace_name());
         let new_view = restore_view(restored.store_view(), tx.base_repo().view().store_view());
@@ -91,6 +118,7 @@ impl Repo {
             .await?;
 
         Ok(UndoOutcome {
+            snapshotted,
             undone: OperationIdHex::of(target.id()),
             restored_to: OperationIdHex::of(parent.id()),
             new_op: OperationIdHex::of(self.repo.op_id()),
