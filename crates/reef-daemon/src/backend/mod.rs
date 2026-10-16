@@ -348,12 +348,14 @@ pub fn select_from(
         BackendChoice::Auto => BackendKind::AUTO_ORDER
             .into_iter()
             .find(|kind| availability(*kind).is_available())
+            // Copy is always available, so this needs stubbed probes; the
+            // error names it as the last resort that also failed.
             .ok_or_else(|| BackendError::Unavailable {
                 kind: BackendKind::Copy,
                 reason: "no backend is available".to_owned(),
             })?,
     };
-    tracing::debug!(backend = kind.as_str(), %choice, "backend selected");
+    tracing::debug!(backend = kind.as_str(), "backend selected");
     Ok(backend_for(kind))
 }
 

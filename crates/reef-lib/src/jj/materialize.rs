@@ -190,7 +190,8 @@ pub fn is_tree_key(key: &str) -> bool {
 
 /// Reads `state_dir/tree_state`, as jj's local working copy writes it, and
 /// returns every file's path, mtime, and size, in the file's order (sorted
-/// by path when jj wrote it).
+/// by path when jj wrote it). Git submodules are left out: jj records them
+/// with placeholder mtime and size, and writes nothing for them on disk.
 ///
 /// Decodes jj-lib's own protobuf message
 /// (`jj_lib::protos::local_working_copy::TreeState`); the rest of the state
@@ -206,6 +207,11 @@ pub fn tree_state_entries(state_dir: &Path) -> Result<Vec<TreeStateEntry>, TreeS
     Ok(proto
         .file_states
         .into_iter()
+        .filter(|entry| {
+            entry.state.as_ref().is_none_or(|state| {
+                state.file_type() != jj_lib::protos::local_working_copy::FileType::GitSubmodule
+            })
+        })
         .map(|entry| {
             let state = entry.state.unwrap_or_default();
             TreeStateEntry {
@@ -287,8 +293,13 @@ impl Repo {
     }
 
     /// The base cache key ([`tree_key`]) of the commit with this full id.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
     pub async fn tree_key(&self, commit: &CommitIdHex) -> Result<String, CommitLookupError> {
-        Ok(tree_key(&self.commit_by_id(commit).await?))
+        let commit = self
+            .commit_by_id(commit)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))?;
+        Ok(tree_key(&commit))
     }
 }
 

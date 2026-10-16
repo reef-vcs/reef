@@ -2,7 +2,9 @@
 //! mtime restoration, the trash rename, and background deletion here;
 //! backends do not grow private copies of these.
 //!
-//! Walks never follow symlinks.
+//! Walks never follow symlinks, the walk's root included
+//! (`follow_root_links(false)`: walkdir follows a symlinked root by
+//! default).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
@@ -26,7 +28,10 @@ const BLOCK_UNIT: u64 = 512;
 pub fn allocated_bytes(path: &Path) -> Result<u64, BackendError> {
     let mut seen = HashSet::new();
     let mut total = 0;
-    for entry in WalkDir::new(path).follow_links(false) {
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) if error.depth() == 0 && is_not_found(&error) => return Ok(0),
@@ -93,7 +98,11 @@ pub fn changed_files_vs_base(
         .map(|entry| (entry.path, (entry.mtime_ms, entry.size)))
         .collect();
     let mut usage = DiskUsage::default();
-    for entry in WalkDir::new(&ws.root).min_depth(1).follow_links(false) {
+    for entry in WalkDir::new(&ws.root)
+        .min_depth(1)
+        .follow_links(false)
+        .follow_root_links(false)
+    {
         let entry = entry.map_err(|error| walk_error(&ws.root, error))?;
         if entry.file_type().is_dir() {
             continue;

@@ -31,6 +31,9 @@ This ADR does not cover any primitive's details (R1.07 to R1.10, ADR 0016 (R1.09
 - Bases accumulate one per tree ever materialized. `base_cache.max_entries` and R1.17's GC bound them; a base a workspace still uses is never evicted.
 - Reading the base's `tree_state` uses jj-lib's public protobuf message (`jj_lib::protos::local_working_copy::TreeState`). A jj-lib upgrade that changes it breaks the disk usage estimate, not correctness, and only `reef_lib::jj::materialize` changes.
 - Conflicted trees work like any other: their key contains `+`, which is safe in a file name.
+- Logs name a base by its key in a `tree_id` field, which this decision adds to the field names of [0009](0009-error-and-logging-conventions.md) (`reef_lib::telemetry::fields::TREE_ID`).
+- The base cache is crash-safe against the daemon dying, not against power loss: jj writes the tree without fsync, so a power cut can leave a recorded entry with a truncated `tree_state` or file. The start-up sweep drops an entry whose `tree_state` does not decode to the recorded file count; a truncated tree file whose state entry survived is not detected (fsyncing every file would add seconds to a `large` materialization).
+- An entry whose tree is on disk without its state is reported as incomplete and left in place while the daemon runs, because an overlay may be using the tree as its lower layer; the start-up sweep, which runs before overlay mounts are re-established, drops it.
 
 ## Alternatives considered
 

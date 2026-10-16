@@ -19,11 +19,11 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
 use reef_lib::error::{Classify, ErrorChain, ErrorKind, classify_by_source};
-use reef_lib::jj::materialize::{TREE_STATE_FILE, is_tree_key};
+use reef_lib::jj::materialize::{TREE_STATE_FILE, is_tree_key, tree_state_entries};
 use reef_lib::jj::{MaterializeError, MaterializeStats};
 use reef_lib::telemetry::elapsed_ms;
 
@@ -77,6 +77,18 @@ impl BaseEntry {
     fn is_complete(&self) -> bool {
         self.path.is_dir() && self.tree_state_file().is_file()
     }
+
+    /// [`BaseEntry::is_complete`], and the `tree_state` decodes with one
+    /// entry per recorded file. jj writes files without fsync, so after a
+    /// power cut the directories and the row can survive with a truncated
+    /// `tree_state`; this catches that case (not a truncated file of the
+    /// tree itself whose state entry survived), at the cost of decoding
+    /// the state, which is why only the start-up sweep does it.
+    fn is_valid(&self) -> bool {
+        self.is_complete()
+            && tree_state_entries(&self.state_dir)
+                .is_ok_and(|entries| entries.len() as u64 == self.files)
+    }
 }
 
 /// Failure of a base cache operation.
@@ -100,8 +112,11 @@ pub enum BaseCacheError {
     /// jj could not materialize the tree.
     #[error("failed to materialize the tree")]
     Materialize(#[from] MaterializeError),
-    /// The materialization reported success but left no `tree_state`.
-    #[error("materialization left no tree state in {}", .0.display())]
+    /// A materialization reported success but left no `tree_state`, or a
+    /// recorded entry's tree is on disk without its state. The entry is
+    /// not removed while the daemon runs (an overlay may use the tree as
+    /// its lower layer); the start-up sweep drops it.
+    #[error("base cache entry {} is incomplete", .0.display())]
     Incomplete(PathBuf),
     /// The key is not a tree id (or `+`-joined tree ids) in lowercase hex.
     #[error("{0:?} is not a tree id")]
@@ -134,6 +149,10 @@ pub struct BaseCache {
     /// tree materialize it once. The outer lock is held only to find or
     /// insert an entry, never while materializing.
     key_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Held shared by `ensure` and `remove`, exclusively by
+    /// `sweep_incomplete`, so a sweep never removes the temporary
+    /// directories of a materialization in progress.
+    sweep: RwLock<()>,
 }
 
 impl BaseCache {
@@ -145,6 +164,7 @@ impl BaseCache {
             repo_id,
             dir: repo_dir.join("bases"),
             key_locks: Mutex::new(HashMap::new()),
+            sweep: RwLock::new(()),
         }
     }
 
@@ -162,10 +182,13 @@ impl BaseCache {
     /// normally `Repo::materialize_tree` on the commit. It is not called if
     /// the entry exists. Concurrent calls for one `tree_id` wait for each
     /// other and materialize once; calls for different trees run in
-    /// parallel.
+    /// parallel. The closure runs with the tree's lock held, so it must not
+    /// call `ensure` for the same tree.
     ///
-    /// An entry whose directories have gone missing is dropped and
-    /// materialized again.
+    /// An entry whose tree directory has gone missing is dropped and
+    /// materialized again. One whose tree is on disk without its state is
+    /// [`BaseCacheError::Incomplete`] until the next start-up sweep, because
+    /// the tree may be a live overlay's lower layer.
     pub fn ensure(
         &self,
         tree_id: &str,
@@ -186,6 +209,9 @@ impl BaseCache {
                 self.db
                     .touch_base(self.repo_id, tree_id, Timestamp::now())?;
                 return Ok(entry);
+            }
+            if entry.path.exists() {
+                return Err(BaseCacheError::Incomplete(entry.path));
             }
             tracing::warn!(
                 path = %entry.path.display(),
@@ -293,19 +319,23 @@ impl BaseCache {
     /// Removes everything under `bases/` that is not a complete, recorded
     /// entry: `*.tmp` and `*.tmp.state` leftovers, directories without a
     /// row, and the rows (with whatever is left of their directories) of
-    /// entries missing on disk. Returns the paths removed. Called at daemon
-    /// start, before the cache is used; it does not wait for `ensure` calls
-    /// in progress.
+    /// entries missing on disk or whose `tree_state` does not decode to the
+    /// recorded file count. Returns the paths removed.
+    ///
+    /// Called at daemon start, before overlay mounts are re-established
+    /// (R1.03, R1.09): a dropped entry's tree must not be a live lower
+    /// layer. It waits for `ensure` and `remove` calls in progress.
     pub fn sweep_incomplete(&self) -> Result<Vec<PathBuf>, BaseCacheError> {
+        let _sweep = self.sweep.write().unwrap_or_else(PoisonError::into_inner);
         let mut complete = HashSet::new();
         for record in self.db.bases(self.repo_id)? {
             let entry = BaseEntry::from_record(record);
-            if entry.is_complete() {
+            if entry.is_valid() {
                 complete.insert(entry.tree_id);
             } else {
                 tracing::warn!(
                     path = %entry.path.display(),
-                    "base cache entry is missing on disk; dropping it"
+                    "base cache entry is missing or damaged on disk; dropping it"
                 );
                 self.db.delete_base(self.repo_id, &entry.tree_id)?;
             }
@@ -354,6 +384,7 @@ impl BaseCache {
     /// Runs `f` holding the lock for `tree_id`, then forgets the lock if no
     /// one else is waiting on it.
     fn with_key_lock<T>(&self, tree_id: &str, f: impl FnOnce() -> T) -> T {
+        let _sweep = self.sweep.read().unwrap_or_else(PoisonError::into_inner);
         let lock = {
             let mut locks = self
                 .key_locks
@@ -474,8 +505,9 @@ mod tests {
 
     const REPO: &str = "aaaa000000000001";
 
-    /// A stand-in for jj: writes one file and a `tree_state` that is not a
-    /// real one (only `ensure`'s bookkeeping is under test here).
+    /// A stand-in for jj: writes one file and an empty `tree_state`, which
+    /// decodes as a state with no entries, so it reports no files (only the
+    /// bookkeeping is under test here; `tests/base_cache.rs` uses jj).
     #[allow(
         clippy::unnecessary_wraps,
         reason = "has the signature of the closure ensure takes"
@@ -486,7 +518,7 @@ mod tests {
         std::fs::write(dir.join("file"), "contents").unwrap();
         std::fs::write(state.join(TREE_STATE_FILE), "").unwrap();
         Ok(MaterializeStats {
-            files: 1,
+            files: 0,
             bytes: 8,
             elapsed: Duration::ZERO,
             checkout: CheckoutStatsSummary::default(),
@@ -505,7 +537,7 @@ mod tests {
         let entry = cache.ensure("0a0b", fake_materialize).unwrap();
         assert_eq!(entry.path, cache.dir().join("0a0b"));
         assert_eq!(entry.state_dir, cache.dir().join("0a0b.state"));
-        assert_eq!((entry.files, entry.bytes), (1, 8));
+        assert_eq!((entry.files, entry.bytes), (0, 8));
         assert!(entry.tree_state_file().is_file());
         assert!(!cache.dir().join("0a0b.tmp").exists());
         assert!(!cache.dir().join("0a0b.tmp.state").exists());
@@ -565,6 +597,13 @@ mod tests {
         let cache = cache(tmp.path());
         let entry = cache.ensure("0a0b", fake_materialize).unwrap();
         std::fs::remove_dir_all(&entry.state_dir).unwrap();
+        let error = cache
+            .ensure("0a0b", |_, _| panic!("a tree on disk is not replaced"))
+            .unwrap_err();
+        assert!(matches!(error, BaseCacheError::Incomplete(_)), "{error:?}");
+        assert!(entry.path.is_dir(), "the tree is left for the sweep");
+
+        std::fs::remove_dir_all(&entry.path).unwrap();
         let calls = AtomicUsize::new(0);
         cache
             .ensure("0a0b", |dir, state| {
@@ -625,6 +664,8 @@ mod tests {
         let kept = cache.ensure("0a0a", fake_materialize).unwrap();
         let gone = cache.ensure("0b0b", fake_materialize).unwrap();
         std::fs::remove_dir_all(&gone.path).unwrap();
+        let damaged = cache.ensure("0f0f", fake_materialize).unwrap();
+        std::fs::write(damaged.tree_state_file(), b"\xff\xff\xff").unwrap();
         let dir = cache.dir().to_owned();
         for leftover in ["0c0c.tmp", "0c0c.tmp.state", "0d0d", "0d0d.state", "0e0e"] {
             std::fs::create_dir(dir.join(leftover)).unwrap();
@@ -645,6 +686,8 @@ mod tests {
                 "0d0d",
                 "0d0d.state",
                 "0e0e",
+                "0f0f",
+                "0f0f.state",
                 "stray-file"
             ]
         );
