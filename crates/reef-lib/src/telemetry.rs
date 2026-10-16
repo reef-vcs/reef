@@ -21,7 +21,7 @@ pub mod fields {
     pub const REPO: &str = "repo";
     /// A Reef workspace.
     pub const WORKSPACE_ID: &str = "workspace_id";
-    /// A jj change id, in reverse hex.
+    /// A jj change id, in hex.
     pub const CHANGE_ID: &str = "change_id";
     /// A jj operation id.
     pub const OP_ID: &str = "op_id";

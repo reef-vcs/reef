@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use jj_lib::backend::BackendError;
@@ -17,7 +18,7 @@ use jj_lib::workspace::{Workspace, WorkspaceInitError, WorkspaceLoadError};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
 macro_rules! hex_id {
-    ($(#[$doc:meta])* $name:ident) => {
+    ($(#[$doc:meta])* $name:ident, $what:literal) => {
         $(#[$doc])*
         #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(String);
@@ -34,22 +35,64 @@ macro_rules! hex_id {
                 f.write_str(&self.0)
             }
         }
+
+        impl FromStr for $name {
+            type Err = ParseHexIdError;
+
+            /// Accepts a non-empty, even number of lowercase hex digits, the
+            /// form [`Display`](fmt::Display) writes. The length depends on
+            /// the backend (ADR 0011), so it is not checked here.
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                let valid = !text.is_empty()
+                    && text.len() % 2 == 0
+                    && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                if valid {
+                    Ok(Self(text.to_owned()))
+                } else {
+                    Err(ParseHexIdError {
+                        what: $what,
+                        text: text.to_owned(),
+                    })
+                }
+            }
+        }
     };
 }
 
 hex_id!(
     /// An operation id, in the lowercase hex jj prints.
-    OperationIdHex
+    OperationIdHex,
+    "operation"
 );
 hex_id!(
     /// A commit id, in lowercase hex. With the git backend this is the git
     /// commit hash.
-    CommitIdHex
+    CommitIdHex,
+    "commit"
 );
 hex_id!(
-    /// A change id, in jj's "reverse hex" (`k` to `z`) form, as `jj log` shows it.
-    ChangeIdHex
+    /// A change id, in lowercase hex like the other ids. `jj log` shows
+    /// change ids in "reverse hex" instead; [`ChangeIdHex::reverse_hex`]
+    /// converts.
+    ChangeIdHex,
+    "change"
 );
+
+/// Text that is not an id of the expected kind in lowercase hex.
+#[derive(Debug, thiserror::Error)]
+#[error("{text:?} is not a valid {what} id")]
+pub struct ParseHexIdError {
+    /// The kind of id expected: `operation`, `commit`, or `change`.
+    pub what: &'static str,
+    /// The rejected text.
+    pub text: String,
+}
+
+impl Classify for ParseHexIdError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::InvalidArgument
+    }
+}
 
 impl OperationIdHex {
     pub(crate) fn of(id: &jj_lib::op_store::OperationId) -> Self {
@@ -65,7 +108,20 @@ impl CommitIdHex {
 
 impl ChangeIdHex {
     pub(crate) fn of(id: &jj_lib::backend::ChangeId) -> Self {
-        Self(id.reverse_hex())
+        Self(id.hex())
+    }
+
+    /// The change id in jj's "reverse hex", the spelling `jj log` shows
+    /// humans: the digits `0` to `f` become the letters `z` to `k`.
+    pub fn reverse_hex(&self) -> String {
+        self.0
+            .bytes()
+            .map(|digit| match digit {
+                b'0'..=b'9' => char::from(b'z' - (digit - b'0')),
+                b'a'..=b'f' => char::from(b'p' - (digit - b'a')),
+                other => char::from(other),
+            })
+            .collect()
     }
 }
 
@@ -290,5 +346,33 @@ impl Repo {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jj_lib::backend::ChangeId;
+
+    use super::*;
+
+    #[test]
+    fn hex_ids_parse_lowercase_hex() {
+        assert_eq!("0a1b".parse::<CommitIdHex>().unwrap().as_str(), "0a1b");
+        assert!("0a1b".parse::<ChangeIdHex>().is_ok());
+        assert!("".parse::<OperationIdHex>().is_err());
+        assert!("abc".parse::<OperationIdHex>().is_err(), "odd length");
+        assert!("0A1B".parse::<CommitIdHex>().is_err(), "uppercase");
+        let error = "kzpq".parse::<ChangeIdHex>().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+        assert_eq!(error.to_string(), "\"kzpq\" is not a valid change id");
+    }
+
+    #[test]
+    fn reverse_hex_matches_jj() {
+        let id = ChangeId::try_from_hex("0123456789abcdeffedcba9876543210").unwrap();
+        let hex = ChangeIdHex::of(&id);
+        assert_eq!(hex.as_str(), "0123456789abcdeffedcba9876543210");
+        assert_eq!(hex.reverse_hex(), id.reverse_hex());
+        assert_eq!(hex.reverse_hex(), "zyxwvutsrqponmlkklmnopqrstuvwxyz");
     }
 }
