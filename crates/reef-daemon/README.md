@@ -5,3 +5,5 @@ The local service of **Reef**, version control built for a world where AI agents
 The version-control data model and merge logic live in `reef-lib`, which this crate depends on. Its own model is the inventory it keeps in SQLite (repositories, workspaces, leases, reclaims), in `reef_daemon::model` and `reef_daemon::db`. It contains no CLI code.
 
 `reef-vcs` depends on this crate and re-exports it. This crate never depends on `reef-vcs`. The design document and roadmap are at <https://github.com/reef-vcs/reef>.
+
+Run it in the foreground with `cargo run -p reef-daemon` (state in the platform state directory, or `REEF_STATE_DIR`); it stops cleanly on Ctrl-C or SIGTERM. The process and threading model is [ADR 0012](../../docs/adr/0012-daemon-process-model-and-threading.md). The API schema is in `proto/`, compiled at build time without `protoc`.

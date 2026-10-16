@@ -19,21 +19,50 @@ workspace = true
 name = "reef-daemon"
 path = "src/main.rs"
 
+[features]
+# `reef_daemon::testing::TestDaemon` for this crate's integration tests and `reef-vcs`'s.
+# reef-testing is `publish = false`, so publishing this crate first needs the feature's
+# synthetic-repo helper moved out (or reef-testing published).
+testing = ["dep:tempfile", "dep:reef-testing"]
+
 [dependencies]
 reef-lib.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 rusqlite.workspace = true
 rand.workspace = true
 serde.workspace = true
 time.workspace = true
-anyhow.workspace = true          # main.rs only
+anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["hostname"] }   # the default identity's host
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+clap.workspace = true
+pollster.workspace = true
+futures.workspace = true
+etcetera.workspace = true
+tempfile = { workspace = true, optional = true }
+reef-testing = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protox.workspace = true
+prost-types.workspace = true
 
 [dev-dependencies]
+reef-daemon = { path = ".", version = "0.0.0", features = ["testing"] }
 serde_json.workspace = true
 tempfile.workspace = true
 reef-testing.workspace = true
 pollster.workspace = true
+tokio.workspace = true
+nix = { workspace = true, features = ["signal"] }   # SIGTERM in the binary test

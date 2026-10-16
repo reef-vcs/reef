@@ -1,0 +1,46 @@
+// The Reef daemon API, version 0 (R1.03). Phase 1's working schema; R2.01
+// replaces it with the reviewed v1. Clients use `reef_daemon::client::Client`,
+// never the generated stubs directly.
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+// The daemon itself.
+service Daemon {
+  // What the daemon is and what it serves.
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  // The daemon's version (`CARGO_PKG_VERSION`).
+  string version = 1;
+  // The daemon's process id.
+  uint32 pid = 2;
+  // Milliseconds since the daemon started.
+  uint64 uptime_ms = 3;
+  // The state directory.
+  string state_dir = 4;
+  // The socket this answer came over.
+  string socket = 5;
+  // The metadata database's schema version.
+  uint32 schema_version = 6;
+  // Registered repositories.
+  uint32 repositories = 7;
+  // Each materialization backend and whether it can serve workspace roots
+  // under the state directory.
+  repeated BackendProbe backends = 8;
+  // Workspaces in the `active` state.
+  uint32 active_workspaces = 9;
+}
+
+message BackendProbe {
+  // The backend's name, as stored in `workspaces.backend`.
+  string kind = 1;
+  bool available = 2;
+  // Why it is unavailable; empty when available.
+  string reason = 3;
+  // The filesystem probed, such as `apfs` or `ext4`.
+  string filesystem = 4;
+}

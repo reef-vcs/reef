@@ -10,6 +10,20 @@
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
 
 pub mod backend;
+pub mod client;
+pub mod config;
+pub mod daemon;
 pub mod db;
+pub mod lock;
 pub mod logging;
 pub mod model;
+pub mod proto;
+pub mod repo;
+mod run;
+pub mod server;
+pub mod service;
+#[cfg(feature = "testing")]
+pub mod testing;
+
+pub use daemon::{AppState, Daemon, DaemonHandle, StartError};
+pub use run::{DaemonArgs, run_main};

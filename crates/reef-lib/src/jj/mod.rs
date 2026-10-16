@@ -22,6 +22,12 @@ pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
     Repo,
 };
+
+// jj-lib types the daemon names without depending on jj-lib: the repository
+// thread's state (R1.03) and the cross-thread `Send + Sync` assertion on them.
+pub use jj_lib::merged_tree::MergedTree;
+pub use jj_lib::repo::ReadonlyRepo;
+pub use jj_lib::settings::UserSettings;
 pub use workspace::{
     CreateWorkspaceError, ForgetWorkspaceError, ResolveError, Resolved, ResolvedVia, StartPoint,
 };
