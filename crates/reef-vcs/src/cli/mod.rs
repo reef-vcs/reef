@@ -132,11 +132,19 @@ impl Ctx {
         &self,
         call: impl Future<Output = Result<T, ClientError>>,
     ) -> Result<T, CliError> {
-        match tokio::time::timeout(self.timeout, call).await {
+        self.call_within(self.timeout, call).await
+    }
+
+    /// Awaits `call` for at most `deadline`, for a call known to take
+    /// longer than most.
+    pub(crate) async fn call_within<T>(
+        &self,
+        deadline: Duration,
+        call: impl Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, CliError> {
+        match tokio::time::timeout(deadline, call).await {
             Ok(result) => result.map_err(CliError::Daemon),
-            Err(_) => Err(CliError::Timeout {
-                after: self.timeout,
-            }),
+            Err(_) => Err(CliError::Timeout { after: deadline }),
         }
     }
 }

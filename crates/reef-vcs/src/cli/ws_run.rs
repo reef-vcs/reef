@@ -8,6 +8,11 @@
 //! else on stdout. The exit code is the command's (`128 + n` if signal *n*
 //! killed it, 127 or 126 if it could not be started), unless it exited 0
 //! and the release failed, which exits with the daemon error's code.
+//!
+//! The release (or `--keep`'s snapshot) waits up to `--timeout` or
+//! [`FINISH_DEADLINE`], whichever is longer: a final snapshot of a large
+//! tree can outlast the usual RPC deadline, and the daemon finishes it
+//! regardless.
 
 use std::io::{self, IsTerminal as _};
 use std::os::unix::process::ExitStatusExt as _;
@@ -40,6 +45,8 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30);
 const ESCALATE_WITHIN: Duration = Duration::from_secs(5);
 /// A release still running after this long is explained on stderr.
 const RELEASE_NOTE_AFTER: Duration = Duration::from_secs(2);
+/// The least time the release, or `--keep`'s snapshot, is given.
+const FINISH_DEADLINE: Duration = Duration::from_secs(600);
 /// The default purpose is the command line, cut to this many characters.
 const PURPOSE_MAX_CHARS: usize = 200;
 
@@ -61,7 +68,11 @@ pub(crate) struct Args {
     lease: Option<Duration>,
     /// Run in this existing workspace (id or unique prefix) instead of
     /// creating one.
-    #[arg(long, value_name = "WS", conflicts_with_all = ["change", "new_on", "path"])]
+    #[arg(
+        long,
+        value_name = "WS",
+        conflicts_with_all = ["change", "new_on", "path", "lease", "purpose"]
+    )]
     workspace: Option<String>,
     /// Keep the workspace when the command exits: snapshot it and let the
     /// lease run out instead of releasing it.
@@ -158,15 +169,15 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         Some(workspace) => attach(ctx, workspace, args.owner.as_deref()).await?,
         None => create(ctx, &args).await?,
     };
-    let lease = ws.lease.clone().ok_or_else(|| missing("lease"))?;
-    let heartbeater = Heartbeater::new(Arc::new(ctx.client.clone()), &ws, &lease, {
-        let out = ctx.out.clone();
-        Box::new(move |text: &str| out.note(text))
-    })?;
-    // Installed before the spawn, so a signal from here on is forwarded
-    // rather than ending `ws run`. Failing to install is not expected; the
-    // lease reclaims the workspace if it happens.
-    let mut signals = Signals::install()?;
+    // The workspace exists from here on: a failure before the command runs
+    // still releases it (or, with `--keep`, snapshots it).
+    let (heartbeater, mut signals) = match prepare(ctx, &ws) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = finish(ctx, &ws, args.keep).await;
+            return Err(error);
+        }
+    };
     let end = match spawn(ctx, &args, &ws) {
         Ok(child) => {
             let heartbeats = tokio::spawn(heartbeats(heartbeater));
@@ -210,8 +221,23 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             message: ErrorChain(error).to_string(),
         }),
     };
-    ctx.out.json_only(&report)?;
+    // The command's exit code stands even if stdout is gone.
+    if let Err(error) = ctx.out.json_only(&report) {
+        ctx.out
+            .error_line(&format!("error: {}", ErrorChain(&error)));
+    }
     Ok(ExitCode::from(code))
+}
+
+/// The heartbeater for `ws`'s lease, and the signal handlers, installed
+/// before the spawn so that a signal from then on is forwarded rather than
+/// ending `ws run`.
+fn prepare(ctx: &Ctx, ws: &Workspace) -> Result<(Heartbeater, Signals), CliError> {
+    let lease = ws.lease.as_ref().ok_or_else(|| missing("lease"))?;
+    let out = ctx.out.clone();
+    let notify = Box::new(move |text: &str| out.note(text));
+    let heartbeater = Heartbeater::new(Arc::new(ctx.client.clone()), ws, lease, notify)?;
+    Ok((heartbeater, Signals::install()?))
 }
 
 /// `Workspaces.Create` with `ws run`'s defaults.
@@ -306,10 +332,13 @@ fn spawn(ctx: &Ctx, args: &Args, ws: &Workspace) -> io::Result<Child> {
         .spawn()
 }
 
-/// The signals `ws run` forwards.
+/// The signals `ws run` forwards. tokio merges deliveries of one signal
+/// that arrive before it is polled, so two signals sent back to back may
+/// count as one.
 struct Signals {
     term: SignalStream,
     int: SignalStream,
+    quit: SignalStream,
     hup: SignalStream,
 }
 
@@ -319,13 +348,14 @@ impl Signals {
         Ok(Self {
             term: stream(SignalKind::terminate())?,
             int: stream(SignalKind::interrupt())?,
+            quit: stream(SignalKind::quit())?,
             hup: stream(SignalKind::hangup())?,
         })
     }
 }
 
-/// Repeated SIGINT and SIGTERM: the second within [`ESCALATE_WITHIN`] of
-/// the first is a repeat.
+/// Repeated forwarded SIGINT and SIGTERM: the second within
+/// [`ESCALATE_WITHIN`] of the first is a repeat.
 #[derive(Debug, Default)]
 struct Escalation {
     first: Option<Instant>,
@@ -344,15 +374,18 @@ impl Escalation {
 }
 
 /// Waits for the command to exit, forwarding signals: SIGTERM and SIGHUP
-/// always; SIGINT only when stdin is not a terminal, since a terminal's
-/// Ctrl-C already reached the command through the shared process group. A
-/// repeated SIGINT or SIGTERM kills it.
+/// always; SIGINT and SIGQUIT only when stdin is not a terminal, since a
+/// terminal's `Ctrl-C` or `Ctrl-\` already reached the command through the
+/// shared process group. A forwarded SIGINT or SIGTERM repeated within
+/// [`ESCALATE_WITHIN`] kills it; a terminal's are the command's to handle
+/// (an interactive agent may take two `Ctrl-C` to exit). SIGHUP is
+/// forwarded although a hangup also reaches the group (R1.21's rule).
 async fn supervise(mut child: Child, signals: &mut Signals, out: &Out) -> ChildEnd {
     let pid = child
         .id()
         .and_then(|id| i32::try_from(id).ok())
         .map(Pid::from_raw);
-    let forward_int = !io::stdin().is_terminal();
+    let forward_tty = !io::stdin().is_terminal();
     let mut escalation = Escalation::default();
     loop {
         let (signal, forward, counts) = tokio::select! {
@@ -366,7 +399,8 @@ async fn supervise(mut child: Child, signals: &mut Signals, out: &Out) -> ChildE
                 };
             }
             Some(()) = signals.term.recv() => (Signal::SIGTERM, true, true),
-            Some(()) = signals.int.recv() => (Signal::SIGINT, forward_int, true),
+            Some(()) = signals.int.recv() => (Signal::SIGINT, forward_tty, forward_tty),
+            Some(()) = signals.quit.recv() => (Signal::SIGQUIT, forward_tty, false),
             Some(()) = signals.hup.recv() => (Signal::SIGHUP, true, false),
         };
         let Some(pid) = pid else { continue };
@@ -383,15 +417,16 @@ async fn supervise(mut child: Child, signals: &mut Signals, out: &Out) -> ChildE
 /// After the command: `--keep` snapshots and leaves the lease to run out;
 /// otherwise release with a final snapshot.
 async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
+    let deadline = ctx.timeout.max(FINISH_DEADLINE);
     if keep {
         return match ctx
-            .call(ctx.client.snapshot_workspace("", &ws.id, ""))
+            .call_within(deadline, ctx.client.snapshot_workspace("", &ws.id, ""))
             .await
         {
             Ok(response) => Outcome {
                 kept: true,
                 snapshot_taken: true,
-                final_op_id: text(&response.op_id),
+                final_op_id: non_empty(&response.op_id),
                 ..Outcome::default()
             },
             Err(error) => Outcome {
@@ -401,7 +436,10 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
             },
         };
     }
-    let release = ctx.call(ctx.client.release_workspace("", &ws.id, true, false));
+    let release = ctx.call_within(
+        deadline,
+        ctx.client.release_workspace("", &ws.id, true, false),
+    );
     tokio::pin!(release);
     let result = tokio::select! {
         result = &mut release => result,
@@ -414,7 +452,7 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
         Ok(response) => Outcome {
             released: true,
             snapshot_taken: response.snapshot_taken,
-            final_op_id: text(&response.final_op_id),
+            final_op_id: non_empty(&response.final_op_id),
             ..Outcome::default()
         },
         Err(error) => Outcome {
@@ -424,18 +462,19 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
     }
 }
 
-fn text(value: &str) -> Option<String> {
+/// `value`, or `None` if it is empty, as the API spells "unset".
+fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// Renews the lease every `heartbeat_every` until aborted, or until the
-/// daemon refuses (the lease ended), which it reports once.
+/// daemon says the lease has ended, which it reports once.
 async fn heartbeats(mut heartbeater: Heartbeater) {
     loop {
         tokio::time::sleep(heartbeater.next_delay()).await;
         if let Err(error) = heartbeater.tick().await {
             heartbeater.notify(&format!(
-                "reef: the daemon refused to renew lease {}: {}; the workspace may be reclaimed",
+                "reef: lease {} cannot be renewed: {}; the workspace may be reclaimed",
                 heartbeater.lease,
                 ErrorChain(&error)
             ));
@@ -475,7 +514,7 @@ impl Backoff {
 /// Keeps one lease alive: renews it on the daemon's `heartbeat_every`, and
 /// while the daemon is unreachable retries with [`Backoff`], noting each
 /// change of [`LinkState`] once, and once that the lease has run out.
-pub(crate) struct Heartbeater {
+struct Heartbeater {
     api: Arc<dyn WorkspacesApi>,
     workspace: String,
     lease: String,
@@ -492,7 +531,7 @@ pub(crate) struct Heartbeater {
 
 impl Heartbeater {
     /// For `lease` on `ws`, with the cadence the daemon gave it.
-    pub(crate) fn new(
+    fn new(
         api: Arc<dyn WorkspacesApi>,
         ws: &Workspace,
         lease: &Lease,
@@ -519,16 +558,18 @@ impl Heartbeater {
     }
 
     /// How long to wait before the next [`Heartbeater::tick`].
-    pub(crate) fn next_delay(&self) -> Duration {
+    fn next_delay(&self) -> Duration {
         match self.state {
             LinkState::Up => self.every,
             LinkState::Lost => self.backoff.delay(),
         }
     }
 
-    /// One heartbeat. `Ok(None)` while the daemon is unreachable; an error
-    /// when it answered and refused, such as for a lease that has ended.
-    pub(crate) async fn tick(&mut self) -> Result<Option<HeartbeatResponse>, ClientError> {
+    /// One heartbeat. `Ok(None)` while it fails for any reason but the
+    /// lease being gone; an error when it is: `Conflict` (ended, replaced,
+    /// or past its grace) or `NotFound`. A request cut off by a daemon
+    /// restart fails as `Internal`, which must not stop the heartbeats.
+    async fn tick(&mut self) -> Result<Option<HeartbeatResponse>, ClientError> {
         let call = self
             .api
             .heartbeat_workspace("", &self.workspace, &self.lease);
@@ -537,10 +578,8 @@ impl Heartbeater {
                 self.renewed(&response);
                 return Ok(Some(response));
             }
-            Ok(Err(error)) if error.kind() == ErrorKind::Unavailable => {
-                ErrorChain(&error).to_string()
-            }
-            Ok(Err(error)) => return Err(error),
+            Ok(Err(error)) if lease_gone(&error) => return Err(error),
+            Ok(Err(error)) => ErrorChain(&error).to_string(),
             Err(_) => format!(
                 "no answer within {}",
                 humantime::format_duration(HEARTBEAT_DEADLINE)
@@ -588,6 +627,11 @@ impl Heartbeater {
     fn notify(&self, text: &str) {
         (self.notify)(text);
     }
+}
+
+/// Whether a heartbeat failed because the lease can no longer be renewed.
+fn lease_gone(error: &ClientError) -> bool {
+    matches!(error.kind(), ErrorKind::Conflict | ErrorKind::NotFound)
 }
 
 /// `expires_at + grace`. Generic over the API's timestamp type, which this
@@ -755,6 +799,16 @@ mod tests {
         let notes = notes.lock().unwrap();
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[1].contains("lease lease has expired"), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn heartbeater_retries_other_failures() {
+        let cut_off = Err(tonic::Status::internal("h2 protocol error").into());
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        let (mut heartbeater, notes) = heartbeater(vec![cut_off], later);
+        assert!(heartbeater.tick().await.unwrap().is_none());
+        assert_eq!(heartbeater.next_delay(), Duration::from_secs(1));
+        assert_eq!(notes.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -271,29 +271,35 @@ async fn missing_command() {
 #[tokio::test(flavor = "multi_thread")]
 async fn heartbeats_keep_the_lease() {
     let (daemon, repo) = with_short_leases().await;
-    let child = spawn(ws_run(&daemon, &repo, &["--", "sleep", "5"]));
-    let mut first_expiry = None;
-    let mut renewed = false;
-    let begun = Instant::now();
-    // Past the 2 s lease and 1 s grace: only heartbeats keep it active.
-    while begun.elapsed() < Duration::from_millis(4000) {
-        let listed = workspaces(&daemon).await;
-        if let Some(ws) = listed.first() {
-            assert_eq!(ws["state"], "active", "{ws}");
-            let expires = ws["lease"]["expires_at"].as_str().unwrap().to_owned();
-            match &first_expiry {
-                None => first_expiry = Some(expires),
-                Some(first) => renewed |= *first != expires,
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(renewed, "expires_at never moved");
+    // The command runs until the test says stop, so a slow start under a
+    // parallel run cannot use up the time the test watches the lease for.
+    let stop = signal_file(&daemon, "stop");
+    let script = r#"while [ ! -e "$STOP" ]; do sleep 0.1; done"#;
+    let child = spawn(ws_run(
+        &daemon,
+        &repo,
+        &["--env", &env_arg("STOP", &stop), "--", "sh", "-c", script],
+    ));
+    wait_for(RECLAIM_BOUND, "workspace created", || async {
+        !workspaces(&daemon).await.is_empty()
+    })
+    .await;
+    let ws = only_workspace(&daemon).await;
+    let id = ws["id"].as_str().unwrap().to_owned();
+    let first = ws["lease"]["expires_at"].clone();
+    wait_for(RECLAIM_BOUND, "lease renewed", || async {
+        workspace(&daemon, &id).await["lease"]["expires_at"] != first
+    })
+    .await;
+    // Past the 2 s lease and 1 s grace from the last sighting of the first
+    // expiry: only heartbeats can have kept it active.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(workspace(&daemon, &id).await["state"], "active");
+    std::fs::write(&stop, "").unwrap();
     let output = wait(child).await;
     assert_eq!(code(&output), 0, "{}", stderr(&output));
-    let ws = only_workspace(&daemon).await;
-    assert_eq!(ws["state"], "released", "{ws}");
-    let reclaims = reclaims_of(&daemon, ws["id"].as_str().unwrap());
+    assert_eq!(workspace(&daemon, &id).await["state"], "released");
+    let reclaims = reclaims_of(&daemon, &id);
     assert_eq!(reclaims.len(), 1, "{reclaims:?}");
     assert_eq!(reclaims[0].reason, ReclaimReason::Released);
 }
