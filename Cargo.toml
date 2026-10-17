@@ -60,6 +60,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"
 tracing-appender = "0.2"           # the daily-rotated daemon log file
 etcetera = "0.11"                  # platform state directories
+# `config.toml` (R1.04, ADR 0013): durations in humantime's form (`"30m"`).
+toml = "1"
+humantime-serde = "1"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

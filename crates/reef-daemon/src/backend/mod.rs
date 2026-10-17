@@ -145,6 +145,20 @@ impl FromStr for BackendChoice {
     }
 }
 
+/// As its [`fmt::Display`] text, the form `workspace.backend` takes.
+impl Serialize for BackendChoice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Where one workspace's files live on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspacePaths {

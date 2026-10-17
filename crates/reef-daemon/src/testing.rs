@@ -16,7 +16,6 @@ use tempfile::TempDir;
 use crate::client::Client;
 use crate::config::{Config, Paths};
 use crate::daemon::{Daemon, DaemonHandle};
-use crate::logging::LogOptions;
 
 /// Above the generator's largest files, so a synthetic tree is tracked in
 /// full.
@@ -46,10 +45,7 @@ impl TestDaemon {
             .tempdir_in(short_tmp())
             .expect("create a temporary directory");
         let paths = Paths::in_state_dir(&tmp.path().join("state")).expect("resolve paths");
-        let config = Config {
-            paths,
-            log: LogOptions::default(),
-        };
+        let config = Config::with_defaults(paths);
         let handle = Daemon::start(config.clone())
             .await
             .expect("start the daemon");

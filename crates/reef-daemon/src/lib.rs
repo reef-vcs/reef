@@ -26,4 +26,4 @@ pub mod service;
 pub mod testing;
 
 pub use daemon::{AppState, Daemon, DaemonHandle, StartError};
-pub use run::{DaemonArgs, run_main};
+pub use run::{DaemonArgs, exit_code, run_main};

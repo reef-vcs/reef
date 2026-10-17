@@ -14,7 +14,7 @@ use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
-use reef_lib::jj::settings::{Identity, user_settings};
+use reef_lib::jj::settings::{Identity, SettingsSpec, user_settings, user_settings_from_spec};
 use reef_lib::jj::snapshot::{ChangeKind, ChangedPath, SnapshotError, UntrackedReasonKind};
 use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
 use reef_lib::jj::{OpenError, Repo};
@@ -201,6 +201,40 @@ async fn snapshot_records_new_file() {
     assert!(!second.changed);
     assert_eq!(second.op_id, first.op_id);
     assert_eq!(second.wc_commit, first.wc_commit);
+}
+
+/// R1.04: settings built from a spec, as the daemon builds them, record the
+/// host and user on the operations they write; jj-lib leaves both empty
+/// otherwise.
+#[tokio::test]
+async fn snapshot_records_operation_host_and_user_from_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = Identity {
+        name: "Reef".into(),
+        email: "reef@build-host.example".into(),
+    };
+    let settings = user_settings_from_spec(&SettingsSpec {
+        identity: &identity,
+        max_new_file_size: 1 << 20,
+        operation_hostname: "build-host.example",
+        operation_username: "agent",
+    })
+    .unwrap();
+    let mut repo = Repo::init_internal_git(dir.path(), &settings)
+        .await
+        .unwrap();
+    write(dir.path(), "a.txt", "hello\n");
+    let outcome = repo.snapshot("test").await.unwrap();
+    let head = &repo.op_log(1).await.unwrap()[0];
+    assert_eq!(head.id, outcome.op_id);
+    assert_eq!(head.hostname, "build-host.example");
+    assert_eq!(head.username, "agent");
+
+    let mut plain = open(dir.path()).await;
+    write(dir.path(), "b.txt", "hello\n");
+    plain.snapshot("test").await.unwrap();
+    let head = &plain.op_log(1).await.unwrap()[0];
+    assert_eq!((head.hostname.as_str(), head.username.as_str()), ("", ""));
 }
 
 #[tokio::test]

@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::config::{Config, PathOverrides, Paths};
+use reef_lib::error::Classify as _;
+
+use crate::config::{Config, ConfigError, PathOverrides};
 use crate::daemon::{Daemon, StartError, create_private_dir};
 use crate::lock::LockError;
 use crate::logging::{self, LogOptions};
@@ -21,7 +23,7 @@ pub struct DaemonArgs {
     /// The socket to listen on; overrides `REEF_SOCKET`.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
-    /// The configuration file; overrides `REEF_CONFIG`. Read from R1.04 on.
+    /// The configuration file; overrides `REEF_CONFIG`.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
     /// Run in the foreground, the only mode; `reef daemon start` detaches
@@ -30,18 +32,19 @@ pub struct DaemonArgs {
     pub foreground: bool,
 }
 
-/// Resolves the configuration, installs logging (stderr and
-/// `<state>/logs/daemon.log`), starts the daemon on a new multi-threaded
+/// Resolves the configuration ([`Config::load`]), installs logging (stderr
+/// and `<state>/logs/daemon.log`), starts the daemon on a new multi-threaded
 /// runtime, and runs until SIGINT or SIGTERM, then shuts down.
 pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
-    let log = LogOptions::from_env().context("initialize logging")?;
-    let paths = Paths::resolve(&PathOverrides {
+    let env_log = LogOptions::from_env().context("initialize logging")?;
+    let mut config = Config::load(&PathOverrides {
         state_dir: args.state_dir,
         socket: args.socket,
         config_file: args.config,
     })
-    .context("resolve the daemon's paths")?;
-    let config = Config::new(paths, log);
+    .context("load the daemon's configuration")?;
+    config.log.filter = env_log.filter;
+    config.log.format = env_log.format;
     // Before logging, which creates `<state>/logs` and would otherwise create
     // the state directory with the default mode.
     create_private_dir(&config.paths.state_dir).context("start the daemon")?;
@@ -78,4 +81,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(signal, "signal received");
     daemon.shutdown();
     daemon.join().await.context("run the daemon")
+}
+
+/// The exit code for a failed [`run_main`]: a configuration error exits with
+/// its kind's CLI code (2 for a bad file or flag, as `reef` does), anything
+/// else 1.
+pub fn exit_code(error: &anyhow::Error) -> u8 {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ConfigError>())
+        .map_or(1, |config| config.kind().exit_code())
+}
+
+#[cfg(test)]
+mod tests {
+    use reef_lib::error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn config_errors_exit_by_kind() {
+        let error = anyhow::Error::new(ConfigError::NoHome).context("load");
+        assert_eq!(exit_code(&error), ErrorKind::InvalidArgument.exit_code());
+        assert_eq!(exit_code(&anyhow::anyhow!("other")), 1);
+    }
 }

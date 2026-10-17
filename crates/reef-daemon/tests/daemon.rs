@@ -23,7 +23,6 @@ use reef_daemon::client::Client;
 use reef_daemon::config::{Config, ConfigError, PathOverrides, Paths, SOCKET_PATH_MAX};
 use reef_daemon::db::SCHEMA_VERSION;
 use reef_daemon::lock::LockError;
-use reef_daemon::logging::LogOptions;
 use reef_daemon::model::{RepoId, RepositoryRecord, Timestamp};
 use reef_daemon::repo::{RepoRegistry, RepoThreadError};
 use reef_daemon::{Daemon, StartError};
@@ -86,10 +85,7 @@ async fn stale_socket_is_replaced() {
     let paths = Paths::in_state_dir(&tmp.path().join("state")).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
     std::fs::write(&paths.socket, b"left behind").unwrap();
-    let config = Config {
-        paths: paths.clone(),
-        log: LogOptions::default(),
-    };
+    let config = Config::with_defaults(paths.clone());
     let handle = Daemon::start(config).await.unwrap();
     let client = Client::connect(&paths.socket).await.unwrap();
     client.status().await.unwrap();
@@ -106,10 +102,7 @@ async fn live_socket_of_another_daemon_is_not_replaced() {
         socket: Some(first.handle.socket_path().to_owned()),
         config_file: None,
     };
-    let config = Config {
-        paths: Paths::resolve(&overrides).unwrap(),
-        log: LogOptions::default(),
-    };
+    let config = Config::with_defaults(Paths::resolve(&overrides).unwrap());
     let err = Daemon::start(config).await.unwrap_err();
     assert!(matches!(err, StartError::SocketInUse { .. }), "{err:?}");
     first.client.status().await.unwrap();
@@ -354,7 +347,8 @@ fn socket_path_too_long_fails_early() {
     let output = daemon_command(tmp.path(), &[("REEF_SOCKET", long.to_str().unwrap())])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    // A configuration error, so `InvalidArgument`'s exit code (R1.04).
+    assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("is 120 bytes; the limit is 103"),
@@ -364,4 +358,45 @@ fn socket_path_too_long_fails_early() {
         std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
         "nothing created before the check"
     );
+}
+
+/// R1.04: a `REEF_CONFIG` file with an unknown key stops the binary with
+/// exit 2 and a message naming the key and the file, before it creates
+/// anything.
+#[test]
+fn unknown_config_key_exits_2() {
+    let tmp = short_tempdir();
+    let files = short_tempdir();
+    let bad = files.path().join("bad.toml");
+    std::fs::write(&bad, "[lease]\ndefualt = \"2h\"\n").unwrap();
+    let output = daemon_command(tmp.path(), &[("REEF_CONFIG", bad.to_str().unwrap())])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("error: "), "{stderr}");
+    assert!(stderr.contains("`lease.defualt`"), "{stderr}");
+    assert!(stderr.contains(&bad.display().to_string()), "{stderr}");
+    assert!(
+        std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+        "nothing created"
+    );
+}
+
+/// R1.04: the daemon's jj settings record the host and user on operations.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_settings_carry_the_operation_identity() {
+    let daemon = TestDaemon::start().await;
+    let settings = &daemon.handle.state().settings;
+    let host = nix::unistd::gethostname().unwrap().into_string().unwrap();
+    assert_eq!(settings.operation_hostname(), host);
+    assert_eq!(
+        settings.operation_username(),
+        daemon.config.operation.username
+    );
+    assert_eq!(
+        settings.user_email(),
+        format!("reef@{}", host.to_lowercase())
+    );
+    daemon.stop().await;
 }
