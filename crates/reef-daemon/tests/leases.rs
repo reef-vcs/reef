@@ -324,8 +324,10 @@ async fn grace_revives() {
     let begun = Instant::now();
     let ws = create(&daemon, &repo).await;
     let expires_at = millis(ws.lease.as_ref().unwrap().expires_at.as_ref());
-    // Early in the grace, so a slow machine still heartbeats inside it.
-    let wait = u64::try_from(expires_at + 200 - now_ms()).unwrap();
+    // Early in the grace, so a slow machine still heartbeats inside it. A
+    // create slower than the lease (a loaded machine) is in the grace
+    // already: no wait.
+    let wait = u64::try_from(expires_at + 200 - now_ms()).unwrap_or(0);
     tokio::time::sleep(Duration::from_millis(wait)).await;
     assert_eq!(
         inspect(&daemon.client, &ws).await.lease.unwrap().state(),
