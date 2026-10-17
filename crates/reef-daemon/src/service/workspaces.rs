@@ -212,9 +212,13 @@ impl Workspaces for WorkspacesService {
             .await
             .map_err(status)?;
         Ok(Response::new(SnapshotResponse {
-            op_id: snapshot.op_id.unwrap_or_default(),
+            op_id: if snapshot.changed {
+                snapshot.op_id.to_string()
+            } else {
+                String::new()
+            },
             changed: snapshot.changed,
-            commit_id: snapshot.commit_id,
+            commit_id: snapshot.commit_id.to_string(),
         }))
     }
 }

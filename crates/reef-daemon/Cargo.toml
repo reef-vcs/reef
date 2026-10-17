@@ -53,6 +53,9 @@ futures.workspace = true
 etcetera.workspace = true
 toml.workspace = true
 humantime-serde.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+rayon.workspace = true
 tempfile = { workspace = true, optional = true }
 reef-testing = { workspace = true, optional = true }
 

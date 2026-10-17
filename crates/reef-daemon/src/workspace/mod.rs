@@ -35,6 +35,7 @@ use reef_lib::jj::{
 };
 
 pub use manager::Manager;
+pub use snapshot::REEFIGNORE;
 
 use crate::backend::{
     Backend, BackendChoice, BackendError, BaseCacheError, DiskUsage, WorkspacePaths,
@@ -59,6 +60,18 @@ pub struct WorkspaceEntry {
     pub repo: RepoHandle,
     /// Serializes snapshots and release of this workspace.
     pub scan_lock: tokio::sync::Mutex<()>,
+    /// What its snapshots exclude beyond git's ignore rules.
+    pub spec: Mutex<SnapshotSpec>,
+}
+
+/// The parts of a workspace's spec its snapshots and watcher apply: empty
+/// until R1.19 reads `reef.toml` at create (and R1.20 adds store mounts).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotSpec {
+    /// `[snapshot] exclude`, in gitignore syntax, repository-root relative.
+    pub excludes: Vec<String>,
+    /// Shared store mount points, repository-root relative.
+    pub mounts: Vec<String>,
 }
 
 impl std::fmt::Debug for WorkspaceEntry {
@@ -81,6 +94,19 @@ impl WorkspaceEntry {
 
     fn update_record(&self, f: impl FnOnce(&mut WorkspaceRecord)) {
         f(&mut self.record.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// A copy of its snapshot spec.
+    pub fn spec(&self) -> SnapshotSpec {
+        self.spec
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Sets `attention` on the loaded row (the database is the caller's).
+    pub(crate) fn set_attention(&self, attention: Option<crate::model::Attention>) {
+        self.update_record(|record| record.attention = attention);
     }
 }
 
@@ -163,17 +189,6 @@ pub struct Released {
     pub snapshot_taken: bool,
     /// Bytes the workspace had allocated, estimated before tear-down.
     pub freed_bytes: u64,
-}
-
-/// What [`Manager::snapshot`] did.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snapshotted {
-    /// The snapshot's operation; `None` when nothing changed.
-    pub op_id: Option<String>,
-    /// Whether the tree changed.
-    pub changed: bool,
-    /// The working-copy commit afterwards.
-    pub commit_id: String,
 }
 
 /// What [`Manager::inspect`] found.

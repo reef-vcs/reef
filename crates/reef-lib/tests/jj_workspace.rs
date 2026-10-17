@@ -27,8 +27,8 @@ use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::workspace::CommitLookupError;
 use reef_lib::jj::{
-    ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, OpenError, Repo,
-    ResolveError, ResolvedVia, StartPoint,
+    ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources, OpenError,
+    Repo, ResolveError, ResolvedVia, StartPoint, commit_snapshot,
 };
 use tempfile::TempDir;
 
@@ -606,8 +606,9 @@ async fn jj_cli_lists_reef_workspace() {
     );
 }
 
-// R1.05: a reopened workspace is loaded at its working copy's operation, so
-// it snapshots even after other workspaces moved the head.
+// R1.05, R1.13: a reopened workspace snapshots even after other workspaces
+// moved the head; its working copy is behind head but its commit was not
+// rewritten, so it is fresh.
 #[tokio::test]
 async fn reopened_workspace_snapshots_after_others_moved_head() {
     let (mut fx, commit) = Fixture::with_files().await;
@@ -619,20 +620,156 @@ async fn reopened_workspace_snapshots_after_others_moved_head() {
     assert_ne!(fx.main.op_id(), created_at);
 
     let mut ws = fx.main.open_workspace(&root, &state).unwrap();
-    let error = ws.snapshot("reef: snapshot workspace x").await.unwrap_err();
-    assert_eq!(
-        error.kind(),
-        ErrorKind::Conflict,
-        "loaded at head, it is stale"
-    );
-    assert_eq!(ws.reload_at_working_copy_op().await.unwrap(), created_at);
-    assert_eq!(ws.op_id(), created_at);
+    assert_eq!(ws.op_id(), fx.main.op_id(), "loaded at head");
+    // The working copy starts empty and the commit holds the files; seed it.
+    ws.reset_to(&ws.wc_change().unwrap().commit_id)
+        .await
+        .unwrap();
+    write(&root, "a.txt", "a\n");
+    write(&root, "dir/b.txt", "b\n");
     write(&root, "x.txt", "x\n");
     assert!(
         ws.snapshot("reef: snapshot workspace x")
             .await
             .unwrap()
             .changed
+    );
+    assert_eq!(ws.reload_at_working_copy_op().await.unwrap(), ws.op_id());
+}
+
+/// Two Reef workspaces on one empty change: `reef-x` creates it on the
+/// user's working-copy commit and `reef-y` edits it.
+async fn two_on_one_change() -> (Fixture, Repo, PathBuf, Repo, PathBuf) {
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx.create("reef-x", StartPoint::NewOn(base)).await;
+    let change = x.wc_change().unwrap().commit_id;
+    let (y, y_root, _) = fx.create("reef-y", StartPoint::Edit(change)).await;
+    // As the daemon does before every snapshot: load at the current head.
+    x.set_head(Arc::clone(fx.main.head()));
+    (fx, x, x_root, y, y_root)
+}
+
+// R1.13: a stale working copy with no edits of its own follows the rewrite
+// of its commit; no operation is written.
+#[tokio::test]
+async fn stale_adopts_when_clean() {
+    let (_fx, mut x, x_root, mut y, y_root) = two_on_one_change().await;
+    let shared = y.wc_change().unwrap().commit_id;
+    write(&x_root, "from-x.txt", "x\n");
+    let snapshot = x.snapshot("reef: snapshot workspace x").await.unwrap();
+    assert!(snapshot.changed);
+
+    y.set_head(Arc::clone(x.head()));
+    let pending = y
+        .begin_snapshot(Some(&shared), &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.adopted());
+    assert!(!pending.changed());
+    assert_eq!(pending.updated_files(), 1);
+    assert_eq!(pending.wc_commit(), Some(&snapshot.wc_commit));
+    pending.finish(&snapshot.op_id).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(y_root.join("from-x.txt")).unwrap(),
+        "x\n"
+    );
+    assert_eq!(y.op_id(), snapshot.op_id, "no operation was written");
+    // The working copy is fresh again.
+    write(&y_root, "from-y.txt", "y\n");
+    assert!(
+        y.snapshot("reef: snapshot workspace y")
+            .await
+            .unwrap()
+            .changed
+    );
+}
+
+// R1.13: a stale working copy with edits rewrites the commit it last
+// snapshotted, which makes the change divergent; neither workspace's files
+// are lost.
+#[tokio::test]
+async fn stale_diverges_when_dirty() {
+    let (fx, mut x, x_root, mut y, y_root) = two_on_one_change().await;
+    let shared = y.wc_change().unwrap();
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    let x_snapshot = x.snapshot("reef: snapshot workspace x").await.unwrap();
+
+    y.set_head(Arc::clone(x.head()));
+    let pending = y
+        .begin_snapshot(Some(&shared.commit_id), &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    assert!(!pending.adopted());
+    let plan = pending.plan().clone();
+    assert!(plan.divergent);
+    assert_eq!(plan.rewrite_of, shared.commit_id);
+    let committed = commit_snapshot(x.head(), &plan, "reef: snapshot workspace y")
+        .await
+        .unwrap();
+    assert!(committed.divergent);
+    assert_eq!(committed.change_id, shared.change_id);
+    pending.finish(&committed.op_id).await.unwrap();
+    y.set_head(committed.repo);
+
+    let mut main = fx.main;
+    main.reload_at_head().await.unwrap();
+    let error = main
+        .resolve_revision(shared.change_id.as_str())
+        .await
+        .unwrap_err();
+    let ResolveError::DivergentChange { commits, .. } = error else {
+        panic!("expected a divergent change, got {error:?}");
+    };
+    let commits: BTreeSet<_> = commits.into_iter().collect();
+    assert_eq!(
+        commits,
+        BTreeSet::from([x_snapshot.wc_commit, committed.commit_id.clone()])
+    );
+    assert_eq!(y.wc_change().unwrap().commit_id, committed.commit_id);
+    assert!(y_root.join("from-y.txt").is_file());
+    assert!(
+        !y_root.join("from-x.txt").exists(),
+        "x's edit is not adopted"
+    );
+}
+
+// R1.13: a workspace jj forgot is recovered onto a new change on its last
+// commit's parents.
+#[tokio::test]
+async fn forgotten_workspace_is_recovered() {
+    let (mut fx, mut x, x_root, mut y, _) = two_on_one_change().await;
+    let before = x.wc_change().unwrap();
+    let parents = fx.main.commit_parents(&before.commit_id).await.unwrap();
+    fx.main
+        .forget_workspace("reef-x", "forget reef-x")
+        .await
+        .unwrap();
+    drop(y.reload_at_head().await);
+    write(&x_root, "after-forget.txt", "x\n");
+
+    x.set_head(Arc::clone(fx.main.head()));
+    let pending = x
+        .begin_snapshot(Some(&before.commit_id), &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    assert_eq!(pending.wc_commit(), None);
+    let plan = pending.plan().clone();
+    assert_eq!(plan.recover.as_deref(), Some(parents.as_slice()));
+    let committed = commit_snapshot(fx.main.head(), &plan, "reef: snapshot workspace x")
+        .await
+        .unwrap();
+    assert!(!committed.divergent);
+    assert_ne!(committed.change_id, before.change_id, "a fresh change id");
+    pending.finish(&committed.op_id).await.unwrap();
+    x.set_head(committed.repo);
+    assert_eq!(x.wc_change().unwrap().commit_id, committed.commit_id);
+    assert_eq!(
+        fx.main.commit_parents(&committed.commit_id).await.unwrap(),
+        parents
     );
 }
 

@@ -18,6 +18,7 @@ allow = [
   "Unicode-3.0",
   "CC0-1.0",
   "MPL-2.0",
+  "ISC",            # inotify and inotify-sys, under notify (R1.13); permissive, MIT-equivalent
 ]
 confidence-threshold = 0.9
 # The list covers the dependency tree Phase 0 builds up (jj-lib, tokio, criterion, ...), which

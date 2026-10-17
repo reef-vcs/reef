@@ -515,9 +515,8 @@ impl Repo {
 
     /// Reopens a workspace made by [`Repo::create_workspace`], after a
     /// restart, from its root and state directory. The returned [`Repo`] is
-    /// loaded at this one's operation; if other workspaces have written
-    /// operations since its working copy was last updated, its next snapshot
-    /// reports the working copy stale (R1.13 handles that).
+    /// loaded at this one's operation; [`Repo::begin_snapshot`] decides what
+    /// to do if its working copy was last updated at another (ADR 0018).
     #[tracing::instrument(
         skip_all,
         fields(repo = %self.workspace_root().display(), path = %root.display())
@@ -565,12 +564,10 @@ impl Repo {
     }
 
     /// Reloads this workspace's repository at the operation its working
-    /// copy was last updated at, as recorded in its state directory, so a
-    /// workspace reopened by [`Repo::open_workspace`] after a restart can
-    /// snapshot as it could before: [`Repo::snapshot`] requires the two to
-    /// match. Returns that operation. Operations other workspaces wrote
-    /// since are merged in when the repository thread next loads at head
-    /// (R1.13 replaces this with its staleness policy).
+    /// copy was last updated at, as recorded in its state directory.
+    /// Returns that operation. The daemon does not need this since R1.13:
+    /// it loads every workspace at head before a snapshot and lets the
+    /// staleness policy decide (ADR 0018).
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn reload_at_working_copy_op(&mut self) -> Result<OperationIdHex, OpenError> {
         let op_id = self.workspace.working_copy().operation_id().clone();

@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::{ForgetWorkspaceError, UserSettings};
-use tokio::sync::Semaphore;
 
 use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
@@ -21,7 +20,7 @@ use crate::model::{
     WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
 use crate::repo::{RepoHandle, RepoRegistry};
-use crate::snapshot::SnapshotKind;
+use crate::snapshot::{Scheduler, SnapshotKind};
 
 /// The `reclaims.detail` of a workspace whose directory was gone at start.
 pub(super) const DIRECTORY_MISSING: &str = "directory missing at start";
@@ -42,8 +41,9 @@ pub struct Manager {
     /// runs under a create that has no row yet.
     repo_locks: Mutex<HashMap<RepoId, Arc<tokio::sync::RwLock<()>>>>,
     entries: RwLock<HashMap<WorkspaceId, Arc<WorkspaceEntry>>>,
-    /// Bounds concurrent scans at `watcher.max_concurrent_scans`.
-    pub(super) scans: Arc<Semaphore>,
+    /// Schedules snapshots and bounds concurrent scans at
+    /// `watcher.max_concurrent_scans`.
+    pub(super) scheduler: Scheduler,
 }
 
 impl std::fmt::Debug for Manager {
@@ -55,24 +55,55 @@ impl std::fmt::Debug for Manager {
 }
 
 impl Manager {
-    /// A manager with nothing loaded yet; [`Manager::load_active`] loads.
+    /// A manager with nothing loaded yet; [`Manager::load_active`] loads,
+    /// and [`Scheduler::start`] starts automatic snapshots.
     pub fn new(
         config: Config,
         db: Arc<Db>,
         repos: Arc<RepoRegistry>,
         settings: UserSettings,
-    ) -> Manager {
-        let scans = Arc::new(Semaphore::new(config.max_concurrent_scans().max(1)));
-        Manager {
-            config,
-            db,
-            repos,
-            settings,
-            bases: Mutex::new(HashMap::new()),
-            repo_locks: Mutex::new(HashMap::new()),
-            entries: RwLock::new(HashMap::new()),
-            scans,
-        }
+    ) -> Arc<Manager> {
+        Arc::new_cyclic(|manager| {
+            let scheduler = Scheduler::new(
+                &config.file.watcher,
+                config.max_concurrent_scans(),
+                manager.clone(),
+            );
+            Manager {
+                config,
+                db,
+                repos,
+                settings,
+                bases: Mutex::new(HashMap::new()),
+                repo_locks: Mutex::new(HashMap::new()),
+                entries: RwLock::new(HashMap::new()),
+                scheduler,
+            }
+        })
+    }
+
+    /// The snapshot scheduler.
+    pub fn scheduler(&self) -> &Scheduler {
+        &self.scheduler
+    }
+
+    /// The metadata database.
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// Replaces a loaded workspace's snapshot spec and re-watches it with
+    /// the new skip list. R1.19 sets the spec at create; tests set it here.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_snapshot_spec(
+        &self,
+        id: WorkspaceId,
+        spec: super::SnapshotSpec,
+    ) -> Result<(), ManagerError> {
+        let entry = self.entry(id).ok_or(ManagerError::NotLoaded(id))?;
+        *entry.spec.lock().unwrap_or_else(PoisonError::into_inner) = spec;
+        self.scheduler.rewatch(id);
+        Ok(())
     }
 
     /// The loaded workspace with this id: every `active` workspace whose
@@ -137,9 +168,21 @@ impl Manager {
         &self,
         id: WorkspaceId,
     ) -> Result<Arc<WorkspaceEntry>, ManagerError> {
+        self.loaded_entry(id, false)
+    }
+
+    /// The loaded entry of an `active` workspace (or a `releasing` one, with
+    /// `releasing_ok`), or why there is none.
+    pub(super) fn loaded_entry(
+        &self,
+        id: WorkspaceId,
+        releasing_ok: bool,
+    ) -> Result<Arc<WorkspaceEntry>, ManagerError> {
         if let Some(entry) = self.entry(id) {
             let state = entry.record().state;
-            if state != WorkspaceState::Active {
+            let allowed = state == WorkspaceState::Active
+                || (releasing_ok && state == WorkspaceState::Releasing);
+            if !allowed {
                 return Err(ManagerError::NotActive { id, state });
             }
             return Ok(entry);
@@ -277,7 +320,8 @@ impl Manager {
     ) -> Result<Inspected, ManagerError> {
         let active = self.db.workspace(id)?.state == WorkspaceState::Active;
         let op_id = if snapshot_first && active {
-            self.snapshot(id, SnapshotKind::Explicit, "").await?.op_id
+            let snapshot = self.snapshot(id, SnapshotKind::Explicit, "").await?;
+            snapshot.changed.then(|| snapshot.op_id.to_string())
         } else {
             None
         };
@@ -391,16 +435,18 @@ impl Manager {
                 jj: Arc::new(Mutex::new(jj)),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
+                spec: Mutex::new(super::SnapshotSpec::default()),
             };
             self.insert_entry(id, Arc::new(entry));
+            self.scheduler.track(id);
             loaded += 1;
         }
         Ok(loaded)
     }
 
-    /// The workspace's jj handle, loaded at the operation its working copy
-    /// last recorded so its next snapshot is not stale; `None` (logged) if
-    /// it cannot be reopened.
+    /// The workspace's jj handle, loaded at the repository thread's head
+    /// (each snapshot reloads it there anyway); `None` (logged) if it cannot
+    /// be reopened.
     async fn reopen(
         &self,
         handle: &RepoHandle,
@@ -411,18 +457,8 @@ impl Manager {
         let state_dir = paths.state_dir.clone();
         let opened = handle
             .call_async(move |head| {
-                async move {
-                    let mut ws = head.repo.open_workspace(&root, &state_dir)?;
-                    if let Err(error) = ws.reload_at_working_copy_op().await {
-                        tracing::warn!(
-                            workspace_id = %id,
-                            error = %ErrorChain(&error),
-                            "cannot load the workspace at its working copy's operation; using head"
-                        );
-                    }
-                    Ok::<_, ManagerError>(ws)
-                }
-                .boxed_local()
+                async move { Ok::<_, ManagerError>(head.repo.open_workspace(&root, &state_dir)?) }
+                    .boxed_local()
             })
             .await;
         match opened {
@@ -527,12 +563,12 @@ mod tests {
     fn manager(state: &Path) -> Arc<Manager> {
         let config = Config::with_defaults(Paths::in_state_dir(state).unwrap());
         let settings = config.jj_settings().unwrap();
-        Arc::new(Manager::new(
+        Manager::new(
             config,
             Arc::new(Db::open_in_memory().unwrap()),
             Arc::new(RepoRegistry::new()),
             settings,
-        ))
+        )
     }
 
     #[tokio::test]

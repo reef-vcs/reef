@@ -58,6 +58,27 @@ impl RepoHead {
         Ok(())
     }
 
+    /// The repository at head, reloading first if anything (the `jj` CLI,
+    /// another process) has written an operation since the last load.
+    /// Clears a pending reload either way.
+    pub async fn refresh(&mut self) -> Result<Arc<ReadonlyRepo>, OpenError> {
+        if self.dirty {
+            self.reload().await?;
+        } else {
+            self.repo.reload_if_moved().await?;
+        }
+        Ok(self.readonly())
+    }
+
+    /// Makes `repo`, the result of a transaction this job committed on
+    /// [`RepoHead::readonly`], the head, without reloading. Operations other
+    /// processes wrote meanwhile are merged by the next
+    /// [`RepoHead::refresh`].
+    pub fn adopt(&mut self, repo: Arc<ReadonlyRepo>) {
+        self.repo.set_head(repo);
+        self.dirty = false;
+    }
+
     /// Records that the current job committed an operation, possibly
     /// through another [`Repo`] or a transaction on [`RepoHead::readonly`].
     /// The thread reloads at head when the job returns, so the next job
