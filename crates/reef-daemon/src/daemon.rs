@@ -478,6 +478,7 @@ async fn reindex_repo(state: &Arc<AppState>, id: RepoId) {
                 repo = %id,
                 added_count = report.added,
                 removed_count = report.removed,
+                skipped_count = report.skipped,
                 walked_count = report.walked,
                 truncated = report.truncated,
                 elapsed_ms = elapsed_ms(begun),

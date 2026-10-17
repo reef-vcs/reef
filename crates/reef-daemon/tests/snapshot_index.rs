@@ -93,6 +93,24 @@ async fn watcher_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Worksp
     }
 }
 
+/// Stops watcher snapshots so that from here on only the test's own steps
+/// write operations. Dropping new events is not enough: a batch already
+/// delivered may have marked a workspace dirty, and its snapshot could take
+/// in the next file the test writes. So wait out the debounce and
+/// `min_interval`, then snapshot each workspace once to absorb whatever is
+/// pending (normally nothing, which writes no operation) and clear its mark.
+async fn quiesce(daemon: &TestDaemon, repo: &SyntheticRepo, workspaces: &[&Workspace]) {
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for ws in workspaces {
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &ws.id, "")
+            .await
+            .unwrap();
+    }
+}
+
 /// Writes a file and takes an explicit snapshot; returns the operation.
 async fn explicit_snapshot(
     daemon: &TestDaemon,
@@ -198,8 +216,7 @@ async fn every_kind_is_recorded() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo, None).await;
     let watcher_op = watcher_snapshot(&daemon, &repo, &ws).await;
-    // From here on only the test's own steps write operations.
-    daemon.handle.state().manager.scheduler().pause_watcher();
+    quiesce(&daemon, &repo, &[&ws]).await;
     let explicit_op = explicit_snapshot(&daemon, &repo, &ws, "explicit.txt").await;
     // A `Move` snapshot is not covered: R1.06 (workspace move) has not
     // landed, so the daemon cannot take one yet.
@@ -277,10 +294,17 @@ async fn reindex_rebuilds() {
     let released = create(&daemon, &repo, None).await;
     let active = create(&daemon, &repo, None).await;
     watcher_snapshot(&daemon, &repo, &released).await;
-    daemon.handle.state().manager.scheduler().pause_watcher();
+    quiesce(&daemon, &repo, &[&released, &active]).await;
     explicit_snapshot(&daemon, &repo, &released, "explicit.txt").await;
     final_snapshot(&daemon, &repo, &released).await;
-    explicit_snapshot(&daemon, &repo, &active, "other.txt").await;
+    // A custom description: the log marks it by its workspace name alone.
+    write(&active, "other.txt", "other\n");
+    let custom = daemon
+        .client
+        .snapshot_workspace(&repo.id, &active.id, "wip before refactor")
+        .await
+        .unwrap();
+    assert!(custom.changed);
     let db = &daemon.handle.state().db;
     let before = by_op(rows(db, &released).into_iter().chain(rows(db, &active)));
     assert_eq!(before.len(), 4);
@@ -316,6 +340,7 @@ async fn reindex_rebuilds() {
     let report = report(&daemon, &repo);
     assert_eq!(report.added, 4);
     assert_eq!(report.removed, 0);
+    assert_eq!(report.skipped, 0);
     assert!(!report.truncated);
     assert!(report.walked >= 4, "{report:?}");
 }
@@ -338,7 +363,7 @@ fn fabricated(ws: &Workspace) -> SnapshotEntry {
 async fn reindex_removes_missing() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo, None).await;
-    daemon.handle.state().manager.scheduler().pause_watcher();
+    quiesce(&daemon, &repo, &[&ws]).await;
     let real = explicit_snapshot(&daemon, &repo, &ws, "real.txt").await;
     let fake = fabricated(&ws);
     index::record(&daemon.handle.state().db, repo_id(&repo), &fake).unwrap();
@@ -405,7 +430,7 @@ async fn for_change_lists_all_workspaces() {
         Some(create_request::Start::Change(a.change_id.clone())),
     )
     .await;
-    daemon.handle.state().manager.scheduler().pause_watcher();
+    quiesce(&daemon, &repo, &[&a, &b]).await;
     let a_op = explicit_snapshot(&daemon, &repo, &a, "from-a.txt").await;
     // `b` had its own edit when `a` rewrote the shared commit: it diverges,
     // on the same change.
@@ -433,7 +458,7 @@ async fn for_change_lists_all_workspaces() {
 async fn truncated_walk_removes_nothing() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo, None).await;
-    daemon.handle.state().manager.scheduler().pause_watcher();
+    quiesce(&daemon, &repo, &[&ws]).await;
     explicit_snapshot(&daemon, &repo, &ws, "one.txt").await;
     let state = daemon.handle.state();
     let fake = fabricated(&ws);
@@ -448,6 +473,7 @@ async fn truncated_walk_removes_nothing() {
         ReindexReport {
             added: 0,
             removed: 0,
+            skipped: 0,
             walked: 1,
             truncated: true
         }

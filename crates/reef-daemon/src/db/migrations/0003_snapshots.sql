@@ -10,7 +10,9 @@ CREATE TABLE snapshots(op_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, workspace_
           change_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('watcher','explicit','final','move','shutdown')),
           local INTEGER NOT NULL DEFAULT 1, taken_at INTEGER NOT NULL);
 
--- A workspace's snapshots, newest first: `ws inspect` and its counts.
-CREATE INDEX snapshots_by_workspace ON snapshots(workspace_id, taken_at DESC);
+-- A workspace's snapshots, newest first: `ws inspect` and its counts. `op_id`
+-- orders snapshots taken in the same millisecond, so the newest-first query
+-- reads the index in order instead of sorting.
+CREATE INDEX snapshots_by_workspace ON snapshots(workspace_id, taken_at DESC, op_id);
 -- Every workspace's snapshots of one change: what R4's publish clears.
 CREATE INDEX snapshots_by_change ON snapshots(repo_id, change_id);

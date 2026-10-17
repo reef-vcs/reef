@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::FutureExt as _;
-use reef_lib::error::{Classify, ErrorKind};
+use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::oplog::{OpLogError, SnapshotMarkKind, is_reef_snapshot};
 use reef_lib::jj::{ChangeIdHex, CommitIdHex, OpenError, OperationIdHex};
 use rusqlite::types::Type;
@@ -199,6 +199,10 @@ pub struct ReindexReport {
     pub added: u64,
     /// Rows removed because their operation has left the log.
     pub removed: u64,
+    /// Reef snapshot operations with no row that were left unindexed: their
+    /// view has no working-copy commit for the workspace, or it could not
+    /// be read (logged).
+    pub skipped: u64,
     /// Operations walked, Reef's or not.
     pub walked: u64,
     /// The walk stopped at `gc.reindex_limit` before the root operation.
@@ -253,6 +257,8 @@ struct SnapshotOpRow {
 struct Scan {
     /// Reef snapshot operations of known workspaces with no row yet.
     missing: Vec<SnapshotOpRow>,
+    /// Reef snapshot operations with no row whose commit could not be read.
+    skipped: u64,
     /// Indexed operations the walk reached.
     present: HashSet<String>,
     walked: u64,
@@ -295,6 +301,7 @@ pub async fn reindex(
     };
 
     let mut report = ReindexReport {
+        skipped: scan.skipped,
         walked: scan.walked,
         truncated: scan.truncated,
         ..ReindexReport::default()
@@ -360,12 +367,29 @@ async fn scan(
         })
         .await?;
     let mut missing = Vec::with_capacity(marked.len());
+    let mut skipped = 0;
     for (op_id, workspace_id, kind, end_time) in marked {
         let name = workspace_id.jj_workspace_name();
-        let Some((commit_id, change_id)) = head.repo.wc_commit_at(&op_id, &name).await? else {
-            // A snapshot of a workspace its own view lacks; nothing to index.
-            tracing::debug!(op_id = %op_id, workspace_id = %workspace_id, "snapshot operation without a working-copy commit; skipped");
-            continue;
+        // One unreadable operation or commit must not keep the rest of the
+        // repository from being indexed.
+        let (commit_id, change_id) = match head.repo.wc_commit_at(&op_id, &name).await {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                // A snapshot of a workspace its own view lacks.
+                tracing::debug!(op_id = %op_id, workspace_id = %workspace_id, "snapshot operation without a working-copy commit; skipped");
+                skipped += 1;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    op_id = %op_id,
+                    workspace_id = %workspace_id,
+                    error = %ErrorChain(&error),
+                    "cannot read a snapshot operation's working-copy commit; not indexed"
+                );
+                skipped += 1;
+                continue;
+            }
         };
         missing.push(SnapshotOpRow {
             op_id,
@@ -379,6 +403,7 @@ async fn scan(
     Ok(Scan {
         missing,
         present,
+        skipped,
         walked: walk.walked,
         truncated: walk.truncated,
     })

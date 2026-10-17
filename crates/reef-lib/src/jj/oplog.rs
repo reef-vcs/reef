@@ -54,7 +54,8 @@ pub struct OpWalk {
 /// operation itself has no field to mark it with; ADR 0008).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotMark {
-    /// The Reef workspace id from the description, in hex.
+    /// The Reef workspace id, in hex: from the description, else from the
+    /// jj workspace name `reef-<id>`.
     pub workspace_id: String,
     /// Which description it carries.
     pub kind: SnapshotMarkKind,
@@ -65,7 +66,8 @@ pub struct SnapshotMark {
 /// keeps the finer kind in its index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotMarkKind {
-    /// `reef: snapshot workspace <id>`.
+    /// `reef: snapshot workspace <id>`, or any other description on a
+    /// snapshot of a `reef-<id>` jj workspace.
     Snapshot,
     /// `reef: final snapshot of workspace <id> (<reason>)`.
     Final,
@@ -79,17 +81,36 @@ const SNAPSHOT_PREFIX: &str = "reef: snapshot workspace ";
 const FINAL_PREFIX: &str = "reef: final snapshot of workspace ";
 /// Prefix of move snapshot descriptions.
 const MOVE_PREFIX: &str = "reef: move workspace ";
+/// Prefix of the jj workspace names of Reef workspaces.
+const WORKSPACE_PREFIX: &str = "reef-";
 
-/// Whether `entry` is a snapshot operation the Reef daemon wrote, and for
-/// which workspace: a snapshot operation (`is_snapshot`) with one of the
-/// daemon's descriptions (R1.13). `None` for anything else, including jj's
-/// own `snapshot working copy` and a snapshot given a custom description
-/// through the `Snapshot` RPC.
+/// Whether `entry` is a snapshot operation of a Reef workspace, and of
+/// which one: a snapshot operation (`is_snapshot`) with one of the daemon's
+/// descriptions (R1.13), or with any other description recorded in a
+/// `reef-<id>` jj workspace. The second covers a snapshot given a custom
+/// description through the `Snapshot` RPC; it also covers `jj` run inside a
+/// Reef workspace, whose snapshot holds that workspace's local edits as
+/// much as one the daemon took. `None` for anything else, such as jj's
+/// `snapshot working copy` in the user's `default` workspace.
 pub fn is_reef_snapshot(entry: &OpEntry) -> Option<SnapshotMark> {
     if !entry.is_snapshot {
         return None;
     }
-    let description = entry.description.as_str();
+    described(&entry.description).or_else(|| {
+        let id = entry.workspace.as_deref()?.strip_prefix(WORKSPACE_PREFIX)?;
+        is_hex(id).then(|| SnapshotMark {
+            workspace_id: id.to_owned(),
+            kind: SnapshotMarkKind::Snapshot,
+        })
+    })
+}
+
+fn is_hex(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The mark one of the daemon's snapshot descriptions carries.
+fn described(description: &str) -> Option<SnapshotMark> {
     let (workspace_id, kind) = if let Some(id) = description.strip_prefix(SNAPSHOT_PREFIX) {
         (id, SnapshotMarkKind::Snapshot)
     } else if let Some(rest) = description.strip_prefix(FINAL_PREFIX) {
@@ -106,8 +127,7 @@ pub fn is_reef_snapshot(entry: &OpEntry) -> Option<SnapshotMark> {
         }
         (id, SnapshotMarkKind::Move)
     };
-    let is_id = !workspace_id.is_empty() && workspace_id.bytes().all(|b| b.is_ascii_hexdigit());
-    is_id.then(|| SnapshotMark {
+    is_hex(workspace_id).then(|| SnapshotMark {
         workspace_id: workspace_id.to_owned(),
         kind,
     })
@@ -263,6 +283,10 @@ mod tests {
     const ID: &str = "0123456789abcdef";
 
     fn entry(description: &str, is_snapshot: bool) -> OpEntry {
+        in_workspace(description, is_snapshot, "default")
+    }
+
+    fn in_workspace(description: &str, is_snapshot: bool, workspace: &str) -> OpEntry {
         OpEntry {
             id: "00".parse().unwrap(),
             parents: Vec::new(),
@@ -272,7 +296,7 @@ mod tests {
             hostname: String::new(),
             username: String::new(),
             is_snapshot,
-            workspace: Some(format!("reef-{ID}")),
+            workspace: Some(workspace.to_owned()),
         }
     }
 
@@ -326,5 +350,31 @@ mod tests {
         // The right description on an operation that is not a snapshot.
         let description = format!("reef: snapshot workspace {ID}");
         assert_eq!(is_reef_snapshot(&entry(&description, false)), None);
+        // Not a Reef workspace's name.
+        for workspace in ["reef-", "reef-xyz", "agent-0123456789abcdef"] {
+            let op = in_workspace("custom description", true, workspace);
+            assert_eq!(is_reef_snapshot(&op), None, "{workspace}");
+        }
+    }
+
+    // A custom description given through the `Snapshot` RPC, and `jj` run
+    // inside a Reef workspace: the workspace name marks them.
+    #[test]
+    fn reef_workspace_snapshots_are_recognized_by_name() {
+        let name = format!("reef-{ID}");
+        for description in ["wip before refactor", "snapshot working copy"] {
+            let mark = is_reef_snapshot(&in_workspace(description, true, &name)).unwrap();
+            assert_eq!(mark.workspace_id, ID);
+            assert_eq!(mark.kind, SnapshotMarkKind::Snapshot);
+        }
+        assert_eq!(
+            is_reef_snapshot(&in_workspace("wip", false, &name)),
+            None,
+            "not a snapshot"
+        );
+        // The description's own form still sets the kind.
+        let fin = format!("reef: final snapshot of workspace {ID} (released)");
+        let mark = is_reef_snapshot(&in_workspace(&fin, true, &name)).unwrap();
+        assert_eq!(mark.kind, SnapshotMarkKind::Final);
     }
 }
