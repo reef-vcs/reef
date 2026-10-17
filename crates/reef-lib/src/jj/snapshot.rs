@@ -16,7 +16,7 @@
 //! [`Repo::snapshot`] runs the three in one place.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures::StreamExt as _;
 use jj_lib::backend::{BackendError, CommitId, TreeId};
@@ -313,6 +313,9 @@ pub struct SnapshotCommit {
     pub write: Duration,
     /// Committing the operation.
     pub commit: Duration,
+    /// When the operation ended, as jj recorded it: what R1.16's index
+    /// stores, so a row and its rebuild from the log agree.
+    pub end_time: SystemTime,
 }
 
 impl std::fmt::Debug for SnapshotCommit {
@@ -376,6 +379,7 @@ pub async fn commit_snapshot(
         commit_id: CommitIdHex::of(new_commit.id()),
         change_id: ChangeIdHex::of(new_commit.change_id()),
         divergent,
+        end_time: super::oplog::system_time(repo.operation().metadata().time.end),
         repo,
         write,
         commit: commit_start.elapsed(),

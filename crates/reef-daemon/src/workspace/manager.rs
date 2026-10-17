@@ -22,6 +22,7 @@ use crate::model::{
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
 use crate::repo::{RepoHandle, RepoRegistry};
+use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind};
 use crate::watcher::{WatchError, select_watcher};
 
@@ -413,7 +414,8 @@ impl Manager {
     }
 
     /// One workspace from the database, with its disk usage from its
-    /// backend and the other active workspaces on its change. With
+    /// backend, the other active workspaces on its change, and its indexed
+    /// snapshots (R1.16). With
     /// `snapshot_first`, takes an explicit snapshot before reading if the
     /// workspace is active (a released one has nothing to snapshot).
     pub async fn inspect(
@@ -443,12 +445,17 @@ impl Manager {
             .filter(|other| other.id != record.id && other.change_id == record.change_id)
             .map(|other| other.id)
             .collect();
+        let (snapshot_count, local_snapshot_count) = index::counts(&self.db, id)?;
+        let recent_snapshots = index::recent(&self.db, id, index::RECENT_LIMIT)?;
         Ok(Inspected {
             record,
             lease,
             disk_usage,
             other_workspaces_on_change,
             op_id,
+            snapshot_count,
+            local_snapshot_count,
+            recent_snapshots,
         })
     }
 

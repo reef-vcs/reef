@@ -10,12 +10,13 @@
 //!    root), reload the repository thread at head and try once more.
 //! 3. (repository thread) If the scan changed anything, `commit_snapshot`;
 //!    its result becomes the thread's head.
-//! 4. (blocking) Update the row, then save the working-copy state at the new
-//!    operation (or at the head, when nothing was committed).
+//! 4. (blocking) Update the row and index the operation as a local snapshot
+//!    (R1.16), then save the working-copy state at the new operation (or at
+//!    the head, when nothing was committed).
 //! 5. (async) Log, and run the post-snapshot hooks.
 //!
-//! The row is written before the working-copy state, as R1.16 requires of
-//! its index row, so a crash between the two leaves a row naming an
+//! Both rows are written before the working-copy state, as R1.16 requires
+//! of its index row, so a crash between the two leaves rows naming an
 //! operation that exists.
 
 use std::path::Path;
@@ -35,6 +36,7 @@ use tracing::Instrument as _;
 use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
+use crate::snapshot::index::{self, SnapshotEntry};
 use crate::snapshot::{ScanPermit, SnapshotKind, SnapshotOutcome, Trigger, description};
 
 /// The per-workspace ignore file, in gitignore syntax, at the workspace root.
@@ -244,6 +246,7 @@ impl Manager {
                     entry: &entry,
                     db: &db,
                     id,
+                    kind,
                     expected: expected.as_ref(),
                     reefignore: &reefignore,
                     spec: &spec,
@@ -321,6 +324,7 @@ struct Pipeline<'a> {
     entry: &'a WorkspaceEntry,
     db: &'a Db,
     id: WorkspaceId,
+    kind: SnapshotKind,
     expected: Option<&'a CommitIdHex>,
     reefignore: &'a Path,
     spec: &'a SnapshotSpec,
@@ -462,7 +466,7 @@ impl Pipeline<'_> {
             Ok(Err(error)) => return (Err(error.into()), None),
             Err(error) => return (Err(error.into()), None),
         };
-        let row = record_commit(self.db, self.entry, &committed, recovered);
+        let row = record_commit(self.db, self.entry, self.kind, &committed, recovered);
         let finished = pollster::block_on(pending.finish(&committed.op_id));
         let new_head = Some(Arc::clone(&committed.repo));
         let ran = row.and(finished.map_err(ManagerError::from)).map(|()| Ran {
@@ -479,11 +483,13 @@ impl Pipeline<'_> {
 
 /// Writes a committed snapshot to the workspace's row, in the database and
 /// in memory: commit, change, last snapshot, and the divergent or recovered
-/// marks. The loaded row follows the operation even if the database write
-/// fails, since the operation exists either way.
+/// marks; then indexes the operation as a local snapshot of `kind` (R1.16).
+/// The loaded row follows the operation even if the database write fails,
+/// since the operation exists either way.
 fn record_commit(
     db: &Db,
     entry: &WorkspaceEntry,
+    kind: SnapshotKind,
     committed: &SnapshotCommit,
     recovered: bool,
 ) -> Result<(), ManagerError> {
@@ -514,6 +520,19 @@ fn record_commit(
     } else if recovered {
         db.set_workspace_attention(id, Some(Attention::StaleRecovered), Some(false))?;
     }
+    index::record(
+        db,
+        entry.record().repo_id,
+        &SnapshotEntry {
+            op_id: committed.op_id.clone(),
+            workspace_id: id,
+            commit_id: committed.commit_id.clone(),
+            change_id: committed.change_id.clone(),
+            kind,
+            local: true,
+            taken_at: Timestamp::from(committed.end_time),
+        },
+    )?;
     Ok(())
 }
 

@@ -44,6 +44,7 @@ use crate::db::DbError;
 use crate::lease::LeaseError;
 use crate::model::{LeaseRecord, RepoId, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::{RegisterError, RepoHandle, RepoThreadError};
+use crate::snapshot::index::SnapshotEntry;
 
 /// One loaded workspace: what the manager holds for every `active` row.
 pub struct WorkspaceEntry {
@@ -208,6 +209,13 @@ pub struct Inspected {
     pub other_workspaces_on_change: Vec<WorkspaceId>,
     /// The operation `snapshot_first` recorded, if it recorded one.
     pub op_id: Option<String>,
+    /// Its indexed snapshot operations, and how many are local (R1.16).
+    pub snapshot_count: u64,
+    /// See `snapshot_count`.
+    pub local_snapshot_count: u64,
+    /// The newest [`crate::snapshot::index::RECENT_LIMIT`] of them, newest
+    /// first.
+    pub recent_snapshots: Vec<SnapshotEntry>,
 }
 
 /// Failure of a workspace operation.

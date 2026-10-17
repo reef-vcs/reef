@@ -33,6 +33,7 @@
 //! hashing ten thousand new files would hold up all the others).
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -40,6 +41,7 @@ use std::time::{Duration, Instant};
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{CommitIdHex, OperationIdHex};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +52,8 @@ use crate::watcher::{
     HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
 };
 use crate::workspace::{Manager, ManagerError};
+
+pub mod index;
 
 /// Events waiting for the scheduler; more are dropped (and counted) by the
 /// watcher, and the fallback timer covers their workspaces.
@@ -78,6 +82,15 @@ pub enum SnapshotKind {
 }
 
 impl SnapshotKind {
+    /// Every kind, in declaration order.
+    pub const ALL: &[SnapshotKind] = &[
+        Self::Watcher,
+        Self::Explicit,
+        Self::Final,
+        Self::Move,
+        Self::Shutdown,
+    ];
+
     /// The stored name: `watcher`, `explicit`, `final`, `move`, `shutdown`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -87,6 +100,39 @@ impl SnapshotKind {
             Self::Move => "move",
             Self::Shutdown => "shutdown",
         }
+    }
+}
+
+/// Text that is not a [`SnapshotKind`]'s stored name.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown snapshot kind {0:?}")]
+pub struct UnknownSnapshotKind(pub String);
+
+impl FromStr for SnapshotKind {
+    type Err = UnknownSnapshotKind;
+
+    /// Parses a stored name, as [`SnapshotKind::as_str`] writes it.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == text)
+            .ok_or_else(|| UnknownSnapshotKind(text.to_owned()))
+    }
+}
+
+impl ToSql for SnapshotKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for SnapshotKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| FromSqlError::Other(Box::new(error)))
     }
 }
 
@@ -411,8 +457,10 @@ impl Scheduler {
 
     /// Registers `hook` to run after every snapshot that ends well, after
     /// the working-copy state is saved and the row updated, in registration
-    /// order, on the tokio runtime. R1.16 records the `snapshots` index
-    /// here and R1.20 checks lockfile hashes; this ticket registers none.
+    /// order, on the tokio runtime. R1.20 checks lockfile hashes here. The
+    /// `snapshots` index row (R1.16) is not written here but before the
+    /// working-copy state is saved, with the workspace's row; see
+    /// `workspace/snapshot.rs`.
     pub fn on_snapshot(&self, hook: SnapshotHook) {
         self.inner
             .hooks
