@@ -29,4 +29,5 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0015](0015-materialization-backends-and-base-cache.md) | Materialization backends and the base cache | accepted |
 | [0017](0017-daemon-api-v0-and-error-mapping.md) | Daemon API v0 and error mapping | accepted |
 | [0018](0018-snapshot-staleness-and-divergence.md) | Snapshot staleness and divergence | accepted |
+| [0019](0019-leases-and-reclaim.md) | Leases and reclaim | accepted |
 | [0023](0023-watchman-as-the-large-repository-watcher.md) | Watchman as the large-repository watcher | accepted |

@@ -267,6 +267,31 @@ impl Db {
         })
     }
 
+    /// Starts a release or reclaim: `active` → `releasing`, only if the
+    /// workspace is `active` and, with `expired_by`, only if its current
+    /// lease is unended and past its grace at that time (`expires_at +
+    /// grace_ms < expired_by`), all in one statement so a heartbeat that
+    /// renewed the lease since the expiry tick read it wins. Returns whether
+    /// the workspace moved; when two callers race, exactly one does.
+    pub fn begin_reclaim(
+        &self,
+        id: WorkspaceId,
+        expired_by: Option<Timestamp>,
+    ) -> Result<bool, DbError> {
+        let changed = self.with(|conn| {
+            conn.execute(
+                "UPDATE workspaces SET state = 'releasing'
+                 WHERE id = ?1 AND state = 'active'
+                   AND (?2 IS NULL OR EXISTS (
+                        SELECT 1 FROM leases
+                        WHERE leases.id = workspaces.lease_id AND leases.ended_at IS NULL
+                          AND leases.expires_at + leases.grace_ms < ?2))",
+                params![id, expired_by],
+            )
+        })?;
+        Ok(changed == 1)
+    }
+
     /// Ends a workspace's life in one transaction: moves it to `state`
     /// (`released` or `reclaimed`), ends its unended lease (if any) at
     /// `reclaim.at` for `lease_end`, and appends `reclaim` to the reclaim

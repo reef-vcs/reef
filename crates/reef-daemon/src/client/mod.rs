@@ -21,10 +21,10 @@ use crate::proto::v0::daemon_client::DaemonClient;
 use crate::proto::v0::repositories_client::RepositoriesClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
-    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, InspectRequest, InspectResponse,
-    ListRepositoriesRequest, ListWorkspacesRequest, RegisterRequest, RegisterResponse,
-    ReleaseRequest, ReleaseResponse, Repository, SnapshotRequest, SnapshotResponse, StatusRequest,
-    StatusResponse, Workspace,
+    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, HeartbeatRequest,
+    HeartbeatResponse, InspectRequest, InspectResponse, ListRepositoriesRequest,
+    ListWorkspacesRequest, RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse,
+    Repository, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, Workspace,
 };
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
@@ -224,6 +224,22 @@ impl Client {
         };
         Ok(self.workspaces().snapshot(request).await?.into_inner())
     }
+
+    /// `Workspaces.Heartbeat`: renews `lease_id` on the workspace. `repo`
+    /// may be empty to look the workspace up in every repository.
+    pub async fn heartbeat_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        lease_id: &str,
+    ) -> Result<HeartbeatResponse, ClientError> {
+        let request = HeartbeatRequest {
+            repo: repo.to_owned(),
+            workspace_id: workspace.to_owned(),
+            lease_id: lease_id.to_owned(),
+        };
+        Ok(self.workspaces().heartbeat(request).await?.into_inner())
+    }
 }
 
 /// The client's surface as a trait: one method per RPC, with the same
@@ -269,6 +285,13 @@ pub trait WorkspacesApi: Send + Sync {
         workspace: &str,
         description: &str,
     ) -> Result<SnapshotResponse, ClientError>;
+    /// `Workspaces.Heartbeat`.
+    async fn heartbeat_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        lease_id: &str,
+    ) -> Result<HeartbeatResponse, ClientError>;
 }
 
 #[tonic::async_trait]
@@ -329,6 +352,15 @@ impl WorkspacesApi for Client {
         description: &str,
     ) -> Result<SnapshotResponse, ClientError> {
         Client::snapshot_workspace(self, repo, workspace, description).await
+    }
+
+    async fn heartbeat_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        lease_id: &str,
+    ) -> Result<HeartbeatResponse, ClientError> {
+        Client::heartbeat_workspace(self, repo, workspace, lease_id).await
     }
 }
 

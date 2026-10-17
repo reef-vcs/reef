@@ -10,6 +10,8 @@ syntax = "proto3";
 
 package reef.daemon.v0;
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "reef/daemon/v0/types.proto";
 
 service Workspaces {
@@ -21,10 +23,13 @@ service Workspaces {
   // change.
   rpc Inspect(InspectRequest) returns (InspectResponse);
   // Takes a final snapshot, forgets the jj workspace, and removes the
-  // directory. The row stays, as `released`.
+  // directory. The row stays, as `released`. The same pipeline reclaims a
+  // workspace whose lease expired (R1.15).
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   // Snapshots the workspace's files into its working-copy commit.
   rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
+  // Renews a workspace's lease (R1.15). Never snapshots.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
 message CreateRequest {
@@ -140,4 +145,22 @@ message SnapshotResponse {
   string commit_id = 3;
   // How long jj's scan of the working copy took, in milliseconds (R1.14).
   uint64 scan_ms = 4;
+}
+
+message HeartbeatRequest {
+  string repo = 1;
+  // A workspace id or unique prefix.
+  string workspace_id = 2;
+  // The lease being renewed: the capability. A lease that is not the
+  // workspace's current one is `FAILED_PRECONDITION` (Conflict), as is a
+  // workspace that was released or reclaimed, or a lease past its grace.
+  string lease_id = 3;
+}
+
+message HeartbeatResponse {
+  string lease_id = 1;
+  // Now plus the lease's length.
+  google.protobuf.Timestamp expires_at = 2;
+  // When to heartbeat next; see `Lease.heartbeat_every`.
+  google.protobuf.Duration heartbeat_every = 3;
 }

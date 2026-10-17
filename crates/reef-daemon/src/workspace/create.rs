@@ -16,7 +16,8 @@
 //!    loaded with the watcher's jj settings.
 //! 6. (blocking) Seed the working copy's `tree_state` from the base's, or
 //!    fall back to `Repo::reset_to`.
-//! 7. (async) Insert the row and issue the lease in one transaction.
+//! 7. (async) Insert the row and issue the lease in one transaction
+//!    ([`crate::lease::LeaseManager::issue_with_workspace`]).
 //!
 //! A failure after step 4 tears the directory down; after step 5 also
 //! forgets the jj workspace and removes its state directory. Partial state
@@ -25,7 +26,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
@@ -36,11 +37,9 @@ use reef_lib::jj::{
 use reef_lib::telemetry::elapsed_ms;
 
 use super::manager::{forget_jj_workspace, remove_state_dir};
-use super::{CreateSpec, Created, Manager, ManagerError, Start, WorkspaceEntry, millis};
+use super::{CreateSpec, Created, Manager, ManagerError, Start, WorkspaceEntry};
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
-use crate::model::{
-    LeaseId, LeaseRecord, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState,
-};
+use crate::model::{RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::RepoHandle;
 
 /// The description of a colocated repository's ref import before a create.
@@ -62,7 +61,7 @@ impl Manager {
         if spec.owner.trim().is_empty() {
             return Err(ManagerError::EmptyOwner);
         }
-        let lease_length = self.lease_length(spec.lease)?;
+        let length = self.leases.length_for(spec.lease)?;
         // Held until the row is written, so the repository is not forgotten
         // under this create.
         let repo_lock = self.repo_lock(spec.repo);
@@ -113,7 +112,7 @@ impl Manager {
 
         // 7.
         let now = Timestamp::now();
-        let lease = self.new_lease(repo.id, id, &spec.owner, lease_length, now);
+        let lease = self.leases.new_lease(id, repo.id, &spec.owner, length, now);
         let record = WorkspaceRecord {
             id,
             repo_id: repo.id,
@@ -134,7 +133,7 @@ impl Manager {
             last_snapshot_op: None,
             watcher,
         };
-        if let Err(error) = self.db.insert_workspace_with_lease(&record, &lease) {
+        if let Err(error) = self.leases.issue_with_workspace(&record, &lease) {
             drop(ws);
             undo.run().await;
             return Err(error.into());
@@ -173,8 +172,6 @@ impl Manager {
         })
     }
 
-    /// The lease length for a request: `lease.default` when none (or zero)
-    /// is asked for; above `lease.max` is refused.
     /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the
     /// blocking pool) at the directory the workspace is created in.
     async fn select_backend(
@@ -188,43 +185,6 @@ impl Manager {
             .parent()
             .map_or_else(|| paths.root.clone(), Path::to_owned);
         Ok(tokio::task::spawn_blocking(move || select(choice, &probe_dir)).await??)
-    }
-
-    fn lease_length(&self, requested: Option<Duration>) -> Result<Duration, ManagerError> {
-        let lease = &self.config.file.lease;
-        match requested {
-            None => Ok(lease.default),
-            Some(length) if length.is_zero() => Ok(lease.default),
-            Some(length) if length > lease.max => Err(ManagerError::LeaseTooLong {
-                requested: length,
-                max: lease.max,
-            }),
-            Some(length) => Ok(length),
-        }
-    }
-
-    /// The first lease of a new workspace, issued `now`.
-    fn new_lease(
-        &self,
-        repo: RepoId,
-        id: WorkspaceId,
-        owner: &str,
-        length: Duration,
-        now: Timestamp,
-    ) -> LeaseRecord {
-        LeaseRecord {
-            id: LeaseId::generate(),
-            repo_id: repo,
-            workspace_id: id,
-            owner: owner.to_owned(),
-            issued_at: now,
-            expires_at: Timestamp(now.0.saturating_add(millis(length))),
-            last_heartbeat_at: now,
-            length,
-            grace: self.config.file.lease.grace,
-            ended_at: None,
-            end_reason: None,
-        }
     }
 
     /// The new workspace's paths: `path` (absolute) or

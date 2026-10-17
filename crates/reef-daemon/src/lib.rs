@@ -15,6 +15,7 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub mod lease;
 pub mod lock;
 pub mod logging;
 pub mod model;

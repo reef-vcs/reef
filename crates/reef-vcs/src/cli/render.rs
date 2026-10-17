@@ -45,8 +45,15 @@ fn span(ms: i64) -> String {
     }
 }
 
-/// `12m left`, `expired 3m ago`, or `-` without a lease.
+/// `12m left`, `expired 3m ago`, `ended (released)`, or `-` without a
+/// lease.
 fn lease_text(lease: Option<&Lease>, now: i64) -> String {
+    if let Some(lease) = lease.filter(|lease| lease.state == "ended") {
+        return match &lease.end_reason {
+            Some(reason) => format!("ended ({reason})"),
+            None => "ended".to_owned(),
+        };
+    }
     match lease.and_then(|lease| lease.expires_at_ms) {
         Some(expires) if expires >= now => format!("{} left", span(expires - now)),
         Some(expires) => format!("expired {} ago", span(now - expires)),
@@ -232,10 +239,19 @@ mod tests {
             last_heartbeat_at: None,
             length_ms: 0,
             grace_ms: 0,
+            state: "active".to_owned(),
+            end_reason: None,
+            heartbeat_every_ms: None,
         };
         assert_eq!(lease_text(Some(&lease(1_000 + 720_000)), 1_000), "12m left");
         assert_eq!(lease_text(Some(&lease(1_000)), 181_000), "expired 3m ago");
         assert_eq!(lease_text(None, 0), "-");
+        let ended = Lease {
+            state: "ended".to_owned(),
+            end_reason: Some("expired".to_owned()),
+            ..lease(1_000)
+        };
+        assert_eq!(lease_text(Some(&ended), 181_000), "ended (expired)");
     }
 
     #[test]

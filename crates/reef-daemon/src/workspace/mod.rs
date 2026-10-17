@@ -1,5 +1,5 @@
 //! Workspaces (R1.05): the [`Manager`] that creates, snapshots, inspects,
-//! and releases them, joining jj workspaces (`reef_lib::jj`), the base
+//! and releases or reclaims them (R1.15), joining jj workspaces (`reef_lib::jj`), the base
 //! cache and backends ([`crate::backend`]), the repository threads
 //! ([`crate::repo`]), and the metadata database ([`crate::db`]).
 //!
@@ -19,7 +19,7 @@
 
 mod create;
 mod manager;
-mod release;
+mod reclaim;
 mod snapshot;
 
 use std::path::PathBuf;
@@ -41,6 +41,7 @@ use crate::backend::{
     Backend, BackendChoice, BackendError, BaseCacheError, DiskUsage, WorkspacePaths,
 };
 use crate::db::DbError;
+use crate::lease::LeaseError;
 use crate::model::{LeaseRecord, RepoId, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::{RegisterError, RepoHandle, RepoThreadError};
 
@@ -139,7 +140,7 @@ pub struct CreateSpec {
     /// `<workspace.root>/<id>`.
     pub path: Option<PathBuf>,
     /// The lease length; `None` for `lease.default`. Above `lease.max` is
-    /// [`ManagerError::LeaseTooLong`].
+    /// [`LeaseError::TooLong`].
     pub lease: Option<Duration>,
 }
 
@@ -161,7 +162,8 @@ pub struct Created {
     pub base_was_cached: bool,
 }
 
-/// How [`Manager::release`] releases.
+/// How [`Manager::reclaim`] releases or reclaims. The expiry loop uses the
+/// default; `Release` passes its request's flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReleaseSpec {
     /// Release even if the final snapshot or forgetting the jj workspace
@@ -180,15 +182,16 @@ impl Default for ReleaseSpec {
     }
 }
 
-/// What [`Manager::release`] did.
+/// What [`Manager::reclaim`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Released {
-    /// The operation holding the final snapshot, if it recorded one.
-    pub final_op_id: Option<String>,
+pub struct ReclaimOutcome {
     /// Whether a final snapshot ran (it may have found no changes).
     pub snapshot_taken: bool,
-    /// Bytes the workspace had allocated, estimated before tear-down.
-    pub freed_bytes: u64,
+    /// The operation holding the final snapshot, if it recorded one.
+    pub final_op_id: Option<String>,
+    /// Bytes the workspace had allocated, estimated before tear-down;
+    /// `None` when the backend could not measure them.
+    pub freed_bytes: Option<u64>,
 }
 
 /// What [`Manager::inspect`] found.
@@ -278,14 +281,13 @@ pub enum ManagerError {
     /// The request named no owner.
     #[error("owner must not be empty")]
     EmptyOwner,
-    /// The requested lease is longer than `lease.max`.
-    #[error("a lease of {requested:?} is longer than the maximum {max:?}")]
-    LeaseTooLong {
-        /// What was asked for.
-        requested: Duration,
-        /// `lease.max`.
-        max: Duration,
-    },
+    /// The lease could not be issued.
+    #[error(transparent)]
+    Lease(#[from] LeaseError),
+    /// The expiry tick found the lease past its grace, but a heartbeat or a
+    /// restart grace renewed it before the reclaim began; nothing was done.
+    #[error("the lease of workspace {0} was renewed; not reclaimed")]
+    LeaseRenewed(WorkspaceId),
     /// The request named no repository where one is required.
     #[error("a repository must be named")]
     RepoRequired,
@@ -349,22 +351,17 @@ impl Classify for ManagerError {
             Self::CommitLookup(error) => error.kind(),
             Self::Reset(error) => error.kind(),
             Self::FinalSnapshotFailed { source, .. } => source.kind(),
+            Self::Lease(error) => error.kind(),
             Self::PathExists(_) | Self::PathRecorded { .. } => ErrorKind::AlreadyExists,
             Self::PathNotAbsolute(_)
             | Self::EmptyOwner
-            | Self::LeaseTooLong { .. }
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
-            Self::NotActive { .. } => ErrorKind::Conflict,
+            Self::NotActive { .. } | Self::LeaseRenewed(_) => ErrorKind::Conflict,
             Self::Task(_) => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
             Self::Settings(error) => error.kind(),
         }
     }
-}
-
-/// `duration` in whole milliseconds, saturating.
-fn millis(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }

@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package reef.daemon.v0;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 // A registered repository.
@@ -20,6 +21,19 @@ message Repository {
 
 // A workspace's lease. R1.15 adds fields 8 to 10.
 message Lease {
+  // Computed when the response is built, from `expires_at`, `grace_ms`,
+  // whether the lease has ended, and the daemon's clock.
+  enum State {
+    // Before `expires_at`.
+    ACTIVE = 0;
+    // Past `expires_at` but within `grace_ms`: a heartbeat still revives it.
+    IN_GRACE = 1;
+    // Past its grace; the next expiry tick reclaims the workspace.
+    EXPIRED = 2;
+    // Released, expired and reclaimed, or replaced by a restore.
+    ENDED = 3;
+  }
+
   string id = 1;
   string owner = 2;
   google.protobuf.Timestamp issued_at = 3;
@@ -30,6 +44,12 @@ message Lease {
   uint64 length_ms = 6;
   // How long after `expires_at` a heartbeat still revives it.
   uint64 grace_ms = 7;
+  State state = 8;
+  // released, expired, or restored; empty until it ends.
+  string end_reason = 9;
+  // How often the holder should heartbeat: the daemon's `lease.heartbeat`,
+  // at most a third of `length_ms`. `ws run` (R1.21) heartbeats on this.
+  google.protobuf.Duration heartbeat_every = 10;
 }
 
 // A Reef workspace: a leased directory backed by its own jj workspace.
@@ -58,7 +78,8 @@ message Workspace {
   // Unset until a snapshot recorded an operation.
   google.protobuf.Timestamp last_snapshot_at = 13;
   string last_snapshot_op = 14;
-  // Its unended lease; unset once released or reclaimed.
+  // Its lease: the unended one while active, the one it ended with once
+  // released or reclaimed (R1.15).
   Lease lease = 15;
   // What triggers its snapshots: `notify` or `watchman` (R1.14). Fixed at
   // create.

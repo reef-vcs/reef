@@ -29,6 +29,8 @@ mod reclaims;
 mod repositories;
 mod workspaces;
 
+pub use leases::Renewal;
+
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14).

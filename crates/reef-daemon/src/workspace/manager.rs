@@ -16,6 +16,7 @@ use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
 use crate::db::Db;
+use crate::lease::LeaseManager;
 use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
@@ -50,6 +51,8 @@ pub struct Manager {
     /// Schedules snapshots and bounds concurrent scans at
     /// `watcher.max_concurrent_scans`.
     pub(super) scheduler: Scheduler,
+    /// Issues and renews leases, and reclaims expired ones (R1.15).
+    pub(super) leases: Arc<LeaseManager>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -62,7 +65,8 @@ impl std::fmt::Debug for Manager {
 
 impl Manager {
     /// A manager with nothing loaded yet; [`Manager::load_active`] loads,
-    /// and [`Scheduler::start`] starts automatic snapshots.
+    /// [`Scheduler::start`] starts automatic snapshots, and
+    /// [`LeaseManager::start_expiry_loop`] starts reclaiming expired leases.
     pub fn new(
         config: Config,
         db: Arc<Db>,
@@ -83,6 +87,11 @@ impl Manager {
                 config.max_concurrent_scans(),
                 manager.clone(),
             );
+            let leases = Arc::new(LeaseManager::new(
+                config.file.lease.clone(),
+                Arc::clone(&db),
+                manager.clone(),
+            ));
             Manager {
                 config,
                 db,
@@ -93,6 +102,7 @@ impl Manager {
                 repo_locks: Mutex::new(HashMap::new()),
                 entries: RwLock::new(HashMap::new()),
                 scheduler,
+                leases,
             }
         })
     }
@@ -100,6 +110,11 @@ impl Manager {
     /// The snapshot scheduler.
     pub fn scheduler(&self) -> &Scheduler {
         &self.scheduler
+    }
+
+    /// The lease manager.
+    pub fn leases(&self) -> &Arc<LeaseManager> {
+        &self.leases
     }
 
     /// The metadata database.
@@ -368,7 +383,8 @@ impl Manager {
 
     /// Workspaces in `repo` (every repository if `None`), in one of
     /// `states` (any if empty), held by `owner` (anyone if `None`), oldest
-    /// first, each with its unended lease. Reads the database only.
+    /// first, each with its lease ([`Manager::lease_of`]). Reads the
+    /// database only.
     pub fn list(
         &self,
         repo: Option<RepoId>,
@@ -386,12 +402,14 @@ impl Manager {
             .collect()
     }
 
-    /// The workspace's unended lease.
+    /// The workspace's lease: its unended one, or for a released or
+    /// reclaimed workspace the one it ended with.
     pub fn lease_of(&self, record: &WorkspaceRecord) -> Result<Option<LeaseRecord>, ManagerError> {
-        Ok(record
-            .lease_id
-            .map(|lease| self.db.lease(lease))
-            .transpose()?)
+        Ok(match record.lease_id {
+            Some(lease) => Some(self.db.lease(lease)?),
+            None if record.state.is_terminal() => self.db.last_lease(record.id)?,
+            None => None,
+        })
     }
 
     /// One workspace from the database, with its disk usage from its

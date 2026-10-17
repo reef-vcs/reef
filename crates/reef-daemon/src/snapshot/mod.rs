@@ -421,6 +421,16 @@ impl Scheduler {
             .push(hook);
     }
 
+    /// The tracked workspaces with watcher events not yet snapshotted.
+    pub fn dirty(&self) -> Vec<WorkspaceId> {
+        self.inner
+            .lock_entries()
+            .iter()
+            .filter(|(_, entry)| entry.dirty_since.is_some())
+            .map(|(ws, _)| *ws)
+            .collect()
+    }
+
     /// Whether `ws` is tracked.
     pub fn is_tracked(&self, ws: WorkspaceId) -> bool {
         self.inner.lock_entries().contains_key(&ws)
