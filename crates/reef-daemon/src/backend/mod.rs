@@ -182,14 +182,30 @@ impl WorkspacePaths {
     /// The default layout under `repo_dir` (`<state>/repos/<repo-id>`):
     /// `ws/<id>`, `ws/<id>.upper`, `ws/<id>.work`, and `wc/<id>`.
     pub fn under(repo_dir: &Path, id: WorkspaceId) -> Self {
-        let ws = repo_dir.join("ws");
         let hex = id.as_hex();
+        Self::at(
+            id,
+            repo_dir.join("ws").join(&hex),
+            repo_dir.join("wc").join(hex),
+        )
+    }
+
+    /// A workspace whose root is `root`, anywhere (a `--path` workspace, or
+    /// a configured `workspace.root`), with the overlay directories as its
+    /// siblings `<root>.upper` and `<root>.work`, and its working-copy state
+    /// at `state_dir`.
+    pub fn at(id: WorkspaceId, root: PathBuf, state_dir: PathBuf) -> Self {
+        let sibling = |suffix: &str| {
+            let mut name = root.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
         Self {
             id,
-            root: ws.join(&hex),
-            upper: ws.join(format!("{hex}.upper")),
-            work: ws.join(format!("{hex}.work")),
-            state_dir: repo_dir.join("wc").join(hex),
+            upper: sibling(".upper"),
+            work: sibling(".work"),
+            root,
+            state_dir,
         }
     }
 }

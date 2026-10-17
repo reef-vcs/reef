@@ -2720,6 +2720,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "hyper-util",
+ "jj-lib",
  "nix",
  "pollster",
  "prost",

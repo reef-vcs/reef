@@ -296,6 +296,78 @@ mod tests {
     }
 
     #[test]
+    fn finish_ends_the_lease_and_logs_the_reclaim_together() {
+        use crate::model::{ReclaimReason, ReclaimRecord};
+
+        let (db, repo_id, ws, other) = fixture();
+        db.issue_lease(&lease(repo_id, ws, "cccc000000000001"))
+            .unwrap();
+        let reclaim = |workspace_id| ReclaimRecord {
+            id: 0,
+            repo_id,
+            workspace_id,
+            reason: ReclaimReason::Released,
+            final_op_id: Some("ab".into()),
+            snapshot_taken: true,
+            freed_bytes: Some(4096),
+            at: Timestamp(60_000),
+            detail: None,
+        };
+        // Released is reached only through releasing; nothing is written.
+        let error = db
+            .finish_workspace(
+                ws,
+                WorkspaceState::Released,
+                LeaseEnd::Released,
+                &reclaim(ws),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert_eq!(db.reclaims(None, 10).unwrap().len(), 0);
+        assert!(db.active_lease(ws).unwrap().is_some());
+
+        db.set_workspace_state(ws, WorkspaceState::Releasing)
+            .unwrap();
+        db.finish_workspace(
+            ws,
+            WorkspaceState::Released,
+            LeaseEnd::Released,
+            &reclaim(ws),
+        )
+        .unwrap();
+        let record = db.workspace(ws).unwrap();
+        assert_eq!(record.state, WorkspaceState::Released);
+        assert_eq!(record.lease_id, None);
+        assert!(db.active_lease(ws).unwrap().is_none());
+        let ended = db.lease("cccc000000000001".parse().unwrap()).unwrap();
+        assert_eq!(ended.ended_at, Some(Timestamp(60_000)));
+        assert_eq!(ended.end_reason, Some(LeaseEnd::Released));
+        let log = db.reclaims(Some(repo_id), 10).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].freed_bytes, Some(4096));
+
+        // An unleased active workspace can be reclaimed directly.
+        db.finish_workspace(
+            other,
+            WorkspaceState::Reclaimed,
+            LeaseEnd::Expired,
+            &reclaim(other),
+        )
+        .unwrap();
+        assert_eq!(
+            db.workspace(other).unwrap().state,
+            WorkspaceState::Reclaimed
+        );
+        let again = db.finish_workspace(
+            other,
+            WorkspaceState::Reclaimed,
+            LeaseEnd::Expired,
+            &reclaim(other),
+        );
+        assert_eq!(again.unwrap_err().kind(), ErrorKind::Conflict);
+    }
+
+    #[test]
     fn issue_sets_the_workspace_lease() {
         let (db, repo_id, ws, _) = fixture();
         let l = lease(repo_id, ws, "cccc000000000001");

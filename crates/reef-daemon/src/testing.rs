@@ -61,16 +61,27 @@ impl TestDaemon {
     }
 
     /// Starts a daemon and generates a `preset` synthetic tree at
-    /// `<tmp>/repo`, made a jj repository and snapshotted once. Returns the
-    /// repository root. R1.05 registers it with the daemon.
-    pub async fn with_synthetic_repo(preset: Preset) -> (TestDaemon, PathBuf) {
+    /// `<tmp>/repo`, made a jj repository, snapshotted once, and registered
+    /// with the daemon. Returns the repository root (canonical) and its
+    /// registration.
+    pub async fn with_synthetic_repo(preset: Preset) -> (TestDaemon, SyntheticRepo) {
         let daemon = TestDaemon::start().await;
         let root = daemon.tmp.path().join("repo");
         let at = root.clone();
         tokio::task::spawn_blocking(move || init_synthetic_repo(&at, preset))
             .await
             .expect("generate the synthetic repository");
-        (daemon, root)
+        let registered = daemon
+            .client
+            .register_repository(&root)
+            .await
+            .expect("register the synthetic repository");
+        let repository = registered.repository.expect("a repository in the response");
+        let repo = SyntheticRepo {
+            root: std::fs::canonicalize(&root).expect("resolve the repository root"),
+            id: repository.id,
+        };
+        (daemon, repo)
     }
 
     /// The daemon's state directory.
@@ -78,11 +89,46 @@ impl TestDaemon {
         &self.config.paths.state_dir
     }
 
+    /// Stops the daemon and starts a new one on the same state directory
+    /// and configuration, with a new client.
+    pub async fn restart(self) -> TestDaemon {
+        let TestDaemon {
+            handle,
+            client,
+            tmp,
+            config,
+        } = self;
+        drop(client);
+        handle.shutdown();
+        handle.join().await.expect("the daemon stops cleanly");
+        let handle = Daemon::start(config.clone())
+            .await
+            .expect("restart the daemon");
+        let client = Client::connect(handle.socket_path())
+            .await
+            .expect("connect to the restarted daemon");
+        TestDaemon {
+            handle,
+            client,
+            tmp,
+            config,
+        }
+    }
+
     /// Shuts the daemon down and waits for it to stop.
     pub async fn stop(self) {
         self.handle.shutdown();
         self.handle.join().await.expect("the daemon stops cleanly");
     }
+}
+
+/// A synthetic repository registered with a [`TestDaemon`].
+#[derive(Clone, Debug)]
+pub struct SyntheticRepo {
+    /// Its root, canonical.
+    pub root: PathBuf,
+    /// Its repo id, as the daemon returned it.
+    pub id: String,
 }
 
 /// Generates a `preset` tree at `root` (seed 7), makes it a jj repository,

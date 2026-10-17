@@ -1,0 +1,139 @@
+// Workspaces: create, list, inspect, release, snapshot (R1.05). R1.06 adds
+// Move and R1.15 Heartbeat; field numbers are stable from here.
+//
+// `repo` accepts a repo id, a unique id prefix (4 or more hex characters),
+// or an absolute path inside a registered root. Where a workspace is named
+// too, `repo` may be empty and the workspace id or prefix is looked up in
+// every repository. Every mutating response carries the `op_id` of the
+// operation it recorded, empty when it recorded none.
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+import "reef/daemon/v0/types.proto";
+
+service Workspaces {
+  // Materializes a new workspace on a change and leases it.
+  rpc Create(CreateRequest) returns (CreateResponse);
+  // Workspaces, from the metadata database only.
+  rpc List(ListWorkspacesRequest) returns (ListWorkspacesResponse);
+  // One workspace, with its disk usage and the other workspaces on its
+  // change.
+  rpc Inspect(InspectRequest) returns (InspectResponse);
+  // Takes a final snapshot, forgets the jj workspace, and removes the
+  // directory. The row stays, as `released`.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Snapshots the workspace's files into its working-copy commit.
+  rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
+}
+
+message CreateRequest {
+  string repo = 1;
+  // Where the working-copy commit starts. Revisions resolve as a change id
+  // prefix (hex or jj's reverse hex), a commit id prefix, or a local
+  // bookmark, in that order. Neither: a new change on the `main` bookmark if
+  // it exists, else on the `default` workspace's working-copy commit.
+  oneof start {
+    // Edit this change: the workspace's working-copy commit is its commit.
+    string change = 2;
+    // A new empty change on top of this revision.
+    string new_on = 3;
+  }
+  // Who holds the workspace. Required; clients fill in a default.
+  string owner = 4;
+  // Free text.
+  string purpose = 5;
+  // auto, copy, apfs, reflink, overlayfs, or fuse-overlayfs; empty for the
+  // daemon's `workspace.backend`.
+  string backend = 6;
+  // An absolute directory to create the workspace at, which must not
+  // exist; empty for the daemon's workspace root.
+  string path = 7;
+  // The lease length; 0 = the daemon default. Grace is never per request
+  // (R1.15).
+  uint64 lease_ms = 8;
+}
+
+message CreateResponse {
+  Workspace workspace = 1;
+  // The operation that created the jj workspace.
+  string op_id = 2;
+  // Another Reef workspace's working-copy commit was already the edited
+  // commit (allowed; the divergence rule applies, R1.13).
+  bool shared_change = 3;
+  // Wall time of making the directory: ensuring the base and the
+  // backend's materialization.
+  uint64 materialize_ms = 4;
+  // Whether the base cache already held the tree.
+  bool base_was_cached = 5;
+}
+
+message ListWorkspacesRequest {
+  // Empty for every repository.
+  string repo = 1;
+  // active, releasing, released, reclaimed; empty for any state.
+  repeated string states = 2;
+  // Empty for any owner.
+  string owner = 3;
+}
+
+message ListWorkspacesResponse {
+  repeated Workspace workspaces = 1;
+}
+
+message InspectRequest {
+  string repo = 1;
+  // A workspace id or unique prefix.
+  string workspace = 2;
+  // Snapshot first, so the answer reflects the files on disk. Off by
+  // default in the API; the CLI turns it on.
+  bool snapshot_first = 3;
+}
+
+message InspectResponse {
+  Workspace workspace = 1;
+  // Unset for a workspace whose directory is gone.
+  DiskUsage disk_usage = 2;
+  // Ids of the other active workspaces on the same change.
+  repeated string other_workspaces_on_change = 3;
+  // The operation `snapshot_first` recorded, if it recorded one.
+  string op_id = 4;
+}
+
+message ReleaseRequest {
+  string repo = 1;
+  string workspace = 2;
+  // Release even if the final snapshot or forgetting the jj workspace
+  // fails.
+  bool force = 3;
+  // proto3 defaults to false, so the safe behavior (snapshot first) is the
+  // default; `Client::release_workspace` takes `snapshot_first` and inverts
+  // it.
+  bool skip_final_snapshot = 4;
+}
+
+message ReleaseResponse {
+  // The operation holding the final snapshot, empty if it found nothing to
+  // record or was skipped.
+  string final_op_id = 1;
+  // Whether a final snapshot ran (it may have found no changes).
+  bool snapshot_taken = 2;
+  // Bytes the workspace had allocated, as estimated before tear-down.
+  uint64 freed_bytes = 3;
+}
+
+message SnapshotRequest {
+  string repo = 1;
+  string workspace = 2;
+  // The operation's description; empty for
+  // `reef: snapshot workspace <id>`.
+  string description = 3;
+}
+
+message SnapshotResponse {
+  // The snapshot's operation; empty when nothing changed.
+  string op_id = 1;
+  bool changed = 2;
+  // The working-copy commit afterwards.
+  string commit_id = 3;
+}

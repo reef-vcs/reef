@@ -16,7 +16,8 @@
 //!    leftovers (`*.gc` under `repos/*/bases/`, R1.17) once that lands.
 //! 4. Reconcile overlay mounts (R1.09; nothing until then).
 //! 5. Start one repository thread per registered repository.
-//! 6. Load active workspaces (R1.05; nothing until then).
+//! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
+//!    one's jj handle; reclaim one whose directory is gone.
 //! 7. Apply the lease restart grace (R1.15; nothing until then).
 //! 8. Replace a stale socket file, bind the socket (`0600`), and serve.
 //!
@@ -52,6 +53,7 @@ use crate::lock::{InstanceLock, LockError};
 use crate::model::RepositoryRecord;
 use crate::repo::RepoRegistry;
 use crate::server;
+use crate::workspace::Manager;
 
 /// How long in-flight requests may run after shutdown begins.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -69,6 +71,8 @@ pub struct AppState {
     pub repos: Arc<RepoRegistry>,
     /// The jj settings repositories are opened and written with.
     pub settings: UserSettings,
+    /// The workspaces.
+    pub manager: Arc<Manager>,
     /// When the daemon started.
     pub started: Instant,
     /// Cancelled when shutdown begins. Long-running tasks select on it.
@@ -242,11 +246,19 @@ impl Daemon {
                 return Err(error.into());
             }
         };
+        let repos = Arc::new(RepoRegistry::new());
+        let manager = Arc::new(Manager::new(
+            config.clone(),
+            Arc::clone(&db),
+            Arc::clone(&repos),
+            settings.clone(),
+        ));
         let state = Arc::new(AppState {
             config,
             db,
-            repos: Arc::new(RepoRegistry::new()),
+            repos,
             settings,
+            manager,
             started: Instant::now(),
             shutdown: CancellationToken::new(),
             hooks: ShutdownHooks::default(),
@@ -359,7 +371,13 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     let opens = records.into_iter().map(|record| open_repo(state, record));
     futures::future::join_all(opens).await;
 
-    // 6. Load active workspaces: R1.05.
+    // 6. Load active workspaces. A database failure here is logged; the
+    //    daemon still serves registration and the database's view.
+    match state.manager.load_active().await {
+        Ok(0) => {}
+        Ok(loaded) => tracing::info!(loaded_count = loaded, "active workspaces loaded"),
+        Err(error) => tracing::error!(error = %ErrorChain(&error), "cannot load active workspaces"),
+    }
     // 7. Lease restart grace: R1.15.
 
     // 8. Bind.

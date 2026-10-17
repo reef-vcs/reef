@@ -23,13 +23,15 @@ use jj_lib::local_working_copy::LocalWorkingCopy;
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
-use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _};
+use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _, RepoLoaderError};
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::WorkingCopyStateError;
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
 use jj_lib::workspace_store::WorkspaceStoreError;
 
-use super::repo::{ChangeIdHex, CommitIdHex, OpenError, OperationIdHex, Repo};
+use super::repo::{
+    ChangeIdHex, ChangeSummary, CommitIdHex, OpenError, OperationIdHex, ReadError, Repo,
+};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
 /// The prefix of every jj workspace name Reef creates, `reef-<id>`
@@ -560,6 +562,69 @@ impl Repo {
             workspace,
             repo: self.repo.clone(),
         })
+    }
+
+    /// Reloads this workspace's repository at the operation its working
+    /// copy was last updated at, as recorded in its state directory, so a
+    /// workspace reopened by [`Repo::open_workspace`] after a restart can
+    /// snapshot as it could before: [`Repo::snapshot`] requires the two to
+    /// match. Returns that operation. Operations other workspaces wrote
+    /// since are merged in when the repository thread next loads at head
+    /// (R1.13 replaces this with its staleness policy).
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    pub async fn reload_at_working_copy_op(&mut self) -> Result<OperationIdHex, OpenError> {
+        let op_id = self.workspace.working_copy().operation_id().clone();
+        let loaded = async {
+            let loader = self.repo.loader();
+            let operation = loader
+                .load_operation(&op_id)
+                .await
+                .map_err(RepoLoaderError::from)?;
+            Ok::<_, OpenError>(loader.load_at(&operation).await?)
+        }
+        .await
+        .inspect_err(|error| crate::log_failure!(error))?;
+        self.repo = loaded;
+        Ok(OperationIdHex::of(&op_id))
+    }
+
+    /// The working-copy commit of this workspace in the loaded view, with
+    /// its change id.
+    pub fn wc_change(&self) -> Result<ChangeSummary, ReadError> {
+        let commit = self.wc_commit()?;
+        Ok(ChangeSummary {
+            change_id: ChangeIdHex::of(commit.change_id()),
+            commit_id: CommitIdHex::of(commit.id()),
+            description: commit.description().to_owned(),
+            is_wc: true,
+        })
+    }
+
+    /// The names of the workspaces whose working-copy commit is `commit` in
+    /// the loaded view, sorted. A commit id that is not one of this
+    /// repository's has none.
+    pub fn workspaces_on_commit(&self, commit: &CommitIdHex) -> Vec<String> {
+        let Some(id) = CommitId::try_from_hex(commit.as_str()) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = self
+            .repo
+            .view()
+            .workspaces_for_wc_commit_id(&id)
+            .into_iter()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The parents of the commit with this full id, in order.
+    pub async fn commit_parents(
+        &self,
+        commit: &CommitIdHex,
+    ) -> Result<Vec<CommitIdHex>, CommitLookupError> {
+        let commit = self.commit_by_id(commit).await?;
+        Ok(commit.parent_ids().iter().map(CommitIdHex::of).collect())
     }
 
     /// `jj workspace forget`: removes the workspace's working-copy pointer

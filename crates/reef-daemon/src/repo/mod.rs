@@ -24,8 +24,10 @@ use tokio::sync::oneshot;
 
 use crate::model::{RepoId, RepositoryRecord};
 
+mod registry;
 mod thread;
 
+pub use registry::RegisterError;
 use thread::{Message, RepoThread};
 
 /// A repository as its thread holds it.

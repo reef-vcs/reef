@@ -7,10 +7,10 @@ use tonic::{Request, Response, Status};
 use crate::backend::{Availability, probe};
 use crate::daemon::AppState;
 use crate::db::SCHEMA_VERSION;
+use crate::error::status;
 use crate::model::WorkspaceState;
 use crate::proto::v0::daemon_server::Daemon;
 use crate::proto::v0::{BackendProbe, StatusRequest, StatusResponse};
-use crate::service::status_of;
 
 /// Serves `Daemon`.
 #[derive(Debug)]
@@ -33,11 +33,11 @@ impl Daemon for DaemonService {
     ) -> Result<Response<StatusResponse>, Status> {
         let state = &self.state;
         let paths = &state.config.paths;
-        let repositories = state.db.repositories().map_err(|e| status_of(&e))?.len();
+        let repositories = state.db.repositories().map_err(status)?.len();
         let active_workspaces = state
             .db
             .workspaces(None, &[WorkspaceState::Active])
-            .map_err(|e| status_of(&e))?
+            .map_err(status)?
             .len();
         // Workspace roots default to `<state>/repos/<repo-id>/ws`. Probing
         // touches the filesystem, so it runs off the async workers.

@@ -105,8 +105,10 @@ impl Db {
     }
 
     /// Forgets a repository with its workspace and lease rows, which the
-    /// foreign keys require. Its `reclaims` rows are kept: they are the audit
-    /// log R1.17 keeps, and `reclaims.repo_id` has no foreign key.
+    /// foreign keys require, and its base cache rows, whose directories go
+    /// with the repository's state directory. Its `reclaims` rows are kept:
+    /// they are the audit log R1.17 keeps, and `reclaims.repo_id` has no
+    /// foreign key.
     /// [`DbError::Conflict`] while any of its workspaces is `active` or
     /// `releasing`, since those still have a directory on disk.
     pub fn delete_repository(&self, id: RepoId) -> Result<(), DbError> {
@@ -141,6 +143,7 @@ impl Db {
             )?;
             tx.execute("DELETE FROM leases WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM workspaces WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM base_cache WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })
@@ -287,7 +290,18 @@ pub(crate) mod tests {
             detail: None,
         })
         .unwrap();
+        db.insert_base(&crate::model::BaseCacheRecord {
+            repo_id: record.id,
+            tree_id: "0a".into(),
+            path: "/state/repos/aaaa000000000001/bases/0a".into(),
+            bytes: 1,
+            files: 1,
+            created_at: Timestamp(0),
+            last_used_at: Timestamp(0),
+        })
+        .unwrap();
         db.delete_repository(record.id).unwrap();
+        assert!(db.bases(record.id).unwrap().is_empty(), "base rows go too");
         assert_eq!(
             db.reclaims(Some(record.id), 10).unwrap().len(),
             1,

@@ -6,9 +6,11 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::leases::issue_lease_in;
+use super::reclaims::insert_reclaim_in;
 use super::{Db, DbError, normalize_prefix, path_text, unique_match};
 use crate::model::{
-    Attention, LeaseRecord, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState,
+    Attention, LeaseEnd, LeaseRecord, ReclaimRecord, RepoId, Timestamp, WorkspaceId,
+    WorkspaceRecord, WorkspaceState,
 };
 
 const WHAT: &str = "workspace";
@@ -180,6 +182,24 @@ impl Db {
         unique_match(WHAT, prefix, matches)
     }
 
+    /// The workspace recorded at `path`, in any state: `workspaces.path` is
+    /// unique, and rows outlive their directories until R1.17 deletes them.
+    /// `path` is compared as given, so the caller canonicalizes it.
+    pub fn workspace_at_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<WorkspaceRecord>, DbError> {
+        let path = path_text(path)?;
+        self.with(|conn| {
+            conn.query_row(
+                &format!("SELECT {COLUMNS} FROM workspaces WHERE path = ?1"),
+                [path],
+                from_row,
+            )
+            .optional()
+        })
+    }
+
     /// Workspaces in `repo` (every repository if `None`) whose state is one
     /// of `states` (any state if empty), oldest first.
     pub fn workspaces(
@@ -240,6 +260,46 @@ impl Db {
                 "UPDATE workspaces SET state = ?2 WHERE id = ?1",
                 params![id, state],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Ends a workspace's life in one transaction: moves it to `state`
+    /// (`released` or `reclaimed`), ends its unended lease (if any) at
+    /// `reclaim.at` for `lease_end`, and appends `reclaim` to the reclaim
+    /// log. [`DbError::Conflict`] if the lifecycle does not allow the move;
+    /// then nothing is written.
+    pub fn finish_workspace(
+        &self,
+        id: WorkspaceId,
+        state: WorkspaceState,
+        lease_end: LeaseEnd,
+        reclaim: &ReclaimRecord,
+    ) -> Result<(), DbError> {
+        self.in_transaction(|tx| {
+            let current: WorkspaceState = tx
+                .query_row("SELECT state FROM workspaces WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .ok_or_else(|| not_found(id))?;
+            if !state.is_terminal() || !current.can_become(state) || current == state {
+                return Err(DbError::Conflict {
+                    what: WHAT,
+                    id: id.as_hex(),
+                    reason: "cannot end in that state",
+                });
+            }
+            tx.execute(
+                "UPDATE leases SET ended_at = ?2, end_reason = ?3
+                 WHERE workspace_id = ?1 AND ended_at IS NULL",
+                params![id, reclaim.at, lease_end],
+            )?;
+            tx.execute(
+                "UPDATE workspaces SET state = ?2, lease_id = NULL WHERE id = ?1",
+                params![id, state],
+            )?;
+            insert_reclaim_in(tx, reclaim)?;
             Ok(())
         })
     }

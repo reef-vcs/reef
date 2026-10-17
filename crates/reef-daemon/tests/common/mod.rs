@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-pub use reef_daemon::testing::{TestDaemon, init_synthetic_repo, short_tmp, test_settings};
+pub use reef_daemon::testing::{
+    SyntheticRepo, TestDaemon, init_synthetic_repo, short_tmp, test_settings,
+};
 use tempfile::TempDir;
 
 /// How long the binary gets to bind its socket, and to exit after SIGTERM.

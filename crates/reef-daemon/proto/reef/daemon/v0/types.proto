@@ -1,0 +1,69 @@
+// Records shared by the Repositories and Workspaces services (R1.05).
+// Timestamps are google.protobuf.Timestamp; ids are lowercase hex strings
+// (ADR 0017).
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+import "google/protobuf/timestamp.proto";
+
+// A registered repository.
+message Repository {
+  // 16 hex characters.
+  string id = 1;
+  // The root of the user's own jj workspace.
+  string root = 2;
+  // Whether jj and git share the working copy (`<root>/.git`).
+  bool colocated = 3;
+  google.protobuf.Timestamp registered_at = 4;
+}
+
+// A workspace's lease. R1.15 adds fields 8 to 10.
+message Lease {
+  string id = 1;
+  string owner = 2;
+  google.protobuf.Timestamp issued_at = 3;
+  // When it lapses unless renewed.
+  google.protobuf.Timestamp expires_at = 4;
+  google.protobuf.Timestamp last_heartbeat_at = 5;
+  // How far each heartbeat extends it.
+  uint64 length_ms = 6;
+  // How long after `expires_at` a heartbeat still revives it.
+  uint64 grace_ms = 7;
+}
+
+// A Reef workspace: a leased directory backed by its own jj workspace.
+message Workspace {
+  // 16 hex characters; the jj workspace is `reef-<id>`.
+  string id = 1;
+  string repo_id = 2;
+  string owner = 3;
+  string purpose = 4;
+  // The jj change it is on, in hex.
+  string change_id = 5;
+  // Its working-copy commit as of the last snapshot or check-out.
+  string commit_id = 6;
+  // The materialization backend: copy, apfs, reflink, overlayfs,
+  // fuse-overlayfs.
+  string backend = 7;
+  // Its directory.
+  string path = 8;
+  // active, releasing, released, or reclaimed.
+  string state = 9;
+  bool divergent = 10;
+  // Why it needs attention, such as `final-snapshot-failed`; empty if it
+  // does not.
+  string attention = 11;
+  google.protobuf.Timestamp created_at = 12;
+  // Unset until a snapshot recorded an operation.
+  google.protobuf.Timestamp last_snapshot_at = 13;
+  string last_snapshot_op = 14;
+  // Its unended lease; unset once released or reclaimed.
+  Lease lease = 15;
+}
+
+// How much disk a workspace uses beyond its base. An estimate.
+message DiskUsage {
+  uint64 allocated_bytes = 1;
+  uint64 files_changed = 2;
+}
