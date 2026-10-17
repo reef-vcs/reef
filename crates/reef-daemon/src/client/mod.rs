@@ -1,5 +1,10 @@
 //! The daemon client the CLI and tests use. It wraps the generated clients,
 //! one method per RPC, so nothing else depends on their shape.
+//! [`WorkspacesApi`] is the same surface as a trait, for code that wants to
+//! run against a fake daemon (R1.21's heartbeater); [`json`] is the stable
+//! JSON form of the responses that `reef -o json` prints (R1.22).
+
+pub mod json;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,12 +14,14 @@ use reef_lib::error::{Classify, ErrorKind};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 
+pub use reef_lib::jj::settings::parse_byte_size;
+
 use crate::error::{detail_of, kind_from_status};
 use crate::proto::v0::daemon_client::DaemonClient;
 use crate::proto::v0::repositories_client::RepositoriesClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
-    CreateRequest, CreateResponse, ForgetRequest, InspectRequest, InspectResponse,
+    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, InspectRequest, InspectResponse,
     ListRepositoriesRequest, ListWorkspacesRequest, RegisterRequest, RegisterResponse,
     ReleaseRequest, ReleaseResponse, Repository, SnapshotRequest, SnapshotResponse, StatusRequest,
     StatusResponse, Workspace,
@@ -141,12 +148,11 @@ impl Client {
 
     /// `Repositories.Forget`. `repo` is an id, an id prefix, or a path
     /// inside the root.
-    pub async fn forget_repository(&self, repo: &str) -> Result<(), ClientError> {
+    pub async fn forget_repository(&self, repo: &str) -> Result<ForgetResponse, ClientError> {
         let request = ForgetRequest {
             repo: repo.to_owned(),
         };
-        self.repositories().forget(request).await?;
-        Ok(())
+        Ok(self.repositories().forget(request).await?.into_inner())
     }
 
     /// `Workspaces.Create`.
@@ -217,5 +223,142 @@ impl Client {
             description: description.to_owned(),
         };
         Ok(self.workspaces().snapshot(request).await?.into_inner())
+    }
+}
+
+/// The client's surface as a trait: one method per RPC, with the same
+/// signatures as [`Client`]'s. [`Client`] implements it; tests and
+/// R1.21's heartbeater implement it over a fake.
+#[tonic::async_trait]
+pub trait WorkspacesApi: Send + Sync {
+    /// `Daemon.Status`.
+    async fn status(&self) -> Result<StatusResponse, ClientError>;
+    /// `Repositories.Register`.
+    async fn register_repository(&self, path: &Path) -> Result<RegisterResponse, ClientError>;
+    /// `Repositories.List`.
+    async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError>;
+    /// `Repositories.Forget`.
+    async fn forget_repository(&self, repo: &str) -> Result<ForgetResponse, ClientError>;
+    /// `Workspaces.Create`.
+    async fn create_workspace(&self, request: CreateRequest)
+    -> Result<CreateResponse, ClientError>;
+    /// `Workspaces.List`.
+    async fn list_workspaces(
+        &self,
+        request: ListWorkspacesRequest,
+    ) -> Result<Vec<Workspace>, ClientError>;
+    /// `Workspaces.Inspect`.
+    async fn inspect_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        snapshot_first: bool,
+    ) -> Result<InspectResponse, ClientError>;
+    /// `Workspaces.Release`.
+    async fn release_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        snapshot_first: bool,
+        force: bool,
+    ) -> Result<ReleaseResponse, ClientError>;
+    /// `Workspaces.Snapshot`.
+    async fn snapshot_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        description: &str,
+    ) -> Result<SnapshotResponse, ClientError>;
+}
+
+#[tonic::async_trait]
+impl WorkspacesApi for Client {
+    async fn status(&self) -> Result<StatusResponse, ClientError> {
+        Client::status(self).await
+    }
+
+    async fn register_repository(&self, path: &Path) -> Result<RegisterResponse, ClientError> {
+        Client::register_repository(self, path).await
+    }
+
+    async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError> {
+        Client::list_repositories(self).await
+    }
+
+    async fn forget_repository(&self, repo: &str) -> Result<ForgetResponse, ClientError> {
+        Client::forget_repository(self, repo).await
+    }
+
+    async fn create_workspace(
+        &self,
+        request: CreateRequest,
+    ) -> Result<CreateResponse, ClientError> {
+        Client::create_workspace(self, request).await
+    }
+
+    async fn list_workspaces(
+        &self,
+        request: ListWorkspacesRequest,
+    ) -> Result<Vec<Workspace>, ClientError> {
+        Client::list_workspaces(self, request).await
+    }
+
+    async fn inspect_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        snapshot_first: bool,
+    ) -> Result<InspectResponse, ClientError> {
+        Client::inspect_workspace(self, repo, workspace, snapshot_first).await
+    }
+
+    async fn release_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        snapshot_first: bool,
+        force: bool,
+    ) -> Result<ReleaseResponse, ClientError> {
+        Client::release_workspace(self, repo, workspace, snapshot_first, force).await
+    }
+
+    async fn snapshot_workspace(
+        &self,
+        repo: &str,
+        workspace: &str,
+        description: &str,
+    ) -> Result<SnapshotResponse, ClientError> {
+        Client::snapshot_workspace(self, repo, workspace, description).await
+    }
+}
+
+/// The owner `reef ws create` sends when not given one: `<user>@<host>`,
+/// the user the process runs as and the machine's full hostname (README,
+/// Owner).
+pub fn default_owner() -> String {
+    format!(
+        "{}@{}",
+        crate::config::os_username(),
+        crate::config::machine_hostname()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The trait stays object-safe, so a heartbeater can hold
+    /// `Arc<dyn WorkspacesApi>`.
+    #[test]
+    fn workspaces_api_is_object_safe() {
+        fn takes(_: &dyn WorkspacesApi) {}
+        let _ = takes;
+    }
+
+    #[test]
+    fn default_owner_is_user_at_host() {
+        let owner = default_owner();
+        let (user, host) = owner.split_once('@').unwrap();
+        assert!(!user.is_empty() && !host.is_empty(), "{owner}");
     }
 }

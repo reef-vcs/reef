@@ -1,0 +1,233 @@
+//! Output rules (README, CLI). JSON (`-o json`, or stdout not a terminal):
+//! exactly one JSON value on stdout per command, an object or, for lists,
+//! an array, and on failure `{"error": {"kind", "message"}}`. Text (`-o
+//! text`, or a terminal): `key: value` blocks and aligned columns. Errors
+//! always go to stderr as `error: <chain>`; notes such as `released <id>`
+//! go to stderr in text mode only, and `-q` silences them.
+
+use std::io::{self, IsTerminal as _, Write};
+
+use reef_lib::error::{Classify as _, ErrorChain};
+use serde::Serialize;
+
+use super::CliError;
+use super::error::kind_text;
+
+/// The output format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Output {
+    // Aligned columns and `key: value` blocks. (Not doc comments, which
+    // would list the values in every subcommand's `--help`.)
+    #[value(alias = "toml")]
+    Text,
+    // One JSON value per command.
+    Json,
+}
+
+/// Where a command's results go, and in what form.
+#[derive(Clone, Debug)]
+pub(crate) struct Out {
+    mode: Output,
+    quiet: bool,
+}
+
+/// A value printed as a `key: value` block in text mode.
+pub(crate) trait TextRender {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()>;
+}
+
+/// A value printed as one row of a table in text mode.
+pub(crate) trait TextRow {
+    const HEADER: &'static [&'static str];
+    fn row(&self) -> Vec<String>;
+}
+
+impl Out {
+    /// `flag` if given, else JSON unless stdout is a terminal.
+    pub(crate) fn detect(flag: Option<Output>, quiet: bool) -> Self {
+        let mode = flag.unwrap_or_else(|| {
+            if io::stdout().is_terminal() {
+                Output::Text
+            } else {
+                Output::Json
+            }
+        });
+        Self { mode, quiet }
+    }
+
+    /// The format in effect.
+    pub(crate) fn mode(&self) -> Output {
+        self.mode
+    }
+
+    /// A single result.
+    pub(crate) fn object<T: Serialize + TextRender>(&self, value: &T) -> Result<(), CliError> {
+        let mut buffer = Vec::new();
+        match self.mode {
+            Output::Json => json_into(&mut buffer, value),
+            Output::Text => value.render(&mut buffer).map_err(CliError::Stdout)?,
+        }
+        self.raw(&buffer)
+    }
+
+    /// A list: a JSON array, or a header line and one aligned row per value.
+    pub(crate) fn list<T: Serialize + TextRow>(&self, values: &[T]) -> Result<(), CliError> {
+        let mut buffer = Vec::new();
+        match self.mode {
+            Output::Json => json_into(&mut buffer, &values),
+            Output::Text => {
+                let rows: Vec<Vec<String>> = values.iter().map(TextRow::row).collect();
+                table(&mut buffer, T::HEADER, &rows);
+            }
+        }
+        self.raw(&buffer)
+    }
+
+    /// A result that has no text form beyond a note: `value` on stdout in
+    /// JSON mode, `note` on stderr in text mode.
+    pub(crate) fn done<T: Serialize>(&self, value: &T, note: &str) -> Result<(), CliError> {
+        match self.mode {
+            Output::Json => {
+                let mut buffer = Vec::new();
+                json_into(&mut buffer, value);
+                self.raw(&buffer)
+            }
+            Output::Text => {
+                self.note(note);
+                Ok(())
+            }
+        }
+    }
+
+    /// A line on stderr, in both modes, unless `-q`.
+    #[expect(clippy::print_stderr, reason = "the CLI's notes go to stderr")]
+    pub(crate) fn note(&self, text: &str) {
+        if !self.quiet {
+            eprintln!("{text}");
+        }
+    }
+
+    /// Bytes on stdout as they are. A closed stdout (`reef ws list | head`)
+    /// is not a failure.
+    #[expect(
+        clippy::unused_self,
+        reason = "every result goes through an `Out`, raw bytes too"
+    )]
+    pub(crate) fn raw(&self, bytes: &[u8]) -> Result<(), CliError> {
+        let mut stdout = io::stdout().lock();
+        match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(CliError::Stdout(error)),
+            _ => Ok(()),
+        }
+    }
+
+    /// `error: <chain>` on stderr; in JSON mode also the error object on
+    /// stdout.
+    #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
+    pub(crate) fn error(&self, error: &CliError) {
+        let message = ErrorChain(error).to_string();
+        eprintln!("error: {message}");
+        if self.mode == Output::Json {
+            self.error_object(kind_text(error.kind()), &message);
+        }
+    }
+
+    /// clap's rendering of a usage error on stderr; in JSON mode also the
+    /// error object, with `message` as its first line.
+    #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
+    pub(crate) fn usage_error(&self, rendered: &str, message: &str) {
+        eprint!("{rendered}");
+        if self.mode == Output::Json {
+            self.error_object("invalid_argument", message);
+        }
+    }
+
+    fn error_object(&self, kind: &str, message: &str) {
+        let value = serde_json::json!({ "error": { "kind": kind, "message": message } });
+        let mut buffer = Vec::new();
+        json_into(&mut buffer, &value);
+        // Already failing; a closed stdout changes nothing.
+        let _ = self.raw(&buffer);
+    }
+}
+
+fn json_into<T: Serialize + ?Sized>(buffer: &mut Vec<u8>, value: &T) {
+    // The output types are plain structs of strings and numbers; they
+    // always serialize.
+    if serde_json::to_writer_pretty(&mut *buffer, value).is_ok() {
+        buffer.push(b'\n');
+    }
+}
+
+/// `rows` under `header`, each column padded to its widest cell with
+/// two-space gutters and no trailing spaces. Cells are ASCII (ids, states,
+/// paths are passed through as they are and only pad by `chars`).
+fn table(w: &mut Vec<u8>, header: &[&str], rows: &[Vec<String>]) {
+    let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let mut line = |cells: &mut dyn Iterator<Item = &str>| {
+        let mut text = String::new();
+        for (index, (cell, width)) in cells.zip(&widths).enumerate() {
+            if index > 0 {
+                text.push_str("  ");
+            }
+            text.push_str(cell);
+            text.extend(std::iter::repeat_n(' ', width - cell.chars().count()));
+        }
+        w.extend_from_slice(text.trim_end().as_bytes());
+        w.push(b'\n');
+    };
+    line(&mut header.iter().copied());
+    for row in rows {
+        line(&mut row.iter().map(String::as_str));
+    }
+}
+
+/// `key: value` lines with the values aligned.
+pub(crate) fn block(w: &mut dyn Write, pairs: &[(&str, String)]) -> io::Result<()> {
+    let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+    for (key, value) in pairs {
+        writeln!(w, "{key}:{:pad$} {value}", "", pad = width - key.len())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tables_align_columns_without_trailing_space() {
+        let mut buffer = Vec::new();
+        table(
+            &mut buffer,
+            &["ID", "STATE", "PATH"],
+            &[
+                vec!["abcd".into(), "active".into(), "/ws/1".into()],
+                vec!["ef".into(), String::new(), "/ws/22".into()],
+            ],
+        );
+        assert_eq!(
+            String::from_utf8(buffer).unwrap(),
+            "ID    STATE   PATH\nabcd  active  /ws/1\nef            /ws/22\n"
+        );
+    }
+
+    #[test]
+    fn blocks_align_values() {
+        let mut buffer = Vec::new();
+        block(
+            &mut buffer,
+            &[("id", "abcd".into()), ("state", "active".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buffer).unwrap(),
+            "id:    abcd\nstate: active\n"
+        );
+    }
+}

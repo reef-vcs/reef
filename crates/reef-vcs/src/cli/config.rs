@@ -1,14 +1,18 @@
 //! `reef config show`: the configuration the daemon would run with, resolved
 //! the same way ([`Config::load`]) without contacting it.
+//!
+//! Unlike other commands, its output defaults to text (TOML) even when
+//! stdout is not a terminal, because the text form is itself machine
+//! readable and loads back as a `config.toml` (`reef config show >
+//! config.toml`). `-o json` selects JSON.
 
-use std::io::{self, Write as _};
-
-use anyhow::Context as _;
 use reef_daemon::config::{Config, PathOverrides};
+
+use super::{CliError, Out, Output};
 
 /// `reef config`.
 #[derive(Debug, clap::Args)]
-pub(crate) struct ConfigArgs {
+pub(crate) struct Args {
     #[command(subcommand)]
     command: ConfigCommand,
 }
@@ -16,53 +20,41 @@ pub(crate) struct ConfigArgs {
 #[derive(Debug, clap::Subcommand)]
 enum ConfigCommand {
     /// Print the effective configuration, with the layer each value came
-    /// from (default, file, env, or flag).
-    Show {
-        /// `text` prints TOML with a `# source:` comment per key; `json` one
-        /// object with a `sources` map.
-        #[arg(short = 'o', long, value_enum, default_value_t = Output::Text)]
-        output: Output,
-    },
+    /// from (default, file, env, or flag): TOML with a `# source:` comment
+    /// per key, or with `-o json` one object with a `sources` map.
+    Show,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum Output {
-    /// TOML, loadable as `config.toml`.
-    #[value(alias = "toml")]
-    Text,
-    /// JSON.
-    Json,
-}
-
-impl ConfigArgs {
-    pub(crate) fn run(self, overrides: &PathOverrides) -> anyhow::Result<()> {
+impl Args {
+    pub(crate) fn run(self, overrides: &PathOverrides, out: &Out) -> Result<(), CliError> {
         match self.command {
-            ConfigCommand::Show { output } => show(overrides, output),
+            ConfigCommand::Show => show(overrides, out),
         }
     }
 }
 
-fn show(overrides: &PathOverrides, output: Output) -> anyhow::Result<()> {
-    let config = Config::load(overrides).context("load the daemon's configuration")?;
-    let text = match output {
+fn show(overrides: &PathOverrides, out: &Out) -> Result<(), CliError> {
+    let config = Config::load(overrides).map_err(CliError::Config)?;
+    let text = match out.mode() {
         Output::Text => config.to_effective_toml(),
         Output::Json => {
-            let mut value = serde_json::to_value(config.effective_file())
-                .context("serialize the configuration")?;
+            let mut value =
+                serde_json::to_value(config.effective_file()).map_err(|e| json_error(&e))?;
             if let Some(object) = value.as_object_mut() {
                 object.insert(
                     "sources".to_owned(),
-                    serde_json::to_value(&config.sources).context("serialize the sources")?,
+                    serde_json::to_value(&config.sources).map_err(|e| json_error(&e))?,
                 );
             }
             format!("{value:#}\n")
         }
     };
-    match io::stdout().lock().write_all(text.as_bytes()) {
-        // `reef config show | head` is not a failure.
-        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
-            Err(error).context("write to stdout")
-        }
-        _ => Ok(()),
+    out.raw(text.as_bytes())
+}
+
+fn json_error(error: &serde_json::Error) -> CliError {
+    CliError::Refused {
+        kind: reef_lib::error::ErrorKind::Internal,
+        message: format!("serialize the configuration: {error}"),
     }
 }

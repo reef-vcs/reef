@@ -1327,7 +1327,7 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
 }
 
 /// The machine's full hostname, or `localhost` if it has none.
-fn machine_hostname() -> String {
+pub(crate) fn machine_hostname() -> String {
     nix::unistd::gethostname()
         .ok()
         .and_then(|name| name.into_string().ok())
@@ -1337,7 +1337,7 @@ fn machine_hostname() -> String {
 
 /// The name of the user the process runs as: the password database entry,
 /// else `$USER`, else the numeric uid.
-fn os_username() -> String {
+pub(crate) fn os_username() -> String {
     let uid = nix::unistd::getuid();
     nix::unistd::User::from_uid(uid)
         .ok()
