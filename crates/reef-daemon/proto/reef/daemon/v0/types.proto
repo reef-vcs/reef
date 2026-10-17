@@ -84,6 +84,9 @@ message Workspace {
   // What triggers its snapshots: `notify` or `watchman` (R1.14). Fixed at
   // create.
   string watcher = 16;
+  // How many of its snapshots have not been published (R1.16); every one,
+  // in Phase 1. Filled in by List and Inspect; 0 in Create.
+  uint64 local_snapshot_count = 17;
 }
 
 // How much disk a workspace uses beyond its base. An estimate.

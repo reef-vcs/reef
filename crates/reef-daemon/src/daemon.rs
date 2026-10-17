@@ -18,7 +18,9 @@
 //!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
 //!    leftovers (`*.gc` under `repos/*/bases/`, R1.17) once that lands.
 //! 4. Reconcile overlay mounts (R1.09; nothing until then).
-//! 5. Start one repository thread per registered repository.
+//! 5. Start one repository thread per registered repository. Then rebuild
+//!    each one's `snapshots` index from its operation log (R1.16) and log
+//!    the report, before any snapshot can add a row.
 //! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
 //!    one's jj handle; reclaim one whose directory is gone. Each is tracked
 //!    by the snapshot scheduler, which then starts (R1.13).
@@ -37,6 +39,7 @@
 //! repository thread finishes its queued jobs and stops, the socket and pid
 //! files are removed, and the lock is released. The lock file stays.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -48,6 +51,7 @@ use futures::future::BoxFuture;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::UserSettings;
 use reef_lib::jj::settings::SettingsError;
+use reef_lib::telemetry::elapsed_ms;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -59,9 +63,10 @@ use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::lease::LeaseError;
 use crate::lock::{InstanceLock, LockError};
-use crate::model::RepositoryRecord;
+use crate::model::{RepoId, RepositoryRecord};
 use crate::repo::RepoRegistry;
 use crate::server;
+use crate::snapshot::index::{self, ReindexReport};
 use crate::workspace::Manager;
 
 /// How long in-flight requests may run after shutdown begins.
@@ -89,6 +94,9 @@ pub struct AppState {
     /// Work to do after the server stops and before the repository threads
     /// do.
     pub hooks: ShutdownHooks,
+    /// What each repository's start-time reindex of the `snapshots` index
+    /// did (R1.16); absent for one whose reindex failed.
+    pub reindexed: Mutex<HashMap<RepoId, ReindexReport>>,
 }
 
 impl fmt::Debug for AppState {
@@ -276,6 +284,7 @@ impl Daemon {
             started: Instant::now(),
             shutdown: CancellationToken::new(),
             hooks: ShutdownHooks::default(),
+            reindexed: Mutex::new(HashMap::new()),
         });
 
         let listener = match bring_up(&state).await {
@@ -406,6 +415,14 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         }
         Err(error) => tracing::error!(error = %ErrorChain(&error), "cannot list repositories"),
     }
+    //    Then rebuild each open repository's snapshot index, before the
+    //    scheduler can record new rows.
+    let reindexes = state
+        .repos
+        .ids()
+        .into_iter()
+        .map(|id| reindex_repo(state, id));
+    futures::future::join_all(reindexes).await;
 
     // 6. Load active workspaces. A database failure here is logged; the
     //    daemon still serves registration and the database's view.
@@ -444,6 +461,49 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         })
     });
     Ok(listener)
+}
+
+/// Rebuilds one repository's `snapshots` index from its operation log and
+/// logs the report. A failure is logged; the index keeps its rows, and new
+/// snapshots still add theirs.
+async fn reindex_repo(state: &Arc<AppState>, id: RepoId) {
+    let Some(handle) = state.repos.get(id) else {
+        return;
+    };
+    let limit = usize::try_from(state.config.file.gc.reindex_limit).unwrap_or(usize::MAX);
+    let begun = Instant::now();
+    match index::reindex(&state.db, &handle, id, limit).await {
+        Ok(report) => {
+            tracing::info!(
+                repo = %id,
+                added_count = report.added,
+                removed_count = report.removed,
+                skipped_count = report.skipped,
+                walked_count = report.walked,
+                truncated = report.truncated,
+                elapsed_ms = elapsed_ms(begun),
+                "snapshot index reconciled with the operation log"
+            );
+            if report.truncated {
+                tracing::warn!(
+                    repo = %id,
+                    reindex_limit = limit,
+                    "the operation log is longer than gc.reindex_limit; older snapshots were not \
+                     checked and no rows were removed"
+                );
+            }
+            state
+                .reindexed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id, report);
+        }
+        Err(error) => tracing::error!(
+            repo = %id,
+            error = %ErrorChain(&error),
+            "cannot reconcile the snapshot index with the operation log"
+        ),
+    }
 }
 
 async fn open_repo(state: &Arc<AppState>, record: RepositoryRecord) {

@@ -263,8 +263,17 @@ async fn ws_list_and_inspect() {
         inspected["disk_usage"]["files_changed"].is_u64(),
         "{inspected}"
     );
+    // R1.16: the snapshot index's counts and recent list.
+    assert!(inspected["snapshot_count"].is_u64(), "{inspected}");
+    assert!(inspected["local_snapshot_count"].is_u64(), "{inspected}");
+    assert!(inspected["recent_snapshots"].is_array(), "{inspected}");
     let output = run(reef(&daemon), &["-o", "text", "ws", "inspect", &id]).await;
     assert!(stdout(&output).starts_with("id:"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("\nsnapshots:"),
+        "{}",
+        stdout(&output)
+    );
 
     // A hex prefix nothing has: 3. Not hex at all: 2.
     let first = if id.starts_with('f') { '0' } else { 'f' };

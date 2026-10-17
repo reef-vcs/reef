@@ -19,7 +19,7 @@ use crate::proto::v0::{
     InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, ReleaseRequest,
     ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
 };
-use crate::snapshot::SnapshotKind;
+use crate::snapshot::{SnapshotKind, index};
 use crate::workspace::{CreateSpec, ReleaseSpec, Start};
 
 /// A request field that does not parse.
@@ -101,6 +101,7 @@ impl Workspaces for WorkspacesService {
             workspace: Some(Workspace::from(WorkspaceView {
                 record: &created.record,
                 lease: self.lease_message(Some(&created.lease), Timestamp::now()),
+                local_snapshot_count: 0,
             })),
             op_id: created.op_id,
             shared_change: created.shared_change,
@@ -131,6 +132,7 @@ impl Workspaces for WorkspacesService {
             .map_err(status)?;
         let owner = non_empty(request.owner);
         let now = Timestamp::now();
+        let local_counts = index::local_counts(&self.state.db, repo).map_err(status)?;
         let workspaces = manager
             .list(repo, &states, owner.as_deref())
             .map_err(status)?
@@ -139,6 +141,7 @@ impl Workspaces for WorkspacesService {
                 Workspace::from(WorkspaceView {
                     record,
                     lease: self.lease_message(lease.as_ref(), now),
+                    local_snapshot_count: local_counts.get(&record.id).copied().unwrap_or(0),
                 })
             })
             .collect();
@@ -164,6 +167,7 @@ impl Workspaces for WorkspacesService {
             workspace: Some(Workspace::from(WorkspaceView {
                 record: &inspected.record,
                 lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
+                local_snapshot_count: inspected.local_snapshot_count,
             })),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
             other_workspaces_on_change: inspected
@@ -172,6 +176,13 @@ impl Workspaces for WorkspacesService {
                 .map(crate::model::WorkspaceId::as_hex)
                 .collect(),
             op_id: inspected.op_id.unwrap_or_default(),
+            snapshot_count: inspected.snapshot_count,
+            local_snapshot_count: inspected.local_snapshot_count,
+            recent_snapshots: inspected
+                .recent_snapshots
+                .iter()
+                .map(v0::SnapshotEntry::from)
+                .collect(),
         }))
     }
 

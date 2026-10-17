@@ -12,6 +12,8 @@ use super::out::{TextRender, TextRow, block};
 const NAME_WIDTH: usize = 40;
 /// Change ids are shown by this many characters of their reverse hex.
 const CHANGE_WIDTH: usize = 8;
+/// Operation ids are shown by this many characters, as `jj op log` does.
+const OP_WIDTH: usize = 12;
 
 fn or_dash(value: Option<&str>) -> String {
     value.unwrap_or("-").to_owned()
@@ -179,7 +181,28 @@ impl TextRender for Inspected {
                 self.other_workspaces_on_change.join(", ")
             },
         ));
-        block(w, &pairs)
+        pairs.push((
+            "snapshots",
+            format!(
+                "{} ({} local)",
+                self.snapshot_count, self.workspace.local_snapshot_count
+            ),
+        ));
+        block(w, &pairs)?;
+        if !self.recent_snapshots.is_empty() {
+            writeln!(w, "recent_snapshots:")?;
+            for snapshot in &self.recent_snapshots {
+                writeln!(
+                    w,
+                    "  {}  {:<8}  {}  {}",
+                    or_dash(snapshot.taken_at.as_deref()),
+                    snapshot.kind,
+                    if snapshot.local { "local" } else { "published" },
+                    snapshot.op_id.chars().take(OP_WIDTH).collect::<String>(),
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 

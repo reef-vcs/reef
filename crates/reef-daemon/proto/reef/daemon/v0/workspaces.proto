@@ -103,6 +103,28 @@ message InspectResponse {
   repeated string other_workspaces_on_change = 3;
   // The operation `snapshot_first` recorded, if it recorded one.
   string op_id = 4;
+  // Snapshot operations the daemon indexed for this workspace (R1.16), and
+  // how many of them are local: not yet published. `local_snapshot_count`
+  // equals `workspace.local_snapshot_count`, which List carries too.
+  uint64 snapshot_count = 5;
+  uint64 local_snapshot_count = 6;
+  // The newest 10 of them, newest first.
+  repeated SnapshotEntry recent_snapshots = 7;
+}
+
+// One snapshot operation in the daemon's index (R1.16).
+message SnapshotEntry {
+  string op_id = 1;
+  // The working-copy commit it wrote.
+  string commit_id = 2;
+  // watcher, explicit, final, move, or shutdown. An index rebuilt from the
+  // operation log reads explicit snapshots as watcher and shutdown ones as
+  // final.
+  string kind = 3;
+  // Not yet published. Always true in Phase 1.
+  bool local = 4;
+  // When the operation ended.
+  google.protobuf.Timestamp taken_at = 5;
 }
 
 message ReleaseRequest {

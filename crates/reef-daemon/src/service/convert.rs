@@ -7,6 +7,7 @@ use crate::backend::DiskUsage;
 use crate::lease::{LeaseManager, LeaseState};
 use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
 use crate::proto::v0;
+use crate::snapshot::index::SnapshotEntry;
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
 pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
@@ -71,10 +72,12 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
     }
 }
 
-/// A workspace row and its lease, as one message.
+/// A workspace row, its lease, and its local snapshot count, as one
+/// message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
     pub(super) lease: Option<v0::Lease>,
+    pub(super) local_snapshot_count: u64,
 }
 
 impl From<WorkspaceView<'_>> for v0::Workspace {
@@ -100,6 +103,19 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             last_snapshot_op: record.last_snapshot_op.clone().unwrap_or_default(),
             lease: view.lease,
             watcher: record.watcher.as_str().to_owned(),
+            local_snapshot_count: view.local_snapshot_count,
+        }
+    }
+}
+
+impl From<&SnapshotEntry> for v0::SnapshotEntry {
+    fn from(entry: &SnapshotEntry) -> Self {
+        Self {
+            op_id: entry.op_id.to_string(),
+            commit_id: entry.commit_id.to_string(),
+            kind: entry.kind.as_str().to_owned(),
+            local: entry.local,
+            taken_at: Some(timestamp(entry.taken_at)),
         }
     }
 }

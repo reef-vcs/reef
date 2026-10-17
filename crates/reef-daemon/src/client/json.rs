@@ -171,6 +171,8 @@ pub struct Workspace {
     pub lease: Option<Lease>,
     /// What triggers its snapshots: `notify` or `watchman`.
     pub watcher: String,
+    /// How many of its snapshots have not been published; 0 in `ws create`.
+    pub local_snapshot_count: u64,
 }
 
 impl From<&v0::Workspace> for Workspace {
@@ -193,6 +195,34 @@ impl From<&v0::Workspace> for Workspace {
             last_snapshot_op: text(&ws.last_snapshot_op),
             lease: ws.lease.as_ref().map(Lease::from),
             watcher: ws.watcher.clone(),
+            local_snapshot_count: ws.local_snapshot_count,
+        }
+    }
+}
+
+/// One indexed snapshot operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotEntry {
+    /// The operation.
+    pub op_id: String,
+    /// The working-copy commit it wrote.
+    pub commit_id: String,
+    /// `watcher`, `explicit`, `final`, `move`, or `shutdown`.
+    pub kind: String,
+    /// Not yet published.
+    pub local: bool,
+    /// When the operation ended.
+    pub taken_at: Option<String>,
+}
+
+impl From<&v0::SnapshotEntry> for SnapshotEntry {
+    fn from(entry: &v0::SnapshotEntry) -> Self {
+        Self {
+            op_id: entry.op_id.clone(),
+            commit_id: entry.commit_id.clone(),
+            kind: entry.kind.clone(),
+            local: entry.local,
+            taken_at: time(entry.taken_at.as_ref()),
         }
     }
 }
@@ -256,6 +286,10 @@ pub struct Inspected {
     pub other_workspaces_on_change: Vec<String>,
     /// The operation the snapshot recorded, if it recorded one.
     pub op_id: Option<String>,
+    /// Its indexed snapshot operations.
+    pub snapshot_count: u64,
+    /// The newest 10 of them, newest first.
+    pub recent_snapshots: Vec<SnapshotEntry>,
 }
 
 impl Inspected {
@@ -266,6 +300,12 @@ impl Inspected {
             disk_usage: response.disk_usage.as_ref().map(DiskUsage::from),
             other_workspaces_on_change: response.other_workspaces_on_change.clone(),
             op_id: text(&response.op_id),
+            snapshot_count: response.snapshot_count,
+            recent_snapshots: response
+                .recent_snapshots
+                .iter()
+                .map(SnapshotEntry::from)
+                .collect(),
         })
     }
 }

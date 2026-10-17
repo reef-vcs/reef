@@ -459,6 +459,13 @@ mod tests {
                 "watcher".to_owned(),
                 names(WatcherKind::ALL, WatcherKind::as_str),
             ),
+            (
+                "kind".to_owned(),
+                names(
+                    crate::snapshot::SnapshotKind::ALL,
+                    crate::snapshot::SnapshotKind::as_str,
+                ),
+            ),
         ]);
         assert_eq!(sets, expected);
     }

@@ -43,6 +43,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0002_base_cache.sql"),
     ),
     (
+        "0003_snapshots",
+        include_str!("migrations/0003_snapshots.sql"),
+    ),
+    (
         "0005_watchman",
         include_str!("migrations/0005_watchman.sql"),
     ),
@@ -497,8 +501,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
-        assert_eq!(SCHEMA_VERSION, 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(SCHEMA_VERSION, 4);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -506,7 +510,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -549,7 +553,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 3
+                    supported: 4
                 }
             ),
             "{error:?}"
@@ -565,7 +569,12 @@ mod tests {
         let applied = db.with(applied_migrations).unwrap();
         assert_eq!(
             applied,
-            ["0001_initial", "0002_base_cache", "0005_watchman"]
+            [
+                "0001_initial",
+                "0002_base_cache",
+                "0003_snapshots",
+                "0005_watchman"
+            ]
         );
         // A newer daemon applied a migration this binary does not have, without
         // raising the count past ours (it may lack one of ours).
@@ -590,10 +599,15 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
-            ["0001_initial", "0002_base_cache", "0005_watchman"]
+            [
+                "0001_initial",
+                "0002_base_cache",
+                "0003_snapshots",
+                "0005_watchman"
+            ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
         assert_eq!(db.bases(repo).unwrap().len(), 0);
@@ -637,12 +651,40 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
             crate::model::WatcherKind::Notify
         );
+    }
+
+    // R1.16: a database from before `0003_snapshots` landed has `0005`
+    // already; the earlier-numbered migration still applies.
+    #[test]
+    fn a_later_migration_does_not_block_an_earlier_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        let without_snapshots = MIGRATIONS
+            .iter()
+            .filter(|(name, _)| *name != "0003_snapshots");
+        for (index, (name, sql)) in without_snapshots.enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        let ws = "bbbb000000000001".parse().unwrap();
+        assert_eq!(crate::snapshot::index::counts(&db, ws).unwrap(), (0, 0));
     }
 
     #[test]
