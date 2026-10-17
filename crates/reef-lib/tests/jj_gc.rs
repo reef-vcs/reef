@@ -162,3 +162,26 @@ async fn missing_git_fails_after_the_operation_store() {
     assert!(has_commit(&repo, &c2).await);
     assert!(repo.working_copy_matches_view().unwrap());
 }
+
+#[tokio::test]
+async fn stranded_working_copy_is_rebound_only_when_stranded() {
+    let (_dir, mut repo) = init().await;
+    two_snapshots(&mut repo).await;
+    assert!(
+        !repo.rebind_if_stranded().await.unwrap(),
+        "a fresh working copy is left alone"
+    );
+    let root = repo.workspace_root().to_owned();
+    write(&root, "a.txt", "third version\n");
+    repo.snapshot("three").await.unwrap();
+    past_this_second().await;
+
+    // A GC whose caller never rebinds: the working copy's operation is gone.
+    let outcome = repo.gc(SystemTime::now()).await.unwrap();
+    assert_ne!(repo.working_copy_op_id(), outcome.new_head);
+    assert!(repo.rebind_if_stranded().await.unwrap());
+    assert_eq!(repo.working_copy_op_id(), outcome.new_head);
+    assert!(!repo.rebind_if_stranded().await.unwrap(), "only once");
+    write(&root, "b.txt", "after repair\n");
+    assert!(repo.snapshot("four").await.unwrap().changed);
+}

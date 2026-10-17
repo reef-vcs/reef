@@ -7,11 +7,17 @@
 //! has its automatic snapshots paused and its scan lock held (explicit
 //! snapshots and releases wait), is snapshotted, and is checked: its
 //! recorded tree must be its working-copy commit's tree at head. A stale
-//! one is snapshotted again, which adopts the rewrite (no operation). After
-//! the GC, each is moved to the new head
+//! one is snapshotted again, which adopts the rewrite (no operation). The
+//! moment the op heads move, inside the GC's job on the repository thread
+//! and before the slow collection, each is moved to the new head
 //! ([`reef_lib::jj::Repo::rebind_working_copy`]), the state R1.13's
 //! freshness check calls fresh. If any workspace cannot be made to match,
 //! or is not loaded, no operation is abandoned: it would be stranded.
+//!
+//! A crash between the two still strands working copies. Their files are
+//! their commits', so the next daemon start (when it reopens them) and the
+//! next GC (before it snapshots) move them to the head
+//! ([`reef_lib::jj::Repo::rebind_if_stranded`]).
 //!
 //! The user's own `default` workspace is not touched; the next `jj` command
 //! there reports a stale working copy, which `jj workspace update-stale`
@@ -94,19 +100,9 @@ impl Manager {
             };
         }
 
-        let ran = handle
-            .call_async(move |head| {
-                async move {
-                    let dirs = head.repo.gc_measured_dirs();
-                    let before = measure_blocking(&dirs);
-                    let outcome = head.repo.gc(keep_newer).await;
-                    let after = measure_blocking(&dirs);
-                    (before, after, outcome, head.repo.op_id(), head.readonly())
-                }
-                .boxed_local()
-            })
-            .await;
-        let (before, after, outcome, op_id, readonly) = match ran {
+        let wcs: Vec<Arc<WorkspaceEntry>> = active.iter().map(|entry| Arc::clone(entry)).collect();
+        let ran = gc_job(handle, wcs, keep_newer).await;
+        let (before, after, outcome, rebind_failures, readonly) = match ran {
             Ok(ran) => ran,
             Err(error) => {
                 return JjStep {
@@ -127,29 +123,19 @@ impl Manager {
             }
             Err(error) => step.error = Some(ErrorChain(&error).to_string()),
         }
-        // Even after a failure: the repository is reloaded at whatever head
-        // the GC left, and every workspace here matches that head's view.
-        let mut rebind_failures = Vec::new();
-        for entry in active {
-            if let Err(error) = rebind(entry, &op_id, &readonly).await {
-                tracing::error!(
-                    workspace_id = %entry.paths.id,
-                    error = %ErrorChain(&error),
-                    "cannot move the workspace's working copy to the new head"
-                );
-                rebind_failures.push(format!(
-                    "workspace {}: {}",
-                    entry.paths.id,
-                    ErrorChain(&error)
-                ));
-            }
-        }
         if !rebind_failures.is_empty() {
             let failures = rebind_failures.join("; ");
             step.error = Some(match step.error {
                 Some(error) => format!("{error}; {failures}"),
                 None => failures,
             });
+        }
+        // Each handle follows the head; its next snapshot refreshes it anyway.
+        for entry in active {
+            let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(repo) = guard.as_mut() {
+                repo.set_head(Arc::clone(&readonly));
+            }
         }
         step
     }
@@ -160,6 +146,15 @@ impl Manager {
     /// cannot be checked) is unsafe to strand. The caller holds every scan
     /// lock.
     async fn settle(&self, handle: &RepoHandle, active: &[&Arc<WorkspaceEntry>]) -> Vec<String> {
+        // A working copy an interrupted GC left on an abandoned operation
+        // cannot snapshot; move it first if its files are its commit's.
+        if let Ok(Ok(head)) = handle.call_async(|head| head.refresh().boxed_local()).await {
+            for entry in active {
+                if let Err(error) = repair(entry, &head).await {
+                    tracing::warn!(workspace_id = %entry.paths.id, error = %ErrorChain(&error), "cannot check the working copy before GC");
+                }
+            }
+        }
         let mut pending: Vec<&Arc<WorkspaceEntry>> = active.to_vec();
         let mut problems = Vec::new();
         for round in 0..=MATCH_ROUNDS {
@@ -224,24 +219,85 @@ async fn matches_head(
     .await?
 }
 
-/// Points the workspace's jj handle at `head` and its working copy at
-/// `op_id`, if it is not there already.
-async fn rebind(
-    entry: &Arc<WorkspaceEntry>,
-    op_id: &OperationIdHex,
-    head: &Arc<ReadonlyRepo>,
-) -> Result<(), ManagerError> {
-    let (entry, head, op_id) = (Arc::clone(entry), Arc::clone(head), op_id.clone());
+/// What the GC's job on the repository thread returns: bytes before and
+/// after, jj's outcome, the working copies that could not be moved, and the
+/// head afterwards.
+type JobResult = (
+    u64,
+    u64,
+    Result<reef_lib::jj::GcOutcome, reef_lib::jj::GcError>,
+    Vec<String>,
+    Arc<ReadonlyRepo>,
+);
+
+/// Runs jj's GC as one job on the repository thread. The working copies in
+/// `wcs` move to the new head inside it, the moment the op heads do and
+/// before the slow collection, so a failure or crash after that leaves none
+/// on an abandoned operation.
+async fn gc_job(
+    handle: &RepoHandle,
+    wcs: Vec<Arc<WorkspaceEntry>>,
+    keep_newer: SystemTime,
+) -> Result<JobResult, crate::repo::RepoThreadError> {
+    handle
+        .call_async(move |head| {
+            async move {
+                let dirs = head.repo.gc_measured_dirs();
+                let before = measure_blocking(&dirs);
+                let mut rebind_failures = Vec::new();
+                let outcome = head
+                    .repo
+                    .gc_with(keep_newer, &mut |op_id| {
+                        for entry in &wcs {
+                            if let Err(error) = rebind(entry, op_id) {
+                                tracing::error!(
+                                    workspace_id = %entry.paths.id,
+                                    error = %ErrorChain(&error),
+                                    "cannot move the workspace's working copy to the new head"
+                                );
+                                rebind_failures.push(format!(
+                                    "workspace {}: {}",
+                                    entry.paths.id,
+                                    ErrorChain(&error)
+                                ));
+                            }
+                        }
+                    })
+                    .await;
+                let after = measure_blocking(&dirs);
+                (before, after, outcome, rebind_failures, head.readonly())
+            }
+            .boxed_local()
+        })
+        .await
+}
+
+/// Moves the workspace's working copy to `op_id`, if it is not there
+/// already. Runs on the repository thread, inside the GC's job.
+fn rebind(entry: &WorkspaceEntry, op_id: &OperationIdHex) -> Result<(), ManagerError> {
     let id: WorkspaceId = entry.paths.id;
+    let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
+    let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
+    if repo.working_copy_op_id() != *op_id {
+        pollster::block_on(repo.rebind_working_copy(op_id))
+            .map_err(|error| ManagerError::Rebind { id, source: error })?;
+    }
+    Ok(())
+}
+
+/// Points the workspace's jj handle at `head` and repairs a working copy an
+/// interrupted GC stranded ([`reef_lib::jj::Repo::rebind_if_stranded`]).
+async fn repair(
+    entry: &Arc<WorkspaceEntry>,
+    head: &Arc<ReadonlyRepo>,
+) -> Result<bool, ManagerError> {
+    let (entry, head, id) = (Arc::clone(entry), Arc::clone(head), entry.paths.id);
     tokio::task::spawn_blocking(move || {
         let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
         let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
         repo.set_head(head);
-        if repo.working_copy_op_id() != op_id {
-            pollster::block_on(repo.rebind_working_copy(&op_id))
-                .map_err(|error| ManagerError::Rebind { id, source: error })?;
-        }
-        Ok(())
+        pollster::block_on(repo.rebind_if_stranded())
+            .map_err(|error| ManagerError::WorkingCopyCheck { id, source: error })
     })
     .await?
 }

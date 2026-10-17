@@ -362,8 +362,12 @@ impl BaseCache {
             let entry = BaseEntry::from_record(record);
             let bytes = if dry_run {
                 allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?
+            } else if let Some(bytes) = self.evict_one(&entry)? {
+                bytes
             } else {
-                self.evict_one(&entry)?
+                // Removed meanwhile; not this eviction's.
+                remaining -= 1;
+                continue;
             };
             remaining -= 1;
             evicted.push(Evicted {
@@ -374,13 +378,14 @@ impl BaseCache {
         Ok(evicted)
     }
 
-    /// Removes one entry for [`BaseCache::evict`]; returns its bytes.
-    fn evict_one(&self, entry: &BaseEntry) -> Result<u64, BaseCacheError> {
+    /// Removes one entry for [`BaseCache::evict`]; returns its bytes, or
+    /// `None` if its row was gone already.
+    fn evict_one(&self, entry: &BaseEntry) -> Result<Option<u64>, BaseCacheError> {
         self.with_key_lock(&entry.tree_id, || {
             let bytes = allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?;
             if self.db.delete_base(self.repo_id, &entry.tree_id)?.is_none() {
                 // Removed meanwhile; nothing of it is ours to delete.
-                return Ok(0);
+                return Ok(None);
             }
             for dir in [&entry.path, &entry.state_dir] {
                 let doomed = with_suffix(dir, GC_SUFFIX);
@@ -398,7 +403,7 @@ impl BaseCache {
                 }
             }
             tracing::info!(tree_id = %entry.tree_id, freed_bytes = bytes, "base evicted");
-            Ok(bytes)
+            Ok(Some(bytes))
         })
     }
 

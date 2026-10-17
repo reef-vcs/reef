@@ -165,7 +165,7 @@ pub async fn run(
     Ok(reports)
 }
 
-#[tracing::instrument(skip_all, fields(repo = %record.id, dry_run))]
+#[tracing::instrument(skip_all, fields(repo = %record.id, dry_run = dry_run))]
 async fn run_repo(
     state: &AppState,
     record: &RepositoryRecord,
@@ -206,7 +206,7 @@ async fn run_repo(
         Some(handle) => manager.gc_jj(id, handle, keep_newer).await,
     };
     if let Some(error) = &jj.error {
-        tracing::error!(repo = %id, error = %error, "the jj step of GC stopped short");
+        tracing::error!(error = %error, "the jj step of GC stopped short");
     }
 
     // 2.
@@ -251,10 +251,8 @@ async fn run_repo(
         dry_run,
     };
     tracing::info!(
-        repo = %id,
-        dry_run,
         keep_newer = %report.keep_newer,
-        operations_abandoned = jj.operations_abandoned,
+        abandoned_count = jj.operations_abandoned,
         jj_bytes_before = report.jj_bytes_before,
         jj_bytes_after = report.jj_bytes_after,
         reindex_ms = report.reindex_ms,
@@ -321,19 +319,18 @@ async fn remove_dir(dir: &Path) -> Result<(), GcRunError> {
 }
 
 /// R1.16's reindex after the jj step rewrote the operation ids its rows
-/// name. A failure is logged; the next daemon start reindexes again.
+/// name. A failure is logged; the next daemon start reindexes again. Runs
+/// inside [`run_repo`]'s span, which carries the repository.
 async fn reindex(state: &AppState, handle: &crate::repo::RepoHandle, id: RepoId) {
     let limit = usize::try_from(state.config.file.gc.reindex_limit).unwrap_or(usize::MAX);
     match index::reindex(&state.db, handle, id, limit).await {
         Ok(report) => tracing::info!(
-            repo = %id,
             added_count = report.added,
             removed_count = report.removed,
             truncated = report.truncated,
             "snapshot index reconciled after GC"
         ),
         Err(error) => tracing::error!(
-            repo = %id,
             error = %ErrorChain(&error),
             "cannot reconcile the snapshot index after GC"
         ),

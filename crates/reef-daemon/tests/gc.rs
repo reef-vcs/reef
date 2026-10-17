@@ -475,6 +475,19 @@ async fn active_workspace_snapshots_after_gc() {
     let report = gc(&daemon, &repo, false).await;
     assert_eq!(report.jj_error, "", "{report:?}");
     assert_eq!(op_count(&repo.root).await, 2);
+    let entry = daemon.handle.state().manager.entry(id_of(&ws)).unwrap();
+    let wc_op = entry
+        .jj
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .working_copy_op_id();
+    assert_eq!(
+        wc_op,
+        open(&repo.root).await.op_id(),
+        "rebound to the GC head"
+    );
 
     write(&ws, "after-gc.txt", "after\n");
     let snapshot = daemon
@@ -499,6 +512,66 @@ async fn active_workspace_snapshots_after_gc() {
     assert!(!row.divergent);
     assert_eq!(row.attention, "");
     assert_eq!(op_count(&repo.root).await, 3, "one snapshot on the GC head");
+}
+
+// A GC cut short (here: one run behind the stopped daemon's back, which
+// rebinds nothing) leaves the workspace's working copy on an abandoned
+// operation; the next start moves it to the head.
+#[tokio::test(flavor = "multi_thread")]
+async fn stranded_working_copy_is_repaired_at_start() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "before.txt", "before\n");
+    snapshot(&daemon, &repo, &ws).await;
+    let TestDaemon {
+        handle,
+        client,
+        tmp,
+        config,
+    } = daemon;
+    drop(client);
+    handle.shutdown();
+    handle.join().await.unwrap();
+    past_this_second().await;
+    let root = repo.root.clone();
+    tokio::task::spawn_blocking(move || {
+        pollster::block_on(async {
+            let mut main = Repo::open(&root, &test_settings()).await.unwrap();
+            main.gc(std::time::SystemTime::now()).await.unwrap();
+        });
+    })
+    .await
+    .unwrap();
+
+    let handle = reef_daemon::Daemon::start(config.clone()).await.unwrap();
+    let client = reef_daemon::client::Client::connect(handle.socket_path())
+        .await
+        .unwrap();
+    let daemon = TestDaemon {
+        handle,
+        client,
+        tmp,
+        config,
+    };
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    write(&ws, "after.txt", "after\n");
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    assert!(tree_has(&repo.root, &snapshot.commit_id, "before.txt").await);
+    assert!(tree_has(&repo.root, &snapshot.commit_id, "after.txt").await);
+    let row = daemon
+        .client
+        .inspect_workspace(&repo.id, &ws.id, false)
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    assert!(!row.divergent);
+    assert_eq!(row.attention, "", "not recovered onto a new change");
 }
 
 /// The first regular file at least three directories deep in `root`, by
@@ -535,9 +608,33 @@ fn deep_file(root: &Path) -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "manual measurement on the medium preset; prints its numbers"]
 async fn medium_thousand_snapshots_then_gc() {
+    let (after_first, after_gc) = thousand_snapshots_then_gc(Duration::ZERO).await;
+    assert!(
+        after_gc * 10 <= after_first * 11,
+        "{after_gc} is not within 10% of {after_first}"
+    );
+}
+
+// The control: the same with a one-hour undo window, which abandons nothing,
+// so the difference from the run above is what abandoning freed rather than
+// what `git gc` packing did.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual measurement on the medium preset; prints its numbers"]
+async fn medium_thousand_snapshots_then_gc_control() {
+    thousand_snapshots_then_gc(Duration::from_hours(1)).await;
+}
+
+/// 1,000 snapshots of one edited file on the medium preset, then a GC with
+/// `undo_window`; prints the numbers and returns the git objects
+/// directory's size after the first snapshot and after GC.
+#[allow(
+    clippy::print_stderr,
+    reason = "a manual measurement prints its numbers"
+)]
+async fn thousand_snapshots_then_gc(undo_window: Duration) -> (u64, u64) {
     const SNAPSHOTS: usize = 1000;
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Medium, |config| {
-        config.file.gc.undo_window = Duration::ZERO;
+        config.file.gc.undo_window = undo_window;
     })
     .await;
     daemon.handle.state().manager.scheduler().pause_watcher();
@@ -566,13 +663,14 @@ async fn medium_thousand_snapshots_then_gc() {
     let report = gc(&daemon, &repo, false).await;
     let gc_time = begun.elapsed();
     let after_gc = size(&objects);
+    let ops_after = op_count(&repo.root).await;
     #[allow(clippy::cast_precision_loss, reason = "printed to one decimal")]
     let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
     eprintln!(
-        "medium preset, {SNAPSHOTS} snapshots of {} ({snapshotting:.1?})",
+        "medium preset, undo window {undo_window:?}, {SNAPSHOTS} snapshots of {} ({snapshotting:.1?})",
         file.display()
     );
-    eprintln!("operations before GC: {ops_before}");
+    eprintln!("operations: {ops_before} before GC, {ops_after} after");
     eprintln!(
         "git objects: {:.1} MiB after the first snapshot, {:.1} MiB before GC, {:.1} MiB after",
         mib(after_first),
@@ -586,8 +684,5 @@ async fn medium_thousand_snapshots_then_gc() {
         report.reindex_ms
     );
     assert_eq!(report.jj_error, "", "{report:?}");
-    assert!(
-        after_gc * 10 <= after_first * 11,
-        "{after_gc} is not within 10% of {after_first}"
-    );
+    (after_first, after_gc)
 }

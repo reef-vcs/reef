@@ -16,6 +16,13 @@
 //! `watcher` and one of a shutdown snapshot `final`
 //! ([`reef_lib::jj::oplog::is_reef_snapshot`]).
 //!
+//! GC (R1.17) rewrites the operations it keeps, with new ids, and jj does
+//! not say which old id became which. The reindex after GC therefore drops
+//! the rows of rewritten operations and adds them again under their new
+//! ids, as local and with the kind the log implies. R4's publish, which
+//! clears `local`, has to survive that: carry the flag by commit id, or
+//! record published changes elsewhere.
+//!
 //! As everywhere in the daemon, SQLite stays off the repository thread: the
 //! pipeline writes a row on its blocking half after the repository thread
 //! has committed the operation, and [`reindex`]'s job on the thread only

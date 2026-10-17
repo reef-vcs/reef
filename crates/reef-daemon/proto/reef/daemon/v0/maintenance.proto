@@ -29,7 +29,8 @@ message GcReport {
   // minus the backup retention while the last backup is within it.
   google.protobuf.Timestamp keep_newer = 2;
   // The operation store and git objects before and after the jj step (the
-  // same in a dry run).
+  // same in a dry run). jj's index, which the step empties and rebuilds, is
+  // not counted.
   uint64 jj_bytes_before = 3;
   uint64 jj_bytes_after = 4;
   // Rebuilding jj's index from the surviving operations.

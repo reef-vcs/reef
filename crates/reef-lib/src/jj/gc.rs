@@ -22,7 +22,7 @@ use jj_lib::op_store::{OpStoreError, OperationId};
 use jj_lib::op_walk::{reparent_range, walk_ancestors};
 use jj_lib::operation::Operation;
 use jj_lib::repo::{Repo as _, RepoLoaderError};
-use jj_lib::working_copy::WorkingCopyStateError;
+use jj_lib::working_copy::{WorkingCopyFreshness, WorkingCopyStateError};
 
 use super::oplog::system_time;
 use super::repo::{OpenError, OperationIdHex, ReadError, Repo};
@@ -97,6 +97,9 @@ pub enum WorkingCopyCheckError {
     /// The view's working-copy commit could not be read.
     #[error(transparent)]
     Read(#[from] ReadError),
+    /// The operation log could not be read to place the working copy.
+    #[error("read the operation log")]
+    OpStore(#[source] OpStoreError),
 }
 
 impl Classify for WorkingCopyCheckError {
@@ -104,6 +107,7 @@ impl Classify for WorkingCopyCheckError {
         match self {
             Self::State(error) => classify_by_source(error),
             Self::Read(error) => error.kind(),
+            Self::OpStore(error) => classify_by_source(error),
         }
     }
 }
@@ -120,19 +124,31 @@ impl Repo {
     /// always in the rewritten range, so its view survives with any
     /// `keep_newer`. The rewritten operations get new ids: a working copy
     /// last updated at an abandoned operation no longer loads, so the caller
-    /// moves each one it owns to the new head ([`Repo::rebind_working_copy`])
-    /// and leaves others (the user's `default`) for `jj workspace
-    /// update-stale`.
+    /// moves each one it owns to the new head and leaves others (the user's
+    /// `default`) for `jj workspace update-stale`. [`Repo::gc_with`] does
+    /// that the moment the op heads move, before the slow collection.
     ///
     /// Nothing newer than `keep_newer` is deleted: unreachable operation
     /// and view files and git objects are pruned by mtime. If a step after
     /// the op heads move fails, this [`Repo`] is still reloaded at the new
-    /// head (best effort) before the error returns, so the caller can rebind
-    /// working copies to [`Repo::op_id`] either way.
-    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    /// head (best effort) before the error returns.
     pub async fn gc(&mut self, keep_newer: SystemTime) -> Result<GcOutcome, GcError> {
+        self.gc_with(keep_newer, &mut |_| {}).await
+    }
+
+    /// [`Repo::gc`], calling `abandoned` with the new head right after the
+    /// op heads move to it, before anything is collected: where the caller
+    /// moves its working copies there ([`Repo::rebind_working_copy`]), so
+    /// no failure or crash in the collection that follows can strand them.
+    /// Not called when nothing is abandoned.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    pub async fn gc_with(
+        &mut self,
+        keep_newer: SystemTime,
+        abandoned: &mut dyn FnMut(&OperationIdHex),
+    ) -> Result<GcOutcome, GcError> {
         let mut moved = false;
-        let result = self.gc_unlogged(keep_newer, &mut moved).await;
+        let result = self.gc_unlogged(keep_newer, abandoned, &mut moved).await;
         if result.is_err() && moved {
             match self.repo.loader().load_at_head().await {
                 Ok(repo) => self.repo = repo,
@@ -156,6 +172,7 @@ impl Repo {
     async fn gc_unlogged(
         &mut self,
         keep_newer: SystemTime,
+        abandoned: &mut dyn FnMut(&OperationIdHex),
         moved: &mut bool,
     ) -> Result<GcOutcome, GcError> {
         let loader = self.repo.loader().clone();
@@ -185,6 +202,7 @@ impl Repo {
                 .update_op_heads(&[head.id().clone()], &new_head)
                 .await?;
             *moved = true;
+            abandoned(&OperationIdHex::of(&new_head));
             operations_abandoned = stats.unreachable_count;
             tracing::debug!(
                 rewritten_count = stats.rewritten_count,
@@ -248,6 +266,46 @@ impl Repo {
         rebound.await.inspect_err(|error| {
             tracing::error!(error = %crate::error::ErrorChain(error), "cannot rebind the working copy");
         })
+    }
+
+    /// Moves a working copy stranded by an interrupted GC to the loaded
+    /// operation: one whose operation is gone, or is not an ancestor of the
+    /// loaded head (jj's sibling answer, which a load at head leaves only for
+    /// an operation the op heads no longer reach), while its recorded tree is
+    /// still its commit's in the loaded view. Anything else is left for the
+    /// snapshot's staleness policy. Returns whether it moved the working
+    /// copy. Load at head first.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    pub async fn rebind_if_stranded(&mut self) -> Result<bool, WorkingCopyCheckError> {
+        let repo = self.repo.clone();
+        let Some(id) = repo
+            .view()
+            .get_wc_commit_id(self.workspace.workspace_name())
+        else {
+            return Ok(false);
+        };
+        let commit = repo.store().get_commit(id).map_err(ReadError::from)?;
+        let mut locked = self.workspace.start_working_copy_mutation().await?;
+        let stranded =
+            match WorkingCopyFreshness::check_stale(locked.locked_wc(), &commit, &repo).await {
+                Ok(WorkingCopyFreshness::SiblingOperation)
+                | Err(OpStoreError::ObjectNotFound { .. }) => true,
+                Ok(_) => false,
+                Err(error) => return Err(WorkingCopyCheckError::OpStore(error)),
+            };
+        let matches = locked.locked_wc().old_tree().tree_ids_and_labels()
+            == commit.tree().tree_ids_and_labels();
+        if !(stranded && matches) {
+            // Dropped without finishing: nothing is written.
+            return Ok(false);
+        }
+        let wc_op = OperationIdHex::of(locked.locked_wc().old_operation_id());
+        locked.finish(repo.op_id().clone()).await?;
+        tracing::warn!(
+            op_id = %wc_op,
+            "working copy was stranded on this abandoned operation; moved to the head"
+        );
+        Ok(true)
     }
 
     /// Whether this workspace's recorded tree is its working-copy commit's
