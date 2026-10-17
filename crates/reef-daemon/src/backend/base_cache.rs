@@ -7,7 +7,10 @@
 //! every workspace on that tree (R1.05). Both are written under `.tmp`
 //! names, renamed (state first), and only then recorded in `base_cache`, so
 //! a directory without a row is incomplete; [`BaseCache::sweep_incomplete`]
-//! removes those at daemon start.
+//! removes those at daemon start. GC ([`BaseCache::evict`], R1.17) deletes
+//! the row first and renames both directories to `*.gc` names before
+//! removing them, so an eviction cut short leaves only row-less leftovers
+//! for the same sweep.
 //!
 //! Entries are immutable by convention: nothing writes under a base after
 //! its rename. Their permissions stay as jj wrote them, because copy and
@@ -20,7 +23,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use reef_lib::error::{Classify, ErrorChain, ErrorKind, classify_by_source};
 use reef_lib::jj::materialize::{TREE_STATE_FILE, is_tree_key, tree_state_entries};
@@ -38,6 +41,8 @@ const STATE_SUFFIX: &str = ".state";
 const TMP_SUFFIX: &str = ".tmp";
 /// Suffix of a state directory being written.
 const TMP_STATE_SUFFIX: &str = ".tmp.state";
+/// Suffix of an evicted directory being removed (R1.17).
+const GC_SUFFIX: &str = ".gc";
 
 /// One materialized tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +94,15 @@ impl BaseEntry {
             && tree_state_entries(&self.state_dir)
                 .is_ok_and(|entries| entries.len() as u64 == self.files)
     }
+}
+
+/// An entry [`BaseCache::evict`] removed, or would remove in a dry run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Evicted {
+    /// The entry's tree.
+    pub tree_id: String,
+    /// What its two directories had allocated.
+    pub bytes: u64,
 }
 
 /// Failure of a base cache operation.
@@ -316,8 +330,80 @@ impl BaseCache {
         })
     }
 
+    /// GC's eviction (R1.17): removes entries whose tree is not in `keep`
+    /// (the trees of `active` and `releasing` workspaces), least recently
+    /// used first, until at most `max_entries` remain; an entry not in
+    /// `keep` and last used before `older_than` goes even below the cap. An
+    /// entry in `keep` is never removed, so the count can stay above the
+    /// cap. With `dry_run`, removes nothing and returns what would go.
+    ///
+    /// Each removal deletes the row, renames both directories to `*.gc`
+    /// names, and removes them; a crash part way leaves row-less `*.gc`
+    /// directories, which the start-up sweep removes. The caller keeps
+    /// creates of this repository out meanwhile, so `keep` stays true.
+    pub fn evict(
+        &self,
+        keep: &HashSet<String>,
+        max_entries: usize,
+        older_than: SystemTime,
+        dry_run: bool,
+    ) -> Result<Vec<Evicted>, BaseCacheError> {
+        let older_than = Timestamp::from(older_than);
+        let entries = self.db.bases(self.repo_id)?;
+        let mut remaining = entries.len();
+        let mut evicted = Vec::new();
+        for record in entries {
+            if keep.contains(&record.tree_id) {
+                continue;
+            }
+            if remaining <= max_entries && record.last_used_at >= older_than {
+                continue;
+            }
+            let entry = BaseEntry::from_record(record);
+            let bytes = if dry_run {
+                allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?
+            } else {
+                self.evict_one(&entry)?
+            };
+            remaining -= 1;
+            evicted.push(Evicted {
+                tree_id: entry.tree_id,
+                bytes,
+            });
+        }
+        Ok(evicted)
+    }
+
+    /// Removes one entry for [`BaseCache::evict`]; returns its bytes.
+    fn evict_one(&self, entry: &BaseEntry) -> Result<u64, BaseCacheError> {
+        self.with_key_lock(&entry.tree_id, || {
+            let bytes = allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?;
+            if self.db.delete_base(self.repo_id, &entry.tree_id)?.is_none() {
+                // Removed meanwhile; nothing of it is ours to delete.
+                return Ok(0);
+            }
+            for dir in [&entry.path, &entry.state_dir] {
+                let doomed = with_suffix(dir, GC_SUFFIX);
+                remove_path(&doomed)?;
+                match std::fs::rename(dir, &doomed) {
+                    Ok(()) => remove_path(&doomed)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(BaseCacheError::Io {
+                            op: "rename",
+                            path: dir.clone(),
+                            source,
+                        });
+                    }
+                }
+            }
+            tracing::info!(tree_id = %entry.tree_id, freed_bytes = bytes, "base evicted");
+            Ok(bytes)
+        })
+    }
+
     /// Removes everything under `bases/` that is not a complete, recorded
-    /// entry: `*.tmp` and `*.tmp.state` leftovers, directories without a
+    /// entry: `*.tmp`, `*.tmp.state`, and GC's `*.gc` leftovers, directories without a
     /// row, and the rows (with whatever is left of their directories) of
     /// entries missing on disk or whose `tree_state` does not decode to the
     /// recorded file count. Returns the paths removed.
@@ -650,6 +736,82 @@ mod tests {
         assert_eq!(cache.get("0a0b").unwrap(), None);
         let error = cache.remove("0a0b").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn evict_keeps_used_entries_and_goes_down_to_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = cache(tmp.path());
+        for (tree, used) in [("0a0a", 10), ("0b0b", 20), ("0c0c", 30), ("0d0d", 40)] {
+            cache.ensure(tree, fake_materialize).unwrap();
+            cache
+                .db
+                .touch_base(cache.repo_id, tree, Timestamp(used))
+                .unwrap();
+        }
+        let keep: HashSet<String> = ["0a0a".to_owned()].into();
+        let long_ago = std::time::UNIX_EPOCH;
+
+        let would = cache.evict(&keep, 2, long_ago, true).unwrap();
+        let names = |evicted: &[Evicted]| {
+            evicted
+                .iter()
+                .map(|entry| entry.tree_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&would), ["0b0b", "0c0c"], "least recently used first");
+        assert!(would.iter().all(|entry| entry.bytes > 0));
+        assert_eq!(
+            cache.entries().unwrap().len(),
+            4,
+            "a dry run removes nothing"
+        );
+
+        let evicted = cache.evict(&keep, 2, long_ago, false).unwrap();
+        assert_eq!(evicted, would);
+        let left: Vec<_> = cache
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.tree_id)
+            .collect();
+        assert_eq!(left, ["0a0a", "0d0d"]);
+        let mut on_disk: Vec<_> = std::fs::read_dir(cache.dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        on_disk.sort();
+        assert_eq!(on_disk, ["0a0a", "0a0a.state", "0d0d", "0d0d.state"]);
+
+        // Under the cap, only what is unused and old enough goes; a kept
+        // entry never does, even over the cap.
+        let now = SystemTime::now();
+        assert_eq!(
+            names(&cache.evict(&keep, 2, long_ago, false).unwrap()),
+            [] as [&str; 0]
+        );
+        assert_eq!(
+            names(&cache.evict(&keep, 0, long_ago, false).unwrap()),
+            ["0d0d"]
+        );
+        assert_eq!(
+            names(&cache.evict(&keep, 0, now, false).unwrap()),
+            [] as [&str; 0]
+        );
+        assert_eq!(cache.entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn gc_leftovers_are_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = cache(tmp.path());
+        let kept = cache.ensure("0a0a", fake_materialize).unwrap();
+        for leftover in ["0b0b.gc", "0b0b.state.gc"] {
+            std::fs::create_dir(cache.dir().join(leftover)).unwrap();
+        }
+        let removed = cache.sweep_incomplete().unwrap();
+        assert_eq!(removed.len(), 2, "{removed:?}");
+        assert!(kept.is_complete());
     }
 
     #[test]

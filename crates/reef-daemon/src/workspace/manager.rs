@@ -148,7 +148,7 @@ impl Manager {
         self.read_entries().len()
     }
 
-    fn read_entries(
+    pub(super) fn read_entries(
         &self,
     ) -> std::sync::RwLockReadGuard<'_, HashMap<WorkspaceId, Arc<WorkspaceEntry>>> {
         self.entries.read().unwrap_or_else(PoisonError::into_inner)
@@ -180,8 +180,9 @@ impl Manager {
         }))
     }
 
-    /// The repository's create/forget lock (see `repo_locks`).
-    pub(super) fn repo_lock(&self, repo: RepoId) -> Arc<tokio::sync::RwLock<()>> {
+    /// The repository's create/forget lock (see `repo_locks`); GC holds it
+    /// exclusively too (R1.17).
+    pub(crate) fn repo_lock(&self, repo: RepoId) -> Arc<tokio::sync::RwLock<()>> {
         let mut locks = self
             .repo_locks
             .lock()

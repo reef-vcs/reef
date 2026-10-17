@@ -1,14 +1,16 @@
-//! `reef ws create | list | inspect | release | run`, and the subcommands
-//! later tickets implement: `move` (R1.06), `gc` (R1.17).
+//! `reef ws create | list | inspect | release | run | gc`, and the
+//! subcommand a later ticket implements: `move` (R1.06).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use reef_daemon::client::default_owner;
-use reef_daemon::client::json::{Created, Inspected, Released, Workspace};
+use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
 use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, create_request};
+use reef_lib::error::ErrorKind;
 
+use super::render::GcReports;
 use super::repo::missing;
 use super::{CliError, Ctx, absolute, repo_arg, ws_move, ws_run};
 
@@ -53,8 +55,20 @@ enum WsCommand {
     /// Run a command in a new workspace, then release it.
     Run(ws_run::Args),
     /// Delete old operations, unused bases, and released workspace records.
+    ///
+    /// Operations and git objects older than the daemon's `gc.undo_window`
+    /// (7 days by default) go, as do base cache entries no active workspace
+    /// uses and records of workspaces released longer ago than that. Every
+    /// active workspace is snapshotted first.
+    ///
+    /// GC rewrites the operations it keeps, so `jj` in the repository's own
+    /// checkout then reports a stale working copy; `jj workspace
+    /// update-stale` there resolves it. Exits 8 with the report printed if
+    /// the jj step failed (such as `git` missing); the other steps still
+    /// ran.
     Gc {
-        /// Only this repository (id, id prefix, or path).
+        /// Only this repository (id, id prefix, or path) [default: every
+        /// registered repository].
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
         /// Report what would be freed without deleting anything.
@@ -139,7 +153,6 @@ impl Args {
     pub(crate) fn stub(&self) -> Option<&'static str> {
         match self.command {
             WsCommand::Move(_) => Some(ws_move::TICKET),
-            WsCommand::Gc { .. } => Some("R1.17"),
             _ => None,
         }
     }
@@ -153,6 +166,7 @@ impl Args {
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     let done = match args.command {
         WsCommand::Run(args) => return ws_run::run(ctx, args).await,
+        WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, args).await,
         WsCommand::List { repo, all } => {
             let states = if all {
@@ -199,9 +213,43 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             ctx.out.done(&released, &note)
         }
         WsCommand::Move(_) => Err(CliError::not_implemented(ws_move::TICKET)),
-        WsCommand::Gc { .. } => Err(CliError::not_implemented("R1.17")),
     };
     done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `ws gc`'s deadline when `--timeout` is not given: GC rebuilds the index
+/// and runs `git gc`, which takes minutes on a large repository.
+const GC_TIMEOUT: Duration = Duration::from_hours(1);
+
+/// `reef ws gc`: the report, then exit 8 (`Io`) if a repository's jj step
+/// stopped short, as the README's exit codes have it; the report is the
+/// command's one JSON value either way.
+async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, CliError> {
+    let repo = repo.map(repo_arg).transpose()?.unwrap_or_default();
+    let deadline = ctx.timeout_flag.unwrap_or(GC_TIMEOUT);
+    let response = ctx
+        .call_within(deadline, ctx.client.gc(&repo, dry_run))
+        .await?;
+    let reports = GcReports {
+        reports: response.reports.iter().map(GcReport::from).collect(),
+        dry_run,
+    };
+    ctx.out.object(&reports)?;
+    let failed: Vec<_> = reports
+        .reports
+        .iter()
+        .filter_map(|report| Some((&report.repo_id, report.jj_error.as_ref()?)))
+        .collect();
+    for (repo, error) in &failed {
+        ctx.out.error_line(&format!(
+            "error: repo {repo}: the jj step of GC stopped short: {error}"
+        ));
+    }
+    if failed.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(ErrorKind::Io.exit_code()))
+    }
 }
 
 /// `--lease` as the request's `lease_ms`: 0 for the daemon's default.

@@ -102,3 +102,21 @@ It runs the `reef-daemon` binary with automatic snapshots held off, creates one 
 | `large` (100,014 files) | 167 ms | 31 ms | 5.4× |
 
 A Watchman query costs about 10 ms whatever the tree's size, so narrowing only pays off well above `medium`, which is why `watcher.backend = "auto"` switches at 50,000 files. These numbers need `WATCHMAN_SOCK`, which the binary sets at start (ADR 0023). Without it, jj runs `watchman get-sockname` for every snapshot, and the `medium` Watchman scan measured 151 ms. The test asserts the 3× bound on `large` only.
+
+## Garbage collection (R1.17)
+
+`crates/reef-daemon/tests/gc.rs` has a manual measurement, `medium_thousand_snapshots_then_gc`:
+
+```sh
+cargo test --release -p reef-daemon --test gc -- --ignored medium_thousand_snapshots_then_gc --nocapture
+```
+
+It registers the `medium` preset with `gc.undo_window = "0s"`, creates one workspace, appends a line to one file three directories deep and takes an explicit snapshot, 1,000 times (watcher snapshots write the same operations), then runs `Maintenance.Gc`. On the M2 Max, release build, git 2.50.1:
+
+| | Git objects (`.jj/repo/store/git/objects`) |
+| --- | ---: |
+| After the first snapshot | 74.5 MiB |
+| After 1,000 snapshots | 101.8 MiB |
+| After GC | 39.8 MiB |
+
+The 1,000 snapshots took 55.5 s, and the operation log held 1,004 operations. GC took 3.9 s in all. Most of that is `git gc`, which packs the loose objects, so the store ends below its size after the first snapshot. The jj step's measure, which adds the operation store, went from 109.6 MiB to 39.8 MiB. Rebuilding the index took 39 ms. With the undo window at zero, every operation but the head is abandoned before the rebuild, so the rebuild walks one operation. Under the default 7-day window it walks every operation newer than a week, which is the case R1.23 should measure before GC runs more often or automatically.

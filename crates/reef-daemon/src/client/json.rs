@@ -397,6 +397,60 @@ impl From<&v0::StatusResponse> for Status {
     }
 }
 
+/// One repository's report from `Maintenance.Gc` (R1.17).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GcReport {
+    /// The repository.
+    pub repo_id: String,
+    /// Nothing newer than this was deleted.
+    pub keep_newer: Option<String>,
+    /// The operation store and git objects before the jj step.
+    pub jj_bytes_before: u64,
+    /// The same, after.
+    pub jj_bytes_after: u64,
+    /// Rebuilding jj's index.
+    pub reindex_ms: u64,
+    /// Why the jj step stopped short.
+    pub jj_error: Option<String>,
+    /// Base cache entries removed.
+    pub base_entries_removed: u32,
+    /// What they had allocated.
+    pub base_bytes_freed: u64,
+    /// Ended workspace rows deleted.
+    pub workspace_rows_removed: u32,
+    /// What their state directories had allocated.
+    pub wc_bytes_freed: u64,
+    /// Stores removed.
+    pub stores_removed: u32,
+    /// What they had allocated.
+    pub store_bytes_freed: u64,
+    /// The run for this repository.
+    pub elapsed_ms: u64,
+    /// Nothing was deleted; the counts are what would have gone.
+    pub dry_run: bool,
+}
+
+impl From<&v0::GcReport> for GcReport {
+    fn from(report: &v0::GcReport) -> Self {
+        Self {
+            repo_id: report.repo_id.clone(),
+            keep_newer: time(report.keep_newer.as_ref()),
+            jj_bytes_before: report.jj_bytes_before,
+            jj_bytes_after: report.jj_bytes_after,
+            reindex_ms: report.reindex_ms,
+            jj_error: text(&report.jj_error),
+            base_entries_removed: report.base_entries_removed,
+            base_bytes_freed: report.base_bytes_freed,
+            workspace_rows_removed: report.workspace_rows_removed,
+            wc_bytes_freed: report.wc_bytes_freed,
+            stores_removed: report.stores_removed,
+            store_bytes_freed: report.store_bytes_freed,
+            elapsed_ms: report.elapsed_ms,
+            dry_run: report.dry_run,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

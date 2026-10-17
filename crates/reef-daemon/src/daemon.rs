@@ -16,7 +16,8 @@
 //! 3. Sweep leftovers: incomplete base cache entries (`*.tmp` under
 //!    `repos/*/bases/`, R1.02); workspace trash (`*.trash-*` in each
 //!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
-//!    leftovers (`*.gc` under `repos/*/bases/`, R1.17) once that lands.
+//!    leftovers (`*.gc` under `repos/*/bases/`, R1.17), by the same base
+//!    cache sweep.
 //! 4. Reconcile overlay mounts (R1.09; nothing until then).
 //! 5. Start one repository thread per registered repository. Then rebuild
 //!    each one's `snapshots` index from its operation log (R1.16) and log
@@ -97,6 +98,8 @@ pub struct AppState {
     /// What each repository's start-time reindex of the `snapshots` index
     /// did (R1.16); absent for one whose reindex failed.
     pub reindexed: Mutex<HashMap<RepoId, ReindexReport>>,
+    /// Held by GC (R1.17), backup and quiesce (R1.18).
+    pub maintenance: crate::maintenance::Lock,
 }
 
 impl fmt::Debug for AppState {
@@ -285,6 +288,7 @@ impl Daemon {
             shutdown: CancellationToken::new(),
             hooks: ShutdownHooks::default(),
             reindexed: Mutex::new(HashMap::new()),
+            maintenance: crate::maintenance::Lock::new(),
         });
 
         let listener = match bring_up(&state).await {

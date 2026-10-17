@@ -3,6 +3,7 @@
 //! `convert`) and end in `.map_err(crate::error::status)`.
 
 pub mod daemon;
+pub mod maintenance;
 pub mod repositories;
 pub mod workspaces;
 

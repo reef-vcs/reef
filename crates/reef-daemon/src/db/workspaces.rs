@@ -389,6 +389,50 @@ impl Db {
         })?;
         updated(id, changed)
     }
+
+    /// GC's candidates (R1.17): `released` and `reclaimed` workspaces of
+    /// `repo` whose latest reclaim log entry is before `before`, oldest
+    /// first. A workspace with no log entry is not one.
+    pub fn ended_workspaces_before(
+        &self,
+        repo: RepoId,
+        before: Timestamp,
+    ) -> Result<Vec<WorkspaceRecord>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM workspaces
+                 WHERE repo_id = ?1 AND state IN ('released', 'reclaimed')
+                   AND (SELECT max(r.at) FROM reclaims r WHERE r.workspace_id = workspaces.id) < ?2
+                 ORDER BY created_at, id"
+            ))?;
+            stmt.query_map(params![repo, before], from_row)?.collect()
+        })
+    }
+
+    /// Deletes an ended workspace's row and its leases in one transaction
+    /// (R1.17); its `reclaims` entries stay, as the audit log.
+    /// [`DbError::Conflict`] if it is not `released` or `reclaimed`.
+    pub fn delete_ended_workspace(&self, id: WorkspaceId) -> Result<(), DbError> {
+        self.in_transaction(|tx| {
+            let state: WorkspaceState = tx
+                .query_row("SELECT state FROM workspaces WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .ok_or_else(|| not_found(id))?;
+            if !state.is_terminal() {
+                return Err(DbError::Conflict {
+                    what: WHAT,
+                    id: id.as_hex(),
+                    reason: "has not ended",
+                });
+            }
+            tx.execute("UPDATE workspaces SET lease_id = NULL WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM leases WHERE workspace_id = ?1", [id])?;
+            tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +674,86 @@ pub(crate) mod tests {
             db.set_workspace_attention(missing, None, None)
                 .unwrap_err()
                 .kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn ended_workspaces_are_listed_by_last_reclaim_and_deleted_with_leases() {
+        use std::time::Duration;
+
+        use crate::model::{LeaseRecord, ReclaimReason};
+
+        let (db, repo_id) = fixture();
+        let ended = |id: &str, path: &str, at: i64| {
+            let ws = workspace(repo_id, id, path);
+            let lease = LeaseRecord {
+                id: format!("cccc{}", &id[4..]).parse().unwrap(),
+                repo_id,
+                workspace_id: ws.id,
+                owner: ws.owner.clone(),
+                issued_at: Timestamp(0),
+                expires_at: Timestamp(60_000),
+                last_heartbeat_at: Timestamp(0),
+                length: Duration::from_mins(1),
+                grace: Duration::from_mins(1),
+                ended_at: None,
+                end_reason: None,
+            };
+            db.insert_workspace_with_lease(&ws, &lease).unwrap();
+            let reclaim = ReclaimRecord {
+                id: 0,
+                repo_id,
+                workspace_id: ws.id,
+                reason: ReclaimReason::Released,
+                final_op_id: None,
+                snapshot_taken: false,
+                freed_bytes: None,
+                at: Timestamp(at),
+                detail: None,
+            };
+            db.set_workspace_state(ws.id, WorkspaceState::Releasing)
+                .unwrap();
+            db.finish_workspace(
+                ws.id,
+                WorkspaceState::Released,
+                LeaseEnd::Released,
+                &reclaim,
+            )
+            .unwrap();
+            ws.id
+        };
+        let old = ended("bbbb000000000001", "/ws/1", 100);
+        let recent = ended("bbbb000000000002", "/ws/2", 900);
+        let active = workspace(repo_id, "bbbb000000000003", "/ws/3");
+        db.insert_workspace(&active).unwrap();
+
+        let ids = |list: Vec<WorkspaceRecord>| list.into_iter().map(|w| w.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(db.ended_workspaces_before(repo_id, Timestamp(500)).unwrap()),
+            [old]
+        );
+        assert_eq!(
+            ids(db
+                .ended_workspaces_before(repo_id, Timestamp(1_000))
+                .unwrap()),
+            [old, recent]
+        );
+
+        db.delete_ended_workspace(old).unwrap();
+        assert_eq!(db.workspace(old).unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(db.last_lease(old).unwrap(), None, "its leases went too");
+        assert_eq!(
+            db.reclaims(Some(repo_id), 10).unwrap().len(),
+            2,
+            "the log stays"
+        );
+        assert_eq!(
+            db.delete_ended_workspace(active.id).unwrap_err().kind(),
+            ErrorKind::Conflict
+        );
+        assert_eq!(
+            db.delete_ended_workspace(old).unwrap_err().kind(),
             ErrorKind::NotFound
         );
     }

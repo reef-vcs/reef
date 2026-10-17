@@ -599,8 +599,7 @@ fn stubs_exit_1_without_a_daemon() {
     let tmp = short_tempdir();
     let state = tmp.path().join("state");
     for (args, ticket) in [
-        (&["ws", "gc"][..], "R1.17"),
-        (&["ws", "move", "abcd", "--change", "x"], "R1.06"),
+        (&["ws", "move", "abcd", "--change", "x"][..], "R1.06"),
         (&["store", "list"], "R1.20"),
         (&["backup", "/tmp/x"], "R1.18"),
         (&["restore", "/tmp/x"], "R1.18"),
@@ -613,4 +612,44 @@ fn stubs_exit_1_without_a_daemon() {
         );
     }
     assert!(!state.exists(), "no daemon was started");
+}
+
+/// `ws gc --dry-run` (R1.17, moved here from R1.22 with the subcommand):
+/// on a fresh daemon it reports every category with zero bytes and exits
+/// 0; with a repository, one line for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_gc_dry_run() {
+    let daemon = TestDaemon::start().await;
+    let value = json(&run(reef(&daemon), &["ws", "gc", "--dry-run"]).await);
+    assert_eq!(value, serde_json::json!([]));
+    let output = run(reef(&daemon), &["-o", "text", "ws", "gc", "--dry-run"]).await;
+    output.clone().assert().success();
+    assert_eq!(
+        stdout(&output),
+        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0\n"
+    );
+    daemon.stop().await;
+
+    let (daemon, repo) = with_repo().await;
+    let value = json(
+        &run(
+            reef(&daemon),
+            &["ws", "gc", "--dry-run", "--repo", &repo.id],
+        )
+        .await,
+    );
+    let reports = value.as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["repo_id"], repo.id.as_str());
+    assert_eq!(reports[0]["dry_run"], true);
+    assert_eq!(reports[0]["jj_error"], Value::Null);
+    assert!(reports[0]["jj_bytes_before"].as_u64().unwrap() > 0);
+    let output = run(reef(&daemon), &["-o", "text", "ws", "gc", "--dry-run"]).await;
+    output.clone().assert().success();
+    let text = stdout(&output);
+    assert!(
+        text.starts_with(&format!("repo {} (dry run): jj ", repo.id)),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 2, "{text}");
 }

@@ -3,8 +3,8 @@
 //! `completions`, and `daemon run`. Output follows [`out`]'s rules and
 //! failures exit with their kind's code ([`error`]).
 //!
-//! Later tickets fill in the stubs: `ws move` (R1.06), `ws gc` (R1.17),
-//! `backup` and `restore` (R1.18), and `store` (R1.20).
+//! Later tickets fill in the stubs: `ws move` (R1.06), `backup` and
+//! `restore` (R1.18), and `store` (R1.20).
 
 mod autostart;
 mod backup;
@@ -70,7 +70,8 @@ pub(crate) struct Global {
     /// Fail instead of starting the daemon when it is not running.
     #[arg(long, global = true)]
     no_autostart: bool,
-    /// How long to wait for the daemon's answer [default: 30s].
+    /// How long to wait for the daemon's answer [default: 30s; 1h for `ws
+    /// gc`].
     #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration)]
     timeout: Option<Duration>,
     /// Print nothing on stderr but errors.
@@ -124,6 +125,8 @@ pub(crate) struct Ctx {
     pub(crate) client: Client,
     pub(crate) out: Out,
     pub(crate) timeout: Duration,
+    /// `--timeout` as given, for a command whose default differs (`ws gc`).
+    pub(crate) timeout_flag: Option<Duration>,
 }
 
 impl Ctx {
@@ -260,6 +263,7 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
         client,
         out: out.clone(),
         timeout: global.timeout.unwrap_or(DEFAULT_TIMEOUT),
+        timeout_flag: global.timeout,
     })
 }
 
