@@ -61,6 +61,10 @@ impl Manager {
             return Err(ManagerError::EmptyOwner);
         }
         let lease_length = self.lease_length(spec.lease)?;
+        // Held until the row is written, so the repository is not forgotten
+        // under this create.
+        let repo_lock = self.repo_lock(spec.repo);
+        let _shared = repo_lock.read().await;
         let repo = self.db.repository(spec.repo)?;
         let handle = self.handle(repo.id)?;
         let id = WorkspaceId::generate();
@@ -222,6 +226,21 @@ impl Manager {
         };
         if std::fs::symlink_metadata(&root).is_ok() {
             return Err(ManagerError::PathExists(root));
+        }
+        // Rows are recorded with canonical paths; the root does not exist
+        // yet, so canonicalize its parent. Checked here, not only by the
+        // insert at step 7, so the failure costs nothing.
+        let canonical = root
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .zip(root.file_name())
+            .map_or_else(|| root.clone(), |(parent, name)| parent.join(name));
+        if let Some(holder) = self.db.workspace_at_path(&canonical)? {
+            return Err(ManagerError::PathRecorded {
+                path: root,
+                id: holder.id,
+                state: holder.state,
+            });
         }
         let state_dir = self
             .config

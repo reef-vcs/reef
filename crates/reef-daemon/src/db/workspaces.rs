@@ -182,6 +182,24 @@ impl Db {
         unique_match(WHAT, prefix, matches)
     }
 
+    /// The workspace recorded at `path`, in any state: `workspaces.path` is
+    /// unique, and rows outlive their directories until R1.17 deletes them.
+    /// `path` is compared as given, so the caller canonicalizes it.
+    pub fn workspace_at_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<WorkspaceRecord>, DbError> {
+        let path = path_text(path)?;
+        self.with(|conn| {
+            conn.query_row(
+                &format!("SELECT {COLUMNS} FROM workspaces WHERE path = ?1"),
+                [path],
+                from_row,
+            )
+            .optional()
+        })
+    }
+
     /// Workspaces in `repo` (every repository if `None`) whose state is one
     /// of `states` (any state if empty), oldest first.
     pub fn workspaces(

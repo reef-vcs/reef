@@ -241,6 +241,22 @@ pub enum ManagerError {
     /// The workspace's path already exists.
     #[error("{} already exists", .0.display())]
     PathExists(PathBuf),
+    /// Another workspace's row records this path. A released or reclaimed
+    /// workspace keeps its path until garbage collection deletes the row
+    /// (R1.17), because `workspaces.path` is unique.
+    #[error(
+        "{} is recorded for workspace {id} ({}); a released workspace keeps its path until garbage collection",
+        path.display(),
+        state.as_str()
+    )]
+    PathRecorded {
+        /// The path.
+        path: PathBuf,
+        /// The workspace whose row holds it.
+        id: WorkspaceId,
+        /// That workspace's state.
+        state: WorkspaceState,
+    },
     /// The workspace's path is not absolute.
     #[error("workspace path {} is not absolute", .0.display())]
     PathNotAbsolute(PathBuf),
@@ -273,8 +289,9 @@ pub enum ManagerError {
         /// Its state.
         state: WorkspaceState,
     },
-    /// The workspace's jj handle could not be reopened at start; only a
-    /// forced release without a final snapshot can remove it.
+    /// The workspace's jj handle could not be reopened at start, or the
+    /// workspace is not loaded yet. A release without a final snapshot
+    /// (`skip_final_snapshot`, or `force`) can still remove it.
     #[error("workspace {0} is not loaded")]
     NotLoaded(WorkspaceId),
     /// The final snapshot before a release failed; the workspace is kept,
@@ -310,7 +327,7 @@ impl Classify for ManagerError {
             Self::CommitLookup(error) => error.kind(),
             Self::Reset(error) => error.kind(),
             Self::FinalSnapshotFailed { source, .. } => source.kind(),
-            Self::PathExists(_) => ErrorKind::AlreadyExists,
+            Self::PathExists(_) | Self::PathRecorded { .. } => ErrorKind::AlreadyExists,
             Self::PathNotAbsolute(_)
             | Self::EmptyOwner
             | Self::LeaseTooLong { .. }

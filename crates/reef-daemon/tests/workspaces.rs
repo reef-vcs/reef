@@ -453,6 +453,17 @@ async fn release_tears_down_and_keeps_row() {
         .await
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::Conflict);
+
+    // Inspecting a released workspace reads its row; there is nothing to
+    // snapshot, even when asked to.
+    let inspected = daemon
+        .client
+        .inspect_workspace(&repo.id, &ws.id, true)
+        .await
+        .unwrap();
+    assert_eq!(inspected.workspace.unwrap().state, "released");
+    assert_eq!(inspected.op_id, "");
+    assert!(inspected.disk_usage.is_none());
 }
 
 // 7
@@ -552,6 +563,26 @@ async fn path_collision_is_already_exists() {
         PathBuf::from(&ws.path),
         std::fs::canonicalize(&chosen).unwrap()
     );
+
+    // A released workspace's row keeps its path until GC (R1.17), so the
+    // same path is refused before anything is materialized.
+    daemon
+        .client
+        .release_workspace(&repo.id, &ws.id, true, false)
+        .await
+        .unwrap();
+    assert!(!chosen.exists());
+    let reused = daemon
+        .client
+        .create_workspace(CreateRequest {
+            path: chosen.display().to_string(),
+            ..request(&repo, None)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&reused), ErrorKind::AlreadyExists);
+    assert!(reused.to_string().contains("released"), "{reused}");
+    assert!(!chosen.exists(), "nothing was materialized");
 }
 
 // 9

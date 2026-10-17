@@ -36,6 +36,11 @@ pub struct Manager {
     /// One base cache per repository, so concurrent creates share its
     /// per-tree locks.
     bases: Mutex<HashMap<RepoId, Arc<BaseCache>>>,
+    /// One lock per repository: creates hold it shared from before they
+    /// read the repository's row until their own row is written, and
+    /// forgetting the repository holds it exclusively, so a forget never
+    /// runs under a create that has no row yet.
+    repo_locks: Mutex<HashMap<RepoId, Arc<tokio::sync::RwLock<()>>>>,
     entries: RwLock<HashMap<WorkspaceId, Arc<WorkspaceEntry>>>,
     /// Bounds concurrent scans at `watcher.max_concurrent_scans`.
     pub(super) scans: Arc<Semaphore>,
@@ -64,6 +69,7 @@ impl Manager {
             repos,
             settings,
             bases: Mutex::new(HashMap::new()),
+            repo_locks: Mutex::new(HashMap::new()),
             entries: RwLock::new(HashMap::new()),
             scans,
         }
@@ -112,6 +118,15 @@ impl Manager {
         }))
     }
 
+    /// The repository's create/forget lock (see `repo_locks`).
+    pub(super) fn repo_lock(&self, repo: RepoId) -> Arc<tokio::sync::RwLock<()>> {
+        let mut locks = self
+            .repo_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(locks.entry(repo).or_default())
+    }
+
     /// The repository's thread.
     pub(super) fn handle(&self, repo: RepoId) -> Result<RepoHandle, ManagerError> {
         self.repos.get(repo).ok_or(ManagerError::RepoNotOpen(repo))
@@ -135,6 +150,11 @@ impl Manager {
                 id,
                 state: record.state,
             });
+        }
+        if self.repos.get(record.repo_id).is_some() {
+            // Skipped at start (an unknown backend name), or a create that
+            // has written its row and not yet its entry.
+            return Err(ManagerError::NotLoaded(id));
         }
         Err(ManagerError::RepoNotOpen(record.repo_id))
     }
@@ -197,6 +217,8 @@ impl Manager {
     /// stops its thread, and removes its state directory (base cache,
     /// leftover workspace trash) in the background.
     pub async fn forget_repository(&self, id: RepoId) -> Result<RepositoryRecord, ManagerError> {
+        let lock = self.repo_lock(id);
+        let _exclusive = lock.write().await;
         let record = self.repos.forget(&self.db, id)?;
         self.bases
             .lock()
@@ -246,13 +268,15 @@ impl Manager {
 
     /// One workspace from the database, with its disk usage from its
     /// backend and the other active workspaces on its change. With
-    /// `snapshot_first`, takes an explicit snapshot before reading.
+    /// `snapshot_first`, takes an explicit snapshot before reading if the
+    /// workspace is active (a released one has nothing to snapshot).
     pub async fn inspect(
         &self,
         id: WorkspaceId,
         snapshot_first: bool,
     ) -> Result<Inspected, ManagerError> {
-        let op_id = if snapshot_first {
+        let active = self.db.workspace(id)?.state == WorkspaceState::Active;
+        let op_id = if snapshot_first && active {
             self.snapshot(id, SnapshotKind::Explicit, "").await?.op_id
         } else {
             None
@@ -321,8 +345,8 @@ impl Manager {
     /// by the stored name, without probing. A workspace whose directory is
     /// gone is reclaimed (`reclaims.detail` = "directory missing at start"),
     /// since nothing can be snapshotted. One whose jj handle cannot be
-    /// reopened is loaded without it ([`ManagerError::NotLoaded`] until a
-    /// forced release). Workspaces of a repository that failed to open are
+    /// reopened is loaded without it ([`ManagerError::NotLoaded`] for
+    /// snapshots; a release without a final snapshot removes it). Workspaces of a repository that failed to open are
     /// skipped. Returns how many were loaded.
     ///
     /// R1.18 adds: with `meta.rematerialize_pending` set, a missing
@@ -488,5 +512,51 @@ pub(super) async fn remove_state_dir(state_dir: &Path) {
             "cannot remove the working-copy state directory"
         ),
         Err(error) => tracing::warn!(%error, "removing the working-copy state directory failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use reef_lib::error::{Classify as _, ErrorKind};
+
+    use super::*;
+    use crate::config::Paths;
+
+    fn manager(state: &Path) -> Arc<Manager> {
+        let config = Config::with_defaults(Paths::in_state_dir(state).unwrap());
+        let settings = config.jj_settings().unwrap();
+        Arc::new(Manager::new(
+            config,
+            Arc::new(Db::open_in_memory().unwrap()),
+            Arc::new(RepoRegistry::new()),
+            settings,
+        ))
+    }
+
+    #[tokio::test]
+    async fn forget_waits_for_creates_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = manager(tmp.path());
+        let repo = RepoId::generate();
+        // What a create holds from before it reads the repository's row
+        // until it has written its own.
+        let lock = manager.repo_lock(repo);
+        let create = lock.read().await;
+
+        let forgetting = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.forget_repository(repo).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!forgetting.is_finished(), "forget waits for the create");
+        drop(create);
+        let error = forgetting.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::NotFound,
+            "then runs (no such repository here)"
+        );
     }
 }
