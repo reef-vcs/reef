@@ -38,4 +38,7 @@ message ForgetRequest {
   string repo = 1;
 }
 
-message ForgetResponse {}
+message ForgetResponse {
+  // The repository forgotten (R1.22).
+  Repository repository = 1;
+}

@@ -26,14 +26,26 @@ default = ["watchman"]
 watchman = ["reef-daemon/watchman"]
 
 [dependencies]
+# Only for `reef_lib::error` (ErrorKind, Classify, ErrorChain); never `reef_lib::jj`, which
+# tests/cli.rs checks. R2.05 moves those types into the API crate and drops this dependency.
 reef-lib.workspace = true
 reef-daemon.workspace = true
 tracing.workspace = true
-anyhow.workspace = true          # the binary only
+thiserror.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+humantime.workspace = true
+serde.workspace = true
 serde_json.workspace = true      # `-o json`
+tokio.workspace = true
+nix = { workspace = true, features = ["signal"] }   # `reef daemon stop`
 
 [dev-dependencies]
+assert_cmd.workspace = true
+reef-daemon = { workspace = true, features = ["testing"] }
+reef-testing.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 toml.workspace = true
+nix = { workspace = true, features = ["signal"] }

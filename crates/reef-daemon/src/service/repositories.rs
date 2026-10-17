@@ -73,7 +73,9 @@ impl Repositories for RepositoriesService {
             .resolve_repo(&request.into_inner().repo)
             .map_err(status)?;
         tracing::Span::current().record("repo", tracing::field::display(record.id));
-        manager.forget_repository(record.id).await.map_err(status)?;
-        Ok(Response::new(ForgetResponse {}))
+        let forgotten = manager.forget_repository(record.id).await.map_err(status)?;
+        Ok(Response::new(ForgetResponse {
+            repository: Some(Repository::from(&forgotten)),
+        }))
     }
 }

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::leases::issue_lease_in;
 use super::reclaims::insert_reclaim_in;
-use super::{Db, DbError, normalize_prefix, path_text, unique_match};
+use super::{Db, DbError, PREFIX_LOOKUP_LIMIT, normalize_prefix, path_text, unique_match};
 use crate::model::{
     Attention, LeaseEnd, LeaseRecord, ReclaimRecord, RepoId, Timestamp, WorkspaceId,
     WorkspaceRecord, WorkspaceState,
@@ -177,11 +177,12 @@ impl Db {
         let matches = self.with(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {COLUMNS} FROM workspaces
-                 WHERE id GLOB ?1 AND (?2 IS NULL OR repo_id = ?2) LIMIT 2"
+                 WHERE id GLOB ?1 AND (?2 IS NULL OR repo_id = ?2)
+                 ORDER BY id LIMIT {PREFIX_LOOKUP_LIMIT}"
             ))?;
             stmt.query_map(params![pattern, repo], from_row)?.collect()
         })?;
-        unique_match(WHAT, prefix, matches)
+        unique_match(WHAT, prefix, matches, |record| record.id.as_hex())
     }
 
     /// The workspace recorded at `path`, in any state: `workspaces.path` is
@@ -457,10 +458,16 @@ pub(crate) mod tests {
         db.insert_workspace(&workspace(other.id, "cafe000000000002", "/ws/2"))
             .unwrap();
 
-        assert!(matches!(
-            db.workspace_by_prefix(None, "cafe").unwrap_err(),
-            DbError::Ambiguous { .. }
-        ));
+        let ambiguous = db.workspace_by_prefix(None, "cafe").unwrap_err();
+        assert!(
+            matches!(&ambiguous, DbError::Ambiguous { candidates, .. }
+                if candidates == &["cafe000000000001", "cafe000000000002"]),
+            "{ambiguous:?}"
+        );
+        assert_eq!(
+            ambiguous.to_string(),
+            "workspace \"cafe\" is ambiguous; it matches cafe000000000001, cafe000000000002"
+        );
         assert_eq!(
             db.workspace_by_prefix(None, "cafe").unwrap_err().kind(),
             ErrorKind::InvalidArgument

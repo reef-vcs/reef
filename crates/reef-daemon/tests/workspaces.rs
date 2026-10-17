@@ -406,6 +406,7 @@ async fn release_tears_down_and_keeps_row() {
         .unwrap();
     assert!(released.snapshot_taken);
     assert!(released.final_op_id.is_empty(), "nothing had changed");
+    assert_eq!(released.workspace_id, ws.id);
     assert!(!Path::new(&ws.path).exists());
     assert!(!state_dir.exists());
 
@@ -604,11 +605,12 @@ async fn forget_repository_refuses_with_active_workspace() {
         .release_workspace(&repo.id, &ws.id, true, false)
         .await
         .unwrap();
-    daemon
+    let forgotten = daemon
         .client
         .forget_repository(&repo.root.display().to_string())
         .await
         .unwrap();
+    assert_eq!(forgotten.repository.unwrap().id, repo.id);
     assert_eq!(daemon.client.list_repositories().await.unwrap().len(), 0);
     let gone = daemon.client.forget_repository(&repo.id).await.unwrap_err();
     assert_eq!(kind_of(&gone), ErrorKind::NotFound);

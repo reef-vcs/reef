@@ -56,6 +56,14 @@ synth-digest:
     cargo run -q -p reef-testing --bin reef-synth -- gen --out target/synth/determinism --preset small --seed 1 --force >/dev/null
     cd target/synth/determinism && { find . -type f | LC_ALL=C sort | xargs shasum -a 256; find . -type l | LC_ALL=C sort | while read -r link; do echo "$link -> $(readlink "$link")"; done; } | shasum -a 256 | cut -d' ' -f1
 
+# Print reef's shell completions (bash, zsh, fish, elvish, powershell). Write them where the shell
+# looks, for example:
+#   zsh:  just completions zsh > ~/.zfunc/_reef        (with `fpath+=~/.zfunc` before compinit)
+#   bash: just completions bash > ~/.local/share/bash-completion/completions/reef
+#   fish: just completions fish > ~/.config/fish/completions/reef.fish
+completions shell="zsh":
+    cargo run -q -p reef-vcs -- completions "$1"
+
 # Everything CI runs, in CI order.
 ci: fmt-check lint build test doc deny
 

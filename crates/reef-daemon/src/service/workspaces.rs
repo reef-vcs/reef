@@ -193,6 +193,7 @@ impl Workspaces for WorkspacesService {
             final_op_id: released.final_op_id.unwrap_or_default(),
             snapshot_taken: released.snapshot_taken,
             freed_bytes: released.freed_bytes,
+            workspace_id: record.id.as_hex(),
         }))
     }
 

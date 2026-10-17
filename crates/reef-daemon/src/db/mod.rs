@@ -120,12 +120,19 @@ pub enum DbError {
         id: String,
     },
     /// More than one record matches an id prefix.
-    #[error("{what} {prefix:?} is ambiguous")]
+    #[error(
+        "{what} {prefix:?} is ambiguous; it matches {}",
+        candidates_text(candidates, *truncated)
+    )]
     Ambiguous {
         /// The kind of record.
         what: &'static str,
         /// The prefix.
         prefix: String,
+        /// Ids of the matching records, at most [`MAX_CANDIDATES`] of them.
+        candidates: Vec<String>,
+        /// Whether more records match than `candidates` lists.
+        truncated: bool,
     },
     /// An id prefix is shorter than [`MIN_PREFIX_LEN`], longer than an id,
     /// or not hex.
@@ -433,11 +440,21 @@ pub(crate) fn normalize_prefix(what: &'static str, prefix: &str) -> Result<Strin
     Ok(prefix.to_ascii_lowercase())
 }
 
-/// The one record in `matches`, a lookup by `prefix` limited to two rows.
+/// How many matching ids an ambiguous prefix's error lists.
+pub const MAX_CANDIDATES: usize = 10;
+
+/// The row limit for a prefix lookup: enough to list [`MAX_CANDIDATES`] and
+/// see that there are more.
+pub(crate) const PREFIX_LOOKUP_LIMIT: usize = MAX_CANDIDATES + 1;
+
+/// The one record in `matches`, a lookup by `prefix` limited to
+/// [`PREFIX_LOOKUP_LIMIT`] rows. `id_of` names a record for the error when
+/// several match.
 pub(crate) fn unique_match<T>(
     what: &'static str,
     prefix: &str,
     mut matches: Vec<T>,
+    id_of: impl Fn(&T) -> String,
 ) -> Result<T, DbError> {
     match matches.len() {
         0 => Err(DbError::NotFound {
@@ -445,11 +462,22 @@ pub(crate) fn unique_match<T>(
             id: prefix.to_owned(),
         }),
         1 => Ok(matches.remove(0)),
-        _ => Err(DbError::Ambiguous {
+        count => Err(DbError::Ambiguous {
             what,
             prefix: prefix.to_owned(),
+            candidates: matches.iter().take(MAX_CANDIDATES).map(id_of).collect(),
+            truncated: count > MAX_CANDIDATES,
         }),
     }
+}
+
+/// `a, b, c`, or `a, b, c, and more` when `truncated`.
+fn candidates_text(candidates: &[String], truncated: bool) -> String {
+    let mut text = candidates.join(", ");
+    if truncated {
+        text.push_str(", and more");
+    }
+    text
 }
 
 /// `path` as the text the schema stores.
@@ -646,5 +674,24 @@ mod tests {
             let error = normalize_prefix("workspace", bad).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::InvalidArgument, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn ambiguous_prefixes_list_at_most_ten_candidates() {
+        let ids: Vec<String> = (0..PREFIX_LOOKUP_LIMIT)
+            .map(|n| format!("cafe{n:012}"))
+            .collect();
+        let error = unique_match("workspace", "cafe", ids.clone(), Clone::clone).unwrap_err();
+        let text = error.to_string();
+        assert!(text.ends_with("cafe000000000009, and more"), "{text}");
+        assert!(!text.contains("cafe000000000010"), "{text}");
+        let error = unique_match("workspace", "cafe", ids[..2].to_vec(), Clone::clone).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with("matches cafe000000000000, cafe000000000001"),
+            "{error}"
+        );
+        assert_eq!(error.kind(), ErrorKind::InvalidArgument);
     }
 }

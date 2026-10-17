@@ -120,6 +120,8 @@ message ReleaseResponse {
   bool snapshot_taken = 2;
   // Bytes the workspace had allocated, as estimated before tear-down.
   uint64 freed_bytes = 3;
+  // The workspace's full id, since the request may name a prefix (R1.22).
+  string workspace_id = 4;
 }
 
 message SnapshotRequest {

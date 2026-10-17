@@ -73,9 +73,14 @@ rayon = "1"
 # Watchman (R1.14), behind the `watchman` features: the version jj-lib's own `watchman` feature
 # uses, so the daemon's trigger subscriptions and jj's narrowed scans share one client crate.
 watchman_client = "0.9"
+# The CLI (R1.22): shell completions from the same clap `Command`, and duration flags in the
+# form config.toml uses.
+clap_complete = "4"
+humantime = "2"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }
+assert_cmd = "2"                   # CLI tests (R1.22)
 
 [workspace.lints.rust]
 unsafe_code = "warn"

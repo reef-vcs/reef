@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension as _, Row, params};
 
-use super::{Db, DbError, normalize_prefix, path_text, unique_match};
+use super::{Db, DbError, PREFIX_LOOKUP_LIMIT, normalize_prefix, path_text, unique_match};
 use crate::model::{RepoId, RepositoryRecord};
 
 const WHAT: &str = "repository";
@@ -109,11 +109,11 @@ impl Db {
         let pattern = format!("{}*", normalize_prefix(WHAT, prefix)?);
         let matches = self.with(|conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM repositories WHERE id GLOB ?1 LIMIT 2"
+                "SELECT {COLUMNS} FROM repositories WHERE id GLOB ?1 ORDER BY id LIMIT {PREFIX_LOOKUP_LIMIT}"
             ))?;
             stmt.query_map([pattern], from_row)?.collect()
         })?;
-        unique_match(WHAT, prefix, matches)
+        unique_match(WHAT, prefix, matches, |record| record.id.as_hex())
     }
 
     /// The registered repository whose root contains `path`, comparing whole
