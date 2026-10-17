@@ -329,6 +329,8 @@ async fn cold_scan(root: &Path, tmp: &Path) -> Duration {
 }
 
 fn copy_tree_without_jj(from: &Path, to: &Path) {
+    // The walk visits entries in directory order, which may put a file first.
+    std::fs::create_dir_all(to).unwrap();
     for entry in walkdir::WalkDir::new(from).min_depth(1) {
         let entry = entry.unwrap();
         let relative = entry.path().strip_prefix(from).unwrap();
