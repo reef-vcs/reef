@@ -135,7 +135,12 @@ async fn register_then_create_default() {
         default_wc(&repo.root).await.change_id.as_str()
     );
     assert_eq!(ws.state, "active");
-    assert_eq!(ws.backend, "copy");
+    let expected = if cfg!(target_os = "macos") {
+        "apfs"
+    } else {
+        "copy"
+    };
+    assert_eq!(ws.backend, expected, "auto picks the platform's clone");
     let lease = ws.lease.unwrap();
     assert_eq!(
         millis(lease.expires_at.as_ref().unwrap()) - millis(lease.issued_at.as_ref().unwrap()),
@@ -346,6 +351,85 @@ fn copy_tree_without_jj(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &target).unwrap();
         }
     }
+}
+
+/// A workspace on a tree the base cache lacks while it holds another: on
+/// macOS the new base is cloned from that one and only the diff is checked
+/// out (R1.08); elsewhere it is a full check-out. Either way the workspace
+/// holds the tree and its first snapshot finds nothing to record.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_tree_gets_its_own_base() {
+    second_tree(false).await;
+}
+
+/// As [`second_tree_gets_its_own_base`], with the first base's
+/// `tree_state` damaged, so building from it fails and the daemon falls
+/// back to the full check-out.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_tree_falls_back_to_a_full_check_out() {
+    second_tree(true).await;
+}
+
+async fn second_tree(damage_first_base: bool) {
+    let (daemon, repo) = fixture().await;
+    let first = create(&daemon, &repo).await;
+    let bases = daemon
+        .state_dir()
+        .join("repos")
+        .join(&repo.id)
+        .join("bases");
+    let manifest = synth::load_manifest(&repo.root).unwrap().unwrap();
+    let edited = &manifest.text_files[0];
+    std::fs::write(Path::new(&first.path).join(edited), "edited in the first\n").unwrap();
+    std::fs::write(Path::new(&first.path).join("added-in-first.txt"), "added\n").unwrap();
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &first.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    if damage_first_base {
+        // The cache holds the first workspace's base only.
+        let states: Vec<_> = std::fs::read_dir(&bases)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "state"))
+            .collect();
+        assert_eq!(states.len(), 1, "{states:?}");
+        std::fs::write(states[0].join("tree_state"), b"\xff\xff\xff").unwrap();
+    }
+
+    let created = daemon
+        .client
+        .create_workspace(request(
+            &repo,
+            Some(create_request::Start::Change(first.change_id.clone())),
+        ))
+        .await
+        .unwrap();
+    assert!(!created.base_was_cached);
+    let second = created.workspace.unwrap();
+    assert_eq!(second.commit_id, snapshot.commit_id);
+    let root = Path::new(&second.path);
+    assert_eq!(
+        std::fs::read_to_string(root.join(edited)).unwrap(),
+        "edited in the first\n"
+    );
+    assert!(root.join("added-in-first.txt").is_file());
+    let again = daemon
+        .client
+        .snapshot_workspace(&repo.id, &second.id, "")
+        .await
+        .unwrap();
+    assert!(!again.changed, "the new base's tree_state describes it");
+
+    let mut trees: Vec<_> = std::fs::read_dir(&bases)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('.') && !name.contains('.'))
+        .collect();
+    trees.sort();
+    assert_eq!(trees.len(), 2, "{trees:?}");
 }
 
 // 5

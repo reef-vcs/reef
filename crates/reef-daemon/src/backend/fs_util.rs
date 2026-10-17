@@ -151,6 +151,11 @@ pub fn mtime_millis(metadata: &Metadata) -> Option<i64> {
 /// Infix of a tree being deleted in the background: `<name>.trash-<nanos>`.
 pub const TRASH_INFIX: &str = ".trash-";
 
+/// Prefix of the trial clone (and its temporary source) the APFS probe
+/// makes in a workspace directory (R1.08). [`sweep_trash`] removes any a
+/// crash left behind.
+pub(crate) const PROBE_CLONE_PREFIX: &str = ".reef-probe-";
+
 /// Mode of every directory [`copy_tree`] creates. jj does not track
 /// directories, so their own modes and mtimes are not carried over.
 const DIR_MODE: u32 = 0o755;
@@ -423,6 +428,24 @@ pub(crate) fn remove_tree_in_background(
     }
 }
 
+/// A clone or copy backend's [`super::Backend::tear_down`]: renames `root`
+/// to a `.trash-*` sibling and deletes it in the background (inline without
+/// a tokio runtime), returning once the root is gone.
+/// [`BackendError::RootMissing`] if it does not exist.
+pub(crate) fn tear_down_root(root: &Path) -> Result<(), BackendError> {
+    match remove_tree_in_background(root) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(BackendError::RootMissing(root.to_owned()))
+        }
+        Err(source) => Err(BackendError::Io {
+            op: "move to trash",
+            path: root.to_owned(),
+            source,
+        }),
+    }
+}
+
 /// Renames `path` to an unused `<name>.trash-<nanos>` sibling.
 fn move_to_trash(path: &Path) -> io::Result<PathBuf> {
     let name = path
@@ -492,7 +515,8 @@ fn remove_all(path: &Path) -> io::Result<()> {
 }
 
 /// Removes every `*.trash-*` entry directly under `dir`, synchronously, as
-/// the daemon does at start for what background deletions left behind.
+/// the daemon does at start for what background deletions left behind, and
+/// any APFS probe clone (`.reef-probe-*`) a crash left there.
 /// Returns how many were removed. A missing `dir` has none. An entry that
 /// cannot be removed is logged and skipped, so one stuck tree does not hide
 /// the others; only failing to list `dir` is an error.
@@ -508,7 +532,7 @@ pub fn sweep_trash(dir: &Path) -> io::Result<u64> {
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.contains(TRASH_INFIX))
+            .is_some_and(|name| name.contains(TRASH_INFIX) || name.starts_with(PROBE_CLONE_PREFIX))
         {
             match remove_all(&entry.path()) {
                 Ok(()) => removed += 1,
@@ -766,7 +790,8 @@ mod tests {
         fs::write(dir.path().join("other.trash-2"), b"x").unwrap();
         fs::create_dir(dir.path().join("live")).unwrap();
         fs::create_dir(dir.path().join("live.upper")).unwrap();
-        assert_eq!(sweep_trash(dir.path()).unwrap(), 2);
+        fs::write(dir.path().join(format!("{PROBE_CLONE_PREFIX}1-0")), b"\n").unwrap();
+        assert_eq!(sweep_trash(dir.path()).unwrap(), 3);
         assert_eq!(names(dir.path()), ["live", "live.upper"]);
     }
 

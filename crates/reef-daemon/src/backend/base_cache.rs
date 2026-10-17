@@ -12,6 +12,11 @@
 //! removing them, so an eviction cut short leaves only row-less leftovers
 //! for the same sweep.
 //!
+//! A clone backend builds a new base from the most recently used one
+//! ([`BaseCache::ensure_from`], R1.08): it clones that base's two
+//! directories and has jj check out only the diff, instead of writing the
+//! whole tree.
+//!
 //! Entries are immutable by convention: nothing writes under a base after
 //! its rename. Their permissions stay as jj wrote them, because copy and
 //! clone backends read them and overlayfs needs them readable. R1.11 checks
@@ -43,6 +48,18 @@ const TMP_SUFFIX: &str = ".tmp";
 const TMP_STATE_SUFFIX: &str = ".tmp.state";
 /// Suffix of an evicted directory being removed (R1.17).
 const GC_SUFFIX: &str = ".gc";
+/// The one-byte file the APFS probe clones into a workspace directory to
+/// see whether it can clone bases there (R1.08). Not an entry; the sweep
+/// keeps it.
+pub(crate) const PROBE_FILE: &str = ".probe";
+
+/// Implemented by backends that can clone a whole directory cheaply, for
+/// [`BaseCache::ensure_from`].
+pub trait DirCloner: Sync {
+    /// Clones the directory `from` to `to`, which must not exist (its parent
+    /// does), keeping every file's mtime and size.
+    fn clone_dir(&self, from: &Path, to: &Path) -> io::Result<()>;
+}
 
 /// One materialized tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +96,7 @@ impl BaseEntry {
     }
 
     /// Whether both directories and the `tree_state` are on disk.
-    fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.path.is_dir() && self.tree_state_file().is_file()
     }
 
@@ -135,6 +152,19 @@ pub enum BaseCacheError {
     /// The key is not a tree id (or `+`-joined tree ids) in lowercase hex.
     #[error("{0:?} is not a tree id")]
     InvalidTreeId(String),
+    /// [`BaseCache::ensure_from`] was asked to build an entry from itself.
+    #[error("base {0} cannot be built from itself")]
+    SameBase(String),
+    /// An incremental check-out left files unwritten because something
+    /// unexpected was in their way (with a missing `tree_state`, jj sees an
+    /// empty tree and skips every file), so the base would be incomplete.
+    #[error("check-out of base {tree_id} skipped {count} files")]
+    SkippedFiles {
+        /// The base being built.
+        tree_id: String,
+        /// Files jj skipped.
+        count: u32,
+    },
     /// Measuring an entry's disk use failed.
     #[error(transparent)]
     Backend(#[from] BackendError),
@@ -146,8 +176,8 @@ impl Classify for BaseCacheError {
             Self::Db(error) => error.kind(),
             Self::Io { source, .. } => classify_by_source(source),
             Self::Materialize(error) => error.kind(),
-            Self::Incomplete(_) => ErrorKind::Internal,
-            Self::InvalidTreeId(_) => ErrorKind::InvalidArgument,
+            Self::Incomplete(_) | Self::SkippedFiles { .. } => ErrorKind::Internal,
+            Self::InvalidTreeId(_) | Self::SameBase(_) => ErrorKind::InvalidArgument,
             Self::Backend(error) => error.kind(),
         }
     }
@@ -209,13 +239,73 @@ impl BaseCache {
         materialize: impl FnOnce(&Path, &Path) -> Result<MaterializeStats, MaterializeError>,
     ) -> Result<BaseEntry, BaseCacheError> {
         check_key(tree_id)?;
-        self.with_key_lock(tree_id, || self.ensure_locked(tree_id, materialize))
+        self.with_key_lock(tree_id, || {
+            self.ensure_locked(tree_id, None, |paths| {
+                Ok(materialize(&paths.tmp, &paths.tmp_state)?)
+            })
+        })
     }
 
+    /// Like [`BaseCache::ensure`], but an absent entry is built from
+    /// `nearest` (another entry, normally the most recently used one):
+    /// `cloner` clones its tree to the temporary tree directory and its
+    /// state to the temporary state directory, and `check_out_diff`
+    /// receives those two and checks out the tree over them, which writes
+    /// only the files that differ. It is normally
+    /// `Repo::materialize_tree_from` on the commit.
+    ///
+    /// Any failure leaves nothing behind and is returned; the caller then
+    /// falls back to [`BaseCache::ensure`], a full check-out. An existing
+    /// entry is returned as `ensure` returns it, without touching
+    /// `nearest`.
+    pub fn ensure_from(
+        &self,
+        tree_id: &str,
+        nearest: &BaseEntry,
+        cloner: &dyn DirCloner,
+        check_out_diff: impl FnOnce(&Path, &Path) -> Result<MaterializeStats, MaterializeError>,
+    ) -> Result<BaseEntry, BaseCacheError> {
+        check_key(tree_id)?;
+        if nearest.tree_id == tree_id {
+            // The build would first remove the very directories it clones.
+            return Err(BaseCacheError::SameBase(tree_id.to_owned()));
+        }
+        self.with_key_lock(tree_id, || {
+            self.ensure_locked(tree_id, Some(&nearest.tree_id), |paths| {
+                for (from, to) in [
+                    (&nearest.path, &paths.tmp),
+                    (&nearest.state_dir, &paths.tmp_state),
+                ] {
+                    cloner
+                        .clone_dir(from, to)
+                        .map_err(|source| BaseCacheError::Io {
+                            op: "clone",
+                            path: from.clone(),
+                            source,
+                        })?;
+                }
+                let stats = check_out_diff(&paths.tmp, &paths.tmp_state)?;
+                // Load-bearing: jj loads a missing or unreadable state as
+                // the empty tree, and then skips every file in the clone.
+                if stats.checkout.skipped_files > 0 {
+                    return Err(BaseCacheError::SkippedFiles {
+                        tree_id: tree_id.to_owned(),
+                        count: stats.checkout.skipped_files,
+                    });
+                }
+                Ok(stats)
+            })
+        })
+    }
+
+    /// [`BaseCache::ensure`]'s body, under the tree's lock: `build` writes
+    /// the entry's two temporary directories. `from` names the entry it was
+    /// cloned from, for the log.
     fn ensure_locked(
         &self,
         tree_id: &str,
-        materialize: impl FnOnce(&Path, &Path) -> Result<MaterializeStats, MaterializeError>,
+        from: Option<&str>,
+        build: impl FnOnce(&EntryPaths) -> Result<MaterializeStats, BaseCacheError>,
     ) -> Result<BaseEntry, BaseCacheError> {
         if let Some(record) = self.db.base(self.repo_id, tree_id)? {
             let entry = BaseEntry::from_record(record);
@@ -247,11 +337,11 @@ impl BaseCache {
         })?;
 
         let begun = Instant::now();
-        let stats = match materialize(&paths.tmp, &paths.tmp_state) {
+        let stats = match build(&paths) {
             Ok(stats) => stats,
             Err(error) => {
                 paths.discard_tmp();
-                return Err(error.into());
+                return Err(error);
             }
         };
         if !paths.tmp.is_dir() || !paths.tmp_state.join(TREE_STATE_FILE).is_file() {
@@ -275,14 +365,27 @@ impl BaseCache {
             last_used_at: now,
         };
         self.db.insert_base(&record)?;
-        tracing::info!(
-            tree_id,
-            path = %record.path.display(),
-            file_count = stats.files,
-            total_bytes = stats.bytes,
-            elapsed_ms = elapsed_ms(begun),
-            "base materialized"
-        );
+        if let Some(from_tree_id) = from {
+            let checkout = stats.checkout;
+            tracing::info!(
+                tree_id,
+                from_tree_id,
+                path = %record.path.display(),
+                file_count = stats.files,
+                changed_count = checkout.updated_files + checkout.added_files + checkout.removed_files,
+                elapsed_ms = elapsed_ms(begun),
+                "base materialized incrementally"
+            );
+        } else {
+            tracing::info!(
+                tree_id,
+                path = %record.path.display(),
+                file_count = stats.files,
+                total_bytes = stats.bytes,
+                elapsed_ms = elapsed_ms(begun),
+                "base materialized"
+            );
+        }
         Ok(BaseEntry::from_record(record))
     }
 
@@ -451,10 +554,11 @@ impl BaseCache {
                 source,
             })?;
             let name = dir_entry.file_name();
-            let keep = name.to_str().is_some_and(|name| {
-                let key = name.strip_suffix(STATE_SUFFIX).unwrap_or(name);
-                complete.contains(key)
-            });
+            let keep = name == PROBE_FILE
+                || name.to_str().is_some_and(|name| {
+                    let key = name.strip_suffix(STATE_SUFFIX).unwrap_or(name);
+                    complete.contains(key)
+                });
             if !keep {
                 let path = dir_entry.path();
                 remove_path(&path)?;
@@ -643,6 +747,70 @@ mod tests {
             cache.key_locks.lock().unwrap().is_empty(),
             "locks are forgotten"
         );
+    }
+
+    /// Clones with `std::fs` copies, which is all the bookkeeping needs.
+    struct CopyCloner;
+
+    impl DirCloner for CopyCloner {
+        fn clone_dir(&self, from: &Path, to: &Path) -> io::Result<()> {
+            std::fs::create_dir(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ensure_from_refuses_skipped_files_and_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = cache(tmp.path());
+        let first = cache.ensure("0a0a", fake_materialize).unwrap();
+
+        let error = cache
+            .ensure_from("0b0b", &first, &CopyCloner, |dir, state| {
+                assert!(dir.join("file").is_file(), "the clone is in place");
+                assert!(state.join(TREE_STATE_FILE).is_file());
+                let mut stats = fake_materialize(&tmp.path().join("x"), &tmp.path().join("y"))?;
+                stats.checkout.skipped_files = 2;
+                Ok(stats)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, BaseCacheError::SkippedFiles { count: 2, .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(cache.get("0b0b").unwrap(), None);
+        let mut left: Vec<_> = std::fs::read_dir(cache.dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["0a0a", "0a0a.state"], "nothing of 0b0b is left");
+
+        let error = cache
+            .ensure_from("0a0a", &first, &CopyCloner, |_, _| {
+                panic!("built from itself")
+            })
+            .unwrap_err();
+        assert!(matches!(error, BaseCacheError::SameBase(_)), "{error:?}");
+        assert!(first.is_complete(), "the base is untouched");
+
+        let second = cache
+            .ensure_from("0b0b", &first, &CopyCloner, |_, _| {
+                Ok(MaterializeStats {
+                    files: 0,
+                    bytes: 8,
+                    elapsed: Duration::ZERO,
+                    checkout: CheckoutStatsSummary::default(),
+                })
+            })
+            .unwrap();
+        assert!(second.is_complete());
+        assert!(second.path.join("file").is_file(), "cloned from the first");
     }
 
     #[test]
@@ -838,6 +1006,7 @@ mod tests {
             std::fs::create_dir(dir.join(leftover)).unwrap();
         }
         std::fs::write(dir.join("stray-file"), "").unwrap();
+        std::fs::write(dir.join(PROBE_FILE), "\n").unwrap();
 
         let removed = cache.sweep_incomplete().unwrap();
         let names: Vec<_> = removed
@@ -859,6 +1028,10 @@ mod tests {
             ]
         );
         assert!(kept.is_complete());
+        assert!(
+            dir.join(PROBE_FILE).is_file(),
+            "the APFS probe's file stays"
+        );
         assert_eq!(cache.entries().unwrap(), [kept]);
     }
 }

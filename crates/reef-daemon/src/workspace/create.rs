@@ -9,8 +9,10 @@
 //!    git refs; resolve the start revision; note whether another Reef
 //!    workspace already has the edited commit.
 //! 3. (blocking, then the repository thread) Ensure the base: the base
-//!    cache's per-tree lock, then `Repo::materialize_tree` on the repository
-//!    thread if the tree is not cached.
+//!    cache's per-tree lock, then, if the tree is not cached, on the
+//!    repository thread either `Repo::materialize_tree_from` over a clone
+//!    of the most recently used base (backends with a [`DirCloner`](crate::backend::DirCloner), R1.08)
+//!    or `Repo::materialize_tree`, which is also the fallback.
 //! 4. (blocking) The backend materializes the workspace from the base.
 //! 5. (repository thread) `Repo::create_workspace_with`, the working copy
 //!    loaded with the watcher's jj settings.
@@ -23,6 +25,7 @@
 //! forgets the jj workspace and removes its state directory. Partial state
 //! never leaves a row behind.
 
+use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -73,14 +76,14 @@ impl Manager {
         let id = WorkspaceId::generate();
         tracing::Span::current().record("workspace_id", tracing::field::display(id));
         let paths = self.new_paths(repo.id, id, spec.path.as_deref())?;
-        let backend = self.select_backend(spec.backend, &paths).await?;
+        let backend = self.select_backend(spec.backend, repo.id, &paths).await?;
 
         // 2.
         let resolved = resolve_start(&handle, spec.start).await?;
 
         // 3.
         let begun = Instant::now();
-        let (base, base_was_cached) = self.ensure_base(&handle, repo.id, &resolved).await?;
+        let (base, base_was_cached) = self.ensure_base(&handle, &resolved, &*backend).await?;
 
         // 4.
         let mut undo = Undo::new(handle.clone(), id);
@@ -173,10 +176,12 @@ impl Manager {
     }
 
     /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the
-    /// blocking pool) at the directory the workspace is created in.
+    /// blocking pool) at the directory the workspace is created in against
+    /// the repository's base cache.
     async fn select_backend(
         &self,
         choice: Option<BackendChoice>,
+        repo: RepoId,
         paths: &WorkspacePaths,
     ) -> Result<Box<dyn Backend>, ManagerError> {
         let choice = choice.unwrap_or(self.config.file.workspace.backend);
@@ -184,7 +189,8 @@ impl Manager {
             .root
             .parent()
             .map_or_else(|| paths.root.clone(), Path::to_owned);
-        Ok(tokio::task::spawn_blocking(move || select(choice, &probe_dir)).await??)
+        let bases_dir = self.base_cache(repo).dir().to_owned();
+        Ok(tokio::task::spawn_blocking(move || select(choice, &probe_dir, &bases_dir)).await??)
     }
 
     /// The new workspace's paths: `path` (absolute) or
@@ -232,33 +238,44 @@ impl Manager {
 
     /// Step 3: the base for the resolved commit's tree, and whether it was
     /// already cached. A cold materialization runs on the repository
-    /// thread, under the base cache's lock for the tree.
+    /// thread, under the base cache's lock for the tree. If the backend has
+    /// a [`DirCloner`](crate::backend::DirCloner) and the cache another base, the most recently used one is cloned
+    /// and only the diff checked out; if that fails, the whole tree is.
     async fn ensure_base(
         &self,
         handle: &RepoHandle,
-        repo: RepoId,
         resolved: &ResolvedStart,
+        backend: &dyn Backend,
     ) -> Result<(BaseEntry, bool), ManagerError> {
-        let cache = self.base_cache(repo);
+        let cache = self.base_cache(handle.id());
+        let cloner = backend.dir_cloner();
         let handle = handle.clone();
         let commit = resolved.commit.clone();
         let key = resolved.tree_key.clone();
         tokio::task::spawn_blocking(move || {
-            let mut cached = true;
-            let mut thread_error = None;
-            let ensured = cache.ensure(&key, |dir, state| {
-                cached = false;
-                let (dir, state) = (dir.to_owned(), state.to_owned());
+            // Cells, so the closure can be called twice (the fallback) while
+            // the error of the first call is cleared in between.
+            let cached = Cell::new(true);
+            let thread_error = Cell::new(None);
+            let materialize = |incremental: bool, dir: &Path, state: &Path| {
+                cached.set(false);
+                let (dir, state, commit) = (dir.to_owned(), state.to_owned(), commit.clone());
                 let at = dir.clone();
                 let job = handle.call_async(move |head| {
-                    async move { head.repo.materialize_tree(&commit, &dir, &state).await }
-                        .boxed_local()
+                    async move {
+                        if incremental {
+                            head.repo.materialize_tree_from(&commit, &dir, &state).await
+                        } else {
+                            head.repo.materialize_tree(&commit, &dir, &state).await
+                        }
+                    }
+                    .boxed_local()
                 });
                 match pollster::block_on(job) {
                     Ok(materialized) => materialized,
                     Err(error) => {
                         let message = error.to_string();
-                        thread_error = Some(error);
+                        thread_error.set(Some(error));
                         Err(MaterializeError::Io {
                             op: "materialize on the repository thread",
                             path: at,
@@ -266,13 +283,49 @@ impl Manager {
                         })
                     }
                 }
-            });
-            match (ensured, thread_error) {
+            };
+            let nearest = cloner
+                .and_then(|cloner| nearest_base(&cache, &key).map(|nearest| (cloner, nearest)));
+            let ensured = match nearest {
+                Some((cloner, nearest)) => cache
+                    .ensure_from(&key, &nearest, cloner, |dir, state| {
+                        materialize(true, dir, state)
+                    })
+                    .or_else(|error| {
+                        tracing::warn!(
+                            tree_id = %key,
+                            from_tree_id = %nearest.tree_id,
+                            error = %ErrorChain(&error),
+                            "cannot build the base from another; checking out the whole tree"
+                        );
+                        thread_error.set(None);
+                        cache.ensure(&key, |dir, state| materialize(false, dir, state))
+                    }),
+                None => cache.ensure(&key, |dir, state| materialize(false, dir, state)),
+            };
+            match (ensured, thread_error.take()) {
                 (Err(_), Some(error)) => Err(error.into()),
-                (ensured, _) => Ok((ensured?, cached)),
+                (ensured, _) => Ok((ensured?, cached.get())),
             }
         })
         .await?
+    }
+}
+
+/// The base to clone a new base for `tree_id` from: the most recently used
+/// other entry that is complete on disk, if any (cloning an incomplete one
+/// would cost a clone and its removal before failing). A failure to list is
+/// logged and means none.
+fn nearest_base(cache: &crate::backend::BaseCache, tree_id: &str) -> Option<BaseEntry> {
+    match cache.entries() {
+        Ok(entries) => entries
+            .into_iter()
+            .rev()
+            .find(|entry| entry.tree_id != tree_id && entry.is_complete()),
+        Err(error) => {
+            tracing::warn!(error = %ErrorChain(&error), "cannot list the base cache");
+            None
+        }
     }
 }
 

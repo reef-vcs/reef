@@ -39,10 +39,11 @@ impl Daemon for DaemonService {
             .workspaces(None, &[WorkspaceState::Active])
             .map_err(status)?
             .len();
-        // Workspace roots default to `<state>/repos/<repo-id>/ws`. Probing
-        // touches the filesystem, so it runs off the async workers.
+        // Workspace roots default to `<state>/repos/<repo-id>/ws`, beside
+        // the base caches, so this reports what a default workspace gets.
+        // Probing touches the filesystem, so it runs off the async workers.
         let repos = paths.repos.clone();
-        let probes = tokio::task::spawn_blocking(move || probe(&repos))
+        let probes = tokio::task::spawn_blocking(move || probe(&repos, None))
             .await
             .map_err(|e| Status::internal(format!("backend probe failed: {e}")))?;
         let backends = probes
