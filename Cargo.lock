@@ -2963,7 +2963,9 @@ dependencies = [
  "clap",
  "clap_complete",
  "humantime",
+ "jj-lib",
  "nix",
+ "pollster",
  "reef-daemon",
  "reef-lib",
  "reef-testing",
@@ -2973,6 +2975,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "tonic",
  "tracing",
 ]
 

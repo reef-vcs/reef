@@ -1,7 +1,8 @@
-//! `reef ws create | list | inspect | release`, and the subcommands later
-//! tickets implement: `move` (R1.06), `run` (R1.21), `gc` (R1.17).
+//! `reef ws create | list | inspect | release | run`, and the subcommands
+//! later tickets implement: `move` (R1.06), `gc` (R1.17).
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use reef_daemon::client::default_owner;
@@ -138,15 +139,20 @@ impl Args {
     pub(crate) fn stub(&self) -> Option<&'static str> {
         match self.command {
             WsCommand::Move(_) => Some(ws_move::TICKET),
-            WsCommand::Run(_) => Some(ws_run::TICKET),
             WsCommand::Gc { .. } => Some("R1.17"),
             _ => None,
         }
     }
+
+    /// Whether this is `ws run`, whose stdout belongs to its command.
+    pub(crate) fn is_run(&self) -> bool {
+        matches!(self.command, WsCommand::Run(_))
+    }
 }
 
-pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
-    match args.command {
+pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
+    let done = match args.command {
+        WsCommand::Run(args) => return ws_run::run(ctx, args).await,
         WsCommand::Create(args) => create(ctx, args).await,
         WsCommand::List { repo, all } => {
             let states = if all {
@@ -192,24 +198,28 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             let note = format!("released {}", released.id);
             ctx.out.done(&released, &note)
         }
-        WsCommand::Move(_) | WsCommand::Run(_) | WsCommand::Gc { .. } => Err(
-            CliError::not_implemented(args.stub().unwrap_or("a later ticket")),
-        ),
+        WsCommand::Move(_) => Err(CliError::not_implemented(ws_move::TICKET)),
+        WsCommand::Gc { .. } => Err(CliError::not_implemented("R1.17")),
+    };
+    done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `--lease` as the request's `lease_ms`: 0 for the daemon's default.
+pub(crate) fn lease_millis(lease: Option<Duration>) -> Result<u64, CliError> {
+    match lease {
+        Some(lease) if lease.is_zero() => {
+            Err(CliError::Usage("--lease must be longer than 0s".to_owned()))
+        }
+        Some(lease) => Ok(u64::try_from(lease.as_millis()).unwrap_or(u64::MAX)),
+        None => Ok(0),
     }
 }
 
 async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
-    let lease_ms = match args.lease {
-        Some(lease) if lease.is_zero() => {
-            return Err(CliError::Usage("--lease must be longer than 0s".to_owned()));
-        }
-        Some(lease) => u64::try_from(lease.as_millis()).unwrap_or(u64::MAX),
-        None => 0,
-    };
     let request = CreateRequest {
         owner: args.owner.unwrap_or_else(default_owner),
         purpose: args.purpose.unwrap_or_default(),
-        lease_ms,
+        lease_ms: lease_millis(args.lease)?,
         ..args.target.request()?
     };
     let response = ctx.call(ctx.client.create_workspace(request)).await?;

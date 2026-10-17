@@ -4,12 +4,13 @@
 //! failures exit with their kind's code ([`error`]).
 //!
 //! Later tickets fill in the stubs: `ws move` (R1.06), `ws gc` (R1.17),
-//! `backup` and `restore` (R1.18), `store` (R1.20), and `ws run` (R1.21).
+//! `backup` and `restore` (R1.18), and `store` (R1.20).
 
 mod autostart;
 mod backup;
 mod config;
 mod daemon;
+mod env;
 mod error;
 mod out;
 mod render;
@@ -131,11 +132,19 @@ impl Ctx {
         &self,
         call: impl Future<Output = Result<T, ClientError>>,
     ) -> Result<T, CliError> {
-        match tokio::time::timeout(self.timeout, call).await {
+        self.call_within(self.timeout, call).await
+    }
+
+    /// Awaits `call` for at most `deadline`, for a call known to take
+    /// longer than most.
+    pub(crate) async fn call_within<T>(
+        &self,
+        deadline: Duration,
+        call: impl Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, CliError> {
+        match tokio::time::timeout(deadline, call).await {
             Ok(result) => result.map_err(CliError::Daemon),
-            Err(_) => Err(CliError::Timeout {
-                after: self.timeout,
-            }),
+            Err(_) => Err(CliError::Timeout { after: deadline }),
         }
     }
 }
@@ -156,9 +165,11 @@ pub(crate) fn main() -> ExitCode {
     {
         return daemon::run_foreground(&cli.global);
     }
-    // `config show` prints TOML unless asked for JSON; see its module.
-    let flag = match cli.command {
+    // `config show` prints TOML unless asked for JSON; see its module. `ws
+    // run`'s stdout is its command's, so it prints JSON only when asked.
+    let flag = match &cli.command {
         Command::Config(_) => cli.global.output.or(Some(Output::Text)),
+        Command::Ws(args) if args.is_run() => cli.global.output.or(Some(Output::Text)),
         _ => cli.global.output,
     };
     let out = Out::detect(flag, cli.global.quiet);
@@ -182,7 +193,7 @@ pub(crate) fn main() -> ExitCode {
         }
     };
     match runtime.block_on(run(cli, &out)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             out.error(&error);
             ExitCode::from(error.exit_code())
@@ -200,9 +211,9 @@ fn init_logging(verbose: u8) -> Result<logging::LoggingGuard, CliError> {
     logging::init(&options).map_err(CliError::Logging)
 }
 
-async fn run(cli: Cli, out: &Out) -> Result<(), CliError> {
+async fn run(cli: Cli, out: &Out) -> Result<ExitCode, CliError> {
     let Cli { global, command } = cli;
-    match command {
+    let done = match command {
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global.overrides(), out),
         Command::Completions { shell } => {
@@ -217,12 +228,13 @@ async fn run(cli: Cli, out: &Out) -> Result<(), CliError> {
             if let Some(ticket) = args.stub() {
                 return Err(CliError::not_implemented(ticket));
             }
-            ws::run(&connect(&global, out).await?, args).await
+            return ws::run(&connect(&global, out).await?, args).await;
         }
         Command::Store(args) => store::run(args),
         Command::Backup(args) => backup::run(args),
         Command::Restore(args) => restore::run(args),
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }
 
 /// Connects to the daemon, starting it first when nothing answers on its
