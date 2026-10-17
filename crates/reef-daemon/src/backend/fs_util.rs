@@ -178,7 +178,10 @@ pub struct TreeCounts {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TreeError {
-    /// The source could not be walked.
+    /// The destination already exists. Nothing was written.
+    #[error("{} already exists", .0.display())]
+    DestinationExists(PathBuf),
+    /// The source could not be walked, or is not a directory.
     #[error("walk {}", path.display())]
     Walk {
         /// The entry being read.
@@ -187,7 +190,7 @@ pub enum TreeError {
         #[source]
         source: io::Error,
     },
-    /// A directory could not be created, or the destination exists.
+    /// A directory could not be created.
     #[error("create directory {}", path.display())]
     Create {
         /// The directory.
@@ -231,9 +234,10 @@ pub enum TreeError {
 impl Classify for TreeError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::Create { source, .. } if source.kind() == io::ErrorKind::AlreadyExists => {
-                ErrorKind::AlreadyExists
-            }
+            Self::DestinationExists(_) => ErrorKind::AlreadyExists,
+            // A nested directory that already exists (a case-only name
+            // clash on a case-insensitive volume) is the filesystem's
+            // doing, not the caller's: `Io`.
             _ => classify_by_source(self),
         }
     }
@@ -242,15 +246,13 @@ impl Classify for TreeError {
 impl From<TreeError> for BackendError {
     fn from(error: TreeError) -> Self {
         let (op, path, source) = match error {
+            TreeError::DestinationExists(path) => return BackendError::RootExists(path),
             TreeError::Walk { path, source } => ("walk", path, source),
             TreeError::Create { path, source } => ("create directory", path, source),
             TreeError::Copy { to, source, .. } => ("copy to", to, source),
             TreeError::Symlink { path, source } => ("recreate symlink", path, source),
             TreeError::Metadata { path, source } => ("set the metadata of", path, source),
         };
-        if op == "create directory" && source.kind() == io::ErrorKind::AlreadyExists {
-            return BackendError::RootExists(path);
-        }
         BackendError::Io { op, path, source }
     }
 }
@@ -265,6 +267,11 @@ impl From<TreeError> for BackendError {
 /// Entries are visited in file-name order, so a failure is deterministic.
 /// Anything other than a file, a symlink, or a directory is an error.
 pub fn copy_tree(src: &Path, dst: &Path, copier: &dyn FileCopier) -> Result<TreeCounts, TreeError> {
+    // Checked before anything is created, so a missing base leaves nothing.
+    check_source_dir(src)?;
+    if fs::symlink_metadata(dst).is_ok() {
+        return Err(TreeError::DestinationExists(dst.to_owned()));
+    }
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|source| TreeError::Create {
             path: parent.to_owned(),
@@ -294,18 +301,18 @@ pub fn copy_tree(src: &Path, dst: &Path, copier: &dyn FileCopier) -> Result<Tree
             fs::DirBuilder::new()
                 .mode(DIR_MODE)
                 .create(&target)
-                .map_err(|source| TreeError::Create {
-                    path: target.clone(),
-                    source,
+                .map_err(|source| {
+                    if entry.depth() == 0 && source.kind() == io::ErrorKind::AlreadyExists {
+                        TreeError::DestinationExists(target.clone())
+                    } else {
+                        TreeError::Create {
+                            path: target.clone(),
+                            source,
+                        }
+                    }
                 })?;
             counts.dirs += 1;
             continue;
-        }
-        if entry.depth() == 0 {
-            return Err(TreeError::Walk {
-                path: src.to_owned(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "not a directory"),
-            });
         }
         let metadata = entry.metadata().map_err(|error| TreeError::Walk {
             path: entry.path().to_owned(),
@@ -354,6 +361,21 @@ pub fn copy_tree(src: &Path, dst: &Path, copier: &dyn FileCopier) -> Result<Tree
     Ok(counts)
 }
 
+/// Fails unless `src` is a directory (not a symlink to one).
+fn check_source_dir(src: &Path) -> Result<(), TreeError> {
+    match fs::symlink_metadata(src) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(TreeError::Walk {
+            path: src.to_owned(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "not a directory"),
+        }),
+        Err(source) => Err(TreeError::Walk {
+            path: src.to_owned(),
+            source,
+        }),
+    }
+}
+
 /// Sets `to`'s mtime (and atime) to `from_meta`'s with `utimensat` and
 /// `AT_SYMLINK_NOFOLLOW`: by path without opening the file, so a read-only
 /// file works, and a symlink's own times are set rather than its target's.
@@ -397,6 +419,9 @@ pub(crate) fn remove_tree_in_background(
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         Ok(Some(runtime.spawn_blocking(move || delete_trash(&trash))))
     } else {
+        // A plain thread (a repository thread, a synchronous test): nothing
+        // to hand the deletion to, so the caller waits for it.
+        tracing::debug!(path = %trash.display(), "no tokio runtime; deleting trash inline");
         delete_trash(&trash);
         Ok(None)
     }
@@ -472,7 +497,9 @@ fn remove_all(path: &Path) -> io::Result<()> {
 
 /// Removes every `*.trash-*` entry directly under `dir`, synchronously, as
 /// the daemon does at start for what background deletions left behind.
-/// Returns how many were removed. A missing `dir` has none.
+/// Returns how many were removed. A missing `dir` has none. An entry that
+/// cannot be removed is logged and skipped, so one stuck tree does not hide
+/// the others; only failing to list `dir` is an error.
 pub fn sweep_trash(dir: &Path) -> io::Result<u64> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -487,8 +514,14 @@ pub fn sweep_trash(dir: &Path) -> io::Result<u64> {
             .to_str()
             .is_some_and(|name| name.contains(TRASH_INFIX))
         {
-            remove_all(&entry.path())?;
-            removed += 1;
+            match remove_all(&entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) => tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %ErrorChain(&error),
+                    "cannot remove workspace trash"
+                ),
+            }
         }
     }
     Ok(removed)
@@ -651,7 +684,7 @@ mod tests {
         fs::create_dir(&dst).unwrap();
         let error = copy_tree(&src, &dst, &StdCopy).unwrap_err();
         assert!(
-            matches!(&error, TreeError::Create { path, .. } if *path == dst),
+            matches!(&error, TreeError::DestinationExists(path) if *path == dst),
             "{error:?}"
         );
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);
@@ -660,6 +693,30 @@ mod tests {
             BackendError::RootExists(_)
         ));
         assert!(!dst.join("a").exists(), "nothing was written");
+    }
+
+    #[test]
+    fn nested_clash_is_io_and_missing_source_writes_nothing() {
+        // A nested directory that already exists (a case-only clash on a
+        // case-insensitive volume) is not the workspace root existing.
+        let error = TreeError::Create {
+            path: "/ws/root/Sub".into(),
+            source: io::Error::from(io::ErrorKind::AlreadyExists),
+        };
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert!(matches!(
+            BackendError::from(error),
+            BackendError::Io {
+                op: "create directory",
+                ..
+            }
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("nested/dst");
+        let error = copy_tree(&dir.path().join("missing"), &dst, &StdCopy).unwrap_err();
+        assert!(matches!(error, TreeError::Walk { .. }), "{error:?}");
+        assert!(!dir.path().join("nested").exists(), "nothing was created");
     }
 
     /// Names of the entries directly under `dir`.
