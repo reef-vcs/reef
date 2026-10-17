@@ -89,17 +89,9 @@ impl WatchError {
     /// Whether the operating system's watch limit was hit (inotify's
     /// `max_user_watches` or `max_user_instances`).
     pub fn is_limit(&self) -> bool {
-        let source = match self {
-            Self::Start { source, .. } | Self::Watch { source, .. } => source,
-            Self::Unavailable(_) => return false,
-        };
-        match &source.kind {
-            ::notify::ErrorKind::MaxFilesWatch => true,
-            ::notify::ErrorKind::Io(error) => {
-                error.raw_os_error() == Some(nix::errno::Errno::ENOSPC as i32)
-                    || error.raw_os_error() == Some(nix::errno::Errno::EMFILE as i32)
-            }
-            _ => false,
+        match self {
+            Self::Start { source, .. } | Self::Watch { source, .. } => notify::is_limit(source),
+            Self::Unavailable(_) => false,
         }
     }
 }
@@ -221,6 +213,11 @@ impl Demux {
             }
         }
         grouped
+    }
+
+    /// The workspaces routed to.
+    pub(crate) fn workspaces(&self) -> Vec<WorkspaceId> {
+        self.roots.values().map(|(id, _)| *id).collect()
     }
 
     /// How many roots are routed.

@@ -211,6 +211,7 @@ pub struct PendingSnapshot<'a> {
     adopted: bool,
     head_op: OperationIdHex,
     wc_commit: Option<CommitIdHex>,
+    wc_change: Option<ChangeIdHex>,
     untracked: Vec<(String, UntrackedReasonKind)>,
     scan: Duration,
     updated_files: u32,
@@ -268,6 +269,11 @@ impl PendingSnapshot<'_> {
     /// when the view has none (the workspace was forgotten).
     pub fn wc_commit(&self) -> Option<&CommitIdHex> {
         self.wc_commit.as_ref()
+    }
+
+    /// The change of [`PendingSnapshot::wc_commit`].
+    pub fn wc_change(&self) -> Option<&ChangeIdHex> {
+        self.wc_change.as_ref()
     }
 
     /// Files the adopt branch updated, added, or removed on disk; zero
@@ -562,8 +568,9 @@ impl Repo {
     /// - the working copy is newer than the loaded repository, or a sibling
     ///   of it: [`SnapshotError::RepoBehind`]; reload at head and retry;
     /// - stale (another operation rewrote the working-copy commit) with no
-    ///   edits since the last update: check the rewritten commit out on
-    ///   disk ([`PendingSnapshot::adopted`]); nothing to commit;
+    ///   edits since the last update, or with files that already match the
+    ///   rewritten commit: check it out on disk
+    ///   ([`PendingSnapshot::adopted`]); nothing to commit;
     /// - stale with edits: plan a rewrite of `expected_commit` instead, which
     ///   makes the change divergent ([`SnapshotPlan::divergent`]);
     /// - no working-copy commit in the view (the workspace was forgotten):
@@ -643,9 +650,14 @@ impl Repo {
                 let changed = new_tree.tree_ids_and_labels() != wc.tree().tree_ids_and_labels();
                 (CommitIdHex::of(wc.id()), changed, false, None)
             }
-            Some(wc) if new_tree.tree_ids_and_labels() == old_tree.tree_ids_and_labels() => {
+            Some(wc)
+                if new_tree.tree_ids_and_labels() == old_tree.tree_ids_and_labels()
+                    || new_tree.tree_ids_and_labels() == wc.tree().tree_ids_and_labels() =>
+            {
                 // Nothing of the workspace's own would be lost: follow the
-                // rewrite.
+                // rewrite. The second case is a working copy whose state was
+                // not saved after its own snapshot was committed (a failed
+                // finish, a crash): the files already are the commit's.
                 let stats = locked.locked_wc().check_out(wc).await?;
                 adopted = true;
                 updated_files = stats.updated_files + stats.added_files + stats.removed_files;
@@ -670,7 +682,8 @@ impl Repo {
             changed,
             adopted,
             head_op,
-            wc_commit: view_wc.map(|wc| CommitIdHex::of(wc.id())),
+            wc_commit: view_wc.as_ref().map(|wc| CommitIdHex::of(wc.id())),
+            wc_change: view_wc.as_ref().map(|wc| ChangeIdHex::of(wc.change_id())),
             untracked,
             scan: start.elapsed(),
             updated_files,

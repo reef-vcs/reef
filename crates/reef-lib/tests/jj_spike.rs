@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jj_lib::settings::UserSettings;
@@ -20,7 +21,7 @@ use reef_lib::jj::snapshot::{
     UntrackedReasonKind,
 };
 use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
-use reef_lib::jj::{IgnoreSources, OpenError, Repo, StartPoint};
+use reef_lib::jj::{IgnoreSources, OpenError, Repo, StartPoint, commit_snapshot};
 
 const MIB: usize = 1 << 20;
 
@@ -475,6 +476,46 @@ async fn sibling_operation_is_reported() {
     assert!(!pending.adopted());
     let head = pending.head_op().clone();
     pending.finish(&head).await.unwrap();
+}
+
+// R1.13: a snapshot whose operation was committed but whose working-copy
+// state was never saved (a failed finish, a crash) is healed on the next
+// snapshot by adopting the commit, not by diverging from it.
+#[tokio::test]
+async fn unsaved_state_after_commit_adopts() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let mut repo = open(dir.path()).await;
+    write(dir.path(), "a.txt", "hello\n");
+    let head = Arc::clone(repo.head());
+    let pending = repo
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    let plan = pending.plan().clone();
+    let committed = commit_snapshot(&head, &plan, "test").await.unwrap();
+    drop(pending); // the working-copy state is not saved
+    repo.set_head(Arc::clone(&committed.repo));
+
+    let pending = repo
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.adopted(), "{pending:?}");
+    assert!(!pending.changed());
+    assert_eq!(pending.wc_commit(), Some(&committed.commit_id));
+    let op = pending.head_op().clone();
+    pending.finish(&op).await.unwrap();
+
+    write(dir.path(), "b.txt", "world\n");
+    let next = repo.snapshot("test").await.unwrap();
+    assert!(next.changed);
+    let change = repo.wc_change().unwrap().change_id;
+    assert!(
+        repo.resolve_revision(change.as_str()).await.is_ok(),
+        "the change is not divergent"
+    );
 }
 
 #[tokio::test]

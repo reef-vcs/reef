@@ -237,9 +237,10 @@ impl Scheduler {
             inner: Arc::new(Inner {
                 config: config.clone(),
                 pools: Mutex::new(Vec::new()),
-                // Twice the CPUs across all slots, at least two per scan: a
-                // lone scan still walks in parallel, and idle pools sleep.
-                pool_threads: (2 * cpus).div_ceil(max_scans).max(2),
+                // Every pool can use every CPU, so a lone scan walks as fast
+                // as on the global pool; idle pool threads only sleep. At
+                // least two, so `install` leaves a worker for jj's scope.
+                pool_threads: cpus.max(2),
                 manager,
                 watcher,
                 events: Mutex::new(Some(rx)),
@@ -316,6 +317,8 @@ impl Scheduler {
                 "cannot watch the workspace; it is snapshotted on the fallback timer only"
             );
             manager.mark_watch_failed(&entry);
+        } else {
+            manager.clear_watch_failed(&entry);
         }
     }
 
@@ -397,21 +400,43 @@ impl Scheduler {
         self.inner.drop_events.store(true, Ordering::Relaxed);
     }
 
+    /// Whether automatic snapshots of `ws` are paused.
+    pub(crate) fn is_paused(&self, ws: WorkspaceId) -> bool {
+        self.inner
+            .lock_entries()
+            .get(&ws)
+            .is_some_and(|entry| entry.paused > 0)
+    }
+
+    /// The manager, while it exists.
+    pub(crate) fn manager(&self) -> Option<Arc<Manager>> {
+        self.inner.manager.upgrade()
+    }
+
     /// A scan permit, waiting for one if `watcher.max_concurrent_scans`
     /// are running. Counted in the summary.
     pub(crate) async fn acquire(&self) -> ScanPermit {
-        {
+        /// Counts a waiter, also when the wait is cancelled.
+        struct Waiting<'a>(&'a Inner);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                let mut stats = self.0.lock_stats();
+                stats.waiting = stats.waiting.saturating_sub(1);
+            }
+        }
+        let waiting = {
             let mut stats = self.inner.lock_stats();
             stats.waiting += 1;
             stats.window_queued_max = stats.window_queued_max.max(stats.waiting);
-        }
+            Waiting(&self.inner)
+        };
         let begun = Instant::now();
         // The semaphore is never closed.
         let permit = Arc::clone(&self.inner.scans).acquire_owned().await.ok();
         let waited = begun.elapsed();
+        drop(waiting);
         {
             let mut stats = self.inner.lock_stats();
-            stats.waiting -= 1;
             stats.running += 1;
             stats.running_max = stats.running_max.max(stats.running);
             stats.window_wait_max = stats.window_wait_max.max(waited);
@@ -577,7 +602,10 @@ impl Inner {
         match built {
             Ok(pool) => Some(Arc::new(pool)),
             Err(error) => {
-                tracing::warn!(%error, "cannot build a scan thread pool; using the global pool");
+                tracing::warn!(
+                    error = %ErrorChain(&error),
+                    "cannot build a scan thread pool; using the global pool"
+                );
                 None
             }
         }
@@ -596,13 +624,16 @@ impl Inner {
             tokio::time::Instant::now() + SUMMARY_INTERVAL,
             SUMMARY_INTERVAL,
         );
+        // Without a watcher the channel is closed from the start; the timers
+        // still run.
+        let mut events_open = true;
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = self.stop.cancelled() => break,
-                event = events.recv() => match event {
+                event = events.recv(), if events_open => match event {
                     Some(event) => self.on_event(&event),
-                    None => break,
+                    None => events_open = false,
                 },
                 _ = tick.tick() => self.start_due(),
                 _ = summary.tick() => self.log_summary(),
@@ -628,6 +659,9 @@ impl Inner {
     /// Starts every snapshot that is due: dirty workspaces past
     /// `min_interval`, and clean ones past `fallback_interval`.
     fn start_due(self: &Arc<Self>) {
+        if self.stop.is_cancelled() {
+            return;
+        }
         let now = Instant::now();
         let mut due = Vec::new();
         for (ws, entry) in self.lock_entries().iter_mut() {
@@ -652,11 +686,22 @@ impl Inner {
     }
 
     async fn run_task(self: Arc<Self>, ws: WorkspaceId, fallback: bool) {
-        if let Some(manager) = self.manager.upgrade() {
-            manager.scheduled_snapshot(ws, fallback).await;
+        /// Clears the entry's task flag however the task ends, so a panic
+        /// does not stop the workspace's scheduled snapshots for good.
+        struct TaskDone<'a>(&'a Inner, WorkspaceId);
+        impl Drop for TaskDone<'_> {
+            fn drop(&mut self) {
+                if let Some(entry) = self.0.lock_entries().get_mut(&self.1) {
+                    entry.task = false;
+                }
+            }
         }
-        if let Some(entry) = self.lock_entries().get_mut(&ws) {
-            entry.task = false;
+        let _done = TaskDone(&self, ws);
+        let ran = match self.manager.upgrade() {
+            Some(manager) => manager.scheduled_snapshot(ws, fallback).await,
+            None => false,
+        };
+        if ran && let Some(entry) = self.lock_entries().get_mut(&ws) {
             entry.last_completed = Instant::now();
         }
     }
@@ -686,6 +731,21 @@ impl Inner {
 }
 
 impl Manager {
+    /// Clears `attention = 'watch-failed'` from `entry` once it is watched
+    /// again (a later start, a raised limit); failures are logged.
+    pub(crate) fn clear_watch_failed(&self, entry: &crate::workspace::WorkspaceEntry) {
+        if entry.record().attention != Some(crate::model::Attention::WatchFailed) {
+            return;
+        }
+        let id = entry.paths.id;
+        match self.db().set_workspace_attention(id, None, None) {
+            Ok(()) => entry.set_attention(None),
+            Err(error) => {
+                tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot clear the workspace's mark");
+            }
+        }
+    }
+
     /// Marks `entry` as unwatched (`attention = 'watch-failed'`) in the
     /// database and the loaded row; failures are logged.
     pub(crate) fn mark_watch_failed(&self, entry: &crate::workspace::WorkspaceEntry) {

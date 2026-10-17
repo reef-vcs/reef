@@ -79,18 +79,25 @@ impl Repo {
     }
 }
 
-/// `entries` as gitignore lines, each anchored at the root.
+/// `entries` as gitignore lines, each anchored at the root. A negation
+/// keeps its `!` in front of the anchor; empty entries and comments are
+/// dropped.
 fn gitignore_lines<'a>(entries: impl Iterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for entry in entries {
         let entry = entry.trim();
-        if entry.is_empty() {
+        if entry.is_empty() || entry.starts_with('#') {
             continue;
         }
-        if !entry.starts_with('/') {
+        let (negation, pattern) = match entry.strip_prefix('!') {
+            Some(pattern) => ("!", pattern),
+            None => ("", entry),
+        };
+        out.push_str(negation);
+        if !pattern.starts_with('/') {
             out.push('/');
         }
-        out.push_str(entry);
+        out.push_str(pattern);
         out.push('\n');
     }
     out
@@ -98,13 +105,13 @@ fn gitignore_lines<'a>(entries: impl Iterator<Item = &'a str>) -> String {
 
 /// The literal directory or file prefixes among `entries`, relative to the
 /// root with no leading or trailing `/`: the entries a watcher can skip
-/// events under without matching patterns. Entries with glob characters or
-/// negations are left out (the scan still ignores them).
+/// events under without matching patterns. Entries with glob characters,
+/// negations, and comments are left out (the scan still applies them).
 pub fn literal_prefixes<'a>(entries: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     entries
         .into_iter()
         .map(str::trim)
-        .filter(|entry| !entry.starts_with('!') && !entry.contains(['*', '?', '[', '\\']))
+        .filter(|entry| !entry.starts_with(['!', '#']) && !entry.contains(['*', '?', '[', '\\']))
         .map(|entry| entry.trim_matches('/').to_owned())
         .filter(|entry| !entry.is_empty())
         .collect()
@@ -123,16 +130,31 @@ mod tests {
 
     #[test]
     fn entries_are_anchored() {
-        let entries = ["target/", "/node_modules/", " build ", ""];
+        let entries = [
+            "target/",
+            "/node_modules/",
+            " build ",
+            "",
+            "!keep",
+            "# note",
+        ];
         assert_eq!(
             gitignore_lines(entries.into_iter()),
-            "/target/\n/node_modules/\n/build\n"
+            "/target/\n/node_modules/\n/build\n!/keep\n"
         );
     }
 
     #[test]
     fn literal_prefixes_skip_patterns() {
-        let entries = ["target/", "/node_modules/", "*.log", "!keep", "a/b", "/"];
+        let entries = [
+            "target/",
+            "/node_modules/",
+            "*.log",
+            "!keep",
+            "a/b",
+            "/",
+            "#c",
+        ];
         assert_eq!(literal_prefixes(entries), ["target", "node_modules", "a/b"]);
     }
 }

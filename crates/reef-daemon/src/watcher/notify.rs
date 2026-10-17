@@ -127,7 +127,15 @@ impl DebounceEventHandler for Handler {
             Ok(batch) => {
                 let mut earliest = None::<Instant>;
                 let mut paths = Vec::new();
+                let mut rescan = false;
                 for event in &batch {
+                    // inotify's queue overflowed (or FSEvents dropped
+                    // events): anything under any root may have changed.
+                    if event.event.need_rescan() {
+                        rescan = true;
+                        earliest = Some(earliest.map_or(event.time, |at| at.min(event.time)));
+                        continue;
+                    }
                     // Reads, including the scan's own, are not changes.
                     if matches!(event.event.kind, EventKind::Access(_)) {
                         continue;
@@ -136,7 +144,17 @@ impl DebounceEventHandler for Handler {
                     paths.extend(event.event.paths.iter().map(PathBuf::as_path));
                 }
                 let Some(at) = earliest else { return };
-                let grouped = lock(&self.demux).group(paths);
+                let grouped = {
+                    let demux = lock(&self.demux);
+                    let mut grouped = demux.group(paths);
+                    if rescan {
+                        tracing::warn!("watch events were lost; rescanning every workspace");
+                        for workspace in demux.workspaces() {
+                            grouped.entry(workspace).or_default();
+                        }
+                    }
+                    grouped
+                };
                 for (workspace, paths) in grouped {
                     let sent = self.events.try_send(WatchEvent {
                         workspace,
@@ -152,6 +170,19 @@ impl DebounceEventHandler for Handler {
                 let demux = lock(&self.demux);
                 for error in errors {
                     let workspace = error.paths.iter().find_map(|path| demux.route(path));
+                    if is_limit(&error) {
+                        // A new subdirectory could not be watched: its
+                        // subtree is covered by the fallback timer only.
+                        let (watches, instances) = inotify_limits().unwrap_or_default();
+                        tracing::error!(
+                            workspace_id = %workspace.map(|ws| ws.to_string()).unwrap_or_default(),
+                            error = %ErrorChain(&error),
+                            watches_count = watches,
+                            instances_count = instances,
+                            "the watch limit is reached; {LIMIT_HINT}"
+                        );
+                        continue;
+                    }
                     if let Some(workspace) = workspace {
                         tracing::warn!(
                             workspace_id = %workspace,
@@ -204,6 +235,29 @@ fn log_inotify_limits() {
     }
 }
 
+/// What to do about a watch limit, by platform.
+const LIMIT_HINT: &str = if cfg!(target_os = "linux") {
+    "raise it with `sysctl fs.inotify.max_user_watches=<n>` (and max_user_instances); \
+     the workspace is snapshotted on the fallback timer meanwhile"
+} else {
+    "raise the open file limit (`ulimit -n`); the workspace is snapshotted on the fallback \
+     timer meanwhile"
+};
+
+/// Whether `error` is the operating system's watch limit (inotify's
+/// `max_user_watches` or `max_user_instances`, or open files).
+pub(super) fn is_limit(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::MaxFilesWatch => true,
+        notify::ErrorKind::Io(io) => matches!(
+            io.raw_os_error(),
+            Some(code) if code == nix::errno::Errno::ENOSPC as i32
+                || code == nix::errno::Errno::EMFILE as i32
+        ),
+        _ => false,
+    }
+}
+
 fn log_limit_hit(workspace: WorkspaceId, root: &Path) {
     let (watches, instances) = inotify_limits().unwrap_or_default();
     tracing::error!(
@@ -211,7 +265,6 @@ fn log_limit_hit(workspace: WorkspaceId, root: &Path) {
         path = %root.display(),
         watches_count = watches,
         instances_count = instances,
-        "the watch limit is reached; raise it with `sysctl fs.inotify.max_user_watches=<n>` \
-         (and max_user_instances); the workspace is snapshotted on the fallback timer only"
+        "the watch limit is reached; {LIMIT_HINT}"
     );
 }

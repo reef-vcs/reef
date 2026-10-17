@@ -211,6 +211,18 @@ async fn burst_coalesces() {
 async fn excluded_paths_do_not_trigger() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo, None).await;
+    let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sink, id) = (std::sync::Arc::clone(&snapshots), id_of(&ws));
+    daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .on_snapshot(Box::new(move |outcome| {
+            if outcome.workspace == id {
+                sink.lock().unwrap().push(outcome.paths_count);
+            }
+        }));
     // What R1.19 reads from `reef.toml` at create.
     daemon
         .handle
@@ -227,14 +239,15 @@ async fn excluded_paths_do_not_trigger() {
     for i in 0..100 {
         write(&ws, &format!("target/debug/{i}.o"), "obj\n");
     }
-    tokio::time::sleep(FALLBACK.saturating_sub(Duration::from_secs(1))).await;
-    assert_eq!(
-        snapshot_ops(&repo.root, &ws).await.len(),
-        0,
-        "no snapshot was triggered"
+    tokio::time::sleep(FALLBACK + Duration::from_secs(1)).await;
+    // The scan ignores the files too, so an operation count cannot tell a
+    // triggered snapshot from none: the hook sees what triggered each one.
+    let seen = snapshots.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|paths| *paths == 0),
+        "no snapshot was triggered by events: {seen:?}"
     );
-    // The fallback snapshot has run by now; it records nothing either.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!seen.is_empty(), "the fallback snapshot ran");
     assert_eq!(snapshot_ops(&repo.root, &ws).await.len(), 0);
     let snapshot = daemon
         .client
@@ -389,7 +402,11 @@ async fn stale_diverges_when_dirty() {
     assert!(!Path::new(&b.path).join("from-a.txt").exists());
 }
 
-// 8
+// 8. The daemon sees the outside operation when it refreshes its head
+// before the scan, so the scan finds the working copy fresh; the
+// `RepoBehind` answer itself (an outside write between refresh and scan)
+// is reef-lib's `stale_working_copy_detected` and
+// `sibling_operation_is_reported`.
 #[tokio::test(flavor = "multi_thread")]
 async fn repo_behind_is_retried() {
     let (daemon, repo) = fixture().await;
@@ -517,6 +534,71 @@ fn inotify_limits_logged() {
         .unwrap_or_else(|| panic!("no inotify limits event in:\n{stderr}"));
     assert!(limits["watches_count"].as_u64().is_some(), "{limits}");
     assert!(limits["instances_count"].as_u64().is_some(), "{limits}");
+}
+
+// Without a watcher (`watchman` until R1.14), every workspace is marked
+// `watch-failed` and still snapshotted by the fallback timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_watcher_falls_back_to_the_timer() {
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.watcher.backend = reef_daemon::config::WatcherBackend::Watchman;
+    })
+    .await;
+    let ws = create(&daemon, &repo, None).await;
+    assert_eq!(inspect(&daemon, &repo, &ws).await.attention, "watch-failed");
+    write(&ws, "unwatched.txt", "x\n");
+    wait_for(
+        FALLBACK + Duration::from_secs(1),
+        "a fallback snapshot",
+        || async {
+            !inspect(&daemon, &repo, &ws)
+                .await
+                .last_snapshot_op
+                .is_empty()
+        },
+    )
+    .await;
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert!(tree_has(&repo.root, &row.commit_id, "unwatched.txt").await);
+}
+
+// Post-snapshot hooks see every snapshot that ends well, after the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn hooks_run_after_snapshots() {
+    let (daemon, repo) = fixture().await;
+    let state = daemon.handle.state();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (db, sink) = (
+        std::sync::Arc::clone(&state.db),
+        std::sync::Arc::clone(&seen),
+    );
+    state
+        .manager
+        .scheduler()
+        .on_snapshot(Box::new(move |outcome| {
+            let row = db.workspace(outcome.workspace).unwrap();
+            sink.lock()
+                .unwrap()
+                .push((outcome.clone(), row.last_snapshot_op));
+        }));
+    let ws = create(&daemon, &repo, None).await;
+    let _hold = state.manager.scheduler().pause(id_of(&ws));
+    write(&ws, "hooked.txt", "x\n");
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    let (outcome, row_op) = seen.last().expect("the hook ran");
+    assert!(outcome.changed);
+    assert_eq!(outcome.kind, reef_daemon::snapshot::SnapshotKind::Explicit);
+    assert_eq!(outcome.op_id.to_string(), snapshot.op_id);
+    assert_eq!(
+        row_op.as_deref(),
+        Some(snapshot.op_id.as_str()),
+        "the row came first"
+    );
 }
 
 // A released workspace is no longer tracked, so no watcher snapshot races

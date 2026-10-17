@@ -26,16 +26,16 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
-    CommitIdHex, IgnoreSources, OperationIdHex, ReadonlyRepo, Repo, SnapshotCommit, SnapshotError,
-    commit_snapshot,
+    ChangeIdHex, CommitIdHex, IgnoreSources, OperationIdHex, ReadonlyRepo, Repo, SnapshotCommit,
+    SnapshotError, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
+use tracing::Instrument as _;
 
 use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
-use crate::repo::RepoHandle;
-use crate::snapshot::{SnapshotKind, SnapshotOutcome, Trigger, description};
+use crate::snapshot::{ScanPermit, SnapshotKind, SnapshotOutcome, Trigger, description};
 
 /// The per-workspace ignore file, in gitignore syntax, at the workspace root.
 pub const REEFIGNORE: &str = ".reefignore";
@@ -57,6 +57,8 @@ enum Recorded {
         head_op: OperationIdHex,
         /// The view's working-copy commit there.
         wc_commit: CommitIdHex,
+        /// Its change.
+        wc_change: ChangeIdHex,
     },
 }
 
@@ -81,7 +83,25 @@ impl Manager {
 
     /// [`Manager::snapshot`] with the description decided. A `Final` or
     /// `Shutdown` snapshot also runs on a `releasing` workspace.
+    ///
+    /// Runs as its own task: a caller that stops waiting (an RPC whose client
+    /// disconnected) must not cut a snapshot between its commit and the row
+    /// update and hooks that follow it.
     pub(crate) async fn snapshot_with(
+        &self,
+        id: WorkspaceId,
+        kind: SnapshotKind,
+        description: String,
+    ) -> Result<SnapshotOutcome, ManagerError> {
+        let manager = self
+            .scheduler
+            .manager()
+            .ok_or(ManagerError::NotLoaded(id))?;
+        let task = async move { manager.snapshot_detached(id, kind, description).await };
+        tokio::spawn(task.instrument(tracing::Span::current())).await?
+    }
+
+    async fn snapshot_detached(
         &self,
         id: WorkspaceId,
         kind: SnapshotKind,
@@ -116,20 +136,22 @@ impl Manager {
 
     /// A watcher (or, with `fallback`, a fallback timer) snapshot, from the
     /// scheduler. Failures are logged; the next event or the fallback timer
-    /// retries.
-    pub(crate) async fn scheduled_snapshot(&self, id: WorkspaceId, fallback: bool) {
+    /// retries. Returns whether a snapshot ran.
+    pub(crate) async fn scheduled_snapshot(&self, id: WorkspaceId, fallback: bool) -> bool {
         let Some(entry) = self.entry(id) else {
-            return;
+            return false;
         };
         let _scan = entry.scan_lock.lock().await;
-        // A releasing workspace's final snapshot is the release's.
-        if entry.record().state != WorkspaceState::Active {
-            return;
+        // A releasing workspace's final snapshot is the release's, and a
+        // pause taken while this waited holds it off; the events stay
+        // marked for after the pause.
+        if entry.record().state != WorkspaceState::Active || self.scheduler.is_paused(id) {
+            return false;
         }
         let trigger = self.scheduler.take_trigger(id);
         if trigger.first_event.is_none() && !fallback {
             // An explicit snapshot covered the events while this waited.
-            return;
+            return false;
         }
         let kind = SnapshotKind::Watcher;
         let ran = self
@@ -137,6 +159,10 @@ impl Manager {
             .await;
         match ran {
             Ok(_) => {}
+            Err(ManagerError::NotLoaded(_)) => {
+                // Its jj handle could not be reopened at start; logged then.
+                tracing::debug!(workspace_id = %id, "watcher snapshot skipped: not loaded");
+            }
             Err(ManagerError::Snapshot(error @ SnapshotError::RepoBehind { .. })) => {
                 tracing::warn!(
                     workspace_id = %id,
@@ -148,6 +174,7 @@ impl Manager {
                 tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "watcher snapshot failed");
             }
         }
+        true
     }
 
     /// The pipeline; see the module docs.
@@ -162,55 +189,42 @@ impl Manager {
         let started = trigger.first_event.unwrap_or(begun);
         let record = entry.record();
         let id = record.id;
-        let permit = self.scheduler.acquire().await;
+        // The head first: a permit is a scan slot, not held while the
+        // repository thread is busy.
         let head = entry
             .repo
             .call_async(|head| head.refresh().boxed_local())
             .await??;
+        let permit = self.scheduler.acquire().await;
         let ran = {
-            let jj = Arc::clone(&entry.jj);
-            let handle = entry.repo.clone();
+            let entry = Arc::clone(entry);
             let db = Arc::clone(&self.db);
             let expected = record.commit_id.parse::<CommitIdHex>().ok();
             let reefignore = entry.paths.root.join(REEFIGNORE);
             let spec = entry.spec();
-            let pool = permit.pool();
             tokio::task::spawn_blocking(move || {
+                let jj = Arc::clone(&entry.jj);
                 let mut guard = jj.lock().unwrap_or_else(PoisonError::into_inner);
                 let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
                 let pipeline = Pipeline {
-                    handle: &handle,
+                    entry: &entry,
                     db: &db,
                     id,
                     expected: expected.as_ref(),
                     reefignore: &reefignore,
                     spec: &spec,
                     description: &description,
-                    pool: pool.as_deref(),
                 };
-                pipeline.run(repo, head)
+                pipeline.run(repo, head, permit)
             })
             .await??
         };
-        drop(permit);
         self.scheduler.report_untracked(id, &ran.untracked);
 
         let outcome = match &ran.recorded {
             Recorded::Committed(committed) => {
-                let now = Timestamp::now();
-                entry.update_record(|record| {
-                    record.commit_id = committed.commit_id.to_string();
-                    record.change_id = committed.change_id.to_string();
-                    record.last_snapshot_op = Some(committed.op_id.to_string());
-                    record.last_snapshot_at = Some(now);
-                    if committed.divergent {
-                        record.divergent = true;
-                        record.attention = Some(Attention::Divergent);
-                    } else if ran.recovered {
-                        record.divergent = false;
-                        record.attention = Some(Attention::StaleRecovered);
-                    }
-                });
+                // The row, in the database and in memory, was written by
+                // the blocking half before the working-copy state.
                 SnapshotOutcome {
                     workspace: id,
                     kind,
@@ -225,16 +239,25 @@ impl Manager {
                     paths_count: trigger.paths_count,
                 }
             }
-            Recorded::Unchanged { head_op, wc_commit } => {
-                if wc_commit.as_str() != record.commit_id {
-                    // Adopted another workspace's rewrite of the shared commit.
+            Recorded::Unchanged {
+                head_op,
+                wc_commit,
+                wc_change,
+            } => {
+                if wc_commit.as_str() != record.commit_id || wc_change.as_str() != record.change_id
+                {
+                    // Adopted another workspace's rewrite of the shared
+                    // commit, or the view moved the workspace (`jj abandon`).
                     self.db.set_workspace_commit(
                         id,
-                        &record.change_id,
+                        wc_change.as_str(),
                         wc_commit.as_str(),
                         None,
                     )?;
-                    entry.update_record(|record| record.commit_id = wc_commit.to_string());
+                    entry.update_record(|record| {
+                        record.commit_id = wc_commit.to_string();
+                        record.change_id = wc_change.to_string();
+                    });
                 }
                 SnapshotOutcome {
                     workspace: id,
@@ -245,7 +268,7 @@ impl Manager {
                     recovered: false,
                     op_id: head_op.clone(),
                     commit_id: wc_commit.clone(),
-                    change_id: record.change_id.clone(),
+                    change_id: wc_change.to_string(),
                     latency_ms: elapsed_ms(started),
                     paths_count: trigger.paths_count,
                 }
@@ -259,24 +282,23 @@ impl Manager {
 
 /// The blocking half of a snapshot, with the jj handle locked.
 struct Pipeline<'a> {
-    handle: &'a RepoHandle,
+    entry: &'a WorkspaceEntry,
     db: &'a Db,
     id: WorkspaceId,
     expected: Option<&'a CommitIdHex>,
     reefignore: &'a Path,
     spec: &'a SnapshotSpec,
     description: &'a str,
-    /// The scan slot's rayon pool; `None` for the global one.
-    pool: Option<&'a rayon::ThreadPool>,
 }
 
 impl Pipeline<'_> {
-    /// `begin_snapshot` on the slot's pool, so jj-lib's directory jobs
-    /// stay there.
+    /// `begin_snapshot` on the scan slot's rayon pool, so jj-lib's directory
+    /// jobs stay there.
     fn begin<'r>(
         &self,
         repo: &'r mut Repo,
         sources: &IgnoreSources<'_>,
+        permit: &ScanPermit,
     ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
         fn scan<'r>(
             repo: &'r mut Repo,
@@ -286,22 +308,28 @@ impl Pipeline<'_> {
             pollster::block_on(repo.begin_snapshot(expected, sources))
         }
         let expected = self.expected;
-        match self.pool {
+        match permit.pool() {
             Some(pool) => pool.install(move || scan(repo, expected, sources)),
             None => scan(repo, expected, sources),
         }
     }
 
-    /// Steps 2 to 4.
-    fn run(&self, repo: &mut Repo, head: Arc<ReadonlyRepo>) -> Result<Ran, ManagerError> {
+    /// Steps 2 to 4. The scan permit is released once the scan is done.
+    fn run(
+        &self,
+        repo: &mut Repo,
+        head: Arc<ReadonlyRepo>,
+        permit: ScanPermit,
+    ) -> Result<Ran, ManagerError> {
         let sources = IgnoreSources {
             reefignore: Some(self.reefignore),
             excludes: &self.spec.excludes,
             mounts: &self.spec.mounts,
         };
         repo.set_head(head);
-        let behind = match self.begin(repo, &sources) {
+        let behind = match self.begin(repo, &sources, &permit) {
             Ok(pending) => {
+                drop(permit);
                 let (ran, new_head) = self.record(pending);
                 if let Some(new_head) = new_head {
                     repo.set_head(new_head);
@@ -311,15 +339,16 @@ impl Pipeline<'_> {
             Err(SnapshotError::RepoBehind { kind, wc_op, .. }) => (kind, wc_op),
             Err(error) => return Err(error.into()),
         };
-        // The `jj` CLI wrote on the registered root: merge its operations
-        // into the repository thread's head and try once more.
+        // The working copy moved past the head between `refresh` and the
+        // scan (the `jj` CLI on this workspace): reload the repository
+        // thread at head and try once more.
         tracing::info!(
             workspace_id = %self.id,
             op_id = %behind.1,
             "working copy is ahead of the daemon's head ({:?}); reloading",
             behind.0
         );
-        let head = pollster::block_on(self.handle.call_async(|head| {
+        let head = pollster::block_on(self.entry.repo.call_async(|head| {
             async move {
                 head.reload().await?;
                 Ok::<_, ManagerError>(head.readonly())
@@ -327,7 +356,8 @@ impl Pipeline<'_> {
             .boxed_local()
         }))??;
         repo.set_head(head);
-        let pending = self.begin(repo, &sources)?;
+        let pending = self.begin(repo, &sources, &permit)?;
+        drop(permit);
         let (ran, new_head) = self.record(pending);
         if let Some(new_head) = new_head {
             repo.set_head(new_head);
@@ -349,7 +379,9 @@ impl Pipeline<'_> {
         let untracked = pending.untracked().to_vec();
         if !pending.changed() {
             let head_op = pending.head_op().clone();
-            let Some(wc_commit) = pending.wc_commit().cloned() else {
+            let (Some(wc_commit), Some(wc_change)) =
+                (pending.wc_commit().cloned(), pending.wc_change().cloned())
+            else {
                 // Unchanged implies the view had a working-copy commit.
                 let error =
                     reef_lib::jj::repo::ReadError::NoWorkingCopyCommit(self.id.jj_workspace_name());
@@ -357,7 +389,11 @@ impl Pipeline<'_> {
             };
             let ran = pollster::block_on(pending.finish(&head_op))
                 .map(|()| Ran {
-                    recorded: Recorded::Unchanged { head_op, wc_commit },
+                    recorded: Recorded::Unchanged {
+                        head_op,
+                        wc_commit,
+                        wc_change,
+                    },
                     adopted,
                     recovered: false,
                     updated_files,
@@ -370,7 +406,7 @@ impl Pipeline<'_> {
         let plan = pending.plan().clone();
         let recovered = plan.recover.is_some();
         let description = self.description.to_owned();
-        let committed = pollster::block_on(self.handle.call_async(move |head| {
+        let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
                 let committed = commit_snapshot(head.repo.head(), &plan, &description).await;
                 if let Ok(committed) = &committed {
@@ -388,7 +424,7 @@ impl Pipeline<'_> {
             Ok(Err(error)) => return (Err(error.into()), None),
             Err(error) => return (Err(error.into()), None),
         };
-        let row = record_commit(self.db, self.id, &committed, recovered);
+        let row = record_commit(self.db, self.entry, &committed, recovered);
         let finished = pollster::block_on(pending.finish(&committed.op_id));
         let new_head = Some(Arc::clone(&committed.repo));
         let ran = row.and(finished.map_err(ManagerError::from)).map(|()| Ran {
@@ -402,21 +438,38 @@ impl Pipeline<'_> {
     }
 }
 
-/// Writes a committed snapshot to the workspace's row: commit, change,
-/// last snapshot, and the divergent or recovered marks.
+/// Writes a committed snapshot to the workspace's row, in the database and
+/// in memory: commit, change, last snapshot, and the divergent or recovered
+/// marks. The loaded row follows the operation even if the database write
+/// fails, since the operation exists either way.
 fn record_commit(
     db: &Db,
-    id: WorkspaceId,
+    entry: &WorkspaceEntry,
     committed: &SnapshotCommit,
     recovered: bool,
 ) -> Result<(), ManagerError> {
+    let now = Timestamp::now();
+    entry.update_record(|record| {
+        record.commit_id = committed.commit_id.to_string();
+        record.change_id = committed.change_id.to_string();
+        record.last_snapshot_op = Some(committed.op_id.to_string());
+        record.last_snapshot_at = Some(now);
+        if committed.divergent {
+            record.divergent = true;
+            record.attention = Some(Attention::Divergent);
+        } else if recovered {
+            record.divergent = false;
+            record.attention = Some(Attention::StaleRecovered);
+        }
+    });
+    let id = entry.paths.id;
     db.set_workspace_commit(
         id,
         committed.change_id.as_str(),
         committed.commit_id.as_str(),
         None,
     )?;
-    db.record_snapshot(id, committed.op_id.as_str(), Timestamp::now())?;
+    db.record_snapshot(id, committed.op_id.as_str(), now)?;
     if committed.divergent {
         db.set_workspace_attention(id, Some(Attention::Divergent), Some(true))?;
     } else if recovered {
