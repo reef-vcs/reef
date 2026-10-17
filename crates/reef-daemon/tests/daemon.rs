@@ -108,6 +108,7 @@ async fn start_sweeps_workspace_trash() {
         jj_repo_path: tmp.path().join("gone/.jj/repo"),
         colocated: false,
         registered_at: Timestamp::now(),
+        tracked_files: None,
     })
     .unwrap();
     drop(db);
@@ -196,17 +197,23 @@ fn log_file_is_json_lines() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
         .collect();
-    // A fresh state directory logs its migration first, and on Linux the
-    // watcher its inotify limits (R1.13); nothing else at info comes before
-    // the start event.
+    // A fresh state directory logs its migration first, on Linux the watcher
+    // its inotify limits (R1.13), and with `watchman` installed the socket it
+    // found (R1.14); nothing else at info comes before the start event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
         .unwrap_or_else(|| panic!("no start event in {text}"));
+    let allowed = [
+        "database migrated",
+        "inotify limits",
+        "watchman socket found; WATCHMAN_SOCK set",
+        "using WATCHMAN_SOCK from the environment",
+    ];
     assert!(
         events[..started]
             .iter()
-            .all(|e| e["message"] == "database migrated" || e["message"] == "inotify limits"),
+            .all(|e| allowed.iter().any(|message| e["message"] == *message)),
         "{text}"
     );
     let event = &events[started];
@@ -287,6 +294,7 @@ async fn repo_thread_runs_jobs_in_order_and_reloads() {
         root: root.clone(),
         colocated: false,
         registered_at: Timestamp::now(),
+        tracked_files: None,
     };
     let registry = std::sync::Arc::new(RepoRegistry::new());
     let handle = {

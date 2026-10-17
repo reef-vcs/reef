@@ -96,6 +96,7 @@ impl RepoRegistry {
             colocated: repo.is_colocated(),
             root,
             registered_at: Timestamp::now(),
+            tracked_files: None,
         };
         drop(repo);
         match db.insert_repository(&record) {

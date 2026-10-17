@@ -71,6 +71,7 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             last_snapshot_at: record.last_snapshot_at.map(timestamp),
             last_snapshot_op: record.last_snapshot_op.clone().unwrap_or_default(),
             lease: view.lease.map(v0::Lease::from),
+            watcher: record.watcher.as_str().to_owned(),
         }
     }
 }

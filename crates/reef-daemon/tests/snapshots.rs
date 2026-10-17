@@ -536,14 +536,12 @@ fn inotify_limits_logged() {
     assert!(limits["instances_count"].as_u64().is_some(), "{limits}");
 }
 
-// Without a watcher (`watchman` until R1.14), every workspace is marked
-// `watch-failed` and still snapshotted by the fallback timer.
+// A workspace that cannot be watched (its watcher failed to start) is
+// marked `watch-failed` and still snapshotted by the fallback timer.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_watcher_falls_back_to_the_timer() {
-    let (daemon, repo) = fixture_with(|config| {
-        config.file.watcher.backend = reef_daemon::config::WatcherBackend::Watchman;
-    })
-    .await;
+    let (daemon, repo) = fixture().await;
+    daemon.handle.state().manager.scheduler().refuse_watches();
     let ws = create(&daemon, &repo, None).await;
     assert_eq!(inspect(&daemon, &repo, &ws).await.attention, "watch-failed");
     write(&ws, "unwatched.txt", "x\n");

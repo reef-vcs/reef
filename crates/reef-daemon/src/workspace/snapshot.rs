@@ -47,6 +47,8 @@ struct Ran {
     recovered: bool,
     updated_files: u32,
     untracked: Vec<(String, UntrackedReasonKind)>,
+    /// jj's scan.
+    scan_ms: u64,
 }
 
 /// Whether the snapshot wrote an operation.
@@ -237,6 +239,7 @@ impl Manager {
                     change_id: committed.change_id.to_string(),
                     latency_ms: elapsed_ms(started),
                     paths_count: trigger.paths_count,
+                    scan_ms: ran.scan_ms,
                 }
             }
             Recorded::Unchanged {
@@ -271,6 +274,7 @@ impl Manager {
                     change_id: wc_change.to_string(),
                     latency_ms: elapsed_ms(started),
                     paths_count: trigger.paths_count,
+                    scan_ms: ran.scan_ms,
                 }
             }
         };
@@ -376,6 +380,7 @@ impl Pipeline<'_> {
     ) -> (Result<Ran, ManagerError>, Option<Arc<ReadonlyRepo>>) {
         let adopted = pending.adopted();
         let updated_files = pending.updated_files();
+        let scan_ms = u64::try_from(pending.scan_time().as_millis()).unwrap_or(u64::MAX);
         let untracked = pending.untracked().to_vec();
         if !pending.changed() {
             let head_op = pending.head_op().clone();
@@ -398,6 +403,7 @@ impl Pipeline<'_> {
                     recovered: false,
                     updated_files,
                     untracked,
+                    scan_ms,
                 })
                 .map_err(ManagerError::from);
             return (ran, None);
@@ -433,6 +439,7 @@ impl Pipeline<'_> {
             recovered,
             updated_files,
             untracked,
+            scan_ms,
         });
         (ran, new_head)
     }
@@ -513,6 +520,7 @@ fn log_outcome(
             commit_id = %outcome.commit_id,
             elapsed_ms = elapsed_ms(begun),
             latency_ms = outcome.latency_ms,
+            scan_ms = outcome.scan_ms,
             paths_count = outcome.paths_count,
             "{kind} snapshot taken"
         );

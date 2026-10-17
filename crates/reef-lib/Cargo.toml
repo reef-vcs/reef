@@ -20,8 +20,15 @@ workspace = true
 [lib]
 bench = false
 
+[features]
+# jj-lib's Watchman integration (R1.14, ADR 0023): narrowed snapshot scans, and the
+# `watchman_client` crate re-exported for the daemon's trigger subscriptions. Off by default; the
+# daemon turns it on.
+watchman = ["jj-lib/watchman", "dep:watchman_client"]
+
 [dependencies]
 jj-lib.workspace = true
+watchman_client = { workspace = true, optional = true }
 gix.workspace = true
 prost.workspace = true
 futures.workspace = true

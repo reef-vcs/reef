@@ -35,6 +35,9 @@ pub struct DaemonArgs {
 /// Resolves the configuration ([`Config::load`]), installs logging (stderr
 /// and `<state>/logs/daemon.log`), starts the daemon on a new multi-threaded
 /// runtime, and runs until SIGINT or SIGTERM, then shuts down.
+///
+/// Call it before the process starts any thread: it may set
+/// `WATCHMAN_SOCK` (R1.14), which is only sound while the process has one.
 pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
     let env_log = LogOptions::from_env().context("initialize logging")?;
     let mut config = Config::load(&PathOverrides {
@@ -48,7 +51,14 @@ pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
     // Before logging, which creates `<state>/logs` and would otherwise create
     // the state directory with the default mode.
     create_private_dir(&config.paths.state_dir).context("start the daemon")?;
+    // Before logging and the runtime start their threads.
+    #[cfg(feature = "watchman")]
+    #[allow(unsafe_code, reason = "no other thread exists yet")]
+    // SAFETY: nothing above starts a thread; logging and the runtime below do.
+    let socket = unsafe { crate::watcher::watchman::export_socket(config.file.watcher.backend) };
     let _logging = logging::init(&config.log).context("initialize logging")?;
+    #[cfg(feature = "watchman")]
+    log_socket_export(&socket);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("reef-daemon-worker")
@@ -81,6 +91,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(signal, "signal received");
     daemon.shutdown();
     daemon.join().await.context("run the daemon")
+}
+
+#[cfg(feature = "watchman")]
+fn log_socket_export(export: &crate::watcher::watchman::SocketExport) {
+    use crate::watcher::watchman::SocketExport;
+    match export {
+        SocketExport::NotNeeded => {}
+        SocketExport::Inherited(socket) => {
+            tracing::info!(socket = %socket.to_string_lossy(), "using WATCHMAN_SOCK from the environment");
+        }
+        SocketExport::Exported(socket) => {
+            tracing::info!(socket = %socket.display(), "watchman socket found; WATCHMAN_SOCK set");
+        }
+        SocketExport::Failed(error) => tracing::warn!(
+            error = %error,
+            "cannot find the watchman socket; each Watchman snapshot will look for it"
+        ),
+    }
 }
 
 /// The exit code for a failed [`run_main`]: a configuration error exits with

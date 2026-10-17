@@ -70,6 +70,9 @@ notify-debouncer-full = "=0.7.0"
 # jj-lib's scan runs on rayon's current pool; the daemon gives each scan slot its own (R1.13).
 # Same major as jj-lib's.
 rayon = "1"
+# Watchman (R1.14), behind the `watchman` features: the version jj-lib's own `watchman` feature
+# uses, so the daemon's trigger subscriptions and jj's narrowed scans share one client crate.
+watchman_client = "0.9"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

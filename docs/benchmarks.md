@@ -85,3 +85,20 @@ Medium preset (10,014 tracked files, 59 MB), median time per iteration from `ben
 The runners are as noisy as warned above. An earlier run of nearly the same code ([38936744617](https://github.com/reef-vcs/reef/actions/runs/38936744617), which still timed settings construction inside `open`) measured `ubuntu-24.04` `modify_1` at 47.3 ms and `macos-15` `modify_500` at 526 ms.
 
 Every benchmark scales with the tree as well as with the change. A no-op snapshot scans all 10,014 files (about 640,000 files per second on the M2 Max), and even a one-file change costs 27 to 59 ms, mostly in committing the operation and saving the working-copy state, and ADR 0008 found that saving the state is O(tracked files). On the `large` preset (100,014 files) on the M2 Max, `noop` takes 146 ms, `modify_1` 194 ms, and the first snapshot 24.9 s. Those are the costs Phase 1's watcher-driven snapshots have to remove.
+
+## Watchman-narrowed scans (R1.14)
+
+`crates/reef-daemon/tests/watchman.rs` has a manual measurement, `scan_is_narrowed`, outside criterion:
+
+```sh
+cargo test --release -p reef-daemon --test watchman -- --ignored scan_is_narrowed --nocapture
+```
+
+It runs the `reef-daemon` binary with automatic snapshots held off, creates one workspace with `watcher.backend` set to `notify` and then to `watchman`, and reports the `scan_ms` of nine explicit snapshots, each after one changed file. `scan_ms` is the time jj spends locking the working copy, checking freshness, and scanning; it does not include committing or saving the working-copy state. Medians on the M2 Max, release build, Watchman 2026.07.06.00:
+
+| Preset | notify (full scan) | Watchman (narrowed) | Ratio |
+| --- | --- | --- | --- |
+| `medium` (10,014 files) | 19 ms | 13 ms | 1.5× |
+| `large` (100,014 files) | 167 ms | 31 ms | 5.4× |
+
+A Watchman query costs about 10 ms whatever the tree's size, so narrowing only pays off well above `medium`, which is why `watcher.backend = "auto"` switches at 50,000 files. These numbers need `WATCHMAN_SOCK`, which the binary sets at start (ADR 0023). Without it, jj runs `watchman get-sockname` for every snapshot, and the `medium` Watchman scan measured 151 ms. The test asserts the 3× bound on `large` only.

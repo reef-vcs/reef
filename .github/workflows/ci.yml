@@ -75,10 +75,21 @@ jobs:
       - uses: extractions/setup-just@v4
         with:
           just-version: "1"
+      # The Watchman tests (R1.14) run on Linux only; on macOS they report
+      # themselves skipped (`brew install watchman` is too slow for every run).
+      - name: Install watchman
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y watchman
+          watchman version
       - name: Lint
         run: just lint
       - name: Build
         run: just build
+      # The daemon builds without Watchman too.
+      - name: Check without default features
+        run: cargo check -p reef-daemon --no-default-features
       - name: Test
         run: just test
       - name: Docs

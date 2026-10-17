@@ -20,6 +20,11 @@ name = "reef-daemon"
 path = "src/main.rs"
 
 [features]
+# Watchman as the snapshot trigger and scan narrowing for large repositories (R1.14, ADR 0023).
+# On by default so released binaries have it; `watcher.backend = "watchman"` is unavailable
+# without it.
+default = ["watchman"]
+watchman = ["reef-lib/watchman"]
 # `reef_daemon::testing::TestDaemon` for this crate's integration tests and `reef-vcs`'s.
 # reef-testing is `publish = false`, so publishing this crate first needs the feature's
 # synthetic-repo helper moved out (or reef-testing published).
@@ -34,6 +39,7 @@ tracing-appender.workspace = true
 rusqlite.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true      # `watchman get-sockname` (R1.14)
 time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true

@@ -39,7 +39,10 @@ pub const FALLBACK_LOG_ENV: &str = "RUST_LOG";
 /// Environment variable selecting the [`LogFormat`].
 pub const LOG_FORMAT_ENV: &str = "REEF_LOG_FORMAT";
 /// The filter used when neither variable is set.
-pub const DEFAULT_FILTER: &str = "info";
+///
+/// jj-lib's Watchman monitor logs three `info` lines on every snapshot of a
+/// Watchman workspace (R1.14); they are held to `warn`.
+pub const DEFAULT_FILTER: &str = "info,jj_lib::fsmonitor=warn";
 /// The daemon log's file name before the date suffix.
 pub const LOG_FILE_PREFIX: &str = "daemon.log";
 /// How many daily log files are kept by default (`log.keep_days`).

@@ -8,6 +8,11 @@
 //! also records the machine's hostname and user name on every operation.
 //! [`user_settings`] and [`user_settings_with_max_new_file_size`] leave both
 //! empty, as jj-lib does; tests and benchmarks use them.
+//!
+//! [`SettingsSpec::fsmonitor`] picks jj's filesystem monitor. jj reads it
+//! into each working copy when the working copy is loaded, so the daemon
+//! keeps one [`UserSettings`] per [`Fsmonitor`] and opens every workspace
+//! with the one recorded for it (R1.14, ADR 0023).
 
 use std::fmt::Write as _;
 
@@ -23,6 +28,36 @@ pub const MAX_NEW_FILE_SIZE_KEY: &str = "snapshot.max-new-file-size";
 
 /// jj's default for [`MAX_NEW_FILE_SIZE_KEY`]. jj-cli sets it; jj-lib does not.
 pub const DEFAULT_MAX_NEW_FILE_SIZE: &str = "1MiB";
+
+/// Config key naming jj's filesystem monitor: `none` or `watchman`.
+pub const FSMONITOR_BACKEND_KEY: &str = "fsmonitor.backend";
+
+/// Config key for jj's own Watchman trigger, which runs `jj util snapshot`
+/// on changes. Always `false`: the daemon is the trigger.
+pub const WATCHMAN_REGISTER_TRIGGER_KEY: &str = "fsmonitor.watchman.register-snapshot-trigger";
+
+/// The filesystem monitor a working copy's snapshots query for changed
+/// paths.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Fsmonitor {
+    /// None: every snapshot scans every tracked file.
+    #[default]
+    None,
+    /// Watchman: a snapshot scans only the paths Watchman reports changed
+    /// since the clock recorded in the working copy's state. Needs the
+    /// `watchman` feature.
+    Watchman,
+}
+
+impl Fsmonitor {
+    /// The [`FSMONITOR_BACKEND_KEY`] value: `none` or `watchman`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Watchman => "watchman",
+        }
+    }
+}
 
 /// The author and committer recorded on commits Reef writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +80,8 @@ pub struct SettingsSpec<'a> {
     pub operation_hostname: &'a str,
     /// Recorded as `operation.username` in every operation's metadata.
     pub operation_username: &'a str,
+    /// The filesystem monitor of working copies loaded with these settings.
+    pub fsmonitor: Fsmonitor,
 }
 
 /// Failure to build [`UserSettings`].
@@ -60,6 +97,9 @@ pub enum SettingsError {
     /// A byte size value was not a number with an optional unit.
     #[error("invalid byte size {0:?}; expected a number with an optional B, KiB, MiB, or GiB unit")]
     ByteSize(String),
+    /// The setting needs a cargo feature this build does not have.
+    #[error("this build does not have the {0} feature")]
+    FeatureDisabled(&'static str),
 }
 
 impl Classify for SettingsError {
@@ -70,6 +110,7 @@ impl Classify for SettingsError {
             // `Repo::open` takes caller-built `UserSettings`, so a bad value read back
             // from them is the caller's input.
             Self::Get(_) | Self::ByteSize(_) => ErrorKind::InvalidArgument,
+            Self::FeatureDisabled(_) => ErrorKind::Unavailable,
         }
     }
 }
@@ -77,7 +118,7 @@ impl Classify for SettingsError {
 /// Builds jj-lib settings from jj-lib's defaults plus Reef's identity and
 /// snapshot limits. `operation.hostname` and `operation.username` stay empty.
 pub fn user_settings(identity: &Identity) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE, "", "")
+    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE, "", "", Fsmonitor::None)
 }
 
 /// [`user_settings`] with [`MAX_NEW_FILE_SIZE_KEY`] set to `bytes` instead of
@@ -86,18 +127,32 @@ pub fn user_settings_with_max_new_file_size(
     identity: &Identity,
     bytes: u64,
 ) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, &bytes.to_string(), "", "")
+    build_settings(identity, &bytes.to_string(), "", "", Fsmonitor::None)
 }
 
 /// The daemon's settings: everything in `spec`, including the operation
 /// hostname and user name jj-lib otherwise records as empty.
+/// [`Fsmonitor::Watchman`] without the `watchman` feature is
+/// [`SettingsError::FeatureDisabled`].
 pub fn user_settings_from_spec(spec: &SettingsSpec<'_>) -> Result<UserSettings, SettingsError> {
     build_settings(
         spec.identity,
         &spec.max_new_file_size.to_string(),
         spec.operation_hostname,
         spec.operation_username,
+        spec.fsmonitor,
     )
+}
+
+/// Reads [`FSMONITOR_BACKEND_KEY`] back from `settings`; anything but
+/// `watchman` is [`Fsmonitor::None`].
+pub fn fsmonitor(settings: &UserSettings) -> Result<Fsmonitor, SettingsError> {
+    let backend: String = settings.get(FSMONITOR_BACKEND_KEY)?;
+    Ok(if backend == Fsmonitor::Watchman.as_str() {
+        Fsmonitor::Watchman
+    } else {
+        Fsmonitor::None
+    })
 }
 
 fn build_settings(
@@ -105,18 +160,24 @@ fn build_settings(
     max_new_file_size: &str,
     operation_hostname: &str,
     operation_username: &str,
+    fsmonitor: Fsmonitor,
 ) -> Result<UserSettings, SettingsError> {
+    if fsmonitor == Fsmonitor::Watchman && !cfg!(feature = "watchman") {
+        return Err(SettingsError::FeatureDisabled("watchman"));
+    }
     let mut config = StackedConfig::with_defaults();
     let layer = ConfigLayer::parse(
         ConfigSource::User,
         &format!(
             "user.name = {}\nuser.email = {}\n{MAX_NEW_FILE_SIZE_KEY} = {}\n\
-             operation.hostname = {}\noperation.username = {}\n",
+             operation.hostname = {}\noperation.username = {}\n\
+             {FSMONITOR_BACKEND_KEY} = {}\n{WATCHMAN_REGISTER_TRIGGER_KEY} = false\n",
             toml_string(&identity.name),
             toml_string(&identity.email),
             toml_string(max_new_file_size),
             toml_string(operation_hostname),
             toml_string(operation_username),
+            toml_string(fsmonitor.as_str()),
         ),
     )?;
     config.add_layer(layer);
@@ -207,6 +268,7 @@ mod tests {
             max_new_file_size: 2 << 20,
             operation_hostname: "host.example",
             operation_username: "agent \"one\"",
+            fsmonitor: Fsmonitor::None,
         })
         .unwrap();
         assert_eq!(settings.operation_hostname(), "host.example");
@@ -228,5 +290,66 @@ mod tests {
         assert_eq!(max_new_file_size(&settings).unwrap(), 16 << 20);
         let settings = user_settings_with_max_new_file_size(&identity, 0).unwrap();
         assert_eq!(max_new_file_size(&settings).unwrap(), u64::MAX);
+    }
+
+    fn spec_with(identity: &Identity, fsmonitor: Fsmonitor) -> SettingsSpec<'_> {
+        SettingsSpec {
+            identity,
+            max_new_file_size: 1 << 20,
+            operation_hostname: "",
+            operation_username: "",
+            fsmonitor,
+        }
+    }
+
+    #[test]
+    fn fsmonitor_defaults_to_none() {
+        let identity = Identity {
+            name: "Reef".into(),
+            email: "reef@example.com".into(),
+        };
+        let settings = user_settings_from_spec(&spec_with(&identity, Fsmonitor::None)).unwrap();
+        assert_eq!(fsmonitor(&settings).unwrap(), Fsmonitor::None);
+        assert_eq!(
+            jj_lib::fsmonitor::FsmonitorSettings::from_settings(&settings).unwrap(),
+            jj_lib::fsmonitor::FsmonitorSettings::None
+        );
+        assert_eq!(
+            fsmonitor(&user_settings(&identity).unwrap()).unwrap(),
+            Fsmonitor::None
+        );
+    }
+
+    #[cfg(feature = "watchman")]
+    #[test]
+    fn watchman_never_registers_jj_trigger() {
+        let identity = Identity {
+            name: "Reef".into(),
+            email: "reef@example.com".into(),
+        };
+        let settings = user_settings_from_spec(&spec_with(&identity, Fsmonitor::Watchman)).unwrap();
+        assert_eq!(fsmonitor(&settings).unwrap(), Fsmonitor::Watchman);
+        assert!(!settings.get_bool(WATCHMAN_REGISTER_TRIGGER_KEY).unwrap());
+        assert_eq!(
+            jj_lib::fsmonitor::FsmonitorSettings::from_settings(&settings).unwrap(),
+            jj_lib::fsmonitor::FsmonitorSettings::Watchman(jj_lib::fsmonitor::WatchmanConfig {
+                register_trigger: false
+            })
+        );
+    }
+
+    #[cfg(not(feature = "watchman"))]
+    #[test]
+    fn watchman_needs_the_feature() {
+        let identity = Identity {
+            name: "Reef".into(),
+            email: "reef@example.com".into(),
+        };
+        let error =
+            user_settings_from_spec(&spec_with(&identity, Fsmonitor::Watchman)).unwrap_err();
+        assert!(
+            matches!(error, SettingsError::FeatureDisabled("watchman")),
+            "{error:?}"
+        );
     }
 }

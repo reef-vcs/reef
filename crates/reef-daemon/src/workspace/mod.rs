@@ -322,6 +322,13 @@ pub enum ManagerError {
     /// A blocking task panicked or was cancelled.
     #[error("a workspace task failed")]
     Task(#[from] tokio::task::JoinError),
+    /// The configured watcher cannot run (R1.14: `watcher.backend =
+    /// "watchman"` without `watchman` on `PATH`).
+    #[error("no watcher for the workspace")]
+    Watcher(#[from] crate::watcher::WatchError),
+    /// The jj settings for the workspace's watcher could not be built.
+    #[error("jj settings for the workspace")]
+    Settings(#[from] reef_lib::jj::settings::SettingsError),
 }
 
 impl Classify for ManagerError {
@@ -351,6 +358,8 @@ impl Classify for ManagerError {
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
             Self::NotActive { .. } => ErrorKind::Conflict,
             Self::Task(_) => ErrorKind::Internal,
+            Self::Watcher(error) => error.kind(),
+            Self::Settings(error) => error.kind(),
         }
     }
 }

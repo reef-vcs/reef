@@ -15,7 +15,9 @@ use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
-use reef_lib::jj::settings::{Identity, SettingsSpec, user_settings, user_settings_from_spec};
+use reef_lib::jj::settings::{
+    Fsmonitor, Identity, SettingsSpec, user_settings, user_settings_from_spec,
+};
 use reef_lib::jj::snapshot::{
     Behind, ChangeKind, ChangedPath, SnapshotCommit, SnapshotError, SnapshotPlan,
     UntrackedReasonKind,
@@ -230,6 +232,7 @@ async fn snapshot_records_operation_host_and_user_from_spec() {
         max_new_file_size: 1 << 20,
         operation_hostname: "build-host.example",
         operation_username: "agent",
+        fsmonitor: Fsmonitor::None,
     })
     .unwrap();
     let mut repo = Repo::init_internal_git(dir.path(), &settings)

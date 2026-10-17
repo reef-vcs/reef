@@ -60,6 +60,9 @@ message Workspace {
   string last_snapshot_op = 14;
   // Its unended lease; unset once released or reclaimed.
   Lease lease = 15;
+  // What triggers its snapshots: `notify` or `watchman` (R1.14). Fixed at
+  // create.
+  string watcher = 16;
 }
 
 // How much disk a workspace uses beyond its base. An estimate.

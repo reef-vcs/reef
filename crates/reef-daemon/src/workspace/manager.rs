@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
+use reef_lib::jj::settings::Fsmonitor;
 use reef_lib::jj::{ForgetWorkspaceError, UserSettings};
 
 use super::{Inspected, ManagerError, WorkspaceEntry};
@@ -17,10 +18,11 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
-    WorkspaceId, WorkspaceRecord, WorkspaceState,
+    WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
 use crate::repo::{RepoHandle, RepoRegistry};
 use crate::snapshot::{Scheduler, SnapshotKind};
+use crate::watcher::{WatchError, select_watcher};
 
 /// The `reclaims.detail` of a workspace whose directory was gone at start.
 pub(super) const DIRECTORY_MISSING: &str = "directory missing at start";
@@ -32,6 +34,10 @@ pub struct Manager {
     pub(super) db: Arc<Db>,
     pub(super) repos: Arc<RepoRegistry>,
     pub(super) settings: UserSettings,
+    /// [`Manager::settings`] with `fsmonitor.backend = "watchman"`, for the
+    /// working copies of Watchman workspaces (R1.14). `None` in a build
+    /// without the `watchman` feature.
+    watchman_settings: Option<UserSettings>,
     /// One base cache per repository, so concurrent creates share its
     /// per-tree locks.
     bases: Mutex<HashMap<RepoId, Arc<BaseCache>>>,
@@ -63,6 +69,14 @@ impl Manager {
         repos: Arc<RepoRegistry>,
         settings: UserSettings,
     ) -> Arc<Manager> {
+        let watchman_settings = match config.jj_settings_for(Fsmonitor::Watchman) {
+            Ok(settings) => Some(settings),
+            Err(reef_lib::jj::settings::SettingsError::FeatureDisabled(_)) => None,
+            Err(error) => {
+                tracing::error!(error = %ErrorChain(&error), "cannot build the jj settings for Watchman workspaces");
+                None
+            }
+        };
         Arc::new_cyclic(|manager| {
             let scheduler = Scheduler::new(
                 &config.file.watcher,
@@ -74,6 +88,7 @@ impl Manager {
                 db,
                 repos,
                 settings,
+                watchman_settings,
                 bases: Mutex::new(HashMap::new()),
                 repo_locks: Mutex::new(HashMap::new()),
                 entries: RwLock::new(HashMap::new()),
@@ -156,6 +171,74 @@ impl Manager {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         Arc::clone(locks.entry(repo).or_default())
+    }
+
+    /// The jj settings a working copy watched by `watcher` is loaded with.
+    pub(super) fn wc_settings(&self, watcher: WatcherKind) -> Result<UserSettings, ManagerError> {
+        match watcher {
+            WatcherKind::Notify => Ok(self.settings.clone()),
+            WatcherKind::Watchman => self.watchman_settings.clone().ok_or(ManagerError::Watcher(
+                WatchError::FeatureDisabled("watchman"),
+            )),
+        }
+    }
+
+    /// The watcher a new workspace of `repo` gets; see [`select_watcher`].
+    pub(super) fn watcher_for(&self, repo: &RepositoryRecord) -> Result<WatcherKind, ManagerError> {
+        Ok(select_watcher(
+            &self.config.file.watcher,
+            repo.tracked_files,
+        )?)
+    }
+
+    /// Counts a registered, open repository's tracked files if they were
+    /// not counted yet (at registration, or at the first start after
+    /// R1.14), stores the count, and logs which watcher its new workspaces
+    /// get. Returns the record with the count. Failures are logged; the
+    /// repository is then treated as uncounted (below the threshold).
+    pub async fn prepare_watcher(&self, mut record: RepositoryRecord) -> RepositoryRecord {
+        let id = record.id;
+        if record.tracked_files.is_none() {
+            let counted = match self.repos.get(id) {
+                Some(handle) => handle
+                    .call(|head| head.repo.tracked_file_count())
+                    .await
+                    .map_err(ManagerError::from)
+                    .and_then(|counted| counted.map_err(ManagerError::from)),
+                None => Err(ManagerError::RepoNotOpen(id)),
+            };
+            match counted {
+                Ok(count) => match self.db.set_repository_tracked_files(id, count) {
+                    Ok(()) => record.tracked_files = Some(count),
+                    Err(error) => {
+                        tracing::error!(repo = %id, error = %ErrorChain(&error), "cannot record the tracked file count");
+                    }
+                },
+                Err(error) => {
+                    tracing::error!(repo = %id, error = %ErrorChain(&error), "cannot count the repository's tracked files");
+                }
+            }
+        }
+        let backend = self.config.file.watcher.backend.as_str();
+        let threshold = self.config.file.watcher.watchman_threshold_files;
+        match self.watcher_for(&record) {
+            Ok(kind) => tracing::info!(
+                repo = %id,
+                tracked_files_count = record.tracked_files,
+                watchman_threshold_files = threshold,
+                backend,
+                watcher = kind.as_str(),
+                "watcher selected for the repository's new workspaces"
+            ),
+            Err(error) => tracing::warn!(
+                repo = %id,
+                tracked_files_count = record.tracked_files,
+                backend,
+                error = %ErrorChain(&error),
+                "no watcher for the repository's new workspaces; creating one fails until this is fixed"
+            ),
+        }
+        record
     }
 
     /// The repository's thread.
@@ -253,7 +336,9 @@ impl Manager {
         let repos = Arc::clone(&self.repos);
         let db = Arc::clone(&self.db);
         let settings = self.settings.clone();
-        Ok(tokio::task::spawn_blocking(move || repos.register(&db, &path, &settings)).await??)
+        let (record, existed) =
+            tokio::task::spawn_blocking(move || repos.register(&db, &path, &settings)).await??;
+        Ok((self.prepare_watcher(record).await, existed))
     }
 
     /// Forgets a repository (refused while any of its workspaces is active),
@@ -427,7 +512,21 @@ impl Manager {
                 }
             };
             let paths = WorkspacePaths::at(id, record.path.clone(), record.state_dir.clone());
-            let jj = self.reopen(&handle, &paths).await;
+            let settings = match self.wc_settings(record.watcher) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    // Scans are full ones, and the watcher is missing too,
+                    // so the workspace lives on the fallback timer.
+                    tracing::warn!(
+                        workspace_id = %id,
+                        watcher = record.watcher.as_str(),
+                        error = %ErrorChain(&error),
+                        "loading the workspace without its watcher's jj settings"
+                    );
+                    self.settings.clone()
+                }
+            };
+            let jj = self.reopen(&handle, &paths, settings).await;
             let entry = WorkspaceEntry {
                 record: Mutex::new(record),
                 paths,
@@ -451,14 +550,20 @@ impl Manager {
         &self,
         handle: &RepoHandle,
         paths: &WorkspacePaths,
+        settings: UserSettings,
     ) -> Option<reef_lib::jj::Repo> {
         let id = paths.id;
         let root = paths.root.clone();
         let state_dir = paths.state_dir.clone();
         let opened = handle
             .call_async(move |head| {
-                async move { Ok::<_, ManagerError>(head.repo.open_workspace(&root, &state_dir)?) }
-                    .boxed_local()
+                async move {
+                    Ok::<_, ManagerError>(
+                        head.repo
+                            .open_workspace_with(&root, &state_dir, &settings)?,
+                    )
+                }
+                .boxed_local()
             })
             .await;
         match opened {

@@ -372,6 +372,18 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     //    fails to open is logged and skipped; the daemon serves the others.
     let opens = records.into_iter().map(|record| open_repo(state, record));
     futures::future::join_all(opens).await;
+    //    Then count the tracked files of repositories registered before
+    //    R1.14 and log each one's watcher selection.
+    match state.db.repositories() {
+        Ok(records) => {
+            let open = records
+                .into_iter()
+                .filter(|record| state.repos.get(record.id).is_some())
+                .map(|record| state.manager.prepare_watcher(record));
+            futures::future::join_all(open).await;
+        }
+        Err(error) => tracing::error!(error = %ErrorChain(&error), "cannot list repositories"),
+    }
 
     // 6. Load active workspaces. A database failure here is logged; the
     //    daemon still serves registration and the database's view.

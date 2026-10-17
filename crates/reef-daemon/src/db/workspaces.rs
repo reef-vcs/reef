@@ -17,7 +17,7 @@ const WHAT: &str = "workspace";
 
 const COLUMNS: &str = "id, repo_id, owner, purpose, change_id, commit_id, base_tree_id, backend, \
      path, state_dir, lease_id, state, divergent, attention, created_at, last_snapshot_at, \
-     last_snapshot_op";
+     last_snapshot_op, watcher";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
     Ok(WorkspaceRecord {
@@ -38,6 +38,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
         created_at: row.get(14)?,
         last_snapshot_at: row.get(15)?,
         last_snapshot_op: row.get(16)?,
+        watcher: row.get(17)?,
     })
 }
 
@@ -97,7 +98,7 @@ pub(crate) fn insert_workspace_in(
         &format!(
             "INSERT INTO workspaces({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17)"
+                     ?16, ?17, ?18)"
         ),
         params![
             w.id,
@@ -117,6 +118,7 @@ pub(crate) fn insert_workspace_in(
             w.created_at,
             w.last_snapshot_at,
             w.last_snapshot_op,
+            w.watcher,
         ],
     )?;
     Ok(())
@@ -368,6 +370,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::db::repositories::tests::repo;
+    use crate::model::WatcherKind;
 
     /// An active, unleased workspace record.
     pub(crate) fn workspace(repo_id: RepoId, id: &str, path: &str) -> WorkspaceRecord {
@@ -389,6 +392,7 @@ pub(crate) mod tests {
             created_at: Timestamp(2_000),
             last_snapshot_at: None,
             last_snapshot_op: None,
+            watcher: WatcherKind::Notify,
         }
     }
 

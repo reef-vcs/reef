@@ -1,9 +1,9 @@
 //! The daemon's record types: what [`crate::db`] stores about repositories,
 //! workspaces, leases, and reclaims, and the ids that name them.
 //!
-//! The string forms of [`WorkspaceState`], [`LeaseEnd`], and
-//! [`ReclaimReason`] are the values the `CHECK` constraints in
-//! `db/migrations/0001_initial.sql` allow; a test keeps the two in step.
+//! The string forms of [`WorkspaceState`], [`LeaseEnd`], [`ReclaimReason`],
+//! and [`WatcherKind`] are the values the `CHECK` constraints in
+//! `db/migrations/` allow; a test keeps the two in step.
 
 pub mod ids;
 
@@ -193,6 +193,25 @@ sql_enum!(ReclaimReason, "reclaim reason", {
     Restore => "restore",
 });
 
+/// What triggers a workspace's snapshots (R1.13, R1.14). Fixed at create
+/// and stored in `workspaces.watcher`: a Watchman workspace's working copy
+/// also narrows its scans with Watchman, which jj fixes when it loads the
+/// working copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherKind {
+    /// The `notify` crate: inotify on Linux, `FSEvents` on macOS.
+    #[default]
+    Notify,
+    /// A Watchman subscription, and Watchman-narrowed scans.
+    Watchman,
+}
+
+sql_enum!(WatcherKind, "watcher", {
+    Notify => "notify",
+    Watchman => "watchman",
+});
+
 /// A registered repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryRecord {
@@ -206,6 +225,10 @@ pub struct RepositoryRecord {
     pub colocated: bool,
     /// When it was registered.
     pub registered_at: Timestamp,
+    /// Files in its `default` workspace's working-copy commit, counted at
+    /// registration (or the first daemon start after R1.14); `None` until
+    /// counted.
+    pub tracked_files: Option<u64>,
 }
 
 /// A Reef workspace: a leased directory backed by its own jj workspace
@@ -246,6 +269,8 @@ pub struct WorkspaceRecord {
     pub last_snapshot_at: Option<Timestamp>,
     /// The operation that recorded its last snapshot.
     pub last_snapshot_op: Option<String>,
+    /// What triggers its snapshots.
+    pub watcher: WatcherKind,
 }
 
 /// One lease on a workspace.
@@ -388,12 +413,14 @@ mod tests {
 
     use super::*;
 
-    /// The quoted values of every `CHECK (<column> IN (...))` in the initial
-    /// migration, by column.
+    /// The quoted values of every `CHECK (<column> IN (...))` in the
+    /// migrations, by column.
     fn check_sets() -> BTreeMap<String, BTreeSet<String>> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/db/migrations/0001_initial.sql");
-        let sql = std::fs::read_to_string(path).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/migrations");
+        let mut sql = String::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            sql.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        }
         let mut sets = BTreeMap::new();
         for (index, _) in sql.match_indices("CHECK (") {
             let rest = &sql[index + "CHECK (".len()..];
@@ -427,6 +454,10 @@ mod tests {
             (
                 "reason".to_owned(),
                 names(ReclaimReason::ALL, ReclaimReason::as_str),
+            ),
+            (
+                "watcher".to_owned(),
+                names(WatcherKind::ALL, WatcherKind::as_str),
             ),
         ]);
         assert_eq!(sets, expected);
