@@ -24,10 +24,12 @@ pub mod copy;
 pub mod fs_util;
 pub mod probe;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::TreeStateReadError;
@@ -336,8 +338,43 @@ pub fn backend_for(kind: BackendKind) -> Box<dyn Backend> {
 /// yet; its nearest existing ancestor is probed): the named one if its probe
 /// says it is available, or for [`BackendChoice::Auto`] the first available
 /// in [`BackendKind::AUTO_ORDER`].
+///
+/// When `auto` falls through to the copy backend, logs one `warn` per `dir`
+/// for the daemon's lifetime naming why every other backend was
+/// unavailable, so a user who expected copy-on-write finds out.
 pub fn select(choice: BackendChoice, dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
-    select_from(choice, &probe(dir))
+    let probes = probe(dir);
+    let backend = select_from(choice, &probes)?;
+    if choice == BackendChoice::Auto && backend.kind() == BackendKind::Copy {
+        warn_copy_fallback_once(dir, &probes);
+    }
+    Ok(backend)
+}
+
+/// The directories [`select`] has warned about.
+static COPY_FALLBACK_WARNED: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn warn_copy_fallback_once(dir: &Path, probes: &[Probe]) {
+    let first = COPY_FALLBACK_WARNED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(dir.to_owned());
+    if !first {
+        return;
+    }
+    let reasons: Vec<String> = probes
+        .iter()
+        .filter_map(|probe| match &probe.availability {
+            Availability::Unavailable(reason) => Some(format!("{}: {reason}", probe.kind)),
+            Availability::Available => None,
+        })
+        .collect();
+    tracing::warn!(
+        path = %dir.display(),
+        unavailable = %reasons.join("; "),
+        "no copy-on-write backend is available; workspaces are full copies"
+    );
 }
 
 /// [`select`] over probes the caller already has, such as the ones

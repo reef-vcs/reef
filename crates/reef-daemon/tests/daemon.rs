@@ -21,7 +21,7 @@ use common::{
 use futures::FutureExt as _;
 use reef_daemon::client::Client;
 use reef_daemon::config::{Config, ConfigError, PathOverrides, Paths, SOCKET_PATH_MAX};
-use reef_daemon::db::SCHEMA_VERSION;
+use reef_daemon::db::{Db, SCHEMA_VERSION};
 use reef_daemon::lock::LockError;
 use reef_daemon::model::{RepoId, RepositoryRecord, Timestamp};
 use reef_daemon::repo::{RepoRegistry, RepoThreadError};
@@ -89,6 +89,37 @@ async fn stale_socket_is_replaced() {
     let handle = Daemon::start(config).await.unwrap();
     let client = Client::connect(&paths.socket).await.unwrap();
     client.status().await.unwrap();
+    handle.shutdown();
+    handle.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_sweeps_workspace_trash() {
+    // A registered repository whose root is gone: the daemon logs that it
+    // cannot open it and still sweeps its workspace root (R1.07).
+    let tmp = short_tempdir();
+    let paths = Paths::in_state_dir(&tmp.path().join("state")).unwrap();
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let id = RepoId::generate();
+    let db = Db::open(&paths.db).unwrap();
+    db.insert_repository(&RepositoryRecord {
+        id,
+        root: tmp.path().join("gone"),
+        jj_repo_path: tmp.path().join("gone/.jj/repo"),
+        colocated: false,
+        registered_at: Timestamp::now(),
+    })
+    .unwrap();
+    drop(db);
+    let config = Config::with_defaults(paths.clone());
+    let ws_root = config.workspace_root(id);
+    std::fs::create_dir_all(ws_root.join("00000000000000aa.trash-1/sub")).unwrap();
+    std::fs::write(ws_root.join("00000000000000aa.trash-1/sub/file"), b"x").unwrap();
+    std::fs::create_dir(ws_root.join("00000000000000bb")).unwrap();
+
+    let handle = Daemon::start(config).await.unwrap();
+    assert!(!ws_root.join("00000000000000aa.trash-1").exists());
+    assert!(ws_root.join("00000000000000bb").is_dir(), "live roots stay");
     handle.shutdown();
     handle.join().await.unwrap();
 }
