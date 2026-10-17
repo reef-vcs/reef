@@ -49,6 +49,9 @@ pub(crate) enum CliError {
     /// The async runtime could not start.
     #[error("start the async runtime")]
     Runtime(#[source] io::Error),
+    /// `ws run` could not install its signal handlers.
+    #[error("install signal handlers")]
+    Signals(#[source] io::Error),
     /// A command refused with a kind of its own, such as `repo register` on
     /// a registered repository (`AlreadyExists`) or a stub (`Internal`).
     #[error("{message}")]
@@ -101,7 +104,7 @@ impl Classify for CliError {
             }
             Self::Config(error) => error.kind(),
             Self::Logging(error) => error.kind(),
-            Self::Runtime(_) => ErrorKind::Internal,
+            Self::Runtime(_) | Self::Signals(_) => ErrorKind::Internal,
             Self::Refused { kind, .. } => *kind,
             Self::Usage(_) => ErrorKind::InvalidArgument,
             Self::Io { source, .. } | Self::Stdout(source) => classify_by_source(source),

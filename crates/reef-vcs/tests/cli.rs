@@ -592,7 +592,6 @@ fn stubs_exit_1_without_a_daemon() {
     for (args, ticket) in [
         (&["ws", "gc"][..], "R1.17"),
         (&["ws", "move", "abcd", "--change", "x"], "R1.06"),
-        (&["ws", "run", "--", "true"], "R1.21"),
         (&["store", "list"], "R1.20"),
         (&["backup", "/tmp/x"], "R1.18"),
         (&["restore", "/tmp/x"], "R1.18"),

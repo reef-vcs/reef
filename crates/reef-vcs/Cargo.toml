@@ -37,11 +37,14 @@ clap_complete.workspace = true
 humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true      # `-o json`
-tokio.workspace = true
-nix = { workspace = true, features = ["signal"] }   # `reef daemon stop`
+tokio = { workspace = true, features = ["process"] }   # `ws run`'s child (R1.21)
+nix = { workspace = true, features = ["signal"] }   # `reef daemon stop`, `ws run`'s forwarding
 
 [dev-dependencies]
 assert_cmd.workspace = true
+jj-lib.workspace = true          # tests/ws_run.rs reads the final snapshot's tree
+pollster.workspace = true
+tonic.workspace = true           # statuses for the heartbeater's fake daemon
 reef-daemon = { workspace = true, features = ["testing"] }
 reef-testing.workspace = true
 serde_json.workspace = true

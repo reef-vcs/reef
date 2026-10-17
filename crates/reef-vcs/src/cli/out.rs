@@ -121,12 +121,34 @@ impl Out {
         }
     }
 
+    /// A JSON value on stdout in JSON mode; nothing in text mode, where
+    /// stdout belongs to something else (`ws run`'s command).
+    pub(crate) fn json_only<T: Serialize>(&self, value: &T) -> Result<(), CliError> {
+        if self.mode != Output::Json {
+            return Ok(());
+        }
+        let mut buffer = Vec::new();
+        json_into(&mut buffer, value);
+        self.raw(&buffer)
+    }
+
+    /// A line on stderr, in both modes, even with `-q`: a failure that is
+    /// not the command's result, such as `ws run`'s release after its
+    /// command exited.
+    #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
+    #[expect(
+        clippy::unused_self,
+        reason = "every message goes through an `Out`, failures too"
+    )]
+    pub(crate) fn error_line(&self, text: &str) {
+        eprintln!("{text}");
+    }
+
     /// `error: <chain>` on stderr; in JSON mode also the error object on
     /// stdout.
-    #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
     pub(crate) fn error(&self, error: &CliError) {
         let message = ErrorChain(error).to_string();
-        eprintln!("error: {message}");
+        self.error_line(&format!("error: {message}"));
         if self.mode == Output::Json {
             self.error_object(kind_text(error.kind()), &message);
         }
