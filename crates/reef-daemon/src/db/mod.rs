@@ -122,16 +122,17 @@ pub enum DbError {
     /// More than one record matches an id prefix.
     #[error(
         "{what} {prefix:?} is ambiguous; it matches {}",
-        candidates_text(candidates)
+        candidates_text(candidates, *truncated)
     )]
     Ambiguous {
         /// The kind of record.
         what: &'static str,
         /// The prefix.
         prefix: String,
-        /// Ids of the matching records, at most [`MAX_CANDIDATES`] of them
-        /// plus an empty string when there are more.
+        /// Ids of the matching records, at most [`MAX_CANDIDATES`] of them.
         candidates: Vec<String>,
+        /// Whether more records match than `candidates` lists.
+        truncated: bool,
     },
     /// An id prefix is shorter than [`MIN_PREFIX_LEN`], longer than an id,
     /// or not hex.
@@ -461,29 +462,19 @@ pub(crate) fn unique_match<T>(
             id: prefix.to_owned(),
         }),
         1 => Ok(matches.remove(0)),
-        count => {
-            let mut candidates: Vec<String> =
-                matches.iter().take(MAX_CANDIDATES).map(id_of).collect();
-            if count > MAX_CANDIDATES {
-                candidates.push(String::new());
-            }
-            Err(DbError::Ambiguous {
-                what,
-                prefix: prefix.to_owned(),
-                candidates,
-            })
-        }
+        count => Err(DbError::Ambiguous {
+            what,
+            prefix: prefix.to_owned(),
+            candidates: matches.iter().take(MAX_CANDIDATES).map(id_of).collect(),
+            truncated: count > MAX_CANDIDATES,
+        }),
     }
 }
 
-/// `a, b, c`, or `a, b, c, and more` when the list ends in an empty string.
-fn candidates_text(candidates: &[String]) -> String {
-    let (more, ids) = match candidates.split_last() {
-        Some((last, ids)) if last.is_empty() => (true, ids),
-        _ => (false, candidates),
-    };
-    let mut text = ids.join(", ");
-    if more {
+/// `a, b, c`, or `a, b, c, and more` when `truncated`.
+fn candidates_text(candidates: &[String], truncated: bool) -> String {
+    let mut text = candidates.join(", ");
+    if truncated {
         text.push_str(", and more");
     }
     text

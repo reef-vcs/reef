@@ -364,6 +364,16 @@ async fn exit_codes() {
         "invalid_argument",
     );
     assert!(text.contains("--change"), "clap's own message: {text}");
+    // A missing subcommand: clap prints help, the JSON names the problem.
+    let output = run(reef(&daemon), &["ws"]).await;
+    output.clone().assert().code(2);
+    assert!(stderr(&output).contains("Usage:"), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["error"]["kind"], "invalid_argument");
+    assert_eq!(
+        value["error"]["message"],
+        "a subcommand is required; see --help"
+    );
     // `-o text` keeps stdout empty on a usage error.
     let output = run(reef(&daemon), &["-o", "text", "ws", "create", "--change"]).await;
     output.clone().assert().code(2);
@@ -443,9 +453,24 @@ fn autostart_spawns_daemon() {
         stderr(&output)
     );
 
+    // A pid file that disagrees with the daemon: refused, nothing signalled.
+    std::fs::write(&pid_file, "1\n").unwrap();
+    let text = failed(
+        &reef().args(["daemon", "stop"]).output().unwrap(),
+        5,
+        "conflict",
+    );
+    assert!(text.contains("not signalling"), "{text}");
+    std::fs::write(&pid_file, format!("{pid}\n")).unwrap();
+
+    // Stopped through `--socket` from a CLI on another state directory: the
+    // daemon's own pid file, in the state directory it reports, agrees.
+    let elsewhere = tmp.path().join("elsewhere");
+    let socket = status["socket"].as_str().unwrap().to_owned();
     let started = Instant::now();
     let output = reef()
-        .args(["-o", "text", "daemon", "stop"])
+        .env("REEF_STATE_DIR", &elsewhere)
+        .args(["-o", "text", "--socket", &socket, "daemon", "stop"])
         .output()
         .unwrap();
     output.clone().assert().success();
@@ -519,6 +544,43 @@ fn no_jj_lib_in_binary() {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(!text.contains(&needle), "{} uses {needle}", file.display());
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_forget() {
+    let (daemon, repo) = with_repo().await;
+    let created = create(&daemon, &repo).await;
+    // Refused while a workspace is active.
+    failed(
+        &run(reef(&daemon), &["repo", "forget", &repo.id]).await,
+        5,
+        "conflict",
+    );
+    json(
+        &run(
+            reef(&daemon),
+            &["ws", "release", created["id"].as_str().unwrap()],
+        )
+        .await,
+    );
+    // By path, in text mode: a note naming the full id.
+    let output = run(
+        reef(&daemon),
+        &["-o", "text", "repo", "forget", repo.root.to_str().unwrap()],
+    )
+    .await;
+    output.clone().assert().success();
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), format!("forgot {}\n", repo.id));
+    assert_eq!(
+        json(&run(reef(&daemon), &["repo", "list"]).await),
+        Value::Array(vec![])
+    );
+    failed(
+        &run(reef(&daemon), &["repo", "forget", &repo.id]).await,
+        3,
+        "not_found",
+    );
 }
 
 /// Stubs fail with their ticket and never start a daemon.

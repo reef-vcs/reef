@@ -16,6 +16,8 @@ use super::{CliError, DEFAULT_TIMEOUT, Global, Out, Output, autostart};
 
 /// How long `stop` waits for the daemon to exit after SIGTERM.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The pid file's name in a state directory (`daemon.pid_file` default).
+const PID_FILE: &str = "daemon.pid";
 /// How long `stop --force` waits after SIGKILL.
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -141,7 +143,13 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
     };
     let status = status_of(&client, global).await?;
     drop(client);
-    if recorded != Some(status.pid) {
+    // The CLI's pid file, or, when `--socket` names a daemon on another
+    // state directory, the one in the state directory it reports.
+    let theirs = Path::new(&status.state_dir).join(PID_FILE);
+    let Some(agreed) = [pid_file.as_path(), theirs.as_path()]
+        .into_iter()
+        .find(|file| read_pid(file) == Some(status.pid))
+    else {
         let named =
             recorded.map_or_else(|| "has no pid".to_owned(), |pid| format!("names pid {pid}"));
         return Err(CliError::Refused {
@@ -153,13 +161,17 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
                 pid_file.display()
             ),
         });
-    }
+    };
+    let gone = Exited {
+        socket,
+        pid_file: agreed,
+    };
     let pid = Pid::from_raw(i32::try_from(status.pid).map_err(|_| CliError::Refused {
         kind: ErrorKind::Internal,
         message: format!("the daemon reports pid {}, which is not a pid", status.pid),
     })?);
     signal(pid, Signal::SIGTERM)?;
-    if !wait_for_exit(pid, STOP_TIMEOUT).await {
+    if !gone.wait(pid, STOP_TIMEOUT).await {
         if !force {
             return Err(CliError::Refused {
                 kind: ErrorKind::Unavailable,
@@ -170,7 +182,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
             });
         }
         signal(pid, Signal::SIGKILL)?;
-        if !wait_for_exit(pid, KILL_TIMEOUT).await {
+        if !gone.wait(pid, KILL_TIMEOUT).await {
             return Err(CliError::Refused {
                 kind: ErrorKind::Internal,
                 message: format!("the daemon (pid {pid}) survived SIGKILL"),
@@ -203,16 +215,31 @@ fn signal(pid: Pid, signal: Signal) -> Result<(), CliError> {
     }
 }
 
-/// Whether `pid` is gone within `timeout`.
-async fn wait_for_exit(pid: Pid, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if kill(pid, None) == Err(Errno::ESRCH) {
-            return true;
+/// How `stop` tells that the daemon has exited.
+struct Exited<'a> {
+    socket: &'a Path,
+    pid_file: &'a Path,
+}
+
+impl Exited<'_> {
+    /// Whether the daemon is gone within `timeout`: its pid no longer
+    /// exists, or its pid file is removed and its socket refuses. The
+    /// daemon removes both as the last step of shutdown, which covers a
+    /// daemon left as an unreaped zombie (a container without an init),
+    /// whose pid still exists.
+    async fn wait(&self, pid: Pid, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if kill(pid, None) == Err(Errno::ESRCH) {
+                return true;
+            }
+            if !self.pid_file.exists() && Client::connect(self.socket).await.is_err() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

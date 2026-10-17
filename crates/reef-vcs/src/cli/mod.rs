@@ -293,12 +293,18 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
     }
     let out = Out::detect(output_flag(args), false);
     let rendered = error.render().to_string();
-    let message = rendered
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches("error: ")
-        .to_owned();
+    let message = match error.kind() {
+        // clap renders the command's help, whose first line is its `about`.
+        Clap::DisplayHelpOnMissingArgumentOrSubcommand | Clap::MissingSubcommand => {
+            "a subcommand is required; see --help".to_owned()
+        }
+        _ => rendered
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("error: ")
+            .to_owned(),
+    };
     out.usage_error(&rendered, &message);
     ExitCode::from(reef_lib::error::ErrorKind::InvalidArgument.exit_code())
 }

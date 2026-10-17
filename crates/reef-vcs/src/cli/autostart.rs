@@ -24,6 +24,9 @@ use super::{CliError, Global, absolute};
 
 /// How long a started daemon gets to answer on its socket.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the socket is still tried after the started daemon exited: long
+/// enough for another CLI's daemon, which won the lock, to answer.
+const AFTER_EXIT: Duration = Duration::from_secs(1);
 /// How often the socket is tried meanwhile.
 const POLL: Duration = Duration::from_millis(100);
 /// The daemon binary's name.
@@ -52,7 +55,7 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
     })?;
     tracing::debug!(program = %program.path.display(), pid = child.id(), "daemon spawned");
     let socket = &config.paths.socket;
-    let deadline = Instant::now() + START_TIMEOUT;
+    let mut deadline = Instant::now() + START_TIMEOUT;
     let mut exited: Option<ExitStatus> = None;
     loop {
         if let Ok(client) = Client::connect(socket).await {
@@ -65,9 +68,12 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
             return Ok((client, status.pid));
         }
         if exited.is_none() {
-            // Keep polling after an exit: losing the lock to another CLI's
-            // daemon also exits, and that daemon answers soon.
+            // Keep polling briefly after an exit: losing the lock to another
+            // CLI's daemon also exits, and that daemon answers soon.
             exited = child.try_wait().ok().flatten();
+            if exited.is_some() {
+                deadline = deadline.min(Instant::now() + AFTER_EXIT);
+            }
         }
         if Instant::now() >= deadline {
             break;
