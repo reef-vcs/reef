@@ -70,8 +70,13 @@ tonic-prost-build.workspace = true
 protox.workspace = true
 prost-types.workspace = true
 
+[[test]]
+name = "watchman"
+required-features = ["watchman"]
+
 [dev-dependencies]
-reef-daemon = { path = ".", version = "0.0.0", features = ["testing"] }
+# Without default features, so `--no-default-features` test builds really leave `watchman` off.
+reef-daemon = { path = ".", version = "0.0.0", default-features = false, features = ["testing"] }
 jj-lib.workspace = true          # tests/workspaces.rs sets a bookmark the way `jj bookmark set` does
 serde_json.workspace = true
 tempfile.workspace = true

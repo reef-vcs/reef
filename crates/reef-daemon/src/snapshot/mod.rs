@@ -822,6 +822,11 @@ fn health_hook(inner: Weak<Inner>) -> HealthHook {
         let Some(entry) = manager.entry(ws) else {
             return;
         };
+        // A release untracks first, but a report already past the check
+        // above must not mark a row on its way out.
+        if entry.record().state != crate::model::WorkspaceState::Active {
+            return;
+        }
         if healthy {
             manager.clear_watch_failed(&entry);
         } else {
@@ -851,11 +856,23 @@ impl Manager {
     }
 
     /// Marks `entry` as unwatched (`attention = 'watch-failed'`) in the
-    /// database and the loaded row; failures are logged.
+    /// database and the loaded row; failures are logged. Another mark
+    /// (`stale-recovered`, R1.20's store marks) is kept rather than replaced:
+    /// a Watchman restart marks and clears every Watchman workspace, and
+    /// would otherwise erase it.
     pub(crate) fn mark_watch_failed(&self, entry: &crate::workspace::WorkspaceEntry) {
         let id = entry.paths.id;
         let attention = Some(crate::model::Attention::WatchFailed);
-        if entry.record().attention == attention {
+        let current = entry.record().attention;
+        if current == attention {
+            return;
+        }
+        if let Some(other) = current {
+            tracing::debug!(
+                workspace_id = %id,
+                attention = other.as_str(),
+                "watch failed; keeping the workspace's other mark"
+            );
             return;
         }
         match self.db().set_workspace_attention(id, attention, None) {

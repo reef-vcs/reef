@@ -87,9 +87,12 @@ jobs:
         run: just lint
       - name: Build
         run: just build
-      # The daemon builds without Watchman too.
+      # The daemon builds without Watchman too, and its unit tests (and
+      # reef-lib's) pass that way.
       - name: Check without default features
-        run: cargo check -p reef-daemon --no-default-features
+        run: |
+          cargo check -p reef-daemon --no-default-features
+          cargo test -p reef-daemon -p reef-lib --no-default-features --lib
       - name: Test
         run: just test
       - name: Docs

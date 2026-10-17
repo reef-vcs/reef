@@ -209,6 +209,7 @@ fn log_file_is_json_lines() {
         "inotify limits",
         "watchman socket found; WATCHMAN_SOCK set",
         "using WATCHMAN_SOCK from the environment",
+        "cannot find the watchman socket; each Watchman snapshot will look for it",
     ];
     assert!(
         events[..started]

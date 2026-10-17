@@ -13,6 +13,9 @@ success-output = "immediate"
 [test-groups]
 watchman = { max-threads = 1 }
 
+# Shown when they pass too, so a run without `watchman` (macOS CI) says
+# `skipped: watchman not on PATH` instead of passing silently.
 [[profile.default.overrides]]
 filter = "package(reef-daemon) & binary(watchman)"
 test-group = "watchman"
+success-output = "immediate"

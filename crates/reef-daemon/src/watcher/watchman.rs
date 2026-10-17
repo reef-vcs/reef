@@ -293,8 +293,12 @@ fn is_connection_error(error: &watchman_client::Error) -> bool {
 enum Ended {
     /// The workspace was unwatched.
     Stopped,
-    /// Watchman cancelled it, or the connection failed.
-    Lost(String),
+    /// Watchman cancelled it (`lost_connection` false: the connection is
+    /// still good), or the connection failed.
+    Lost {
+        reason: String,
+        lost_connection: bool,
+    },
 }
 
 impl Shared {
@@ -347,9 +351,6 @@ impl Task {
     /// The state machine: subscribed, reconnecting(attempt), stopped.
     async fn run(self) {
         let ws = self.workspace;
-        // Whether events may have been missed since `watch`: a subscription
-        // that comes up after that asks for one snapshot at once.
-        let mut missed = false;
         let mut established = false;
         let mut attempt: u32 = 0;
         loop {
@@ -375,13 +376,16 @@ impl Task {
                     established = true;
                     attempt = 0;
                     self.report(true);
-                    match self.pump(&mut subscription, missed).await {
+                    match self.pump(&mut subscription).await {
                         Ended::Stopped => {
                             let cancel = subscription.cancel();
                             let _ = tokio::time::timeout(UNSUBSCRIBE_TIMEOUT, cancel).await;
                             return;
                         }
-                        Ended::Lost(reason) => {
+                        Ended::Lost {
+                            reason,
+                            lost_connection,
+                        } => {
                             tracing::warn!(
                                 workspace_id = %ws,
                                 reason = %reason,
@@ -389,7 +393,9 @@ impl Task {
                                  fallback timer until it is back"
                             );
                             drop(subscription);
-                            self.shared.forget(&client).await;
+                            if lost_connection {
+                                self.shared.forget(&client).await;
+                            }
                         }
                     }
                 }
@@ -417,7 +423,6 @@ impl Task {
                     }
                 }
             }
-            missed = true;
             self.report(false);
             let delay = backoff(attempt);
             attempt = attempt.saturating_add(1);
@@ -457,10 +462,12 @@ impl Task {
     }
 
     /// Delivers the subscription's batches as debounced events until it
-    /// ends. The first result is the fresh-instance one every subscription
-    /// starts with; it asks for a snapshot only if events may have been
-    /// `missed` before the subscription came up.
-    async fn pump(&self, subscription: &mut Subscription<NameOnly>, missed: bool) -> Ended {
+    /// ends. Every subscription starts with a fresh-instance result, and
+    /// Watchman sends another after it restarts or recrawls; each asks for
+    /// one snapshot, since changes made before (or while Watchman was not
+    /// watching) were seen by nobody. jj's own clock decides how much that
+    /// snapshot scans.
+    async fn pump(&self, subscription: &mut Subscription<NameOnly>) -> Ended {
         let mut first = true;
         let mut pending: Option<Pending> = None;
         let mut deadline = tokio::time::Instant::now();
@@ -479,9 +486,17 @@ impl Task {
                             continue;
                         }
                         Ok(SubscriptionData::Canceled) => {
-                            return Ended::Lost("watchman cancelled the subscription".to_owned());
+                            return Ended::Lost {
+                                reason: "watchman cancelled the subscription".to_owned(),
+                                lost_connection: false,
+                            };
                         }
-                        Err(error) => return Ended::Lost(ErrorChain(&error).to_string()),
+                        Err(error) => {
+                            return Ended::Lost {
+                                reason: ErrorChain(&error).to_string(),
+                                lost_connection: is_connection_error(&error),
+                            };
+                        }
                     };
                     let initial = std::mem::replace(&mut first, false);
                     let new_batch = || Pending {
@@ -490,9 +505,6 @@ impl Task {
                         rescan: false,
                     };
                     if result.is_fresh_instance {
-                        if initial && !missed {
-                            continue;
-                        }
                         if !initial {
                             tracing::info!(
                                 workspace_id = %self.workspace,

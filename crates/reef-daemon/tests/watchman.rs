@@ -360,7 +360,10 @@ async fn excluded_dirs_do_not_trigger() {
         seen.iter().all(|paths| *paths == 0),
         "no snapshot was triggered by events: {seen:?}"
     );
-    assert!(!seen.is_empty(), "the fallback snapshot ran");
+    assert!(
+        !seen.is_empty(),
+        "the subscription's first result or the fallback timer snapshotted it"
+    );
 
     // A write outside the excluded directory still triggers.
     write(&ws, "src/kept.rs", "fn main() {}\n");
@@ -392,12 +395,15 @@ async fn survives_watchman_restart() {
         String::from_utf8_lossy(&shutdown.stderr)
     );
     write(&ws, "during-restart.txt", "x\n");
+    // The fallback snapshot's own Watchman query starts the server again
+    // (jj runs `watchman get-sockname` without `WATCHMAN_SOCK` in-process),
+    // which took 3.4 s on an M2 Max.
     let waited = snapshotted(
         &daemon,
         &repo,
         &ws,
         "during-restart.txt",
-        FALLBACK + Duration::from_secs(2),
+        FALLBACK + Duration::from_secs(10),
     )
     .await;
     eprintln!("write during the restart snapshotted after {waited:.2?}");
