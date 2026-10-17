@@ -155,13 +155,18 @@ fn bases_dir(daemon: &TestDaemon, repo: &SyntheticRepo) -> PathBuf {
         .join("bases")
 }
 
+/// The APFS probe's file in `bases/` (R1.08), which is not an entry.
+const PROBE_FILE: &str = ".probe";
+
 /// The base cache entries on disk: tree directories, without their
-/// `.state` siblings.
+/// `.state` siblings or the probe file.
 fn base_dirs(daemon: &TestDaemon, repo: &SyntheticRepo) -> BTreeSet<String> {
     std::fs::read_dir(bases_dir(daemon, repo))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| Path::new(name).extension().is_none_or(|ext| ext != "state"))
+        .filter(|name| {
+            name != PROBE_FILE && Path::new(name).extension().is_none_or(|ext| ext != "state")
+        })
         .collect()
 }
 
@@ -275,6 +280,7 @@ async fn base_cache_evicts_unreferenced() {
     let after: Vec<String> = std::fs::read_dir(bases_dir(&daemon, &repo))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != PROBE_FILE)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

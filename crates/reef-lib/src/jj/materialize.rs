@@ -9,6 +9,10 @@
 //! seed the working copy of any workspace holding byte-identical files with
 //! the same mtimes and sizes (R1.05). Conflicted trees are written with jj's
 //! conflict markers, as jj writes them into any working copy.
+//!
+//! A base can also be built from a copy of another one
+//! ([`Repo::materialize_tree_from`], R1.08): a clone of its directory and
+//! state, on which jj's check-out writes only the files that differ.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -254,6 +258,40 @@ impl Repo {
         Ok(stats)
     }
 
+    /// Like [`Repo::materialize_tree`], but `dir` and `state_dir` already
+    /// hold another tree and its working-copy state, as jj wrote them (a
+    /// clone of another base and of its state directory, files with their
+    /// mtimes and sizes). The throwaway working copy is loaded on them
+    /// instead of initialized empty, so the check-out writes, replaces, and
+    /// removes only the files that differ; the returned
+    /// [`MaterializeStats::checkout`] counts those. Afterwards
+    /// `state_dir/tree_state` describes `dir` exactly, as after
+    /// `materialize_tree`.
+    ///
+    /// On failure the two directories are in an unknown state; the caller
+    /// removes them.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), path = %dir.display()))]
+    pub async fn materialize_tree_from(
+        &self,
+        commit: &CommitIdHex,
+        dir: &Path,
+        state_dir: &Path,
+    ) -> Result<MaterializeStats, MaterializeError> {
+        let stats = self
+            .materialize_tree_from_unlogged(commit, dir, state_dir)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))?;
+        tracing::info!(
+            file_count = stats.files,
+            changed_count = stats.checkout.updated_files
+                + stats.checkout.added_files
+                + stats.checkout.removed_files,
+            elapsed_ms = u64::try_from(stats.elapsed.as_millis()).unwrap_or(u64::MAX),
+            "tree materialized from another"
+        );
+        Ok(stats)
+    }
+
     async fn materialize_tree_unlogged(
         &self,
         commit: &CommitIdHex,
@@ -264,23 +302,50 @@ impl Repo {
         let commit = self.commit_by_id(commit).await?;
         create_empty_dir(dir)?;
         create_empty_dir(state_dir)?;
-        let dir = std::fs::canonicalize(dir).map_err(|source| MaterializeError::Io {
-            op: "resolve",
-            path: dir.to_owned(),
-            source,
-        })?;
-
-        let op_id = self.repo.op_id().clone();
+        let dir = canonical(dir)?;
         let working_copy = LocalWorkingCopy::init(
             self.repo.store().clone(),
             dir,
             state_dir.to_owned(),
-            op_id.clone(),
+            self.repo.op_id().clone(),
             WorkspaceNameBuf::from(MATERIALIZE_WORKSPACE_NAME),
             self.workspace.settings(),
         )?;
+        self.check_out_and_count(working_copy, &commit, state_dir, begun)
+            .await
+    }
+
+    async fn materialize_tree_from_unlogged(
+        &self,
+        commit: &CommitIdHex,
+        dir: &Path,
+        state_dir: &Path,
+    ) -> Result<MaterializeStats, MaterializeError> {
+        let begun = Instant::now();
+        let commit = self.commit_by_id(commit).await?;
+        let dir = canonical(dir)?;
+        let working_copy = LocalWorkingCopy::load(
+            self.repo.store().clone(),
+            dir,
+            state_dir.to_owned(),
+            self.workspace.settings(),
+        )?;
+        self.check_out_and_count(working_copy, &commit, state_dir, begun)
+            .await
+    }
+
+    /// Checks `working_copy` out to `commit`, finishes it at the current
+    /// operation, and counts what its `tree_state` then records.
+    async fn check_out_and_count(
+        &self,
+        working_copy: LocalWorkingCopy,
+        commit: &Commit,
+        state_dir: &Path,
+        begun: Instant,
+    ) -> Result<MaterializeStats, MaterializeError> {
+        let op_id = self.repo.op_id().clone();
         let mut locked = working_copy.start_mutation().await?;
-        let checkout = locked.check_out(&commit).await?;
+        let checkout = locked.check_out(commit).await?;
         locked.finish(op_id).await?;
 
         let entries = tree_state_entries(state_dir)?;
@@ -301,6 +366,15 @@ impl Repo {
             .inspect_err(|error| crate::log_failure!(error))?;
         Ok(tree_key(&commit))
     }
+}
+
+/// `dir` resolved, as jj's working copy wants its root.
+fn canonical(dir: &Path) -> Result<PathBuf, MaterializeError> {
+    std::fs::canonicalize(dir).map_err(|source| MaterializeError::Io {
+        op: "resolve",
+        path: dir.to_owned(),
+        source,
+    })
 }
 
 /// Creates `dir` and its parents, or checks that an existing `dir` is

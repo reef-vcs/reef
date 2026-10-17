@@ -26,8 +26,8 @@ use std::time::{Instant, UNIX_EPOCH};
 use reef_daemon::backend::copy::CopyBackend;
 use reef_daemon::backend::fs_util::changed_files_vs_base;
 use reef_daemon::backend::{
-    Availability, Backend as _, BackendChoice, BackendError, BackendKind, BaseCache, Probe,
-    WorkspacePaths, select, select_from,
+    Availability, Backend as _, BackendChoice, BackendError, BackendKind, BaseCache, DirCloner,
+    Probe, WorkspacePaths, select, select_from,
 };
 use reef_daemon::db::Db;
 use reef_daemon::model::RepoId;
@@ -260,10 +260,20 @@ fn changed_files_vs_base_counts_edits() {
 }
 
 #[test]
-fn select_auto_returns_copy_here() {
+fn select_auto_returns_the_platform_backend() {
     let dir = tempfile::tempdir().unwrap();
-    let backend = select(BackendChoice::Auto, &dir.path().join("ws")).unwrap();
-    assert_eq!(backend.kind(), BackendKind::Copy);
+    let bases = dir.path().join("bases");
+    let backend = select(BackendChoice::Auto, &dir.path().join("ws"), &bases).unwrap();
+    let expected = if cfg!(target_os = "macos") {
+        BackendKind::ApfsClone
+    } else {
+        BackendKind::Copy
+    };
+    assert_eq!(backend.kind(), expected);
+    assert_eq!(
+        backend.dir_cloner().is_some(),
+        expected == BackendKind::ApfsClone
+    );
 
     // With every other backend stubbed unavailable, auto is the copy; with
     // one available, auto takes it in AUTO_ORDER.
@@ -303,6 +313,7 @@ fn select_auto_returns_copy_here() {
     let error = select(
         BackendChoice::Named(BackendKind::Overlayfs),
         &dir.path().join("ws"),
+        &bases,
     )
     .err()
     .unwrap();
@@ -316,4 +327,185 @@ fn select_auto_returns_copy_here() {
     assert_eq!(error.kind(), ErrorKind::Unavailable);
     let error = select_from(BackendChoice::Named(BackendKind::Reflink), &clones);
     assert_eq!(error.unwrap().kind(), BackendKind::Reflink);
+}
+
+/// The fixture's working copy with five files changed (three edited, one
+/// added, one deleted) and snapshotted again: the new commit and its key.
+fn change_five_files(fixture: &mut Fixture) -> (CommitIdHex, String) {
+    let root = fixture.tmp.path().join("repo");
+    let text = &fixture.manifest.text_files;
+    for file in &text[..3] {
+        let mut contents = std::fs::read(root.join(file)).unwrap();
+        contents.extend_from_slice(b"\nedited\n");
+        std::fs::write(root.join(file), contents).unwrap();
+    }
+    std::fs::write(root.join("added.txt"), "added\n").unwrap();
+    std::fs::remove_file(root.join(&text[3])).unwrap();
+    let outcome = pollster::block_on(fixture.repo.snapshot("five files")).unwrap();
+    let key = pollster::block_on(fixture.repo.tree_key(&outcome.wc_commit)).unwrap();
+    assert_ne!(key, fixture.tree_id);
+    (outcome.wc_commit, key)
+}
+
+/// Asserts the base's `tree_state` records every file on disk with its
+/// mtime and size, and nothing else.
+fn assert_state_describes_disk(entry: &reef_daemon::backend::BaseEntry) {
+    let entries = tree_state_entries(&entry.state_dir).unwrap();
+    assert_eq!(entries.len() as u64, count_files(&entry.path));
+    assert_eq!(entries.len() as u64, entry.files);
+    for recorded in &entries {
+        let metadata = std::fs::symlink_metadata(entry.path.join(&recorded.path)).unwrap();
+        let mtime = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(recorded.size, metadata.len(), "{}", recorded.path);
+        assert_eq!(
+            recorded.mtime_ms,
+            i64::try_from(mtime.as_millis()).unwrap(),
+            "{}",
+            recorded.path
+        );
+    }
+}
+
+/// A cloner that always fails, as a full disk or a vanished base would.
+struct FailingCloner;
+
+impl DirCloner for FailingCloner {
+    fn clone_dir(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected clone failure"))
+    }
+}
+
+#[test]
+fn ensure_from_with_a_failing_clone_leaves_nothing() {
+    let mut fixture = Fixture::new(Preset::Small);
+    let first = fixture.ensure();
+    let (commit, key) = change_five_files(&mut fixture);
+    let error = fixture
+        .cache
+        .ensure_from(&key, &first, &FailingCloner, |_, _| {
+            panic!("no check-out without a clone")
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error:?}");
+    assert_eq!(fixture.cache.get(&key).unwrap(), None);
+    let mut left: Vec<_> = std::fs::read_dir(fixture.cache.dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [first.tree_id.clone(), format!("{}.state", first.tree_id)]
+    );
+
+    // The fallback the daemon takes: the full check-out.
+    let second = fixture
+        .cache
+        .ensure(&key, |dir, state| {
+            pollster::block_on(fixture.repo.materialize_tree(&commit, dir, state))
+        })
+        .unwrap();
+    assert_state_describes_disk(&second);
+}
+
+// 6
+#[test]
+#[cfg(target_os = "macos")]
+fn ensure_from_checks_out_only_the_diff() {
+    use std::cell::Cell;
+
+    use reef_daemon::backend::apfs::ApfsBackend;
+    use reef_lib::jj::materialize::CheckoutStatsSummary;
+
+    let mut fixture = Fixture::new(Preset::Small);
+    let first = fixture.ensure();
+    let (commit, key) = change_five_files(&mut fixture);
+
+    let checkout = Cell::new(None);
+    let second = fixture
+        .cache
+        .ensure_from(&key, &first, &ApfsBackend, |dir, state| {
+            let stats =
+                pollster::block_on(fixture.repo.materialize_tree_from(&commit, dir, state))?;
+            checkout.set(Some(stats.checkout));
+            Ok(stats)
+        })
+        .unwrap();
+    assert_eq!(
+        checkout.get(),
+        Some(CheckoutStatsSummary {
+            updated_files: 3,
+            added_files: 1,
+            removed_files: 1,
+            skipped_files: 0,
+        })
+    );
+    assert_eq!(second.tree_id, key);
+    assert_eq!(fixture.cache.get(&key).unwrap(), Some(second.clone()));
+    assert!(first.state_dir.is_dir() && second.state_dir.is_dir());
+    assert_eq!(second.files, fixture.tracked_files());
+    assert_state_describes_disk(&second);
+    assert_state_describes_disk(&first);
+
+    // The incremental base holds what a full check-out writes.
+    let root = fixture.tmp.path().join("repo");
+    let text = &fixture.manifest.text_files;
+    for file in &text[..3] {
+        assert_eq!(
+            std::fs::read(second.path.join(file)).unwrap(),
+            std::fs::read(root.join(file)).unwrap()
+        );
+        assert_ne!(
+            std::fs::read(first.path.join(file)).unwrap(),
+            std::fs::read(second.path.join(file)).unwrap(),
+            "the first base is untouched"
+        );
+    }
+    assert!(second.path.join("added.txt").is_file() && !first.path.join("added.txt").exists());
+    assert!(!second.path.join(&text[3]).exists() && first.path.join(&text[3]).is_file());
+    let full = fixture.tmp.path().join("full");
+    let full_state = fixture.tmp.path().join("full.state");
+    pollster::block_on(fixture.repo.materialize_tree(&commit, &full, &full_state)).unwrap();
+    let paths = |state: &Path| {
+        tree_state_entries(state)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.path, entry.size))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&second.state_dir), paths(&full_state));
+}
+
+/// A workspace cloned from a jj-written base is what the base's
+/// `tree_state` describes, so the first snapshot needs no rehash; edits
+/// show in `disk_usage` and leave the base alone.
+#[test]
+#[cfg(target_os = "macos")]
+fn apfs_workspace_matches_the_base_state() {
+    use reef_daemon::backend::apfs::ApfsBackend;
+
+    let fixture = Fixture::new(Preset::Small);
+    let base = fixture.ensure();
+    let ws = WorkspacePaths::under(
+        &repo_dir(&fixture.state(), RepoId::generate()),
+        "00000000000000aa".parse().unwrap(),
+    );
+    ApfsBackend.materialize(&base, &ws).unwrap();
+    let usage = ApfsBackend.disk_usage(&base, &ws).unwrap();
+    assert_eq!(usage.files_changed, 0, "every mtime and size kept");
+    assert_eq!(usage.allocated_bytes, 0);
+
+    let file = &fixture.manifest.text_files[0];
+    let original = std::fs::read(base.path.join(file)).unwrap();
+    std::fs::write(ws.root.join(file), b"rewritten by an agent\n").unwrap();
+    let usage = ApfsBackend.disk_usage(&base, &ws).unwrap();
+    assert_eq!(usage.files_changed, 1);
+    assert!(usage.allocated_bytes > 0, "{usage:?}");
+    assert_eq!(std::fs::read(base.path.join(file)).unwrap(), original);
+    ApfsBackend.tear_down(&ws).unwrap();
+    assert_state_describes_disk(&base);
 }

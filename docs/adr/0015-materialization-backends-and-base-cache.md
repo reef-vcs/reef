@@ -20,7 +20,7 @@ We will put a `Backend` trait between the daemon and the primitives, and feed ev
 - **Seeding.** A workspace's `tree_state` starts as a copy of its base's, so its first snapshot is a no-op scan rather than a rehash of every file (R1.05). This is why backends must preserve mtimes and sizes, which R1.11 tests.
 - **Immutability by convention.** Nothing writes under a base after its rename. Permissions stay as jj wrote them, because backends read them and overlayfs needs them readable.
 
-This ADR does not cover any primitive's details (R1.07 to R1.10, ADR 0016 (R1.09) for overlayfs), base cache eviction (R1.17), or incremental bases cloned from a nearby one (R1.08).
+This ADR does not cover any primitive's details (R1.07 to R1.10, ADR 0016 (R1.09) for overlayfs) or base cache eviction (R1.17). Incremental bases cloned from a nearby one (R1.08) are in the amendment at the end.
 
 ## Consequences
 
@@ -44,3 +44,9 @@ This ADR does not cover any primitive's details (R1.07 to R1.10, ADR 0016 (R1.09
 **Materialize by walking `MergedTree` by hand.** A Reef walker writing blobs straight from the store. Rejected: it loses jj's conflict materialization, its EOL and executable-bit handling, and the `tree_state` it writes as a side effect, which is what makes seeding possible.
 
 **No base cache: clone or check out straight from the store per workspace.** Rejected: a check-out per workspace is O(repository) every time (seconds on the `large` preset), and clone and overlay primitives need a directory to clone or lay over.
+
+## Amendment, 2026-10-17 (R1.08): directory clones on APFS, and incremental bases
+
+- **The `apfs` backend clones the whole base directory with one `clonefile(2)` call.** `man 2 clonefile` (macOS 27) says cloning directory hierarchies "is strongly discouraged" and recommends `copyfile(3)`, which clones item by item. On the 102,005-file `large` tree on an M2 Max, one directory call takes 0.93 to 0.97 s with a warm cache (1.6 s on the first, cold run) and about 30 MiB of free space, against 13.3 s for a per-file `clonefile` walk and 15.2 s for `cp -cR`. Nothing else meets the one-second creation criterion, so the directory call is used despite the man page, and the per-file walk (`reflink_copy::reflink` per file under `copy_tree`) is only the fallback when the directory call fails. `ENOTSUP` and `EXDEV` make the backend unavailable rather than falling back, because per-file clones fail the same way and a plain copy under the `apfs` name would hide the cost. If a macOS release breaks or slows directory clones, the fallback keeps workspaces working at about 13 s each and the criterion fails; the alternative left is an APFS snapshot or volume per workspace, which needs `diskutil` and root.
+- **Clone backends probe against the base cache.** A clone needs the base and the workspace on one volume, so `probe` takes the base cache directory and the `apfs` probe clones a one-byte `bases/.probe` file into the workspace directory (removed again). A `--path` on another volume gets `apfs` unavailable with "different volume", and `auto` falls through to `copy` with the usual warning.
+- **Incremental bases.** A backend with a whole-directory clone (`Backend::dir_cloner`) builds a new base from the most recently used one: `BaseCache::ensure_from` clones that base's tree and state into the `.tmp` names, and `Repo::materialize_tree_from` loads a throwaway working copy on them and checks out the new commit, so jj writes only the files that differ. A check-out that skips files is an error, since a base must be complete. Any failure removes the temporary directories and the daemon falls back to the full check-out. Bases are still never written after their rename, so cloning one while workspaces are cloned from it is safe.

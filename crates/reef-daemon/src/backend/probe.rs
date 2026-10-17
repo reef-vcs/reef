@@ -4,7 +4,8 @@
 //! (R1.08 clones a probe file on APFS, R1.09 checks `CAP_SYS_ADMIN` and the
 //! `fuse-overlayfs` binary, R1.10 clones a probe file with `FICLONE`). Until
 //! then a kind is unavailable with the ticket named as the reason; `Copy`
-//! is always available.
+//! is always available. Clone backends also need the base cache on the
+//! workspace's volume, so the probe takes the base cache directory.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,11 +42,20 @@ pub struct Probe {
     pub filesystem: String,
 }
 
-/// Probes every backend for workspace roots under `dir`, one entry per
-/// kind in [`BackendKind::AUTO_ORDER`] order. `dir` need not exist yet (the
-/// default workspace root is created on first use); its nearest existing
-/// ancestor is probed instead.
-pub fn probe(dir: &Path) -> Vec<Probe> {
+/// Reason `apfs` is unavailable off macOS.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const APFS_MACOS_ONLY: &str = "APFS clones are macOS only";
+
+/// Probes every backend for workspace roots under `dir` built from bases in
+/// `bases_dir`, one entry per kind in [`BackendKind::AUTO_ORDER`] order.
+/// `dir` need not exist yet (the default workspace root is created on first
+/// use); its nearest existing ancestor is probed instead. Without
+/// `bases_dir` (the daemon's status, for no repository in particular),
+/// clone backends report whether `dir`'s volume can clone at all.
+///
+/// The `apfs` probe writes, clones, and removes a one-byte file in that
+/// directory, and keeps a `.probe` file in `bases_dir`.
+pub fn probe(dir: &Path, bases_dir: Option<&Path>) -> Vec<Probe> {
     let target = nearest_existing(dir);
     let filesystem = filesystem_name(&target).unwrap_or_else(|error| {
         tracing::debug!(
@@ -59,18 +69,25 @@ pub fn probe(dir: &Path) -> Vec<Probe> {
         .into_iter()
         .map(|kind| Probe {
             kind,
-            availability: probe_kind(kind),
+            availability: probe_kind(kind, &target, bases_dir),
             filesystem: filesystem.clone(),
         })
         .collect()
 }
 
-fn probe_kind(kind: BackendKind) -> Availability {
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(unused_variables, reason = "only the APFS probe reads the paths")
+)]
+fn probe_kind(kind: BackendKind, target: &Path, bases_dir: Option<&Path>) -> Availability {
     let pending =
         |ticket: &str| Availability::Unavailable(format!("not implemented until {ticket}"));
     match kind {
         BackendKind::Copy => Availability::Available,
-        BackendKind::ApfsClone => pending("R1.08"),
+        #[cfg(target_os = "macos")]
+        BackendKind::ApfsClone => super::apfs::probe_apfs(bases_dir, target),
+        #[cfg(not(target_os = "macos"))]
+        BackendKind::ApfsClone => Availability::Unavailable(APFS_MACOS_ONLY.to_owned()),
         BackendKind::Reflink => pending("R1.10"),
         BackendKind::Overlayfs | BackendKind::FuseOverlayfs => pending("R1.09"),
     }
@@ -137,7 +154,10 @@ mod tests {
     #[test]
     fn copy_is_always_available_and_every_kind_is_probed() {
         let dir = tempfile::tempdir().unwrap();
-        let probes = probe(&dir.path().join("not/yet/created"));
+        let probes = probe(
+            &dir.path().join("not/yet/created"),
+            Some(&dir.path().join("bases")),
+        );
         let kinds: Vec<_> = probes.iter().map(|probe| probe.kind).collect();
         assert_eq!(kinds, BackendKind::AUTO_ORDER);
         for probe in &probes {
@@ -148,6 +168,13 @@ mod tests {
             );
             match probe.kind {
                 BackendKind::Copy => assert_eq!(probe.availability, Availability::Available),
+                #[cfg(target_os = "macos")]
+                BackendKind::ApfsClone => assert_eq!(probe.availability, Availability::Available),
+                #[cfg(not(target_os = "macos"))]
+                BackendKind::ApfsClone => assert_eq!(
+                    probe.availability,
+                    Availability::Unavailable(APFS_MACOS_ONLY.to_owned())
+                ),
                 _ => assert!(
                     matches!(&probe.availability, Availability::Unavailable(reason) if reason.starts_with("not implemented until R1.")),
                     "{probe:?}"

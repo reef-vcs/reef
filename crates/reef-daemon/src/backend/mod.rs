@@ -19,6 +19,8 @@
 //! The trait's methods are synchronous and block; the daemon calls them from
 //! `spawn_blocking` (R1.03).
 
+#[cfg(target_os = "macos")]
+pub mod apfs;
 pub mod base_cache;
 pub mod copy;
 pub mod fs_util;
@@ -35,7 +37,7 @@ use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::TreeStateReadError;
 use serde::{Deserialize, Serialize};
 
-pub use base_cache::{BaseCache, BaseCacheError, BaseEntry};
+pub use base_cache::{BaseCache, BaseCacheError, BaseEntry, DirCloner};
 pub use probe::{Availability, Probe, probe};
 
 use crate::model::WorkspaceId;
@@ -327,6 +329,14 @@ pub trait Backend: Send + Sync {
     /// symlink out of them. [`BackendError::RootMissing`] if the root does
     /// not exist.
     fn tear_down(&self, ws: &WorkspacePaths) -> Result<(), BackendError>;
+
+    /// The backend's cheap whole-directory clone, if it has one. The base
+    /// cache then builds a new base by cloning a recent one and checking out
+    /// only the diff (`BaseCache::ensure_from`, R1.08). Clone primitives
+    /// hold no state, hence `'static`.
+    fn dir_cloner(&self) -> Option<&'static dyn DirCloner> {
+        None
+    }
 }
 
 /// Constructs the backend for `kind` without probing. Each backend ticket
@@ -335,31 +345,36 @@ pub trait Backend: Send + Sync {
 pub fn backend_for(kind: BackendKind) -> Box<dyn Backend> {
     match kind {
         BackendKind::Copy => Box::new(copy::CopyBackend),
+        #[cfg(target_os = "macos")]
+        BackendKind::ApfsClone => Box::new(apfs::ApfsBackend),
+        #[cfg(not(target_os = "macos"))]
         BackendKind::ApfsClone => Box::new(Pending {
             kind,
-            ticket: "R1.08",
+            reason: probe::APFS_MACOS_ONLY.to_owned(),
         }),
-        BackendKind::Reflink => Box::new(Pending {
-            kind,
-            ticket: "R1.10",
-        }),
-        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => Box::new(Pending {
-            kind,
-            ticket: "R1.09",
-        }),
+        BackendKind::Reflink => Box::new(Pending::until(kind, "R1.10")),
+        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => {
+            Box::new(Pending::until(kind, "R1.09"))
+        }
     }
 }
 
 /// Picks the backend for a workspace root under `dir` (which need not exist
-/// yet; its nearest existing ancestor is probed): the named one if its probe
-/// says it is available, or for [`BackendChoice::Auto`] the first available
-/// in [`BackendKind::AUTO_ORDER`].
+/// yet; its nearest existing ancestor is probed) built from the base cache
+/// at `bases_dir`: the named one if its probe says it is available, or for
+/// [`BackendChoice::Auto`] the first available in
+/// [`BackendKind::AUTO_ORDER`]. A `dir` on another volume than `bases_dir`
+/// cannot clone, so `auto` takes the copy there (R1.08).
 ///
 /// When `auto` falls through to the copy backend, logs one `warn` per `dir`
 /// for the daemon's lifetime naming why every other backend was
 /// unavailable, so a user who expected copy-on-write finds out.
-pub fn select(choice: BackendChoice, dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
-    let probes = probe(dir);
+pub fn select(
+    choice: BackendChoice,
+    dir: &Path,
+    bases_dir: &Path,
+) -> Result<Box<dyn Backend>, BackendError> {
+    let probes = probe(dir, Some(bases_dir));
     let backend = select_from(choice, &probes)?;
     if choice == BackendChoice::Auto && backend.kind() == BackendKind::Copy {
         warn_copy_fallback_once(dir, &probes);
@@ -426,23 +441,27 @@ pub fn select_from(
     Ok(backend_for(kind))
 }
 
-/// Placeholder for a backend whose ticket has not landed.
+/// Placeholder for a backend whose ticket has not landed, or that this
+/// platform does not have.
 struct Pending {
     kind: BackendKind,
-    ticket: &'static str,
+    reason: String,
 }
 
 impl Pending {
-    fn unavailable<T>(&self) -> Result<T, BackendError> {
-        Err(not_implemented(self.kind, self.ticket))
+    /// A backend implemented by `ticket`.
+    fn until(kind: BackendKind, ticket: &str) -> Self {
+        Self {
+            kind,
+            reason: format!("not implemented until {ticket}"),
+        }
     }
-}
 
-/// [`BackendError::Unavailable`] for a backend implemented by `ticket`.
-pub(crate) fn not_implemented(kind: BackendKind, ticket: &str) -> BackendError {
-    BackendError::Unavailable {
-        kind,
-        reason: format!("not implemented until {ticket}"),
+    fn unavailable<T>(&self) -> Result<T, BackendError> {
+        Err(BackendError::Unavailable {
+            kind: self.kind,
+            reason: self.reason.clone(),
+        })
     }
 }
 
@@ -544,7 +563,10 @@ mod tests {
             ErrorKind::NotFound
         );
         assert_eq!(
-            not_implemented(BackendKind::Reflink, "R1.10").kind(),
+            Pending::until(BackendKind::Reflink, "R1.10")
+                .unavailable::<()>()
+                .unwrap_err()
+                .kind(),
             ErrorKind::Unavailable
         );
         let tool = BackendError::Tool {

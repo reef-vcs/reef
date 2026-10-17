@@ -11,7 +11,7 @@ use std::io;
 use std::path::Path;
 
 use super::fs_util::{
-    FileCopier, allocated_bytes, changed_files_vs_base, copy_tree, remove_tree_in_background,
+    FileCopier, allocated_bytes, changed_files_vs_base, copy_tree, tear_down_root,
 };
 use super::{BackendError, BackendKind, BaseEntry, DiskUsage, SwapOutcome, WorkspacePaths};
 use crate::backend::Backend;
@@ -73,17 +73,7 @@ impl Backend for CopyBackend {
     /// background (inline without a tokio runtime). Returns once the root
     /// is gone.
     fn tear_down(&self, ws: &WorkspacePaths) -> Result<(), BackendError> {
-        match remove_tree_in_background(&ws.root) {
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Err(BackendError::RootMissing(ws.root.clone()))
-            }
-            Err(source) => Err(BackendError::Io {
-                op: "move to trash",
-                path: ws.root.clone(),
-                source,
-            }),
-        }
+        tear_down_root(&ws.root)
     }
 }
 
