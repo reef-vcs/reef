@@ -196,8 +196,9 @@ fn log_file_is_json_lines() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
         .collect();
-    // A fresh state directory logs its migration first; nothing else at
-    // info comes before the start event.
+    // A fresh state directory logs its migration first, and on Linux the
+    // watcher its inotify limits (R1.13); nothing else at info comes before
+    // the start event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
@@ -205,7 +206,7 @@ fn log_file_is_json_lines() {
     assert!(
         events[..started]
             .iter()
-            .all(|e| e["message"] == "database migrated"),
+            .all(|e| e["message"] == "database migrated" || e["message"] == "inotify limits"),
         "{text}"
     );
     let event = &events[started];

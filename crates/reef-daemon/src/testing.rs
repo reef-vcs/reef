@@ -40,12 +40,19 @@ impl TestDaemon {
     /// Starts a daemon on a fresh state directory. Needs a multi-threaded
     /// runtime (`#[tokio::test(flavor = "multi_thread")]`).
     pub async fn start() -> TestDaemon {
+        TestDaemon::start_with(|_| {}).await
+    }
+
+    /// [`TestDaemon::start`] with the default configuration changed by
+    /// `configure` first, such as shorter watcher intervals.
+    pub async fn start_with(configure: impl FnOnce(&mut Config)) -> TestDaemon {
         let tmp = tempfile::Builder::new()
             .prefix("reef-")
             .tempdir_in(short_tmp())
             .expect("create a temporary directory");
         let paths = Paths::in_state_dir(&tmp.path().join("state")).expect("resolve paths");
-        let config = Config::with_defaults(paths);
+        let mut config = Config::with_defaults(paths);
+        configure(&mut config);
         let handle = Daemon::start(config.clone())
             .await
             .expect("start the daemon");
@@ -65,7 +72,16 @@ impl TestDaemon {
     /// with the daemon. Returns the repository root (canonical) and its
     /// registration.
     pub async fn with_synthetic_repo(preset: Preset) -> (TestDaemon, SyntheticRepo) {
-        let daemon = TestDaemon::start().await;
+        TestDaemon::with_synthetic_repo_and(preset, |_| {}).await
+    }
+
+    /// [`TestDaemon::with_synthetic_repo`] on a daemon started with
+    /// [`TestDaemon::start_with`].
+    pub async fn with_synthetic_repo_and(
+        preset: Preset,
+        configure: impl FnOnce(&mut Config),
+    ) -> (TestDaemon, SyntheticRepo) {
+        let daemon = TestDaemon::start_with(configure).await;
         let root = daemon.tmp.path().join("repo");
         let at = root.clone();
         tokio::task::spawn_blocking(move || init_synthetic_repo(&at, preset))

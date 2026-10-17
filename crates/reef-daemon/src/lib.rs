@@ -26,6 +26,7 @@ pub mod service;
 pub mod snapshot;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod watcher;
 pub mod workspace;
 
 pub use daemon::{AppState, Daemon, DaemonHandle, StartError};

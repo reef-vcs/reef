@@ -346,6 +346,19 @@ impl Repo {
         Arc::clone(&self.repo)
     }
 
+    /// The repository as loaded: the head this workspace snapshots
+    /// against.
+    pub fn head(&self) -> &Arc<ReadonlyRepo> {
+        &self.repo
+    }
+
+    /// Points this workspace at `repo`, a load of the same repository at
+    /// another operation, such as the head a repository thread holds. The
+    /// next [`Repo::begin_snapshot`] checks the working copy against it.
+    pub fn set_head(&mut self, repo: Arc<ReadonlyRepo>) {
+        self.repo = repo;
+    }
+
     /// The operation the repository is currently loaded at.
     pub fn op_id(&self) -> OperationIdHex {
         OperationIdHex::of(self.repo.op_id())
@@ -373,6 +386,28 @@ impl Repo {
             .inspect_err(|error| crate::log_failure!(error))?;
         tracing::debug!(op_id = %self.op_id(), "repository reloaded");
         Ok(())
+    }
+
+    /// [`Repo::reload_at_head`] if another process or [`Repo`] has written
+    /// an operation since this one was loaded (the operation heads are no
+    /// longer exactly the loaded operation); otherwise nothing, at the cost
+    /// of listing the operation heads. Returns whether it reloaded.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    pub async fn reload_if_moved(&mut self) -> Result<bool, OpenError> {
+        let heads = self
+            .repo
+            .op_heads_store()
+            .get_op_heads()
+            .await
+            .map_err(|error| OpenError::Repo(error.into()))
+            .inspect_err(|error| crate::log_failure!(error))?;
+        if let [head] = heads.as_slice()
+            && head == self.repo.op_id()
+        {
+            return Ok(false);
+        }
+        self.reload_at_head().await?;
+        Ok(true)
     }
 
     /// The head commits of the loaded view, sorted by commit id.

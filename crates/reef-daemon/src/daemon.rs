@@ -17,7 +17,8 @@
 //! 4. Reconcile overlay mounts (R1.09; nothing until then).
 //! 5. Start one repository thread per registered repository.
 //! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
-//!    one's jj handle; reclaim one whose directory is gone.
+//!    one's jj handle; reclaim one whose directory is gone. Each is tracked
+//!    by the snapshot scheduler, which then starts (R1.13).
 //! 7. Apply the lease restart grace (R1.15; nothing until then).
 //! 8. Replace a stale socket file, bind the socket (`0600`), and serve.
 //!
@@ -25,7 +26,8 @@
 //!
 //! [`DaemonHandle::shutdown`] cancels [`AppState::shutdown`]. The server stops
 //! accepting connections and in-flight requests get [`SHUTDOWN_GRACE`]; then
-//! the [`ShutdownHooks`] run (R1.13 and R1.15 add final snapshots), every
+//! the [`ShutdownHooks`] run (the snapshot scheduler stops and its snapshots
+//! in flight end, R1.13; R1.15 adds final snapshots), every
 //! repository thread finishes its queued jobs and stops, the socket and pid
 //! files are removed, and the lock is released. The lock file stays.
 
@@ -247,12 +249,12 @@ impl Daemon {
             }
         };
         let repos = Arc::new(RepoRegistry::new());
-        let manager = Arc::new(Manager::new(
+        let manager = Manager::new(
             config.clone(),
             Arc::clone(&db),
             Arc::clone(&repos),
             settings.clone(),
-        ));
+        );
         let state = Arc::new(AppState {
             config,
             db,
@@ -378,6 +380,13 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         Ok(loaded) => tracing::info!(loaded_count = loaded, "active workspaces loaded"),
         Err(error) => tracing::error!(error = %ErrorChain(&error), "cannot load active workspaces"),
     }
+    //    Then start the snapshot scheduler: watcher events, the fallback
+    //    timer, and the summary line. Workspaces were tracked as they loaded.
+    state.manager.scheduler().start(&state.shutdown);
+    let manager = Arc::clone(&state.manager);
+    state.hooks.add("snapshot scheduler", move || {
+        Box::pin(async move { manager.scheduler().stop().await })
+    });
     // 7. Lease restart grace: R1.15.
 
     // 8. Bind.

@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jj_lib::settings::UserSettings;
@@ -15,9 +16,12 @@ use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::settings::{Identity, SettingsSpec, user_settings, user_settings_from_spec};
-use reef_lib::jj::snapshot::{ChangeKind, ChangedPath, SnapshotError, UntrackedReasonKind};
+use reef_lib::jj::snapshot::{
+    Behind, ChangeKind, ChangedPath, SnapshotCommit, SnapshotError, SnapshotPlan,
+    UntrackedReasonKind,
+};
 use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
-use reef_lib::jj::{OpenError, Repo};
+use reef_lib::jj::{IgnoreSources, OpenError, Repo, StartPoint, commit_snapshot};
 
 const MIB: usize = 1 << 20;
 
@@ -168,6 +172,14 @@ fn repo_is_send() {
     // The futures are not `Send` and `Repo` is not `Sync`; ADR 0008.
     fn assert_send<T: Send>() {}
     assert_send::<Repo>();
+}
+
+#[test]
+fn snapshot_plan_crosses_threads() {
+    // R1.13: the plan goes from the workspace's thread to the repository's.
+    fn assert_send_static<T: Send + 'static>() {}
+    assert_send_static::<SnapshotPlan>();
+    assert_send_static::<SnapshotCommit>();
 }
 
 #[tokio::test]
@@ -395,17 +407,115 @@ async fn stale_working_copy_detected() {
 
     let err = second.snapshot("test").await.err().unwrap();
     match err {
-        SnapshotError::Stale { wc_op, repo_op } => {
+        SnapshotError::RepoBehind {
+            kind,
+            wc_op,
+            repo_op,
+        } => {
+            assert_eq!(kind, Behind::WorkingCopyNewer);
             assert_eq!(wc_op, snapshot.op_id);
             assert_eq!(repo_op, second.op_id());
         }
-        other => panic!("expected Stale, got {other:?}"),
+        other => panic!("expected RepoBehind, got {other:?}"),
     }
 
     second.reload_at_head().await.unwrap();
     assert_eq!(second.op_id(), snapshot.op_id);
     write(dir.path(), "b.txt", "world\n");
     assert!(second.snapshot("test").await.unwrap().changed);
+}
+
+// R1.13: an operation committed from the same base as the working copy's
+// leaves two operation heads; the working copy is behind until a load at
+// head merges them.
+#[tokio::test]
+async fn sibling_operation_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let mut first = open(dir.path()).await;
+    let mut second = open(dir.path()).await;
+    write(dir.path(), "a.txt", "hello\n");
+    let snapshot = first.snapshot("test").await.unwrap();
+    // A transaction on `second`, still loaded at the base: a sibling of the
+    // snapshot's operation. The new workspace lives outside the user's tree.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let ws_root = elsewhere.path().join("ws");
+    std::fs::create_dir(&ws_root).unwrap();
+    let wc = second.wc_change().unwrap().commit_id;
+    second
+        .create_workspace(
+            "reef-sibling",
+            &ws_root,
+            &elsewhere.path().join("wc"),
+            StartPoint::NewOn(wc),
+            "sibling",
+        )
+        .await
+        .unwrap();
+
+    let err = second
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.kind(), ErrorKind::Conflict);
+    match err {
+        SnapshotError::RepoBehind { kind, wc_op, .. } => {
+            assert_eq!(kind, Behind::SiblingOperation);
+            assert_eq!(wc_op, snapshot.op_id);
+        }
+        other => panic!("expected RepoBehind, got {other:?}"),
+    }
+
+    second.reload_at_head().await.unwrap();
+    let pending = second
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(!pending.changed());
+    assert!(!pending.adopted());
+    let head = pending.head_op().clone();
+    pending.finish(&head).await.unwrap();
+}
+
+// R1.13: a snapshot whose operation was committed but whose working-copy
+// state was never saved (a failed finish, a crash) is healed on the next
+// snapshot by adopting the commit, not by diverging from it.
+#[tokio::test]
+async fn unsaved_state_after_commit_adopts() {
+    let dir = tempfile::tempdir().unwrap();
+    init_internal_git(dir.path()).await;
+    let mut repo = open(dir.path()).await;
+    write(dir.path(), "a.txt", "hello\n");
+    let head = Arc::clone(repo.head());
+    let pending = repo
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    let plan = pending.plan().clone();
+    let committed = commit_snapshot(&head, &plan, "test").await.unwrap();
+    drop(pending); // the working-copy state is not saved
+    repo.set_head(Arc::clone(&committed.repo));
+
+    let pending = repo
+        .begin_snapshot(None, &IgnoreSources::default())
+        .await
+        .unwrap();
+    assert!(pending.adopted(), "{pending:?}");
+    assert!(!pending.changed());
+    assert_eq!(pending.wc_commit(), Some(&committed.commit_id));
+    let op = pending.head_op().clone();
+    pending.finish(&op).await.unwrap();
+
+    write(dir.path(), "b.txt", "world\n");
+    let next = repo.snapshot("test").await.unwrap();
+    assert!(next.changed);
+    let change = repo.wc_change().unwrap().change_id;
+    assert!(
+        repo.resolve_revision(change.as_str()).await.is_ok(),
+        "the change is not divergent"
+    );
 }
 
 #[tokio::test]

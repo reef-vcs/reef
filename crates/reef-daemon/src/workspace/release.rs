@@ -12,7 +12,7 @@ use crate::backend::fs_util::allocated_bytes;
 use crate::model::{
     Attention, LeaseEnd, ReclaimReason, ReclaimRecord, Timestamp, WorkspaceId, WorkspaceState,
 };
-use crate::snapshot::SnapshotKind;
+use crate::snapshot::{SnapshotKind, description};
 
 impl Manager {
     /// Releases an `active` workspace: `releasing`; a final snapshot
@@ -44,10 +44,16 @@ impl Manager {
         }
         self.db.set_workspace_state(id, WorkspaceState::Releasing)?;
         entry.update_record(|record| record.state = WorkspaceState::Releasing);
+        // No watcher snapshot races the final one, or the tear-down.
+        self.scheduler.untrack(id);
 
         let (snapshot_taken, final_op_id) = if spec.final_snapshot {
-            match self.snapshot_locked(&entry, SnapshotKind::Final, "").await {
-                Ok(snapshot) => (true, snapshot.op_id),
+            let kind = SnapshotKind::Final;
+            match self
+                .snapshot_locked(&entry, kind, description(kind, id, None))
+                .await
+            {
+                Ok(snapshot) => (true, snapshot.changed.then(|| snapshot.op_id.to_string())),
                 Err(error) if spec.force => {
                     tracing::warn!(error = %ErrorChain(&error), "final snapshot failed; releasing anyway");
                     (false, None)
@@ -140,6 +146,7 @@ impl Manager {
             return;
         }
         entry.update_record(|record| record.state = WorkspaceState::Active);
+        self.scheduler.track(id);
         if let Some(attention) = attention {
             match self.db.set_workspace_attention(id, Some(attention), None) {
                 Ok(()) => entry.update_record(|record| record.attention = Some(attention)),

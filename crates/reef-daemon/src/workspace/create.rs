@@ -147,8 +147,10 @@ impl Manager {
             jj: Arc::new(Mutex::new(Some(ws))),
             repo: handle,
             scan_lock: tokio::sync::Mutex::new(()),
+            spec: Mutex::new(super::SnapshotSpec::default()),
         };
         self.insert_entry(id, Arc::new(entry));
+        self.scheduler.track(id);
         tracing::info!(
             path = %record.path.display(),
             backend = %record.backend,

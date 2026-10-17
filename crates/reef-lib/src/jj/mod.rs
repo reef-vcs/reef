@@ -10,6 +10,7 @@
 //! shares one through an `Arc` alone (ADR 0008, R1.03).
 
 pub mod git;
+pub mod ignore;
 pub mod materialize;
 pub mod oplog;
 pub mod repo;
@@ -19,10 +20,14 @@ pub mod undo;
 pub mod workspace;
 
 pub use git::{ImportRefsError, ImportRefsOutcome};
+pub use ignore::IgnoreSources;
 pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeStateReadError};
 pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
     Repo,
+};
+pub use snapshot::{
+    Behind, PendingSnapshot, SnapshotCommit, SnapshotError, SnapshotPlan, commit_snapshot,
 };
 
 // jj-lib types the daemon names without depending on jj-lib: the repository
