@@ -136,4 +136,6 @@ message SnapshotResponse {
   bool changed = 2;
   // The working-copy commit afterwards.
   string commit_id = 3;
+  // How long jj's scan of the working copy took, in milliseconds (R1.14).
+  uint64 scan_ms = 4;
 }

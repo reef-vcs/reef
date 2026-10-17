@@ -40,6 +40,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_base_cache",
         include_str!("migrations/0002_base_cache.sql"),
     ),
+    (
+        "0005_watchman",
+        include_str!("migrations/0005_watchman.sql"),
+    ),
 ];
 
 /// The schema version (`user_version`) of a fully migrated database: the
@@ -463,8 +467,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
-        assert_eq!(SCHEMA_VERSION, 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(SCHEMA_VERSION, 3);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -472,7 +476,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -515,7 +519,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 2
+                    supported: 3
                 }
             ),
             "{error:?}"
@@ -529,7 +533,10 @@ mod tests {
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
         let applied = db.with(applied_migrations).unwrap();
-        assert_eq!(applied, ["0001_initial", "0002_base_cache"]);
+        assert_eq!(
+            applied,
+            ["0001_initial", "0002_base_cache", "0005_watchman"]
+        );
         // A newer daemon applied a migration this binary does not have, without
         // raising the count past ours (it may lack one of ours).
         db.set_meta("migration:0099_future", "0").unwrap();
@@ -553,13 +560,59 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
-            ["0001_initial", "0002_base_cache"]
+            ["0001_initial", "0002_base_cache", "0005_watchman"]
         );
         let repo = "aaaa000000000001".parse().unwrap();
         assert_eq!(db.bases(repo).unwrap().len(), 0);
+    }
+
+    // R1.14: rows written before `0005_watchman` were watched by notify and
+    // have no tracked file count.
+    #[test]
+    fn existing_rows_gain_the_watcher_columns() {
+        use crate::db::repositories::tests::repo;
+        use crate::db::workspaces::tests::workspace;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        for (index, (name, sql)) in MIGRATIONS[..2].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        let record = repo("aaaa000000000001", "/src/app");
+        let ws = workspace(record.id, "bbbb000000000001", "/ws/one");
+        conn.execute(
+            "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at)
+             VALUES (?1, '/src/app', '/src/app/.jj/repo', 0, 1000)",
+            [record.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces(id, repo_id, owner, change_id, commit_id, base_tree_id,
+                                    backend, path, state_dir, state, created_at)
+             VALUES (?1, ?2, 'alice@host', 'c', 'd', 'e', 'copy', '/ws/one', '/state/wc', 'active', 2000)",
+            rusqlite::params![ws.id, record.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
+        assert_eq!(
+            db.workspace(ws.id).unwrap().watcher,
+            crate::model::WatcherKind::Notify
+        );
     }
 
     #[test]

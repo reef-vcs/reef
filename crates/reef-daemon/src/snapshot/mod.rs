@@ -3,8 +3,9 @@
 //!
 //! # Scheduling
 //!
-//! The daemon's one watcher ([`crate::watcher`]) reports debounced changes
-//! per workspace. Each tracked workspace has one scheduler entry: an event
+//! The daemon's watchers ([`crate::watcher`]: at most one notify and one
+//! Watchman watcher, each created when a workspace first needs it) report
+//! debounced changes per workspace. Each tracked workspace has one scheduler entry: an event
 //! marks it dirty, and a snapshot starts once `watcher.min_interval` has
 //! passed since its last one finished. Events during a snapshot mark it
 //! dirty again, so exactly one more follows. A workspace never has more than
@@ -43,9 +44,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::WatcherSection;
-use crate::model::WorkspaceId;
-use crate::watcher::{NoWatcher, WatchEvent, Watcher, new_watcher, skip_prefixes};
+use crate::config::{WatcherBackend, WatcherSection};
+use crate::model::{WatcherKind, WorkspaceId};
+use crate::watcher::{
+    HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
+};
 use crate::workspace::{Manager, ManagerError};
 
 /// Events waiting for the scheduler; more are dropped (and counted) by the
@@ -137,6 +140,10 @@ pub struct SnapshotOutcome {
     pub latency_ms: u64,
     /// Paths the watcher reported since the previous snapshot.
     pub paths_count: usize,
+    /// How long jj's scan of the working copy took, in milliseconds: all
+    /// tracked files for a notify workspace, the paths Watchman reported
+    /// for a Watchman one (R1.14).
+    pub scan_ms: u64,
 }
 
 /// A post-snapshot hook; see [`Scheduler::on_snapshot`].
@@ -163,8 +170,13 @@ struct Inner {
     /// Threads in each scan pool.
     pool_threads: usize,
     manager: Weak<Manager>,
-    watcher: Box<dyn Watcher>,
+    /// The watchers, by kind, created on first use.
+    watchers: Mutex<HashMap<WatcherKind, Arc<dyn Watcher>>>,
+    /// What every watcher sends to.
+    events_tx: mpsc::Sender<WatchEvent>,
     events: Mutex<Option<mpsc::Receiver<WatchEvent>>>,
+    /// Given to watchers that report health.
+    health: HealthHook,
     entries: Mutex<HashMap<WorkspaceId, Entry>>,
     scans: Arc<Semaphore>,
     hooks: RwLock<Vec<SnapshotHook>>,
@@ -173,11 +185,15 @@ struct Inner {
     stop: CancellationToken,
     /// Test hook: drop every event, as if the watcher had lost them.
     drop_events: AtomicBool,
+    /// Test hook: fail every watch, as if no watcher could start.
+    refuse_watches: AtomicBool,
 }
 
 /// One tracked workspace.
 #[derive(Debug)]
 struct Entry {
+    /// Which watcher watches it.
+    watcher: WatcherKind,
     /// When the first event since the last snapshot began arrived.
     dirty_since: Option<Instant>,
     /// Paths reported since then.
@@ -216,25 +232,17 @@ pub(crate) struct Trigger {
 }
 
 impl Scheduler {
-    /// A scheduler for `manager`, with its watcher (or, if the watcher
-    /// cannot start, none: every workspace then lives on the fallback
-    /// timer). Nothing is snapshotted automatically until
-    /// [`Scheduler::start`].
+    /// A scheduler for `manager`. The notify watcher starts here unless
+    /// `watcher.backend = "watchman"`; the Watchman watcher (and notify,
+    /// then) when a workspace first needs it. A watcher that cannot start
+    /// is replaced by none: its workspaces live on the fallback timer.
+    /// Nothing is snapshotted automatically until [`Scheduler::start`].
     pub(crate) fn new(config: &WatcherSection, max_scans: usize, manager: Weak<Manager>) -> Self {
         let (tx, rx) = mpsc::channel(EVENT_QUEUE);
-        let watcher = new_watcher(config, tx).unwrap_or_else(|error| {
-            tracing::error!(
-                error = %ErrorChain(&error),
-                "cannot start the filesystem watcher; workspaces are snapshotted on the fallback timer only"
-            );
-            Box::new(NoWatcher {
-                reason: config.backend.as_str(),
-            })
-        });
         let max_scans = max_scans.max(1);
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        Self {
-            inner: Arc::new(Inner {
+        let scheduler = Self {
+            inner: Arc::new_cyclic(|weak| Inner {
                 config: config.clone(),
                 pools: Mutex::new(Vec::new()),
                 // Every pool can use every CPU, so a lone scan walks as fast
@@ -242,8 +250,10 @@ impl Scheduler {
                 // least two, so `install` leaves a worker for jj's scope.
                 pool_threads: cpus.max(2),
                 manager,
-                watcher,
+                watchers: Mutex::new(HashMap::new()),
+                events_tx: tx,
                 events: Mutex::new(Some(rx)),
+                health: health_hook(weak.clone()),
                 entries: Mutex::new(HashMap::new()),
                 scans: Arc::new(Semaphore::new(max_scans)),
                 hooks: RwLock::new(Vec::new()),
@@ -251,8 +261,14 @@ impl Scheduler {
                 stats: Mutex::new(Stats::default()),
                 stop: CancellationToken::new(),
                 drop_events: AtomicBool::new(false),
+                refuse_watches: AtomicBool::new(false),
             }),
+        };
+        if config.backend != WatcherBackend::Watchman {
+            // At start, so the daemon log shows the inotify limits.
+            scheduler.inner.watcher(WatcherKind::Notify);
         }
+        scheduler
     }
 
     /// Starts scheduling: watcher events, the fallback timer, and the
@@ -281,11 +297,13 @@ impl Scheduler {
         while tasks.join_next().await.is_some() {}
     }
 
-    /// Starts watching a loaded workspace and scheduling its snapshots: on
-    /// create, at daemon start for each active workspace, and after an
-    /// aborted release. If its root cannot be watched, it is marked
-    /// `attention = 'watch-failed'` and snapshotted on the fallback timer
-    /// alone. Tracking a tracked workspace again re-reads its skip list.
+    /// Starts watching a loaded workspace, with the watcher its row
+    /// records, and scheduling its snapshots: on create, at daemon start for
+    /// each active workspace, and after an aborted release. If its root
+    /// cannot be watched, it is marked `attention = 'watch-failed'` and
+    /// snapshotted on the fallback timer alone; a Watchman workspace is
+    /// marked (and cleared) as its subscription goes down and comes up.
+    /// Tracking a tracked workspace again re-reads its skip list.
     pub fn track(&self, ws: WorkspaceId) {
         let Some(manager) = self.inner.manager.upgrade() else {
             return;
@@ -293,10 +311,12 @@ impl Scheduler {
         let Some(entry) = manager.entry(ws) else {
             return;
         };
+        let kind = entry.record().watcher;
         self.inner
             .lock_entries()
             .entry(ws)
             .or_insert_with(|| Entry {
+                watcher: kind,
                 dirty_since: None,
                 paths_count: 0,
                 task: false,
@@ -309,25 +329,44 @@ impl Scheduler {
             std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
         let spec = entry.spec();
         let skip = skip_prefixes(&root, &spec.excludes, &spec.mounts);
-        if let Err(error) = self.inner.watcher.watch(ws, &root, skip) {
-            tracing::warn!(
-                workspace_id = %ws,
-                path = %root.display(),
-                error = %ErrorChain(&error),
-                "cannot watch the workspace; it is snapshotted on the fallback timer only"
-            );
-            manager.mark_watch_failed(&entry);
+        let watcher = self.inner.watcher(kind);
+        let outcome = if self.inner.refuse_watches.load(Ordering::Relaxed) {
+            Err(WatchError::Unavailable(kind.as_str()))
         } else {
-            manager.clear_watch_failed(&entry);
+            watcher.watch(ws, &root, skip)
+        };
+        match outcome {
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %ws,
+                    path = %root.display(),
+                    watcher = kind.as_str(),
+                    error = %ErrorChain(&error),
+                    "cannot watch the workspace; it is snapshotted on the fallback timer only"
+                );
+                manager.mark_watch_failed(&entry);
+            }
+            // The health hook reports the outcome.
+            Ok(()) if watcher.reports_health() => {}
+            Ok(()) => manager.clear_watch_failed(&entry),
         }
     }
 
     /// Stops watching `ws` and scheduling its snapshots; events still in
     /// the queue for it are ignored. A snapshot in flight finishes.
     pub fn untrack(&self, ws: WorkspaceId) {
-        self.inner.lock_entries().remove(&ws);
-        if let Err(error) = self.inner.watcher.unwatch(ws) {
-            tracing::warn!(workspace_id = %ws, error = %ErrorChain(&error), "cannot stop watching the workspace");
+        let removed = self.inner.lock_entries().remove(&ws);
+        let watchers: Vec<Arc<dyn Watcher>> = {
+            let watchers = lock(&self.inner.watchers);
+            match removed {
+                Some(entry) => watchers.get(&entry.watcher).into_iter().cloned().collect(),
+                None => watchers.values().cloned().collect(),
+            }
+        };
+        for watcher in watchers {
+            if let Err(error) = watcher.unwatch(ws) {
+                tracing::warn!(workspace_id = %ws, error = %ErrorChain(&error), "cannot stop watching the workspace");
+            }
         }
     }
 
@@ -398,6 +437,14 @@ impl Scheduler {
     #[cfg(any(test, feature = "testing"))]
     pub fn pause_watcher(&self) {
         self.inner.drop_events.store(true, Ordering::Relaxed);
+    }
+
+    /// Test hook: from now on, every workspace tracked fails to be watched,
+    /// as if its watcher could not start: it is marked `watch-failed` and
+    /// lives on the fallback timer.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn refuse_watches(&self) {
+        self.inner.refuse_watches.store(true, Ordering::Relaxed);
     }
 
     /// Whether automatic snapshots of `ws` are paused.
@@ -589,6 +636,35 @@ impl Inner {
         self.pools.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The watcher of `kind`, starting it if this is its first use. One
+    /// that cannot start is logged once and replaced by a [`NoWatcher`].
+    fn watcher(&self, kind: WatcherKind) -> Arc<dyn Watcher> {
+        let mut watchers = lock(&self.watchers);
+        if let Some(watcher) = watchers.get(&kind) {
+            return Arc::clone(watcher);
+        }
+        let started = new_watcher(
+            kind,
+            &self.config,
+            self.events_tx.clone(),
+            Arc::clone(&self.health),
+        );
+        let watcher: Arc<dyn Watcher> = match started {
+            Ok(watcher) => Arc::from(watcher),
+            Err(error) => {
+                tracing::error!(
+                    watcher = kind.as_str(),
+                    error = %ErrorChain(&error),
+                    "cannot start the filesystem watcher; its workspaces are snapshotted on the \
+                     fallback timer only"
+                );
+                Arc::new(NoWatcher { kind })
+            }
+        };
+        watchers.insert(kind, Arc::clone(&watcher));
+        watcher
+    }
+
     /// An idle scan pool, building one if none is idle. Never more pools
     /// than permits exist, since each permit holds at most one.
     fn take_pool(&self) -> Option<Arc<rayon::ThreadPool>> {
@@ -730,6 +806,39 @@ impl Inner {
     }
 }
 
+/// The scheduler's [`HealthHook`]: marks or clears `watch-failed` on a
+/// tracked workspace as its watch goes down or comes up.
+fn health_hook(inner: Weak<Inner>) -> HealthHook {
+    Arc::new(move |ws, healthy| {
+        let Some(inner) = inner.upgrade() else {
+            return;
+        };
+        if !inner.lock_entries().contains_key(&ws) {
+            return;
+        }
+        let Some(manager) = inner.manager.upgrade() else {
+            return;
+        };
+        let Some(entry) = manager.entry(ws) else {
+            return;
+        };
+        // A release untracks first, but a report already past the check
+        // above must not mark a row on its way out.
+        if entry.record().state != crate::model::WorkspaceState::Active {
+            return;
+        }
+        if healthy {
+            manager.clear_watch_failed(&entry);
+        } else {
+            manager.mark_watch_failed(&entry);
+        }
+    })
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Manager {
     /// Clears `attention = 'watch-failed'` from `entry` once it is watched
     /// again (a later start, a raised limit); failures are logged.
@@ -747,10 +856,25 @@ impl Manager {
     }
 
     /// Marks `entry` as unwatched (`attention = 'watch-failed'`) in the
-    /// database and the loaded row; failures are logged.
+    /// database and the loaded row; failures are logged. Another mark
+    /// (`stale-recovered`, R1.20's store marks) is kept rather than replaced:
+    /// a Watchman restart marks and clears every Watchman workspace, and
+    /// would otherwise erase it.
     pub(crate) fn mark_watch_failed(&self, entry: &crate::workspace::WorkspaceEntry) {
         let id = entry.paths.id;
         let attention = Some(crate::model::Attention::WatchFailed);
+        let current = entry.record().attention;
+        if current == attention {
+            return;
+        }
+        if let Some(other) = current {
+            tracing::debug!(
+                workspace_id = %id,
+                attention = other.as_str(),
+                "watch failed; keeping the workspace's other mark"
+            );
+            return;
+        }
         match self.db().set_workspace_attention(id, attention, None) {
             Ok(()) => entry.set_attention(attention),
             Err(error) => {

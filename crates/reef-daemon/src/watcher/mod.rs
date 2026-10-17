@@ -1,24 +1,37 @@
-//! Filesystem watchers that trigger snapshots (R1.13). A watcher only says
-//! that something under a workspace changed; the scheduler
+//! Filesystem watchers that trigger snapshots (R1.13, R1.14). A watcher only
+//! says that something under a workspace changed; the scheduler
 //! ([`crate::snapshot::Scheduler`]) decides when to snapshot, and the scan
-//! itself is jj's, over every tracked file (ADR 0008). Watchman, which can
-//! also narrow the scan, is R1.14.
+//! itself is jj's.
 //!
-//! The daemon runs one watcher for every workspace. Events are mapped back
-//! to workspaces by root (`Demux`): workspace roots never nest, so the
-//! root a path falls under is unambiguous.
+//! There are two kinds ([`WatcherKind`]), chosen per repository by
+//! [`select_watcher`] and recorded per workspace at create:
+//!
+//! - **notify** ([`notify::NotifyWatcher`]): one debounced watcher for every
+//!   notify workspace. Its events are mapped back to workspaces by root
+//!   (`Demux`): workspace roots never nest, so the root a path falls under
+//!   is unambiguous. Every snapshot scans every tracked file (ADR 0008).
+//! - **watchman** (`watchman::WatchmanWatcher`, with the `watchman`
+//!   feature): a Watchman subscription per workspace, and scans narrowed by
+//!   jj's own Watchman query (ADR 0023). For repositories at or above
+//!   `watcher.watchman_threshold_files` under `watcher.backend = "auto"`.
+//!
+//! The daemon holds at most one watcher of each kind.
 
 pub mod notify;
+#[cfg(feature = "watchman")]
+pub mod watchman;
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use reef_lib::error::{Classify, ErrorKind};
 use tokio::sync::mpsc;
 
 use crate::config::{WatcherBackend, WatcherSection};
+pub use crate::model::WatcherKind;
 use crate::model::WorkspaceId;
 
 /// Changes under one workspace, after debouncing.
@@ -32,19 +45,23 @@ pub struct WatchEvent {
     pub at: Instant,
 }
 
-/// Which mechanism a watcher uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WatcherKind {
-    /// The `notify` crate: inotify on Linux, `FSEvents` on macOS.
-    Notify,
-    /// A Watchman subscription (R1.14).
-    Watchman,
-}
+/// Hears whether a workspace's watch is up (`true`) or down (`false`), from
+/// a watcher that sets watches up in the background
+/// ([`Watcher::reports_health`]). The scheduler clears or sets
+/// `attention = 'watch-failed'` from it.
+pub type HealthHook = Arc<dyn Fn(WorkspaceId, bool) + Send + Sync>;
 
 /// Watches workspace roots and reports changes as [`WatchEvent`]s.
 pub trait Watcher: Send + Sync {
     /// Which mechanism this is.
     fn kind(&self) -> WatcherKind;
+    /// Whether [`Watcher::watch`] only starts setting the watch up, and the
+    /// outcome (and any later loss and recovery) arrives through the
+    /// watcher's [`HealthHook`]. When false, `watch` returning `Ok` means
+    /// the workspace is watched.
+    fn reports_health(&self) -> bool {
+        false
+    }
     /// Starts watching `root`, recursively, for `workspace`. Changes under
     /// any of `skip` (absolute prefixes under `root`) are not reported.
     /// Watching a workspace again replaces its root and skip list.
@@ -83,6 +100,15 @@ pub enum WatchError {
     /// The configured watcher cannot run here.
     #[error("the {0} watcher is unavailable")]
     Unavailable(&'static str),
+    /// The watcher's executable is not on `PATH`.
+    #[error("`{0}` is not on PATH; install it or set watcher.backend to \"notify\" or \"auto\"")]
+    BinaryMissing(&'static str),
+    /// This build does not have the watcher's cargo feature.
+    #[error("this build has no {0} support (the `{0}` cargo feature is off)")]
+    FeatureDisabled(&'static str),
+    /// The watcher was created outside a tokio runtime.
+    #[error("the {0} watcher needs a tokio runtime")]
+    NoRuntime(&'static str),
 }
 
 impl WatchError {
@@ -91,7 +117,10 @@ impl WatchError {
     pub fn is_limit(&self) -> bool {
         match self {
             Self::Start { source, .. } | Self::Watch { source, .. } => notify::is_limit(source),
-            Self::Unavailable(_) => false,
+            Self::Unavailable(_)
+            | Self::BinaryMissing(_)
+            | Self::FeatureDisabled(_)
+            | Self::NoRuntime(_) => false,
         }
     }
 }
@@ -100,24 +129,92 @@ impl Classify for WatchError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::Start { .. } | Self::Watch { .. } => ErrorKind::Io,
-            Self::Unavailable(_) => ErrorKind::Unavailable,
+            Self::Unavailable(_) | Self::BinaryMissing(_) | Self::FeatureDisabled(_) => {
+                ErrorKind::Unavailable
+            }
+            Self::NoRuntime(_) => ErrorKind::Internal,
         }
     }
 }
 
-/// The daemon's watcher for `config.backend`, sending to `events`: notify
-/// for `notify` and `auto`; `watchman` is [`WatchError::Unavailable`] until
-/// R1.14.
+/// The watcher a repository's new workspaces get under `config`, given
+/// its tracked file count (`None` if not counted yet):
+///
+/// - `notify`: notify.
+/// - `watchman`: Watchman; [`WatchError::BinaryMissing`] if `watchman` is
+///   not on `PATH`, [`WatchError::FeatureDisabled`] in a build without the
+///   `watchman` feature.
+/// - `auto`: Watchman if it is available and the repository has at least
+///   `watcher.watchman_threshold_files` tracked files, notify otherwise (and
+///   for an uncounted repository).
+pub fn select_watcher(
+    config: &WatcherSection,
+    tracked_files: Option<u64>,
+) -> Result<WatcherKind, WatchError> {
+    match config.backend {
+        WatcherBackend::Notify => Ok(WatcherKind::Notify),
+        WatcherBackend::Watchman => watchman_available().map(|()| WatcherKind::Watchman),
+        WatcherBackend::Auto => {
+            let large = tracked_files.is_some_and(|count| count >= config.watchman_threshold_files);
+            Ok(if large && watchman_available().is_ok() {
+                WatcherKind::Watchman
+            } else {
+                WatcherKind::Notify
+            })
+        }
+    }
+}
+
+/// Whether this build and machine can run the Watchman watcher.
+fn watchman_available() -> Result<(), WatchError> {
+    if !cfg!(feature = "watchman") {
+        return Err(WatchError::FeatureDisabled("watchman"));
+    }
+    if !watchman_on_path() {
+        return Err(WatchError::BinaryMissing("watchman"));
+    }
+    Ok(())
+}
+
+/// Whether an executable `watchman` is in a directory on `PATH`.
+pub(crate) fn watchman_on_path() -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        std::fs::metadata(dir.join("watchman"))
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
+}
+
+/// A watcher of `kind`, sending to `events`, with `config.debounce`.
+/// `health` is given to watchers that report it ([`Watcher::reports_health`]).
 pub fn new_watcher(
+    kind: WatcherKind,
     config: &WatcherSection,
     events: mpsc::Sender<WatchEvent>,
+    health: HealthHook,
 ) -> Result<Box<dyn Watcher>, WatchError> {
-    match config.backend {
-        WatcherBackend::Watchman => Err(WatchError::Unavailable("watchman")),
-        WatcherBackend::Auto | WatcherBackend::Notify => Ok(Box::new(notify::NotifyWatcher::new(
+    match kind {
+        WatcherKind::Notify => {
+            drop(health);
+            Ok(Box::new(notify::NotifyWatcher::new(
+                config.debounce,
+                events,
+            )?))
+        }
+        #[cfg(feature = "watchman")]
+        WatcherKind::Watchman => Ok(Box::new(watchman::WatchmanWatcher::new(
             config.debounce,
             events,
+            health,
         )?)),
+        #[cfg(not(feature = "watchman"))]
+        WatcherKind::Watchman => {
+            drop((events, health));
+            Err(WatchError::FeatureDisabled("watchman"))
+        }
     }
 }
 
@@ -125,17 +222,17 @@ pub fn new_watcher(
 /// workspace is marked `watch-failed` and lives on the fallback timer.
 #[derive(Debug)]
 pub struct NoWatcher {
-    /// Why there is no watcher, as `watch` reports it.
-    pub reason: &'static str,
+    /// The kind that could not be created.
+    pub kind: WatcherKind,
 }
 
 impl Watcher for NoWatcher {
     fn kind(&self) -> WatcherKind {
-        WatcherKind::Notify
+        self.kind
     }
 
     fn watch(&self, _: WorkspaceId, _: &Path, _: Vec<PathBuf>) -> Result<(), WatchError> {
-        Err(WatchError::Unavailable(self.reason))
+        Err(WatchError::Unavailable(self.kind.as_str()))
     }
 
     fn unwatch(&self, _: WorkspaceId) -> Result<(), WatchError> {
@@ -289,6 +386,38 @@ mod tests {
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped[&id(1)].len(), 2);
         assert_eq!(grouped[&id(2)], [PathBuf::from("/b/1")]);
+    }
+
+    #[test]
+    fn selection_by_backend_and_threshold() {
+        let mut config = WatcherSection {
+            watchman_threshold_files: 100,
+            ..WatcherSection::default()
+        };
+        config.backend = WatcherBackend::Notify;
+        assert_eq!(
+            select_watcher(&config, Some(1_000_000)).unwrap(),
+            WatcherKind::Notify
+        );
+        config.backend = WatcherBackend::Auto;
+        assert_eq!(
+            select_watcher(&config, Some(99)).unwrap(),
+            WatcherKind::Notify
+        );
+        assert_eq!(
+            select_watcher(&config, None).unwrap(),
+            WatcherKind::Notify,
+            "an uncounted repository is below the threshold"
+        );
+        let available = watchman_available().is_ok();
+        let large = if available {
+            WatcherKind::Watchman
+        } else {
+            WatcherKind::Notify
+        };
+        assert_eq!(select_watcher(&config, Some(100)).unwrap(), large);
+        config.backend = WatcherBackend::Watchman;
+        assert_eq!(select_watcher(&config, None).is_ok(), available);
     }
 
     #[test]

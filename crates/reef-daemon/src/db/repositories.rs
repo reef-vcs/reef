@@ -9,7 +9,7 @@ use crate::model::{RepoId, RepositoryRecord};
 
 const WHAT: &str = "repository";
 
-const COLUMNS: &str = "id, root, jj_repo_path, colocated, registered_at";
+const COLUMNS: &str = "id, root, jj_repo_path, colocated, registered_at, tracked_files";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<RepositoryRecord> {
     Ok(RepositoryRecord {
@@ -18,7 +18,15 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<RepositoryRecord> {
         jj_repo_path: PathBuf::from(row.get::<_, String>(2)?),
         colocated: row.get(3)?,
         registered_at: row.get(4)?,
+        tracked_files: row
+            .get::<_, Option<i64>>(5)?
+            .map(|count| u64::try_from(count).unwrap_or(0)),
     })
+}
+
+/// A count as SQLite stores it, saturating.
+fn count_sql(count: Option<u64>) -> Option<i64> {
+    count.map(|count| i64::try_from(count).unwrap_or(i64::MAX))
 }
 
 impl Db {
@@ -46,12 +54,37 @@ impl Db {
                 });
             }
             tx.execute(
-                "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![r.id, root, jj_repo_path, r.colocated, r.registered_at],
+                "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at,
+                                          tracked_files)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    r.id,
+                    root,
+                    jj_repo_path,
+                    r.colocated,
+                    r.registered_at,
+                    count_sql(r.tracked_files)
+                ],
             )?;
             Ok(())
         })
+    }
+
+    /// Records the repository's tracked file count (R1.14).
+    pub fn set_repository_tracked_files(&self, id: RepoId, count: u64) -> Result<(), DbError> {
+        let changed = self.with(|conn| {
+            conn.execute(
+                "UPDATE repositories SET tracked_files = ?2 WHERE id = ?1",
+                params![id, count_sql(Some(count))],
+            )
+        })?;
+        if changed == 0 {
+            return Err(DbError::NotFound {
+                what: WHAT,
+                id: id.as_hex(),
+            });
+        }
+        Ok(())
     }
 
     /// The repository with this id.
@@ -165,6 +198,7 @@ pub(crate) mod tests {
             jj_repo_path: Path::new(root).join(".jj/repo"),
             colocated: false,
             registered_at: Timestamp(1_000),
+            tracked_files: None,
         }
     }
 
@@ -178,6 +212,21 @@ pub(crate) mod tests {
         assert_eq!(db.repositories().unwrap(), vec![record.clone()]);
 
         let missing = db.repository("aaaa000000000002".parse().unwrap());
+        assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn tracked_files_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let record = repo("aaaa000000000001", "/src/app");
+        db.insert_repository(&record).unwrap();
+        assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
+        db.set_repository_tracked_files(record.id, 50_000).unwrap();
+        assert_eq!(
+            db.repository(record.id).unwrap().tracked_files,
+            Some(50_000)
+        );
+        let missing = db.set_repository_tracked_files("aaaa000000000002".parse().unwrap(), 1);
         assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
     }
 

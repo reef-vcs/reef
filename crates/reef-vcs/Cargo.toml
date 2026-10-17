@@ -19,6 +19,12 @@ workspace = true
 name = "reef"
 path = "src/main.rs"
 
+[features]
+default = ["watchman"]
+# Forwarded to reef-daemon (R1.14). reef-daemon has it in its own defaults too, so turning it
+# off takes `--no-default-features` on both.
+watchman = ["reef-daemon/watchman"]
+
 [dependencies]
 reef-lib.workspace = true
 reef-daemon.workspace = true

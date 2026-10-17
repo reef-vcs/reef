@@ -30,6 +30,13 @@ pub use snapshot::{
     Behind, PendingSnapshot, SnapshotCommit, SnapshotError, SnapshotPlan, commit_snapshot,
 };
 
+// Watchman (R1.14): jj-lib's monitor, and the client crate at the version
+// jj-lib uses, for the daemon's trigger subscriptions.
+#[cfg(feature = "watchman")]
+pub use jj_lib::fsmonitor::watchman;
+#[cfg(feature = "watchman")]
+pub use watchman_client;
+
 // jj-lib types the daemon names without depending on jj-lib: the repository
 // thread's state (R1.03) and the cross-thread `Send + Sync` assertion on them.
 pub use jj_lib::merged_tree::MergedTree;

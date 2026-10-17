@@ -7,3 +7,15 @@
 [[profile.default.overrides]]
 filter = "package(reef-daemon) & binary(workspaces) & (test(register_then_create_default) | test(first_snapshot_is_noop) | test(colocated_repo_imports_refs))"
 success-output = "immediate"
+
+# The Watchman tests (R1.14) share the machine's one Watchman server, and
+# `survives_watchman_restart` shuts it down, so they run one at a time.
+[test-groups]
+watchman = { max-threads = 1 }
+
+# Shown when they pass too, so a run without `watchman` (macOS CI) says
+# `skipped: watchman not on PATH` instead of passing silently.
+[[profile.default.overrides]]
+filter = "package(reef-daemon) & binary(watchman)"
+test-group = "watchman"
+success-output = "immediate"

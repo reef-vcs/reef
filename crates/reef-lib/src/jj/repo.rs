@@ -374,6 +374,21 @@ impl Repo {
         Ok(self.repo.store().get_commit(id)?)
     }
 
+    /// The number of files, symlinks, and conflicts in this workspace's
+    /// working-copy commit as of the loaded view: what a full scan of its
+    /// working copy walks. Reads tree objects from the store, not the disk.
+    /// R1.14's `watcher.backend = "auto"` compares it with
+    /// `watcher.watchman_threshold_files`.
+    pub fn tracked_file_count(&self) -> Result<u64, ReadError> {
+        let tree = self.wc_commit()?.tree();
+        let mut count = 0;
+        for (_, value) in tree.entries() {
+            value?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Reloads the repository at the current head operation, picking up
     /// operations written by other processes or other [`Repo`] values.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]

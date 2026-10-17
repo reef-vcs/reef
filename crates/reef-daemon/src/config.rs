@@ -46,7 +46,7 @@ use std::time::Duration;
 use reef_lib::error::{Classify, ErrorKind};
 use reef_lib::jj::UserSettings;
 use reef_lib::jj::settings::{
-    Identity, SettingsError, SettingsSpec, parse_byte_size, user_settings_from_spec,
+    Fsmonitor, Identity, SettingsError, SettingsSpec, parse_byte_size, user_settings_from_spec,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -956,11 +956,20 @@ impl Config {
     /// effective identity, `snapshot.max_new_file_size`, and the operation
     /// host and user.
     pub fn jj_settings(&self) -> Result<UserSettings, SettingsError> {
+        self.jj_settings_for(Fsmonitor::None)
+    }
+
+    /// [`Config::jj_settings`] for working copies with `fsmonitor`: the
+    /// daemon loads Watchman workspaces with [`Fsmonitor::Watchman`]
+    /// (R1.14). That is [`SettingsError::FeatureDisabled`] in a build
+    /// without the `watchman` feature.
+    pub fn jj_settings_for(&self, fsmonitor: Fsmonitor) -> Result<UserSettings, SettingsError> {
         user_settings_from_spec(&SettingsSpec {
             identity: &self.identity,
             max_new_file_size: self.file.snapshot.max_new_file_size.0,
             operation_hostname: &self.operation.hostname,
             operation_username: &self.operation.username,
+            fsmonitor,
         })
     }
 

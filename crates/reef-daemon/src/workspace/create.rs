@@ -2,8 +2,9 @@
 //!
 //! The steps, and the thread each runs on:
 //!
-//! 1. (async) Validate, resolve the repository, allocate the id, compute the
-//!    paths, select the backend (probing on the blocking pool).
+//! 1. (async) Validate, resolve the repository, select the watcher
+//!    (R1.14), allocate the id, compute the paths, select the backend
+//!    (probing on the blocking pool).
 //! 2. (repository thread) Reload at head; in a colocated repository import
 //!    git refs; resolve the start revision; note whether another Reef
 //!    workspace already has the edited commit.
@@ -11,7 +12,8 @@
 //!    cache's per-tree lock, then `Repo::materialize_tree` on the repository
 //!    thread if the tree is not cached.
 //! 4. (blocking) The backend materializes the workspace from the base.
-//! 5. (repository thread) `Repo::create_workspace`.
+//! 5. (repository thread) `Repo::create_workspace_with`, the working copy
+//!    loaded with the watcher's jj settings.
 //! 6. (blocking) Seed the working copy's `tree_state` from the base's, or
 //!    fall back to `Repo::reset_to`.
 //! 7. (async) Insert the row and issue the lease in one transaction.
@@ -35,7 +37,7 @@ use reef_lib::telemetry::elapsed_ms;
 
 use super::manager::{forget_jj_workspace, remove_state_dir};
 use super::{CreateSpec, Created, Manager, ManagerError, Start, WorkspaceEntry, millis};
-use crate::backend::{Backend, BackendError, BaseEntry, WorkspacePaths, select};
+use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{
     LeaseId, LeaseRecord, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
@@ -67,15 +69,12 @@ impl Manager {
         let _shared = repo_lock.read().await;
         let repo = self.db.repository(spec.repo)?;
         let handle = self.handle(repo.id)?;
+        let watcher = self.watcher_for(&repo)?;
+        let wc_settings = self.wc_settings(watcher)?;
         let id = WorkspaceId::generate();
         tracing::Span::current().record("workspace_id", tracing::field::display(id));
         let paths = self.new_paths(repo.id, id, spec.path.as_deref())?;
-        let choice = spec.backend.unwrap_or(self.config.file.workspace.backend);
-        let probe_dir = paths
-            .root
-            .parent()
-            .map_or_else(|| paths.root.clone(), Path::to_owned);
-        let backend = tokio::task::spawn_blocking(move || select(choice, &probe_dir)).await??;
+        let backend = self.select_backend(spec.backend, &paths).await?;
 
         // 2.
         let resolved = resolve_start(&handle, spec.start).await?;
@@ -91,7 +90,9 @@ impl Manager {
 
         // 5.
         let (ws, op_id, wc) =
-            match create_jj_workspace(&handle, id, &paths, resolved.start.clone()).await {
+            match create_jj_workspace(&handle, id, &paths, resolved.start.clone(), wc_settings)
+                .await
+            {
                 Ok(created) => created,
                 Err(error) => {
                     undo.run().await;
@@ -131,6 +132,7 @@ impl Manager {
             created_at: now,
             last_snapshot_at: None,
             last_snapshot_op: None,
+            watcher,
         };
         if let Err(error) = self.db.insert_workspace_with_lease(&record, &lease) {
             drop(ws);
@@ -173,6 +175,21 @@ impl Manager {
 
     /// The lease length for a request: `lease.default` when none (or zero)
     /// is asked for; above `lease.max` is refused.
+    /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the
+    /// blocking pool) at the directory the workspace is created in.
+    async fn select_backend(
+        &self,
+        choice: Option<BackendChoice>,
+        paths: &WorkspacePaths,
+    ) -> Result<Box<dyn Backend>, ManagerError> {
+        let choice = choice.unwrap_or(self.config.file.workspace.backend);
+        let probe_dir = paths
+            .root
+            .parent()
+            .map_or_else(|| paths.root.clone(), Path::to_owned);
+        Ok(tokio::task::spawn_blocking(move || select(choice, &probe_dir)).await??)
+    }
+
     fn lease_length(&self, requested: Option<Duration>) -> Result<Duration, ManagerError> {
         let lease = &self.config.file.lease;
         match requested {
@@ -402,6 +419,7 @@ async fn create_jj_workspace(
     id: WorkspaceId,
     paths: &WorkspacePaths,
     start: StartPoint,
+    wc_settings: reef_lib::jj::UserSettings,
 ) -> Result<(Repo, String, ChangeSummary), ManagerError> {
     let name = id.jj_workspace_name();
     let root = paths.root.clone();
@@ -412,7 +430,14 @@ async fn create_jj_workspace(
             async move {
                 let created = head
                     .repo
-                    .create_workspace(&name, &root, &state_dir, start, &description)
+                    .create_workspace_with(
+                        &name,
+                        &root,
+                        &state_dir,
+                        start,
+                        &description,
+                        &wc_settings,
+                    )
                     .await;
                 let (ws, op_id) = match created {
                     Ok(created) => created,

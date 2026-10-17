@@ -24,6 +24,7 @@ use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
 use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _, RepoLoaderError};
+use jj_lib::settings::UserSettings;
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::WorkingCopyStateError;
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
@@ -397,10 +398,6 @@ impl Repo {
     /// commit for `name`, and the caller cleans up with
     /// [`Repo::forget_workspace`]. A failure before the operation leaves
     /// nothing behind.
-    #[tracing::instrument(
-        skip_all,
-        fields(repo = %self.workspace_root().display(), path = %root.display())
-    )]
     pub async fn create_workspace(
         &mut self,
         name: &str,
@@ -409,8 +406,31 @@ impl Repo {
         start: StartPoint,
         description: &str,
     ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
+        let settings = self.workspace.settings().clone();
+        self.create_workspace_with(name, root, state_dir, start, description, &settings)
+            .await
+    }
+
+    /// [`Repo::create_workspace`], with the new working copy loaded with
+    /// `wc_settings` instead of this repository's settings. Only the
+    /// working copy's own settings (`fsmonitor.*`, read when it is loaded)
+    /// come from them; operations are still written with this repository's.
+    /// The daemon passes its Watchman variant here (R1.14).
+    #[tracing::instrument(
+        skip_all,
+        fields(repo = %self.workspace_root().display(), path = %root.display())
+    )]
+    pub async fn create_workspace_with(
+        &mut self,
+        name: &str,
+        root: &Path,
+        state_dir: &Path,
+        start: StartPoint,
+        description: &str,
+        wc_settings: &UserSettings,
+    ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
         let (repo, op_id) = self
-            .create_workspace_unlogged(name, root, state_dir, start, description)
+            .create_workspace_unlogged(name, root, state_dir, start, description, wc_settings)
             .await
             .inspect_err(|error| crate::log_failure!(error))?;
         tracing::info!(op_id = %op_id, "workspace created");
@@ -424,6 +444,7 @@ impl Repo {
         state_dir: &Path,
         start: StartPoint,
         description: &str,
+        wc_settings: &UserSettings,
     ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
         let name = WorkspaceNameBuf::from(name);
         if self.repo.view().get_wc_commit_id(&name).is_some() {
@@ -467,7 +488,7 @@ impl Repo {
         };
 
         let op_id = self.repo.op_id().clone();
-        let attached = self.attach_new_workspace(&name, &root, state_dir, &op_id);
+        let attached = self.attach_new_workspace(&name, &root, state_dir, &op_id, wc_settings);
         let workspace = match attached {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -491,6 +512,7 @@ impl Repo {
         root: &Path,
         state_dir: &Path,
         op_id: &OperationId,
+        wc_settings: &UserSettings,
     ) -> Result<Workspace, CreateWorkspaceError> {
         let working_copy = LocalWorkingCopy::init(
             self.repo.store().clone(),
@@ -498,7 +520,7 @@ impl Repo {
             state_dir.to_owned(),
             op_id.clone(),
             name.clone(),
-            self.workspace.settings(),
+            wc_settings,
         )?;
         let workspace = Workspace::new(
             root,
@@ -517,16 +539,32 @@ impl Repo {
     /// restart, from its root and state directory. The returned [`Repo`] is
     /// loaded at this one's operation; [`Repo::begin_snapshot`] decides what
     /// to do if its working copy was last updated at another (ADR 0018).
+    pub fn open_workspace(&self, root: &Path, state_dir: &Path) -> Result<Repo, OpenError> {
+        self.open_workspace_with(root, state_dir, self.workspace.settings())
+    }
+
+    /// [`Repo::open_workspace`], with the working copy loaded with
+    /// `wc_settings`, as in [`Repo::create_workspace_with`].
     #[tracing::instrument(
         skip_all,
         fields(repo = %self.workspace_root().display(), path = %root.display())
     )]
-    pub fn open_workspace(&self, root: &Path, state_dir: &Path) -> Result<Repo, OpenError> {
-        self.open_workspace_unlogged(root, state_dir)
+    pub fn open_workspace_with(
+        &self,
+        root: &Path,
+        state_dir: &Path,
+        wc_settings: &UserSettings,
+    ) -> Result<Repo, OpenError> {
+        self.open_workspace_unlogged(root, state_dir, wc_settings)
             .inspect_err(|error| crate::log_failure!(error))
     }
 
-    fn open_workspace_unlogged(&self, root: &Path, state_dir: &Path) -> Result<Repo, OpenError> {
+    fn open_workspace_unlogged(
+        &self,
+        root: &Path,
+        state_dir: &Path,
+        wc_settings: &UserSettings,
+    ) -> Result<Repo, OpenError> {
         if !state_dir.join("checkout").is_file() {
             return Err(WorkspaceLoadError::NoWorkspaceHere(state_dir.to_owned()).into());
         }
@@ -547,7 +585,7 @@ impl Repo {
             self.repo.store().clone(),
             root.clone(),
             state_dir.to_owned(),
-            self.workspace.settings(),
+            wc_settings,
         )
         .map_err(WorkspaceLoadError::from)?;
         let workspace = Workspace::new(

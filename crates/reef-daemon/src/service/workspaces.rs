@@ -219,6 +219,7 @@ impl Workspaces for WorkspacesService {
             },
             changed: snapshot.changed,
             commit_id: snapshot.commit_id.to_string(),
+            scan_ms: snapshot.scan_ms,
         }))
     }
 }
