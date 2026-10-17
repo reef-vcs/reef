@@ -422,7 +422,9 @@ async fn release_tears_down_and_keeps_row() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, ws.id);
     assert_eq!(listed[0].state, "released");
-    assert!(listed[0].lease.is_none());
+    let lease = listed[0].lease.as_ref().expect("the lease it ended with");
+    assert_eq!(lease.state(), reef_daemon::proto::v0::lease::State::Ended);
+    assert_eq!(lease.end_reason, "released");
     let active = daemon
         .client
         .list_workspaces(ListWorkspacesRequest {

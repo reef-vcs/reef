@@ -9,7 +9,10 @@
 //! Later tickets extend this list in place, keeping its order:
 //!
 //! 1. Create the state directory (`0700`) and take the single-instance lock.
-//! 2. Open the database and apply migrations; write the pid file.
+//! 2. Open the database and apply migrations; write the pid file. Apply the
+//!    lease restart grace (R1.15): every unended lease gets at least
+//!    `lease.restart_grace` from now, before anything can reclaim. If that
+//!    fails, the daemon does not start.
 //! 3. Sweep leftovers: incomplete base cache entries (`*.tmp` under
 //!    `repos/*/bases/`, R1.02); workspace trash (`*.trash-*` in each
 //!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
@@ -19,15 +22,18 @@
 //! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
 //!    one's jj handle; reclaim one whose directory is gone. Each is tracked
 //!    by the snapshot scheduler, which then starts (R1.13).
-//! 7. Apply the lease restart grace (R1.15; nothing until then).
-//! 8. Replace a stale socket file, bind the socket (`0600`), and serve.
+//! 7. Replace a stale socket file, bind the socket (`0600`), and serve.
+//! 8. Start the lease expiry loop (R1.15), its first tick `lease.tick`
+//!    later; after the bind, so a failed start leaves no loop running.
 //!
 //! # Shutdown
 //!
 //! [`DaemonHandle::shutdown`] cancels [`AppState::shutdown`]. The server stops
 //! accepting connections and in-flight requests get [`SHUTDOWN_GRACE`]; then
 //! the [`ShutdownHooks`] run (the snapshot scheduler stops and its snapshots
-//! in flight end, R1.13; R1.15 adds final snapshots), every
+//! in flight end, R1.13; the lease expiry loop stops after any reclaim in
+//! progress, then every workspace with unsnapshotted events gets a
+//! `shutdown` snapshot, R1.15; leases are left as they are), every
 //! repository thread finishes its queued jobs and stops, the socket and pid
 //! files are removed, and the lock is released. The lock file stays.
 
@@ -51,6 +57,7 @@ use crate::backend::BaseCache;
 use crate::backend::fs_util::sweep_trash;
 use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
+use crate::lease::LeaseError;
 use crate::lock::{InstanceLock, LockError};
 use crate::model::RepositoryRecord;
 use crate::repo::RepoRegistry;
@@ -159,6 +166,10 @@ pub enum StartError {
     /// The database could not be opened or migrated.
     #[error("open the database")]
     Db(#[from] DbError),
+    /// The lease restart grace could not be applied; starting anyway could
+    /// reclaim workspaces that were alive at shutdown.
+    #[error("apply the lease restart grace")]
+    RestartGrace(#[source] LeaseError),
     /// The jj settings could not be built.
     #[error("build the jj settings")]
     Settings(#[from] SettingsError),
@@ -200,6 +211,7 @@ impl Classify for StartError {
             Self::Config(error) => error.kind(),
             Self::Lock(error) => error.kind(),
             Self::Db(error) => error.kind(),
+            Self::RestartGrace(error) => error.kind(),
             Self::Settings(error) => error.kind(),
             Self::SocketInUse { .. } => ErrorKind::Unavailable,
             Self::CreateDir { source, .. }
@@ -331,9 +343,19 @@ impl Drop for DaemonHandle {
     }
 }
 
-/// Steps 3 to 8 of the start sequence; returns the bound listener.
+/// The rest of step 2, and steps 3 to 8 of the start sequence; returns the
+/// bound listener.
 async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     let paths = &state.config.paths;
+    for warning in state.config.warnings() {
+        tracing::warn!(config = %paths.config_file.display(), "{warning}");
+    }
+    // 2. The lease restart grace, before anything can reclaim.
+    state
+        .manager
+        .leases()
+        .apply_restart_grace()
+        .map_err(StartError::RestartGrace)?;
     let records = state.db.repositories()?;
 
     // 3. Sweep leftovers.
@@ -399,10 +421,29 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     state.hooks.add("snapshot scheduler", move || {
         Box::pin(async move { manager.scheduler().stop().await })
     });
-    // 7. Lease restart grace: R1.15.
+    // 7. Bind.
+    let listener = bind(&paths.socket).await?;
 
-    // 8. Bind.
-    bind(&paths.socket).await
+    // 8. The lease expiry loop. Its hook runs after the scheduler's, and the
+    //    shutdown snapshots after both, so no reclaim or watcher snapshot
+    //    races them.
+    let expiry = Arc::clone(state.manager.leases()).start_expiry_loop();
+    let leases = Arc::clone(state.manager.leases());
+    state.hooks.add("lease expiry loop", move || {
+        Box::pin(async move {
+            leases.stop();
+            if let Err(error) = expiry.await {
+                tracing::error!(%error, "the lease expiry loop panicked");
+            }
+        })
+    });
+    let manager = Arc::clone(&state.manager);
+    state.hooks.add("shutdown snapshots", move || {
+        Box::pin(async move {
+            manager.shutdown_snapshots().await;
+        })
+    });
+    Ok(listener)
 }
 
 async fn open_repo(state: &Arc<AppState>, record: RepositoryRecord) {

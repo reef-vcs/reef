@@ -325,7 +325,8 @@ async fn ws_release() {
     let all = json(&run(reef(&daemon), &["ws", "list", "--all"]).await);
     assert_eq!(all[0]["id"], id);
     assert_eq!(all[0]["state"], "released");
-    assert_eq!(all[0]["lease"], Value::Null);
+    assert_eq!(all[0]["lease"]["state"], "ended");
+    assert_eq!(all[0]["lease"]["end_reason"], "released");
 
     // JSON mode prints the release's result instead of the note.
     let second = create(&daemon, &repo).await;

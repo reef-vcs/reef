@@ -85,6 +85,33 @@ fn expired_sql() -> String {
     )
 }
 
+/// What [`Db::renew_lease`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Renewal {
+    /// The lease was renewed; this is the lease as it now is.
+    Renewed(LeaseRecord),
+    /// No workspace has that id.
+    NoWorkspace,
+    /// The workspace was released or reclaimed; `at` is when its last lease
+    /// ended.
+    Ended {
+        /// `released` or `reclaimed`.
+        state: WorkspaceState,
+        /// When its last lease ended, if it had one.
+        at: Option<Timestamp>,
+    },
+    /// The workspace is being released or reclaimed.
+    Releasing,
+    /// The lease is not the workspace's current one.
+    Superseded,
+    /// The lease is past its grace; the next expiry tick reclaims the
+    /// workspace.
+    PastGrace {
+        /// `expires_at + grace_ms`.
+        grace_ended_at: Timestamp,
+    },
+}
+
 /// [`Db::issue_lease`] inside the caller's transaction.
 pub(crate) fn issue_lease_in(tx: &Transaction<'_>, l: &LeaseRecord) -> Result<(), DbError> {
     let state: WorkspaceState = tx
@@ -210,6 +237,86 @@ impl Db {
                 return Err(missing_or_ended(tx, id));
             }
             Ok(())
+        })
+    }
+
+    /// The workspace's most recently issued lease, ended or not.
+    pub fn last_lease(&self, workspace: WorkspaceId) -> Result<Option<LeaseRecord>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM leases WHERE workspace_id = ?1
+                     ORDER BY issued_at DESC, rowid DESC LIMIT 1"
+                ),
+                [workspace],
+                from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// A heartbeat at `now` on `lease`, in one transaction: if `lease` is
+    /// the current lease of the `active` workspace `workspace` and is not
+    /// past its grace, moves its expiry to `now + length_ms` and records
+    /// the heartbeat. Otherwise writes nothing and says why. Serialized
+    /// with [`Db::begin_reclaim`], so a lease is never renewed after a
+    /// reclaim has started.
+    pub fn renew_lease(
+        &self,
+        workspace: WorkspaceId,
+        lease: LeaseId,
+        now: Timestamp,
+    ) -> Result<Renewal, DbError> {
+        self.in_transaction(|tx| {
+            let row: Option<(WorkspaceState, Option<LeaseId>)> = tx
+                .query_row(
+                    "SELECT state, lease_id FROM workspaces WHERE id = ?1",
+                    [workspace],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((state, current)) = row else {
+                return Ok(Renewal::NoWorkspace);
+            };
+            match state {
+                WorkspaceState::Active => {}
+                WorkspaceState::Releasing => return Ok(Renewal::Releasing),
+                WorkspaceState::Released | WorkspaceState::Reclaimed => {
+                    let at = tx.query_row(
+                        "SELECT MAX(ended_at) FROM leases WHERE workspace_id = ?1",
+                        [workspace],
+                        |row| row.get(0),
+                    )?;
+                    return Ok(Renewal::Ended { state, at });
+                }
+            }
+            if current != Some(lease) {
+                return Ok(Renewal::Superseded);
+            }
+            let record = tx.query_row(
+                &format!("SELECT {COLUMNS} FROM leases WHERE id = ?1"),
+                [lease],
+                from_row,
+            )?;
+            let grace_ended_at = Timestamp(
+                record
+                    .expires_at
+                    .0
+                    .saturating_add(duration_millis(record.grace)),
+            );
+            if now > grace_ended_at {
+                return Ok(Renewal::PastGrace { grace_ended_at });
+            }
+            let expires_at = Timestamp(now.0.saturating_add(duration_millis(record.length)));
+            tx.execute(
+                "UPDATE leases SET last_heartbeat_at = ?2, expires_at = ?3 WHERE id = ?1",
+                params![lease, now, expires_at],
+            )?;
+            Ok(Renewal::Renewed(LeaseRecord {
+                expires_at,
+                last_heartbeat_at: now,
+                ..record
+            }))
         })
     }
 
@@ -438,6 +545,84 @@ mod tests {
         let second = lease(repo_id, ws, "cccc000000000002");
         db.issue_lease(&second).unwrap();
         assert_eq!(db.workspace(ws).unwrap().lease_id, Some(second.id));
+    }
+
+    #[test]
+    fn renew_checks_state_lease_and_grace() {
+        let (db, repo_id, ws, other) = fixture();
+        let mut l = lease(repo_id, ws, "cccc000000000001");
+        l.expires_at = Timestamp(1_000);
+        l.length = Duration::from_millis(2_000);
+        l.grace = Duration::from_millis(500);
+        db.issue_lease(&l).unwrap();
+
+        let renewed = db.renew_lease(ws, l.id, Timestamp(1_200)).unwrap();
+        let Renewal::Renewed(record) = renewed else {
+            panic!("{renewed:?}")
+        };
+        assert_eq!(record.expires_at, Timestamp(3_200), "revived within grace");
+        assert_eq!(record.last_heartbeat_at, Timestamp(1_200));
+        assert_eq!(db.lease(l.id).unwrap(), record);
+
+        assert_eq!(
+            db.renew_lease(ws, l.id, Timestamp(3_701)).unwrap(),
+            Renewal::PastGrace {
+                grace_ended_at: Timestamp(3_700)
+            }
+        );
+        assert_eq!(
+            db.renew_lease(ws, "cccc00000000000f".parse().unwrap(), Timestamp(2_000))
+                .unwrap(),
+            Renewal::Superseded
+        );
+        assert_eq!(
+            db.renew_lease(other, l.id, Timestamp(2_000)).unwrap(),
+            Renewal::Superseded,
+            "another workspace's lease"
+        );
+        assert_eq!(
+            db.renew_lease("bbbb00000000000f".parse().unwrap(), l.id, Timestamp(2_000))
+                .unwrap(),
+            Renewal::NoWorkspace
+        );
+
+        assert!(db.begin_reclaim(ws, None).unwrap());
+        assert_eq!(
+            db.renew_lease(ws, l.id, Timestamp(2_000)).unwrap(),
+            Renewal::Releasing
+        );
+        db.end_lease(l.id, Timestamp(2_500), LeaseEnd::Expired)
+            .unwrap();
+        db.set_workspace_state(ws, WorkspaceState::Reclaimed)
+            .unwrap();
+        assert_eq!(
+            db.renew_lease(ws, l.id, Timestamp(2_600)).unwrap(),
+            Renewal::Ended {
+                state: WorkspaceState::Reclaimed,
+                at: Some(Timestamp(2_500))
+            }
+        );
+        assert_eq!(db.last_lease(ws).unwrap().unwrap().id, l.id);
+        assert_eq!(db.last_lease(other).unwrap(), None);
+    }
+
+    #[test]
+    fn expiry_reclaim_starts_only_past_grace() {
+        let (db, repo_id, ws, unleased) = fixture();
+        let mut l = lease(repo_id, ws, "cccc000000000001");
+        l.expires_at = Timestamp(1_000);
+        l.grace = Duration::from_millis(500);
+        db.issue_lease(&l).unwrap();
+
+        assert!(!db.begin_reclaim(ws, Some(Timestamp(1_500))).unwrap());
+        assert!(
+            !db.begin_reclaim(unleased, Some(Timestamp(9_000))).unwrap(),
+            "no lease, nothing expired"
+        );
+        assert_eq!(db.workspace(ws).unwrap().state, WorkspaceState::Active);
+        assert!(db.begin_reclaim(ws, Some(Timestamp(1_501))).unwrap());
+        assert_eq!(db.workspace(ws).unwrap().state, WorkspaceState::Releasing);
+        assert!(!db.begin_reclaim(ws, None).unwrap(), "only one caller wins");
     }
 
     #[test]

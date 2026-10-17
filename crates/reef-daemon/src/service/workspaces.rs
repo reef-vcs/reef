@@ -1,4 +1,5 @@
-//! `reef.daemon.v0.Workspaces`: create, list, inspect, release, snapshot.
+//! `reef.daemon.v0.Workspaces`: create, list, inspect, release, snapshot,
+//! heartbeat.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,16 +8,16 @@ use std::time::Duration;
 use reef_lib::error::{Classify, ErrorKind};
 use tonic::{Request, Response, Status};
 
-use super::convert::WorkspaceView;
+use super::convert::{WorkspaceView, lease, proto_duration, timestamp};
 use crate::backend::BackendChoice;
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::model::WorkspaceState;
+use crate::model::{LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceState};
 use crate::proto::v0::workspaces_server::Workspaces;
 use crate::proto::v0::{
-    CreateRequest, CreateResponse, InspectRequest, InspectResponse, ListWorkspacesRequest,
-    ListWorkspacesResponse, ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse,
-    Workspace, create_request,
+    self, CreateRequest, CreateResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest,
+    InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, ReleaseRequest,
+    ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
 };
 use crate::snapshot::SnapshotKind;
 use crate::workspace::{CreateSpec, ReleaseSpec, Start};
@@ -42,6 +43,11 @@ impl WorkspacesService {
     /// A service over `state`.
     pub fn new(state: Arc<AppState>) -> WorkspacesService {
         WorkspacesService { state }
+    }
+
+    /// `record` as a message, its lease state computed at `now`.
+    fn lease_message(&self, record: Option<&LeaseRecord>, now: Timestamp) -> Option<v0::Lease> {
+        record.map(|record| lease(record, self.state.manager.leases(), now))
     }
 }
 
@@ -94,7 +100,7 @@ impl Workspaces for WorkspacesService {
         Ok(Response::new(CreateResponse {
             workspace: Some(Workspace::from(WorkspaceView {
                 record: &created.record,
-                lease: Some(&created.lease),
+                lease: self.lease_message(Some(&created.lease), Timestamp::now()),
             })),
             op_id: created.op_id,
             shared_change: created.shared_change,
@@ -124,6 +130,7 @@ impl Workspaces for WorkspacesService {
             .collect::<Result<Vec<_>, _>>()
             .map_err(status)?;
         let owner = non_empty(request.owner);
+        let now = Timestamp::now();
         let workspaces = manager
             .list(repo, &states, owner.as_deref())
             .map_err(status)?
@@ -131,7 +138,7 @@ impl Workspaces for WorkspacesService {
             .map(|(record, lease)| {
                 Workspace::from(WorkspaceView {
                     record,
-                    lease: lease.as_ref(),
+                    lease: self.lease_message(lease.as_ref(), now),
                 })
             })
             .collect();
@@ -156,7 +163,7 @@ impl Workspaces for WorkspacesService {
         Ok(Response::new(InspectResponse {
             workspace: Some(Workspace::from(WorkspaceView {
                 record: &inspected.record,
-                lease: inspected.lease.as_ref(),
+                lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
             })),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
             other_workspaces_on_change: inspected
@@ -180,8 +187,10 @@ impl Workspaces for WorkspacesService {
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
         let released = manager
-            .release(
+            .leases()
+            .reclaim(
                 record.id,
+                ReclaimReason::Released,
                 ReleaseSpec {
                     force: request.force,
                     final_snapshot: !request.skip_final_snapshot,
@@ -192,7 +201,7 @@ impl Workspaces for WorkspacesService {
         Ok(Response::new(ReleaseResponse {
             final_op_id: released.final_op_id.unwrap_or_default(),
             snapshot_taken: released.snapshot_taken,
-            freed_bytes: released.freed_bytes,
+            freed_bytes: released.freed_bytes.unwrap_or(0),
             workspace_id: record.id.as_hex(),
         }))
     }
@@ -221,6 +230,27 @@ impl Workspaces for WorkspacesService {
             changed: snapshot.changed,
             commit_id: snapshot.commit_id.to_string(),
             scan_ms: snapshot.scan_ms,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn heartbeat(
+        &self,
+        request: Request<HeartbeatRequest>,
+    ) -> Result<Response<HeartbeatResponse>, Status> {
+        let request = request.into_inner();
+        let manager = &self.state.manager;
+        let record = manager
+            .resolve_workspace(&request.repo, &request.workspace_id)
+            .map_err(status)?;
+        record_ids(record.repo_id, record.id);
+        let lease_id: LeaseId = request.lease_id.trim().parse().map_err(status)?;
+        let leases = manager.leases();
+        let renewed = leases.heartbeat(record.id, lease_id).map_err(status)?;
+        Ok(Response::new(HeartbeatResponse {
+            lease_id: renewed.id.as_hex(),
+            expires_at: Some(timestamp(renewed.expires_at)),
+            heartbeat_every: Some(proto_duration(leases.heartbeat_every(renewed.length))),
         }))
     }
 }

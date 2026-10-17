@@ -88,6 +88,31 @@ pub struct Lease {
     pub length_ms: u64,
     /// How long after `expires_at` a heartbeat still revives it.
     pub grace_ms: u64,
+    /// `active`, `in_grace`, `expired`, or `ended`, as of the response.
+    pub state: String,
+    /// `released`, `expired`, or `restored` once it has ended.
+    pub end_reason: Option<String>,
+    /// How often its holder should heartbeat.
+    pub heartbeat_every_ms: Option<u64>,
+}
+
+/// A lease state's JSON name.
+fn lease_state(state: v0::lease::State) -> &'static str {
+    match state {
+        v0::lease::State::Active => "active",
+        v0::lease::State::InGrace => "in_grace",
+        v0::lease::State::Expired => "expired",
+        v0::lease::State::Ended => "ended",
+    }
+}
+
+/// A `google.protobuf.Duration` in whole milliseconds; negative is zero.
+fn duration_millis(duration: &prost_types::Duration) -> u64 {
+    let millis = duration
+        .seconds
+        .saturating_mul(1000)
+        .saturating_add(i64::from(duration.nanos / 1_000_000));
+    u64::try_from(millis).unwrap_or(0)
 }
 
 impl From<&v0::Lease> for Lease {
@@ -101,6 +126,9 @@ impl From<&v0::Lease> for Lease {
             last_heartbeat_at: time(lease.last_heartbeat_at.as_ref()),
             length_ms: lease.length_ms,
             grace_ms: lease.grace_ms,
+            state: lease_state(lease.state()).to_owned(),
+            end_reason: text(&lease.end_reason),
+            heartbeat_every_ms: lease.heartbeat_every.as_ref().map(duration_millis),
         }
     }
 }
@@ -138,7 +166,8 @@ pub struct Workspace {
     pub last_snapshot_at: Option<String>,
     /// That operation.
     pub last_snapshot_op: Option<String>,
-    /// Its unended lease; `null` once released or reclaimed.
+    /// Its lease: the unended one while active, the one it ended with once
+    /// released or reclaimed.
     pub lease: Option<Lease>,
     /// What triggers its snapshots: `notify` or `watchman`.
     pub watcher: String,
@@ -368,6 +397,12 @@ mod tests {
         assert_eq!(value["last_snapshot_at"], serde_json::Value::Null);
         assert_eq!(value["lease"]["expires_at"], "2026-10-16T18:31:18Z");
         assert!(value["lease"].get("expires_at_ms").is_none());
+        assert_eq!(value["lease"]["state"], "active");
+        assert_eq!(value["lease"]["end_reason"], serde_json::Value::Null);
+        assert_eq!(
+            value["lease"]["heartbeat_every_ms"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

@@ -331,6 +331,16 @@ fn validation_names_the_key() {
         ("[lease]\ntick = \"5m\"\n", "lease.tick"),
         ("[lease]\ntick = \"0s\"\n", "lease.tick"),
         ("[lease]\nheartbeat = \"0s\"\n", "lease.heartbeat"),
+        ("[lease]\ndefault = \"1m\"\n", "lease.grace"),
+        ("[lease]\nrestart_grace = \"0s\"\n", "lease.restart_grace"),
+        (
+            "[lease]\nmax = \"1h\"\ndefault = \"1h\"\nrestart_grace = \"2h\"\n",
+            "lease.restart_grace",
+        ),
+        (
+            "[lease]\ndefault = \"10m\"\nheartbeat = \"10m\"\n",
+            "lease.heartbeat",
+        ),
         ("[watcher]\ndebounce = \"2m\"\n", "watcher.debounce"),
         (
             "[watcher]\nmax_concurrent_scans = 0\n",
@@ -375,9 +385,21 @@ fn validation_names_the_key() {
 }
 
 #[test]
+fn heartbeat_near_the_default_warns() {
+    assert_eq!(load_file("").unwrap().warnings(), Vec::<String>::new());
+    let config = load_file("[lease]\ndefault = \"10m\"\nheartbeat = \"5m\"\n").unwrap();
+    let warnings = config.warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].starts_with("lease.heartbeat (5m)"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn sizes_and_durations_parse() {
     let config = load_file(
-        "[snapshot]\nmax_new_file_size = 4096\n[lease]\ndefault = \"90s\"\n[gc]\nundo_window = \"36h\"\n",
+        "[snapshot]\nmax_new_file_size = 4096\n[lease]\ndefault = \"90s\"\ngrace = \"1m\"\n[gc]\nundo_window = \"36h\"\n",
     )
     .unwrap();
     assert_eq!(config.file.snapshot.max_new_file_size, ByteSize(4096));

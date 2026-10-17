@@ -122,6 +122,38 @@ impl Manager {
         self.snapshot_locked(&entry, kind, description).await
     }
 
+    /// While the daemon shuts down, after the scheduler and the lease
+    /// expiry loop have stopped: snapshots every workspace with watcher
+    /// events not yet snapshotted (`kind = shutdown`), concurrently up to
+    /// `watcher.max_concurrent_scans`. Leases are untouched; a restart gives
+    /// them the restart grace. Failures are logged. Returns how many ran.
+    pub async fn shutdown_snapshots(&self) -> usize {
+        let dirty = self.scheduler.dirty();
+        let kind = SnapshotKind::Shutdown;
+        let snapshots = dirty.iter().map(|&id| async move {
+            match self.snapshot_with(id, kind, description(kind, id, None)).await {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "shutdown snapshot failed");
+                    false
+                }
+            }
+        });
+        let taken = futures::future::join_all(snapshots)
+            .await
+            .into_iter()
+            .filter(|ok| *ok)
+            .count();
+        if !dirty.is_empty() {
+            tracing::info!(
+                dirty_count = dirty.len(),
+                snapshot_count = taken,
+                "shutdown snapshots taken"
+            );
+        }
+        taken
+    }
+
     /// A snapshot with the entry's scan lock already held.
     pub(super) async fn snapshot_locked(
         &self,

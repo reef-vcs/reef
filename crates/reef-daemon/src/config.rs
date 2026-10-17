@@ -944,6 +944,21 @@ impl Config {
         }
     }
 
+    /// Values that are allowed but probably wrong, one sentence each. The
+    /// daemon logs them at start; loading runs before logging does.
+    pub fn warnings(&self) -> Vec<String> {
+        let lease = &self.file.lease;
+        let mut warnings = Vec::new();
+        if lease.heartbeat >= lease.default / 2 {
+            warnings.push(format!(
+                "lease.heartbeat ({}) is at least half of lease.default ({}); one missed heartbeat leaves a default lease little time before its grace",
+                format_duration(lease.heartbeat),
+                format_duration(lease.default)
+            ));
+        }
+        warnings
+    }
+
     /// `watcher.max_concurrent_scans`, defaulting to the number of CPUs.
     pub fn max_concurrent_scans(&self) -> usize {
         self.file
@@ -1222,6 +1237,78 @@ fn check_byte_size(path: &Path, table: &toml::Table) -> Result<(), ConfigError> 
     }
 }
 
+/// The `[lease]` rules of [`validate`], in order: each holds, or names its
+/// key and why not.
+fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 8] {
+    let fd = |value: Duration| format_duration(value);
+    [
+        (
+            lease.default <= lease.max,
+            "lease.default",
+            format!(
+                "{} is longer than lease.max ({})",
+                fd(lease.default),
+                fd(lease.max)
+            ),
+        ),
+        (
+            lease.grace <= lease.default,
+            "lease.grace",
+            format!(
+                "{} is longer than lease.default ({})",
+                fd(lease.grace),
+                fd(lease.default)
+            ),
+        ),
+        (
+            lease.restart_grace <= lease.max,
+            "lease.restart_grace",
+            format!(
+                "{} is longer than lease.max ({})",
+                fd(lease.restart_grace),
+                fd(lease.max)
+            ),
+        ),
+        (
+            !lease.tick.is_zero(),
+            "lease.tick",
+            "must be above zero".to_owned(),
+        ),
+        (
+            lease.restart_grace >= lease.tick,
+            "lease.restart_grace",
+            format!(
+                "{} must be at least lease.tick ({}), or a restart could reclaim on its first tick",
+                fd(lease.restart_grace),
+                fd(lease.tick)
+            ),
+        ),
+        (
+            lease.tick < lease.grace,
+            "lease.tick",
+            format!(
+                "{} must be shorter than lease.grace ({})",
+                fd(lease.tick),
+                fd(lease.grace)
+            ),
+        ),
+        (
+            !lease.heartbeat.is_zero(),
+            "lease.heartbeat",
+            "must be above zero".to_owned(),
+        ),
+        (
+            lease.heartbeat < lease.default,
+            "lease.heartbeat",
+            format!(
+                "{} must be shorter than lease.default ({})",
+                fd(lease.heartbeat),
+                fd(lease.default)
+            ),
+        ),
+    ]
+}
+
 /// The rules values must keep beyond their types.
 fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
     let fd = |value: Duration| format_duration(value);
@@ -1249,35 +1336,7 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             reason: "must not be empty".to_owned(),
         });
     }
-    let rules: [(bool, &str, String); 10] = [
-        (
-            lease.default <= lease.max,
-            "lease.default",
-            format!(
-                "{} is longer than lease.max ({})",
-                fd(lease.default),
-                fd(lease.max)
-            ),
-        ),
-        (
-            !lease.tick.is_zero(),
-            "lease.tick",
-            "must be above zero".to_owned(),
-        ),
-        (
-            lease.tick < lease.grace,
-            "lease.tick",
-            format!(
-                "{} must be shorter than lease.grace ({})",
-                fd(lease.tick),
-                fd(lease.grace)
-            ),
-        ),
-        (
-            !lease.heartbeat.is_zero(),
-            "lease.heartbeat",
-            "must be above zero".to_owned(),
-        ),
+    let rules = lease_rules(lease).into_iter().chain([
         (
             watcher.debounce < watcher.fallback_interval,
             "watcher.debounce",
@@ -1315,7 +1374,7 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
                 "{root:?} must contain {REPO_ID_PLACEHOLDER}, and {STATE_PLACEHOLDER} only at the start"
             ),
         ),
-    ];
+    ]);
     match rules.into_iter().find(|(ok, _, _)| !ok) {
         Some((_, key, reason)) => Err(ConfigError::Invalid {
             path: path.to_owned(),

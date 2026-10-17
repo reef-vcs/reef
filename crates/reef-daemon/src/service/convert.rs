@@ -1,7 +1,10 @@
 //! Conversions between the daemon's records and the generated messages,
 //! one per type, so the manager never sees the generated code.
 
+use std::time::Duration;
+
 use crate::backend::DiskUsage;
+use crate::lease::{LeaseManager, LeaseState};
 use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
 use crate::proto::v0;
 
@@ -14,8 +17,17 @@ pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
     }
 }
 
-fn millis(duration: std::time::Duration) -> u64 {
+fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A duration as a `google.protobuf.Duration`.
+pub(super) fn proto_duration(duration: Duration) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        // Below one second, so it fits.
+        nanos: i32::try_from(duration.subsec_nanos()).unwrap_or(0),
+    }
 }
 
 impl From<&RepositoryRecord> for v0::Repository {
@@ -29,24 +41,40 @@ impl From<&RepositoryRecord> for v0::Repository {
     }
 }
 
-impl From<&LeaseRecord> for v0::Lease {
-    fn from(lease: &LeaseRecord) -> Self {
-        Self {
-            id: lease.id.as_hex(),
-            owner: lease.owner.clone(),
-            issued_at: Some(timestamp(lease.issued_at)),
-            expires_at: Some(timestamp(lease.expires_at)),
-            last_heartbeat_at: Some(timestamp(lease.last_heartbeat_at)),
-            length_ms: millis(lease.length),
-            grace_ms: millis(lease.grace),
+impl From<LeaseState> for v0::lease::State {
+    fn from(state: LeaseState) -> Self {
+        match state {
+            LeaseState::Active => Self::Active,
+            LeaseState::InGrace => Self::InGrace,
+            LeaseState::Expired => Self::Expired,
+            LeaseState::Ended => Self::Ended,
         }
     }
 }
 
-/// A workspace row and its unended lease, as one message.
+/// A lease as a message, its state computed at `now`.
+pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v0::Lease {
+    v0::Lease {
+        id: lease.id.as_hex(),
+        owner: lease.owner.clone(),
+        issued_at: Some(timestamp(lease.issued_at)),
+        expires_at: Some(timestamp(lease.expires_at)),
+        last_heartbeat_at: Some(timestamp(lease.last_heartbeat_at)),
+        length_ms: millis(lease.length),
+        grace_ms: millis(lease.grace),
+        state: v0::lease::State::from(LeaseState::of(lease, now)).into(),
+        end_reason: lease
+            .end_reason
+            .map(|reason| reason.as_str().to_owned())
+            .unwrap_or_default(),
+        heartbeat_every: Some(proto_duration(leases.heartbeat_every(lease.length))),
+    }
+}
+
+/// A workspace row and its lease, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
-    pub(super) lease: Option<&'a LeaseRecord>,
+    pub(super) lease: Option<v0::Lease>,
 }
 
 impl From<WorkspaceView<'_>> for v0::Workspace {
@@ -70,7 +98,7 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             created_at: Some(timestamp(record.created_at)),
             last_snapshot_at: record.last_snapshot_at.map(timestamp),
             last_snapshot_op: record.last_snapshot_op.clone().unwrap_or_default(),
-            lease: view.lease.map(v0::Lease::from),
+            lease: view.lease,
             watcher: record.watcher.as_str().to_owned(),
         }
     }
@@ -88,6 +116,17 @@ impl From<&DiskUsage> for v0::DiskUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_split_into_seconds_and_nanos() {
+        assert_eq!(
+            proto_duration(Duration::from_millis(60_250)),
+            prost_types::Duration {
+                seconds: 60,
+                nanos: 250_000_000
+            }
+        );
+    }
 
     #[test]
     fn timestamps_split_into_seconds_and_nanos() {
