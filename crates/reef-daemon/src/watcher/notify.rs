@@ -225,13 +225,14 @@ fn inotify_limits() -> Option<(u64, u64)> {
 
 #[cfg(target_os = "linux")]
 fn log_inotify_limits() {
-    match inotify_limits() {
-        Some((watches, instances)) => tracing::info!(
+    if let Some((watches, instances)) = inotify_limits() {
+        tracing::info!(
             watches_count = watches,
             instances_count = instances,
             "inotify limits"
-        ),
-        None => tracing::warn!("cannot read the inotify limits"),
+        );
+    } else {
+        tracing::warn!("cannot read the inotify limits");
     }
 }
 
