@@ -9,6 +9,7 @@
 //! and moves a `Repo` between threads by ownership or behind a `Mutex`, never
 //! shares one through an `Arc` alone (ADR 0008, R1.03).
 
+pub mod gc;
 pub mod git;
 pub mod ignore;
 pub mod materialize;
@@ -19,6 +20,7 @@ pub mod snapshot;
 pub mod undo;
 pub mod workspace;
 
+pub use gc::{GcError, GcOutcome, WorkingCopyCheckError};
 pub use git::{ImportRefsError, ImportRefsOutcome};
 pub use ignore::IgnoreSources;
 pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeStateReadError};
@@ -42,6 +44,7 @@ pub use watchman_client;
 pub use jj_lib::merged_tree::MergedTree;
 pub use jj_lib::repo::ReadonlyRepo;
 pub use jj_lib::settings::UserSettings;
+pub use jj_lib::working_copy::WorkingCopyStateError;
 pub use workspace::{
     CreateWorkspaceError, ForgetWorkspaceError, ResolveError, Resolved, ResolvedVia, StartPoint,
 };

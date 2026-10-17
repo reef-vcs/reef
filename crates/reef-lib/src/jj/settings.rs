@@ -32,6 +32,13 @@ pub const DEFAULT_MAX_NEW_FILE_SIZE: &str = "1MiB";
 /// Config key naming jj's filesystem monitor: `none` or `watchman`.
 pub const FSMONITOR_BACKEND_KEY: &str = "fsmonitor.backend";
 
+/// Config key naming the `git` binary jj runs for `git gc` (R1.17). The
+/// daemon sets it from `gc.git_executable`.
+pub const GIT_EXECUTABLE_KEY: &str = "git.executable-path";
+
+/// jj's default for [`GIT_EXECUTABLE_KEY`]: `git` on `PATH`.
+pub const DEFAULT_GIT_EXECUTABLE: &str = "git";
+
 /// Config key for jj's own Watchman trigger, which runs `jj util snapshot`
 /// on changes. Always `false`: the daemon is the trigger.
 pub const WATCHMAN_REGISTER_TRIGGER_KEY: &str = "fsmonitor.watchman.register-snapshot-trigger";
@@ -82,6 +89,8 @@ pub struct SettingsSpec<'a> {
     pub operation_username: &'a str,
     /// The filesystem monitor of working copies loaded with these settings.
     pub fsmonitor: Fsmonitor,
+    /// The `git` binary jj's backend GC runs ([`GIT_EXECUTABLE_KEY`]).
+    pub git_executable: &'a str,
 }
 
 /// Failure to build [`UserSettings`].
@@ -118,7 +127,14 @@ impl Classify for SettingsError {
 /// Builds jj-lib settings from jj-lib's defaults plus Reef's identity and
 /// snapshot limits. `operation.hostname` and `operation.username` stay empty.
 pub fn user_settings(identity: &Identity) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, DEFAULT_MAX_NEW_FILE_SIZE, "", "", Fsmonitor::None)
+    build_settings(
+        identity,
+        DEFAULT_MAX_NEW_FILE_SIZE,
+        "",
+        "",
+        Fsmonitor::None,
+        DEFAULT_GIT_EXECUTABLE,
+    )
 }
 
 /// [`user_settings`] with [`MAX_NEW_FILE_SIZE_KEY`] set to `bytes` instead of
@@ -127,7 +143,14 @@ pub fn user_settings_with_max_new_file_size(
     identity: &Identity,
     bytes: u64,
 ) -> Result<UserSettings, SettingsError> {
-    build_settings(identity, &bytes.to_string(), "", "", Fsmonitor::None)
+    build_settings(
+        identity,
+        &bytes.to_string(),
+        "",
+        "",
+        Fsmonitor::None,
+        DEFAULT_GIT_EXECUTABLE,
+    )
 }
 
 /// The daemon's settings: everything in `spec`, including the operation
@@ -141,6 +164,7 @@ pub fn user_settings_from_spec(spec: &SettingsSpec<'_>) -> Result<UserSettings, 
         spec.operation_hostname,
         spec.operation_username,
         spec.fsmonitor,
+        spec.git_executable,
     )
 }
 
@@ -161,6 +185,7 @@ fn build_settings(
     operation_hostname: &str,
     operation_username: &str,
     fsmonitor: Fsmonitor,
+    git_executable: &str,
 ) -> Result<UserSettings, SettingsError> {
     if fsmonitor == Fsmonitor::Watchman && !cfg!(feature = "watchman") {
         return Err(SettingsError::FeatureDisabled("watchman"));
@@ -171,13 +196,15 @@ fn build_settings(
         &format!(
             "user.name = {}\nuser.email = {}\n{MAX_NEW_FILE_SIZE_KEY} = {}\n\
              operation.hostname = {}\noperation.username = {}\n\
-             {FSMONITOR_BACKEND_KEY} = {}\n{WATCHMAN_REGISTER_TRIGGER_KEY} = false\n",
+             {FSMONITOR_BACKEND_KEY} = {}\n{WATCHMAN_REGISTER_TRIGGER_KEY} = false\n\
+             {GIT_EXECUTABLE_KEY} = {}\n",
             toml_string(&identity.name),
             toml_string(&identity.email),
             toml_string(max_new_file_size),
             toml_string(operation_hostname),
             toml_string(operation_username),
             toml_string(fsmonitor.as_str()),
+            toml_string(git_executable),
         ),
     )?;
     config.add_layer(layer);
@@ -269,8 +296,11 @@ mod tests {
             operation_hostname: "host.example",
             operation_username: "agent \"one\"",
             fsmonitor: Fsmonitor::None,
+            git_executable: "/opt/git/bin/git",
         })
         .unwrap();
+        let git: String = settings.get(GIT_EXECUTABLE_KEY).unwrap();
+        assert_eq!(git, "/opt/git/bin/git");
         assert_eq!(settings.operation_hostname(), "host.example");
         assert_eq!(settings.operation_username(), "agent \"one\"");
         assert_eq!(settings.user_email(), "reef@host.example");
@@ -299,6 +329,7 @@ mod tests {
             operation_hostname: "",
             operation_username: "",
             fsmonitor,
+            git_executable: DEFAULT_GIT_EXECUTABLE,
         }
     }
 

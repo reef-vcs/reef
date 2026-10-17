@@ -1,8 +1,9 @@
 //! The daemon client the CLI and tests use. It wraps the generated clients,
 //! one method per RPC, so nothing else depends on their shape.
-//! [`WorkspacesApi`] is the same surface as a trait, for code that wants to
-//! run against a fake daemon (R1.21's heartbeater); [`json`] is the stable
-//! JSON form of the responses that `reef -o json` prints (R1.22).
+//! [`WorkspacesApi`] is the same surface, less maintenance, as a trait, for
+//! code that wants to run against a fake daemon (R1.21's heartbeater);
+//! [`json`] is the stable JSON form of the responses that `reef -o json`
+//! prints (R1.22).
 
 pub mod json;
 
@@ -18,11 +19,12 @@ pub use reef_lib::jj::settings::parse_byte_size;
 
 use crate::error::{detail_of, kind_from_status};
 use crate::proto::v0::daemon_client::DaemonClient;
+use crate::proto::v0::maintenance_client::MaintenanceClient;
 use crate::proto::v0::repositories_client::RepositoriesClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
-    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, HeartbeatRequest,
-    HeartbeatResponse, InspectRequest, InspectResponse, ListRepositoriesRequest,
+    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, GcRequest, GcResponse,
+    HeartbeatRequest, HeartbeatResponse, InspectRequest, InspectResponse, ListRepositoriesRequest,
     ListWorkspacesRequest, RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse,
     Repository, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, Workspace,
 };
@@ -240,10 +242,23 @@ impl Client {
         };
         Ok(self.workspaces().heartbeat(request).await?.into_inner())
     }
+
+    /// `Maintenance.Gc` (R1.17). `repo` empty for every registered
+    /// repository. Can take minutes on a large repository; the caller sets
+    /// its own deadline.
+    pub async fn gc(&self, repo: &str, dry_run: bool) -> Result<GcResponse, ClientError> {
+        let request = GcRequest {
+            repo: repo.to_owned(),
+            dry_run,
+        };
+        let mut client = MaintenanceClient::new(self.channel.clone());
+        Ok(client.gc(request).await?.into_inner())
+    }
 }
 
-/// The client's surface as a trait: one method per RPC, with the same
-/// signatures as [`Client`]'s. [`Client`] implements it; tests and
+/// The workspace side of the client's surface as a trait: one method per
+/// `Daemon`, `Repositories`, and `Workspaces` RPC, with the same
+/// signatures as [`Client`]'s (maintenance is [`Client`]'s alone). [`Client`] implements it; tests and
 /// R1.21's heartbeater implement it over a fake.
 #[tonic::async_trait]
 pub trait WorkspacesApi: Send + Sync {

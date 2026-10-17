@@ -4,7 +4,11 @@
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reef_daemon::client::json::{Created, Inspected, Lease, Repository, Status, Workspace};
+use reef_daemon::client::json::{
+    Created, GcReport, Inspected, Lease, Repository, Status, Workspace,
+};
+
+use serde::Serialize;
 
 use super::out::{TextRender, TextRow, block};
 
@@ -239,9 +243,142 @@ impl TextRender for Status {
     }
 }
 
+/// A byte count in binary units, as `du -h` would: `0 B`, `512 B`,
+/// `1.2 GiB`, `41 MiB` (one decimal below ten).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a rounded display; f64 is exact far past any disk"
+)]
+fn size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else if value < 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
+/// One `ws gc` line after its label: `jj 120 MiB -> 41 MiB, bases 3
+/// removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0`.
+fn gc_line(report: &GcReport) -> String {
+    let stores = if report.stores_removed == 0 {
+        "0".to_owned()
+    } else {
+        format!(
+            "{} removed ({})",
+            report.stores_removed,
+            size(report.store_bytes_freed)
+        )
+    };
+    format!(
+        "jj {} -> {}, bases {} removed ({}), workspaces {} rows ({}), stores {stores}",
+        size(report.jj_bytes_before),
+        size(report.jj_bytes_after),
+        report.base_entries_removed,
+        size(report.base_bytes_freed),
+        report.workspace_rows_removed,
+        size(report.wc_bytes_freed),
+    )
+}
+
+/// `ws gc`'s result: the reports, a JSON array; in text, one line per
+/// repository, then the total, each saying so in a dry run.
+#[derive(Serialize)]
+#[serde(transparent)]
+pub(crate) struct GcReports {
+    pub(crate) reports: Vec<GcReport>,
+    #[serde(skip)]
+    pub(crate) dry_run: bool,
+}
+
+impl TextRender for GcReports {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let dry = if self.dry_run { " (dry run)" } else { "" };
+        let mut total = GcReport {
+            repo_id: String::new(),
+            keep_newer: None,
+            jj_bytes_before: 0,
+            jj_bytes_after: 0,
+            reindex_ms: 0,
+            jj_error: None,
+            base_entries_removed: 0,
+            base_bytes_freed: 0,
+            workspace_rows_removed: 0,
+            wc_bytes_freed: 0,
+            stores_removed: 0,
+            store_bytes_freed: 0,
+            elapsed_ms: 0,
+            dry_run: self.dry_run,
+        };
+        for report in &self.reports {
+            writeln!(w, "repo {}{dry}: {}", report.repo_id, gc_line(report))?;
+            total.jj_bytes_before += report.jj_bytes_before;
+            total.jj_bytes_after += report.jj_bytes_after;
+            total.base_entries_removed += report.base_entries_removed;
+            total.base_bytes_freed += report.base_bytes_freed;
+            total.workspace_rows_removed += report.workspace_rows_removed;
+            total.wc_bytes_freed += report.wc_bytes_freed;
+            total.stores_removed += report.stores_removed;
+            total.store_bytes_freed += report.store_bytes_freed;
+        }
+        writeln!(w, "total{dry}: {}", gc_line(&total))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_use_binary_units() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(512), "512 B");
+        assert_eq!(size(1536), "1.5 KiB");
+        assert_eq!(size(41 << 20), "41 MiB");
+        assert_eq!(size((12 << 30) / 10), "1.2 GiB");
+    }
+
+    #[test]
+    fn gc_reports_read_as_one_line_each_and_a_total() {
+        let report = |id: &str, before: u64, after: u64| GcReport {
+            repo_id: id.to_owned(),
+            keep_newer: None,
+            jj_bytes_before: before,
+            jj_bytes_after: after,
+            reindex_ms: 5,
+            jj_error: None,
+            base_entries_removed: 3,
+            base_bytes_freed: (12 << 30) / 10,
+            workspace_rows_removed: 7,
+            wc_bytes_freed: 18 << 20,
+            stores_removed: 0,
+            store_bytes_freed: 0,
+            elapsed_ms: 9,
+            dry_run: false,
+        };
+        let reports = GcReports {
+            reports: vec![report("aaaa", 120 << 20, 41 << 20), report("bbbb", 0, 0)],
+            dry_run: false,
+        };
+        let mut buffer = Vec::new();
+        reports.render(&mut buffer).unwrap();
+        assert_eq!(
+            String::from_utf8(buffer).unwrap(),
+            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0\n\
+             repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0\n\
+             total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0\n"
+        );
+        let json = serde_json::to_value(&reports).unwrap();
+        assert!(json.is_array(), "{json}");
+    }
 
     #[test]
     fn spans_use_the_largest_unit() {

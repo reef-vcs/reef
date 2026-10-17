@@ -10,8 +10,11 @@ success-output = "immediate"
 
 # The Watchman tests (R1.14) share the machine's one Watchman server, and
 # `survives_watchman_restart` shuts it down, so they run one at a time.
+# The GC tests (R1.17) each run `git gc`, which packs on every core; one at a
+# time, they leave the timing-bound tests beside them their CPU.
 [test-groups]
 watchman = { max-threads = 1 }
+gc = { max-threads = 1 }
 
 # Shown when they pass too, so a run without `watchman` (macOS CI) says
 # `skipped: watchman not on PATH` instead of passing silently.
@@ -19,3 +22,7 @@ watchman = { max-threads = 1 }
 filter = "package(reef-daemon) & binary(watchman)"
 test-group = "watchman"
 success-output = "immediate"
+
+[[profile.default.overrides]]
+filter = "(package(reef-daemon) & binary(gc)) | (package(reef-lib) & binary(jj_gc))"
+test-group = "gc"

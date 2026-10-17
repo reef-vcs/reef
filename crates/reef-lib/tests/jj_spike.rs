@@ -233,6 +233,7 @@ async fn snapshot_records_operation_host_and_user_from_spec() {
         operation_hostname: "build-host.example",
         operation_username: "agent",
         fsmonitor: Fsmonitor::None,
+        git_executable: "git",
     })
     .unwrap();
     let mut repo = Repo::init_internal_git(dir.path(), &settings)

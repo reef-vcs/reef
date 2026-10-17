@@ -71,6 +71,9 @@ pub const MIN_PREFIX_LEN: usize = 4;
 pub const META_DAEMON_INSTANCE_ID: &str = "daemon_instance_id";
 /// `meta` key of the creation time, as decimal unix milliseconds.
 pub const META_CREATED_AT: &str = "created_at";
+/// `meta` key of when the last backup was taken, as decimal unix
+/// milliseconds; written by R1.18's backup, read by R1.17's GC.
+pub const META_LAST_BACKUP_AT: &str = "last_backup_at";
 /// Prefix of the `meta` keys recording applied migrations, such as
 /// `migration:0001_initial`; the value is when it was applied, as decimal
 /// unix milliseconds.

@@ -18,6 +18,7 @@
 //! waits on the base cache's per-tree lock, not on the repository thread.
 
 mod create;
+mod gc;
 mod manager;
 mod reclaim;
 mod snapshot;
@@ -26,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use reef_lib::error::{Classify, ErrorKind};
+use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::repo::ReadError;
 use reef_lib::jj::snapshot::SnapshotError;
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
@@ -34,6 +35,8 @@ use reef_lib::jj::{
     CreateWorkspaceError, ForgetWorkspaceError, ImportRefsError, OpenError, Repo, ResolveError,
 };
 
+pub use gc::JjStep;
+pub(crate) use gc::measure;
 pub use manager::Manager;
 pub use snapshot::REEFIGNORE;
 
@@ -340,6 +343,26 @@ pub enum ManagerError {
     /// The jj settings for the workspace's watcher could not be built.
     #[error("jj settings for the workspace")]
     Settings(#[from] reef_lib::jj::settings::SettingsError),
+    /// GC could not compare a workspace's working copy with its commit
+    /// (R1.17).
+    #[error("check workspace {id}'s working copy")]
+    WorkingCopyCheck {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Why.
+        #[source]
+        source: reef_lib::jj::WorkingCopyCheckError,
+    },
+    /// GC could not move a workspace's working copy to the new head
+    /// (R1.17).
+    #[error("move workspace {id}'s working copy to the new head")]
+    Rebind {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Why.
+        #[source]
+        source: reef_lib::jj::WorkingCopyStateError,
+    },
 }
 
 impl Classify for ManagerError {
@@ -371,6 +394,8 @@ impl Classify for ManagerError {
             Self::Task(_) => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
             Self::Settings(error) => error.kind(),
+            Self::WorkingCopyCheck { source, .. } => source.kind(),
+            Self::Rebind { source, .. } => classify_by_source(source),
         }
     }
 }

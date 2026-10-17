@@ -21,6 +21,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use reef_daemon::model::WorkspaceId;
 use reef_daemon::proto::v0::{CreateRequest, Workspace, create_request};
+use reef_daemon::snapshot::PauseGuard;
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::{Repo, ResolveError};
@@ -314,13 +315,34 @@ async fn two_on_one_change(daemon: &TestDaemon, repo: &SyntheticRepo) -> (Worksp
     (a, b)
 }
 
+/// Holds off automatic snapshots of `a` and `b`, then waits out any already
+/// in flight (an explicit snapshot runs after it), so the test's own
+/// snapshots see its writes first. Under load, creating `b` can outlast
+/// `a`'s fallback interval.
+async fn hold_both(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    a: &Workspace,
+    b: &Workspace,
+) -> (PauseGuard, PauseGuard) {
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = (scheduler.pause(id_of(a)), scheduler.pause(id_of(b)));
+    for ws in [a, b] {
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &ws.id, "")
+            .await
+            .unwrap();
+    }
+    hold
+}
+
 // 6
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_adopts_when_clean() {
     let (daemon, repo) = fixture().await;
     let (a, b) = two_on_one_change(&daemon, &repo).await;
-    let scheduler = daemon.handle.state().manager.scheduler();
-    let _hold = (scheduler.pause(id_of(&a)), scheduler.pause(id_of(&b)));
+    let _hold = hold_both(&daemon, &repo, &a, &b).await;
     write(&a, "from-a.txt", "a\n");
     let snapshot_a = daemon
         .client
@@ -357,8 +379,7 @@ async fn stale_adopts_when_clean() {
 async fn stale_diverges_when_dirty() {
     let (daemon, repo) = fixture().await;
     let (a, b) = two_on_one_change(&daemon, &repo).await;
-    let scheduler = daemon.handle.state().manager.scheduler();
-    let hold = (scheduler.pause(id_of(&a)), scheduler.pause(id_of(&b)));
+    let hold = hold_both(&daemon, &repo, &a, &b).await;
     write(&a, "from-a.txt", "a\n");
     write(&b, "from-b.txt", "b\n");
     let snapshot_a = daemon

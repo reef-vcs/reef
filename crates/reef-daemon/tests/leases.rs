@@ -324,8 +324,10 @@ async fn grace_revives() {
     let begun = Instant::now();
     let ws = create(&daemon, &repo).await;
     let expires_at = millis(ws.lease.as_ref().unwrap().expires_at.as_ref());
-    // Early in the grace, so a slow machine still heartbeats inside it.
-    let wait = u64::try_from(expires_at + 200 - now_ms()).unwrap();
+    // Early in the grace, so a slow machine still heartbeats inside it. A
+    // create slower than the lease (a loaded machine) is in the grace
+    // already: no wait.
+    let wait = u64::try_from(expires_at + 200 - now_ms()).unwrap_or(0);
     tokio::time::sleep(Duration::from_millis(wait)).await;
     assert_eq!(
         inspect(&daemon.client, &ws).await.lease.unwrap().state(),
@@ -482,9 +484,16 @@ async fn final_snapshot_failure_keeps_directory() {
         inspect(&daemon.client, &ws).await.attention == "final-snapshot-failed"
     })
     .await;
-    // Two more ticks, each retrying and failing.
+    // Two more ticks, each retrying and failing. Each attempt holds the
+    // workspace `releasing` until its final snapshot fails, so read it
+    // between attempts.
     tokio::time::sleep(TICK * 2 + Duration::from_millis(100)).await;
-    let inspected = inspect(&daemon.client, &ws).await;
+    let mut inspected = inspect(&daemon.client, &ws).await;
+    let begun = Instant::now();
+    while inspected.state == "releasing" && begun.elapsed() < RECLAIM_BOUND {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        inspected = inspect(&daemon.client, &ws).await;
+    }
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(inspected.state, "active");
     assert_eq!(inspected.attention, "final-snapshot-failed");

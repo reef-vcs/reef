@@ -148,7 +148,7 @@ impl Manager {
         self.read_entries().len()
     }
 
-    fn read_entries(
+    pub(super) fn read_entries(
         &self,
     ) -> std::sync::RwLockReadGuard<'_, HashMap<WorkspaceId, Arc<WorkspaceEntry>>> {
         self.entries.read().unwrap_or_else(PoisonError::into_inner)
@@ -180,8 +180,9 @@ impl Manager {
         }))
     }
 
-    /// The repository's create/forget lock (see `repo_locks`).
-    pub(super) fn repo_lock(&self, repo: RepoId) -> Arc<tokio::sync::RwLock<()>> {
+    /// The repository's create/forget lock (see `repo_locks`); GC holds it
+    /// exclusively too (R1.17).
+    pub(crate) fn repo_lock(&self, repo: RepoId) -> Arc<tokio::sync::RwLock<()>> {
         let mut locks = self
             .repo_locks
             .lock()
@@ -569,8 +570,9 @@ impl Manager {
     }
 
     /// The workspace's jj handle, loaded at the repository thread's head
-    /// (each snapshot reloads it there anyway); `None` (logged) if it cannot
-    /// be reopened.
+    /// (each snapshot reloads it there anyway), with a working copy an
+    /// interrupted GC stranded moved to that head; `None` (logged) if it
+    /// cannot be reopened.
     async fn reopen(
         &self,
         handle: &RepoHandle,
@@ -583,10 +585,14 @@ impl Manager {
         let opened = handle
             .call_async(move |head| {
                 async move {
-                    Ok::<_, ManagerError>(
-                        head.repo
-                            .open_workspace_with(&root, &state_dir, &settings)?,
-                    )
+                    head.refresh().await?;
+                    let mut ws = head.repo.open_workspace_with(&root, &state_dir, &settings)?;
+                    // A GC cut short by a crash can leave the working copy
+                    // on an abandoned operation (R1.17).
+                    if let Err(error) = ws.rebind_if_stranded().await {
+                        tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "cannot check the working copy's operation");
+                    }
+                    Ok::<_, ManagerError>(ws)
                 }
                 .boxed_local()
             })

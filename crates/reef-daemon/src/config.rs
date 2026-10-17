@@ -968,8 +968,8 @@ impl Config {
     }
 
     /// The jj settings every repository is opened and written with: the
-    /// effective identity, `snapshot.max_new_file_size`, and the operation
-    /// host and user.
+    /// effective identity, `snapshot.max_new_file_size`, the operation host
+    /// and user, and `gc.git_executable` as jj's `git.executable-path`.
     pub fn jj_settings(&self) -> Result<UserSettings, SettingsError> {
         self.jj_settings_for(Fsmonitor::None)
     }
@@ -985,6 +985,7 @@ impl Config {
             operation_hostname: &self.operation.hostname,
             operation_username: &self.operation.username,
             fsmonitor,
+            git_executable: &self.file.gc.git_executable,
         })
     }
 

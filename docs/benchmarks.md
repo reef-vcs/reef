@@ -102,3 +102,25 @@ It runs the `reef-daemon` binary with automatic snapshots held off, creates one 
 | `large` (100,014 files) | 167 ms | 31 ms | 5.4× |
 
 A Watchman query costs about 10 ms whatever the tree's size, so narrowing only pays off well above `medium`, which is why `watcher.backend = "auto"` switches at 50,000 files. These numbers need `WATCHMAN_SOCK`, which the binary sets at start (ADR 0023). Without it, jj runs `watchman get-sockname` for every snapshot, and the `medium` Watchman scan measured 151 ms. The test asserts the 3× bound on `large` only.
+
+## Garbage collection (R1.17)
+
+`crates/reef-daemon/tests/gc.rs` has a manual measurement, `medium_thousand_snapshots_then_gc`, and its control, `medium_thousand_snapshots_then_gc_control`:
+
+```sh
+cargo test --release -p reef-daemon --test gc -- --ignored medium --nocapture --test-threads 1
+```
+
+Each registers the `medium` preset, creates one workspace, appends a line to one file three directories deep and takes an explicit snapshot, 1,000 times (watcher snapshots write the same operations), then runs `Maintenance.Gc`. The measurement uses `gc.undo_window = "0s"`, which abandons every operation but the head. The control uses a one-hour window, which abandons nothing, so `git gc` packs the same objects without pruning any. On the M2 Max, release build, git 2.50.1:
+
+| | `undo_window = "0s"` | Control, `"1h"` |
+| --- | ---: | ---: |
+| Git objects after the first snapshot | 74.5 MiB | 74.5 MiB |
+| Git objects after 1,000 snapshots | 101.8 MiB | 101.8 MiB |
+| Git objects after GC | 39.8 MiB | 40.5 MiB |
+| Operation store and git objects (the report's `jj_bytes_*`) | 109.6 → 39.8 MiB | 109.6 → 48.4 MiB |
+| Operations after GC | 2 | 1,004 |
+| Index rebuild (`reindex_ms`) | 21 ms | 109 ms |
+| GC in all | 3.8 s | 4.9 s |
+
+The 1,000 snapshots took about 55 s. The acceptance criterion (git objects within 10% of their size after the first snapshot) holds in both columns, because `git gc` packs the loose objects and deltas the 1,000 versions of one file against each other. Pruning the hidden snapshots saved only 0.7 MiB of git objects. Abandoning the old operations freed the rest of the difference: the operation store's 8.6 MiB of operations and views, which `git gc` cannot touch. The index rebuild walks every surviving operation, so its cost follows the operations newer than the undo window: 109 ms for 1,004 here. R1.23 should measure it on a long log before GC runs more often or automatically.

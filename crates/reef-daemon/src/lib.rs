@@ -18,6 +18,7 @@ pub mod error;
 pub mod lease;
 pub mod lock;
 pub mod logging;
+pub mod maintenance;
 pub mod model;
 pub mod proto;
 pub mod repo;
