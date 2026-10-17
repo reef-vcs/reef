@@ -11,9 +11,9 @@
 //! 1. Create the state directory (`0700`) and take the single-instance lock.
 //! 2. Open the database and apply migrations; write the pid file.
 //! 3. Sweep leftovers: incomplete base cache entries (`*.tmp` under
-//!    `repos/*/bases/`, R1.02); workspace trash (`*.trash-*` under
-//!    `repos/*/ws/`, R1.07) and GC leftovers (`*.gc` under `repos/*/bases/`,
-//!    R1.17) once those tickets land.
+//!    `repos/*/bases/`, R1.02); workspace trash (`*.trash-*` in each
+//!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
+//!    leftovers (`*.gc` under `repos/*/bases/`, R1.17) once that lands.
 //! 4. Reconcile overlay mounts (R1.09; nothing until then).
 //! 5. Start one repository thread per registered repository.
 //! 6. Load active workspaces (R1.05; nothing until then).
@@ -45,6 +45,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::BaseCache;
+use crate::backend::fs_util::sweep_trash;
 use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::lock::{InstanceLock, LockError};
@@ -338,6 +339,16 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
                 tracing::warn!(%repo, error = %ErrorChain(&error), "base cache sweep failed");
             }
             Err(error) => tracing::warn!(%repo, %error, "base cache sweep panicked"),
+        }
+
+        let ws_root = state.config.workspace_root(record.id);
+        match tokio::task::spawn_blocking(move || sweep_trash(&ws_root)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(removed)) => {
+                tracing::info!(%repo, removed_count = removed, "swept workspace trash");
+            }
+            Ok(Err(error)) => tracing::warn!(%repo, %error, "workspace trash sweep failed"),
+            Err(error) => tracing::warn!(%repo, %error, "workspace trash sweep panicked"),
         }
     }
 

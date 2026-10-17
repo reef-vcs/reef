@@ -23,12 +23,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, UNIX_EPOCH};
 
-use nix::sys::stat::{UtimensatFlags, utimensat};
-use nix::sys::time::TimeSpec;
+use reef_daemon::backend::copy::CopyBackend;
 use reef_daemon::backend::fs_util::changed_files_vs_base;
 use reef_daemon::backend::{
-    Availability, BackendChoice, BackendError, BackendKind, BaseCache, Probe, WorkspacePaths,
-    select, select_from,
+    Availability, Backend as _, BackendChoice, BackendError, BackendKind, BaseCache, Probe,
+    WorkspacePaths, select, select_from,
 };
 use reef_daemon::db::Db;
 use reef_daemon::model::RepoId;
@@ -233,13 +232,14 @@ fn tree_state_entries_match_disk() {
 
 #[test]
 fn changed_files_vs_base_counts_edits() {
+    // The copy backend materializes the workspace, keeping every mtime.
     let fixture = Fixture::new(Preset::Small);
     let base = fixture.ensure();
     let ws = WorkspacePaths::under(
         &repo_dir(&fixture.state(), RepoId::generate()),
         "00000000000000aa".parse().unwrap(),
     );
-    copy_preserving_mtimes(&base.path, &ws.root);
+    CopyBackend.materialize(&base, &ws).unwrap();
     let usage = changed_files_vs_base(&base, &ws).unwrap();
     assert_eq!(usage.files_changed, 0, "an exact copy differs in nothing");
     assert_eq!(usage.allocated_bytes, 0);
@@ -257,42 +257,6 @@ fn changed_files_vs_base_counts_edits() {
         "one modified, one deleted, one added"
     );
     assert!(usage.allocated_bytes >= 10_000, "{usage:?}");
-}
-
-/// Copies `from` to `to` with every file's and symlink's mtime kept, as a
-/// backend must (a stand-in for R1.07's copy walk).
-fn copy_preserving_mtimes(from: &Path, to: &Path) {
-    let mut files = Vec::new();
-    for entry in WalkDir::new(from) {
-        let entry = entry.unwrap();
-        let target = to.join(entry.path().strip_prefix(from).unwrap());
-        let file_type = entry.file_type();
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&target).unwrap();
-            continue;
-        }
-        if file_type.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(entry.path()).unwrap(), &target).unwrap();
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-        files.push((entry.path().to_owned(), target));
-    }
-    for (source, target) in files {
-        let mtime = std::fs::symlink_metadata(&source)
-            .unwrap()
-            .modified()
-            .unwrap();
-        let mtime = TimeSpec::from(mtime.duration_since(UNIX_EPOCH).unwrap());
-        utimensat(
-            nix::fcntl::AT_FDCWD,
-            &target,
-            &TimeSpec::UTIME_OMIT,
-            &mtime,
-            UtimensatFlags::NoFollowSymlink,
-        )
-        .unwrap();
-    }
 }
 
 #[test]
