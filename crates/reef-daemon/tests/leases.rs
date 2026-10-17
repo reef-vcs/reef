@@ -213,7 +213,10 @@ fn state_dir_of(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) -> st
 #[tokio::test(flavor = "multi_thread")]
 async fn heartbeat_extends() {
     let (daemon, repo) = fixture().await;
-    let ws = create(&daemon, &repo).await;
+    // The maximum, not the 2 s default: with every test starting at once a
+    // loaded runner can take longer than the default's 3 s to send the
+    // heartbeat, and expiry is not what this test checks.
+    let ws = create_with(&daemon, &repo, 10_000).await;
     let issued = ws.lease.clone().unwrap();
     assert_eq!(issued.state(), lease::State::Active);
     assert_eq!(
@@ -223,6 +226,11 @@ async fn heartbeat_extends() {
             nanos: 500_000_000
         }),
         "lease.heartbeat, under a third of the length"
+    );
+    let short = create(&daemon, &repo).await.lease.unwrap();
+    assert_eq!(
+        short.heartbeat_every, issued.heartbeat_every,
+        "a third of the 2 s default is still above 500 ms"
     );
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -243,7 +251,7 @@ async fn heartbeat_extends() {
     assert!(heartbeat_at >= millis(issued.issued_at.as_ref()) + 900);
     assert_eq!(
         millis(lease.expires_at.as_ref()) - heartbeat_at,
-        2_000,
+        10_000,
         "now plus the length"
     );
     // By the time between issue and heartbeat: about 1 s, more on a busy
@@ -316,7 +324,8 @@ async fn grace_revives() {
     let begun = Instant::now();
     let ws = create(&daemon, &repo).await;
     let expires_at = millis(ws.lease.as_ref().unwrap().expires_at.as_ref());
-    let wait = u64::try_from(expires_at + 500 - now_ms()).unwrap();
+    // Early in the grace, so a slow machine still heartbeats inside it.
+    let wait = u64::try_from(expires_at + 200 - now_ms()).unwrap();
     tokio::time::sleep(Duration::from_millis(wait)).await;
     assert_eq!(
         inspect(&daemon.client, &ws).await.lease.unwrap().state(),
@@ -489,6 +498,11 @@ async fn final_snapshot_failure_keeps_directory() {
     assert_eq!(reclaims.len(), 1);
     assert!(reclaims[0].snapshot_taken);
     assert!(reclaims[0].final_op_id.is_some(), "the file was saved");
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.attention,
+        "",
+        "cleared once reclaimed"
+    );
 }
 
 // 9

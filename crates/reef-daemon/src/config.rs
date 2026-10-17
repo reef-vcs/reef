@@ -1239,7 +1239,7 @@ fn check_byte_size(path: &Path, table: &toml::Table) -> Result<(), ConfigError> 
 
 /// The `[lease]` rules of [`validate`], in order: each holds, or names its
 /// key and why not.
-fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 7] {
+fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 8] {
     let fd = |value: Duration| format_duration(value);
     [
         (
@@ -1273,6 +1273,15 @@ fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 7] {
             !lease.tick.is_zero(),
             "lease.tick",
             "must be above zero".to_owned(),
+        ),
+        (
+            lease.restart_grace >= lease.tick,
+            "lease.restart_grace",
+            format!(
+                "{} must be at least lease.tick ({}), or a restart could reclaim on its first tick",
+                fd(lease.restart_grace),
+                fd(lease.tick)
+            ),
         ),
         (
             lease.tick < lease.grace,

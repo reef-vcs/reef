@@ -92,7 +92,7 @@ impl Manager {
         if !self.db.begin_reclaim(id, expired_by)? {
             let state = self.db.workspace(id)?.state;
             return Err(if state == WorkspaceState::Active {
-                ManagerError::LeaseRenewed(id)
+                ManagerError::LeaseNotExpired(id)
             } else {
                 ManagerError::NotActive { id, state }
             });
@@ -115,7 +115,7 @@ impl Manager {
             .await?;
 
         // 4.
-        let freed_bytes = self.freed_bytes(&entry).await;
+        let freed_bytes = self.freed_bytes(&entry, root_exists).await;
         if freed_bytes.is_none() {
             details.push(DISK_USAGE_UNKNOWN.to_owned());
         }
@@ -135,7 +135,7 @@ impl Manager {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
 
-        self.tear_down(&entry, root_exists, &mut details).await?;
+        self.tear_down(&entry, root_exists, &mut details).await;
         remove_state_dir(&entry.paths.state_dir).await;
 
         let (state, lease_end) = ending(reason);
@@ -219,16 +219,25 @@ impl Manager {
     }
 
     /// The backend's tear-down, on the blocking pool. A failure is logged
-    /// and recorded in `details`, not returned: the jj workspace is gone.
+    /// and recorded in `details`, not returned: the jj workspace is gone, so
+    /// the reclaim must still be recorded.
     async fn tear_down(
         &self,
         entry: &Arc<WorkspaceEntry>,
         root_exists: bool,
         details: &mut Vec<String>,
-    ) -> Result<(), ManagerError> {
+    ) {
         let torn = {
             let entry = Arc::clone(entry);
-            tokio::task::spawn_blocking(move || entry.backend.tear_down(&entry.paths)).await?
+            tokio::task::spawn_blocking(move || entry.backend.tear_down(&entry.paths)).await
+        };
+        let torn = match torn {
+            Ok(torn) => torn,
+            Err(error) => {
+                tracing::error!(%error, "the tear-down task failed");
+                details.push(format!("tear-down task failed: {error}"));
+                return;
+            }
         };
         match torn {
             Ok(()) => {}
@@ -244,7 +253,6 @@ impl Manager {
                 details.push(format!("tear-down failed: {message}"));
             }
         }
-        Ok(())
     }
 
     /// Rolls an aborted release or reclaim back to `active`, setting
@@ -269,17 +277,24 @@ impl Manager {
     }
 
     /// The bytes the workspace has allocated, estimated before tear-down:
-    /// the backend's disk usage beyond the base plus the working-copy state.
-    /// `None` when the backend could not measure it.
-    async fn freed_bytes(&self, entry: &Arc<WorkspaceEntry>) -> Option<u64> {
-        let record = entry.record();
-        let usage = self.disk_usage(Arc::clone(entry), &record).await?;
+    /// the backend's disk usage beyond the base (nothing when the root is
+    /// gone) plus the working-copy state. `None` when the backend could not
+    /// measure a root that exists.
+    async fn freed_bytes(&self, entry: &Arc<WorkspaceEntry>, root_exists: bool) -> Option<u64> {
+        let tree = if root_exists {
+            let record = entry.record();
+            self.disk_usage(Arc::clone(entry), &record)
+                .await?
+                .allocated_bytes
+        } else {
+            0
+        };
         let state_dir = entry.paths.state_dir.clone();
         let state = tokio::task::spawn_blocking(move || allocated_bytes(&state_dir))
             .await
             .ok()
             .and_then(Result::ok)
             .unwrap_or(0);
-        Some(usage.allocated_bytes + state)
+        Some(tree + state)
     }
 }

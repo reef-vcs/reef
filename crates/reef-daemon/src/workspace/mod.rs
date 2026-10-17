@@ -284,10 +284,11 @@ pub enum ManagerError {
     /// The lease could not be issued.
     #[error(transparent)]
     Lease(#[from] LeaseError),
-    /// The expiry tick found the lease past its grace, but a heartbeat or a
-    /// restart grace renewed it before the reclaim began; nothing was done.
-    #[error("the lease of workspace {0} was renewed; not reclaimed")]
-    LeaseRenewed(WorkspaceId),
+    /// An expiry reclaim found the workspace's lease not past its grace (a
+    /// heartbeat or the restart grace renewed it after the tick read it, or
+    /// it has no lease); nothing was done.
+    #[error("the lease of workspace {0} is not past its grace; not reclaimed")]
+    LeaseNotExpired(WorkspaceId),
     /// The request named no repository where one is required.
     #[error("a repository must be named")]
     RepoRequired,
@@ -358,7 +359,7 @@ impl Classify for ManagerError {
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
-            Self::NotActive { .. } | Self::LeaseRenewed(_) => ErrorKind::Conflict,
+            Self::NotActive { .. } | Self::LeaseNotExpired(_) => ErrorKind::Conflict,
             Self::Task(_) => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
             Self::Settings(error) => error.kind(),

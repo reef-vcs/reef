@@ -19,6 +19,7 @@ use reef_lib::telemetry::elapsed_ms;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::config::LeaseSection;
 use crate::db::{Db, DbError, Renewal};
@@ -27,6 +28,10 @@ use crate::model::{
     WorkspaceState, duration_millis,
 };
 use crate::workspace::{Manager, ManagerError, ReclaimOutcome, ReleaseSpec};
+
+/// The shortest lease a request may ask for, so `heartbeat_every` (a third
+/// of the length at most) stays a real interval.
+pub const MIN_LENGTH: Duration = Duration::from_secs(1);
 
 /// A failing reclaim is logged at `error` on its first tick and then once
 /// every this many ticks; the ticks between log at `debug`.
@@ -105,8 +110,9 @@ pub enum LeaseError {
         /// When its lease ended.
         at: Option<Timestamp>,
     },
-    /// The workspace is being released or reclaimed now.
-    #[error("workspace {0} is being released")]
+    /// The workspace is being released or reclaimed now. Retryable: a
+    /// release whose final snapshot fails goes back to `active`.
+    #[error("workspace {0} is being released; retry")]
     Releasing(WorkspaceId),
     /// The lease is past its grace; its workspace is about to be reclaimed.
     #[error("lease {lease} of workspace {workspace} expired; its grace ended at {grace_ended_at}")]
@@ -126,6 +132,9 @@ pub enum LeaseError {
         /// `lease.max`.
         max: Duration,
     },
+    /// The requested lease is shorter than [`MIN_LENGTH`].
+    #[error("a lease of {0:?} is shorter than the minimum {MIN_LENGTH:?}")]
+    TooShort(Duration),
     /// The database failed.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -135,11 +144,11 @@ impl Classify for LeaseError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::NotFound(_) => ErrorKind::NotFound,
-            Self::Superseded { .. }
-            | Self::Reclaimed { .. }
-            | Self::Releasing(_)
-            | Self::Expired { .. } => ErrorKind::Conflict,
-            Self::TooLong { .. } => ErrorKind::InvalidArgument,
+            Self::Superseded { .. } | Self::Reclaimed { .. } | Self::Expired { .. } => {
+                ErrorKind::Conflict
+            }
+            Self::Releasing(_) => ErrorKind::Unavailable,
+            Self::TooLong { .. } | Self::TooShort(_) => ErrorKind::InvalidArgument,
             Self::Db(error) => error.kind(),
         }
     }
@@ -183,7 +192,8 @@ impl LeaseManager {
     }
 
     /// The lease length for a request: `lease.default` when none (or zero)
-    /// is asked for; above `lease.max` is [`LeaseError::TooLong`].
+    /// is asked for; above `lease.max` is [`LeaseError::TooLong`], below
+    /// [`MIN_LENGTH`] [`LeaseError::TooShort`].
     pub fn length_for(&self, requested: Option<Duration>) -> Result<Duration, LeaseError> {
         match requested {
             None => Ok(self.config.default),
@@ -192,6 +202,7 @@ impl LeaseManager {
                 requested: length,
                 max: self.config.max,
             }),
+            Some(length) if length < MIN_LENGTH => Err(LeaseError::TooShort(length)),
             Some(length) => Ok(length),
         }
     }
@@ -311,12 +322,14 @@ impl LeaseManager {
         Ok(extended)
     }
 
-    /// Starts the expiry loop: every `lease.tick`, [`LeaseManager::tick_once`].
+    /// Starts the expiry loop: every `lease.tick`, [`LeaseManager::tick_once`],
+    /// the first one `lease.tick` from now.
     /// [`LeaseManager::stop`] ends it between ticks, or between two reclaims
     /// of one tick; a reclaim in progress always finishes.
     pub fn start_expiry_loop(self: Arc<Self>) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.tick);
+            let first = tokio::time::Instant::now() + self.config.tick;
+            let mut interval = tokio::time::interval_at(first, self.config.tick);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
@@ -362,7 +375,13 @@ impl LeaseManager {
             {
                 Ok(_) => reclaimed.push(ws),
                 // A heartbeat revived it, or a release got there first.
-                Err(error @ (ManagerError::LeaseRenewed(_) | ManagerError::NotActive { .. })) => {
+                Err(
+                    error @ (ManagerError::LeaseNotExpired(_)
+                    | ManagerError::NotActive {
+                        state: WorkspaceState::Released | WorkspaceState::Reclaimed,
+                        ..
+                    }),
+                ) => {
                     tracing::debug!(workspace_id = %ws, error = %ErrorChain(&error), "expired lease not reclaimed");
                 }
                 Err(error) => {
@@ -415,6 +434,11 @@ impl LeaseManager {
 
     /// Reclaims `ws` for `reason` through the shared pipeline
     /// ([`Manager::reclaim`]); `Release` passes its own [`ReleaseSpec`].
+    ///
+    /// Runs as its own task, as snapshots do: a caller that stops waiting
+    /// (a `Release` whose client disconnected, or one aborted at shutdown)
+    /// must not cut the pipeline between forgetting the jj workspace and
+    /// recording the reclaim.
     pub async fn reclaim(
         &self,
         ws: WorkspaceId,
@@ -423,7 +447,8 @@ impl LeaseManager {
     ) -> Result<ReclaimOutcome, ManagerError> {
         let begun = Instant::now();
         let manager = self.manager.upgrade().ok_or(ManagerError::NotLoaded(ws))?;
-        let outcome = manager.reclaim(ws, reason, spec).await;
+        let task = async move { manager.reclaim(ws, reason, spec).await };
+        let outcome = tokio::spawn(task.instrument(tracing::Span::current())).await?;
         tracing::debug!(workspace_id = %ws, elapsed_ms = elapsed_ms(begun), ok = outcome.is_ok(), "reclaim finished");
         outcome
     }
@@ -480,6 +505,10 @@ mod tests {
             .length_for(Some(Duration::from_hours(25)))
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+        let error = leases
+            .length_for(Some(Duration::from_millis(2)))
+            .unwrap_err();
+        assert!(matches!(error, LeaseError::TooShort(_)), "{error:?}");
     }
 
     #[test]

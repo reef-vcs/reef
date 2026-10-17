@@ -332,6 +332,7 @@ fn validation_names_the_key() {
         ("[lease]\ntick = \"0s\"\n", "lease.tick"),
         ("[lease]\nheartbeat = \"0s\"\n", "lease.heartbeat"),
         ("[lease]\ndefault = \"1m\"\n", "lease.grace"),
+        ("[lease]\nrestart_grace = \"0s\"\n", "lease.restart_grace"),
         (
             "[lease]\nmax = \"1h\"\ndefault = \"1h\"\nrestart_grace = \"2h\"\n",
             "lease.restart_grace",

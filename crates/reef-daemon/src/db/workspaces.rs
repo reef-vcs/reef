@@ -293,7 +293,8 @@ impl Db {
     }
 
     /// Ends a workspace's life in one transaction: moves it to `state`
-    /// (`released` or `reclaimed`), ends its unended lease (if any) at
+    /// (`released` or `reclaimed`, clearing `attention`), ends its unended
+    /// lease (if any) at
     /// `reclaim.at` for `lease_end`, and appends `reclaim` to the reclaim
     /// log. [`DbError::Conflict`] if the lifecycle does not allow the move;
     /// then nothing is written.
@@ -323,8 +324,10 @@ impl Db {
                  WHERE workspace_id = ?1 AND ended_at IS NULL",
                 params![id, reclaim.at, lease_end],
             )?;
+            // Whatever needed attention (a failed final snapshot) is moot
+            // once the directory is gone.
             tx.execute(
-                "UPDATE workspaces SET state = ?2, lease_id = NULL WHERE id = ?1",
+                "UPDATE workspaces SET state = ?2, lease_id = NULL, attention = NULL WHERE id = ?1",
                 params![id, state],
             )?;
             insert_reclaim_in(tx, reclaim)?;
