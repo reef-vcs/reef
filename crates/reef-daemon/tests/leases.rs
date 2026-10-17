@@ -482,9 +482,16 @@ async fn final_snapshot_failure_keeps_directory() {
         inspect(&daemon.client, &ws).await.attention == "final-snapshot-failed"
     })
     .await;
-    // Two more ticks, each retrying and failing.
+    // Two more ticks, each retrying and failing. Each attempt holds the
+    // workspace `releasing` until its final snapshot fails, so read it
+    // between attempts.
     tokio::time::sleep(TICK * 2 + Duration::from_millis(100)).await;
-    let inspected = inspect(&daemon.client, &ws).await;
+    let mut inspected = inspect(&daemon.client, &ws).await;
+    let begun = Instant::now();
+    while inspected.state == "releasing" && begun.elapsed() < RECLAIM_BOUND {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        inspected = inspect(&daemon.client, &ws).await;
+    }
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(inspected.state, "active");
     assert_eq!(inspected.attention, "final-snapshot-failed");
