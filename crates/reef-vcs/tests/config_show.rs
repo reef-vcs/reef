@@ -144,3 +144,19 @@ fn invalid_value_exits_2() {
     let text = String::from_utf8(output.stderr).unwrap();
     assert!(text.contains("invalid lease.default"), "{text}");
 }
+
+/// A `REEF_CONFIG` that names no file is an error (exit 3, `NotFound`), not
+/// a silent fall back to defaults.
+#[test]
+fn missing_named_config_exits_3() {
+    let tmp = state_dir();
+    let missing = tmp.path().join("confg.toml");
+    let output = reef(
+        tmp.path(),
+        &["config", "show"],
+        &[("REEF_CONFIG", &missing)],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    let text = String::from_utf8(output.stderr).unwrap();
+    assert!(text.contains(&missing.display().to_string()), "{text}");
+}

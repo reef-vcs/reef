@@ -240,6 +240,30 @@ fn relative_paths_in_the_file_are_under_the_state_dir() {
 }
 
 #[test]
+fn a_named_config_file_must_exist() {
+    let tmp = state_dir(None);
+    let missing = tmp.path().join("confg.toml");
+    let err = load(
+        &tmp,
+        &PathOverrides::default(),
+        &[(CONFIG_ENV, missing.to_str().unwrap())],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConfigError::Missing { path, source_layer: Source::Env } if *path == missing),
+        "{err:?}"
+    );
+    assert_eq!(err.kind(), ErrorKind::NotFound);
+    assert!(err.to_string().contains(CONFIG_ENV), "{err}");
+    let flag = PathOverrides {
+        config_file: Some(missing.clone()),
+        ..PathOverrides::default()
+    };
+    let err = load(&tmp, &flag, &[]).unwrap_err();
+    assert!(err.to_string().contains("--config"), "{err}");
+}
+
+#[test]
 fn reef_config_names_the_file() {
     let tmp = state_dir(None);
     let other = tmp.path().join("other.toml");
@@ -327,6 +351,15 @@ fn validation_names_the_key() {
             "snapshot.max_new_file_size",
         ),
         ("[workspace]\nroot = \"/ws\"\n", "workspace.root"),
+        ("[daemon]\nsocket = \"\"\n", "daemon.socket"),
+        ("[daemon]\npid_file = \"\"\n", "daemon.pid_file"),
+        ("[identity]\nname = \"\"\n", "identity.name"),
+        ("[identity]\nemail = \"\"\n", "identity.email"),
+        (
+            "[workspace]\nfuse_overlayfs = \"\"\n",
+            "workspace.fuse_overlayfs",
+        ),
+        ("[gc]\ngit_executable = \"\"\n", "gc.git_executable"),
         (
             "[workspace]\nroot = \"/x/<state>/<repo-id>\"\n",
             "workspace.root",
@@ -437,6 +470,25 @@ fn jj_settings_carry_the_operation_identity() {
     let head = &pollster::block_on(repo.op_log(1)).unwrap()[0];
     assert_eq!(head.hostname, host);
     assert_eq!(head.username, os_username());
+}
+
+/// Strings toml has to escape or write in another form, and durations and
+/// sizes outside the exact-unit defaults, load back unchanged.
+#[test]
+fn effective_toml_round_trips_odd_values() {
+    let tmp = state_dir(Some(concat!(
+        "[identity]\nname = 'A \"quoted\" \\ name\twith tab'\nemail = \"a@b\\nc\"\n",
+        "[daemon]\nsocket = \"/tmp/it's here.sock\"\n",
+        "[lease]\ndefault = \"1h 30m\"\nmax = \"2w\"\ntick = \"1500ms\"\n",
+        "[snapshot]\nmax_new_file_size = 1536\n",
+        "[workspace]\nroot = \"<state>/ws dir/<repo-id>\"\n",
+    )));
+    let config = load(&tmp, &PathOverrides::default(), &[]).unwrap();
+    let text = config.to_effective_toml();
+    let back: FileConfig = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert_eq!(back, config.effective_file());
+    assert_eq!(back.identity.name, "A \"quoted\" \\ name\twith tab");
+    assert_eq!(back.lease.default, Duration::from_mins(90));
 }
 
 #[test]

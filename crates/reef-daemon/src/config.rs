@@ -30,7 +30,8 @@
 //! `stores/<name>/<lockfile-hash>/`.
 //!
 //! In `config.toml`, unknown keys are errors, durations are humantime's form
-//! in integer units (`"500ms"`, `"30m"`, `"7d"`), sizes are an integer number
+//! (`"500ms"`, `"30m"`, `"7d"`, `"1h 30m"`; printed back in the largest exact
+//! unit), sizes are an integer number
 //! of bytes or a string with a `B`, `KiB`, `MiB`, or `GiB` unit, and relative
 //! paths are relative to the state directory.
 
@@ -648,6 +649,18 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
+    /// A config file named by `REEF_CONFIG` or `--config` does not exist.
+    #[error(
+        "the configuration file {} does not exist (named by {})",
+        path.display(),
+        if *source_layer == Source::Flag { "--config" } else { CONFIG_ENV }
+    )]
+    Missing {
+        /// The file.
+        path: PathBuf,
+        /// [`Source::Env`] or [`Source::Flag`].
+        source_layer: Source,
+    },
     /// The config file is not valid TOML, or a value has the wrong type.
     #[error("parse the configuration file {}", path.display())]
     Parse {
@@ -690,6 +703,7 @@ impl Classify for ConfigError {
             | Self::Parse { .. }
             | Self::UnknownKey { .. }
             | Self::Invalid { .. } => ErrorKind::InvalidArgument,
+            Self::Missing { .. } => ErrorKind::NotFound,
             Self::Io { source, .. } | Self::Read { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
                     ErrorKind::PermissionDenied
@@ -842,6 +856,14 @@ impl Config {
         let path = layered.config_file.clone();
         let (file, file_keys, read) = match read_file(&path)? {
             Some((file, keys)) => (file, keys, true),
+            // Only the implicit `<state>/config.toml` may be absent: a file
+            // named by `REEF_CONFIG` or `--config` that is missing is a typo.
+            None if layered.config_file_source != Source::Default => {
+                return Err(ConfigError::Missing {
+                    path,
+                    source_layer: layered.config_file_source,
+                });
+            }
             None => (FileConfig::default(), BTreeSet::new(), false),
         };
         validate(&file, &path)?;
@@ -1196,6 +1218,28 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
     let fd = |value: Duration| format_duration(value);
     let (lease, watcher) = (&file.lease, &file.watcher);
     let root = &file.workspace.root;
+    let path_empty = |path: Option<&PathBuf>| path.is_some_and(|p| p.as_os_str().is_empty());
+    let required = [
+        (path_empty(file.daemon.socket.as_ref()), "daemon.socket"),
+        (path_empty(file.daemon.pid_file.as_ref()), "daemon.pid_file"),
+        (file.identity.name.is_empty(), "identity.name"),
+        (
+            file.identity.email.as_ref().is_some_and(String::is_empty),
+            "identity.email",
+        ),
+        (
+            file.workspace.fuse_overlayfs.is_empty(),
+            "workspace.fuse_overlayfs",
+        ),
+        (file.gc.git_executable.is_empty(), "gc.git_executable"),
+    ];
+    if let Some((_, key)) = required.into_iter().find(|(empty, _)| *empty) {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            key: key.to_owned(),
+            reason: "must not be empty".to_owned(),
+        });
+    }
     let rules: [(bool, &str, String); 10] = [
         (
             lease.default <= lease.max,

@@ -47,9 +47,7 @@ impl ErrorKind {
                 | Self::PermissionDenied
         )
     }
-}
 
-impl ErrorKind {
     /// The CLI's exit code for a command that failed with this kind: 2 for
     /// `InvalidArgument`, 3 `NotFound`, 4 `AlreadyExists`, 5 `Conflict`, 6
     /// `Unavailable`, 7 `PermissionDenied`, 8 `Io`, 1 `Internal`.
