@@ -605,3 +605,116 @@ async fn jj_cli_lists_reef_workspace() {
         "a Reef workspace is not a jj repo"
     );
 }
+
+// R1.05: a reopened workspace is loaded at its working copy's operation, so
+// it snapshots even after other workspaces moved the head.
+#[tokio::test]
+async fn reopened_workspace_snapshots_after_others_moved_head() {
+    let (mut fx, commit) = Fixture::with_files().await;
+    let (ws, root, state) = fx.create("reef-x", StartPoint::NewOn(commit.clone())).await;
+    let created_at = ws.op_id();
+    drop(ws);
+    // Another workspace's creation moves the head past reef-x's operation.
+    fx.create("reef-y", StartPoint::NewOn(commit)).await;
+    assert_ne!(fx.main.op_id(), created_at);
+
+    let mut ws = fx.main.open_workspace(&root, &state).unwrap();
+    let error = ws.snapshot("reef: snapshot workspace x").await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Conflict,
+        "loaded at head, it is stale"
+    );
+    assert_eq!(ws.reload_at_working_copy_op().await.unwrap(), created_at);
+    assert_eq!(ws.op_id(), created_at);
+    write(&root, "x.txt", "x\n");
+    assert!(
+        ws.snapshot("reef: snapshot workspace x")
+            .await
+            .unwrap()
+            .changed
+    );
+}
+
+// R1.05: the workspaces on a commit, a workspace's own change, and a
+// commit's parents.
+#[tokio::test]
+async fn workspaces_on_commit_wc_change_and_parents() {
+    let (mut fx, commit) = Fixture::with_files().await;
+    let (edit, _, _) = fx.create("reef-x", StartPoint::Edit(commit.clone())).await;
+    let (new, _, _) = fx.create("reef-y", StartPoint::NewOn(commit.clone())).await;
+    assert_eq!(
+        fx.main.workspaces_on_commit(&commit),
+        ["default", "reef-x"],
+        "edit shares the commit with the user's own workspace"
+    );
+    let wc = edit.wc_change().unwrap();
+    assert_eq!(wc.commit_id, commit);
+    assert!(wc.is_wc);
+    let new_wc = new.wc_change().unwrap();
+    assert_ne!(new_wc.change_id, wc.change_id);
+    assert_eq!(
+        fx.main.commit_parents(&new_wc.commit_id).await.unwrap(),
+        std::slice::from_ref(&commit)
+    );
+    assert_eq!(
+        fx.main.workspaces_on_commit(&"00".parse().unwrap()).len(),
+        0,
+        "not a commit id of this repository"
+    );
+    assert!(
+        fx.main
+            .workspaces_on_commit(&new_wc.commit_id)
+            .contains(&"reef-y".to_owned())
+    );
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+// R1.05: a colocated repository imports git's refs as bookmarks; an
+// internal-git one is not colocated.
+#[tokio::test]
+async fn colocated_repository_imports_git_branches() {
+    let (internal, _) = Fixture::with_files().await;
+    assert!(!internal.main.is_colocated());
+    if !git_available() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("colocated");
+    std::fs::create_dir(&root).unwrap();
+    write(&root, "a.txt", "a\n");
+    let mut repo = Repo::init_colocated_git(&root, &settings()).await.unwrap();
+    assert!(repo.is_colocated());
+    let commit = repo.snapshot("snapshot").await.unwrap().wc_commit;
+
+    let nothing = repo.import_git_refs("reef: import git refs").await.unwrap();
+    assert_eq!(nothing.op_id, None, "nothing moved in git");
+
+    let output = std::process::Command::new("git")
+        .args(["branch", "feat", commit.as_str()])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing = repo.resolve_revision("feat").await.unwrap_err();
+    assert!(matches!(missing, ResolveError::NoMatch(_)), "{missing:?}");
+    let imported = repo.import_git_refs("reef: import git refs").await.unwrap();
+    assert_eq!(imported.op_id.as_ref(), Some(&repo.op_id()));
+    assert_eq!(imported.failed_refs.len(), 0, "{:?}", imported.failed_refs);
+    let resolved = repo.resolve_revision("feat").await.unwrap();
+    assert_eq!(
+        (resolved.via, resolved.commit_id),
+        (ResolvedVia::Bookmark, commit)
+    );
+}

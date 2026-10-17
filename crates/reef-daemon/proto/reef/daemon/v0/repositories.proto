@@ -1,0 +1,41 @@
+// Registering the repositories workspaces are created in (R1.05).
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+import "reef/daemon/v0/types.proto";
+
+service Repositories {
+  // Registers the jj repository containing `path`, by its root. Registering
+  // a registered repository again succeeds with `already_registered`.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Every registered repository, oldest first.
+  rpc List(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+  // Unregisters a repository. Refused with FAILED_PRECONDITION while any of
+  // its workspaces is active.
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+}
+
+message RegisterRequest {
+  // An absolute path inside the repository's root.
+  string path = 1;
+}
+
+message RegisterResponse {
+  Repository repository = 1;
+  bool already_registered = 2;
+}
+
+message ListRepositoriesRequest {}
+
+message ListRepositoriesResponse {
+  repeated Repository repositories = 1;
+}
+
+message ForgetRequest {
+  // A repo id, a unique id prefix (4 or more hex characters), or an
+  // absolute path inside a registered root.
+  string repo = 1;
+}
+
+message ForgetResponse {}

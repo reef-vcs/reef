@@ -1,0 +1,14 @@
+// The detail every daemon error carries in its status details (R1.05,
+// ADR 0017).
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+message ErrorDetail {
+  // The error's `reef_lib::error::ErrorKind`, by variant name: NotFound,
+  // AlreadyExists, InvalidArgument, Conflict, Unavailable,
+  // PermissionDenied, Io, or Internal.
+  string kind = 1;
+  // The error's message, then each source's, outermost first.
+  repeated string chain = 2;
+}

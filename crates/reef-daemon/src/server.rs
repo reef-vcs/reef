@@ -7,10 +7,19 @@ use tonic::transport::server::Router;
 
 use crate::daemon::AppState;
 use crate::proto::v0::daemon_server::DaemonServer;
+use crate::proto::v0::repositories_server::RepositoriesServer;
+use crate::proto::v0::workspaces_server::WorkspacesServer;
 use crate::service::daemon::DaemonService;
+use crate::service::repositories::RepositoriesService;
+use crate::service::workspaces::WorkspacesService;
 
 /// The router over `state`, one `add_service` per service. Built here, not
 /// generically, so `Daemon::start` stays non-generic over tonic's layers.
 pub fn router(state: Arc<AppState>) -> Router {
-    Server::builder().add_service(DaemonServer::new(DaemonService::new(state)))
+    Server::builder()
+        .add_service(DaemonServer::new(DaemonService::new(Arc::clone(&state))))
+        .add_service(RepositoriesServer::new(RepositoriesService::new(
+            Arc::clone(&state),
+        )))
+        .add_service(WorkspacesServer::new(WorkspacesService::new(state)))
 }

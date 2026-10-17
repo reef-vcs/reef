@@ -401,10 +401,6 @@ pub fn is_executable(mode: u32) -> bool {
 /// the background, on the tokio runtime's blocking pool when called with a
 /// runtime (`spawn_blocking` threads count), inline otherwise. Returns once
 /// `path` is gone: "no directory on disk" holds from the rename.
-#[expect(
-    clippy::unused_async,
-    reason = "async for async callers, per R1.07; the rename is its only blocking step and is quick"
-)]
 pub async fn remove_tree_async(path: &Path) -> io::Result<()> {
     remove_tree_in_background(path).map(drop)
 }

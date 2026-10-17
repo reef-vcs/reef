@@ -1,0 +1,9 @@
+# cargo-nextest configuration (https://nexte.st/docs/configuration/).
+#
+# Tests that print a measurement show their output even when they pass, so
+# the numbers appear in CI logs on both runners (R1.05: create time with the
+# base cached, the first snapshot against a cold scan, the colocated ref
+# import).
+[[profile.default.overrides]]
+filter = "package(reef-daemon) & binary(workspaces) & (test(register_then_create_default) | test(first_snapshot_is_noop) | test(colocated_repo_imports_refs))"
+success-output = "immediate"

@@ -262,6 +262,48 @@ impl Repo {
         Ok(repo)
     }
 
+    /// Creates a jj repository colocated with a new git repository at
+    /// `path/.git` (git and jj share the working copy, as `jj git init
+    /// --colocate` does), in the existing directory `path`, with one empty
+    /// working-copy commit, and opens it. Files already in `path` are not
+    /// snapshotted.
+    #[tracing::instrument(skip_all, fields(path = %path.display()))]
+    pub async fn init_colocated_git(
+        path: &Path,
+        settings: &UserSettings,
+    ) -> Result<Self, InitError> {
+        let (workspace, repo) =
+            Workspace::init_colocated_git(settings, path, gix::hash::Kind::Sha1)
+                .await
+                .map_err(InitError::from)
+                .inspect_err(|error| crate::log_failure!(error))?;
+        let repo = Self { workspace, repo };
+        tracing::info!(
+            repo = %repo.workspace_root().display(),
+            op_id = %repo.op_id(),
+            "colocated repository created"
+        );
+        Ok(repo)
+    }
+
+    /// Whether the repository's store is a git repository at
+    /// `<workspace root>/.git`, shared with git's own working copy: a
+    /// colocated repository, whose git refs [`Repo::import_git_refs`] brings
+    /// into jj's view.
+    pub fn is_colocated(&self) -> bool {
+        let Ok(git_backend) = jj_lib::git::get_git_backend(self.repo.store()) else {
+            return false;
+        };
+        let dot_git = self.workspace_root().join(".git");
+        match (
+            std::fs::canonicalize(git_backend.git_repo_path()),
+            std::fs::canonicalize(&dot_git),
+        ) {
+            (Ok(store), Ok(dot_git)) => store == dot_git,
+            _ => false,
+        }
+    }
+
     async fn open_unlogged(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
         let absolute = std::path::absolute(path).map_err(|source| OpenError::CurrentDir {
             path: path.to_owned(),

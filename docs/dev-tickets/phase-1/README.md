@@ -12,9 +12,9 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.02 | [R1.02-backend-trait-and-base-cache.md](R1.02-backend-trait-and-base-cache.md) | M | R1.01 | R1.05, R1.07, R1.08, R1.09 |
 | R1.03 | [R1.03-daemon-skeleton.md](R1.03-daemon-skeleton.md) | M | R1.01, R0.09 | R1.04, R1.05 |
 | R1.04 | [R1.04-config-and-state-dir.md](R1.04-config-and-state-dir.md) | S | R1.03, R0.09 | R1.18, R1.22, R2.08 |
-| R1.05 | [R1.05-workspace-service.md](R1.05-workspace-service.md) | M | R1.02, R1.03 | R1.06, R1.12, R1.13, R1.15, R1.20, R1.21, R1.22, R2.01 |
+| R1.05 | [R1.05-workspace-service.md](R1.05-workspace-service.md) | M | R1.02, R1.03, R1.07 | R1.06, R1.12, R1.13, R1.15, R1.20, R1.21, R1.22, R2.01 |
 | R1.06 | [R1.06-workspace-move.md](R1.06-workspace-move.md) | S | R1.05, R1.13, R1.11 | |
-| R1.07 | [R1.07-copy-backend.md](R1.07-copy-backend.md) | S | R1.02 | R1.11 |
+| R1.07 | [R1.07-copy-backend.md](R1.07-copy-backend.md) | S | R1.02 | R1.05, R1.11 |
 | R1.08 | [R1.08-apfs-clone-backend.md](R1.08-apfs-clone-backend.md) | M | R1.02 | R1.10, R1.20 |
 | R1.09 | [R1.09-overlayfs-backend.md](R1.09-overlayfs-backend.md) | L | R1.02 | R1.20 |
 | R1.10 | [R1.10-reflink-backend.md](R1.10-reflink-backend.md) | S | R1.08 | |
@@ -36,7 +36,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 ## Suggested execution order
 
 1. R1.01 (needs only Phase 0), then R1.03 (needs R1.01 for the database). R1.02 (needs R1.01) runs in parallel with R1.03; R1.04 follows R1.03.
-2. R1.05 (needs R1.02 and R1.03). In parallel: R1.07, R1.08, R1.09 (need R1.02) and R1.19 (needs R1.01). R1.09 is the long pole of the phase; start it as soon as R1.02 lands.
+2. R1.07 (needs R1.02), then R1.05 (needs R1.02, R1.03, and R1.07: its tests need a backend that materializes). In parallel: R1.08, R1.09 (need R1.02) and R1.19 (needs R1.01). R1.09 is the long pole of the phase; start it as soon as R1.02 lands.
 3. R1.13 (needs R1.05). R1.22 (needs R1.04 and R1.05). R1.11 (needs R1.07), then R1.10 and R1.12 (R1.12 also needs R1.05).
 4. R1.15, R1.16, R1.14 (need R1.13). R1.06 (needs R1.13 and R1.11). R1.20 (needs R1.19, R1.08, R1.09, R1.13, and R1.22).
 5. R1.17 and R1.21 (need R1.15 and R1.22; R1.17 also needs R1.16).

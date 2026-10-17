@@ -14,6 +14,7 @@ pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod error;
 pub mod lock;
 pub mod logging;
 pub mod model;
@@ -22,8 +23,10 @@ pub mod repo;
 mod run;
 pub mod server;
 pub mod service;
+pub mod snapshot;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod workspace;
 
 pub use daemon::{AppState, Daemon, DaemonHandle, StartError};
 pub use run::{DaemonArgs, exit_code, run_main};

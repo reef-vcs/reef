@@ -2,7 +2,7 @@
 //! removed.
 
 use rusqlite::types::Type;
-use rusqlite::{Row, params};
+use rusqlite::{Connection, Row, params};
 
 use super::{Db, DbError};
 use crate::model::{ReclaimRecord, RepoId};
@@ -41,32 +41,35 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ReclaimRecord> {
     })
 }
 
+/// [`Db::insert_reclaim`] on the caller's connection or transaction.
+pub(crate) fn insert_reclaim_in(conn: &Connection, r: &ReclaimRecord) -> rusqlite::Result<i64> {
+    // SQLite integers are signed; a byte count above i64::MAX is not a real disk.
+    let freed_bytes = r
+        .freed_bytes
+        .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX));
+    conn.execute(
+        "INSERT INTO reclaims(repo_id, workspace_id, reason, final_op_id, snapshot_taken,
+                              freed_bytes, at, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            r.repo_id,
+            r.workspace_id,
+            r.reason,
+            r.final_op_id,
+            r.snapshot_taken,
+            freed_bytes,
+            r.at,
+            r.detail,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 impl Db {
     /// Appends an entry to the reclaim log and returns its row id. `r.id` is
     /// ignored.
     pub fn insert_reclaim(&self, r: &ReclaimRecord) -> Result<i64, DbError> {
-        // SQLite integers are signed; a byte count above i64::MAX is not a real disk.
-        let freed_bytes = r
-            .freed_bytes
-            .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX));
-        self.with(|conn| {
-            conn.execute(
-                "INSERT INTO reclaims(repo_id, workspace_id, reason, final_op_id, snapshot_taken,
-                                      freed_bytes, at, detail)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    r.repo_id,
-                    r.workspace_id,
-                    r.reason,
-                    r.final_op_id,
-                    r.snapshot_taken,
-                    freed_bytes,
-                    r.at,
-                    r.detail,
-                ],
-            )?;
-            Ok(conn.last_insert_rowid())
-        })
+        self.with(|conn| insert_reclaim_in(conn, r))
     }
 
     /// Up to `limit` entries of the reclaim log for `repo` (every repository
