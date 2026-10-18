@@ -34,6 +34,9 @@ prost.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+toml.workspace = true
+serde.workspace = true
+humantime-serde.workspace = true
 
 [dev-dependencies]
 reef-testing.workspace = true

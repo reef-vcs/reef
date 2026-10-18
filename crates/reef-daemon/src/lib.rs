@@ -26,6 +26,7 @@ mod run;
 pub mod server;
 pub mod service;
 pub mod snapshot;
+pub mod spec;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod watcher;
