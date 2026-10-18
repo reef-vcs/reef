@@ -51,6 +51,9 @@ nix = { version = "0.31", features = ["fs"] }
 # clones through `reflink-copy` (`clonefile` on macOS, `FICLONE` on Linux for R1.10).
 libc = "0.2"
 reflink-copy = "0.1"
+# The backend conformance suite's tree digest (R1.11, dev-only). 0.11, the version jj-lib's
+# dependencies already pull in, rather than the brief's 0.10, so the lockfile gains no second copy.
+sha2 = "0.11"
 # The daemon's gRPC API over a Unix socket (R1.03, ADR 0012). `tonic-prost-build` is fed a
 # descriptor set compiled by `protox`, so neither CI nor contributors need `protoc`.
 tonic = "0.14"

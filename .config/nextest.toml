@@ -26,3 +26,9 @@ success-output = "immediate"
 [[profile.default.overrides]]
 filter = "(package(reef-daemon) & binary(gc)) | (package(reef-lib) & binary(jj_gc))"
 test-group = "gc"
+
+# The backend conformance suite (R1.11) prints each kind's timing row and
+# every `skipped: <kind or case>: <reason>`, so they show when it passes.
+[[profile.default.overrides]]
+filter = "package(reef-daemon) & binary(backend_conformance)"
+success-output = "immediate"
