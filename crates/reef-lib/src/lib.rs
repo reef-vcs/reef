@@ -10,4 +10,5 @@
 
 pub mod error;
 pub mod jj;
+pub mod spec;
 pub mod telemetry;

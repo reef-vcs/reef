@@ -17,6 +17,7 @@ pub mod oplog;
 pub mod repo;
 pub mod settings;
 pub mod snapshot;
+pub mod spec;
 pub mod undo;
 pub mod workspace;
 

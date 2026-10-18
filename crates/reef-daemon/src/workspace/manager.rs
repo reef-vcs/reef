@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::settings::Fsmonitor;
-use reef_lib::jj::{ForgetWorkspaceError, UserSettings};
+use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, UserSettings};
 
 use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
@@ -124,7 +124,8 @@ impl Manager {
     }
 
     /// Replaces a loaded workspace's snapshot spec and re-watches it with
-    /// the new skip list. R1.19 sets the spec at create; tests set it here.
+    /// the new skip list. Create sets the spec from `reef.toml` (R1.19);
+    /// tests set it here.
     #[cfg(any(test, feature = "testing"))]
     pub fn set_snapshot_spec(
         &self,
@@ -553,6 +554,7 @@ impl Manager {
                 }
             };
             let jj = self.reopen(&handle, &paths, settings).await;
+            let spec = base_spec(&handle, &record).await;
             let entry = WorkspaceEntry {
                 record: Mutex::new(record),
                 paths,
@@ -560,7 +562,7 @@ impl Manager {
                 jj: Arc::new(Mutex::new(jj)),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
-                spec: Mutex::new(super::SnapshotSpec::default()),
+                spec: Mutex::new(spec),
             };
             self.insert_entry(id, Arc::new(entry));
             self.scheduler.track(id);
@@ -685,6 +687,54 @@ pub(super) async fn remove_state_dir(state_dir: &Path) {
         ),
         Err(error) => tracing::warn!(%error, "removing the working-copy state directory failed"),
     }
+}
+
+/// The snapshot spec `record`'s workspace was created with: `reef.toml`
+/// read again from its base tree, the tree it was created on (R1.19), so a
+/// restart neither loses its excludes nor picks up a `reef.toml` edited
+/// inside it. If the base tree cannot be read (GC can prune the tree of a
+/// commit edited in place once the workspace has rewritten it), the
+/// workspace's current commit is read instead: its `reef.toml` is at worst
+/// one edited inside it, which beats snapshotting `target/` and store
+/// mounts. If that fails too, the defaults. `Repo` logs each failure.
+async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::SnapshotSpec {
+    let key = record.base_tree_id.clone();
+    let commit = record.commit_id.parse::<CommitIdHex>().ok();
+    let read = handle
+        .call_async(move |head| {
+            async move {
+                if let Ok(spec) = head.repo.spec_in_tree(&key).await {
+                    return Some((spec, true));
+                }
+                let spec = head.repo.spec_at(&commit?).await.ok()?;
+                Some((spec, false))
+            }
+            .boxed_local()
+        })
+        .await;
+    match read {
+        Ok(Some((spec, true))) => return crate::spec::resolve(spec).snapshot,
+        Ok(Some((spec, false))) => {
+            tracing::warn!(
+                workspace_id = %record.id,
+                tree_id = %record.base_tree_id,
+                commit_id = %record.commit_id,
+                "cannot read reef.toml from the workspace's base tree; using its current commit's"
+            );
+            return crate::spec::resolve(spec).snapshot;
+        }
+        Ok(None) => {}
+        Err(error) => tracing::error!(
+            workspace_id = %record.id,
+            error = %ErrorChain(&error),
+            "cannot read the workspace's reef.toml on the repository thread"
+        ),
+    }
+    tracing::error!(
+        workspace_id = %record.id,
+        "no reef.toml readable for the workspace; its snapshots use no excludes"
+    );
+    super::SnapshotSpec::default()
 }
 
 #[cfg(test)]

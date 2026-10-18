@@ -34,6 +34,7 @@ use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
     CreateWorkspaceError, ForgetWorkspaceError, ImportRefsError, OpenError, Repo, ResolveError,
 };
+use reef_lib::spec::SpecError;
 
 pub use gc::JjStep;
 pub(crate) use gc::measure;
@@ -69,13 +70,15 @@ pub struct WorkspaceEntry {
     pub spec: Mutex<SnapshotSpec>,
 }
 
-/// The parts of a workspace's spec its snapshots and watcher apply: empty
-/// until R1.19 reads `reef.toml` at create (and R1.20 adds store mounts).
+/// The parts of a workspace's spec its snapshots and watcher apply, from
+/// the `reef.toml` of the tree it was created on (`crate::spec::resolve`);
+/// empty when that tree has none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotSpec {
     /// `[snapshot] exclude`, in gitignore syntax, repository-root relative.
     pub excludes: Vec<String>,
-    /// Shared store mount points, repository-root relative.
+    /// Shared store mount points (`[[store]] mount`), repository-root
+    /// relative.
     pub mounts: Vec<String>,
 }
 
@@ -264,6 +267,9 @@ pub enum ManagerError {
     /// A commit could not be read.
     #[error(transparent)]
     CommitLookup(#[from] CommitLookupError),
+    /// The target commit's `reef.toml` is invalid or could not be read.
+    #[error("read the workspace spec")]
+    Spec(#[from] SpecError),
     /// The working-copy state could not be reset.
     #[error(transparent)]
     Reset(#[from] ResetError),
@@ -382,6 +388,7 @@ impl Classify for ManagerError {
             Self::Read(error) => error.kind(),
             Self::CommitLookup(error) => error.kind(),
             Self::Reset(error) => error.kind(),
+            Self::Spec(error) => error.kind(),
             Self::FinalSnapshotFailed { source, .. } => source.kind(),
             Self::Lease(error) => error.kind(),
             Self::PathExists(_) | Self::PathRecorded { .. } => ErrorKind::AlreadyExists,

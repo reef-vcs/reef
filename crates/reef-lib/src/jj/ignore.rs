@@ -79,7 +79,9 @@ impl Repo {
     }
 }
 
-/// `entries` as gitignore lines, each anchored at the root. A negation
+/// `entries` as gitignore lines, each anchored at the root, the way
+/// [`Spec::effective_excludes`](crate::spec::Spec::effective_excludes)
+/// anchors store mounts. A negation
 /// keeps its `!` in front of the anchor; empty entries and comments are
 /// dropped.
 fn gitignore_lines<'a>(entries: impl Iterator<Item = &'a str>) -> String {

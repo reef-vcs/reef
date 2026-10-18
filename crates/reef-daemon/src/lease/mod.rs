@@ -207,6 +207,33 @@ impl LeaseManager {
         }
     }
 
+    /// The lease length for a create: the request's, as
+    /// [`LeaseManager::length_for`] checks it; when the request asks for
+    /// none (or zero), the repository's `reef.toml` `[workspace] lease`
+    /// (`from_spec`), capped at `lease.max` with a warning, since the
+    /// repository's authors cannot know every daemon's maximum; else
+    /// `lease.default`.
+    pub fn length_with_spec(
+        &self,
+        requested: Option<Duration>,
+        from_spec: Option<Duration>,
+    ) -> Result<Duration, LeaseError> {
+        let requested = requested.filter(|length| !length.is_zero());
+        match (requested, from_spec) {
+            (None, Some(length)) if length > self.config.max => {
+                tracing::warn!(
+                    requested_ms = u64::try_from(length.as_millis()).unwrap_or(u64::MAX),
+                    max_ms = u64::try_from(self.config.max.as_millis()).unwrap_or(u64::MAX),
+                    "reef.toml asks for a lease longer than lease.max; capped"
+                );
+                Ok(self.config.max)
+            }
+            // `Spec::parse` holds it to at least a minute, above MIN_LENGTH.
+            (None, Some(length)) => Ok(length),
+            _ => self.length_for(requested),
+        }
+    }
+
     /// How often a holder of a lease of `length` should heartbeat:
     /// `lease.heartbeat`, at most a third of `length`.
     pub fn heartbeat_every(&self, length: Duration) -> Duration {

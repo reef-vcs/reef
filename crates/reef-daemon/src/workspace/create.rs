@@ -7,7 +7,9 @@
 //!    (probing on the blocking pool).
 //! 2. (repository thread) Reload at head; in a colocated repository import
 //!    git refs; resolve the start revision; note whether another Reef
-//!    workspace already has the edited commit.
+//!    workspace already has the edited commit; read `reef.toml` from the
+//!    resolved commit's tree (R1.19), which sets the lease length when the
+//!    request gives none and the snapshot excludes.
 //! 3. (blocking, then the repository thread) Ensure the base: the base
 //!    cache's per-tree lock, then, if the tree is not cached, on the
 //!    repository thread either `Repo::materialize_tree_from` over a clone
@@ -37,13 +39,15 @@ use reef_lib::jj::{
     ChangeSummary, CommitIdHex, CreateWorkspaceError, MaterializeError, Repo, ResolveError,
     ResolvedVia, StartPoint,
 };
+use reef_lib::spec::SPEC_FILE;
 use reef_lib::telemetry::elapsed_ms;
 
 use super::manager::{forget_jj_workspace, remove_state_dir};
-use super::{CreateSpec, Created, Manager, ManagerError, Start, WorkspaceEntry};
+use super::{CreateSpec, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry};
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::RepoHandle;
+use crate::spec::ResolvedSpec;
 
 /// The description of a colocated repository's ref import before a create.
 const IMPORT_DESCRIPTION: &str = "reef: import git refs";
@@ -54,6 +58,7 @@ struct ResolvedStart {
     commit: CommitIdHex,
     tree_key: String,
     shared_change: bool,
+    spec: ResolvedSpec,
 }
 
 impl Manager {
@@ -64,7 +69,8 @@ impl Manager {
         if spec.owner.trim().is_empty() {
             return Err(ManagerError::EmptyOwner);
         }
-        let length = self.leases.length_for(spec.lease)?;
+        // Checked before any work; the length is settled at step 2.
+        self.leases.length_for(spec.lease)?;
         // Held until the row is written, so the repository is not forgotten
         // under this create.
         let repo_lock = self.repo_lock(spec.repo);
@@ -80,6 +86,9 @@ impl Manager {
 
         // 2.
         let resolved = resolve_start(&handle, spec.start).await?;
+        let length = self
+            .leases
+            .length_with_spec(spec.lease, resolved.spec.lease)?;
 
         // 3.
         let begun = Instant::now();
@@ -141,26 +150,20 @@ impl Manager {
             undo.run().await;
             return Err(error.into());
         }
-        let Some((backend, paths)) = undo.backend.take() else {
-            unreachable!("set after step 4")
-        };
-        let entry = WorkspaceEntry {
-            record: Mutex::new(record.clone()),
-            paths,
-            backend,
-            jj: Arc::new(Mutex::new(Some(ws))),
-            repo: handle,
-            scan_lock: tokio::sync::Mutex::new(()),
-            spec: Mutex::new(super::SnapshotSpec::default()),
-        };
-        self.insert_entry(id, Arc::new(entry));
-        self.scheduler.track(id);
+        self.load_created(
+            &record,
+            &mut undo,
+            ws,
+            handle,
+            resolved.spec.snapshot.clone(),
+        );
         tracing::info!(
             path = %record.path.display(),
             backend = %record.backend,
             change_id = %record.change_id,
             %op_id,
             shared_change = resolved.shared_change,
+            stores = resolved.spec.spec.stores.len(),
             base_was_cached,
             materialize_ms = u64::try_from(materialize.as_millis()).unwrap_or(u64::MAX),
             "workspace created"
@@ -173,6 +176,32 @@ impl Manager {
             materialize,
             base_was_cached,
         })
+    }
+
+    /// The end of step 7: loads the new workspace, taking the backend from
+    /// `undo`, and starts scheduling its snapshots.
+    fn load_created(
+        &self,
+        record: &WorkspaceRecord,
+        undo: &mut Undo,
+        ws: Repo,
+        handle: RepoHandle,
+        spec: SnapshotSpec,
+    ) {
+        let Some((backend, paths)) = undo.backend.take() else {
+            unreachable!("set after step 4")
+        };
+        let entry = WorkspaceEntry {
+            record: Mutex::new(record.clone()),
+            paths,
+            backend,
+            jj: Arc::new(Mutex::new(Some(ws))),
+            repo: handle,
+            scan_lock: tokio::sync::Mutex::new(()),
+            spec: Mutex::new(spec),
+        };
+        self.insert_entry(record.id, Arc::new(entry));
+        self.scheduler.track(record.id);
     }
 
     /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the
@@ -416,11 +445,19 @@ async fn resolve_start(handle: &RepoHandle, start: Start) -> Result<ResolvedStar
                         name.starts_with(reef_lib::jj::workspace::REEF_WORKSPACE_PREFIX)
                     });
                 let tree_key = head.repo.tree_key(&commit).await?;
+                let spec = head.repo.spec_at(&commit).await?;
+                if spec.is_none() && head.root.join(SPEC_FILE).exists() {
+                    tracing::info!(
+                        commit_id = %commit,
+                        "{SPEC_FILE} is on disk at the root but not in the target commit; using the defaults (snapshot or commit it)"
+                    );
+                }
                 Ok::<_, ManagerError>(ResolvedStart {
                     start,
                     commit,
                     tree_key,
                     shared_change,
+                    spec: crate::spec::resolve(spec),
                 })
             }
             .boxed_local()
