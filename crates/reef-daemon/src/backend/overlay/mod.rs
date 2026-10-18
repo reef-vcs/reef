@@ -4,11 +4,11 @@
 //! wrote. The merged view shows the lower's files with their own mtimes and
 //! sizes, so the base's `tree_state` describes a fresh workspace as is.
 //!
-//! Two tiers share this module and differ only in their [`Mounter`]:
-//! kernel overlayfs through `mount(2)` when the daemon has `CAP_SYS_ADMIN`
-//! ([`KernelMounter`]), and the `fuse-overlayfs` binary otherwise
-//! ([`FuseMounter`]). [`probe_kernel`] and [`probe_fuse`] decide which can
-//! serve a directory with a trial mount.
+//! Two tiers share this module and differ only in their `Mounter`: kernel
+//! overlayfs through `mount(2)` when the daemon has `CAP_SYS_ADMIN`
+//! (`kernel.rs`), and the `fuse-overlayfs` binary otherwise (`fuse.rs`).
+//! `probe_kernel` and `probe_fuse` decide which can serve a directory with a
+//! trial mount.
 //!
 //! Mounts outlive the daemon: a kernel mount stays in the mount namespace,
 //! and `fuse-overlayfs` daemonizes. [`reconcile_mounts`] runs at daemon
