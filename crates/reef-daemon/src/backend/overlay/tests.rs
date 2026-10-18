@@ -182,7 +182,7 @@ fn mount_info_parses_proc_mounts() {
         }
     );
     assert_eq!(mounts[2].mountpoint, Path::new("/tab\tnew\nline"));
-    assert_eq!(mounts[2].fstype, FUSE_FSTYPE);
+    assert_eq!(mounts[2].fstype, "fuse.fuse-overlayfs");
     assert_eq!(unescape(b"\\999 \\04"), b"\\999 \\04", "not escapes");
 
     assert!(mount_info(Path::new("/")).unwrap().is_some());
@@ -262,13 +262,15 @@ fn fuse_overlayfs_reconcile_replaces_a_dead_server() {
         assert!(Instant::now() < deadline, "the mount never disconnected");
         std::thread::sleep(Duration::from_millis(20));
     }
+    let error = backend.check_materialized(&ws).unwrap_err();
+    assert!(error.to_string().contains("server"), "{error}");
 
     let report = reconcile_mounts(
         &[ws.root.parent().unwrap().to_owned()],
         &[OverlayWorkspace {
             paths: ws.clone(),
             kind: BackendKind::FuseOverlayfs,
-            lower: Some(base.path.clone()),
+            lower: Ok(Some(base.path.clone())),
         }],
         &OverlayConfig::default(),
     )
@@ -280,6 +282,48 @@ fn fuse_overlayfs_reconcile_replaces_a_dead_server() {
     );
     assert_eq!(fs::read_to_string(ws.root.join("a.txt")).unwrap(), "a\n");
     backend.tear_down(&ws).unwrap();
+}
+
+/// libfuse names a FUSE mount's type after the binary, so a renamed copy
+/// (or a wrapper) mounts as `fuse.<name>`, which the backend expects.
+#[test]
+fn fuse_overlayfs_under_another_name() {
+    if fuse_backend().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let renamed = dir.path().join("my-overlay");
+    fs::copy(find_program("fuse-overlayfs").unwrap(), &renamed).unwrap();
+    let backend = OverlayBackend::fuse(&OverlayConfig {
+        fuse_overlayfs: renamed.to_str().unwrap().to_owned(),
+        nosuid: false,
+    });
+    assert_eq!(backend.fstype(), "fuse.my-overlay");
+    mounts_and_unmounts(&backend);
+}
+
+/// fuse-overlayfs splits its lower directories at every `:`, so a base
+/// path with one is refused rather than mounted wrong; a `,` is escaped.
+#[test]
+fn fuse_overlayfs_separators_in_paths() {
+    let Some(backend) = fuse_backend() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let commas = dir.path().join("a,b");
+    let base = base_in(&commas);
+    let ws = workspace(&commas, "00000000000000ae");
+    backend.materialize(&base, &ws).unwrap();
+    assert_eq!(fs::read_to_string(ws.root.join("a.txt")).unwrap(), "a\n");
+    backend.tear_down(&ws).unwrap();
+
+    let colon = dir.path().join("a:b");
+    let base = base_in(&colon);
+    let ws = workspace(&colon, "00000000000000af");
+    let error = backend.materialize(&base, &ws).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error:?}");
+    assert!(ErrorChain(&error).to_string().contains("`:`"), "{error}");
+    let _ = backend.tear_down(&ws);
 }
 
 /// The pid of the `fuse-overlayfs` process serving `root`, found by its
@@ -379,18 +423,24 @@ fn reconcile_remounts_missing_and_cleans_stale() {
     fs::remove_dir_all(&no_upper.upper).unwrap();
     // A probe a crash left mounted.
     let probe = live.root.parent().unwrap().join(".reef-probe-1-1");
-    for name in ["lower", "upper", "work", "merged"] {
-        fs::create_dir_all(probe.join(name)).unwrap();
+    // And someone else's overlay beside them, not named like a workspace.
+    let foreign = live.root.parent().unwrap().join("not-a-workspace");
+    for dir in [&probe, &foreign] {
+        for name in ["lower", "upper", "work", "merged"] {
+            fs::create_dir_all(dir.join(name)).unwrap();
+        }
     }
-    backend
-        .mounter()
-        .mount(
-            &probe.join("lower"),
-            &probe.join("upper"),
-            &probe.join("work"),
-            &probe.join("merged"),
-        )
-        .unwrap();
+    for dir in [&probe, &foreign] {
+        backend
+            .mounter()
+            .mount(
+                &dir.join("lower"),
+                &dir.join("upper"),
+                &dir.join("work"),
+                &dir.join("merged"),
+            )
+            .unwrap();
+    }
 
     // As `/proc/self/mounts` names them, while they exist.
     let canon = |path: &Path| canonical(path).unwrap().unwrap();
@@ -400,7 +450,7 @@ fn reconcile_remounts_missing_and_cleans_stale() {
     let overlay = |ws: &WorkspacePaths, lower: Option<PathBuf>| OverlayWorkspace {
         paths: ws.clone(),
         kind: BackendKind::Overlayfs,
-        lower,
+        lower: Ok(lower),
     };
     let report = reconcile_mounts(
         &[live.root.parent().unwrap().to_owned()],
@@ -434,10 +484,22 @@ fn reconcile_remounts_missing_and_cleans_stale() {
         assert!(!is_mounted(&ws.root));
         assert!(backend.check_materialized(ws).is_err());
     }
+    assert!(
+        is_mounted(&foreign.join("merged")),
+        "not Reef's: left alone"
+    );
+    backend
+        .mounter()
+        .unmount(&foreign.join("merged"), false)
+        .unwrap();
 
+    // A base lookup that failed says nothing about a healthy mount.
     let again = reconcile_mounts(
         &[live.root.parent().unwrap().to_owned()],
-        &[overlay(&live, Some(base.path.clone()))],
+        &[OverlayWorkspace {
+            lower: Err("database is locked".to_owned()),
+            ..overlay(&live, None)
+        }],
         &OverlayConfig::default(),
     )
     .unwrap();

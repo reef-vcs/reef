@@ -107,8 +107,8 @@ jobs:
           retention-days: 7
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
-  # kernel overlayfs as root. The root step runs last and gives target/ back to
-  # the runner user, or the cache save after it fails on root-owned files.
+  # kernel overlayfs as root. The root step runs last, and target/ goes back to
+  # the runner user after it, or the cache save fails on root-owned files.
   overlayfs:
     name: overlayfs (ubuntu-24.04, privileged)
     runs-on: ubuntu-24.04
@@ -125,13 +125,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs btrfs-progs xfsprogs
       - name: Build the privileged tests
         run: cargo nextest run -p reef-daemon --features privileged-tests --no-run
-      - name: fuse-overlayfs conformance (unprivileged)
-        run: cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/fuse_overlayfs/)'
+      # Unfiltered: with fuse-overlayfs installed, `auto` picks it, so every
+      # daemon test also runs on overlay workspaces.
+      - name: Daemon tests on fuse-overlayfs (unprivileged)
+        run: cargo nextest run -p reef-daemon --features privileged-tests
       # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`.
       - name: Kernel overlayfs and reflink conformance (root)
-        run: |
-          sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay|reflink/)'
-          sudo chown -R "$USER" target
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay|reflink/)'
+      - name: Give target/ back to the runner user
+        if: always()
+        run: sudo chown -R "$(id -un)" target
 
   # Every platform's digest must equal the pinned one, so an output change that is the same on
   # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.

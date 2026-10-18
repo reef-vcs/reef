@@ -61,8 +61,10 @@ pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(5);
 const MOUNT_POLL: Duration = Duration::from_millis(50);
 /// A kernel overlay's type in `/proc/self/mounts`.
 pub(crate) const KERNEL_FSTYPE: &str = "overlay";
-/// A `fuse-overlayfs` mount's type in `/proc/self/mounts`.
-pub(crate) const FUSE_FSTYPE: &str = "fuse.fuse-overlayfs";
+/// The prefix of a FUSE mount's type in `/proc/self/mounts`. libfuse
+/// names the rest after the server binary's file name:
+/// `fuse.fuse-overlayfs`, or `fuse.<name>` for a renamed copy or a wrapper.
+pub(crate) const FUSE_FSTYPE_PREFIX: &str = "fuse.";
 /// The marker `fuse-overlayfs` puts in an opaque upper directory when it
 /// cannot set the xattr. It records no change of its own.
 const FUSE_OPAQUE_MARKER: &str = ".wh..wh..opq";
@@ -149,6 +151,9 @@ pub(crate) enum MountError {
     /// There is no mount to unmount.
     #[error("{} is not mounted", target.display())]
     NotMounted { target: PathBuf },
+    /// A path the mounter cannot pass on.
+    #[error("{}: {reason}", path.display())]
+    Unsupported { path: PathBuf, reason: &'static str },
     /// `/proc/self/mounts` could not be read.
     #[error("read {PROC_MOUNTS}")]
     Mounts {
@@ -166,6 +171,7 @@ impl Classify for MountError {
                 _ => ErrorKind::Io,
             },
             Self::Busy { .. } => ErrorKind::Conflict,
+            Self::Unsupported { .. } => ErrorKind::InvalidArgument,
             _ => ErrorKind::Io,
         }
     }
@@ -190,6 +196,11 @@ impl From<MountError> for BackendError {
                 "unmount",
                 target,
                 io::Error::new(io::ErrorKind::InvalidInput, "not mounted"),
+            ),
+            MountError::Unsupported { path, reason } => mount(
+                "mount",
+                path,
+                io::Error::new(io::ErrorKind::InvalidInput, reason),
             ),
             MountError::Spawn { binary, source } => Self::Io {
                 op: "run",
@@ -248,10 +259,10 @@ impl OverlayBackend {
     }
 
     /// The type this tier's mounts have in `/proc/self/mounts`.
-    fn fstype(&self) -> &'static str {
-        match self.tier {
-            Tier::Kernel(_) => KERNEL_FSTYPE,
-            Tier::Fuse(_) => FUSE_FSTYPE,
+    fn fstype(&self) -> String {
+        match &self.tier {
+            Tier::Kernel(_) => KERNEL_FSTYPE.to_owned(),
+            Tier::Fuse(mounter) => mounter.fstype(),
         }
     }
 
@@ -452,10 +463,15 @@ impl Backend for OverlayBackend {
         remove_layer(&ws.work)
     }
 
-    /// Fails unless the root is mounted with this tier's overlay: a scan of
-    /// the bare mountpoint would record every file as deleted.
+    /// Fails unless the root is mounted with this tier's overlay, and
+    /// served: a scan of the bare mountpoint would record every file as
+    /// deleted, and one of a mount whose FUSE server died fails file by
+    /// file.
     fn check_materialized(&self, ws: &WorkspacePaths) -> Result<(), BackendError> {
         let reason = match mount_info(&ws.root).map_err(|source| MountError::Mounts { source })? {
+            Some(info) if info.fstype == self.fstype() && is_disconnected(&ws.root) => {
+                format!("the fuse-overlayfs server of {} is gone", ws.root.display())
+            }
             Some(info) if info.fstype == self.fstype() => return Ok(()),
             Some(info) => format!(
                 "{} is a {} mount, not {}",
@@ -721,9 +737,9 @@ pub struct OverlayWorkspace {
     pub paths: WorkspacePaths,
     /// [`BackendKind::Overlayfs`] or [`BackendKind::FuseOverlayfs`].
     pub kind: BackendKind,
-    /// Its base's directory, the lower layer; `None` if the base cache has
-    /// no entry for its tree.
-    pub lower: Option<PathBuf>,
+    /// Its base's directory, the lower layer: `Ok(None)` if the base cache
+    /// has no entry for its tree, an error if that could not be looked up.
+    pub lower: Result<Option<PathBuf>, String>,
 }
 
 /// What [`reconcile_mounts`] did.
@@ -745,11 +761,13 @@ pub struct ReconcileReport {
 
 /// At daemon start: mounts every workspace in `workspaces` again whose
 /// mount is gone (or whose FUSE server died), over its existing upper
-/// directory, so the agent's edits reappear. Then lazily unmounts every
-/// overlay mount under one of `scan_dirs` (the repositories' workspace
-/// directories and the state directory's `repos/`, where probes run) that
-/// belongs to no workspace in `workspaces`, and removes its root and
-/// layers, or its probe directory. Problems with single mounts are in the
+/// directory, so the agent's edits reappear; a mounted one whose base is
+/// known to be gone is unmounted. Then lazily unmounts every overlay mount
+/// that looks like Reef's and belongs to no workspace in `workspaces`: one
+/// directly in one of `scan_dirs` (the repositories' workspace directories)
+/// named like a workspace id, or a trial mount in a `.reef-probe-*`
+/// directory there or in the state directory's `repos/`. It removes its
+/// root and layers, or its probe directory. Other mounts are left alone. Problems with single mounts are in the
 /// report or the log; only failing to read `/proc/self/mounts` is an error.
 pub fn reconcile_mounts(
     scan_dirs: &[PathBuf],
@@ -783,16 +801,33 @@ pub fn reconcile_mounts(
         .collect();
     let mut seen = HashSet::new();
     for mount in read_mounts()?.into_iter().rev() {
-        let stale = (mount.fstype == KERNEL_FSTYPE || mount.fstype == FUSE_FSTYPE)
-            && scan_dirs
-                .iter()
-                .any(|dir| mount.mountpoint.starts_with(dir))
+        let stale = (mount.fstype == KERNEL_FSTYPE || mount.fstype.starts_with(FUSE_FSTYPE_PREFIX))
+            && looks_like_reefs(&mount.mountpoint, &scan_dirs)
             && !live.contains(&mount.mountpoint);
         if stale && seen.insert(mount.mountpoint.clone()) && clean_stale(&mount, config) {
             report.cleaned.push(mount.mountpoint);
         }
     }
     Ok(report)
+}
+
+/// Whether `mountpoint` is where Reef mounts: `<dir>/<workspace id>` or
+/// `<dir>/.reef-probe-*/merged` for a `dir` in `scan_dirs`.
+fn looks_like_reefs(mountpoint: &Path, scan_dirs: &[PathBuf]) -> bool {
+    let (Some(parent), Some(name)) = (mountpoint.parent(), mountpoint.file_name()) else {
+        return false;
+    };
+    let in_scan_dir = |dir: &Path| scan_dirs.iter().any(|scan| scan == dir);
+    let workspace = in_scan_dir(parent)
+        && name
+            .to_str()
+            .is_some_and(|name| name.parse::<WorkspaceId>().is_ok());
+    let probe = name == "merged"
+        && parent
+            .file_name()
+            .is_some_and(|probe| probe.as_bytes().starts_with(PROBE_CLONE_PREFIX.as_bytes()))
+        && parent.parent().is_some_and(in_scan_dir);
+    workspace || probe
 }
 
 /// What [`reconcile_one`] found.
@@ -808,14 +843,17 @@ fn reconcile_one(
     mounted: bool,
 ) -> Result<Reconciled, String> {
     let paths = &ws.paths;
-    let lower = match ws.lower.as_deref() {
-        Some(lower) if lower.is_dir() => Ok(lower),
-        Some(lower) => Err(format!("its base {} is missing", lower.display())),
-        None => Err("its base is not in the base cache".to_owned()),
+    let lower = match &ws.lower {
+        Ok(Some(lower)) if lower.is_dir() => Ok(lower.as_path()),
+        Ok(Some(lower)) => Err(format!("its base {} is missing", lower.display())),
+        Ok(None) => Err("its base is not in the base cache".to_owned()),
+        Err(error) => Err(format!("cannot look up its base: {error}")),
     };
+    // Not a failed lookup, which says nothing about the mount.
+    let base_gone = ws.lower.is_ok() && lower.is_err();
     if mounted {
         let healthy = !is_disconnected(&paths.root);
-        if healthy && lower.is_ok() {
+        if healthy && !base_gone {
             return Ok(Reconciled::Mounted);
         }
         // A mount over a base the start-up sweep dropped would snapshot as

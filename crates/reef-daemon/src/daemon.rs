@@ -13,11 +13,8 @@
 //!    lease restart grace (R1.15): every unended lease gets at least
 //!    `lease.restart_grace` from now, before anything can reclaim. If that
 //!    fails, the daemon does not start.
-//! 3. Sweep leftovers: incomplete base cache entries (`*.tmp` under
-//!    `repos/*/bases/`, R1.02); workspace trash (`*.trash-*` in each
-//!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
-//!    leftovers (`*.gc` under `repos/*/bases/`, R1.17), by the same base
-//!    cache sweep.
+//! 3. Sweep base cache leftovers: incomplete entries (`*.tmp` under
+//!    `repos/*/bases/`, R1.02) and GC's (`*.gc`, R1.17).
 //! 4. Reconcile overlay mounts (Linux, R1.09): mount every `active` or
 //!    `releasing` overlay workspace again whose mount is gone, over its
 //!    upper directory; mark one that cannot be `attention = 'upper-missing'`
@@ -25,6 +22,8 @@
 //!    unmount and remove overlay mounts under `repos/` and the workspace
 //!    roots that no workspace owns. Before step 6, which reclaims a
 //!    workspace whose root cannot be `stat`ed and watches every root.
+//!    Then sweep workspace trash (`*.trash-*` and `.reef-probe-*` in each
+//!    repository's workspace root, `repos/*/ws/` by default, R1.07).
 //! 5. Start one repository thread per registered repository. Then rebuild
 //!    each one's `snapshots` index from its operation log (R1.16) and log
 //!    the report, before any snapshot can add a row.
@@ -377,7 +376,7 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         .map_err(StartError::RestartGrace)?;
     let records = state.db.repositories()?;
 
-    // 3. Sweep leftovers.
+    // 3. Sweep base cache leftovers.
     for record in &records {
         let cache = BaseCache::new(Arc::clone(&state.db), &paths.repo_dir(record.id), record.id);
         let repo = record.id;
@@ -395,7 +394,14 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
             }
             Err(error) => tracing::warn!(%repo, %error, "base cache sweep panicked"),
         }
+    }
 
+    // 4. Reconcile overlay mounts, then sweep workspace trash: a probe
+    //    directory a crash left mounted is trash only once unmounted.
+    #[cfg(target_os = "linux")]
+    reconcile_overlays(state, &records).await;
+    for record in &records {
+        let repo = record.id;
         let ws_root = state.config.workspace_root(record.id);
         match tokio::task::spawn_blocking(move || sweep_trash(&ws_root)).await {
             Ok(Ok(0)) => {}
@@ -406,10 +412,6 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
             Err(error) => tracing::warn!(%repo, %error, "workspace trash sweep panicked"),
         }
     }
-
-    // 4. Reconcile overlay mounts.
-    #[cfg(target_os = "linux")]
-    reconcile_overlays(state, &records).await;
 
     // 5. One repository thread per registered repository. A repository that
     //    fails to open is logged and skipped; the daemon serves the others.
@@ -500,23 +502,18 @@ async fn reconcile_overlays(state: &Arc<AppState>, records: &[RepositoryRecord])
     let workspaces: Vec<OverlayWorkspace> = rows
         .into_iter()
         .filter_map(|record| {
-            let kind = record
-                .backend
-                .parse::<BackendKind>()
-                .ok()
-                .filter(|kind| matches!(kind, BackendKind::Overlayfs | BackendKind::FuseOverlayfs))?;
+            let kind = record.backend.parse::<BackendKind>().ok().filter(|kind| {
+                matches!(kind, BackendKind::Overlayfs | BackendKind::FuseOverlayfs)
+            })?;
             let cache = BaseCache::new(
                 Arc::clone(&state.db),
                 &paths.repo_dir(record.repo_id),
                 record.repo_id,
             );
-            let lower = match cache.get(&record.base_tree_id) {
-                Ok(entry) => entry.map(|entry| entry.path),
-                Err(error) => {
-                    tracing::warn!(workspace_id = %record.id, error = %ErrorChain(&error), "cannot look up the workspace's base");
-                    None
-                }
-            };
+            let lower = cache
+                .get(&record.base_tree_id)
+                .map(|entry| entry.map(|entry| entry.path))
+                .map_err(|error| ErrorChain(&error).to_string());
             attention.insert(record.id, record.attention);
             Some(OverlayWorkspace {
                 paths: WorkspacePaths::at(record.id, record.path, record.state_dir),

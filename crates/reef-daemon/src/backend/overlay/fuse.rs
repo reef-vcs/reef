@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 use super::{
-    FUSE_FSTYPE, MOUNT_POLL, MOUNT_TIMEOUT, MountError, Mounter, find_program, layer_options,
-    mount_info,
+    FUSE_FSTYPE_PREFIX, MOUNT_POLL, MOUNT_TIMEOUT, MountError, Mounter, find_program,
+    layer_options, mount_info,
 };
 
 /// How often the spawned `fuse-overlayfs` is checked for having exited.
@@ -41,6 +41,14 @@ impl FuseMounter {
             binary: binary.into(),
         }
     }
+
+    /// The type of this binary's mounts in `/proc/self/mounts`: libfuse
+    /// names it after the binary's file name, `fuse.fuse-overlayfs` for the
+    /// default.
+    pub(crate) fn fstype(&self) -> String {
+        let name = self.binary.file_name().unwrap_or(self.binary.as_os_str());
+        format!("{FUSE_FSTYPE_PREFIX}{}", name.to_string_lossy())
+    }
 }
 
 impl Mounter for FuseMounter {
@@ -51,6 +59,13 @@ impl Mounter for FuseMounter {
         work: &Path,
         target: &Path,
     ) -> Result<(), MountError> {
+        // fuse-overlayfs splits `lowerdir` at every `:`, escaped or not.
+        if lower.as_os_str().as_bytes().contains(&b':') {
+            return Err(MountError::Unsupported {
+                path: lower.to_owned(),
+                reason: "fuse-overlayfs cannot take a lower directory whose path has a `:`",
+            });
+        }
         let spawn_error = |source| MountError::Spawn {
             binary: self.binary.clone(),
             source,
@@ -65,6 +80,7 @@ impl Mounter for FuseMounter {
             .spawn()
             .map_err(spawn_error)?;
         let deadline = Instant::now() + MOUNT_TIMEOUT;
+        let fstype = self.fstype();
         let status = loop {
             match child.try_wait().map_err(spawn_error)? {
                 Some(status) => break status,
@@ -87,7 +103,7 @@ impl Mounter for FuseMounter {
         }
         loop {
             let info = mount_info(target).map_err(|source| MountError::Mounts { source })?;
-            if info.is_some_and(|info| info.fstype == FUSE_FSTYPE) {
+            if info.is_some_and(|info| info.fstype == fstype) {
                 return Ok(());
             }
             if Instant::now() >= deadline {

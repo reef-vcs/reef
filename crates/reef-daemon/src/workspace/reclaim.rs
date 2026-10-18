@@ -22,6 +22,10 @@ use crate::snapshot::{SnapshotKind, description};
 /// reclaimed, so no final snapshot could be taken.
 const ROOT_MISSING: &str = "workspace root missing";
 
+/// The `reclaims.detail` of an overlay workspace whose upper directory was
+/// gone when it was reclaimed (R1.09).
+const UPPER_MISSING: &str = "overlay upper directory missing";
+
 /// The `reclaims.detail` when the backend could not measure the workspace's
 /// disk usage, so `freed_bytes` is unknown.
 const DISK_USAGE_UNKNOWN: &str = "disk usage unknown";
@@ -55,10 +59,12 @@ impl Manager {
     ///    untracked so no watcher snapshot races the final one.
     /// 2. A final snapshot (unless `spec.final_snapshot` is off), described
     ///    `reef: final snapshot of workspace <id> (<reason>)`. If the root is
-    ///    gone there is nothing to snapshot: skipped, and the reclaim row
-    ///    says so.
+    ///    gone, or an overlay workspace's upper directory (`attention =
+    ///    upper-missing`, R1.09), there is nothing to snapshot: skipped, and
+    ///    the reclaim row says so.
     /// 3. A failed final snapshot stops here: the workspace goes back to
-    ///    `active` with `attention = final-snapshot-failed`, its directory
+    ///    `active` with `attention = final-snapshot-failed` (an overlay left
+    ///    unmounted keeps `mount-failed`, which says more), its directory
     ///    and lease intact, unless `spec.force`. So does failing to forget
     ///    the jj workspace.
     /// 4. The disk usage measured; `forget_workspace` on the repository
@@ -197,6 +203,15 @@ impl Manager {
             details.push(ROOT_MISSING.to_owned());
             return Ok((false, None));
         }
+        let attention = entry.record().attention;
+        if attention == Some(Attention::UpperMissing) {
+            tracing::warn!(
+                path = %entry.paths.upper.display(),
+                "the overlay's upper directory is missing; reclaiming it without a final snapshot"
+            );
+            details.push(UPPER_MISSING.to_owned());
+            return Ok((false, None));
+        }
         if !spec.final_snapshot {
             return Ok((false, None));
         }
@@ -209,7 +224,9 @@ impl Manager {
                 Ok((false, None))
             }
             Err(error) => {
-                self.back_to_active(entry, Some(Attention::FinalSnapshotFailed));
+                let attention = (attention != Some(Attention::MountFailed))
+                    .then_some(Attention::FinalSnapshotFailed);
+                self.back_to_active(entry, attention);
                 Err(ManagerError::FinalSnapshotFailed {
                     id,
                     source: Box::new(error),

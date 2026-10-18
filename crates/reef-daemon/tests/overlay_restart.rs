@@ -184,12 +184,13 @@ async fn survives_restart(kind: BackendKind) {
         .await
         .unwrap();
     assert!(!root.exists() && !is_mounted(root));
-    // Without its upper, a final snapshot fails, and a forced release
-    // skips it.
-    client
-        .release_workspace("", &lost.id, false, true)
+    // Without its upper there is nothing to snapshot: a release (or the
+    // lease's reclaim) goes ahead without a final snapshot.
+    let released = client
+        .release_workspace("", &lost.id, true, false)
         .await
         .unwrap();
+    assert!(!released.snapshot_taken, "{released:?}");
     assert!(!Path::new(&lost.path).exists());
     handle.shutdown();
     handle.join().await.unwrap();
