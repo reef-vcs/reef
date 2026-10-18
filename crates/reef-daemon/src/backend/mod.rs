@@ -24,6 +24,8 @@ pub mod apfs;
 pub mod base_cache;
 pub mod copy;
 pub mod fs_util;
+#[cfg(target_os = "linux")]
+pub mod overlay;
 pub mod probe;
 
 use std::collections::HashSet;
@@ -163,6 +165,26 @@ impl<'de> Deserialize<'de> for BackendChoice {
     }
 }
 
+/// The overlay backends' settings, from `[workspace]` (R1.09). Other
+/// backends ignore them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayConfig {
+    /// The `fuse-overlayfs` binary: a path, or a name looked up on `PATH`
+    /// (`workspace.fuse_overlayfs`).
+    pub fuse_overlayfs: String,
+    /// Mount kernel overlays `nosuid` (`workspace.overlay_nosuid`).
+    pub nosuid: bool,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            fuse_overlayfs: "fuse-overlayfs".to_owned(),
+            nosuid: false,
+        }
+    }
+}
+
 /// Where one workspace's files live on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspacePaths {
@@ -267,8 +289,10 @@ pub enum BackendError {
         source: io::Error,
     },
     /// Mounting or unmounting an overlay failed (R1.09).
-    #[error("mount {}", path.display())]
+    #[error("{op} {}", path.display())]
     Mount {
+        /// `mount` or `unmount`.
+        op: &'static str,
         /// The mount point.
         path: PathBuf,
         /// The underlying error.
@@ -296,6 +320,10 @@ impl Classify for BackendError {
             Self::Unavailable { .. } => ErrorKind::Unavailable,
             Self::RootExists(_) => ErrorKind::AlreadyExists,
             Self::RootMissing(_) => ErrorKind::NotFound,
+            // The workspace is in use.
+            Self::Mount { source, .. } if source.kind() == io::ErrorKind::ResourceBusy => {
+                ErrorKind::Conflict
+            }
             Self::Io { source, .. } | Self::Mount { source, .. } => classify_by_source(source),
             Self::Tool { .. } => ErrorKind::Internal,
             Self::TreeState(error) => error.kind(),
@@ -330,6 +358,14 @@ pub trait Backend: Send + Sync {
     /// not exist.
     fn tear_down(&self, ws: &WorkspacePaths) -> Result<(), BackendError>;
 
+    /// Fails if `ws.root` cannot hold the workspace's files right now, as
+    /// far as the backend can tell cheaply. Snapshots check this before
+    /// scanning: the bare mountpoint of an overlay that is not mounted would
+    /// snapshot as every file deleted. Only overlay backends can fail it.
+    fn check_materialized(&self, _ws: &WorkspacePaths) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// The backend's cheap whole-directory clone, if it has one. The base
     /// cache then builds a new base by cloning a recent one and checking out
     /// only the diff (`BaseCache::ensure_from`, R1.08). Clone primitives
@@ -339,10 +375,14 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// Constructs the backend for `kind` without probing. Each backend ticket
-/// replaces its placeholder arm; a placeholder fails every operation with
-/// [`BackendError::Unavailable`].
-pub fn backend_for(kind: BackendKind) -> Box<dyn Backend> {
+/// Constructs the backend for `kind` without probing, with `overlay` for
+/// the overlay kinds. Each backend ticket replaces its placeholder arm; a
+/// placeholder fails every operation with [`BackendError::Unavailable`].
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(unused_variables, reason = "only the overlay backends read the config")
+)]
+pub fn backend_for(kind: BackendKind, overlay: &OverlayConfig) -> Box<dyn Backend> {
     match kind {
         BackendKind::Copy => Box::new(copy::CopyBackend),
         #[cfg(target_os = "macos")]
@@ -353,9 +393,15 @@ pub fn backend_for(kind: BackendKind) -> Box<dyn Backend> {
             reason: probe::APFS_MACOS_ONLY.to_owned(),
         }),
         BackendKind::Reflink => Box::new(Pending::until(kind, "R1.10")),
-        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => {
-            Box::new(Pending::until(kind, "R1.09"))
-        }
+        #[cfg(target_os = "linux")]
+        BackendKind::Overlayfs => Box::new(overlay::OverlayBackend::kernel(overlay)),
+        #[cfg(target_os = "linux")]
+        BackendKind::FuseOverlayfs => Box::new(overlay::OverlayBackend::fuse(overlay)),
+        #[cfg(not(target_os = "linux"))]
+        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => Box::new(Pending {
+            kind,
+            reason: probe::OVERLAY_LINUX_ONLY.to_owned(),
+        }),
     }
 }
 
@@ -364,7 +410,8 @@ pub fn backend_for(kind: BackendKind) -> Box<dyn Backend> {
 /// at `bases_dir`: the named one if its probe says it is available, or for
 /// [`BackendChoice::Auto`] the first available in
 /// [`BackendKind::AUTO_ORDER`]. A `dir` on another volume than `bases_dir`
-/// cannot clone, so `auto` takes the copy there (R1.08).
+/// cannot clone, so `auto` takes the copy there (R1.08). `overlay`
+/// configures the overlay backends' probes and the backend.
 ///
 /// When `auto` falls through to the copy backend, logs one `warn` per `dir`
 /// for the daemon's lifetime naming why every other backend was
@@ -373,9 +420,10 @@ pub fn select(
     choice: BackendChoice,
     dir: &Path,
     bases_dir: &Path,
+    overlay: &OverlayConfig,
 ) -> Result<Box<dyn Backend>, BackendError> {
-    let probes = probe(dir, Some(bases_dir));
-    let backend = select_from(choice, &probes)?;
+    let probes = probe(dir, Some(bases_dir), overlay);
+    let backend = select_from(choice, &probes, overlay)?;
     if choice == BackendChoice::Auto && backend.kind() == BackendKind::Copy {
         warn_copy_fallback_once(dir, &probes);
     }
@@ -413,6 +461,7 @@ fn warn_copy_fallback_once(dir: &Path, probes: &[Probe]) {
 pub fn select_from(
     choice: BackendChoice,
     probes: &[Probe],
+    overlay: &OverlayConfig,
 ) -> Result<Box<dyn Backend>, BackendError> {
     let availability = |kind: BackendKind| {
         probes.iter().find(|probe| probe.kind == kind).map_or_else(
@@ -438,7 +487,7 @@ pub fn select_from(
             })?,
     };
     tracing::debug!(backend = kind.as_str(), "backend selected");
-    Ok(backend_for(kind))
+    Ok(backend_for(kind, overlay))
 }
 
 /// Placeholder for a backend whose ticket has not landed, or that this
@@ -575,22 +624,49 @@ mod tests {
             stderr: "fuse: device not found".into(),
         };
         assert_eq!(tool.kind(), ErrorKind::Internal);
+        let mount = |source| BackendError::Mount {
+            op: "unmount",
+            path: "/x".into(),
+            source,
+        };
+        assert_eq!(
+            mount(io::Error::from(io::ErrorKind::ResourceBusy)).kind(),
+            ErrorKind::Conflict
+        );
+        assert_eq!(
+            mount(io::Error::from(io::ErrorKind::PermissionDenied)).kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            mount(io::Error::other("no")).to_string(),
+            "unmount /x",
+            "the source is not repeated"
+        );
     }
 
     #[test]
     fn placeholders_are_unavailable() {
+        let overlay = OverlayConfig::default();
         for kind in BackendKind::AUTO_ORDER {
-            let backend = backend_for(kind);
+            let backend = backend_for(kind, &overlay);
             assert_eq!(backend.kind(), kind);
         }
         let id: WorkspaceId = "00000000000000ab".parse().unwrap();
         let ws = WorkspacePaths::under(Path::new("/nonexistent"), id);
-        let error = backend_for(BackendKind::Overlayfs)
+        let error = backend_for(BackendKind::Reflink, &overlay)
             .tear_down(&ws)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "backend overlayfs is not available here: not implemented until R1.09"
+            "backend reflink is not available here: not implemented until R1.10"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            backend_for(BackendKind::Overlayfs, &overlay)
+                .tear_down(&ws)
+                .unwrap_err()
+                .to_string(),
+            "backend overlayfs is not available here: overlayfs is Linux only"
         );
     }
 }

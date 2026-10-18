@@ -27,7 +27,7 @@ use reef_daemon::backend::copy::CopyBackend;
 use reef_daemon::backend::fs_util::changed_files_vs_base;
 use reef_daemon::backend::{
     Availability, Backend as _, BackendChoice, BackendError, BackendKind, BaseCache, DirCloner,
-    Probe, WorkspacePaths, select, select_from,
+    OverlayConfig, Probe, WorkspacePaths, probe, select, select_from,
 };
 use reef_daemon::db::Db;
 use reef_daemon::model::RepoId;
@@ -263,12 +263,35 @@ fn changed_files_vs_base_counts_edits() {
 fn select_auto_returns_the_platform_backend() {
     let dir = tempfile::tempdir().unwrap();
     let bases = dir.path().join("bases");
-    let backend = select(BackendChoice::Auto, &dir.path().join("ws"), &bases).unwrap();
+    let overlay = OverlayConfig::default();
+    let backend = select(
+        BackendChoice::Auto,
+        &dir.path().join("ws"),
+        &bases,
+        &overlay,
+    )
+    .unwrap();
+    // On Linux, an overlay when this test may mount one (as root, or with
+    // `fuse-overlayfs` installed), else the copy until reflinks (R1.10).
     let expected = if cfg!(target_os = "macos") {
         BackendKind::ApfsClone
     } else {
-        BackendKind::Copy
+        probe(&dir.path().join("ws"), Some(&bases), &overlay)
+            .into_iter()
+            .find(|probe| probe.availability.is_available())
+            .unwrap()
+            .kind
     };
+    assert!(
+        matches!(
+            expected,
+            BackendKind::ApfsClone
+                | BackendKind::Overlayfs
+                | BackendKind::FuseOverlayfs
+                | BackendKind::Copy
+        ),
+        "{expected}"
+    );
     assert_eq!(backend.kind(), expected);
     assert_eq!(
         backend.dir_cloner().is_some(),
@@ -293,7 +316,9 @@ fn select_auto_returns_the_platform_backend() {
     };
     let only_copy = stub(&[BackendKind::Copy]);
     assert_eq!(
-        select_from(BackendChoice::Auto, &only_copy).unwrap().kind(),
+        select_from(BackendChoice::Auto, &only_copy, &overlay)
+            .unwrap()
+            .kind(),
         BackendKind::Copy
     );
     let clones = stub(&[
@@ -302,10 +327,14 @@ fn select_auto_returns_the_platform_backend() {
         BackendKind::ApfsClone,
     ]);
     assert_eq!(
-        select_from(BackendChoice::Auto, &clones).unwrap().kind(),
+        select_from(BackendChoice::Auto, &clones, &overlay)
+            .unwrap()
+            .kind(),
         BackendKind::ApfsClone
     );
-    let error = select_from(BackendChoice::Auto, &stub(&[])).err().unwrap();
+    let error = select_from(BackendChoice::Auto, &stub(&[]), &overlay)
+        .err()
+        .unwrap();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
 
     // A named backend that is unavailable is an error with the reason,
@@ -314,6 +343,7 @@ fn select_auto_returns_the_platform_backend() {
         BackendChoice::Named(BackendKind::Overlayfs),
         &dir.path().join("ws"),
         &bases,
+        &overlay,
     )
     .err()
     .unwrap();
@@ -325,7 +355,11 @@ fn select_auto_returns_the_platform_backend() {
         "{error:?}"
     );
     assert_eq!(error.kind(), ErrorKind::Unavailable);
-    let error = select_from(BackendChoice::Named(BackendKind::Reflink), &clones);
+    let error = select_from(
+        BackendChoice::Named(BackendKind::Reflink),
+        &clones,
+        &overlay,
+    );
     assert_eq!(error.unwrap().kind(), BackendKind::Reflink);
 }
 

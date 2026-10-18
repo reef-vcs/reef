@@ -18,7 +18,13 @@
 //!    repository's workspace root, `repos/*/ws/` by default, R1.07); GC
 //!    leftovers (`*.gc` under `repos/*/bases/`, R1.17), by the same base
 //!    cache sweep.
-//! 4. Reconcile overlay mounts (R1.09; nothing until then).
+//! 4. Reconcile overlay mounts (Linux, R1.09): mount every `active` or
+//!    `releasing` overlay workspace again whose mount is gone, over its
+//!    upper directory; mark one that cannot be `attention = 'upper-missing'`
+//!    or `'mount-failed'` (snapshots refuse an unmounted overlay); and
+//!    unmount and remove overlay mounts under `repos/` and the workspace
+//!    roots that no workspace owns. Before step 6, which reclaims a
+//!    workspace whose root cannot be `stat`ed and watches every root.
 //! 5. Start one repository thread per registered repository. Then rebuild
 //!    each one's `snapshots` index from its operation log (R1.16) and log
 //!    the report, before any snapshot can add a row.
@@ -401,7 +407,9 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         }
     }
 
-    // 4. Reconcile overlay mounts: R1.09.
+    // 4. Reconcile overlay mounts.
+    #[cfg(target_os = "linux")]
+    reconcile_overlays(state, &records).await;
 
     // 5. One repository thread per registered repository. A repository that
     //    fails to open is logged and skipped; the daemon serves the others.
@@ -465,6 +473,113 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         })
     });
     Ok(listener)
+}
+
+/// Step 4: re-establishes or cleans up overlay mounts, records the
+/// attention of workspaces left unmounted (and clears it from ones mounted
+/// again), and logs the report. Failures are logged; the daemon starts
+/// regardless.
+#[cfg(target_os = "linux")]
+async fn reconcile_overlays(state: &Arc<AppState>, records: &[RepositoryRecord]) {
+    use crate::backend::overlay::{OverlayWorkspace, ReconcileReport, reconcile_mounts};
+    use crate::backend::{BackendKind, WorkspacePaths};
+    use crate::model::{Attention, WorkspaceState};
+
+    let rows = match state
+        .db
+        .workspaces(None, &[WorkspaceState::Active, WorkspaceState::Releasing])
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(error = %ErrorChain(&error), "cannot list workspaces to reconcile overlay mounts");
+            return;
+        }
+    };
+    let paths = &state.config.paths;
+    let mut attention = HashMap::new();
+    let workspaces: Vec<OverlayWorkspace> = rows
+        .into_iter()
+        .filter_map(|record| {
+            let kind = record
+                .backend
+                .parse::<BackendKind>()
+                .ok()
+                .filter(|kind| matches!(kind, BackendKind::Overlayfs | BackendKind::FuseOverlayfs))?;
+            let cache = BaseCache::new(
+                Arc::clone(&state.db),
+                &paths.repo_dir(record.repo_id),
+                record.repo_id,
+            );
+            let lower = match cache.get(&record.base_tree_id) {
+                Ok(entry) => entry.map(|entry| entry.path),
+                Err(error) => {
+                    tracing::warn!(workspace_id = %record.id, error = %ErrorChain(&error), "cannot look up the workspace's base");
+                    None
+                }
+            };
+            attention.insert(record.id, record.attention);
+            Some(OverlayWorkspace {
+                paths: WorkspacePaths::at(record.id, record.path, record.state_dir),
+                kind,
+                lower,
+            })
+        })
+        .collect();
+    let mut scan_dirs = vec![paths.repos.clone()];
+    scan_dirs.extend(
+        records
+            .iter()
+            .map(|record| state.config.workspace_root(record.id)),
+    );
+    let overlay = state.config.file.workspace.overlay();
+    let begun = Instant::now();
+    let report = match tokio::task::spawn_blocking(move || {
+        reconcile_mounts(&scan_dirs, &workspaces, &overlay)
+    })
+    .await
+    {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            tracing::error!(error = %ErrorChain(&error), "cannot reconcile overlay mounts");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, "reconciling overlay mounts panicked");
+            return;
+        }
+    };
+    let set = |id, value: Option<Attention>| {
+        if let Err(error) = state.db.set_workspace_attention(id, value, None) {
+            tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the workspace's attention");
+        }
+    };
+    for &id in &report.upper_missing {
+        tracing::error!(workspace_id = %id, "the overlay workspace's upper directory is missing; it is left unmounted");
+        set(id, Some(Attention::UpperMissing));
+    }
+    for (id, reason) in &report.failed {
+        tracing::error!(workspace_id = %id, %reason, "cannot mount the overlay workspace again; it is left unmounted");
+        set(*id, Some(Attention::MountFailed));
+    }
+    for &id in report.mounted.iter().chain(&report.remounted) {
+        if matches!(
+            attention.get(&id),
+            Some(Some(Attention::UpperMissing | Attention::MountFailed))
+        ) {
+            set(id, None);
+        }
+    }
+    // Quiet when there was nothing to do.
+    if report != ReconcileReport::default() {
+        tracing::info!(
+            mounted_count = report.mounted.len(),
+            remounted_count = report.remounted.len(),
+            cleaned_count = report.cleaned.len(),
+            attention_count = report.upper_missing.len() + report.failed.len(),
+            elapsed_ms = elapsed_ms(begun),
+            "overlay mounts reconciled"
+        );
+    }
 }
 
 /// Rebuilds one repository's `snapshots` index from its operation log and

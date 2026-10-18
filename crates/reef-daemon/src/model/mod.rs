@@ -141,6 +141,9 @@ pub enum Attention {
     WatchFailed,
     /// An overlay workspace's upper directory is missing (R1.09).
     UpperMissing,
+    /// An overlay workspace could not be mounted again at daemon start; it
+    /// is not snapshotted until it is (R1.09).
+    MountFailed,
 }
 
 sql_enum!(Attention, "attention reason", {
@@ -151,6 +154,7 @@ sql_enum!(Attention, "attention reason", {
     StoreMissing => "store-missing",
     WatchFailed => "watch-failed",
     UpperMissing => "upper-missing",
+    MountFailed => "mount-failed",
 });
 
 /// Why a lease ended. A workspace move keeps its lease (R1.06), so moving is

@@ -50,7 +50,7 @@ use reef_lib::jj::settings::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::backend::BackendChoice;
+use crate::backend::{BackendChoice, OverlayConfig};
 use crate::logging::{DEFAULT_KEEP_DAYS, LOG_FILE_PREFIX, LogOptions};
 use crate::model::RepoId;
 
@@ -374,6 +374,16 @@ pub struct WorkspaceSection {
     pub fuse_overlayfs: String,
     /// Mount overlays with `nosuid`. Default false.
     pub overlay_nosuid: bool,
+}
+
+impl WorkspaceSection {
+    /// The overlay backends' settings (R1.09).
+    pub fn overlay(&self) -> OverlayConfig {
+        OverlayConfig {
+            fuse_overlayfs: self.fuse_overlayfs.clone(),
+            nosuid: self.overlay_nosuid,
+        }
+    }
 }
 
 impl Default for WorkspaceSection {
