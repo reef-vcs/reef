@@ -232,7 +232,7 @@ Verified against crates.io on 2026-10-16 with `cargo info`. Pin the major (or `0
 | `blake3` | 1 | lockfile hash for stores (a verification digest, not an object identity; ADR 0011 is unaffected) | R1.20 |
 | `assert_cmd` | 2 (dev) | CLI tests | R1.22 |
 | `clap_complete`, `humantime` | 4, 2 | shell completions, duration flags | R1.22 |
-| `sha2` | 0.10 (dev) | conformance tree digest in R1.11 (use `blake3` instead if R1.20 has landed) | R1.11 |
+| `sha2` | 0.11 (dev; 0.11 rather than 0.10 because jj-lib's dependencies already pull it in) | conformance tree digest in R1.11 (use `blake3` instead if R1.20 has landed) | R1.11 |
 
 `uuid` is not used (ids are 64-bit hex). `rand` and `clap` are already workspace dependencies.
 

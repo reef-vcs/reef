@@ -29,6 +29,9 @@ watchman = ["reef-lib/watchman"]
 # reef-testing is `publish = false`, so publishing this crate first needs the feature's
 # synthetic-repo helper moved out (or reef-testing published).
 testing = ["dep:tempfile", "dep:reef-testing"]
+# Tests that need root: the kernel overlayfs backend (R1.09) in the backend conformance suite
+# (R1.11). CI's privileged Linux job runs them under `sudo -E`.
+privileged-tests = []
 
 [dependencies]
 reef-lib.workspace = true
@@ -87,4 +90,5 @@ tempfile.workspace = true
 reef-testing.workspace = true
 pollster.workspace = true
 tokio.workspace = true
+sha2.workspace = true            # the conformance suite's tree digest (R1.11)
 nix = { workspace = true, features = ["signal", "hostname"] }   # SIGTERM in the binary test; the hostname check
