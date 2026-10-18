@@ -556,7 +556,7 @@ impl Manager {
             let entry = WorkspaceEntry {
                 record: Mutex::new(record),
                 paths,
-                backend: backend_for(kind),
+                backend: backend_for(kind, &self.config.file.workspace.overlay()),
                 jj: Arc::new(Mutex::new(jj)),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),

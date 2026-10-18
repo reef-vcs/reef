@@ -43,7 +43,8 @@ impl Daemon for DaemonService {
         // the base caches, so this reports what a default workspace gets.
         // Probing touches the filesystem, so it runs off the async workers.
         let repos = paths.repos.clone();
-        let probes = tokio::task::spawn_blocking(move || probe(&repos, None))
+        let overlay = state.config.file.workspace.overlay();
+        let probes = tokio::task::spawn_blocking(move || probe(&repos, None, &overlay))
             .await
             .map_err(|e| Status::internal(format!("backend probe failed: {e}")))?;
         let backends = probes

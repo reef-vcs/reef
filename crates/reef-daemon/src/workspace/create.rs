@@ -190,7 +190,11 @@ impl Manager {
             .parent()
             .map_or_else(|| paths.root.clone(), Path::to_owned);
         let bases_dir = self.base_cache(repo).dir().to_owned();
-        Ok(tokio::task::spawn_blocking(move || select(choice, &probe_dir, &bases_dir)).await??)
+        let overlay = self.config.file.workspace.overlay();
+        Ok(
+            tokio::task::spawn_blocking(move || select(choice, &probe_dir, &bases_dir, &overlay))
+                .await??,
+        )
     }
 
     /// The new workspace's paths: `path` (absolute) or

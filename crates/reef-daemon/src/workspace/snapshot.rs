@@ -239,6 +239,8 @@ impl Manager {
             let reefignore = entry.paths.root.join(REEFIGNORE);
             let spec = entry.spec();
             tokio::task::spawn_blocking(move || {
+                // An overlay whose mount is gone would scan as empty.
+                entry.backend.check_materialized(&entry.paths)?;
                 let jj = Arc::clone(&entry.jj);
                 let mut guard = jj.lock().unwrap_or_else(PoisonError::into_inner);
                 let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;

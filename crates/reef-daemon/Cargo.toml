@@ -29,8 +29,9 @@ watchman = ["reef-lib/watchman"]
 # reef-testing is `publish = false`, so publishing this crate first needs the feature's
 # synthetic-repo helper moved out (or reef-testing published).
 testing = ["dep:tempfile", "dep:reef-testing"]
-# Tests that need root: the kernel overlayfs backend (R1.09) in the backend conformance suite
-# (R1.11). CI's privileged Linux job runs them under `sudo -E`.
+# Tests that need root: the kernel overlayfs backend (R1.09), its own tests and the backend
+# conformance suite (R1.11). CI's `overlayfs` job runs them under `sudo -E`. Enables tests only;
+# no `cfg` outside a test reads it.
 privileged-tests = []
 
 [dependencies]
@@ -71,6 +72,9 @@ reef-testing = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true            # clonefile(2) on a directory (R1.08)
 reflink-copy.workspace = true    # per-file clones (R1.08's fallback, R1.10)
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["mount", "fs"] }   # overlay mounts (R1.09)
 
 [build-dependencies]
 tonic-prost-build.workspace = true

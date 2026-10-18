@@ -1,18 +1,19 @@
 //! Which backends can serve a directory, and the filesystem it is on.
 //!
 //! Each backend ticket replaces its arm in `probe_kind` with a real check
-//! (R1.08 clones a probe file on APFS, R1.09 checks `CAP_SYS_ADMIN` and the
-//! `fuse-overlayfs` binary, R1.10 clones a probe file with `FICLONE`). Until
-//! then a kind is unavailable with the ticket named as the reason; `Copy`
-//! is always available. Clone backends also need the base cache on the
-//! workspace's volume, so the probe takes the base cache directory.
+//! (R1.08 clones a probe file on APFS, R1.09 checks `CAP_SYS_ADMIN` or the
+//! `fuse-overlayfs` binary and makes a trial mount, R1.10 clones a probe
+//! file with `FICLONE`). Until then a kind is unavailable with the ticket
+//! named as the reason; `Copy` is always available. Clone backends also
+//! need the base cache on the workspace's volume, so the probe takes the
+//! base cache directory.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use reef_lib::error::ErrorChain;
 
-use super::BackendKind;
+use super::{BackendKind, OverlayConfig};
 
 /// Whether a backend can serve a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +47,10 @@ pub struct Probe {
 #[cfg(not(target_os = "macos"))]
 pub(crate) const APFS_MACOS_ONLY: &str = "APFS clones are macOS only";
 
+/// Reason the overlay kinds are unavailable off Linux.
+#[cfg(not(target_os = "linux"))]
+pub(crate) const OVERLAY_LINUX_ONLY: &str = "overlayfs is Linux only";
+
 /// Probes every backend for workspace roots under `dir` built from bases in
 /// `bases_dir`, one entry per kind in [`BackendKind::AUTO_ORDER`] order.
 /// `dir` need not exist yet (the default workspace root is created on first
@@ -54,8 +59,10 @@ pub(crate) const APFS_MACOS_ONLY: &str = "APFS clones are macOS only";
 /// clone backends report whether `dir`'s volume can clone at all.
 ///
 /// The `apfs` probe writes, clones, and removes a one-byte file in that
-/// directory, and keeps a `.probe` file in `bases_dir`.
-pub fn probe(dir: &Path, bases_dir: Option<&Path>) -> Vec<Probe> {
+/// directory, and keeps a `.probe` file in `bases_dir`. The overlay probes
+/// (with `overlay`'s settings) mount and unmount an empty overlay in a
+/// `.reef-probe-*` directory there and remove it.
+pub fn probe(dir: &Path, bases_dir: Option<&Path>, overlay: &OverlayConfig) -> Vec<Probe> {
     let target = nearest_existing(dir);
     let filesystem = filesystem_name(&target).unwrap_or_else(|error| {
         tracing::debug!(
@@ -69,17 +76,22 @@ pub fn probe(dir: &Path, bases_dir: Option<&Path>) -> Vec<Probe> {
         .into_iter()
         .map(|kind| Probe {
             kind,
-            availability: probe_kind(kind, &target, bases_dir),
+            availability: probe_kind(kind, &target, bases_dir, overlay),
             filesystem: filesystem.clone(),
         })
         .collect()
 }
 
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(unused_variables, reason = "only the APFS probe reads the paths")
+#[allow(
+    unused_variables,
+    reason = "each platform's probes read some of the arguments: APFS the base cache, the overlays the config"
 )]
-fn probe_kind(kind: BackendKind, target: &Path, bases_dir: Option<&Path>) -> Availability {
+fn probe_kind(
+    kind: BackendKind,
+    target: &Path,
+    bases_dir: Option<&Path>,
+    overlay: &OverlayConfig,
+) -> Availability {
     let pending =
         |ticket: &str| Availability::Unavailable(format!("not implemented until {ticket}"));
     match kind {
@@ -89,7 +101,14 @@ fn probe_kind(kind: BackendKind, target: &Path, bases_dir: Option<&Path>) -> Ava
         #[cfg(not(target_os = "macos"))]
         BackendKind::ApfsClone => Availability::Unavailable(APFS_MACOS_ONLY.to_owned()),
         BackendKind::Reflink => pending("R1.10"),
-        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => pending("R1.09"),
+        #[cfg(target_os = "linux")]
+        BackendKind::Overlayfs => super::overlay::probe_kernel(target, overlay),
+        #[cfg(target_os = "linux")]
+        BackendKind::FuseOverlayfs => super::overlay::probe_fuse(target, overlay),
+        #[cfg(not(target_os = "linux"))]
+        BackendKind::Overlayfs | BackendKind::FuseOverlayfs => {
+            Availability::Unavailable(OVERLAY_LINUX_ONLY.to_owned())
+        }
     }
 }
 
@@ -157,6 +176,7 @@ mod tests {
         let probes = probe(
             &dir.path().join("not/yet/created"),
             Some(&dir.path().join("bases")),
+            &OverlayConfig::default(),
         );
         let kinds: Vec<_> = probes.iter().map(|probe| probe.kind).collect();
         assert_eq!(kinds, BackendKind::AUTO_ORDER);
@@ -175,12 +195,27 @@ mod tests {
                     probe.availability,
                     Availability::Unavailable(APFS_MACOS_ONLY.to_owned())
                 ),
-                _ => assert!(
+                #[cfg(not(target_os = "linux"))]
+                BackendKind::Overlayfs | BackendKind::FuseOverlayfs => assert_eq!(
+                    probe.availability,
+                    Availability::Unavailable(OVERLAY_LINUX_ONLY.to_owned())
+                ),
+                // Either, depending on privilege and `fuse-overlayfs`; the
+                // overlay module's tests check the reasons.
+                #[cfg(target_os = "linux")]
+                BackendKind::Overlayfs | BackendKind::FuseOverlayfs => {}
+                BackendKind::Reflink => assert!(
                     matches!(&probe.availability, Availability::Unavailable(reason) if reason.starts_with("not implemented until R1.")),
                     "{probe:?}"
                 ),
             }
         }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "bases")
+            .collect();
+        assert!(leftovers.is_empty(), "probes left {leftovers:?}");
     }
 
     #[test]

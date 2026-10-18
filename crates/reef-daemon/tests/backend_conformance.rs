@@ -23,7 +23,7 @@
 mod backends;
 
 use backends::{BaseFixture, BrokenCopy, SuiteOptions, run_conformance};
-use reef_daemon::backend::{Availability, Backend, BackendKind, backend_for, probe};
+use reef_daemon::backend::{Availability, Backend, BackendKind, OverlayConfig, backend_for, probe};
 
 /// Runs the suite against `backend` and fails with every failed case.
 fn conform(backend: &dyn Backend, fx: &BaseFixture) {
@@ -42,13 +42,14 @@ fn conform(backend: &dyn Backend, fx: &BaseFixture) {
 /// Probes `kind` for the fixture's workspace directory and base cache, and
 /// runs the suite if it is available.
 fn conform_if_available(kind: BackendKind, fx: &BaseFixture) {
-    let probes = probe(&fx.repo_dir().join("ws"), Some(fx.bases_dir()));
+    let overlay = OverlayConfig::default();
+    let probes = probe(&fx.repo_dir().join("ws"), Some(fx.bases_dir()), &overlay);
     let availability = probes
         .into_iter()
         .find(|probe| probe.kind == kind)
         .map(|probe| probe.availability);
     match availability {
-        Some(Availability::Available) => conform(backend_for(kind).as_ref(), fx),
+        Some(Availability::Available) => conform(backend_for(kind, &overlay).as_ref(), fx),
         Some(Availability::Unavailable(reason)) => eprintln!("skipped: {kind}: {reason}"),
         None => panic!("probe reported nothing for {kind}"),
     }
@@ -58,7 +59,7 @@ fn conform_if_available(kind: BackendKind, fx: &BaseFixture) {
 #[test]
 fn conformance_copy() {
     conform(
-        backend_for(BackendKind::Copy).as_ref(),
+        backend_for(BackendKind::Copy, &OverlayConfig::default()).as_ref(),
         &BaseFixture::small(),
     );
 }

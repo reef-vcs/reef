@@ -135,12 +135,18 @@ async fn register_then_create_default() {
         default_wc(&repo.root).await.change_id.as_str()
     );
     assert_eq!(ws.state, "active");
-    let expected = if cfg!(target_os = "macos") {
-        "apfs"
-    } else {
-        "copy"
-    };
-    assert_eq!(ws.backend, expected, "auto picks the platform's clone");
+    // The first available in auto's order: apfs on macOS; on Linux an
+    // overlay as root or with `fuse-overlayfs` installed, else the copy.
+    let status = daemon.client.status().await.unwrap();
+    let expected = status
+        .backends
+        .iter()
+        .find(|backend| backend.available)
+        .unwrap();
+    if cfg!(target_os = "macos") {
+        assert_eq!(expected.kind, "apfs");
+    }
+    assert_eq!(ws.backend, expected.kind, "auto picks the platform's clone");
     let lease = ws.lease.unwrap();
     assert_eq!(
         millis(lease.expires_at.as_ref().unwrap()) - millis(lease.issued_at.as_ref().unwrap()),

@@ -489,7 +489,7 @@ fn delete_trash(trash: &Path) {
 /// after making every directory under `path` writable if the first attempt
 /// was refused: an agent may have left a read-only directory in its
 /// workspace. Symlinks are never followed.
-fn remove_all(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
     let remove = |path: &Path| {
         if fs::symlink_metadata(path)?.is_dir() {
             fs::remove_dir_all(path)
@@ -553,7 +553,7 @@ fn is_not_found(error: &walkdir::Error) -> bool {
         .is_some_and(|io| io.kind() == io::ErrorKind::NotFound)
 }
 
-fn walk_error(root: &Path, error: walkdir::Error) -> BackendError {
+pub(crate) fn walk_error(root: &Path, error: walkdir::Error) -> BackendError {
     let path = error.path().unwrap_or(root).to_owned();
     BackendError::Io {
         op: "walk",

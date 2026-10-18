@@ -22,6 +22,7 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_daemon::backend::{BackendChoice, BackendKind};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::daemon::Daemon;
 use reef_daemon::error::detail_of;
@@ -52,6 +53,26 @@ fn configure(config: &mut reef_daemon::config::Config) {
 }
 
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
+    fixture_with(configure).await
+}
+
+/// [`fixture`] with workspace roots that are plain directories: on Linux
+/// the copy backend, not an overlay (whose root is a mountpoint, which
+/// cannot be removed or locked with `chmod` from under the mount), when
+/// `fuse-overlayfs` is installed or the tests run as root.
+async fn fixture_on_plain_directories() -> (TestDaemon, SyntheticRepo) {
+    fixture_with(|config| {
+        configure(config);
+        if cfg!(target_os = "linux") {
+            config.file.workspace.backend = BackendChoice::Named(BackendKind::Copy);
+        }
+    })
+    .await
+}
+
+async fn fixture_with(
+    configure: impl FnOnce(&mut reef_daemon::config::Config),
+) -> (TestDaemon, SyntheticRepo) {
     // `TEST_LOG=reef_daemon=debug` shows the daemons' logs.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("TEST_LOG"))
@@ -474,7 +495,7 @@ async fn final_snapshot_failure_keeps_directory() {
         eprintln!("skipped: root ignores directory permissions");
         return;
     }
-    let (daemon, repo) = fixture().await;
+    let (daemon, repo) = fixture_on_plain_directories().await;
     let ws = create(&daemon, &repo).await;
     let root = Path::new(&ws.path);
     std::fs::write(root.join("last-words.txt"), "unsaved\n").unwrap();
@@ -517,7 +538,7 @@ async fn final_snapshot_failure_keeps_directory() {
 // 9
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_root_is_reclaimed_without_snapshot() {
-    let (daemon, repo) = fixture().await;
+    let (daemon, repo) = fixture_on_plain_directories().await;
     let ws = create(&daemon, &repo).await;
     std::fs::remove_dir_all(&ws.path).unwrap();
 
