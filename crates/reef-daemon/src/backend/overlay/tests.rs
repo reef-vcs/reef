@@ -13,7 +13,7 @@
 )]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::*;
 use crate::model::RepoId;
