@@ -7,7 +7,9 @@ import "reef/daemon/v0/types.proto";
 
 service Repositories {
   // Registers the jj repository containing `path`, by its root. Registering
-  // a registered repository again succeeds with `already_registered`.
+  // a registered repository again succeeds with `already_registered`. With
+  // `if_not_jj = INIT_ALONGSIDE_GIT`, a git checkout without jj gets a
+  // colocated `.jj` first (R1.25).
   rpc Register(RegisterRequest) returns (RegisterResponse);
   // Every registered repository, oldest first.
   rpc List(ListRepositoriesRequest) returns (ListRepositoriesResponse);
@@ -17,13 +19,27 @@ service Repositories {
 }
 
 message RegisterRequest {
+  // What to do when no jj repository contains `path` (R1.25).
+  enum IfNotJj {
+    // Refuse with NOT_FOUND, as before R1.25.
+    FAIL = 0;
+    // If the nearest ancestor with a `.git` has it as a directory, create
+    // jj's side of a colocated repository there and add `/.jj/` to
+    // `.git/info/exclude`, then register it. A `.git` file (a worktree or
+    // submodule) is INVALID_ARGUMENT; no `.git` at all stays NOT_FOUND.
+    INIT_ALONGSIDE_GIT = 1;
+  }
+
   // An absolute path inside the repository's root.
   string path = 1;
+  IfNotJj if_not_jj = 2;
 }
 
 message RegisterResponse {
   Repository repository = 1;
   bool already_registered = 2;
+  // Whether this call created `.jj` in the checkout (R1.25).
+  bool initialized_jj = 3;
 }
 
 message ListRepositoriesRequest {}

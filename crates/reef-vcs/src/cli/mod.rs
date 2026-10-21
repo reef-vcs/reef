@@ -30,12 +30,18 @@ use clap::{ArgAction, CommandFactory as _, Parser as _};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, PathOverrides};
 use reef_daemon::logging::{self, LogOptions};
+use reef_daemon::proto::v0::register_request::IfNotJj;
+use reef_lib::error::ErrorKind;
 
 pub(crate) use error::CliError;
 pub(crate) use out::{Out, Output};
 
 /// The RPC deadline when `--timeout` is not given.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `Repositories.Register`'s deadline when `--timeout` is not given:
+/// initializing jj alongside git indexes every commit of the history, which
+/// takes minutes on a large one.
+pub(crate) const REGISTER_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// `reef`.
 #[derive(Debug, clap::Parser)]
@@ -70,6 +76,11 @@ pub(crate) struct Global {
     /// Fail instead of starting the daemon when it is not running.
     #[arg(long, global = true)]
     no_autostart: bool,
+    /// Fail instead of registering a repository that a path names (and
+    /// initializing jj alongside git there) when it is not registered;
+    /// overrides `[repo] auto_register`.
+    #[arg(long, global = true)]
+    no_register: bool,
     /// How long to wait for the daemon's answer [default: 30s; 1h for `ws
     /// gc`; for `store build`, how long its command may run, 30m].
     #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration)]
@@ -127,6 +138,10 @@ pub(crate) struct Ctx {
     pub(crate) timeout: Duration,
     /// `--timeout` as given, for a command whose default differs (`ws gc`).
     pub(crate) timeout_flag: Option<Duration>,
+    /// Whether a command given a path in no registered repository registers
+    /// it and retries (R1.25): `[repo] auto_register` and no
+    /// `--no-register`.
+    pub(crate) auto_register: bool,
 }
 
 impl Ctx {
@@ -149,6 +164,91 @@ impl Ctx {
             Ok(result) => result.map_err(CliError::Daemon),
             Err(_) => Err(CliError::Timeout { after: deadline }),
         }
+    }
+
+    /// [`Ctx::call_with_repo_within`] with the RPC deadline.
+    pub(crate) async fn call_with_repo<T, F, Fut>(
+        &self,
+        repo: &RepoArg,
+        call: F,
+    ) -> Result<T, CliError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = Result<T, ClientError>>,
+    {
+        self.call_with_repo_within(self.timeout, repo, call).await
+    }
+
+    /// Awaits `call(repo)`, `repo` as the request's repository field, for at
+    /// most `deadline`. If `repo` is a path in no registered repository,
+    /// registers the repository containing it, initializing jj alongside a
+    /// plain git checkout (R1.25), says so on stderr, and calls once more;
+    /// a second failure is returned as it is. Not with `--no-register` or
+    /// `[repo] auto_register = false`, and never for a repo id or prefix.
+    pub(crate) async fn call_with_repo_within<T, F, Fut>(
+        &self,
+        deadline: Duration,
+        repo: &RepoArg,
+        call: F,
+    ) -> Result<T, CliError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = Result<T, ClientError>>,
+    {
+        let result = self.call_within(deadline, call(repo.text())).await;
+        let RepoArg::Path(path) = repo else {
+            return result;
+        };
+        match result {
+            Err(error) if self.auto_register && is_unregistered_path(&error) => {
+                self.register_implicitly(path).await?;
+                self.call_within(deadline, call(repo.text())).await
+            }
+            result => result,
+        }
+    }
+
+    /// `Repositories.Register` with `INIT_ALONGSIDE_GIT`, and the stderr
+    /// line that says the checkout was changed.
+    async fn register_implicitly(&self, path: &Path) -> Result<(), CliError> {
+        let response = self
+            .call_within(
+                self.timeout_flag.unwrap_or(REGISTER_TIMEOUT),
+                self.client
+                    .register_repository(path, IfNotJj::InitAlongsideGit),
+            )
+            .await?;
+        let root = response
+            .repository
+            .as_ref()
+            .map(|repo| repo.root.clone())
+            .ok_or_else(|| repo::missing("repository"))?;
+        if response.initialized_jj {
+            self.out.note(&format!(
+                "reef: registered {root} and initialized jj alongside git"
+            ));
+        } else if !response.already_registered {
+            // Already registered: another command did it meanwhile.
+            self.out.note(&format!("reef: registered {root}"));
+        }
+        Ok(())
+    }
+}
+
+/// Whether the daemon refused a request because no registered repository
+/// contains the path it named (`WorkspaceManager::resolve_repo`).
+fn is_unregistered_path(error: &CliError) -> bool {
+    match error {
+        CliError::Daemon(ClientError::Rpc {
+            kind: ErrorKind::NotFound,
+            chain,
+            message,
+            ..
+        }) => chain
+            .first()
+            .unwrap_or(message)
+            .starts_with("repository containing "),
+        _ => false,
     }
 }
 
@@ -264,6 +364,7 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
         out: out.clone(),
         timeout: global.timeout.unwrap_or(DEFAULT_TIMEOUT),
         timeout_flag: global.timeout,
+        auto_register: config.file.repo.auto_register && !global.no_register,
     })
 }
 
@@ -322,23 +423,55 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
             .to_owned(),
     };
     out.usage_error(&rendered, &message);
-    ExitCode::from(reef_lib::error::ErrorKind::InvalidArgument.exit_code())
+    ExitCode::from(ErrorKind::InvalidArgument.exit_code())
 }
 
-/// `text` as the repository field of a request: an id or id prefix (4 to 16
-/// hex characters) as given, anything else as a path made absolute. A
-/// directory whose name is hex can be given as `./name`.
-pub(crate) fn repo_arg(text: &str) -> Result<String, CliError> {
-    let is_prefix = (4..=16).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit());
-    if is_prefix {
-        return Ok(text.to_owned());
+/// A repository as a command line names it (`--repo`, `repo forget`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RepoArg {
+    /// A file or directory that exists, made absolute: what implicit
+    /// registration may register (R1.25).
+    Path(PathBuf),
+    /// Anything else, as the request's repository field: an id or id prefix
+    /// (4 to 16 hex characters) as given, or a path that does not exist made
+    /// absolute. Never registered.
+    Named(String),
+}
+
+impl RepoArg {
+    /// `text` as a path if it exists on disk, else as an id or prefix if it
+    /// looks like one, else as a path that does not exist. An existing
+    /// directory whose name is hex is a path.
+    pub(crate) fn parse(text: &str) -> Result<RepoArg, CliError> {
+        let path = Path::new(text);
+        if !text.is_empty() && path.exists() {
+            return absolute(path).map(RepoArg::Path);
+        }
+        let is_prefix =
+            (4..=16).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit());
+        if is_prefix {
+            return Ok(RepoArg::Named(text.to_owned()));
+        }
+        absolute(path).map(|path| RepoArg::Named(path.display().to_string()))
     }
-    absolute(Path::new(text)).map(|path| path.display().to_string())
+
+    /// The current directory: the default repository of commands with
+    /// `--repo`.
+    pub(crate) fn current() -> Result<RepoArg, CliError> {
+        current_dir().map(RepoArg::Path)
+    }
+
+    /// The text of the request's repository field.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            RepoArg::Path(path) => path.display().to_string(),
+            RepoArg::Named(text) => text.clone(),
+        }
+    }
 }
 
-/// The current directory: the default repository of commands with
-/// `--repo`.
-pub(crate) fn current_dir() -> Result<PathBuf, CliError> {
+/// The current directory.
+fn current_dir() -> Result<PathBuf, CliError> {
     std::env::current_dir().map_err(|source| CliError::Io {
         op: "read the current directory",
         path: PathBuf::from("."),
@@ -389,11 +522,33 @@ mod tests {
 
     #[test]
     fn repo_args_are_prefixes_or_absolute_paths() {
-        assert_eq!(repo_arg("CAFE").unwrap(), "CAFE");
-        assert_eq!(repo_arg("0123456789abcdef").unwrap(), "0123456789abcdef");
-        for path in [".", "./cafe", "abc", "cafe0123456789abc"] {
-            assert!(Path::new(&repo_arg(path).unwrap()).is_absolute(), "{path}");
+        let named = |text: &str| RepoArg::Named(text.to_owned());
+        assert_eq!(RepoArg::parse("CAFE").unwrap(), named("CAFE"));
+        assert_eq!(
+            RepoArg::parse("0123456789abcdef").unwrap(),
+            named("0123456789abcdef")
+        );
+        for path in ["./cafe", "abc", "cafe0123456789abc"] {
+            let RepoArg::Named(text) = RepoArg::parse(path).unwrap() else {
+                panic!("{path} does not exist, so it is not a path to register");
+            };
+            assert!(Path::new(&text).is_absolute(), "{path}");
         }
-        assert_eq!(repo_arg("/src/x").unwrap(), "/src/x");
+        assert_eq!(
+            RepoArg::parse("/nonexistent/x").unwrap(),
+            named("/nonexistent/x")
+        );
+        assert_eq!(
+            RepoArg::parse(".").unwrap(),
+            RepoArg::Path(std::env::current_dir().unwrap())
+        );
+        // An existing directory is a path even when its name is hex.
+        let dir = tempfile::tempdir().unwrap();
+        let hex = dir.path().join("cafe");
+        std::fs::create_dir(&hex).unwrap();
+        assert_eq!(
+            RepoArg::parse(hex.to_str().unwrap()).unwrap(),
+            RepoArg::Path(hex.clone())
+        );
     }
 }

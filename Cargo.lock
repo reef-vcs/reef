@@ -2915,6 +2915,7 @@ dependencies = [
  "criterion",
  "etcetera",
  "futures 0.3.34",
+ "gix",
  "humantime-serde",
  "hyper-util",
  "jj-lib",
@@ -2981,6 +2982,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "gix",
  "rand",
  "rand_chacha",
  "serde",

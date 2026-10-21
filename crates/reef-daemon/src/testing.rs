@@ -16,6 +16,7 @@ use tempfile::TempDir;
 use crate::client::Client;
 use crate::config::{Config, Paths};
 use crate::daemon::{Daemon, DaemonHandle};
+use crate::proto::v0::register_request::IfNotJj;
 
 /// Above the generator's largest files, so a synthetic tree is tracked in
 /// full.
@@ -89,7 +90,7 @@ impl TestDaemon {
             .expect("generate the synthetic repository");
         let registered = daemon
             .client
-            .register_repository(&root)
+            .register_repository(&root, IfNotJj::Fail)
             .await
             .expect("register the synthetic repository");
         let repository = registered.repository.expect("a repository in the response");

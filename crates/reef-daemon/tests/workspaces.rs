@@ -21,6 +21,7 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use reef_daemon::client::ClientError;
 use reef_daemon::error::detail_of;
 use reef_daemon::model::{ReclaimReason, WorkspaceState};
+use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace, create_request};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo};
@@ -97,7 +98,7 @@ async fn register_then_create_default() {
     let (daemon, repo) = fixture().await;
     let again = daemon
         .client
-        .register_repository(&repo.root.join("src"))
+        .register_repository(&repo.root.join("src"), IfNotJj::Fail)
         .await
         .unwrap();
     assert!(
@@ -105,6 +106,14 @@ async fn register_then_create_default() {
         "a path inside the root registers the root"
     );
     assert_eq!(again.repository.unwrap().id, repo.id);
+    // A jj repository is never initialized again (R1.25).
+    let again = daemon
+        .client
+        .register_repository(&repo.root, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    assert!(again.already_registered);
+    assert!(!again.initialized_jj);
     let listed = daemon.client.list_repositories().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].root, repo.root.display().to_string());
@@ -707,7 +716,11 @@ async fn forget_repository_refuses_with_active_workspace() {
     let gone = daemon.client.forget_repository(&repo.id).await.unwrap_err();
     assert_eq!(kind_of(&gone), ErrorKind::NotFound);
     // Registering again works and gets a new id.
-    let again = daemon.client.register_repository(&repo.root).await.unwrap();
+    let again = daemon
+        .client
+        .register_repository(&repo.root, IfNotJj::Fail)
+        .await
+        .unwrap();
     assert!(!again.already_registered);
     assert_ne!(again.repository.unwrap().id, repo.id);
 }
@@ -820,7 +833,11 @@ async fn colocated_repo_imports_refs() {
     })
     .await
     .unwrap();
-    let registered = daemon.client.register_repository(&root).await.unwrap();
+    let registered = daemon
+        .client
+        .register_repository(&root, IfNotJj::Fail)
+        .await
+        .unwrap();
     let repository = registered.repository.unwrap();
     assert!(repository.colocated);
 
@@ -940,4 +957,109 @@ async fn failed_create_after_materialize_tears_down() {
     // With the obstacle gone, creating works.
     std::fs::remove_file(repo_dir.join("wc")).unwrap();
     create(&daemon, &repo).await;
+}
+
+/// Whether git itself, reading `.git/info/exclude`, ignores `<root>/.jj/`.
+fn git_ignores_jj_dir(root: &Path) -> bool {
+    let repo = gix::open(root).unwrap();
+    let index = repo.index_or_empty().unwrap();
+    let mut excludes = repo
+        .excludes(
+            &index,
+            None,
+            gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+        )
+        .unwrap();
+    excludes
+        .at_entry(".jj", Some(gix::index::entry::Mode::DIR))
+        .unwrap()
+        .is_excluded()
+}
+
+/// R1.25: `INIT_ALONGSIDE_GIT` makes a plain git checkout a colocated jj
+/// repository, adds the exclude line, and registers it; `FAIL` and the
+/// cases that cannot be initialized are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn register_initializes_jj_alongside_git() {
+    let daemon = TestDaemon::start().await;
+    let root = daemon.tmp.path().join("plain-git");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let head = reef_testing::git::init_repo(&root, &[("README", "plain git\n")]);
+    assert!(!git_ignores_jj_dir(&root));
+
+    let refused = daemon
+        .client
+        .register_repository(&root, IfNotJj::Fail)
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&refused), ErrorKind::NotFound);
+    assert!(!root.join(".jj").exists());
+
+    let registered = daemon
+        .client
+        .register_repository(&root.join("sub"), IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    assert!(registered.initialized_jj);
+    assert!(!registered.already_registered);
+    let repository = registered.repository.unwrap();
+    assert!(repository.colocated);
+    assert_eq!(
+        Path::new(&repository.root),
+        std::fs::canonicalize(&root).unwrap()
+    );
+    assert!(root.join(".jj").is_dir());
+    assert!(git_ignores_jj_dir(&root));
+
+    let again = daemon
+        .client
+        .register_repository(&root, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    assert!(again.already_registered);
+    assert!(!again.initialized_jj);
+
+    // git's `main` is the default base once the create imports refs.
+    let ws = daemon
+        .client
+        .create_workspace(CreateRequest {
+            repo: repository.id.clone(),
+            owner: OWNER.into(),
+            ..CreateRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&ws.path).join("README")).unwrap(),
+        "plain git\n"
+    );
+    let new_commit: CommitIdHex = ws.commit_id.parse().unwrap();
+    let parents = open(&root).await.commit_parents(&new_commit).await.unwrap();
+    assert_eq!(parents, [head.parse::<CommitIdHex>().unwrap()]);
+
+    let worktree = daemon.tmp.path().join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+    let error = daemon
+        .client
+        .register_repository(&worktree, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&error), ErrorKind::InvalidArgument);
+    assert!(
+        error.to_string().contains("worktree or submodule"),
+        "{error}"
+    );
+
+    let empty = daemon.tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let error = daemon
+        .client
+        .register_repository(&empty, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&error), ErrorKind::NotFound);
+    assert!(error.to_string().contains("run git init first"), "{error}");
 }

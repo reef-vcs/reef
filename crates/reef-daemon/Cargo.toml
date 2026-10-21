@@ -104,6 +104,7 @@ jj-lib.workspace = true          # tests/workspaces.rs sets a bookmark the way `
 serde_json.workspace = true
 tempfile.workspace = true
 reef-testing.workspace = true
+gix = { workspace = true, features = ["excludes"] }   # tests/workspaces.rs asks git's own ignore stack about `.jj` (R1.25)
 pollster.workspace = true
 tokio.workspace = true
 sha2.workspace = true            # the conformance suite's tree digest (R1.11)

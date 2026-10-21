@@ -36,9 +36,9 @@ A **proposal** is the unit of review: a change or stack of changes, with its evi
 
 ## What runs today
 
-Phase 1 replaces git worktrees for agents working on existing [Jujutsu](https://github.com/jj-vcs/jj) repositories. This is what has landed on `main`:
+Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositories. This is what has landed on `main`:
 
-- **A local daemon** (`reef daemon run|start|stop|status`) serving gRPC over a Unix socket, with its state, configuration, and logs under a per-user state directory. It serves many repositories; `reef repo register` adds one.
+- **A local daemon** (`reef daemon run|start|stop|status`) serving gRPC over a Unix socket, with its state, configuration, and logs under a per-user state directory. It serves many repositories; the first `reef` command in a checkout registers it, and in a plain git checkout first creates jj's side of a colocated repository (`.jj/` plus one line in `.git/info/exclude`).
 - **Leased workspaces.** `reef ws create` materializes a workspace on a change in a second or two on a 100k-file repository (under half a second on overlayfs), `reef ws run` runs a command inside a fresh workspace with the lease heartbeated for the life of the process and the workspace released on exit, and `reef ws list|inspect|release` manage them. When an agent dies, its lease expires, a final snapshot lands in the store, and the directory is reclaimed. Nothing is lost.
 - **Copy-on-write backends.** APFS clones on macOS, kernel overlayfs or fuse-overlayfs on Linux, and a plain copy fallback everywhere, all behind one `Backend` trait and one conformance suite. A workspace costs disk proportional to what the agent changed.
 - **Continuous snapshots.** A filesystem watcher (`notify`, or Watchman on large repositories) snapshots each workspace through jj-lib after every debounced write. Watcher snapshots are marked local-only and never leave the machine until a change is published.
@@ -46,7 +46,7 @@ Phase 1 replaces git worktrees for agents working on existing [Jujutsu](https://
 - **Shared dependency stores.** A `reef.toml` in the repository declares stores such as `node_modules` or `target`; `reef store build` builds one in a scratch workspace and seals it, and the daemon mounts it read-only into every workspace after verifying it against the lockfile hash.
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, zero-step onboarding of any git repository, the agent-facing CLI contract (`reef guide`, `reef here`, hints on every error), `reef init` for writing agent configuration, prebuilt binaries with a one-line installer, and the quickstart.
+Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, the agent-facing CLI contract (`reef guide`, `reef here`, hints on every error), `reef init` for writing agent configuration, prebuilt binaries with a one-line installer, and the quickstart.
 
 To try it from source:
 
@@ -54,8 +54,7 @@ To try it from source:
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
 reef daemon start
-cd /path/to/a/jj/repo
-reef repo register
+cd /path/to/a/git/or/jj/repo
 reef ws run -- your-agent-command
 ```
 

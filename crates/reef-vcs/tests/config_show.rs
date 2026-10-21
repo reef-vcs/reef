@@ -59,6 +59,12 @@ fn show_prints_loadable_toml_with_sources() {
         keys.iter().all(|line| line.ends_with("# source: default")),
         "{text}"
     );
+    // R1.25's one key, under its own section.
+    assert!(
+        text.contains("[repo]\nauto_register = true  # source: default\n"),
+        "{text}"
+    );
+    assert!(config.repo.auto_register);
     assert!(
         std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
         "show creates nothing"

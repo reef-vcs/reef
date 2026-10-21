@@ -170,6 +170,17 @@ pub enum InitError {
     /// The repository could not be created.
     #[error("failed to create the jj repository")]
     Init(#[from] WorkspaceInitError),
+    /// The directory has no `.git` (R1.25).
+    #[error("{} is not a git repository: it has no .git directory", .0.display())]
+    NotAGitRepo(PathBuf),
+    /// The directory's `.git` is a file: a git worktree or submodule
+    /// checkout, whose repository lives elsewhere (R1.25).
+    #[error("{} is a git worktree or submodule: its .git is a file", .0.display())]
+    GitFile(PathBuf),
+    /// git's HEAD could not be imported, or the working-copy commit moved
+    /// onto it.
+    #[error("failed to check out git's HEAD")]
+    Head(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Failure to read a commit from the store.
@@ -203,6 +214,8 @@ impl Classify for InitError {
         match self {
             Self::Init(WorkspaceInitError::DestinationExists(_)) => ErrorKind::AlreadyExists,
             Self::Init(error) => classify_by_source(error),
+            Self::NotAGitRepo(_) | Self::GitFile(_) => ErrorKind::InvalidArgument,
+            Self::Head(error) => classify_by_source(&**error),
         }
     }
 }
@@ -284,6 +297,69 @@ impl Repo {
             "colocated repository created"
         );
         Ok(repo)
+    }
+
+    /// Creates the jj side of a colocated repository in the existing git
+    /// repository at `root` (`root/.git` must be a directory), with one empty
+    /// working-copy commit on top of git's HEAD, and opens it. The equivalent
+    /// of `jj git init --colocate` in a checkout that already has `.git`
+    /// (R1.25). The working-copy state records HEAD's tree without reading
+    /// the files, so jj's next snapshot of `root` rehashes them. With an
+    /// unborn HEAD the working-copy commit stays on the root commit. If a
+    /// step fails, the `.jj` directory it made is removed.
+    #[tracing::instrument(skip_all, fields(path = %root.display()))]
+    pub async fn init_in_git_repo(root: &Path, settings: &UserSettings) -> Result<Self, InitError> {
+        let dot_git = root.join(".git");
+        if !dot_git.is_dir() {
+            let error = if dot_git.exists() {
+                InitError::GitFile(root.to_owned())
+            } else {
+                InitError::NotAGitRepo(root.to_owned())
+            };
+            crate::log_failure!(&error);
+            return Err(error);
+        }
+        let (workspace, repo) = Workspace::init_external_git(settings, root, &dot_git)
+            .await
+            .map_err(InitError::from)
+            .inspect_err(|error| crate::log_failure!(error))?;
+        let mut repo = Self { workspace, repo };
+        if let Err(source) = repo.check_out_git_head().await {
+            drop(repo);
+            // jj-lib removes `.jj` when one of its own steps fails; so does this.
+            std::fs::remove_dir_all(root.join(".jj")).ok();
+            let error = InitError::Head(source);
+            crate::log_failure!(&error);
+            return Err(error);
+        }
+        tracing::info!(
+            repo = %repo.workspace_root().display(),
+            op_id = %repo.op_id(),
+            "repository created alongside git"
+        );
+        Ok(repo)
+    }
+
+    /// Moves this workspace's working-copy commit onto a new empty change
+    /// on git's HEAD and records HEAD's tree as the working-copy state, as
+    /// `jj git init --colocate` does. Nothing is written for an unborn HEAD.
+    async fn check_out_git_head(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let name = self.workspace.workspace_name().to_owned();
+        let mut tx = self.repo.start_transaction();
+        jj_lib::git::import_head(tx.repo_mut(), &name, self.workspace.workspace_root()).await?;
+        let Some(head_id) = tx.repo().view().git_head(&name).as_normal().cloned() else {
+            return Ok(());
+        };
+        let head = tx.repo().store().get_commit_async(&head_id).await?;
+        let wc_commit = tx.repo_mut().check_out(name, &head).await?;
+        tx.repo_mut().rebase_descendants().await?;
+        // Working copy first, as jj does: the lock is held from the reset
+        // until the state names the new operation.
+        let mut locked = self.workspace.start_working_copy_mutation().await?;
+        locked.locked_wc().reset(&wc_commit).await?;
+        self.repo = tx.commit("import git head").await?;
+        locked.finish(self.repo.op_id().clone()).await?;
+        Ok(())
     }
 
     /// Whether the repository's store is a git repository at

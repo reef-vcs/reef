@@ -50,6 +50,7 @@ use reef_daemon::backend::fs_util::{allocated_bytes, free_bytes};
 use reef_daemon::backend::{
     Backend, BackendKind, OverlayConfig, WorkspacePaths, backend_for, probe,
 };
+use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_daemon::proto::v0::{CreateRequest, CreateResponse, Workspace};
 use reef_daemon::testing::{TestDaemon, short_tmp};
 use reef_testing::synth::{self, MutateOps, Preset};
@@ -308,7 +309,7 @@ impl Api {
             let daemon = TestDaemon::start().await;
             let registered = daemon
                 .client
-                .register_repository(&fixture.root)
+                .register_repository(&fixture.root, IfNotJj::Fail)
                 .await
                 .expect("register the fixture");
             let repo = registered.repository.expect("a repository").id;

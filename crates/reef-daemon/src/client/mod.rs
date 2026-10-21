@@ -20,6 +20,7 @@ pub use reef_lib::jj::settings::parse_byte_size;
 use crate::error::{detail_of, kind_from_status};
 use crate::proto::v0::daemon_client::DaemonClient;
 use crate::proto::v0::maintenance_client::MaintenanceClient;
+use crate::proto::v0::register_request::IfNotJj;
 use crate::proto::v0::repositories_client::RepositoriesClient;
 use crate::proto::v0::stores_client::StoresClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
@@ -132,10 +133,16 @@ impl Client {
     }
 
     /// `Repositories.Register`: registers the jj repository containing
-    /// `path`, which must be absolute.
-    pub async fn register_repository(&self, path: &Path) -> Result<RegisterResponse, ClientError> {
+    /// `path`, which must be absolute. `if_not_jj` says what to do with a
+    /// git checkout that has no jj repository yet (R1.25).
+    pub async fn register_repository(
+        &self,
+        path: &Path,
+        if_not_jj: IfNotJj,
+    ) -> Result<RegisterResponse, ClientError> {
         let request = RegisterRequest {
             path: path.display().to_string(),
+            if_not_jj: if_not_jj.into(),
         };
         Ok(self.repositories().register(request).await?.into_inner())
     }
@@ -304,7 +311,11 @@ pub trait WorkspacesApi: Send + Sync {
     /// `Daemon.Status`.
     async fn status(&self) -> Result<StatusResponse, ClientError>;
     /// `Repositories.Register`.
-    async fn register_repository(&self, path: &Path) -> Result<RegisterResponse, ClientError>;
+    async fn register_repository(
+        &self,
+        path: &Path,
+        if_not_jj: IfNotJj,
+    ) -> Result<RegisterResponse, ClientError>;
     /// `Repositories.List`.
     async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError>;
     /// `Repositories.Forget`.
@@ -354,8 +365,12 @@ impl WorkspacesApi for Client {
         Client::status(self).await
     }
 
-    async fn register_repository(&self, path: &Path) -> Result<RegisterResponse, ClientError> {
-        Client::register_repository(self, path).await
+    async fn register_repository(
+        &self,
+        path: &Path,
+        if_not_jj: IfNotJj,
+    ) -> Result<RegisterResponse, ClientError> {
+        Client::register_repository(self, path, if_not_jj).await
     }
 
     async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError> {
