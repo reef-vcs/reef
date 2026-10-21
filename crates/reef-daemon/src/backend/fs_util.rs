@@ -155,10 +155,101 @@ pub fn mtime_millis(metadata: &Metadata) -> Option<i64> {
 /// Infix of a tree being deleted in the background: `<name>.trash-<nanos>`.
 pub const TRASH_INFIX: &str = ".trash-";
 
-/// Prefix of the trial clone (and its temporary source) the APFS probe
-/// makes in a workspace directory (R1.08). [`sweep_trash`] removes any a
-/// crash left behind.
+/// Prefix of the trial clone (and its temporary source) the clone probes
+/// make in a workspace directory (R1.08, R1.10), and of the overlay probes'
+/// trial mounts (R1.09). [`sweep_trash`] removes any a crash left behind.
 pub(crate) const PROBE_CLONE_PREFIX: &str = ".reef-probe-";
+
+/// Makes trial clone names unique among concurrent probes in one process.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether `error`, from cloning a file, means nothing on this filesystem
+/// can clone (`ENOTSUP`, `EOPNOTSUPP`) or not between these two paths
+/// (`EXDEV`), rather than that this one file failed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn cannot_clone(error: &io::Error) -> bool {
+    // Compared one by one: Linux's `ENOTSUP` is `EOPNOTSUPP`, macOS has both.
+    let code = error.raw_os_error();
+    [libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV]
+        .into_iter()
+        .any(|errno| code == Some(errno))
+}
+
+/// A clone backend's probe (APFS, R1.08; reflink, R1.10): whether
+/// workspaces under `target_dir` (which exists) can be cloned from bases
+/// under `base_dir`. The two must be on one volume, and `clone` of a
+/// one-byte probe file in `base_dir` ([`PROBE_FILE`](super::base_cache::PROBE_FILE),
+/// created once) into `target_dir` must succeed. Without a `base_dir` (the
+/// daemon's status, which names no repository), whether `target_dir`'s
+/// volume can clone at all, from a temporary probe file beside the trial
+/// clone. Whatever the trial creates in `target_dir` is removed again.
+/// The error is the reason, for the user.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn trial_clone(
+    base_dir: Option<&Path>,
+    target_dir: &Path,
+    clone: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let unique = format!(
+        "{PROBE_CLONE_PREFIX}{}-{}",
+        std::process::id(),
+        PROBE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let (source, temporary) = match base_dir {
+        Some(base_dir) => {
+            fs::create_dir_all(base_dir)
+                .map_err(|error| format!("cannot create {}: {error}", base_dir.display()))?;
+            if !same_volume(base_dir, target_dir).map_err(|error| ErrorChain(&error).to_string())? {
+                return Err(format!(
+                    "different volume from the base cache ({})",
+                    base_dir.display()
+                ));
+            }
+            (base_dir.join(super::base_cache::PROBE_FILE), false)
+        }
+        None => (target_dir.join(format!("{unique}.src")), true),
+    };
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&source)
+        .and_then(|mut file| file.write_all(b"\n"));
+    match created {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && !temporary => {}
+        Err(error) => return Err(format!("cannot create {}: {error}", source.display())),
+    }
+    let trial = target_dir.join(unique);
+    let cloned = clone(&source, &trial);
+    let mut leftovers = vec![];
+    if cloned.is_ok() {
+        leftovers.push(trial);
+    }
+    if temporary {
+        leftovers.push(source);
+    }
+    for path in leftovers {
+        if let Err(error) = fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), %error, "cannot remove a probe file");
+        }
+    }
+    match cloned {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            Err(format!("different volume from the base cache ({error})"))
+        }
+        Err(error) if cannot_clone(&error) => {
+            Err(format!("the filesystem cannot clone files ({error})"))
+        }
+        Err(error) => Err(format!(
+            "trial clone into {} failed: {error}",
+            target_dir.display()
+        )),
+    }
+}
 
 /// Mode of every directory [`copy_tree`] creates. jj does not track
 /// directories, so their own modes and mtimes are not carried over.
@@ -577,7 +668,7 @@ pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
 
 /// Removes every `*.trash-*` entry directly under `dir`, synchronously, as
 /// the daemon does at start for what background deletions left behind, and
-/// any APFS probe clone (`.reef-probe-*`) a crash left there.
+/// any probe clone or trial mount (`.reef-probe-*`) a crash left there.
 /// Returns how many were removed. A missing `dir` has none. An entry that
 /// cannot be removed is logged and skipped, so one stuck tree does not hide
 /// the others; only failing to list `dir` is an error.

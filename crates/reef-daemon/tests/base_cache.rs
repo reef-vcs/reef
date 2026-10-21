@@ -272,7 +272,8 @@ fn select_auto_returns_the_platform_backend() {
     )
     .unwrap();
     // On Linux, an overlay when this test may mount one (as root, or with
-    // `fuse-overlayfs` installed), else the copy until reflinks (R1.10).
+    // `fuse-overlayfs` installed), else reflink on btrfs or XFS, else the
+    // copy.
     let expected = if cfg!(target_os = "macos") {
         BackendKind::ApfsClone
     } else {
@@ -288,6 +289,7 @@ fn select_auto_returns_the_platform_backend() {
             BackendKind::ApfsClone
                 | BackendKind::Overlayfs
                 | BackendKind::FuseOverlayfs
+                | BackendKind::Reflink
                 | BackendKind::Copy
         ),
         "{expected}"
@@ -295,7 +297,7 @@ fn select_auto_returns_the_platform_backend() {
     assert_eq!(backend.kind(), expected);
     assert_eq!(
         backend.dir_cloner().is_some(),
-        expected == BackendKind::ApfsClone
+        matches!(expected, BackendKind::ApfsClone | BackendKind::Reflink)
     );
 
     // With every other backend stubbed unavailable, auto is the copy; with

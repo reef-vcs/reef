@@ -48,9 +48,9 @@ const TMP_SUFFIX: &str = ".tmp";
 const TMP_STATE_SUFFIX: &str = ".tmp.state";
 /// Suffix of an evicted directory being removed (R1.17).
 const GC_SUFFIX: &str = ".gc";
-/// The one-byte file the APFS probe clones into a workspace directory to
-/// see whether it can clone bases there (R1.08). Not an entry; the sweep
-/// keeps it.
+/// The one-byte file the clone probes (APFS, R1.08; reflink, R1.10) clone
+/// into a workspace directory to see whether they can clone bases there.
+/// Not an entry; the sweep keeps it.
 pub(crate) const PROBE_FILE: &str = ".probe";
 
 /// Implemented by backends that can clone a whole directory cheaply, for

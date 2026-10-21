@@ -81,7 +81,19 @@ fn conformance_reflink() {
     };
     let spec = reef_testing::synth::Spec::preset(reef_testing::synth::Preset::Small);
     let fx = BaseFixture::in_dir(dir.as_ref(), &spec, backends::SEED, "small");
-    conform_if_available(BackendKind::Reflink, &fx);
+    // The variable promises a filesystem that can reflink, so an
+    // unavailable probe is a failure here, not a skip.
+    let overlay = OverlayConfig::default();
+    let availability = probe(&fx.repo_dir().join("ws"), Some(fx.bases_dir()), &overlay)
+        .into_iter()
+        .find(|probe| probe.kind == BackendKind::Reflink)
+        .map(|probe| probe.availability);
+    assert_eq!(
+        availability,
+        Some(Availability::Available),
+        "REEF_TEST_REFLINK_DIR is set"
+    );
+    conform(backend_for(BackendKind::Reflink, &overlay).as_ref(), &fx);
 }
 
 #[test]

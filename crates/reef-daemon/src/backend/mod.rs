@@ -27,6 +27,8 @@ pub mod fs_util;
 #[cfg(target_os = "linux")]
 pub mod overlay;
 pub mod probe;
+#[cfg(target_os = "linux")]
+pub mod reflink;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -391,8 +393,9 @@ pub trait Backend: Send + Sync {
 }
 
 /// Constructs the backend for `kind` without probing, with `overlay` for
-/// the overlay kinds. Each backend ticket replaces its placeholder arm; a
-/// placeholder fails every operation with [`BackendError::Unavailable`].
+/// the overlay kinds. A backend this platform does not have is a
+/// placeholder that fails every operation with
+/// [`BackendError::Unavailable`].
 #[cfg_attr(
     not(target_os = "linux"),
     allow(unused_variables, reason = "only the overlay backends read the config")
@@ -407,7 +410,13 @@ pub fn backend_for(kind: BackendKind, overlay: &OverlayConfig) -> Box<dyn Backen
             kind,
             reason: probe::APFS_MACOS_ONLY.to_owned(),
         }),
-        BackendKind::Reflink => Box::new(Pending::until(kind, "R1.10")),
+        #[cfg(target_os = "linux")]
+        BackendKind::Reflink => Box::new(reflink::ReflinkBackend),
+        #[cfg(not(target_os = "linux"))]
+        BackendKind::Reflink => Box::new(Pending {
+            kind,
+            reason: probe::REFLINK_LINUX_ONLY.to_owned(),
+        }),
         #[cfg(target_os = "linux")]
         BackendKind::Overlayfs => Box::new(overlay::OverlayBackend::kernel(overlay)),
         #[cfg(target_os = "linux")]
@@ -505,22 +514,13 @@ pub fn select_from(
     Ok(backend_for(kind, overlay))
 }
 
-/// Placeholder for a backend whose ticket has not landed, or that this
-/// platform does not have.
+/// Placeholder for a backend this platform does not have.
 struct Pending {
     kind: BackendKind,
     reason: String,
 }
 
 impl Pending {
-    /// A backend implemented by `ticket`.
-    fn until(kind: BackendKind, ticket: &str) -> Self {
-        Self {
-            kind,
-            reason: format!("not implemented until {ticket}"),
-        }
-    }
-
     fn unavailable<T>(&self) -> Result<T, BackendError> {
         Err(BackendError::Unavailable {
             kind: self.kind,
@@ -627,10 +627,13 @@ mod tests {
             ErrorKind::NotFound
         );
         assert_eq!(
-            Pending::until(BackendKind::Reflink, "R1.10")
-                .unavailable::<()>()
-                .unwrap_err()
-                .kind(),
+            Pending {
+                kind: BackendKind::Reflink,
+                reason: "not here".into(),
+            }
+            .unavailable::<()>()
+            .unwrap_err()
+            .kind(),
             ErrorKind::Unavailable
         );
         let tool = BackendError::Tool {
@@ -668,20 +671,32 @@ mod tests {
         }
         let id: WorkspaceId = "00000000000000ab".parse().unwrap();
         let ws = WorkspacePaths::under(Path::new("/nonexistent"), id);
-        let error = backend_for(BackendKind::Reflink, &overlay)
-            .tear_down(&ws)
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "backend reflink is not available here: not implemented until R1.10"
-        );
         #[cfg(not(target_os = "linux"))]
+        for (kind, message) in [
+            (
+                BackendKind::Overlayfs,
+                "backend overlayfs is not available here: overlayfs is Linux only",
+            ),
+            (
+                BackendKind::Reflink,
+                "backend reflink is not available here: reflink (FICLONE) is Linux only",
+            ),
+        ] {
+            assert_eq!(
+                backend_for(kind, &overlay)
+                    .tear_down(&ws)
+                    .unwrap_err()
+                    .to_string(),
+                message
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
-            backend_for(BackendKind::Overlayfs, &overlay)
+            backend_for(BackendKind::ApfsClone, &overlay)
                 .tear_down(&ws)
                 .unwrap_err()
                 .to_string(),
-            "backend overlayfs is not available here: overlayfs is Linux only"
+            "backend apfs is not available here: APFS clones are macOS only"
         );
     }
 }

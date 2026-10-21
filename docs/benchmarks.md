@@ -232,6 +232,18 @@ Docker Desktop's Linux VM on the same M2 Max: arm64, kernel 6.10.14-linuxkit, 12
 - **The overlay rows fail the `proportional` check, by under a megabyte.** An overlay workspace costs nothing until it is written (0.02 MiB, its empty upper and work directories), so the bound is twice the modified files alone, 0.5 to 0.6 MiB, and modifying 50 files cost about 1 MiB. Copy-up also creates each modified file's parent directories in the upper layer, a block apiece on ext4, which the check does not count. The cost is still in proportion to the modified files, about a thousandth of the 608 MiB tree. RX.06 should allow for the directories if it gates on this check.
 - **`copy` on ext4 is a real copy**: 608 MiB per workspace, the tree's allocated size, and 1.4 s.
 
+#### Reflink (R1.10)
+
+The reflink backend is not in the rows above: it needs the state directory on btrfs or XFS, and the bench's is under `target/`. These are its `materialize` alone on the `large` preset (100,000 files) in the same container, on 4 GiB loop-mounted images (`mkfs.btrfs` defaults, `mkfs.xfs -m reflink=1`), from `REEF_TEST_REFLINK_DIR=<mount> cargo test -p reef-daemon --release --lib reflink::tests::timing_large -- --ignored --nocapture`: three runs each, free space read after a `syncfs`.
+
+| Filesystem | materialize, runs 1 to 3 | free space per workspace |
+| --- | --- | ---: |
+| btrfs | 1.63 s, 1.48 s, 1.84 s | 122 MiB of metadata (245 MiB of disk: metadata is `DUP`) |
+| XFS | 1.60 s, 1.69 s, 1.71 s | 55 MiB |
+
+- **Both miss the one-second creation target**, as the R1.10 brief expected: Linux has no directory clone, so each of the 100,000 files costs two opens, a `FICLONE`, two mode changes, and a `utimensat`. The exit criterion names APFS and overlayfs only; reflink is for Linux machines that can mount neither overlay.
+- **Neither is proportional to modified files.** XFS spends 55 MiB per workspace on inodes, directories, and extent records. btrfs spends more because it stores files under 2 KiB inline in its metadata, and cloning an inline extent copies it, so the `large` tree's small files are duplicated in every workspace. The test's free-space delta is coarse on btrfs (512 MiB on the first run, when a metadata chunk was allocated, then 0), so the btrfs figure is `btrfs filesystem df`'s metadata `used` across ten `cp -a --reflink=always` copies of the same tree, which make the same `FICLONE` per file. A btrfs subvolume snapshot per base would make creation O(1) and share the metadata too; it is a follow-up listed in R1.10.
+
 #### CI runners
 
 Run [39660853557](https://github.com/reef-vcs/reef/actions/runs/39660853557), dispatched on the R1.12 branch at commit `5cb9ba1` with the `medium` preset (10,014 files). Hardware is GitHub's published spec for public repositories. The `ubuntu-24.04` job took 28 minutes, the root run included; `macos-15` took 35. Neither runner has Watchman, so `create_api` used `notify` on both.

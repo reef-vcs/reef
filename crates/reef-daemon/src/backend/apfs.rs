@@ -16,18 +16,17 @@
 //! ([`DirCloner`], `BaseCache::ensure_from`).
 
 use std::ffi::CString;
-use std::io::{self, Write as _};
+use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use reef_lib::error::ErrorChain;
 use reef_lib::telemetry::elapsed_ms;
 
-use super::base_cache::{DirCloner, PROBE_FILE};
+use super::base_cache::DirCloner;
 use super::fs_util::{
-    FileCopier, PROBE_CLONE_PREFIX, changed_files_vs_base, copy_tree, same_volume, tear_down_root,
+    FileCopier, cannot_clone, changed_files_vs_base, copy_tree, tear_down_root, trial_clone,
 };
 use super::{
     Availability, Backend, BackendError, BackendKind, BaseEntry, DiskUsage, SwapOutcome,
@@ -40,9 +39,6 @@ const CLONE_NOFOLLOW: u32 = 0x0001;
 /// `<sys/clonefile.h>`: do not copy the owner; the clone belongs to the
 /// caller, as a copy would.
 const CLONE_NOOWNERCOPY: u32 = 0x0002;
-
-/// Makes trial clone names unique among concurrent probes in one process.
-static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
@@ -83,9 +79,9 @@ pub(crate) fn clone_dir(from: &Path, to: &Path) -> io::Result<()> {
     clonefile(from, to, CLONE_NOOWNERCOPY)
 }
 
-/// Clones one regular file: the per-file fallback's [`FileCopier`], and
-/// R1.10's on Linux. `reflink_copy::reflink` fails rather than copying, and
-/// on macOS is `clonefile` with `CLONE_NOOWNERCOPY`.
+/// Clones one regular file: the per-file fallback's [`FileCopier`].
+/// `reflink_copy::reflink` fails rather than copying, and on macOS is
+/// `clonefile` with `CLONE_NOOWNERCOPY`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ApfsCloner;
 
@@ -99,14 +95,6 @@ impl DirCloner for ApfsBackend {
     fn clone_dir(&self, from: &Path, to: &Path) -> io::Result<()> {
         clone_dir(from, to)
     }
-}
-
-/// Whether `error` means the volume cannot clone at all.
-fn cannot_clone(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENOTSUP | libc::EOPNOTSUPP | libc::EXDEV)
-    )
 }
 
 impl ApfsBackend {
@@ -216,87 +204,29 @@ impl Backend for ApfsBackend {
 }
 
 /// Whether workspaces under `target_dir` (which exists) can be cloned from
-/// bases under `base_dir`: the two are on one volume, and a trial clone of
-/// a one-byte probe file in `base_dir` (`.probe`, created once) into
-/// `target_dir` succeeds. Without a `base_dir` (the daemon's status, which
-/// names no repository), whether `target_dir`'s volume can clone at all,
-/// from a temporary probe file beside the trial clone. Whatever the trial
-/// creates in `target_dir` is removed again.
+/// bases under `base_dir`, by a trial `clonefile` of a probe file
+/// ([`trial_clone`]). Without a `base_dir`, whether `target_dir`'s volume
+/// can clone at all.
 pub(crate) fn probe_apfs(base_dir: Option<&Path>, target_dir: &Path) -> Availability {
-    match trial_clone(base_dir, target_dir) {
+    match trial_clone(base_dir, target_dir, &|from, to| {
+        clonefile(from, to, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)
+    }) {
         Ok(()) => Availability::Available,
         Err(reason) => Availability::Unavailable(reason),
-    }
-}
-
-fn trial_clone(base_dir: Option<&Path>, target_dir: &Path) -> Result<(), String> {
-    let unique = format!(
-        "{PROBE_CLONE_PREFIX}{}-{}",
-        std::process::id(),
-        PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let (source, temporary) = match base_dir {
-        Some(base_dir) => {
-            std::fs::create_dir_all(base_dir)
-                .map_err(|error| format!("cannot create {}: {error}", base_dir.display()))?;
-            if !same_volume(base_dir, target_dir).map_err(|error| ErrorChain(&error).to_string())? {
-                return Err(format!(
-                    "different volume from the base cache ({})",
-                    base_dir.display()
-                ));
-            }
-            (base_dir.join(PROBE_FILE), false)
-        }
-        None => (target_dir.join(format!("{unique}.src")), true),
-    };
-    let created = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&source)
-        .and_then(|mut file| file.write_all(b"\n"));
-    match created {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && !temporary => {}
-        Err(error) => return Err(format!("cannot create {}: {error}", source.display())),
-    }
-    let clone = target_dir.join(unique);
-    let cloned = clonefile(&source, &clone, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY);
-    let mut leftovers = vec![];
-    if cloned.is_ok() {
-        leftovers.push(clone);
-    }
-    if temporary {
-        leftovers.push(source);
-    }
-    for path in leftovers {
-        if let Err(error) = std::fs::remove_file(&path) {
-            tracing::warn!(path = %path.display(), %error, "cannot remove a probe file");
-        }
-    }
-    match cloned {
-        Ok(()) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-            Err(format!("different volume from the base cache ({error})"))
-        }
-        Err(error) if cannot_clone(&error) => {
-            Err(format!("the filesystem cannot clone files ({error})"))
-        }
-        Err(error) => Err(format!(
-            "trial clone into {} failed: {error}",
-            target_dir.display()
-        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::backend::fs_util::{allocated_bytes, free_bytes};
+    use crate::backend::base_cache::PROBE_FILE;
+    use crate::backend::fs_util::{allocated_bytes, free_bytes, same_volume};
     use crate::model::RepoId;
 
     /// A tree with files of distinct mtimes, an executable, a relative
