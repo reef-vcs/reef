@@ -1,6 +1,6 @@
 [package]
 name = "reef-vcs"
-description = "Reef: version control built for a world where AI agents write most of the code. Provides the `reef` binary and re-exports the Reef library and daemon crates."
+description = "Reef: version control for fleets of coding agents. Provides the `reef` binary and re-exports the Reef library and daemon crates."
 readme = "README.md"
 keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools", "command-line-utilities"]

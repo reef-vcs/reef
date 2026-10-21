@@ -1,6 +1,6 @@
 [package]
 name = "reef-daemon"
-description = "Reef daemon: the local service that owns snapshots, workspaces, leases, and the typed API. Reef is version control built for a world where AI agents write most of the code."
+description = "Reef daemon: the local service that owns snapshots, workspaces, leases, and the typed API. Reef is version control for fleets of coding agents."
 readme = "README.md"
 keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools"]

@@ -4,7 +4,7 @@ Thanks for helping. This file covers how work is organized, how to set up, and w
 
 ## Status
 
-Reef is in Phase 0: foundations, with nothing user-facing yet. The roadmap is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and the current phase's tickets have implementation briefs in [docs/dev-tickets/](docs/dev-tickets/phase-0/README.md). Open tickets are tracked as issues labeled [`phase-0`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-0). Bugs, proposals, and tickets each have an issue form; open-ended questions belong in [Discussions](https://github.com/reef-vcs/reef/discussions).
+Reef is in Phase 1: leased copy-on-write workspaces. Phase 0 (foundations) is complete, and a daemon and `reef` CLI build from source and run on macOS and Linux, though nothing is released or stable yet. The roadmap is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and the current phase's tickets have implementation briefs in [docs/dev-tickets/](docs/dev-tickets/phase-1/README.md). Open tickets are tracked as issues labeled [`phase-1`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-1). Bugs, proposals, and tickets each have an issue form; open-ended questions belong in [Discussions](https://github.com/reef-vcs/reef/discussions).
 
 ## Setup
 
