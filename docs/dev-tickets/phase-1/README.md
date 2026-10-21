@@ -31,7 +31,12 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.21 | [R1.21-ws-run.md](R1.21-ws-run.md) | S | R1.05, R1.15, R1.22 | R1.24, R2.11 |
 | R1.22 | [R1.22-workspace-cli.md](R1.22-workspace-cli.md) | M | R1.04, R1.05 | R1.17, R1.18, R1.20, R1.21, R1.24, R2.05 |
 | R1.23 | [R1.23-crash-reclaim-load-tests.md](R1.23-crash-reclaim-load-tests.md) | M | R1.15, R1.20 | |
-| R1.24 | [R1.24-quickstart-docs.md](R1.24-quickstart-docs.md) | S | R1.18, R1.20, R1.21, R1.22 | RX.04 |
+| R1.24 | [R1.24-quickstart-docs.md](R1.24-quickstart-docs.md) | S | R1.18, R1.20, R1.21, R1.22, R1.25, R1.26, R1.27, R1.28 | RX.04 |
+| R1.25 | [R1.25-zero-step-repository-onboarding.md](R1.25-zero-step-repository-onboarding.md) | M | R1.05, R1.21, R1.22 | R1.24, R1.27, RX.07 |
+| R1.26 | [R1.26-agent-facing-cli.md](R1.26-agent-facing-cli.md) | M | R1.05, R1.21, R1.22 | R1.24, R1.27, R2.13, RX.07 |
+| R1.27 | [R1.27-agent-config-init.md](R1.27-agent-config-init.md) | S | R1.25, R1.26 | R1.24, R2.13, R2.25, RX.07 |
+| R1.28 | [R1.28-prebuilt-binaries-and-installer.md](R1.28-prebuilt-binaries-and-installer.md) | M | R0.03, R1.22 | R1.24, R4.17, RX.07 |
+| RX.07 | [RX.07-agent-onboarding-benchmark.md](RX.07-agent-onboarding-benchmark.md) | M | R1.25, R1.26, R1.27, R1.28 | R2.17 (cross-cutting; first needed for the Phase 1 release) |
 
 ## Suggested execution order
 
@@ -40,7 +45,8 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 3. R1.13 (needs R1.05). R1.22 (needs R1.04 and R1.05). R1.11 (needs R1.07), then R1.10 and R1.12 (R1.12 also needs R1.05).
 4. R1.15, R1.16, R1.14 (need R1.13). R1.06 (needs R1.13 and R1.11). R1.20 (needs R1.19, R1.08, R1.09, R1.13, and R1.22).
 5. R1.17 and R1.21 (need R1.15 and R1.22; R1.17 also needs R1.16).
-6. R1.18, R1.23, R1.24 last. R1.23 is the phase's acceptance test and should run against everything else merged.
+6. R1.25 and R1.26 (need R1.21 and R1.22, both merged) in parallel; R1.28 (needs only R0.03 and R1.22) alongside them. R1.27 after both R1.25 and R1.26.
+7. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test and needs R1.24's quickstart and R1.28's installer published to run scenario C.
 
 ## Phase exit criteria (from dev-phases.md)
 
@@ -52,6 +58,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 - A workspace moves to another change without losing its lease or leaving a directory behind.
 - Two hundred workspaces with active watchers on one machine, with a write reaching the store as a snapshot within five seconds at that load.
 - A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
+- On the onboarding benchmark's scenario A (RX.07), an agent with no Reef configuration and only `reef` on `PATH` reaches a successful `reef ws run` in at most eight tool calls and with at most two failed `reef` invocations, median of three trials.
 
 Which ticket proves each criterion: R1.12 (creation time and disk), R1.23 (kill, 200 workspaces, same-change workspaces, both platforms), R1.20 (shared store), R1.06 (move), R1.18 (backup).
 
@@ -64,6 +71,7 @@ These were decided while writing the briefs. `dev-phases.md` was edited to match
 - **R1.05 adds a `Repositories` service.** "Every request names a registered repository" needs a way to register one. `Register`, `List`, and `Forget` are part of R1.05.
 - **R1.13 fixes the staleness policy** ADR 0008 left open, and the behavior when two workspaces edit one change. See "Snapshots, staleness, and divergence".
 - **R1.22 adds `reef completions <shell>`** (shell completions through `clap_complete`), which the `dev-phases.md` row did not list, and **`reef ws gc` moves to R1.17**, which owns the `Gc` RPC. R1.22 builds the CLI skeleton with a stub for `ws gc`, and R1.17 replaces the stub, so R1.22 no longer waits for R1.17.
+- **R1.25 to R1.28 and RX.07 were added on 2026-10-21**, after R1.01 to R1.22 had merged, to make Phase 1 usable by an agent with no setup: implicit registration and jj alongside git (R1.25), the agent-facing CLI contract with `reef guide`, error hints, and `reef here` (R1.26), `reef init` writing harness files (R1.27), prebuilt binaries and an installer pulled forward from R4.17 (R1.28), and an onboarding benchmark that becomes a Phase 1 exit criterion (RX.07). **R1.24 changes scope**: it no longer requires an existing jj repository or a `repo register` step, installs with the installer rather than two `cargo install` commands (R1.22's autostart already runs the daemon from the `reef` binary, so one binary was always enough), and gains a "set up your agent" section; it now depends on the four new tickets. R2.13, R2.17, RX.04, and R4.17 rows were amended and R2.24 to R2.26 added in `dev-phases.md` in the same change.
 
 ## Decisions fixed across all Phase 1 tickets
 
@@ -206,6 +214,10 @@ meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)   -- daemon_instance_id, created
 | Commands | `reef daemon run` (foreground), `reef daemon start|stop|status` (detached `reef-daemon` found next to `reef` or on `PATH`, else `reef daemon run` from the `reef` binary itself), `reef config show`, `reef repo register [path]|list|forget`, `reef ws create|list|inspect|release|move|run|gc`, `reef store build|list`, `reef backup <dir>`, `reef restore <dir>`, `reef completions <shell>`. Any command needing the daemon starts it when the socket is absent unless `--no-autostart`. From R1.22 on, subcommands whose ticket has not landed exist as stubs that print `not implemented until R1.xx` and exit 1 without contacting the daemon, so `--help` is complete. `--repo` defaults to the repository containing the current directory, except for `ws list`, which lists every repository's workspaces without it. | R1.22 |
 | Output | JSON (one object, or one array for lists) when stdout is not a terminal or `-o json`; aligned text otherwise (`-o text` forces it). Errors go to stderr as `error: <chain>`; in JSON mode also `{"error": {"kind", "message"}}` on stdout. | R1.22 |
 | Exit codes | 0 ok; from `ErrorKind`: `InvalidArgument` 2, `NotFound` 3, `AlreadyExists` 4, `Conflict` 5, `Unavailable` 6, `PermissionDenied` 7, `Io` 8, `Internal` 1. `ws run` exits with the child's code (or 128 + signal). | R1.22 |
+| Agent contract | Never interactive (no prompt, pager, or editor; stdin is read only by `ws run`'s child). Every error with a known fix carries `hint` (a sentence) and `next` (an argv array) in the JSON error object and on stderr in text mode; the daemon sets them in ADR 0017's mapping layer, never inside message text. `reef` with no arguments and `reef guide` print `docs/agent-guide.md` (embedded; at most 1,600 bytes, short form at most 40 lines); `reef --help` at most 60 lines. `reef here` answers where the agent is (by `REEF_WORKSPACE`, else by path) without a snapshot, exits 0 outside a workspace, and names the next command. `infer_subcommands` and visible aliases (`workspace`, `new`, `ls`, `rm`); names are never renamed. `REEF_OUTPUT` defaults `-o`. `ws list --limit` (100). ADR 0025. | R1.26 |
+| Repository onboarding | A command whose `--repo` is a path and gets `NotFound` ("repository containing") registers the path with `if_not_jj = INIT_ALONGSIDE_GIT`, prints `reef: registered <root>` on stderr, and retries once. A git checkout without `.jj` gets jj initialized alongside git (`Repo::init_in_git_repo`, `/.jj/` in `.git/info/exclude`); a `.git` file (worktree or submodule) is `InvalidArgument`; no `.git` at all stays `NotFound`. Off with `--no-register` or `[repo] auto_register = false`. `repo register --no-init` keeps the old behavior. ADR 0024. | R1.25 |
+| `reef init` | Registers (R1.25), then writes managed `<!-- reef:begin v1 -->` sections into `AGENTS.md` (always) and `CLAUDE.md` (when `claude` is detected or named; skipped when it imports `@AGENTS.md`), and whole owned files `.claude/skills/reef/SKILL.md`, `.cursor/rules/reef.mdc`, and with `--user` `~/.claude/skills/reef/SKILL.md`, all rendered from `docs/agent-guide.md`. Never overwrites text it did not write; `--check` exits 3 when stale; `--print` for pasting. `.mcp.json` is R2.13's. | R1.27 |
+| Distribution | A `v<version>` tag builds `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (gnu on `ubuntu-22.04` as the recorded fallback), tarballs with both binaries and completions, `SHA256SUMS`, a GitHub Release with the `CHANGELOG.md` section, `install.sh` (POSIX, checksum-verified, `~/.local/bin`, no `sudo`, `REEF_VERSION` and `REEF_INSTALL_DIR`), a Homebrew tap PR, and binstall metadata. `reef --version` prints version, commit, and target. Unsigned until R4.17. | R1.28 |
 | Workspace spec | `reef.toml` at the repository root: `[workspace] lease = "30m"`, `[snapshot] exclude = ["target/", "node_modules/"]`, `[[store]] name, lockfile, mount, build` (an argv array, no shell) with optional `[store.env]` (R1.20). Read from the target commit's tree at workspace creation, never from disk, and the lockfile bytes for hashing come from the same tree. Every store mount is added to the excludes as an anchored pattern. Parsed by `reef_lib::spec`. Unknown keys are errors. | R1.19 |
 | Shared stores | `stores/<name>/<blake3 of lockfile>/`, per daemon and keyed by `(name, hash)` (`stores.repo_id` records the first builder), built by the daemon running the declared `build` command once in a scratch workspace on the copy backend with the store directory writable, then sealed (`chmod -R a-w`; on Linux with privilege, a read-only bind mount into the workspace instead of a symlink). Mounted into workspaces as a symlink at `mount` (or the bind mount), excluded from snapshots and from the watcher. A lockfile whose hash has no sealed store is `Unavailable` with the `reef store build` hint, unless `Create` is sent with `missing_stores = SKIP` (`--skip-missing-stores`), which creates the workspace with `attention = 'store-missing'`; a mismatch found later sets `attention = 'store-hash-mismatch'`. `reef store build|list` are in R1.20. | R1.20 |
 
@@ -254,6 +266,8 @@ Allocated here so parallel tickets do not collide. The index row in `docs/adr/RE
 | 0021 | Workspace spec file | R1.19 |
 | 0022 | Shared dependency stores | R1.20 |
 | 0023 | Watchman as the large-repository watcher | R1.14 |
+| 0024 | Repository onboarding: implicit registration and jj alongside git | R1.25 |
+| 0025 | Agent-facing CLI contract | R1.26 |
 
 ### Platform and CI
 
