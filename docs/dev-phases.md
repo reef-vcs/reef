@@ -1,6 +1,6 @@
 # Reef development phases
 
-*Companion to [design.md](design.md). Last updated 2026-10-16.*
+*Companion to [design.md](design.md). Last updated 2026-10-21.*
 
 This document breaks the design into phases and the phases into tickets. Each ticket row is meant to become one issue. Phases map to GitHub milestones, and a phase's exit criteria are the milestone's acceptance test.
 
@@ -53,6 +53,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A workspace moves to another change without losing its lease or leaving a directory behind.
 - Two hundred workspaces with active watchers on one machine, with a write reaching the store as a snapshot within five seconds at that load.
 - A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
+- On the onboarding benchmark's scenario A (RX.07), an agent with no Reef configuration and only `reef` on `PATH` reaches a successful `reef ws run` in at most eight tool calls and with at most two failed `reef` invocations, median of three trials.
 
 ### Workstream: workspace model and daemon skeleton
 
@@ -96,7 +97,11 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R1.21 | `reef ws run` | Run a command inside a leased workspace with automatic heartbeat for the process lifetime and release on exit. The primary agent entry point for phase one. | S | R1.05, R1.15, R1.22 |
 | R1.22 | CLI for workspaces | `reef ws create`, `list`, `release`, `inspect`, daemon lifecycle, repository registration, and `reef completions <shell>`, with JSON output when stdout is not a terminal. Thin client of the daemon. Subcommands owned by later tickets (`ws gc` is R1.17's) exist as stubs until those land. | M | R1.04, R1.05 |
 | R1.23 | Crash, reclaim, and load integration tests | Kill agents mid-edit, kill the daemon, fill the disk, expire leases, and assert the invariants from the exit criteria. Run 200 workspaces with active watchers on one machine on both platforms, measure write-to-snapshot latency against the phase target, and record inotify and thread pool limits hit. | M | R1.15, R1.20 |
-| R1.24 | Quickstart documentation | Install, point at an existing jj repo, run an agent in a workspace, watch it reclaim. | S | R1.18, R1.20, R1.21, R1.22 |
+| R1.24 | Quickstart documentation | Install with the one-line installer, run an agent in a workspace in any git or jj repository with no setup step, set up the agent's harness, watch the workspace reclaim. | S | R1.18, R1.20, R1.21, R1.22, R1.25, R1.26, R1.27, R1.28 |
+| R1.25 | Zero-step repository onboarding | Any command that resolves `--repo` by path registers the repository on the way, and registration initializes jj alongside an existing git checkout (colocated, `.jj` plus one `info/exclude` line). `--no-register` and `[repo] auto_register` opt out. ADR. | M | R1.05, R1.21, R1.22 |
+| R1.26 | Agent-facing CLI contract | `reef guide` (and `reef` with no arguments) under 400 tokens, `hint` and `next` argv on every error with a known fix, `reef here` for orientation, aliases and prefix inference, `REEF_OUTPUT`, never interactive. The contract is an ADR and a test suite. | M | R1.05, R1.21, R1.22 |
+| R1.27 | `reef init` agent configuration | Registers the repository (R1.25) and writes managed sections into `AGENTS.md` and `CLAUDE.md`, a Claude Code skill, and a Cursor rule from the same guide text; `--check`, `--print`, `--user`. Reef's own repository dogfoods it in CI. | S | R1.25, R1.26 |
+| R1.28 | Prebuilt binaries and a one-line install | Release workflow on a version tag for four targets, `install.sh` with checksum verification and no `sudo`, a Homebrew tap formula, `cargo binstall` metadata, `reef --version` with commit and target. Unsigned until R4.17. | M | R0.03, R1.22 |
 
 ---
 
@@ -141,11 +146,14 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.13 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`. | M | R2.05 |
+| R2.13 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`, zero-argument over stdio. Tool descriptions and error hints reuse R1.26's guide and `hint`/`next` fields; `reef init` (R1.27) gains the `.mcp.json` renderer; the server is listed on the MCP registry. | M | R2.05, R1.26, R1.27 |
 | R2.14 | Symbol index ingestion | Accept SCIP indexes and tree-sitter tag output per snapshot. Store symbol locations keyed by snapshot. | L | R2.02 |
 | R2.15 | Symbol-level diff | `diff --symbols`: which symbols changed, added, or removed, and which call sites are affected. Line-level on expand. | M | R2.14 |
 | R2.16 | Query layer | SQL-backed queries over changes, operations, and symbols: changes touching a symbol in a window, by agent, by outcome. Exposed through the API. | M | R2.14 |
-| R2.17 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results. | S | R2.15 |
+| R2.17 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results, on RX.07's harness and results page. | S | R2.15, RX.07 |
+| R2.24 | `reef schema` | The CLI's command tree and the API's services and messages as JSON Schema and a protobuf descriptor set, from one command, so a harness can generate tool definitions without a human writing them. | S | R2.01, R2.05 |
+| R2.25 | Harness packages | A Claude Code plugin (skill, MCP server entry, hooks) and the equivalents for Codex and opencode, built from R1.27's renderers and published by R1.28's release workflow, so one install line configures a harness for Reef. | S | R1.27, R1.28, R2.13 |
+| R2.26 | Workspace provider contract | A small documented interface (create, attach, release, with JSON in and out) and a reference adapter so a harness that creates git worktrees for isolation can ask Reef for a workspace instead; the upstream conversation with the first harness. | M | R2.13, R1.21 |
 
 ### Workstream: web UI v0
 
@@ -284,7 +292,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R4.14 | Git wire protocol hardening via gitoxide | Fetch and push against git remotes natively through gitoxide, which jj-lib already uses, with no subprocess path: SSH and HTTPS authentication, credential helpers, large-repository performance, partial clones, and retries. R3.17 delivers the first push; this makes it production grade. | L | R3.17 |
 | R4.15 | Deterministic change IDs on import | Derive change IDs from git commit hashes so two importers agree. | S | R4.14 |
 | R4.16 | Clean export of landed history | Export the landed projection, not the operation log, to git. Round-trip test suite on real repositories. | L | R4.14, R3.16 |
-| R4.17 | Homebrew tap and release engineering | Signed binaries for macOS and Linux, a Homebrew tap, release automation, changelog, and App Store and Play Store distribution for the mobile shell from R3.40, including signing, review submission, and update cadence. Can start during phase two; the mobile part waits for R3.40. | M | R2.05, R3.40 |
+| R4.17 | Signing and release engineering | Code signing and notarization of the binaries R1.28 already builds and publishes (release workflow, installer, Homebrew tap, binstall), and App Store and Play Store distribution for the mobile shell from R3.40, including signing, review submission, and update cadence. Can start during phase two; the mobile part waits for R3.40. | M | R1.28, R2.05, R3.40 |
 | R4.18 | Store backup and restore | Documented and scripted procedure: object storage first, then a Postgres snapshot, so no backup contains a dangling reference. Point-in-time recovery and bucket versioning configured in the Docker and reference deployment. A backup retention window setting that garbage collection enforces by never deleting a blob younger than it. The store's landing signing key included in the metadata backup. Restore test with writers active during the backup, asserting every referenced blob is present. | M | R4.02 |
 | R4.19 | Store load test | Drive the phase target against a store: 1,000 agents across repositories at 10,000 operations per minute, measuring p99 API latency, subscription delivery latency through the broker from R2.22, and landing queue depth with 50 agents proposing against one repository. Publish results and use them to decide whether repository sharding across database instances is needed before the first public store. | M | R4.11, R2.22 |
 
@@ -344,9 +352,10 @@ These do not belong to a phase and should be scheduled alongside the phase where
 | RX.01 | Security review of workspace isolation | Shared stores as a lateral movement path, daemon socket permissions, lease hijacking. | M | Phase 1 |
 | RX.02 | Security review of evidence and identity | Forged evidence, key handling, executor sandbox escape. External review if possible. | L | Phase 3 |
 | RX.03 | Opt-in telemetry | Anonymous usage and performance metrics with a clear opt-in. Needed to measure fallback rates and token savings in the wild. | M | Phase 2 |
-| RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases. | M | Phase 1 release |
+| RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases, with `llms.txt` and `llms-full.txt` at the root and the agent guide (R1.26) at a stable URL, so an agent with web access finds the answer in one fetch. | M | Phase 1 release |
 | RX.05 | Windows support decision | Whether and how to support Windows workspaces. No copy-on-write primitive comparable to APFS or overlayfs; options are ReFS block cloning, a VFS, or Linux-only via WSL. ADR. | S | Phase 1 |
 | RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.12 run in CI with a threshold that fails the build. | S | Phase 1 |
+| RX.07 | Agent onboarding benchmark | A real agent (Claude Code headless first, Codex second) in a fresh container, with no Reef configuration, after `reef init`, from nothing, and inside `ws run`: tool calls, failed `reef` invocations, tokens, and cost to a working workspace, three trials, weekly, published like the benchmarks. Phase 1's agent exit criterion. Brief in `dev-tickets/phase-1/`. | M | Phase 1 release |
 
 ---
 
