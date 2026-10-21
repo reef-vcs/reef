@@ -36,6 +36,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.26 | [R1.26-agent-facing-cli.md](R1.26-agent-facing-cli.md) | M | R1.05, R1.21, R1.22 | R1.24, R1.27, R2.13, RX.07 |
 | R1.27 | [R1.27-agent-config-init.md](R1.27-agent-config-init.md) | S | R1.25, R1.26 | R1.24, R2.13, R2.25, RX.07 |
 | R1.28 | [R1.28-prebuilt-binaries-and-installer.md](R1.28-prebuilt-binaries-and-installer.md) | M | R0.03, R1.22 | R1.24, R4.17, RX.07 |
+| R1.29 | [R1.29-create-latency-off-the-watcher-path.md](R1.29-create-latency-off-the-watcher-path.md) | M | R1.12, R1.13, R1.14 | The APFS half of the first exit criterion, RX.06 |
 | RX.07 | [RX.07-agent-onboarding-benchmark.md](RX.07-agent-onboarding-benchmark.md) | M | R1.25, R1.26, R1.27, R1.28 | R2.17 (cross-cutting; first needed for the Phase 1 release) |
 
 ## Suggested execution order
@@ -46,7 +47,8 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 4. R1.15, R1.16, R1.14 (need R1.13). R1.06 (needs R1.13 and R1.11). R1.20 (needs R1.19, R1.08, R1.09, R1.13, and R1.22).
 5. R1.17 and R1.21 (need R1.15 and R1.22; R1.17 also needs R1.16).
 6. R1.25 and R1.26 (need R1.21 and R1.22, both merged) in parallel; R1.28 (needs only R0.03 and R1.22) alongside them. R1.27 after both R1.25 and R1.26.
-7. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test and needs R1.24's quickstart and R1.28's installer published to run scenario C.
+7. R1.29 (needs only merged tickets) any time before R1.23: R1.12 found `create_api/large/apfs/20` at 1.93 s, and R1.23 should measure the phase with the fix in.
+8. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test and needs R1.24's quickstart and R1.28's installer published to run scenario C.
 
 ## Phase exit criteria (from dev-phases.md)
 
