@@ -467,13 +467,38 @@ fn move_to_trash(path: &Path) -> io::Result<PathBuf> {
         if fs::symlink_metadata(&trash).is_ok() {
             continue;
         }
-        fs::rename(path, &trash)?;
+        rename_even_read_only(path, &trash)?;
         return Ok(trash);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "no free trash name",
     ))
+}
+
+/// `fs::rename`, retried once with the owner write bit added if it was
+/// refused and `from` is a directory without one: macOS 15 refuses to
+/// rename a read-only directory even within one parent (Linux does not),
+/// and a sealed store's root is `0555`. The directory's mode is put back
+/// wherever it ends up.
+pub(crate) fn rename_even_read_only(from: &Path, to: &Path) -> io::Result<()> {
+    let error = match fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => error,
+        Err(error) => return Err(error),
+    };
+    let Ok(meta) = fs::symlink_metadata(from) else {
+        return Err(error);
+    };
+    let mode = meta.permissions().mode() & 0o7777;
+    if !meta.is_dir() || mode & 0o200 != 0 {
+        return Err(error);
+    }
+    fs::set_permissions(from, fs::Permissions::from_mode(mode | 0o200))?;
+    let renamed = fs::rename(from, to);
+    let at = if renamed.is_ok() { to } else { from };
+    let restored = fs::set_permissions(at, fs::Permissions::from_mode(mode));
+    renamed.and(restored)
 }
 
 /// Deletes a trashed tree, logging rather than returning failure: the
@@ -774,6 +799,27 @@ mod tests {
         assert!(!tree.exists());
         let error = remove_tree_async(&tree).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_read_only_directory_renames_and_keeps_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("sealed");
+        let to = dir.path().join("sealed.moved");
+        fs::create_dir(&from).unwrap();
+        fs::write(from.join("file"), b"x").unwrap();
+        fs::set_permissions(&from, fs::Permissions::from_mode(0o555)).unwrap();
+
+        rename_even_read_only(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read(to.join("file")).unwrap(), b"x");
+        assert_eq!(
+            fs::metadata(&to).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+        // GC's path to the same rename: a sealed store goes to trash.
+        remove_tree_in_background(&to).unwrap();
+        assert!(names(dir.path()).is_empty(), "{:?}", names(dir.path()));
     }
 
     #[test]

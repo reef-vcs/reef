@@ -602,7 +602,7 @@ impl Drop for BuildGuard<'_> {
 }
 
 fn rename(from: &Path, to: &Path) -> Result<(), StoreError> {
-    std::fs::rename(from, to).map_err(|source| StoreError::Io {
+    crate::backend::fs_util::rename_even_read_only(from, to).map_err(|source| StoreError::Io {
         op: "rename",
         path: from.to_owned(),
         source,
