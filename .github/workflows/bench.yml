@@ -26,7 +26,9 @@ jobs:
   bench:
     name: bench ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # The workspace benchmarks (R1.12) take about 17 minutes on medium and 53 on large on an
+    # M2 Max, Linux runs them twice, and the runners are slower.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -41,11 +43,28 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+      # The unprivileged overlay backend, so the workspace benchmarks (R1.12) cover it.
+      - name: Install fuse-overlayfs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
       # `--bench '*'` keeps criterion's arguments away from the libtest harnesses of lib and bin
       # targets. `shell: bash` adds pipefail, so a failed run is not hidden by tee.
       - name: Run benchmarks
         shell: bash
         run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-results.txt
+      # Kernel overlayfs needs root: REEF_BENCH_PRIVILEGED=1 benchmarks that backend alone, and
+      # `create_api` on it, since `auto` picks it as root. Appends to target/bench-ws.json.
+      - name: Run workspace benchmarks as root (kernel overlayfs)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo -E env "PATH=$PATH" REEF_BENCH_PRIVILEGED=1 \
+            cargo bench -p reef-daemon --bench workspace_create -- --output-format bencher \
+            | tee bench-results-privileged.txt
+      # Before the upload and the cache save, which fail on root-owned files.
+      - name: Give target/ back to the runner user
+        if: ${{ always() && runner.os == 'Linux' }}
+        run: sudo chown -R "$(id -un)" target
       - name: Fixture summary
         run: cat target/bench-fixtures/*/.reef-synth.json | jq -c '{files,dirs,bytes}' || true
       # Also after a failed run: partial results and reports help explain the failure.
@@ -56,9 +75,12 @@ jobs:
           name: bench-${{ matrix.os }}-${{ env.REEF_BENCH_PRESET }}-${{ github.sha }}-${{ github.run_id }}
           path: |
             bench-results.txt
+            bench-results-privileged.txt
+            target/bench-ws.json
             target/criterion/
           retention-days: 90
-      # Keep the fixtures (up to a few GB for large) out of the toolchain action's target cache.
+      # Keep the fixtures (up to a few GB for large) out of the toolchain action's target cache,
+      # and the appended-to bench-ws.json, so the next run starts a new one.
       - name: Drop fixtures before the cache is saved
         if: always()
-        run: rm -rf target/bench-fixtures target/criterion
+        run: rm -rf target/bench-fixtures target/bench-state target/criterion target/bench-ws.json
