@@ -13,7 +13,7 @@ use reef_lib::error::ErrorKind;
 
 use super::render::GcReports;
 use super::repo::missing;
-use super::{CliError, Ctx, absolute, current_dir, repo_arg, ws_move, ws_run};
+use super::{CliError, Ctx, RepoArg, absolute, ws_move, ws_run};
 
 /// `reef ws`.
 #[derive(Debug, clap::Args)]
@@ -103,12 +103,17 @@ pub(crate) struct CreateTarget {
 }
 
 impl CreateTarget {
+    /// `--repo`, or the current directory.
+    pub(crate) fn repo(&self) -> Result<RepoArg, CliError> {
+        match &self.repo {
+            Some(repo) => RepoArg::parse(repo),
+            None => RepoArg::current(),
+        }
+    }
+
     /// The request these flags describe, owner and lease unset.
     pub(crate) fn request(&self) -> Result<CreateRequest, CliError> {
-        let repo = match &self.repo {
-            Some(repo) => repo_arg(repo)?,
-            None => current_dir()?.display().to_string(),
-        };
+        let repo = self.repo()?.text();
         let start = match (&self.change, &self.new_on) {
             (Some(change), _) => Some(create_request::Start::Change(change.clone())),
             (None, Some(new_on)) => Some(create_request::Start::NewOn(new_on.clone())),
@@ -175,16 +180,17 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             } else {
                 vec!["active".to_owned(), "releasing".to_owned()]
             };
-            let request = ListWorkspacesRequest {
-                repo: repo
-                    .as_deref()
-                    .map(repo_arg)
-                    .transpose()?
-                    .unwrap_or_default(),
-                states,
-                owner: String::new(),
+            let list = |repo| {
+                ctx.client.list_workspaces(ListWorkspacesRequest {
+                    repo,
+                    states: states.clone(),
+                    owner: String::new(),
+                })
             };
-            let listed = ctx.call(ctx.client.list_workspaces(request)).await?;
+            let listed = match repo {
+                Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
+                None => ctx.call(list(String::new())).await?,
+            };
             let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
             ctx.out.list(&listed)
         }
@@ -226,11 +232,15 @@ const GC_TIMEOUT: Duration = Duration::from_hours(1);
 /// stopped short, as the README's exit codes have it; the report is the
 /// command's one JSON value either way.
 async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, CliError> {
-    let repo = repo.map(repo_arg).transpose()?.unwrap_or_default();
     let deadline = ctx.timeout_flag.unwrap_or(GC_TIMEOUT);
-    let response = ctx
-        .call_within(deadline, ctx.client.gc(&repo, dry_run))
-        .await?;
+    let gc = |repo: String| async move { ctx.client.gc(&repo, dry_run).await };
+    let response = match repo {
+        Some(repo) => {
+            ctx.call_with_repo_within(deadline, &RepoArg::parse(repo)?, gc)
+                .await?
+        }
+        None => ctx.call_within(deadline, gc(String::new())).await?,
+    };
     let reports = GcReports {
         reports: response.reports.iter().map(GcReport::from).collect(),
         dry_run,
@@ -271,7 +281,14 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
         lease_ms: lease_millis(args.lease)?,
         ..args.target.request()?
     };
-    let response = ctx.call(ctx.client.create_workspace(request)).await?;
+    let response = ctx
+        .call_with_repo(&args.target.repo()?, |repo| {
+            ctx.client.create_workspace(CreateRequest {
+                repo,
+                ..request.clone()
+            })
+        })
+        .await?;
     let created = Created::from_response(&response).ok_or_else(|| missing("workspace"))?;
     ctx.out.object(&created)
 }

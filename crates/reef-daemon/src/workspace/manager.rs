@@ -21,7 +21,8 @@ use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
-use crate::repo::{RepoHandle, RepoRegistry};
+use crate::proto::v0::register_request::IfNotJj;
+use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind};
 use crate::store::StoreManager;
@@ -355,13 +356,18 @@ impl Manager {
     pub async fn register_repository(
         &self,
         path: PathBuf,
-    ) -> Result<(RepositoryRecord, bool), ManagerError> {
+        if_not_jj: IfNotJj,
+    ) -> Result<Registered, ManagerError> {
         let repos = Arc::clone(&self.repos);
         let db = Arc::clone(&self.db);
         let settings = self.settings.clone();
-        let (record, existed) =
-            tokio::task::spawn_blocking(move || repos.register(&db, &path, &settings)).await??;
-        Ok((self.prepare_watcher(record).await, existed))
+        let registered =
+            tokio::task::spawn_blocking(move || repos.register(&db, &path, &settings, if_not_jj))
+                .await??;
+        Ok(Registered {
+            record: self.prepare_watcher(registered.record).await,
+            ..registered
+        })
     }
 
     /// Forgets a repository (refused while any of its workspaces is active),

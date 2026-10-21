@@ -254,7 +254,14 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<Workspace, CliError> {
         lease_ms: lease_millis(args.lease)?,
         ..args.target.request()?
     };
-    let response = ctx.call(ctx.client.create_workspace(request)).await?;
+    let response = ctx
+        .call_with_repo(&args.target.repo()?, |repo| {
+            ctx.client.create_workspace(CreateRequest {
+                repo,
+                ..request.clone()
+            })
+        })
+        .await?;
     response.workspace.ok_or_else(|| missing("workspace"))
 }
 
@@ -650,6 +657,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
+    use reef_daemon::proto::v0::register_request::IfNotJj;
     use reef_daemon::proto::v0::{
         CreateResponse, ForgetResponse, InspectResponse, ListWorkspacesRequest, RegisterResponse,
         ReleaseResponse, Repository, SnapshotResponse, StatusResponse,
@@ -673,7 +681,11 @@ mod tests {
         async fn status(&self) -> Result<StatusResponse, ClientError> {
             not_here()
         }
-        async fn register_repository(&self, _: &Path) -> Result<RegisterResponse, ClientError> {
+        async fn register_repository(
+            &self,
+            _: &Path,
+            _: IfNotJj,
+        ) -> Result<RegisterResponse, ClientError> {
             not_here()
         }
         async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError> {

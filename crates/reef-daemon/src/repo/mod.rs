@@ -24,10 +24,11 @@ use tokio::sync::oneshot;
 
 use crate::model::{RepoId, RepositoryRecord};
 
+mod exclude;
 mod registry;
 mod thread;
 
-pub use registry::RegisterError;
+pub use registry::{RegisterError, Registered};
 use thread::{Message, RepoThread};
 
 /// A repository as its thread holds it.
@@ -239,6 +240,8 @@ pub struct RepoRegistry {
     /// Threads closed by [`RepoRegistry::close`], joined by
     /// [`RepoRegistry::close_all`].
     closed: Mutex<Vec<RepoThread>>,
+    /// Held for the whole of each [`RepoRegistry::register`].
+    register_turn: Mutex<()>,
 }
 
 impl RepoRegistry {

@@ -1,6 +1,7 @@
 //! The `reef` CLI against a daemon (R1.22): output modes, exit codes,
 //! autostart, and `daemon start|stop|status`. Tests 1 to 11 are the brief's;
-//! R1.17 adds `ws_gc_dry_run`.
+//! R1.17 adds `ws_gc_dry_run`, R1.20 the store tests, and R1.25 the
+//! implicit registration tests at the end.
 //!
 //! Most tests run a [`TestDaemon`] in this process and the `reef` binary
 //! against its socket with `--no-autostart`, so a mistake never starts a
@@ -776,4 +777,173 @@ async fn store_build_and_list() {
         .await,
     );
     assert_eq!(ws["attention"], "store-missing");
+}
+
+/// `reef` against `daemon`, run from `dir`.
+fn reef_at(daemon: &TestDaemon, dir: &Path) -> Command {
+    let mut command = reef(daemon);
+    command.current_dir(dir);
+    command
+}
+
+/// A directory under the daemon's temporary directory, created.
+fn new_dir(daemon: &TestDaemon, name: &str) -> PathBuf {
+    let dir = daemon.tmp.path().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+/// A plain git repository with one commit on `main`, no jj.
+fn plain_git_repo(daemon: &TestDaemon) -> PathBuf {
+    let root = new_dir(daemon, "plain-git");
+    reef_testing::git::init_repo(&root, &[("README", "plain git\n")]);
+    root
+}
+
+/// R1.25: `ws run` in a git checkout nobody registered initializes jj
+/// alongside git, registers it, says so on stderr, and runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_registers_a_plain_git_repo() {
+    let daemon = TestDaemon::start().await;
+    let root = plain_git_repo(&daemon);
+
+    let output = run(reef_at(&daemon, &root), &["ws", "run", "--", "true"]).await;
+    output.clone().assert().success();
+    let text = stderr(&output);
+    assert!(
+        text.contains(&format!(
+            "reef: registered {} and initialized jj alongside git",
+            root.display()
+        )),
+        "{text}"
+    );
+    assert!(root.join(".jj").is_dir());
+    let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == "/.jj/"), "{exclude}");
+
+    let listed = json(&run(reef(&daemon), &["repo", "list"]).await);
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["root"], root.to_str().unwrap());
+    assert_eq!(listed[0]["colocated"], true);
+}
+
+/// R1.25: an existing jj repository is registered without initializing
+/// anything, and only the first command says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_create_registers_an_existing_jj_repo() {
+    let daemon = TestDaemon::start().await;
+    let root = new_dir(&daemon, "jj-repo");
+    let at = root.clone();
+    tokio::task::spawn_blocking(move || init_synthetic_repo(&at, Preset::Small))
+        .await
+        .unwrap();
+
+    let output = run(reef_at(&daemon, &root), &["ws", "create", "-o", "json"]).await;
+    let created = json(&output);
+    assert!(created["path"].is_string(), "{created}");
+    let text = stderr(&output);
+    assert!(
+        text.contains(&format!("reef: registered {}\n", root.display())),
+        "{text}"
+    );
+    assert!(!text.contains("initialized"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn implicit_registration_is_once() {
+    let daemon = TestDaemon::start().await;
+    let root = plain_git_repo(&daemon);
+    let first = run(reef_at(&daemon, &root), &["ws", "create"]).await;
+    json(&first);
+    assert!(stderr(&first).contains("registered"), "{}", stderr(&first));
+
+    let second = run(reef_at(&daemon, &root), &["ws", "create"]).await;
+    json(&second);
+    assert!(
+        !stderr(&second).contains("registered"),
+        "{}",
+        stderr(&second)
+    );
+    let listed = json(&run(reef(&daemon), &["repo", "list"]).await);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_register_flag_keeps_not_found() {
+    let daemon = TestDaemon::start().await;
+    let root = plain_git_repo(&daemon);
+
+    let output = run(
+        reef_at(&daemon, &root),
+        &["--no-register", "-o", "json", "ws", "run", "--", "true"],
+    )
+    .await;
+    let text = failed(&output, 3, "not_found");
+    assert!(text.contains("repository containing"), "{text}");
+    assert!(!root.join(".jj").exists());
+
+    std::fs::write(
+        daemon.state_dir().join("config.toml"),
+        "[repo]\nauto_register = false\n",
+    )
+    .unwrap();
+    let output = run(reef_at(&daemon, &root), &["ws", "create"]).await;
+    let text = failed(&output, 3, "not_found");
+    assert!(text.contains("repository containing"), "{text}");
+    assert!(!root.join(".jj").exists());
+    let listed = json(&run(reef(&daemon), &["repo", "list"]).await);
+    assert_eq!(listed.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_worktree_is_refused() {
+    let daemon = TestDaemon::start().await;
+    let worktree = new_dir(&daemon, "worktree");
+    std::fs::write(
+        worktree.join(".git"),
+        "gitdir: /elsewhere/.git/worktrees/w\n",
+    )
+    .unwrap();
+
+    let output = run(reef_at(&daemon, &worktree), &["ws", "create"]).await;
+    let text = failed(&output, 2, "invalid_argument");
+    assert!(text.contains("worktree or submodule"), "{text}");
+    assert!(!worktree.join(".jj").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_dir_is_not_found() {
+    let daemon = TestDaemon::start().await;
+    let empty = new_dir(&daemon, "empty");
+
+    let output = run(
+        reef_at(&daemon, &empty),
+        &["-o", "json", "ws", "run", "--", "true"],
+    )
+    .await;
+    let text = failed(&output, 3, "not_found");
+    assert!(text.contains("run git init first"), "{text}");
+    assert!(!empty.join(".jj").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_register_no_init() {
+    let daemon = TestDaemon::start().await;
+    let root = plain_git_repo(&daemon);
+    let path = root.to_str().unwrap();
+
+    let output = run(reef(&daemon), &["repo", "register", "--no-init", path]).await;
+    failed(&output, 3, "not_found");
+    assert!(!root.join(".jj").exists());
+
+    let output = run(reef(&daemon), &["repo", "register", path]).await;
+    let registered = json(&output);
+    assert_eq!(registered["root"], path);
+    assert_eq!(registered["colocated"], true);
+    assert!(
+        stderr(&output).contains("initialized jj alongside git"),
+        "{}",
+        stderr(&output)
+    );
 }

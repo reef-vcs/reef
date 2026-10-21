@@ -19,6 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true          # binary edge only
 thiserror.workspace = true
+# `git::init_repo` (R1.25): a git repository with one commit, without a `git` binary.
+gix = { workspace = true, features = ["sha1"] }
 
 [dev-dependencies]
 tempfile.workspace = true

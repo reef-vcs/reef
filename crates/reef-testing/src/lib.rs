@@ -4,4 +4,5 @@
 //! This crate is not published and depends on no other Reef crate, so any
 //! Reef crate can take it as a dev-dependency without creating a cycle.
 
+pub mod git;
 pub mod synth;

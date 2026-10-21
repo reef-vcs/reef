@@ -24,6 +24,7 @@ use jj_lib::repo_path::RepoPathBuf;
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, WatcherBackend};
 use reef_daemon::model::WorkspaceId;
+use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace};
 use reef_daemon::watcher::watchman::WatchmanWatcher;
 use reef_daemon::workspace::SnapshotSpec;
@@ -284,7 +285,7 @@ async fn scan_ms_after_one_change(preset: Preset, backend: WatcherBackend) -> Ve
     );
     let client = Client::connect(&socket).await.unwrap();
     let repo = client
-        .register_repository(&root)
+        .register_repository(&root, IfNotJj::Fail)
         .await
         .unwrap()
         .repository
@@ -487,7 +488,10 @@ async fn missing_binary_is_unavailable() {
         "the daemon started"
     );
     let client = Client::connect(&socket).await.unwrap();
-    let registered = client.register_repository(&root).await.unwrap();
+    let registered = client
+        .register_repository(&root, IfNotJj::Fail)
+        .await
+        .unwrap();
     let repo = registered.repository.unwrap();
     let created = client
         .create_workspace(CreateRequest {

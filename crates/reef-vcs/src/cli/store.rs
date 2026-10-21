@@ -11,7 +11,7 @@ use reef_daemon::proto::v0::{build_event, output_line};
 use reef_lib::error::ErrorKind;
 
 use super::repo::missing;
-use super::{CliError, Ctx, Output, repo_arg};
+use super::{CliError, Ctx, Output, RepoArg};
 
 /// `store build`'s timeout when `--timeout` is not given.
 const BUILD_TIMEOUT: Duration = Duration::from_mins(30);
@@ -73,12 +73,11 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             force,
         } => build(ctx, name, repo, rev, force).await,
         StoreCommand::List { repo } => {
-            let repo = repo
-                .as_deref()
-                .map(repo_arg)
-                .transpose()?
-                .unwrap_or_default();
-            let stores = ctx.call(ctx.client.list_stores(&repo)).await?;
+            let list = |repo: String| async move { ctx.client.list_stores(&repo).await };
+            let stores = match repo {
+                Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
+                None => ctx.call(list(String::new())).await?,
+            };
             let stores: Vec<Store> = stores.iter().map(Store::from).collect();
             ctx.out.list(&stores)?;
             Ok(ExitCode::SUCCESS)
@@ -94,30 +93,35 @@ async fn build(
     force: bool,
 ) -> Result<ExitCode, CliError> {
     let repo = match repo {
-        Some(repo) => repo_arg(&repo)?,
-        None => super::current_dir()?.display().to_string(),
+        Some(repo) => RepoArg::parse(&repo)?,
+        None => RepoArg::current()?,
     };
     let timeout = ctx.timeout_flag.unwrap_or(BUILD_TIMEOUT);
     let rev = rev.unwrap_or_default();
     let deadline = timeout.saturating_add(BUILD_SLACK);
-    let streamed = async {
-        let mut events = ctx
-            .client
-            .build_store(&repo, &name, &rev, timeout, force)
-            .await?;
-        while let Some(event) = events.message().await.map_err(ClientError::from)? {
-            match event.event {
-                Some(build_event::Event::Line(line)) => {
-                    let stderr = line.stream() == output_line::Stream::Stderr;
-                    ctx.out.passthrough(&line.text, stderr);
+    // An unregistered repository fails before any output, so a retry after
+    // registering it never repeats a line.
+    let streamed = |repo: String| {
+        let (name, rev) = (&name, &rev);
+        async move {
+            let mut events = ctx
+                .client
+                .build_store(&repo, name, rev, timeout, force)
+                .await?;
+            while let Some(event) = events.message().await.map_err(ClientError::from)? {
+                match event.event {
+                    Some(build_event::Event::Line(line)) => {
+                        let stderr = line.stream() == output_line::Stream::Stderr;
+                        ctx.out.passthrough(&line.text, stderr);
+                    }
+                    Some(build_event::Event::Done(result)) => return Ok(Some(result)),
+                    None => {}
                 }
-                Some(build_event::Event::Done(result)) => return Ok(Some(result)),
-                None => {}
             }
+            Ok(None)
         }
-        Ok(None)
     };
-    let Some(result) = ctx.call_within(deadline, streamed).await? else {
+    let Some(result) = ctx.call_with_repo_within(deadline, &repo, streamed).await? else {
         return Err(missing("build result"));
     };
     let built = BuiltStore::from(&result);

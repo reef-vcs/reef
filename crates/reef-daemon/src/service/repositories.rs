@@ -33,17 +33,20 @@ impl Repositories for RepositoriesService {
         &self,
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
-        let path = PathBuf::from(request.into_inner().path);
-        let (record, already_registered) = self
+        let request = request.into_inner();
+        let if_not_jj = request.if_not_jj();
+        let registered = self
             .state
             .manager
-            .register_repository(path)
+            .register_repository(PathBuf::from(request.path), if_not_jj)
             .await
             .map_err(status)?;
+        let record = &registered.record;
         tracing::Span::current().record("repo", tracing::field::display(record.id));
         Ok(Response::new(RegisterResponse {
-            repository: Some(Repository::from(&record)),
-            already_registered,
+            repository: Some(Repository::from(record)),
+            already_registered: registered.already_registered,
+            initialized_jj: registered.initialized_jj,
         }))
     }
 

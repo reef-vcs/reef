@@ -11,6 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use jj_lib::object_id::ObjectId;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
@@ -23,7 +24,7 @@ use reef_lib::jj::snapshot::{
     UntrackedReasonKind,
 };
 use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
-use reef_lib::jj::{IgnoreSources, OpenError, Repo, StartPoint, commit_snapshot};
+use reef_lib::jj::{IgnoreSources, InitError, OpenError, Repo, StartPoint, commit_snapshot};
 
 const MIB: usize = 1 << 20;
 
@@ -128,6 +129,69 @@ async fn open_colocated_repo() {
     assert_eq!(heads.len(), 1);
     assert!(heads[0].is_wc);
     assert!(dir.path().join(".git").exists());
+}
+
+/// R1.25: jj created alongside an existing git repository is colocated,
+/// its working-copy commit is an empty change on git's HEAD, and git's
+/// branches appear once refs are imported.
+#[tokio::test]
+async fn init_in_git_repo_colocates_on_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let head = reef_testing::git::init_repo(dir.path(), &[("README", "hello\n")]);
+
+    let mut repo = Repo::init_in_git_repo(dir.path(), &settings())
+        .await
+        .expect("init alongside git");
+    assert!(repo.is_colocated());
+    let wc = repo.wc_commit().unwrap();
+    let parents: Vec<String> = wc.parent_ids().iter().map(ObjectId::hex).collect();
+    assert_eq!(parents, [head.as_str()]);
+    // The files on disk are HEAD's, so the first snapshot records nothing.
+    assert!(!repo.snapshot("snapshot").await.unwrap().changed);
+
+    assert!(repo.resolve_revision("main").await.is_err());
+    repo.import_git_refs("import git refs").await.unwrap();
+    let main = repo
+        .resolve_revision("main")
+        .await
+        .expect("main after import");
+    assert_eq!(main.commit_id.as_str(), head);
+
+    let reopened = open(dir.path()).await;
+    assert!(reopened.is_colocated());
+}
+
+/// With no commit in git yet, the working-copy commit stays on the root.
+#[tokio::test]
+async fn init_in_git_repo_with_unborn_head() {
+    let dir = tempfile::tempdir().unwrap();
+    gix::init(dir.path()).expect("git init");
+    let repo = Repo::init_in_git_repo(dir.path(), &settings())
+        .await
+        .expect("init alongside git");
+    assert!(repo.is_colocated());
+    let wc = repo.wc_commit().unwrap();
+    let parents: Vec<String> = wc.parent_ids().iter().map(ObjectId::hex).collect();
+    assert_eq!(parents, ["0".repeat(40)]);
+}
+
+#[tokio::test]
+async fn init_in_git_repo_refuses_non_git_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = Repo::init_in_git_repo(dir.path(), &settings())
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, InitError::NotAGitRepo(_)), "{err}");
+    assert_eq!(err.kind(), ErrorKind::InvalidArgument);
+
+    std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere\n").unwrap();
+    let err = Repo::init_in_git_repo(dir.path(), &settings())
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, InitError::GitFile(_)), "{err}");
+    assert!(!dir.path().join(".jj").exists());
 }
 
 #[tokio::test]

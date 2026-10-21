@@ -112,6 +112,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["retention", "quiesce_max", "sqlite_pages_per_step"],
     ),
     ("snapshot", &["max_new_file_size"]),
+    ("repo", &["auto_register"]),
 ];
 
 /// Every path the daemon uses, resolved and absolute.
@@ -205,6 +206,8 @@ pub struct FileConfig {
     pub backup: BackupSection,
     /// `[snapshot]`.
     pub snapshot: SnapshotSection,
+    /// `[repo]`.
+    pub repo: RepoSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -473,6 +476,24 @@ impl Default for SnapshotSection {
     fn default() -> Self {
         Self {
             max_new_file_size: ByteSize(1 << 20),
+        }
+    }
+}
+
+/// `[repo]`: how the CLI treats repositories it has not seen (R1.25).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RepoSection {
+    /// A command given a path in no registered repository registers it
+    /// (initializing jj alongside a plain git checkout) and retries once.
+    /// Default true; `--no-register` turns it off for one command.
+    pub auto_register: bool,
+}
+
+impl Default for RepoSection {
+    fn default() -> Self {
+        Self {
+            auto_register: true,
         }
     }
 }
@@ -1145,6 +1166,10 @@ impl Config {
                     "max_new_file_size",
                     s(&f.snapshot.max_new_file_size.to_string()),
                 )],
+            ),
+            (
+                "repo",
+                vec![("auto_register", f.repo.auto_register.to_string())],
             ),
         ]
     }
