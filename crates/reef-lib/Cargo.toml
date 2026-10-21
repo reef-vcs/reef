@@ -1,6 +1,6 @@
 [package]
 name = "reef-lib"
-description = "Reef core library: data model, snapshots, workspaces, and merge. Reef is version control built for a world where AI agents write most of the code."
+description = "Reef core library: data model, snapshots, workspaces, and merge. Reef is version control for fleets of coding agents."
 readme = "README.md"
 keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools"]
