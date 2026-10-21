@@ -211,7 +211,7 @@ Against the exit criterion:
 
 #### Linux
 
-Docker Desktop's Linux VM on the same M2 Max: arm64, kernel 6.10.14-linuxkit, 12 vCPUs, 7.7 GB, the state and target directories on an ext4 volume, in a `--privileged` `ubuntu:24.04` container with `fuse-overlayfs` 1.13 and no Watchman, so `create_api` used `notify`. The privileged run (root, `REEF_BENCH_PRIVILEGED=1`) took 11 minutes and the unprivileged one 20. A VM on a laptop is not a Linux server; these are the numbers until a CI run replaces them.
+Docker Desktop's Linux VM on the same M2 Max: arm64, kernel 6.10.14-linuxkit, 12 vCPUs, 7.7 GB, the state and target directories on an ext4 volume, in a `--privileged` `ubuntu:24.04` container with `fuse-overlayfs` 1.13 and no Watchman, so `create_api` used `notify`. The privileged run (root, `REEF_BENCH_PRIVILEGED=1`) took 11 minutes and the unprivileged one 20. A VM on a laptop is not a Linux server. The CI rows below are `medium`; the first scheduled `large` run (Mondays) gives the runners' numbers for the criterion itself.
 
 | Benchmark | p50 create ms/ws | disk MiB/ws | after modify 50 | tear_down ms/ws |
 | --- | ---: | ---: | ---: | ---: |
@@ -231,3 +231,33 @@ Docker Desktop's Linux VM on the same M2 Max: arm64, kernel 6.10.14-linuxkit, 12
 - **`fuse-overlayfs` through the daemon misses (1.56 s)** although its mount takes 7 ms. Most of the difference is `notify` starting up: its debouncer walks the new tree, and on a FUSE mount every one of the 100,000 entries goes through the `fuse-overlayfs` process.
 - **The overlay rows fail the `proportional` check, by under a megabyte.** An overlay workspace costs nothing until it is written (0.02 MiB, its empty upper and work directories), so the bound is twice the modified files alone, 0.5 to 0.6 MiB, and modifying 50 files cost about 1 MiB. Copy-up also creates each modified file's parent directories in the upper layer, a block apiece on ext4, which the check does not count. The cost is still in proportion to the modified files, about a thousandth of the 608 MiB tree. RX.06 should allow for the directories if it gates on this check.
 - **`copy` on ext4 is a real copy**: 608 MiB per workspace, the tree's allocated size, and 1.4 s.
+
+#### CI runners
+
+Run [39660853557](https://github.com/reef-vcs/reef/actions/runs/39660853557), dispatched on the R1.12 branch at commit `5cb9ba1` with the `medium` preset (10,014 files). Hardware is GitHub's published spec for public repositories. The `ubuntu-24.04` job took 28 minutes, the root run included; `macos-15` took 35. Neither runner has Watchman, so `create_api` used `notify` on both.
+
+| Benchmark | p50 create ms/ws | disk MiB/ws | after modify 50 | tear_down ms/ws |
+| --- | ---: | ---: | ---: | ---: |
+| **`macos-15`** (arm64 M1, 3 vCPU, 7 GB) | | | | |
+| `create/medium/apfs/1` | 128 | 3.0 | 3.8 | 863 |
+| `create/medium/apfs/20` | 109 | 3.0 | 3.8 | 529 |
+| `create/medium/apfs/100` | 119 | 2.9 | 3.6 | 714 |
+| `create/medium/copy/1` | 2,150 | 3.5 | 4.3 | 465 |
+| `create_api/medium/apfs/1` | 312 | 3.5 | 5.5 | 72 (`Release`) |
+| `create_api/medium/apfs/20` | 289 | 3.5 | 4.5 | 478 (`Release`) |
+| **`ubuntu-24.04`** (x64, 4 vCPU, 16 GB, ext4) | | | | |
+| `create/medium/fuse-overlayfs/1` | 5 | 0.02 | 0.77 | 13 |
+| `create/medium/fuse-overlayfs/20` | 5 | 0.02 | 0.76 | 11 |
+| `create/medium/fuse-overlayfs/100` | 6 | 0.02 | 0.77 | 12 |
+| `create/medium/copy/1` | 398 | 82.7 | 82.7 | 1,230 |
+| `create_api/medium/fuse-overlayfs/1` | 270 | 0.57 | 1.3 | 58 (`Release`) |
+| `create_api/medium/fuse-overlayfs/20` | 268 | 0.56 | 1.5 | 49 (`Release`) |
+| `create/medium/overlayfs/1` (root) | 0.2 | 0.02 | 0.83 | 12 |
+| `create/medium/overlayfs/20` (root) | 0.3 | 0.02 | 0.77 | 11 |
+| `create/medium/overlayfs/100` (root) | 0.4 | 0.02 | 0.76 | 12 |
+| `create_api/medium/overlayfs/1` (root) | 104 | 0.56 | 1.4 | 28 (`Release`) |
+| `create_api/medium/overlayfs/20` (root) | 101 | 0.57 | 1.3 | 35 (`Release`) |
+
+`tear_down/medium` took 525 ms for `apfs` and 522 ms for `copy` on `macos-15`; 0.69 ms for `overlayfs`, 1.2 ms for `fuse-overlayfs`, and 153 ms for `copy` on `ubuntu-24.04`.
+
+The runners agree with the local runs in shape. APFS clones cost about 3 MiB per `medium` workspace, overlays nothing until written, and `copy` the whole tree on ext4 but not on APFS. Every `n = 20` target passes on `medium`; only `large` is the criterion. On `medium` the `macos-15` runner clones about as fast as the M2 Max (109 against 132 ms at `n = 20`). The overlay rows miss the `proportional` check by the margin explained above.
