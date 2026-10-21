@@ -340,6 +340,54 @@ async fn spec_in_tree_matches_spec_at() {
     assert_eq!(error.kind(), ErrorKind::InvalidArgument);
 }
 
+// R1.20: a lockfile's blob, by commit and by base cache key, and its id
+// alone, which changes exactly when the contents do.
+#[tokio::test]
+async fn file_blobs_and_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (mut repo, commit) = repo_with_spec(root).await;
+    let lockfile = RepoPath::from_internal_string("pnpm-lock.yaml").unwrap();
+    let blob = repo
+        .file_blob_at(&commit, lockfile)
+        .await
+        .unwrap()
+        .expect("the lockfile");
+    assert_eq!(blob.bytes, b"lockfileVersion: 9\n");
+    assert_eq!(
+        repo.file_id_at(&commit, lockfile).await.unwrap().as_deref(),
+        Some(blob.id.as_str())
+    );
+    let key = {
+        let readonly = repo.readonly();
+        let id = jj_lib::backend::CommitId::try_from_hex(commit.as_str()).unwrap();
+        tree_key(
+            &jj_lib::repo::Repo::store(&*readonly)
+                .get_commit(&id)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        repo.file_blob_in_tree(&key, lockfile).await.unwrap(),
+        Some(blob.clone())
+    );
+    let absent = RepoPath::from_internal_string("absent").unwrap();
+    assert_eq!(repo.file_blob_at(&commit, absent).await.unwrap(), None);
+    assert_eq!(repo.file_id_at(&commit, absent).await.unwrap(), None);
+
+    // Touching the file without changing it keeps the id; an edit changes it.
+    std::fs::write(root.join("README"), "x").unwrap();
+    let same = repo.snapshot("another file").await.unwrap().wc_commit;
+    assert_eq!(
+        repo.file_id_at(&same, lockfile).await.unwrap().as_deref(),
+        Some(blob.id.as_str())
+    );
+    std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: 10\n").unwrap();
+    let edited = repo.snapshot("edit the lockfile").await.unwrap().wc_commit;
+    let id = repo.file_id_at(&edited, lockfile).await.unwrap().unwrap();
+    assert_ne!(id, blob.id);
+}
+
 #[tokio::test]
 async fn spec_must_be_a_regular_utf8_file() {
     let tmp = tempfile::tempdir().unwrap();

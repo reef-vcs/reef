@@ -457,8 +457,9 @@ impl Scheduler {
 
     /// Registers `hook` to run after every snapshot that ends well, after
     /// the working-copy state is saved and the row updated, in registration
-    /// order, on the tokio runtime. R1.20 checks lockfile hashes here. The
-    /// `snapshots` index row (R1.16) is not written here but before the
+    /// order, on the tokio runtime. R1.20's lockfile check runs just before
+    /// them, in the pipeline itself, so it is done when the snapshot
+    /// answers. The `snapshots` index row (R1.16) is not written here but before the
     /// working-copy state is saved, with the workspace's row; see
     /// `workspace/snapshot.rs`.
     pub fn on_snapshot(&self, hook: SnapshotHook) {

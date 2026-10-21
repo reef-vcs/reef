@@ -10,6 +10,7 @@ const PROTOS: &[&str] = &[
     "proto/reef/daemon/v0/repositories.proto",
     "proto/reef/daemon/v0/workspaces.proto",
     "proto/reef/daemon/v0/maintenance.proto",
+    "proto/reef/daemon/v0/stores.proto",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

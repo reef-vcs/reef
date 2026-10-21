@@ -173,6 +173,39 @@ pub struct Workspace {
     pub watcher: String,
     /// How many of its snapshots have not been published; 0 in `ws create`.
     pub local_snapshot_count: u64,
+    /// The shared stores mounted in it (R1.20).
+    pub stores: Vec<MountedStore>,
+}
+
+/// A shared store mounted in a workspace (R1.20).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MountedStore {
+    /// The store's name.
+    pub name: String,
+    /// Its lockfile's blake3 hash.
+    pub lockfile_hash: String,
+    /// Where, repository-root relative.
+    pub mount: String,
+    /// `symlink` or `bind`.
+    pub mode: String,
+    /// Whether the workspace's lockfile still matches the store.
+    pub verified: bool,
+}
+
+impl From<&v0::MountedStore> for MountedStore {
+    fn from(store: &v0::MountedStore) -> Self {
+        let mode = match store.mode() {
+            v0::mounted_store::Mode::Symlink => "symlink",
+            v0::mounted_store::Mode::Bind => "bind",
+        };
+        Self {
+            name: store.name.clone(),
+            lockfile_hash: store.lockfile_hash.clone(),
+            mount: store.mount.clone(),
+            mode: mode.to_owned(),
+            verified: store.verified,
+        }
+    }
 }
 
 impl From<&v0::Workspace> for Workspace {
@@ -196,6 +229,7 @@ impl From<&v0::Workspace> for Workspace {
             lease: ws.lease.as_ref().map(Lease::from),
             watcher: ws.watcher.clone(),
             local_snapshot_count: ws.local_snapshot_count,
+            stores: ws.stores.iter().map(MountedStore::from).collect(),
         }
     }
 }
@@ -397,6 +431,81 @@ impl From<&v0::StatusResponse> for Status {
     }
 }
 
+/// A built store, from `Stores.List` (R1.20).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Store {
+    /// The `[[store]] name`.
+    pub name: String,
+    /// blake3 of its lockfile.
+    pub lockfile_hash: String,
+    /// Its directory.
+    pub path: String,
+    /// Allocated bytes, measured when listed.
+    pub bytes: u64,
+    /// When its build was sealed.
+    pub built_at: Option<String>,
+    /// Whether it is sealed.
+    pub sealed: bool,
+    /// Active workspaces that mount it.
+    pub in_use_by: u32,
+    /// The repository that built it first.
+    pub repo_id: String,
+}
+
+impl From<&v0::StoreInfo> for Store {
+    fn from(store: &v0::StoreInfo) -> Self {
+        Self {
+            name: store.name.clone(),
+            lockfile_hash: store.lockfile_hash.clone(),
+            path: store.path.clone(),
+            bytes: store.bytes,
+            built_at: time(store.built_at.as_ref()),
+            sealed: store.sealed,
+            in_use_by: store.in_use_by,
+            repo_id: store.repo_id.clone(),
+        }
+    }
+}
+
+/// How a `Stores.Build` ended (R1.20).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuiltStore {
+    /// The store.
+    pub name: String,
+    /// blake3 of its lockfile.
+    pub lockfile_hash: String,
+    /// The sealed store's directory, or the failed build's.
+    pub path: String,
+    /// Allocated bytes of the sealed store.
+    pub bytes: u64,
+    /// Whether the store is sealed.
+    pub sealed: bool,
+    /// The build command's exit code; -1 for a signal.
+    pub exit_code: i32,
+    /// The operation that released the scratch workspace.
+    pub op_id: Option<String>,
+    /// Output lines dropped because the client read too slowly.
+    pub dropped_lines: u64,
+    /// A sealed store already existed; nothing was built.
+    pub already_built: bool,
+}
+
+impl From<&v0::BuildResult> for BuiltStore {
+    fn from(result: &v0::BuildResult) -> Self {
+        Self {
+            name: result.name.clone(),
+            lockfile_hash: result.lockfile_hash.clone(),
+            path: result.path.clone(),
+            bytes: result.bytes,
+            sealed: result.sealed,
+            exit_code: result.exit_code,
+            op_id: text(&result.op_id),
+            dropped_lines: result.dropped_lines,
+            already_built: result.already_built,
+        }
+    }
+}
+
 /// One repository's report from `Maintenance.Gc` (R1.17).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GcReport {
@@ -496,6 +605,32 @@ mod tests {
         assert_eq!(
             value["lease"]["heartbeat_every_ms"],
             serde_json::Value::Null
+        );
+        assert_eq!(value["stores"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn mounted_stores_name_their_mode() {
+        let ws = v0::Workspace {
+            stores: vec![v0::MountedStore {
+                name: "deps".into(),
+                lockfile_hash: "ab".into(),
+                mount: "vendor/deps".into(),
+                mode: v0::mounted_store::Mode::Bind.into(),
+                verified: true,
+            }],
+            ..v0::Workspace::default()
+        };
+        let value = serde_json::to_value(Workspace::from(&ws)).unwrap();
+        assert_eq!(
+            value["stores"],
+            serde_json::json!([{
+                "name": "deps",
+                "lockfile_hash": "ab",
+                "mount": "vendor/deps",
+                "mode": "bind",
+                "verified": true,
+            }])
         );
     }
 

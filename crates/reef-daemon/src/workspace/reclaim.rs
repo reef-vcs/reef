@@ -68,9 +68,10 @@ impl Manager {
     ///    and lease intact, unless `spec.force`. So does failing to forget
     ///    the jj workspace.
     /// 4. The disk usage measured; `forget_workspace` on the repository
-    ///    thread (`reef: release workspace <id>`); backend tear-down; the
-    ///    state directory removed; then, in one transaction, the lease ended,
-    ///    a `reclaims` row, and the terminal state.
+    ///    thread (`reef: release workspace <id>`); the shared stores
+    ///    unmounted (R1.20); backend tear-down; the state directory removed;
+    ///    then, in one transaction, the lease ended, a `reclaims` row (with
+    ///    `spec.detail`, if any), and the terminal state.
     ///
     /// A failed tear-down does not abort: the jj workspace is already gone,
     /// so the reclaim completes and the reclaim row's detail records the
@@ -121,19 +122,14 @@ impl Manager {
             .await?;
 
         // 4.
+        if let Some(detail) = spec.detail {
+            details.push(detail.to_owned());
+        }
         let freed_bytes = self.freed_bytes(&entry, root_exists).await;
         if freed_bytes.is_none() {
             details.push(DISK_USAGE_UNKNOWN.to_owned());
         }
-        if let Err(error) =
-            forget_jj_workspace(&entry.repo, id, "reef: release workspace {id}").await
-        {
-            if !spec.force {
-                self.back_to_active(&entry, None);
-                return Err(error);
-            }
-            tracing::warn!(error = %ErrorChain(&error), "cannot forget the jj workspace; releasing anyway");
-        }
+        let release_op_id = self.forget(&entry, spec).await?;
         // The handle is useless without its jj workspace.
         entry
             .jj
@@ -141,6 +137,7 @@ impl Manager {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
 
+        self.unmount_stores(&entry, &mut details).await;
         self.tear_down(&entry, root_exists, &mut details).await;
         remove_state_dir(&entry.paths.state_dir).await;
 
@@ -180,6 +177,7 @@ impl Manager {
             snapshot_taken,
             final_op_id,
             freed_bytes,
+            release_op_id,
         })
     }
 
@@ -231,6 +229,27 @@ impl Manager {
                     id,
                     source: Box::new(error),
                 })
+            }
+        }
+    }
+
+    /// Step 4's `forget_workspace`: the operation it recorded, if any. A
+    /// failure rolls the workspace back unless `spec.force`.
+    async fn forget(
+        &self,
+        entry: &WorkspaceEntry,
+        spec: ReleaseSpec,
+    ) -> Result<Option<String>, ManagerError> {
+        let id = entry.paths.id;
+        match forget_jj_workspace(&entry.repo, id, "reef: release workspace {id}").await {
+            Ok(op_id) => Ok(op_id),
+            Err(error) if !spec.force => {
+                self.back_to_active(entry, None);
+                Err(error)
+            }
+            Err(error) => {
+                tracing::warn!(error = %ErrorChain(&error), "cannot forget the jj workspace; releasing anyway");
+                Ok(None)
             }
         }
     }

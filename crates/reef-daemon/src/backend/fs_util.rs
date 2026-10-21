@@ -93,7 +93,8 @@ pub fn same_volume(a: &Path, b: &Path) -> Result<bool, BackendError> {
 /// missing from the workspace count as changed with no bytes. Unchanged
 /// files are assumed to share the base's blocks (clones) or are what any
 /// copy costs anyway, and are not counted. Ignored files (build output)
-/// are not in the base, so they count. Directories are not counted.
+/// are not in the base, so they count. Directories are not counted, nor is
+/// anything at a shared store's mount point.
 pub fn changed_files_vs_base(
     base: &BaseEntry,
     ws: &WorkspacePaths,
@@ -107,6 +108,9 @@ pub fn changed_files_vs_base(
         .min_depth(1)
         .follow_links(false)
         .follow_root_links(false)
+        .into_iter()
+        // A bind-mounted store is not the workspace's (R1.20).
+        .filter_entry(|entry| !ws.store_mounts.iter().any(|mount| entry.path() == mount))
     {
         let entry = entry.map_err(|error| walk_error(&ws.root, error))?;
         if entry.file_type().is_dir() {

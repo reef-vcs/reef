@@ -200,6 +200,9 @@ pub struct WorkspacePaths {
     pub work: PathBuf,
     /// jj's working-copy state for the workspace, outside the tree.
     pub state_dir: PathBuf,
+    /// Shared store mount points under the root (R1.20), which disk usage
+    /// does not descend into.
+    pub store_mounts: Vec<PathBuf>,
 }
 
 impl WorkspacePaths {
@@ -230,7 +233,19 @@ impl WorkspacePaths {
             work: sibling(".work"),
             root,
             state_dir,
+            store_mounts: Vec::new(),
         }
+    }
+
+    /// These paths with the store mount points `mounts` (repository-root
+    /// relative) recorded.
+    #[must_use]
+    pub fn with_store_mounts<'a>(mut self, mounts: impl IntoIterator<Item = &'a str>) -> Self {
+        self.store_mounts = mounts
+            .into_iter()
+            .map(|mount| crate::store::mount::mount_path(&self.root, mount))
+            .collect();
+        self
     }
 }
 

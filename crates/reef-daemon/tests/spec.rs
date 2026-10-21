@@ -17,7 +17,7 @@ use std::time::Duration;
 use common::{SyntheticRepo, TestDaemon, test_settings};
 use reef_daemon::client::ClientError;
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace};
+use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace, create_request};
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
@@ -77,6 +77,8 @@ async fn create(
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
             lease_ms,
+            // The spec's store is never built here; R1.20's tests build it.
+            missing_stores: create_request::MissingStores::Skip.into(),
             ..CreateRequest::default()
         })
         .await?;

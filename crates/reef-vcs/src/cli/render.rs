@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reef_daemon::client::json::{
-    Created, GcReport, Inspected, Lease, Repository, Status, Workspace,
+    Created, GcReport, Inspected, Lease, Repository, Status, Store, Workspace,
 };
 
 use serde::Serialize;
@@ -152,7 +152,47 @@ fn workspace_pairs(ws: &Workspace) -> Vec<(&'static str, String)> {
             "lease_expires_at",
             or_dash(ws.lease.as_ref().and_then(|l| l.expires_at.as_deref())),
         ),
+        ("stores", stores_text(ws)),
     ]
+}
+
+/// `deps at vendor/deps (symlink), tools at .tools (bind, lockfile
+/// changed)`, or `-`.
+fn stores_text(ws: &Workspace) -> String {
+    if ws.stores.is_empty() {
+        return "-".to_owned();
+    }
+    ws.stores
+        .iter()
+        .map(|store| {
+            let changed = if store.verified {
+                ""
+            } else {
+                ", lockfile changed"
+            };
+            format!(
+                "{} at {} ({}{changed})",
+                store.name, store.mount, store.mode
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl TextRow for Store {
+    const HEADER: &'static [&'static str] =
+        &["NAME", "LOCKFILE", "SIZE", "IN_USE", "BUILT", "PATH"];
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.lockfile_hash.chars().take(OP_WIDTH).collect(),
+            size(self.bytes),
+            self.in_use_by.to_string(),
+            or_dash(self.built_at.as_deref()),
+            self.path.clone(),
+        ]
+    }
 }
 
 /// Only the path, so `cd "$(reef ws create)"` works.

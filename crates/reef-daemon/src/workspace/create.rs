@@ -9,13 +9,18 @@
 //!    git refs; resolve the start revision; note whether another Reef
 //!    workspace already has the edited commit; read `reef.toml` from the
 //!    resolved commit's tree (R1.19), which sets the lease length when the
-//!    request gives none and the snapshot excludes.
+//!    request gives none and the snapshot excludes, and hash each declared
+//!    store's lockfile in that tree (R1.20). Then (async) look each store up:
+//!    one with no sealed build fails the create unless the request skips
+//!    missing stores. Step 4 looks them up again under the store manager's
+//!    mount lock.
 //! 3. (blocking, then the repository thread) Ensure the base: the base
 //!    cache's per-tree lock, then, if the tree is not cached, on the
 //!    repository thread either `Repo::materialize_tree_from` over a clone
 //!    of the most recently used base (backends with a [`DirCloner`](crate::backend::DirCloner), R1.08)
 //!    or `Repo::materialize_tree`, which is also the fallback.
-//! 4. (blocking) The backend materializes the workspace from the base.
+//! 4. (blocking) The backend materializes the workspace from the base, and
+//!    the sealed stores are mounted into it (R1.20).
 //! 5. (repository thread) `Repo::create_workspace_with`, the working copy
 //!    loaded with the watcher's jj settings.
 //! 6. (blocking) Seed the working copy's `tree_state` from the base's, or
@@ -23,9 +28,12 @@
 //! 7. (async) Insert the row and issue the lease in one transaction
 //!    ([`crate::lease::LeaseManager::issue_with_workspace`]).
 //!
-//! A failure after step 4 tears the directory down; after step 5 also
-//! forgets the jj workspace and removes its state directory. Partial state
-//! never leaves a row behind.
+//! A failure after step 4 unmounts the stores and tears the directory down;
+//! after step 5 also forgets the jj workspace and removes its state
+//! directory. Partial state never leaves a row behind. From mounting the
+//! stores to the row, the create holds the store manager's mount lock
+//! shared, so GC cannot remove a store it mounts before its entry counts it
+//! as in use.
 
 use std::cell::Cell;
 use std::io;
@@ -43,11 +51,13 @@ use reef_lib::spec::SPEC_FILE;
 use reef_lib::telemetry::elapsed_ms;
 
 use super::manager::{forget_jj_workspace, remove_state_dir};
+use super::stores::{StorePlan, StoreTarget, TreeAt, store_targets};
 use super::{CreateSpec, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry};
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
-use crate::model::{RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
+use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::RepoHandle;
 use crate::spec::ResolvedSpec;
+use crate::store::{MountedStore, StoreManager};
 
 /// The description of a colocated repository's ref import before a create.
 const IMPORT_DESCRIPTION: &str = "reef: import git refs";
@@ -59,6 +69,8 @@ struct ResolvedStart {
     tree_key: String,
     shared_change: bool,
     spec: ResolvedSpec,
+    /// The spec's stores, their lockfiles hashed in the commit's tree.
+    stores: Vec<StoreTarget>,
 }
 
 impl Manager {
@@ -85,10 +97,12 @@ impl Manager {
         let backend = self.select_backend(spec.backend, repo.id, &paths).await?;
 
         // 2.
-        let resolved = resolve_start(&handle, spec.start).await?;
+        let resolved = resolve_start(&handle, spec.start.clone()).await?;
         let length = self
             .leases
             .length_with_spec(spec.lease, resolved.spec.lease)?;
+        // Fails a create that would fail anyway before anything is made.
+        self.plan_stores(&resolved.stores, &spec, &resolved.commit)?;
 
         // 3.
         let begun = Instant::now();
@@ -98,29 +112,21 @@ impl Manager {
         let mut undo = Undo::new(handle.clone(), id);
         materialize(backend, &base, &paths, &mut undo).await?;
         let materialize = begun.elapsed();
+        let (_mounting, plan, mounted) = self
+            .mount_planned(&resolved, &spec, &paths.root, &mut undo)
+            .await?;
 
         // 5.
-        let (ws, op_id, wc) =
-            match create_jj_workspace(&handle, id, &paths, resolved.start.clone(), wc_settings)
-                .await
-            {
-                Ok(created) => created,
-                Err(error) => {
-                    undo.run().await;
-                    return Err(error);
-                }
-            };
+        let created =
+            create_jj_workspace(&handle, id, &paths, resolved.start.clone(), wc_settings).await;
+        let (ws, op_id, wc) = undo.or_undo(created).await?;
         undo.jj_workspace = true;
         undo.state_dir = Some(paths.state_dir.clone());
 
         // 6.
-        let ws = match seed(ws, &base, &paths, &wc.commit_id).await {
-            Ok(ws) => ws,
-            Err(error) => {
-                undo.run().await;
-                return Err(error);
-            }
-        };
+        let ws = undo
+            .or_undo(seed(ws, &base, &paths, &wc.commit_id).await)
+            .await?;
 
         // 7.
         let now = Timestamp::now();
@@ -139,7 +145,7 @@ impl Manager {
             lease_id: Some(lease.id),
             state: WorkspaceState::Active,
             divergent: false,
-            attention: None,
+            attention: (!plan.missing.is_empty()).then_some(Attention::StoreMissing),
             created_at: now,
             last_snapshot_at: None,
             last_snapshot_op: None,
@@ -156,6 +162,7 @@ impl Manager {
             ws,
             handle,
             resolved.spec.snapshot.clone(),
+            mounted.clone(),
         );
         tracing::info!(
             path = %record.path.display(),
@@ -164,6 +171,8 @@ impl Manager {
             %op_id,
             shared_change = resolved.shared_change,
             stores = resolved.spec.spec.stores.len(),
+            stores_mounted = mounted.len(),
+            stores_missing = plan.missing.len(),
             base_was_cached,
             materialize_ms = u64::try_from(materialize.as_millis()).unwrap_or(u64::MAX),
             "workspace created"
@@ -175,7 +184,41 @@ impl Manager {
             shared_change: resolved.shared_change,
             materialize,
             base_was_cached,
+            stores: mounted,
         })
+    }
+
+    /// The end of step 4: the stores looked up again under the store
+    /// manager's mount lock (GC may have removed one since step 2) and
+    /// mounted at `root`, recorded in `undo`. Returns the lock, which the
+    /// create holds until its row is written, so GC sees the new entry use
+    /// them.
+    async fn mount_planned(
+        &self,
+        resolved: &ResolvedStart,
+        spec: &CreateSpec,
+        root: &Path,
+        undo: &mut Undo,
+    ) -> Result<
+        (
+            tokio::sync::RwLockReadGuard<'_, ()>,
+            StorePlan,
+            Vec<MountedStore>,
+        ),
+        ManagerError,
+    > {
+        let mounting = self.stores.mounting.read().await;
+        let plan = undo
+            .or_undo(self.plan_stores(&resolved.stores, spec, &resolved.commit))
+            .await?;
+        let kind = undo.backend.as_ref().map(|(backend, _)| backend.kind());
+        let mounted = match kind {
+            Some(kind) => self.mount_stores(&plan.mount, root, kind).await,
+            None => Ok(Vec::new()),
+        };
+        let mounted = undo.or_undo(mounted).await?;
+        undo.mount_stores(Arc::clone(&self.stores), mounted.clone());
+        Ok((mounting, plan, mounted))
     }
 
     /// The end of step 7: loads the new workspace, taking the backend from
@@ -187,10 +230,14 @@ impl Manager {
         ws: Repo,
         handle: RepoHandle,
         spec: SnapshotSpec,
+        stores: Vec<MountedStore>,
     ) {
         let Some((backend, paths)) = undo.backend.take() else {
             unreachable!("set after step 4")
         };
+        // The entry owns the mounts now; release unmounts them.
+        undo.stores = None;
+        let paths = paths.with_store_mounts(stores.iter().map(|store| store.mount.as_str()));
         let entry = WorkspaceEntry {
             record: Mutex::new(record.clone()),
             paths,
@@ -199,6 +246,7 @@ impl Manager {
             repo: handle,
             scan_lock: tokio::sync::Mutex::new(()),
             spec: Mutex::new(spec),
+            stores: Mutex::new(stores),
         };
         self.insert_entry(record.id, Arc::new(entry));
         self.scheduler.track(record.id);
@@ -398,18 +446,7 @@ async fn resolve_start(handle: &RepoHandle, start: Start) -> Result<ResolvedStar
     handle
         .call_async(move |head| {
             async move {
-                // Operations the `jj` CLI wrote on the registered root
-                // (bookmarks, new changes) count.
-                head.reload().await?;
-                if head.colocated {
-                    let begun = Instant::now();
-                    let imported = head.repo.import_git_refs(IMPORT_DESCRIPTION).await?;
-                    tracing::info!(
-                        op_id = ?imported.op_id.as_ref().map(ToString::to_string),
-                        elapsed_ms = elapsed_ms(begun),
-                        "git refs imported before resolving"
-                    );
-                }
+                refresh_for_resolve(head).await?;
                 let (start, commit) = match start {
                     Start::Change(text) => {
                         let resolved = head.repo.resolve_revision(&text).await?;
@@ -426,17 +463,7 @@ async fn resolve_start(handle: &RepoHandle, start: Start) -> Result<ResolvedStar
                         )
                     }
                     Start::Default => {
-                        // `main` is neither hex nor reverse hex, so it can
-                        // only resolve as a bookmark.
-                        let commit = match head.repo.resolve_revision("main").await {
-                            Ok(resolved) if resolved.via == ResolvedVia::Bookmark => {
-                                resolved.commit_id
-                            }
-                            Ok(_) | Err(ResolveError::NoMatch(_)) => {
-                                head.repo.wc_change()?.commit_id
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
+                        let commit = default_start(&head.repo).await?;
                         (StartPoint::NewOn(commit.clone()), commit)
                     }
                 };
@@ -452,17 +479,56 @@ async fn resolve_start(handle: &RepoHandle, start: Start) -> Result<ResolvedStar
                         "{SPEC_FILE} is on disk at the root but not in the target commit; using the defaults (snapshot or commit it)"
                     );
                 }
+                let stores = match &spec {
+                    Some(spec) => {
+                        store_targets(&head.repo, &spec.stores, TreeAt::Commit(&commit)).await?
+                    }
+                    None => Vec::new(),
+                };
                 Ok::<_, ManagerError>(ResolvedStart {
                     start,
                     commit,
                     tree_key,
                     shared_change,
                     spec: crate::spec::resolve(spec),
+                    stores,
                 })
             }
             .boxed_local()
         })
         .await?
+}
+
+/// Reloads the repository thread at head and, in a colocated repository,
+/// imports git refs, so operations the `jj` CLI wrote on the registered
+/// root (bookmarks, new changes) count when a revision is resolved.
+pub(super) async fn refresh_for_resolve(
+    head: &mut crate::repo::RepoHead,
+) -> Result<(), ManagerError> {
+    head.reload().await?;
+    if head.colocated {
+        let begun = Instant::now();
+        let imported = head.repo.import_git_refs(IMPORT_DESCRIPTION).await?;
+        tracing::info!(
+            op_id = ?imported.op_id.as_ref().map(ToString::to_string),
+            elapsed_ms = elapsed_ms(begun),
+            "git refs imported before resolving"
+        );
+    }
+    Ok(())
+}
+
+/// The commit a create without a start revision starts on: the `main`
+/// bookmark if it exists, else the `default` workspace's working-copy
+/// commit. A store build without `--rev` and GC's store step use the same.
+pub(super) async fn default_start(repo: &Repo) -> Result<CommitIdHex, ManagerError> {
+    // `main` is neither hex nor reverse hex, so it can only resolve as a
+    // bookmark.
+    match repo.resolve_revision("main").await {
+        Ok(resolved) if resolved.via == ResolvedVia::Bookmark => Ok(resolved.commit_id),
+        Ok(_) | Err(ResolveError::NoMatch(_)) => Ok(repo.wc_change()?.commit_id),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Step 5, on the repository thread: the jj workspace, its handle, the
@@ -582,6 +648,9 @@ struct Undo {
     jj_workspace: bool,
     /// The working-copy state directory (step 5).
     state_dir: Option<PathBuf>,
+    /// The stores mounted into the directory (step 4), unmounted before
+    /// it is torn down.
+    stores: Option<(Arc<StoreManager>, Vec<MountedStore>)>,
 }
 
 impl Undo {
@@ -592,6 +661,22 @@ impl Undo {
             backend: None,
             jj_workspace: false,
             state_dir: None,
+            stores: None,
+        }
+    }
+
+    /// `result`, after undoing what was done when it is an error.
+    async fn or_undo<T>(&mut self, result: Result<T, ManagerError>) -> Result<T, ManagerError> {
+        if result.is_err() {
+            self.run().await;
+        }
+        result
+    }
+
+    /// Records the stores mounted at step 4.
+    fn mount_stores(&mut self, stores: Arc<StoreManager>, mounted: Vec<MountedStore>) {
+        if !mounted.is_empty() {
+            self.stores = Some((stores, mounted));
         }
     }
 
@@ -617,6 +702,22 @@ impl Undo {
         }
         if let Some(state_dir) = self.state_dir.take() {
             remove_state_dir(&state_dir).await;
+        }
+        if let Some((stores, mounted)) = self.stores.take()
+            && let Some((_, paths)) = &self.backend
+        {
+            let root = paths.root.clone();
+            let unmounted = tokio::task::spawn_blocking(move || {
+                for store in &mounted {
+                    if let Err(error) = stores.unmount(&root, &store.mount, store.mode) {
+                        tracing::error!(workspace_id = %id, store = %store.key.name, error = %ErrorChain(&error), "cannot unmount a store of a failed create");
+                    }
+                }
+            })
+            .await;
+            if let Err(error) = unmounted {
+                tracing::error!(workspace_id = %id, %error, "store unmount task failed");
+            }
         }
         if let Some((backend, paths)) = self.backend.take() {
             if std::fs::symlink_metadata(&paths.root).is_err() {

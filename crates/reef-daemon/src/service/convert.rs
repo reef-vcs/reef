@@ -8,6 +8,7 @@ use crate::lease::{LeaseManager, LeaseState};
 use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
 use crate::proto::v0;
 use crate::snapshot::index::SnapshotEntry;
+use crate::store::{MountMode, MountedStore};
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
 pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
@@ -72,12 +73,13 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
     }
 }
 
-/// A workspace row, its lease, and its local snapshot count, as one
-/// message.
+/// A workspace row, its lease, its local snapshot count, and its mounted
+/// stores, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
     pub(super) lease: Option<v0::Lease>,
     pub(super) local_snapshot_count: u64,
+    pub(super) stores: &'a [MountedStore],
 }
 
 impl From<WorkspaceView<'_>> for v0::Workspace {
@@ -104,6 +106,23 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             lease: view.lease,
             watcher: record.watcher.as_str().to_owned(),
             local_snapshot_count: view.local_snapshot_count,
+            stores: view.stores.iter().map(v0::MountedStore::from).collect(),
+        }
+    }
+}
+
+impl From<&MountedStore> for v0::MountedStore {
+    fn from(store: &MountedStore) -> Self {
+        let mode = match store.mode {
+            MountMode::Symlink => v0::mounted_store::Mode::Symlink,
+            MountMode::Bind => v0::mounted_store::Mode::Bind,
+        };
+        Self {
+            name: store.key.name.clone(),
+            lockfile_hash: store.key.lockfile_hash.clone(),
+            mount: store.mount.clone(),
+            mode: mode.into(),
+            verified: store.verified,
         }
     }
 }

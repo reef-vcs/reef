@@ -44,6 +44,8 @@ pub use watchman_client;
 // thread's state (R1.03) and the cross-thread `Send + Sync` assertion on them.
 pub use jj_lib::merged_tree::MergedTree;
 pub use jj_lib::repo::ReadonlyRepo;
+// A store's lockfile path, for `Repo::file_id_at` (R1.20).
+pub use jj_lib::repo_path::RepoPath;
 pub use jj_lib::settings::UserSettings;
 pub use jj_lib::working_copy::WorkingCopyStateError;
 pub use workspace::{

@@ -6,6 +6,7 @@ use jj_lib::backend::{BackendError, FileId, TreeId, TreeValue};
 use jj_lib::conflict_labels::ConflictLabels;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPath;
 
@@ -14,6 +15,15 @@ use super::repo::{CommitIdHex, Repo};
 use super::workspace::CommitLookupError;
 use crate::error::{Classify, ErrorKind, classify_by_source};
 use crate::spec::{SPEC_FILE, Spec, SpecError};
+
+/// A regular file read from a tree (R1.20).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileBlob {
+    /// Its blob id in hex: equal ids are equal contents.
+    pub id: String,
+    /// Its contents.
+    pub bytes: Vec<u8>,
+}
 
 /// Failure to read a file from a tree.
 #[derive(Debug, thiserror::Error)]
@@ -109,6 +119,56 @@ impl Repo {
         read.await.inspect_err(|error| crate::log_failure!(error))
     }
 
+    /// The regular file at `path` in `commit`'s tree, with its blob id:
+    /// what a shared store's lockfile is hashed from, and the id later
+    /// snapshots are compared against (R1.20). `Ok(None)` when the tree has
+    /// nothing there.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
+    pub async fn file_blob_at(
+        &self,
+        commit: &CommitIdHex,
+        path: &RepoPath,
+    ) -> Result<Option<FileBlob>, ReadFileError> {
+        let read = async {
+            let commit = self.commit_by_id(commit).await?;
+            blob_in(&commit.tree(), path).await
+        };
+        read.await.inspect_err(|error| crate::log_failure!(error))
+    }
+
+    /// [`Repo::file_blob_at`] for the tree with this base cache key: the
+    /// lockfile a workspace was created with, read again when the daemon
+    /// restarts.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), tree_id = %tree_key))]
+    pub async fn file_blob_in_tree(
+        &self,
+        tree_key: &str,
+        path: &RepoPath,
+    ) -> Result<Option<FileBlob>, ReadFileError> {
+        let read = async {
+            let tree = self.tree_by_key(tree_key)?;
+            blob_in(&tree, path).await
+        };
+        read.await.inspect_err(|error| crate::log_failure!(error))
+    }
+
+    /// The blob id of the regular file at `path` in `commit`'s tree, without
+    /// reading the file: a lockfile whose id differs from the
+    /// [`FileBlob::id`] a store was chosen by has changed (R1.20).
+    /// `Ok(None)` when the tree has nothing there.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
+    pub async fn file_id_at(
+        &self,
+        commit: &CommitIdHex,
+        path: &RepoPath,
+    ) -> Result<Option<String>, ReadFileError> {
+        let read = async {
+            let commit = self.commit_by_id(commit).await?;
+            Ok(file_id(&commit.tree(), path).await?.map(|id| id.hex()))
+        };
+        read.await.inspect_err(|error| crate::log_failure!(error))
+    }
+
     fn tree_by_key(&self, key: &str) -> Result<MergedTree, ReadFileError> {
         let invalid = || ReadFileError::InvalidTree(key.to_owned());
         if !is_tree_key(key) {
@@ -153,6 +213,18 @@ async fn spec_in(tree: &MergedTree) -> Result<Option<Spec>, SpecError> {
     Ok(Some(spec))
 }
 
+/// The regular file at `path` in `tree` with its id, `None` if absent.
+async fn blob_in(tree: &MergedTree, path: &RepoPath) -> Result<Option<FileBlob>, ReadFileError> {
+    let Some(id) = file_id(tree, path).await? else {
+        return Ok(None);
+    };
+    let bytes = read_blob(tree, path, &id).await?;
+    Ok(Some(FileBlob {
+        id: id.hex(),
+        bytes,
+    }))
+}
+
 /// The bytes of the regular file at `path` in `tree`, `None` if absent.
 async fn read_file_in(
     tree: &MergedTree,
@@ -161,10 +233,19 @@ async fn read_file_in(
     let Some(id) = file_id(tree, path).await? else {
         return Ok(None);
     };
+    read_blob(tree, path, &id).await.map(Some)
+}
+
+/// The contents of blob `id`, the file at `path` in `tree`.
+async fn read_blob(
+    tree: &MergedTree,
+    path: &RepoPath,
+    id: &FileId,
+) -> Result<Vec<u8>, ReadFileError> {
     let name = || path.as_internal_file_string().to_owned();
     let mut reader =
         tree.store()
-            .read_file(path, &id)
+            .read_file(path, id)
             .await
             .map_err(|source| ReadFileError::Backend {
                 path: name(),
@@ -178,7 +259,7 @@ async fn read_file_in(
             path: name(),
             source,
         })?;
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 /// The blob id of the regular file at `path` in `tree`, `None` if absent;

@@ -349,6 +349,25 @@ pub struct BaseCacheRecord {
     pub last_used_at: Timestamp,
 }
 
+/// A row of `stores` (R1.20): a shared dependency store built from one
+/// lockfile, under `<state>/stores/<name>/<lockfile-hash>/`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreRecord {
+    /// The repository that first built it; informational, since stores are
+    /// shared by every repository on the daemon.
+    pub repo_id: RepoId,
+    /// The store's name in `reef.toml`.
+    pub name: String,
+    /// blake3 of the lockfile's bytes, 64 lowercase hex characters.
+    pub lockfile_hash: String,
+    /// Its directory.
+    pub path: PathBuf,
+    /// When its build succeeded; `None` while it builds.
+    pub built_at: Option<Timestamp>,
+    /// Whether it is built and read-only: what a workspace may mount.
+    pub sealed: bool,
+}
+
 /// A point in time as Unix milliseconds UTC, the form SQLite stores. Shown as
 /// RFC 3339 at the edges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

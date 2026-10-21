@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use reef_daemon::client::default_owner;
 use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
+use reef_daemon::proto::v0::create_request::MissingStores;
 use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, create_request};
 use reef_lib::error::ErrorKind;
 
 use super::render::GcReports;
 use super::repo::missing;
-use super::{CliError, Ctx, absolute, repo_arg, ws_move, ws_run};
+use super::{CliError, Ctx, absolute, current_dir, repo_arg, ws_move, ws_run};
 
 /// `reef ws`.
 #[derive(Debug, clap::Args)]
@@ -94,8 +95,9 @@ pub(crate) struct CreateTarget {
     /// Create the workspace at this directory, which must not exist.
     #[arg(long, value_name = "DIR")]
     pub(crate) path: Option<PathBuf>,
-    /// Create the workspace even if a shared store it declares is not built
-    /// (R1.20; before it no store is ever missing).
+    /// Create the workspace even if a shared store it declares is not
+    /// built; it is marked `store-missing` [default: fail, naming the `reef
+    /// store build` to run].
     #[arg(long)]
     pub(crate) skip_missing_stores: bool,
 }
@@ -105,14 +107,7 @@ impl CreateTarget {
     pub(crate) fn request(&self) -> Result<CreateRequest, CliError> {
         let repo = match &self.repo {
             Some(repo) => repo_arg(repo)?,
-            None => std::env::current_dir()
-                .map_err(|source| CliError::Io {
-                    op: "read the current directory",
-                    path: PathBuf::from("."),
-                    source,
-                })?
-                .display()
-                .to_string(),
+            None => current_dir()?.display().to_string(),
         };
         let start = match (&self.change, &self.new_on) {
             (Some(change), _) => Some(create_request::Start::Change(change.clone())),
@@ -123,10 +118,16 @@ impl CreateTarget {
             Some(path) => absolute(path)?.display().to_string(),
             None => String::new(),
         };
+        let missing_stores = if self.skip_missing_stores {
+            MissingStores::Skip
+        } else {
+            MissingStores::Fail
+        };
         Ok(CreateRequest {
             repo,
             start,
             path,
+            missing_stores: missing_stores.into(),
             ..CreateRequest::default()
         })
     }

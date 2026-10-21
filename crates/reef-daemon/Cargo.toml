@@ -47,7 +47,8 @@ serde_json.workspace = true      # `watchman get-sockname` (R1.14)
 time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true
-nix = { workspace = true, features = ["hostname", "user"] }   # the default identity and jj's operation.hostname/username
+blake3.workspace = true          # store lockfile hashes (R1.20)
+nix = { workspace = true, features = ["hostname", "user", "signal"] }   # the default identity and jj's operation.hostname/username; killing a store build's process group (R1.20)
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
@@ -74,7 +75,7 @@ libc.workspace = true            # clonefile(2) on a directory (R1.08)
 reflink-copy.workspace = true    # per-file clones (R1.08's fallback, R1.10)
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { workspace = true, features = ["mount", "fs"] }   # overlay mounts (R1.09)
+nix = { workspace = true, features = ["mount", "fs"] }   # overlay mounts (R1.09), store bind mounts (R1.20)
 
 [build-dependencies]
 tonic-prost-build.workspace = true

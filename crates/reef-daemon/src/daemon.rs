@@ -14,7 +14,9 @@
 //!    `lease.restart_grace` from now, before anything can reclaim. If that
 //!    fails, the daemon does not start.
 //! 3. Sweep base cache leftovers: incomplete entries (`*.tmp` under
-//!    `repos/*/bases/`, R1.02) and GC's (`*.gc`, R1.17).
+//!    `repos/*/bases/`, R1.02) and GC's (`*.gc`, R1.17). Then store builds
+//!    a stop interrupted (R1.20): their unsealed rows go, and their
+//!    `.building` directories are kept as failed; and store trash.
 //! 4. Reconcile overlay mounts (Linux, R1.09): mount every `active` or
 //!    `releasing` overlay workspace again whose mount is gone, over its
 //!    upper directory; mark one that cannot be `attention = 'upper-missing'`
@@ -396,6 +398,9 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         }
     }
 
+    //    Then interrupted store builds and store trash.
+    sweep_stores(state).await;
+
     // 4. Reconcile overlay mounts, then sweep workspace trash: a probe
     //    directory a crash left mounted is trash only once unmounted.
     #[cfg(target_os = "linux")]
@@ -475,6 +480,23 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         })
     });
     Ok(listener)
+}
+
+/// The end of step 3: the store builds a stop interrupted, and store trash
+/// (R1.20). Failures are logged.
+async fn sweep_stores(state: &AppState) {
+    let stores = Arc::clone(state.manager.stores());
+    match tokio::task::spawn_blocking(move || (stores.sweep_interrupted(), stores.sweep_trash()))
+        .await
+    {
+        Ok((0, 0)) => {}
+        Ok((interrupted, trash)) => tracing::info!(
+            interrupted_count = interrupted,
+            trash_count = trash,
+            "swept store leftovers"
+        ),
+        Err(error) => tracing::warn!(%error, "store sweep panicked"),
+    }
 }
 
 /// Step 4: re-establishes or cleans up overlay mounts, records the
