@@ -22,6 +22,7 @@ mod gc;
 mod manager;
 mod reclaim;
 mod snapshot;
+mod stores;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -40,6 +41,7 @@ pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
 pub use snapshot::REEFIGNORE;
+pub(crate) use stores::StoreTarget;
 
 use crate::backend::{
     Backend, BackendChoice, BackendError, BaseCacheError, DiskUsage, WorkspacePaths,
@@ -49,6 +51,7 @@ use crate::lease::LeaseError;
 use crate::model::{LeaseRecord, RepoId, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::{RegisterError, RepoHandle, RepoThreadError};
 use crate::snapshot::index::SnapshotEntry;
+use crate::store::{MountedStore, StoreError};
 
 /// One loaded workspace: what the manager holds for every `active` row.
 pub struct WorkspaceEntry {
@@ -68,6 +71,8 @@ pub struct WorkspaceEntry {
     pub scan_lock: tokio::sync::Mutex<()>,
     /// What its snapshots exclude beyond git's ignore rules.
     pub spec: Mutex<SnapshotSpec>,
+    /// The shared stores mounted in it (R1.20).
+    pub stores: Mutex<Vec<MountedStore>>,
 }
 
 /// The parts of a workspace's spec its snapshots and watcher apply, from
@@ -116,6 +121,25 @@ impl WorkspaceEntry {
     pub(crate) fn set_attention(&self, attention: Option<crate::model::Attention>) {
         self.update_record(|record| record.attention = attention);
     }
+
+    /// A copy of its mounted stores.
+    pub fn stores(&self) -> Vec<MountedStore> {
+        self.stores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// What [`Manager::create`] does when a store the spec declares has no
+/// sealed build for the lockfile's hash (R1.20).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MissingStores {
+    /// Fail the create with [`StoreError::Missing`].
+    #[default]
+    Fail,
+    /// Create the workspace without the store, marked `store-missing`.
+    Skip,
 }
 
 /// Where a new workspace's working-copy commit starts.
@@ -149,6 +173,11 @@ pub struct CreateSpec {
     /// The lease length; `None` for `lease.default`. Above `lease.max` is
     /// [`LeaseError::TooLong`].
     pub lease: Option<Duration>,
+    /// What to do about a store with no sealed build (R1.20).
+    pub missing_stores: MissingStores,
+    /// A store left out without counting as missing: the one a store
+    /// build's scratch workspace is building (R1.20).
+    pub skip_store: Option<String>,
 }
 
 /// What [`Manager::create`] made.
@@ -167,6 +196,8 @@ pub struct Created {
     pub materialize: Duration,
     /// Whether the base cache already held the tree.
     pub base_was_cached: bool,
+    /// The shared stores mounted in it (R1.20).
+    pub stores: Vec<MountedStore>,
 }
 
 /// How [`Manager::reclaim`] releases or reclaims. The expiry loop uses the
@@ -178,6 +209,9 @@ pub struct ReleaseSpec {
     pub force: bool,
     /// Take a final snapshot first (the default).
     pub final_snapshot: bool,
+    /// Recorded in the `reclaims` row's detail, such as `store build` for a
+    /// store build's scratch workspace (R1.20).
+    pub detail: Option<&'static str>,
 }
 
 impl Default for ReleaseSpec {
@@ -185,6 +219,7 @@ impl Default for ReleaseSpec {
         Self {
             force: false,
             final_snapshot: true,
+            detail: None,
         }
     }
 }
@@ -199,6 +234,8 @@ pub struct ReclaimOutcome {
     /// Bytes the workspace had allocated, estimated before tear-down;
     /// `None` when the backend could not measure them.
     pub freed_bytes: Option<u64>,
+    /// The operation that forgot the jj workspace, if one was recorded.
+    pub release_op_id: Option<String>,
 }
 
 /// What [`Manager::inspect`] found.
@@ -222,6 +259,8 @@ pub struct Inspected {
     /// The newest [`crate::snapshot::index::RECENT_LIMIT`] of them, newest
     /// first.
     pub recent_snapshots: Vec<SnapshotEntry>,
+    /// Its mounted stores, for a loaded workspace (R1.20).
+    pub stores: Vec<MountedStore>,
 }
 
 /// Failure of a workspace operation.
@@ -369,6 +408,12 @@ pub enum ManagerError {
         #[source]
         source: reef_lib::jj::WorkingCopyStateError,
     },
+    /// A shared store could not be found, mounted, or built (R1.20).
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// A lockfile could not be read from the tree (R1.20).
+    #[error("read a store's lockfile")]
+    ReadFile(#[from] reef_lib::jj::spec::ReadFileError),
 }
 
 impl Classify for ManagerError {
@@ -403,6 +448,8 @@ impl Classify for ManagerError {
             Self::Settings(error) => error.kind(),
             Self::WorkingCopyCheck { source, .. } => source.kind(),
             Self::Rebind { source, .. } => classify_by_source(source),
+            Self::Store(error) => error.kind(),
+            Self::ReadFile(error) => error.kind(),
         }
     }
 }

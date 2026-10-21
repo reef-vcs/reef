@@ -1,0 +1,104 @@
+// Shared dependency stores (R1.20, ADR 0022): built once per store name and
+// lockfile hash by the daemon, sealed read-only, and mounted into every
+// workspace whose lockfile hashes the same. Stores are per daemon; `repo`
+// names the repository whose `reef.toml` declares the store.
+syntax = "proto3";
+
+package reef.daemon.v0;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+service Stores {
+  // Runs the store's `build` command in a scratch workspace and seals what
+  // it wrote: the command's output lines as they come, then the result. A
+  // build that exits non-zero ends with a result whose `sealed` is false.
+  // A sealed store for the lockfile's hash is the result at once, unless
+  // `force`. Errors: NOT_FOUND (no such store at the revision),
+  // ALREADY_EXISTS (a build of the same store and hash is running),
+  // INTERNAL (timed out; the process group was killed), UNAVAILABLE (the
+  // daemon is shutting down).
+  rpc Build(BuildStoreRequest) returns (stream BuildEvent);
+  // Sealed stores.
+  rpc List(ListStoresRequest) returns (ListStoresResponse);
+}
+
+message BuildStoreRequest {
+  // A repo id, a unique id prefix, or an absolute path inside a registered
+  // root.
+  string repo = 1;
+  // The `[[store]] name`.
+  string name = 2;
+  // The revision whose `reef.toml` and lockfile to build from; empty for
+  // the `main` bookmark, else the `default` workspace's change.
+  string rev = 3;
+  // How long the command may run; unset for 30 minutes.
+  google.protobuf.Duration timeout = 4;
+  // Rebuild even if a sealed store exists; the old one is moved aside when
+  // the new one is sealed.
+  bool force = 5;
+}
+
+message BuildEvent {
+  oneof event {
+    OutputLine line = 1;
+    BuildResult done = 2;
+  }
+}
+
+// One line of the build command's output, without its line ending, lossily
+// decoded as UTF-8.
+message OutputLine {
+  enum Stream {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  string text = 1;
+  Stream stream = 2;
+}
+
+message BuildResult {
+  string name = 1;
+  // blake3 of the lockfile's bytes, 64 hex characters.
+  string lockfile_hash = 2;
+  // The sealed store's directory; a failed build's directory, kept for
+  // inspection until GC.
+  string path = 3;
+  // Bytes the sealed store allocates.
+  uint64 bytes = 4;
+  bool sealed = 5;
+  // The command's exit code; -1 if a signal ended it.
+  int32 exit_code = 6;
+  // The operation that released the scratch workspace; empty when nothing
+  // was built.
+  string op_id = 7;
+  // Output lines dropped because the client read too slowly.
+  uint64 dropped_lines = 8;
+  // A sealed store already existed; nothing was built.
+  bool already_built = 9;
+}
+
+message ListStoresRequest {
+  // Empty for every store; otherwise the stores this repository built
+  // first or one of its workspaces mounts.
+  string repo = 1;
+}
+
+message StoreInfo {
+  string name = 1;
+  string lockfile_hash = 2;
+  string path = 3;
+  // Allocated bytes, measured when listed.
+  uint64 bytes = 4;
+  google.protobuf.Timestamp built_at = 5;
+  bool sealed = 6;
+  // Loaded workspaces that mount it, a running build's scratch workspace
+  // (which mounts the other stores it can) included.
+  uint32 in_use_by = 7;
+  // The repository that built it first.
+  string repo_id = 8;
+}
+
+message ListStoresResponse {
+  repeated StoreInfo stores = 1;
+}

@@ -87,6 +87,27 @@ message Workspace {
   // How many of its snapshots have not been published (R1.16); every one,
   // in Phase 1. Filled in by List and Inspect; 0 in Create.
   uint64 local_snapshot_count = 17;
+  // The shared stores mounted in it (R1.20). Empty for a workspace that is
+  // not active or not loaded.
+  repeated MountedStore stores = 18;
+}
+
+// A shared dependency store mounted in a workspace (R1.20).
+message MountedStore {
+  enum Mode {
+    // A symlink to the store directory.
+    SYMLINK = 0;
+    // A read-only bind mount (Linux, with CAP_SYS_ADMIN).
+    BIND = 1;
+  }
+  string name = 1;
+  string lockfile_hash = 2;
+  // Repository-root relative.
+  string mount = 3;
+  Mode mode = 4;
+  // The workspace's lockfile still matches the store as of its last
+  // snapshot; false sets `attention = store-hash-mismatch`.
+  bool verified = 5;
 }
 
 // How much disk a workspace uses beyond its base. An estimate.

@@ -17,8 +17,16 @@
 //!    reclaim is before `keep_newer`: their `wc/<id>` state directory, their
 //!    leases, and the row. The `reclaims` log stays; `snapshots` rows are
 //!    left to R1.16's reindex, which runs after GC.
-//! 4. **Stores**: R1.20's `stores` table does not exist yet, so nothing is
-//!    removed; the step reports zero until R1.20 fills it in.
+//! 4. **Stores** (R1.20): sealed stores this repository built first that no
+//!    loaded workspace mounts, that the `reef.toml` at no registered
+//!    repository's default start revision (`main`, else the `default`
+//!    workspace's change) names with its current lockfile, and that were
+//!    built before `keep_newer`. If any repository's spec cannot be read,
+//!    none are removed. Stores are shared by every repository, so the first
+//!    report of a run also removes what no registered repository owns:
+//!    unused stores a forgotten repository built, and `.failed-*` and
+//!    `.replaced-*` directories from before `keep_newer`.
+//!    Creates in every repository wait while stores are removed.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -40,6 +48,7 @@ use crate::daemon::AppState;
 use crate::db::{DbError, META_LAST_BACKUP_AT};
 use crate::model::{RepoId, RepositoryRecord, Timestamp, WorkspaceState};
 use crate::snapshot::index;
+use crate::store::{FAILED, REPLACED, StoreKey};
 use crate::workspace::{JjStep, Manager, measure};
 
 /// What GC did to one repository; see `maintenance.proto`'s `GcReport`.
@@ -94,6 +103,15 @@ pub enum GcRunError {
         #[source]
         source: io::Error,
     },
+    /// A store directory could not be removed (R1.20).
+    #[error("remove store {}", path.display())]
+    RemoveStore {
+        /// The directory.
+        path: std::path::PathBuf,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
     /// A blocking task panicked.
     #[error("a GC task failed")]
     Task(#[from] tokio::task::JoinError),
@@ -104,7 +122,9 @@ impl Classify for GcRunError {
         match self {
             Self::Db(error) => error.kind(),
             Self::BaseCache(error) => error.kind(),
-            Self::RemoveStateDir { source, .. } => reef_lib::error::classify_by_source(source),
+            Self::RemoveStateDir { source, .. } | Self::RemoveStore { source, .. } => {
+                reef_lib::error::classify_by_source(source)
+            }
             Self::Task(_) => ErrorKind::Internal,
         }
     }
@@ -159,8 +179,9 @@ pub async fn run(
     };
     let last_backup = last_backup_at(state)?;
     let mut reports = Vec::with_capacity(records.len());
-    for record in records {
-        reports.push(run_repo(state, &record, last_backup, dry_run).await?);
+    for (index, record) in records.iter().enumerate() {
+        let leftovers = index == 0;
+        reports.push(run_repo(state, record, last_backup, dry_run, leftovers).await?);
     }
     Ok(reports)
 }
@@ -171,6 +192,7 @@ async fn run_repo(
     record: &RepositoryRecord,
     last_backup: Option<SystemTime>,
     dry_run: bool,
+    store_leftovers: bool,
 ) -> Result<GcReport, GcRunError> {
     let begun = Instant::now();
     let id = record.id;
@@ -229,7 +251,9 @@ async fn run_repo(
     let (workspace_rows_removed, wc_bytes_freed) =
         remove_ended_rows(state, id, keep_newer, dry_run).await?;
 
-    // 4. Stores: R1.20.
+    // 4.
+    let (stores_removed, store_bytes_freed) =
+        remove_stores(state, id, keep_newer, dry_run, store_leftovers).await?;
 
     if !dry_run && let Some(handle) = &handle {
         reindex(state, handle, id).await;
@@ -245,8 +269,8 @@ async fn run_repo(
         base_bytes_freed: evicted.iter().map(|entry| entry.bytes).sum(),
         workspace_rows_removed,
         wc_bytes_freed,
-        stores_removed: 0,
-        store_bytes_freed: 0,
+        stores_removed,
+        store_bytes_freed,
         elapsed_ms: elapsed_ms(begun),
         dry_run,
     };
@@ -260,6 +284,8 @@ async fn run_repo(
         base_bytes_freed = report.base_bytes_freed,
         workspace_rows_removed = report.workspace_rows_removed,
         wc_bytes_freed = report.wc_bytes_freed,
+        stores_removed = report.stores_removed,
+        store_bytes_freed = report.store_bytes_freed,
         elapsed_ms = report.elapsed_ms,
         "garbage collection finished"
     );
@@ -302,6 +328,98 @@ async fn remove_ended_rows(
         removed += 1;
     }
     Ok((removed, bytes))
+}
+
+/// Step 4: removes the stores `id` built first that nothing keeps, and with
+/// `leftovers` the failed and replaced build directories older than
+/// `keep_newer`. Returns how many went and the bytes they had allocated.
+async fn remove_stores(
+    state: &AppState,
+    id: RepoId,
+    keep_newer: SystemTime,
+    dry_run: bool,
+    leftovers: bool,
+) -> Result<(u32, u64), GcRunError> {
+    let manager: &Manager = &state.manager;
+    let stores = manager.stores();
+    // Read before the lock, which holds every create off.
+    let mut keep: HashSet<StoreKey> = HashSet::new();
+    for repo in state.db.repositories()? {
+        let Some(handle) = state.repos.get(repo.id) else {
+            tracing::warn!(other_repo = %repo.id, "repository is not open; keeping every store");
+            return Ok((0, 0));
+        };
+        match manager.default_store_keys(&handle).await {
+            Ok(keys) => keep.extend(keys),
+            Err(error) => {
+                tracing::warn!(other_repo = %repo.id, error = %ErrorChain(&error), "cannot read the repository's stores; keeping every store");
+                return Ok((0, 0));
+            }
+        }
+    }
+    let _no_mounts = stores.mounting.write().await;
+    keep.extend(manager.stores_in_use().into_keys());
+    let cutoff = Timestamp::from(keep_newer);
+    let registered: HashSet<RepoId> = state
+        .db
+        .repositories()?
+        .into_iter()
+        .map(|repo| repo.id)
+        .collect();
+    let mut removed = 0u32;
+    let mut bytes = 0;
+    for row in state.db.stores()? {
+        let key = StoreKey {
+            name: row.name.clone(),
+            lockfile_hash: row.lockfile_hash.clone(),
+        };
+        let old = row.built_at.is_some_and(|at| at < cutoff);
+        // A store whose first builder was forgotten is the first report's.
+        let ours = row.repo_id == id || (leftovers && !registered.contains(&row.repo_id));
+        if !ours || !row.sealed || !old || keep.contains(&key) || stores.is_building(&key) {
+            continue;
+        }
+        bytes += measure(std::slice::from_ref(&row.path)).await;
+        if !dry_run {
+            state.db.delete_store(&key.name, &key.lockfile_hash)?;
+            remove_store_dir(&row.path).await?;
+        }
+        tracing::info!(store = %key.name, lockfile_hash = %key.lockfile_hash, "unused store removed");
+        removed += 1;
+    }
+    if leftovers {
+        let cutoff_ms = keep_newer
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        for (_, file, path) in stores.leftovers() {
+            let stamp = file
+                .split_once(&format!(".{FAILED}"))
+                .or_else(|| file.split_once(&format!(".{REPLACED}")))
+                .and_then(|(_, millis)| millis.parse::<u128>().ok());
+            if stamp.is_none_or(|millis| millis >= cutoff_ms) {
+                continue;
+            }
+            bytes += measure(std::slice::from_ref(&path)).await;
+            if !dry_run {
+                remove_store_dir(&path).await?;
+            }
+            removed += 1;
+        }
+    }
+    Ok((removed, bytes))
+}
+
+/// Removes a store directory, whose sealed files and directories are
+/// read-only, tolerating one already gone.
+async fn remove_store_dir(dir: &Path) -> Result<(), GcRunError> {
+    match crate::backend::fs_util::remove_tree_async(dir).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(GcRunError::RemoveStore {
+            path: dir.to_owned(),
+            source,
+        }),
+    }
 }
 
 /// Removes a state directory, tolerating one already gone.

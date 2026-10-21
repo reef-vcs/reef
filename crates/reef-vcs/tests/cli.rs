@@ -600,7 +600,6 @@ fn stubs_exit_1_without_a_daemon() {
     let state = tmp.path().join("state");
     for (args, ticket) in [
         (&["ws", "move", "abcd", "--change", "x"][..], "R1.06"),
-        (&["store", "list"], "R1.20"),
         (&["backup", "/tmp/x"], "R1.18"),
         (&["restore", "/tmp/x"], "R1.18"),
     ] {
@@ -652,4 +651,129 @@ async fn ws_gc_dry_run() {
         "{text}"
     );
     assert_eq!(text.lines().count(), 2, "{text}");
+}
+
+/// Writes `files` at the registered root and snapshots its `default`
+/// workspace, which a build without `--rev` builds from.
+async fn commit_at_root(root: &Path, files: &[(&str, &str)]) {
+    for (path, contents) in files {
+        std::fs::write(root.join(path), contents).unwrap();
+    }
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        pollster::block_on(async {
+            let settings = reef_daemon::testing::test_settings();
+            let mut repo = reef_lib::jj::Repo::open(&root, &settings).await.unwrap();
+            repo.snapshot("edit reef.toml").await.unwrap();
+        });
+    })
+    .await
+    .unwrap();
+}
+
+/// A `reef.toml` with store `deps` built by `sh -c <script>`.
+fn store_spec(script: &str) -> String {
+    format!(
+        "[[store]]\nname = \"deps\"\nlockfile = \"deps.lock\"\nmount = \"vendor/deps\"\nbuild = [\"sh\", \"-c\", {script:?}]\n"
+    )
+}
+
+/// `store build` and `store list` (R1.20) in JSON and text: the build's
+/// output streams through (all on stderr in JSON mode), JSON mode prints
+/// one result, and a failed build exits with its command's code.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_build_and_list() {
+    let (daemon, repo) = with_repo().await;
+    let spec = store_spec("echo to-stdout; echo to-stderr >&2; mkdir -p \"$REEF_STORE_DIR\"");
+    commit_at_root(&repo.root, &[("reef.toml", &spec), ("deps.lock", "v1\n")]).await;
+
+    let output = run(
+        reef(&daemon),
+        &["store", "build", "deps", "--repo", &repo.id],
+    )
+    .await;
+    let value = json(&output);
+    assert_eq!(value["name"], "deps");
+    assert_eq!(value["sealed"], true);
+    assert_eq!(value["exit_code"], 0);
+    assert_eq!(value["already_built"], false);
+    let text = stderr(&output);
+    assert!(
+        text.contains("to-stdout") && text.contains("to-stderr"),
+        "{text}"
+    );
+
+    let output = run(
+        reef(&daemon),
+        &["-o", "text", "store", "build", "deps", "--repo", &repo.id],
+    )
+    .await;
+    output.clone().assert().success();
+    assert!(
+        stderr(&output).contains("is already built at"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let output = run(
+        reef(&daemon),
+        &[
+            "-o", "text", "store", "build", "deps", "--force", "--repo", &repo.id,
+        ],
+    )
+    .await;
+    output.clone().assert().success();
+    assert_eq!(stdout(&output), "to-stdout\n");
+    let text = stderr(&output);
+    assert!(
+        text.contains("to-stderr") && text.contains("built store deps"),
+        "{text}"
+    );
+
+    let listed = json(&run(reef(&daemon), &["store", "list"]).await);
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["name"], "deps");
+    assert_eq!(listed[0]["in_use_by"], 0);
+    assert_eq!(listed[0]["sealed"], true);
+    let output = run(reef(&daemon), &["-o", "text", "store", "list"]).await;
+    output.clone().assert().success();
+    let text = stdout(&output);
+    let mut lines = text.lines();
+    assert!(lines.next().unwrap().starts_with("NAME"), "{text}");
+    assert!(lines.next().unwrap().starts_with("deps "), "{text}");
+
+    // The workspace shows its store.
+    let ws = json(&run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await);
+    assert_eq!(ws["stores"][0]["name"], "deps");
+    assert_eq!(ws["stores"][0]["mount"], "vendor/deps");
+
+    let failing = store_spec("exit 7");
+    commit_at_root(
+        &repo.root,
+        &[("reef.toml", &failing), ("deps.lock", "v2\n")],
+    )
+    .await;
+    let output = run(
+        reef(&daemon),
+        &["store", "build", "deps", "--repo", &repo.id],
+    )
+    .await;
+    output.clone().assert().code(7);
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["sealed"], false);
+    assert_eq!(value["exit_code"], 7);
+    // Without the store, a create fails unless told to skip it.
+    let output = run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await;
+    let text = failed(&output, 6, "unavailable");
+    assert!(text.contains("reef store build deps"), "{text}");
+    let ws = json(
+        &run(
+            reef(&daemon),
+            &["ws", "create", "--skip-missing-stores", "--repo", &repo.id],
+        )
+        .await,
+    );
+    assert_eq!(ws["attention"], "store-missing");
 }

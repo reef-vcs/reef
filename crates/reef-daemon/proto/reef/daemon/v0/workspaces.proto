@@ -1,5 +1,6 @@
 // Workspaces: create, list, inspect, release, snapshot (R1.05). R1.06 adds
-// Move and R1.15 Heartbeat; field numbers are stable from here.
+// Move and R1.15 Heartbeat, R1.20 shared stores; field numbers are stable
+// from here.
 //
 // `repo` accepts a repo id, a unique id prefix (4 or more hex characters),
 // or an absolute path inside a registered root. Where a workspace is named
@@ -57,6 +58,15 @@ message CreateRequest {
   // The lease length; 0 = the daemon default. Grace is never per request
   // (R1.15).
   uint64 lease_ms = 8;
+  // What to do about a shared store `reef.toml` declares that has no
+  // sealed build for the lockfile's hash (R1.20).
+  enum MissingStores {
+    // Fail with UNAVAILABLE, naming the `reef store build` to run.
+    FAIL = 0;
+    // Create the workspace without it, with `attention = store-missing`.
+    SKIP = 1;
+  }
+  MissingStores missing_stores = 9;
 }
 
 message CreateResponse {

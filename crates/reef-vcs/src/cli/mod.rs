@@ -3,8 +3,8 @@
 //! `completions`, and `daemon run`. Output follows [`out`]'s rules and
 //! failures exit with their kind's code ([`error`]).
 //!
-//! Later tickets fill in the stubs: `ws move` (R1.06), `backup` and
-//! `restore` (R1.18), and `store` (R1.20).
+//! Later tickets fill in the stubs: `ws move` (R1.06), and `backup` and
+//! `restore` (R1.18).
 
 mod autostart;
 mod backup;
@@ -71,7 +71,7 @@ pub(crate) struct Global {
     #[arg(long, global = true)]
     no_autostart: bool,
     /// How long to wait for the daemon's answer [default: 30s; 1h for `ws
-    /// gc`].
+    /// gc`; for `store build`, how long its command may run, 30m].
     #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration)]
     timeout: Option<Duration>,
     /// Print nothing on stderr but errors.
@@ -233,7 +233,7 @@ async fn run(cli: Cli, out: &Out) -> Result<ExitCode, CliError> {
             }
             return ws::run(&connect(&global, out).await?, args).await;
         }
-        Command::Store(args) => store::run(args),
+        Command::Store(args) => return store::run(&connect(&global, out).await?, args).await,
         Command::Backup(args) => backup::run(args),
         Command::Restore(args) => restore::run(args),
     };
@@ -334,6 +334,16 @@ pub(crate) fn repo_arg(text: &str) -> Result<String, CliError> {
         return Ok(text.to_owned());
     }
     absolute(Path::new(text)).map(|path| path.display().to_string())
+}
+
+/// The current directory: the default repository of commands with
+/// `--repo`.
+pub(crate) fn current_dir() -> Result<PathBuf, CliError> {
+    std::env::current_dir().map_err(|source| CliError::Io {
+        op: "read the current directory",
+        path: PathBuf::from("."),
+        source,
+    })
 }
 
 /// `path` made absolute against the current directory.

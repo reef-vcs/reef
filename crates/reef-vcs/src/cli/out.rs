@@ -132,6 +132,24 @@ impl Out {
         self.raw(&buffer)
     }
 
+    /// A line of another program's output (`store build`'s command): to
+    /// stdout or stderr as it came in text mode, to stderr in JSON mode,
+    /// where stdout holds the one JSON value. Nothing with `-q`.
+    #[expect(clippy::print_stderr, reason = "the build's own stderr")]
+    pub(crate) fn passthrough(&self, line: &str, stderr: bool) {
+        if self.quiet {
+            return;
+        }
+        if stderr || self.mode == Output::Json {
+            eprintln!("{line}");
+        } else {
+            let mut text = line.to_owned();
+            text.push('\n');
+            // A closed stdout is not worth stopping the build's output for.
+            let _ = self.raw(text.as_bytes());
+        }
+    }
+
     /// A line on stderr, in both modes, even with `-q`: a failure that is
     /// not the command's result, such as `ws run`'s release after its
     /// command exited.

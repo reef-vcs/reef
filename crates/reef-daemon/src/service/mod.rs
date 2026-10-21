@@ -5,6 +5,7 @@
 pub mod daemon;
 pub mod maintenance;
 pub mod repositories;
+pub mod stores;
 pub mod workspaces;
 
 mod convert;

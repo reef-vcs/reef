@@ -20,7 +20,7 @@ use crate::proto::v0::{
     ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
 };
 use crate::snapshot::{SnapshotKind, index};
-use crate::workspace::{CreateSpec, ReleaseSpec, Start};
+use crate::workspace::{CreateSpec, MissingStores, ReleaseSpec, Start};
 
 /// A request field that does not parse.
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +75,10 @@ impl Workspaces for WorkspacesService {
         let request = request.into_inner();
         let manager = &self.state.manager;
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
+        let missing_stores = match request.missing_stores() {
+            create_request::MissingStores::Fail => MissingStores::Fail,
+            create_request::MissingStores::Skip => MissingStores::Skip,
+        };
         let start = match request.start {
             Some(create_request::Start::Change(text)) => Start::Change(text),
             Some(create_request::Start::NewOn(text)) => Start::NewOn(text),
@@ -93,6 +97,8 @@ impl Workspaces for WorkspacesService {
                 backend,
                 path: non_empty(request.path).map(PathBuf::from),
                 lease: optional_millis(request.lease_ms),
+                missing_stores,
+                skip_store: None,
             })
             .await
             .map_err(status)?;
@@ -102,6 +108,7 @@ impl Workspaces for WorkspacesService {
                 record: &created.record,
                 lease: self.lease_message(Some(&created.lease), Timestamp::now()),
                 local_snapshot_count: 0,
+                stores: &created.stores,
             })),
             op_id: created.op_id,
             shared_change: created.shared_change,
@@ -138,10 +145,16 @@ impl Workspaces for WorkspacesService {
             .map_err(status)?
             .iter()
             .map(|(record, lease)| {
+                let stores = manager
+                    .entry(record.id)
+                    .filter(|_| record.state == WorkspaceState::Active)
+                    .map(|entry| entry.stores())
+                    .unwrap_or_default();
                 Workspace::from(WorkspaceView {
                     record,
                     lease: self.lease_message(lease.as_ref(), now),
                     local_snapshot_count: local_counts.get(&record.id).copied().unwrap_or(0),
+                    stores: &stores,
                 })
             })
             .collect();
@@ -168,6 +181,7 @@ impl Workspaces for WorkspacesService {
                 record: &inspected.record,
                 lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
                 local_snapshot_count: inspected.local_snapshot_count,
+                stores: &inspected.stores,
             })),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
             other_workspaces_on_change: inspected
@@ -205,6 +219,7 @@ impl Workspaces for WorkspacesService {
                 ReleaseSpec {
                     force: request.force,
                     final_snapshot: !request.skip_final_snapshot,
+                    detail: None,
                 },
             )
             .await

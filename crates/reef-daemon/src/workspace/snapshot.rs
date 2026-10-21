@@ -13,7 +13,10 @@
 //! 4. (blocking) Update the row and index the operation as a local snapshot
 //!    (R1.16), then save the working-copy state at the new operation (or at
 //!    the head, when nothing was committed).
-//! 5. (async) Log, and run the post-snapshot hooks.
+//! 5. (async) Log; when the working-copy commit moved, check the mounted
+//!    stores' lockfiles against the commit (R1.20, on the repository
+//!    thread), so the answer to an explicit snapshot already carries the
+//!    mark; then run the post-snapshot hooks.
 //!
 //! Both rows are written before the working-copy state, as R1.16 requires
 //! of its index row, so a crash between the two leaves rows naming an
@@ -316,6 +319,7 @@ impl Manager {
             }
         };
         log_outcome(&outcome, record.repo_id, ran.updated_files, begun);
+        self.verify_stores(entry, &outcome, &record.commit_id).await;
         self.scheduler.run_hooks(&outcome);
         Ok(outcome)
     }

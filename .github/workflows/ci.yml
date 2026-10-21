@@ -129,9 +129,10 @@ jobs:
       # daemon test also runs on overlay workspaces.
       - name: Daemon tests on fuse-overlayfs (unprivileged)
         run: cargo nextest run -p reef-daemon --features privileged-tests
-      # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`.
-      - name: Kernel overlayfs and reflink conformance (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay|reflink/)'
+      # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`. The
+      # `stores` binary as root gets read-only bind mounts (R1.20).
+      - name: Kernel overlayfs, reflink conformance, and store bind mounts (root)
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay|reflink/) | binary(stores)'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target

@@ -93,7 +93,8 @@ pub fn same_volume(a: &Path, b: &Path) -> Result<bool, BackendError> {
 /// missing from the workspace count as changed with no bytes. Unchanged
 /// files are assumed to share the base's blocks (clones) or are what any
 /// copy costs anyway, and are not counted. Ignored files (build output)
-/// are not in the base, so they count. Directories are not counted.
+/// are not in the base, so they count. Directories are not counted, nor is
+/// anything at a shared store's mount point.
 pub fn changed_files_vs_base(
     base: &BaseEntry,
     ws: &WorkspacePaths,
@@ -107,6 +108,9 @@ pub fn changed_files_vs_base(
         .min_depth(1)
         .follow_links(false)
         .follow_root_links(false)
+        .into_iter()
+        // A bind-mounted store is not the workspace's (R1.20).
+        .filter_entry(|entry| !ws.store_mounts.iter().any(|mount| entry.path() == mount))
     {
         let entry = entry.map_err(|error| walk_error(&ws.root, error))?;
         if entry.file_type().is_dir() {
@@ -463,13 +467,70 @@ fn move_to_trash(path: &Path) -> io::Result<PathBuf> {
         if fs::symlink_metadata(&trash).is_ok() {
             continue;
         }
-        fs::rename(path, &trash)?;
+        rename_even_read_only(path, &trash)?;
         return Ok(trash);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "no free trash name",
     ))
+}
+
+/// `fs::rename`, retried once with the owner write bit added if it was
+/// refused and `from` is a directory without one: the macos-15 CI runner
+/// refuses to rename a read-only directory even within one parent (Linux
+/// and newer macOS allow it), and a sealed store's root is `0555`. The
+/// mode changes go through a handle on the directory, so a path swapped
+/// for a symlink meanwhile is never chmod-ed, and the mode is put back
+/// wherever the directory ends up; failing that is logged, not returned.
+/// When the retry does not apply, or fails, the first error is returned.
+pub(crate) fn rename_even_read_only(from: &Path, to: &Path) -> io::Result<()> {
+    rename_even_read_only_with(from, to, |from, to| fs::rename(from, to))
+}
+
+/// [`rename_even_read_only`] with the rename injected, so tests can refuse
+/// it the way macOS 15 does.
+fn rename_even_read_only_with(
+    from: &Path,
+    to: &Path,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let error = match rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => error,
+        Err(error) => return Err(error),
+    };
+    let Ok(meta) = fs::symlink_metadata(from) else {
+        return Err(error);
+    };
+    let mode = meta.permissions().mode() & 0o7777;
+    if !meta.is_dir() || mode & 0o200 != 0 {
+        return Err(error);
+    }
+    // The same inode `symlink_metadata` saw, or `from` was swapped.
+    let Ok(dir) = fs::File::open(from) else {
+        return Err(error);
+    };
+    match dir.metadata() {
+        Ok(opened) if opened.dev() == meta.dev() && opened.ino() == meta.ino() => {}
+        _ => return Err(error),
+    }
+    tracing::debug!(path = %from.display(), "rename refused; retrying with the owner write bit");
+    if dir
+        .set_permissions(fs::Permissions::from_mode(mode | 0o200))
+        .is_err()
+    {
+        return Err(error);
+    }
+    let renamed = rename(from, to);
+    if let Err(restore) = dir.set_permissions(fs::Permissions::from_mode(mode)) {
+        tracing::warn!(
+            path = %from.display(),
+            error = %ErrorChain(&restore),
+            "cannot put back a renamed directory's mode"
+        );
+    }
+    renamed.map_err(|_| error)
 }
 
 /// Deletes a trashed tree, logging rather than returning failure: the
@@ -770,6 +831,73 @@ mod tests {
         assert!(!tree.exists());
         let error = remove_tree_async(&tree).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_read_only_directory_renames_and_keeps_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("sealed");
+        let to = dir.path().join("sealed.moved");
+        fs::create_dir(&from).unwrap();
+        fs::write(from.join("file"), b"x").unwrap();
+        fs::set_permissions(&from, fs::Permissions::from_mode(0o555)).unwrap();
+
+        rename_even_read_only(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read(to.join("file")).unwrap(), b"x");
+        assert_eq!(
+            fs::metadata(&to).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+        // GC's path to the same rename: a sealed store goes to trash.
+        remove_tree_in_background(&to).unwrap();
+        assert!(names(dir.path()).is_empty(), "{:?}", names(dir.path()));
+    }
+
+    #[test]
+    fn a_refused_rename_retries_only_for_a_read_only_directory() {
+        let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+        let calls = std::cell::Cell::new(0);
+        // macOS 15: refused while the directory lacks its owner write bit.
+        let macos_15 = |from: &Path, to: &Path| {
+            calls.set(calls.get() + 1);
+            if mode(from) & 0o200 == 0 {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("sealed");
+        let to = dir.path().join("sealed.moved");
+        fs::create_dir(&from).unwrap();
+        fs::set_permissions(&from, fs::Permissions::from_mode(0o555)).unwrap();
+
+        rename_even_read_only_with(&from, &to, macos_15).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(!from.exists());
+        assert_eq!(mode(&to), 0o555);
+
+        // A retry that is refused too returns the first error, mode intact.
+        let refused = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        let error = rename_even_read_only_with(&to, &from, refused).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(mode(&to), 0o555);
+
+        // A writable directory, or a file, is not retried.
+        let file = dir.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        for (path, start) in [(&to, 0o755), (&file, 0o444)] {
+            fs::set_permissions(path, fs::Permissions::from_mode(start)).unwrap();
+            calls.set(0);
+            let refuse_once = |_: &Path, _: &Path| {
+                calls.set(calls.get() + 1);
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            };
+            rename_even_read_only_with(path, &from, refuse_once).unwrap_err();
+            assert_eq!(calls.get(), 1, "{}", path.display());
+            assert_eq!(mode(path), start);
+        }
     }
 
     #[test]

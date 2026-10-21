@@ -21,12 +21,14 @@ use crate::error::{detail_of, kind_from_status};
 use crate::proto::v0::daemon_client::DaemonClient;
 use crate::proto::v0::maintenance_client::MaintenanceClient;
 use crate::proto::v0::repositories_client::RepositoriesClient;
+use crate::proto::v0::stores_client::StoresClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
-    CreateRequest, CreateResponse, ForgetRequest, ForgetResponse, GcRequest, GcResponse,
-    HeartbeatRequest, HeartbeatResponse, InspectRequest, InspectResponse, ListRepositoriesRequest,
-    ListWorkspacesRequest, RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse,
-    Repository, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, Workspace,
+    BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse, ForgetRequest, ForgetResponse,
+    GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest, InspectResponse,
+    ListRepositoriesRequest, ListStoresRequest, ListWorkspacesRequest, RegisterRequest,
+    RegisterResponse, ReleaseRequest, ReleaseResponse, Repository, SnapshotRequest,
+    SnapshotResponse, StatusRequest, StatusResponse, StoreInfo, Workspace,
 };
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
@@ -254,11 +256,48 @@ impl Client {
         let mut client = MaintenanceClient::new(self.channel.clone());
         Ok(client.gc(request).await?.into_inner())
     }
+
+    /// `Stores.Build` (R1.20) of store `name` in `repo` at `rev` (empty
+    /// for the default), the command given `timeout`: the command's output
+    /// lines as they come, then its result; an error ends the stream
+    /// instead of a result. The caller sets its own deadline, past
+    /// `timeout`.
+    pub async fn build_store(
+        &self,
+        repo: &str,
+        name: &str,
+        rev: &str,
+        timeout: std::time::Duration,
+        force: bool,
+    ) -> Result<tonic::Streaming<BuildEvent>, ClientError> {
+        let request = BuildStoreRequest {
+            repo: repo.to_owned(),
+            name: name.to_owned(),
+            rev: rev.to_owned(),
+            timeout: Some(prost_types::Duration {
+                seconds: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+                nanos: i32::try_from(timeout.subsec_nanos()).unwrap_or(0),
+            }),
+            force,
+        };
+        let mut client = StoresClient::new(self.channel.clone());
+        Ok(client.build(request).await?.into_inner())
+    }
+
+    /// `Stores.List` (R1.20). `repo` empty for every store.
+    pub async fn list_stores(&self, repo: &str) -> Result<Vec<StoreInfo>, ClientError> {
+        let request = ListStoresRequest {
+            repo: repo.to_owned(),
+        };
+        let mut client = StoresClient::new(self.channel.clone());
+        Ok(client.list(request).await?.into_inner().stores)
+    }
 }
 
 /// The workspace side of the client's surface as a trait: one method per
 /// `Daemon`, `Repositories`, and `Workspaces` RPC, with the same
-/// signatures as [`Client`]'s (maintenance is [`Client`]'s alone). [`Client`] implements it; tests and
+/// signatures as [`Client`]'s (maintenance and stores are [`Client`]'s
+/// alone). [`Client`] implements it; tests and
 /// R1.21's heartbeater implement it over a fake.
 #[tonic::async_trait]
 pub trait WorkspacesApi: Send + Sync {

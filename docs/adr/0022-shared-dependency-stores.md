@@ -1,0 +1,51 @@
+# 0022. Shared dependency stores
+
+- Status: accepted
+- Date: 2026-10-20
+- Ticket: R1.20
+
+## Context
+
+The worktree problem the design starts from is that every checkout drags its own `node_modules`, virtualenv, and `target`, often ten times the size of the source tree. Twenty agents on one repository means twenty copies. The design's answer: "Twenty workspaces on the same lockfile share one copy of the dependencies. Shared stores are mounted read-only, verified against the lockfile hash, and written only by the daemon, so an agent running arbitrary code cannot poison another agent's workspace" (`docs/design.md`, Workspaces). The Phase 1 exit criterion is "A shared dependency store is mounted read-only into every workspace and verified against a lockfile hash."
+
+ADR 0021 put the declaration in `reef.toml`: each `[[store]]` names a lockfile, a mount path, and a `build` argv, read from the target commit's tree. Mount paths are already excluded from snapshots and from the watcher. This ADR decides how a store is identified, built, protected, mounted, and checked.
+
+## Decision
+
+1. **A store is identified by its name and the blake3 hash of its lockfile's bytes in the target commit's tree**, never the file on disk, which an agent may have edited. The directory is `<state>/stores/<name>/<hash>/` and the row is in `stores`. The hash is a verification digest, not an object identity, so ADR 0011 is unaffected. Stores belong to the daemon, not to a repository: two registered repositories with the same store name and lockfile bytes share one directory. `stores.repo_id` records which repository built it first.
+2. **Only the daemon writes a store.** `reef store build <name>` (`Stores.Build`) runs the spec's `build` argv as the daemon's user, inside a scratch workspace that goes through the ordinary create path. The scratch workspace is a new change on the requested revision, owned by `reef-store-build`, on the copy backend, because a build must not depend on a clone or overlay backend being available. The store's mount path in it is a symlink to `<hash>.building/`. The build's working directory is the scratch root. Its environment is the daemon's `PATH`, `HOME`, `LANG`, and `TMPDIR`, then `[store.env]`, then `REEF_STORE_DIR` (the building directory) and `REEF_STORE_NAME`. It runs in its own process group. When it times out (30 minutes by default) or the daemon shuts down, the whole group is killed. Its output streams to the client, and lines a slow client cannot take are dropped and counted. The scratch workspace's watcher snapshots are paused, and it is released without a final snapshot, so nothing the build writes reaches the repository. One build per store and hash runs at a time. A second one is `AlreadyExists`.
+3. **Sealing.** On exit 0 the daemon clears every write bit in the building directory (`0755` becomes `0555`, `0644` becomes `0444`, and execute bits stay), renames it into place, and marks the row sealed. A forced rebuild keeps the old store mounted until the new one is sealed, then moves it aside to `<hash>.replaced-<ms>/`. Any other exit moves the directory to `<hash>.failed-<ms>/`, kept for inspection, and seals nothing. A build interrupted by a stop is swept at the next start: its unsealed row goes, and its directory is kept as failed.
+4. **Mounting, in two tiers.** At create, after the backend materializes and before the working copy is seeded, each declared store whose hash has a sealed build is linked at its mount path. On Linux, when the daemon has `CAP_SYS_ADMIN` (R1.09's probe) and the workspace is not on a FUSE overlay, the store is bind-mounted and then remounted read-only and `nosuid`. Everywhere else the mount path is an absolute symlink to the store directory. The mount path must not exist in the materialized tree (`Conflict`), and each of its ancestors must be a real directory or absent (`Conflict`), so a tree whose `vendor` is a symlink cannot make the daemon create anything outside the workspace. Release and lease reclaim unmount the stores before the backend's tear-down, which therefore never walks into a store. A daemon restart finds each workspace's mounts again from its base tree's spec and remounts a bind mount that a reboot dropped. It does not mount a store the workspace did not have.
+5. **A missing store fails loudly.** If the lockfile's hash has no sealed store, `Create` fails `Unavailable`, naming the hash and the exact `reef store build <name> --repo <id> --rev <commit>` to run. The exception is a request with `missing_stores = SKIP` (`--skip-missing-stores`): the workspace is then created without that mount and marked `attention = 'store-missing'`.
+6. **Mismatch detection by tree lookup.** Each mounted store remembers the lockfile's blob id from the tree it was chosen by. After every snapshot that moves the working-copy commit, the daemon compares the new commit's blob id at the lockfile path with that id. A difference sets `attention = 'store-hash-mismatch'` (or leaves a more serious mark in place), sets the store's `verified` to false, and logs a warning. The mount stays, since pulling it out from under a running build would be worse. When the lockfile matches again, the mark clears. The fix is `reef store build`, then `reef ws move` to the same change (R1.06), which remounts. The check runs inside the snapshot pipeline rather than as a detached hook, so it is done by the time an explicit snapshot answers.
+7. **Excluded everywhere.** The mount path is in the ignore chain (ADR 0021), the watcher does not follow symlinks and drops events under it, and disk usage does not descend into it.
+8. **Garbage collection.** R1.17's step 4 removes a sealed store that no loaded workspace mounts, that no registered repository's default start revision (`main`, else the `default` workspace's change) names with its current lockfile hash, and that was built before `keep_newer`. If any repository's spec cannot be read, GC keeps every store. It also removes `.failed-*` and `.replaced-*` directories older than `keep_newer`. Creates hold the store manager's mount lock shared from looking a store up until it is mounted, and GC holds it exclusively while it removes stores.
+
+## Consequences
+
+- Builds are a daemon operation and run with the daemon's privileges and network access. Every point under "For RX.01" follows from that.
+- In the symlink tier, a store is read-only by mode bits only. An agent running as the daemon's user can `chmod +w` it and poison every workspace that mounts it. The bind tier closes this, because a read-only bind mount cannot be made writable from the workspace side, even by root.
+- The symlink tier turns `node_modules` from a directory into a symlink. Tools that resolve it (`realpath`) and then write next to the resolved path fail with `EACCES`. The quickstart (R1.24) documents this; the bind tier avoids it.
+- `REEF_STORE_DIR` is the building directory, which is renamed when it is sealed. Build tools that embed absolute paths (virtualenvs) embed a path that no longer exists, and need a relocatable layout. Phase 1 accepts this.
+- Stores outlive the repositories that built them until GC removes them. `reef store list` measures each store's size when it is called, which is slow for a store with hundreds of thousands of files.
+- Sealing walks the whole tree once per build, on the blocking pool. That takes seconds for a large `node_modules` and is acceptable once per lockfile.
+- The scratch workspace adds a create and a release to every build. It also exercises the real create path, which is the point.
+- Build caches keyed by tree hash (the design's "a build cache keyed by tree hash") are not this ADR. They would be a second store kind with a different key and lifecycle.
+
+## For RX.01
+
+The security review (RX.01) must look at:
+
+- **Arbitrary command execution as the daemon user from a repository file.** Anyone who can land a commit can make `reef store build` run any argv. The build is triggered by a human or agent, never automatically, but the trigger does not show the command.
+- **The symlink tier's same-uid writability.** Sealing is advisory against an agent running as the daemon's user. Only the bind tier, which needs `CAP_SYS_ADMIN`, is enforced.
+- **`[store.env]` as an injection surface.** It can set `LD_PRELOAD`, `PATH`, and the like for the build.
+- **The build's network access.** Every package install fetches, and nothing restricts where it goes.
+- **No daemon-user separation in Phase 1.** Builds, workspaces, and the daemon all share one uid.
+
+## Alternatives considered
+
+- **Per-workspace installs.** This is the problem statement: N copies, N install times.
+- **A content-addressed file store with hard links into each workspace, like pnpm's.** Rejected for Phase 1 as ecosystem-specific: hard links share inodes, so a writable link is a poisoning path. It may come later as another store kind.
+- **Running the build inside the agent's own workspace and then adopting the result.** Rejected: the agent controls that directory while the build runs and could poison the store before it is sealed.
+- **`chflags uchg` on macOS for sealing.** Rejected: the same uid can clear it, so it adds nothing over mode bits against the threat model, and GC would need an extra step to remove the store.
+- **Rehashing the lockfile on disk after each snapshot.** Rejected: the tree lookup is cheaper and reads what was snapshotted, not what is on disk mid-edit.

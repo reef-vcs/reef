@@ -1,6 +1,6 @@
 //! The daemon's metadata database (ADR 0003): registered repositories,
-//! workspaces, leases, the reclaim log, and the base cache, in one SQLite
-//! file per machine.
+//! workspaces, leases, the reclaim log, the base cache, and shared stores,
+//! in one SQLite file per machine.
 //!
 //! [`Db`] owns one connection behind a [`std::sync::Mutex`]; every method
 //! takes the lock for one short statement or transaction, so `&Db` can be
@@ -27,6 +27,7 @@ mod base_cache;
 mod leases;
 mod reclaims;
 mod repositories;
+mod stores;
 mod workspaces;
 
 pub use leases::Renewal;
@@ -46,6 +47,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_snapshots",
         include_str!("migrations/0003_snapshots.sql"),
     ),
+    ("0004_stores", include_str!("migrations/0004_stores.sql")),
     (
         "0005_watchman",
         include_str!("migrations/0005_watchman.sql"),
@@ -504,8 +506,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
-        assert_eq!(SCHEMA_VERSION, 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(SCHEMA_VERSION, 5);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -513,7 +515,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -556,7 +558,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 4
+                    supported: 5
                 }
             ),
             "{error:?}"
@@ -576,6 +578,7 @@ mod tests {
                 "0001_initial",
                 "0002_base_cache",
                 "0003_snapshots",
+                "0004_stores",
                 "0005_watchman"
             ]
         );
@@ -602,13 +605,14 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
                 "0001_initial",
                 "0002_base_cache",
                 "0003_snapshots",
+                "0004_stores",
                 "0005_watchman"
             ]
         );
@@ -654,7 +658,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,

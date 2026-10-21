@@ -24,6 +24,7 @@ use crate::model::{
 use crate::repo::{RepoHandle, RepoRegistry};
 use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind};
+use crate::store::StoreManager;
 use crate::watcher::{WatchError, select_watcher};
 
 /// The `reclaims.detail` of a workspace whose directory was gone at start.
@@ -54,6 +55,8 @@ pub struct Manager {
     pub(super) scheduler: Scheduler,
     /// Issues and renews leases, and reclaims expired ones (R1.15).
     pub(super) leases: Arc<LeaseManager>,
+    /// The shared dependency stores (R1.20).
+    pub(super) stores: Arc<StoreManager>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -93,6 +96,7 @@ impl Manager {
                 Arc::clone(&db),
                 manager.clone(),
             ));
+            let stores = Arc::new(StoreManager::new(&config.paths.state_dir, Arc::clone(&db)));
             Manager {
                 config,
                 db,
@@ -104,6 +108,7 @@ impl Manager {
                 entries: RwLock::new(HashMap::new()),
                 scheduler,
                 leases,
+                stores,
             }
         })
     }
@@ -449,6 +454,10 @@ impl Manager {
             .collect();
         let (snapshot_count, local_snapshot_count) = index::counts(&self.db, id)?;
         let recent_snapshots = index::recent(&self.db, id, index::RECENT_LIMIT)?;
+        let stores = self
+            .entry(id)
+            .map(|entry| entry.stores())
+            .unwrap_or_default();
         Ok(Inspected {
             record,
             lease,
@@ -458,6 +467,7 @@ impl Manager {
             snapshot_count,
             local_snapshot_count,
             recent_snapshots,
+            stores,
         })
     }
 
@@ -555,6 +565,8 @@ impl Manager {
             };
             let jj = self.reopen(&handle, &paths, settings).await;
             let spec = base_spec(&handle, &record).await;
+            let stores = self.load_stores(&handle, &record).await;
+            let paths = paths.with_store_mounts(stores.iter().map(|store| store.mount.as_str()));
             let entry = WorkspaceEntry {
                 record: Mutex::new(record),
                 paths,
@@ -563,6 +575,7 @@ impl Manager {
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
                 spec: Mutex::new(spec),
+                stores: Mutex::new(stores),
             };
             self.insert_entry(id, Arc::new(entry));
             self.scheduler.track(id);
@@ -654,11 +667,12 @@ impl Manager {
 
 /// Forgets the jj workspace `reef-<id>` on the repository thread with
 /// `description` (`{id}` replaced), tolerating one that is already gone.
+/// Returns the operation that forgot it, `None` if it was gone.
 pub(super) async fn forget_jj_workspace(
     handle: &RepoHandle,
     id: WorkspaceId,
     description: &str,
-) -> Result<(), ManagerError> {
+) -> Result<Option<String>, ManagerError> {
     let name = id.jj_workspace_name();
     let description = description.replace("{id}", &id.as_hex());
     let forgotten = handle
@@ -667,7 +681,8 @@ pub(super) async fn forget_jj_workspace(
         })
         .await;
     match forgotten? {
-        Ok(_) | Err(ForgetWorkspaceError::NoSuchWorkspace(_)) => Ok(()),
+        Ok(op_id) => Ok(Some(op_id.to_string())),
+        Err(ForgetWorkspaceError::NoSuchWorkspace(_)) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
