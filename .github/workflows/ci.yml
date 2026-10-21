@@ -121,7 +121,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9
-      # btrfs-progs and xfsprogs are for R1.10's reflink tests.
+      # btrfs-progs and xfsprogs make the reflink tests' filesystems (R1.10).
       - run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs btrfs-progs xfsprogs
       - name: Build the privileged tests
         run: cargo nextest run -p reef-daemon --features privileged-tests --no-run
@@ -129,10 +129,32 @@ jobs:
       # daemon test also runs on overlay workspaces.
       - name: Daemon tests on fuse-overlayfs (unprivileged)
         run: cargo nextest run -p reef-daemon --features privileged-tests
+      # The runner's disk is ext4, which cannot reflink, so the reflink backend (R1.10) runs on
+      # loop-mounted btrfs and XFS images. Mounting needs root; the tests do not. Both run even
+      # if the first fails.
+      - name: Reflink backend on btrfs and XFS
+        run: |
+          failed=""
+          for fs in btrfs xfs; do
+            image="$RUNNER_TEMP/reef-$fs.img"
+            truncate -s 2G "$image"
+            case "$fs" in
+              btrfs) sudo mkfs.btrfs -q "$image" ;;
+              xfs) sudo mkfs.xfs -q -m reflink=1 "$image" ;;
+            esac
+            sudo mkdir -p "/mnt/reef-$fs"
+            sudo mount -o loop "$image" "/mnt/reef-$fs"
+            sudo chown "$(id -un)" "/mnt/reef-$fs"
+            echo "::group::reflink on $fs"
+            REEF_TEST_REFLINK_DIR="/mnt/reef-$fs" cargo nextest run -p reef-daemon --features privileged-tests --no-capture -E 'test(/reflink/)' || failed="$failed $fs"
+            echo "::endgroup::"
+            sudo umount "/mnt/reef-$fs"
+          done
+          if [[ -n "$failed" ]]; then echo "::error::reflink tests failed on:$failed"; exit 1; fi
       # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`. The
       # `stores` binary as root gets read-only bind mounts (R1.20).
-      - name: Kernel overlayfs, reflink conformance, and store bind mounts (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay|reflink/) | binary(stores)'
+      - name: Kernel overlayfs and store bind mounts (root)
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores)'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target
