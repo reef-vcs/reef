@@ -15,9 +15,15 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# Neither has #[bench] functions. Without this, `cargo bench -p reef-daemon -- <criterion args>`
+# also hands the arguments to their libtest harnesses, which reject them.
+[lib]
+bench = false
+
 [[bin]]
 name = "reef-daemon"
 path = "src/main.rs"
+bench = false
 
 [features]
 # Watchman as the snapshot trigger and scan narrowing for large repositories (R1.14, ADR 0023).
@@ -86,6 +92,11 @@ prost-types.workspace = true
 name = "watchman"
 required-features = ["watchman"]
 
+# Workspace creation per backend and through the daemon (R1.12). See docs/benchmarks.md.
+[[bench]]
+name = "workspace_create"
+harness = false
+
 [dev-dependencies]
 # Without default features, so `--no-default-features` test builds really leave `watchman` off.
 reef-daemon = { path = ".", version = "0.0.0", default-features = false, features = ["testing"] }
@@ -97,3 +108,4 @@ pollster.workspace = true
 tokio.workspace = true
 sha2.workspace = true            # the conformance suite's tree digest (R1.11)
 nix = { workspace = true, features = ["signal", "hostname"] }   # SIGTERM in the binary test; the hostname check
+criterion.workspace = true

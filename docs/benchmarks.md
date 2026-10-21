@@ -124,3 +124,140 @@ Each registers the `medium` preset, creates one workspace, appends a line to one
 | GC in all | 3.8 s | 4.9 s |
 
 The 1,000 snapshots took about 55 s. The acceptance criterion (git objects within 10% of their size after the first snapshot) holds in both columns, because `git gc` packs the loose objects and deltas the 1,000 versions of one file against each other. Pruning the hidden snapshots saved only 0.7 MiB of git objects. Abandoning the old operations freed the rest of the difference: the operation store's 8.6 MiB of operations and views, which `git gc` cannot touch. The index rebuild walks every surviving operation, so its cost follows the operations newer than the undo window: 109 ms for 1,004 here. R1.23 should measure it on a long log before GC runs more often or automatically.
+
+## Workspace creation (R1.12)
+
+Phase 1's exit criterion is quantitative: twenty workspaces on the 100k-file synthetic repo, each created in under one second on APFS and overlayfs, with disk usage per workspace proportional to modified files. `crates/reef-daemon/benches/workspace_create.rs` measures it, and how every other backend compares.
+
+### Running them
+
+```sh
+REEF_BENCH_PRESET=small just bench -- create       # every create group on small: about 6 minutes
+just bench-ws                                      # the large preset, the exit-criterion run: see below
+REEF_BENCH_PRESET=large REEF_BENCH_WS_MAX=20 just bench -- 'create/large'
+REEF_BENCH_PRESET=medium just bench -- create_api  # only the daemon group
+```
+
+`just bench` runs them with the snapshot benchmarks; `just bench-ws [preset]` runs only these, with `--sample-size 10`. The filter is a regular expression over benchmark ids, so `create` also selects `create_api`. `REEF_BENCH_WS_MAX` caps the workspace counts: by default 20 on `large` and 100 on `small` and `medium`, since tearing down a hundred `large` workspaces alone takes minutes. `REEF_BENCH_PRIVILEGED=1`, run as root on Linux, benchmarks kernel overlayfs and nothing else (see CI below).
+
+### Where the benchmarks live
+
+R0.06 decided that "benches live in `crates/reef-lib/benches/`". R1.12 amends that: benches live in the crate that owns the code they measure, and fixtures are shared through `target/bench-fixtures/`. The backends are daemon code, and `reef-lib` cannot depend on `reef-daemon`, so these benchmarks are in `crates/reef-daemon/benches/`. Their fixture builder (`benches/common/mod.rs`) is a copy of `reef-lib`'s with the same seed, `FIXTURE_VERSION`, and `.ready` stamp, so whichever crate's benchmarks run first build `target/bench-fixtures/<preset>-42/` and the other reuses it. Keep the two builders in step.
+
+### What each group measures
+
+The first backend benchmark to run builds a base cache entry for the fixture's working-copy commit in a temporary state directory under `target/bench-state/` (removed at the end; a killed run leaves it, and on Linux possibly overlay mounts under it). Its build time is printed (`bench base: materialized ...`) and not benchmarked. Every available backend is probed for that directory, and the unavailable ones are printed with the reason.
+
+| Benchmark | Timed | Not timed |
+| --- | --- | --- |
+| `create/<preset>/<kind>/<n>` | `Backend::materialize` of `n` workspaces, one after another | tearing them down, on a few threads, deleting inline |
+| `tear_down/<preset>/<kind>` | `Backend::tear_down` of one workspace, deletion included (no tokio runtime, so the backend deletes inline) | materializing it |
+| `create_api/<preset>/<kind>/<n>` | `n` `Workspaces.Create` calls to an in-process daemon (`TestDaemon`) on the `auto` backend, which resolves to `<kind>`: resolving the revision, the base cache lookup, materializing, `jj` workspace init, seeding `tree_state`, the lease row, starting the workspace's watcher, and the RPC | releasing them without a final snapshot, and waiting for the daemon's background deletions |
+
+`n` is 1, 20, and 100, up to `REEF_BENCH_WS_MAX`. The copy backend runs only `n = 1` above `small`, in `create` and in `create_api` when `auto` resolves to it: a copy costs the same whatever `n` is, and twenty of them on `large` would take minutes per iteration. `create_api` runs `n` = 1 and 20, with one daemon for the group, started when its first benchmark runs; its first create builds the daemon's own base and is printed (`bench base: the daemon's first create took ...`), not timed. The daemon registers the shared fixture, so the fixture's operation log gains each workspace's creation and release.
+
+Criterion's times are per workspace: each iteration's total divided by `n`. Every benchmark takes 10 samples with flat sampling (the same iteration count in each), and the measurement time is 30 s for `small`, 60 s for `medium`, and 120 s for `large`. The untimed teardown still counts toward it, so the slow benchmarks run their minimum of 11 iterations (one warm-up, ten samples) and take longer than the measurement time; criterion warns that it could not complete 10 samples in time, which is expected.
+
+### The disk rows
+
+After each `create` and `create_api` benchmark a disk pass creates `n` more workspaces and prints one Markdown row to stderr:
+
+```text
+| group | preset | kind | n | p50 create ms/ws | disk MiB/ws | disk MiB/ws after modify 50 | tear_down ms/ws |
+```
+
+- **p50 create ms/ws**: the median over every workspace the benchmark created, warm-up included. This, not criterion's mean, is what the phase target is judged on.
+- **disk MiB/ws**: free space on the workspace directory's volume (`statvfs`, after a `sync`, the median of three samples) before and after creating the `n` workspaces, divided by `n`. Measured, not estimated with `Backend::disk_usage`.
+- **disk MiB/ws after modify 50**: the same plus the free space lost when `synth::mutate` then modifies 50 text files in each workspace. The generator's manifest, which `mutate` needs, is copied into each workspace before that measurement and is not counted.
+- **tear_down ms/ws**: the median of tearing the `n` workspaces down one at a time. For `create_api` it is the whole `Release` call: the daemon walks the workspace to report what it frees, forgets the jj workspace, renames the root away, and removes the working-copy state before answering; only deleting the renamed root runs in the background. On `large` that took 1.0 to 2.3 s per workspace on the M2 Max, against 4.3 s for the backend's inline teardown.
+
+A `proportional` line follows each row. For copy-on-write backends it checks that the modified column is within 2× of `disk MiB/ws` plus the 50 modified files' allocated size (printed as `modified`). For `copy` it prints the base tree's allocated size beside the modified column instead, which should be about equal. On `small` both checks are within free-space noise (hundredths of a MiB), so a MISS there means little. `n = 20` rows (and copy's `n = 1` row when that is all it runs) add a target line, on every preset; only `large`'s is the phase exit criterion:
+
+```text
+target (create_api/large/apfs/20): 20 workspaces under 1 s each: PASS (0.512 s)
+```
+
+It never fails the run; RX.06 decides the threshold and the gate. Each row is also appended as a JSON line to `target/bench-ws.json`, with the OS, whether the run was privileged, the target result, and for `create_api` the median `materialize_ms` the daemon reported and the watcher it started (also printed as a `breakdown` line). Free space is shared with everything else on the volume (criterion's reports, other processes, APFS's own housekeeping), so read the disk columns from a quiet machine, and trust the modified column's difference more than either absolute value.
+
+### CI
+
+`bench.yml` runs these with the snapshot benchmarks on both runners, with `fuse-overlayfs` installed on `ubuntu-24.04`. Then the Linux job runs this bench a second time as root with `REEF_BENCH_PRIVILEGED=1`, for kernel overlayfs, the way `ci.yml`'s overlayfs job runs its tests (`sudo -E env "PATH=$PATH" ...`), and gives `target/` back to the runner user. Its bencher output is `bench-results-privileged.txt`, and both runs append to `target/bench-ws.json`; the artifact holds both files. The workflow does not install Watchman, so `create_api` on the runners uses the `notify` watcher whatever the preset, unlike a `large` run on a machine with Watchman; the JSON's `watcher` field says which ran.
+
+### Baseline
+
+Apple M2 Max, 12 cores, 32 GB, macOS 27.0.1, APFS, `cargo bench` (release with debug info), Watchman 2026.07.06.00 on `PATH`. `large` is 100,014 tracked files and 362 MB; the bench base took 31.7 s to materialize. The `large` run took 53 minutes and the `medium` run 17.
+
+| Benchmark | p50 create ms/ws | disk MiB/ws | after modify 50 | tear_down ms/ws |
+| --- | ---: | ---: | ---: | ---: |
+| `create/large/apfs/1` | 909 | 29.7 | 35.2 | 4,257 |
+| `create/large/apfs/20` | **961** | **29.0** | 34.8 | 4,322 |
+| `create/large/copy/1` | 17,830 | 78.7 | 86.1 | 4,589 |
+| `create_api/large/apfs/1` | 2,312 | 34.5 | 40.0 | 1,601 (`Release`) |
+| `create_api/large/apfs/20` | **1,933** | **34.1** | 39.0 | 2,346 (`Release`) |
+| `create/medium/apfs/1` | 156 | 3.0 | 3.7 | 516 |
+| `create/medium/apfs/20` | 132 | 3.0 | 3.8 | 446 |
+| `create/medium/apfs/100` | 82 | 3.1 | 3.9 | 432 |
+| `create/medium/copy/1` | 1,778 | 4.6 | 5.3 | 445 |
+| `create_api/medium/apfs/1` | 316 | 3.8 | 4.5 | 91 (`Release`) |
+| `create_api/medium/apfs/20` | 245 | 3.6 | 4.6 | 284 (`Release`) |
+
+`tear_down/large/apfs` took 4.32 s and `tear_down/large/copy` 4.47 s; on `medium`, 0.41 s and 0.40 s.
+
+Against the exit criterion:
+
+- **`create_api/large/20` misses: 1.93 s per workspace, not under 1 s.** The backend alone makes it (`create/large/apfs/20`, 0.96 s), and so does one workspace through the daemon when nothing else is going on: a second run of `create_api/large` measured 0.95 s at `n = 1`, 0.89 s of it the clone. Twenty in a row are slower because each new workspace gets a Watchman watch (`auto` picks Watchman above 50,000 files), and Watchman's crawl of its 100,000 files runs while the next workspace is being cloned. That second run's `breakdown` line put the clone at 1.83 s of a 1.89 s create, against 0.96 s for the same clones with no daemon. With `watcher.backend = "notify"` the clone stays at 0.95 s, but starting the watcher (notify's debouncer walks the tree to build its file-id cache) adds 1.1 to 1.3 s inside the create, so both watchers cost about a second per `large` workspace. The full run's `create_api/large/apfs/1` measured 2.3 s, close to what a `notify` watcher costs, but that run predates the `breakdown` line that names the watcher, so why it differs from the second run's 0.95 s is unconfirmed. Making the target needs the watcher's start-up kept off the create path and out of the next clone's way; that is follow-up work, not this ticket's.
+- **Disk passes**: 34 MiB per workspace through the daemon (29 MiB of directory clone metadata, plus the working-copy state, chiefly its `tree_state`), under the 50 MiB bound. Modifying 50 files adds 5 to 6 MiB per workspace, while the files themselves allocate 0.25 MiB: APFS copies the cloned directories' metadata on the first write under them. That is within 2× of `disk MiB/ws` plus the files on every copy-on-write row, as the `proportional` lines check.
+- **`copy` is not a full copy on APFS.** The copy backend uses `std::fs::copy`, which clones each file (`fclonefileat`) on APFS, so `create/large/copy/1` costs 79 MiB per workspace against the tree's 576 MiB allocated, and 17.8 s (a clone per file) instead of the 26 s and 632 MiB a byte copy measured while R1.07 was written. On ext4 it is a real copy (see the Linux rows below, 608 MiB and 1.4 s). R1.07 documents this and accepts it for the fallback.
+
+#### Linux
+
+Docker Desktop's Linux VM on the same M2 Max: arm64, kernel 6.10.14-linuxkit, 12 vCPUs, 7.7 GB, the state and target directories on an ext4 volume, in a `--privileged` `ubuntu:24.04` container with `fuse-overlayfs` 1.13 and no Watchman, so `create_api` used `notify`. The privileged run (root, `REEF_BENCH_PRIVILEGED=1`) took 11 minutes and the unprivileged one 20. A VM on a laptop is not a Linux server. The CI rows below are `medium`; the first scheduled `large` run (Mondays) gives the runners' numbers for the criterion itself.
+
+| Benchmark | p50 create ms/ws | disk MiB/ws | after modify 50 | tear_down ms/ws |
+| --- | ---: | ---: | ---: | ---: |
+| `create/large/overlayfs/1` | 0.2 | 0.02 | 0.97 | 9.2 |
+| `create/large/overlayfs/20` | **0.2** | 0.02 | 0.99 | 3.7 |
+| `create_api/large/overlayfs/1` | 356 | 5.9 | 6.9 | 106 (`Release`) |
+| `create_api/large/overlayfs/20` | **467** | **5.9** | 7.7 | 131 (`Release`) |
+| `create/large/fuse-overlayfs/1` | 6.9 | 0.02 | 0.98 | 7.2 |
+| `create/large/fuse-overlayfs/20` | 7.3 | 0.02 | 1.02 | 3.9 |
+| `create/large/copy/1` | 1,360 | 608 | 608 | 615 |
+| `create_api/large/fuse-overlayfs/1` | 1,429 | 5.9 | 6.9 | 106 (`Release`) |
+| `create_api/large/fuse-overlayfs/20` | 1,556 | 5.9 | 7.0 | 119 (`Release`) |
+
+`tear_down/large/overlayfs` took 0.90 ms, `tear_down/large/fuse-overlayfs` 0.91 ms, and `tear_down/large/copy` 441 ms.
+
+- **The overlayfs half of the exit criterion holds**: `create_api/large/overlayfs/20` is 0.47 s per workspace and `create/large/overlayfs/20` 0.2 ms, under the brief's 1 s and 0.1 s. The daemon's own cost is most of the 0.47 s: its `breakdown` line puts the mount under a millisecond, and the rest is the jj workspace, seeding the 5.9 MiB of working-copy state, and starting `notify`.
+- **`fuse-overlayfs` through the daemon misses (1.56 s)** although its mount takes 7 ms. Most of the difference is `notify` starting up: its debouncer walks the new tree, and on a FUSE mount every one of the 100,000 entries goes through the `fuse-overlayfs` process.
+- **The overlay rows fail the `proportional` check, by under a megabyte.** An overlay workspace costs nothing until it is written (0.02 MiB, its empty upper and work directories), so the bound is twice the modified files alone, 0.5 to 0.6 MiB, and modifying 50 files cost about 1 MiB. Copy-up also creates each modified file's parent directories in the upper layer, a block apiece on ext4, which the check does not count. The cost is still in proportion to the modified files, about a thousandth of the 608 MiB tree. RX.06 should allow for the directories if it gates on this check.
+- **`copy` on ext4 is a real copy**: 608 MiB per workspace, the tree's allocated size, and 1.4 s.
+
+#### CI runners
+
+Run [39660853557](https://github.com/reef-vcs/reef/actions/runs/39660853557), dispatched on the R1.12 branch at commit `5cb9ba1` with the `medium` preset (10,014 files). Hardware is GitHub's published spec for public repositories. The `ubuntu-24.04` job took 28 minutes, the root run included; `macos-15` took 35. Neither runner has Watchman, so `create_api` used `notify` on both.
+
+| Benchmark | p50 create ms/ws | disk MiB/ws | after modify 50 | tear_down ms/ws |
+| --- | ---: | ---: | ---: | ---: |
+| **`macos-15`** (arm64 M1, 3 vCPU, 7 GB) | | | | |
+| `create/medium/apfs/1` | 128 | 3.0 | 3.8 | 863 |
+| `create/medium/apfs/20` | 109 | 3.0 | 3.8 | 529 |
+| `create/medium/apfs/100` | 119 | 2.9 | 3.6 | 714 |
+| `create/medium/copy/1` | 2,150 | 3.5 | 4.3 | 465 |
+| `create_api/medium/apfs/1` | 312 | 3.5 | 5.5 | 72 (`Release`) |
+| `create_api/medium/apfs/20` | 289 | 3.5 | 4.5 | 478 (`Release`) |
+| **`ubuntu-24.04`** (x64, 4 vCPU, 16 GB, ext4) | | | | |
+| `create/medium/fuse-overlayfs/1` | 5 | 0.02 | 0.77 | 13 |
+| `create/medium/fuse-overlayfs/20` | 5 | 0.02 | 0.76 | 11 |
+| `create/medium/fuse-overlayfs/100` | 6 | 0.02 | 0.77 | 12 |
+| `create/medium/copy/1` | 398 | 82.7 | 82.7 | 1,230 |
+| `create_api/medium/fuse-overlayfs/1` | 270 | 0.57 | 1.3 | 58 (`Release`) |
+| `create_api/medium/fuse-overlayfs/20` | 268 | 0.56 | 1.5 | 49 (`Release`) |
+| `create/medium/overlayfs/1` (root) | 0.2 | 0.02 | 0.83 | 12 |
+| `create/medium/overlayfs/20` (root) | 0.3 | 0.02 | 0.77 | 11 |
+| `create/medium/overlayfs/100` (root) | 0.4 | 0.02 | 0.76 | 12 |
+| `create_api/medium/overlayfs/1` (root) | 104 | 0.56 | 1.4 | 28 (`Release`) |
+| `create_api/medium/overlayfs/20` (root) | 101 | 0.57 | 1.3 | 35 (`Release`) |
+
+`tear_down/medium` took 525 ms for `apfs` and 522 ms for `copy` on `macos-15`; 0.69 ms for `overlayfs`, 1.2 ms for `fuse-overlayfs`, and 153 ms for `copy` on `ubuntu-24.04`.
+
+The runners agree with the local runs in shape. APFS clones cost about 3 MiB per `medium` workspace, overlays nothing until written, and `copy` the whole tree on ext4 but not on APFS. Every `n = 20` target passes on `medium`; only `large` is the criterion. On `medium` the `macos-15` runner clones about as fast as the M2 Max (109 against 132 ms at `n = 20`). The overlay rows miss the `proportional` check by the margin explained above.

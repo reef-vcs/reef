@@ -41,6 +41,11 @@ deny-advisories:
 bench *ARGS:
     cargo bench --workspace --bench '*' "$@"
 
+# Workspace creation benchmarks alone (R1.12) on a preset, large by default. `just bench` includes
+# them; this is the exit-criterion run. See docs/benchmarks.md.
+bench-ws preset="large":
+    REEF_BENCH_PRESET="$1" cargo bench -p reef-daemon --bench workspace_create -- --sample-size 10
+
 # Quick local benchmark on the small preset.
 bench-quick:
     REEF_BENCH_PRESET=small cargo bench --workspace --bench '*' -- --sample-size 10 --warm-up-time 1 --measurement-time 5
