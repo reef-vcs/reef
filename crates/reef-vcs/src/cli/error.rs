@@ -1,7 +1,8 @@
 //! How a command fails. Every variant has an [`ErrorKind`], which is the
 //! exit code (README, CLI: `InvalidArgument` 2, `NotFound` 3,
 //! `AlreadyExists` 4, `Conflict` 5, `Unavailable` 6, `PermissionDenied` 7,
-//! `Io` 8, `Internal` 1) and the `kind` of the JSON error object.
+//! `Io` 8, `Internal` 1) and the `kind` of the JSON error object, and may
+//! have an [`Advice`]: the `hint` and `next` of ADR 0025.
 
 use std::io;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use reef_daemon::client::ClientError;
 use reef_daemon::config::ConfigError;
+use reef_daemon::error::Advice;
 use reef_daemon::logging::LoggingError;
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 
@@ -24,6 +26,12 @@ pub(crate) enum CliError {
     NotRunning {
         /// The socket.
         socket: PathBuf,
+        /// The `reef daemon start` that starts it, with the global flags
+        /// that chose the socket.
+        start: Vec<String>,
+        /// Whether `--no-autostart` is why it was not started; `daemon
+        /// status` and `stop` never start one.
+        autostart_off: bool,
     },
     /// Starting the daemon failed.
     #[error("could not start the daemon: {reason}")]
@@ -60,6 +68,8 @@ pub(crate) enum CliError {
         kind: ErrorKind,
         /// The message.
         message: String,
+        /// How to fix it, if the command knows.
+        advice: Option<Advice>,
     },
     /// The command line is valid to clap but not to the command.
     #[error("{0}")]
@@ -86,6 +96,33 @@ impl CliError {
         Self::Refused {
             kind: ErrorKind::Internal,
             message: format!("not implemented until {ticket}"),
+            advice: None,
+        }
+    }
+
+    /// How to fix the failure, when that is known: the daemon's advice for
+    /// its own errors, the command's for the rest.
+    pub(crate) fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Daemon(error) => error.advice(),
+            Self::NotRunning {
+                start,
+                autostart_off,
+                ..
+            } => Some(Advice {
+                hint: if *autostart_off {
+                    "Start the daemon, or drop --no-autostart to let any command start it."
+                } else {
+                    "Start the daemon."
+                }
+                .to_owned(),
+                next: start.clone(),
+            }),
+            Self::Refused { advice, .. } => advice.clone(),
+            Self::Timeout { .. } => Some(Advice::hint(
+                "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create.",
+            )),
+            _ => None,
         }
     }
 
@@ -146,12 +183,15 @@ mod tests {
             let error = CliError::Refused {
                 kind,
                 message: String::new(),
+                advice: None,
             };
             assert_eq!(error.exit_code(), code, "{kind:?}");
             assert_eq!(kind_text(kind), text);
         }
         let not_running = CliError::NotRunning {
             socket: "/s".into(),
+            start: Vec::new(),
+            autostart_off: true,
         };
         assert_eq!(not_running.exit_code(), 6);
         assert_eq!(CliError::not_implemented("R1.17").exit_code(), 1);

@@ -90,6 +90,7 @@ impl Manager {
         if record.state != WorkspaceState::Active {
             return Err(ManagerError::NotActive {
                 id,
+                repo: record.repo_id,
                 state: record.state,
             });
         }
@@ -101,7 +102,11 @@ impl Manager {
             return Err(if state == WorkspaceState::Active {
                 ManagerError::LeaseNotExpired(id)
             } else {
-                ManagerError::NotActive { id, state }
+                ManagerError::NotActive {
+                    id,
+                    repo: record.repo_id,
+                    state,
+                }
             });
         }
         entry.update_record(|record| record.state = WorkspaceState::Releasing);

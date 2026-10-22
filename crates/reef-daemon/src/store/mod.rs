@@ -32,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 
 use crate::db::{Db, DbError};
+use crate::error::{Advice, Advise};
 use crate::model::{RepoId, StoreRecord, Timestamp};
 
 /// The suffix of a store directory while its build runs.
@@ -105,9 +106,7 @@ pub struct MountedStore {
 pub enum StoreError {
     /// No sealed store for the lockfile's hash; the request did not ask to
     /// skip missing stores.
-    #[error(
-        "store {name} has no build for lockfile hash {hash}; run: reef store build {name} --repo {repo} --rev {commit}"
-    )]
+    #[error("store {name} has no build for lockfile hash {hash}")]
     Missing {
         /// The store.
         name: String,
@@ -225,6 +224,36 @@ impl Classify for StoreError {
             Self::BuildFailed { .. } | Self::BuildTimeout { .. } => ErrorKind::Internal,
             Self::Spawn { source, .. } | Self::Io { source, .. } => classify_by_source(source),
             Self::Db(error) => error.kind(),
+        }
+    }
+}
+
+impl Advise for StoreError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Missing {
+                name, repo, commit, ..
+            } => Some(Advice::run(
+                "Build the store for this lockfile first, or create the workspace with --skip-missing-stores.",
+                [
+                    "reef",
+                    "store",
+                    "build",
+                    name,
+                    "--repo",
+                    &repo.as_hex(),
+                    "--rev",
+                    commit,
+                ],
+            )),
+            Self::NotDeclared { .. } => Some(Advice::hint(
+                "Declare it as a [[store]] in reef.toml at that revision, or check the name.",
+            )),
+            Self::BuildRunning { .. } => Some(Advice::hint(
+                "Another build of this store is running; retry when it finishes.",
+            )),
+            Self::Db(error) => error.advice(),
+            _ => None,
         }
     }
 }

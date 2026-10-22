@@ -46,6 +46,7 @@ use crate::backend::BaseCacheError;
 use crate::config::{BackupSection, GcSection};
 use crate::daemon::AppState;
 use crate::db::{DbError, META_LAST_BACKUP_AT};
+use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp, WorkspaceState};
 use crate::snapshot::index;
 use crate::store::{FAILED, REPLACED, StoreKey};
@@ -115,6 +116,16 @@ pub enum GcRunError {
     /// A blocking task panicked.
     #[error("a GC task failed")]
     Task(#[from] tokio::task::JoinError),
+}
+
+/// Only the database's advice; nothing else here has a known fix.
+impl Advise for GcRunError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Db(error) => error.advice(),
+            _ => None,
+        }
+    }
 }
 
 impl Classify for GcRunError {

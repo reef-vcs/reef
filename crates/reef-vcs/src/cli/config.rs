@@ -19,9 +19,10 @@ pub(crate) struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum ConfigCommand {
-    /// Print the effective configuration, with the layer each value came
-    /// from (default, file, env, or flag): TOML with a `# source:` comment
-    /// per key, or with `-o json` one object with a `sources` map.
+    /// Print the effective configuration and where each value came from.
+    ///
+    /// TOML with a `# source: default | file | env | flag` comment per key,
+    /// or with `-o json` one object with a `sources` map.
     Show,
 }
 
@@ -56,5 +57,6 @@ fn json_error(error: &serde_json::Error) -> CliError {
     CliError::Refused {
         kind: reef_lib::error::ErrorKind::Internal,
         message: format!("serialize the configuration: {error}"),
+        advice: None,
     }
 }

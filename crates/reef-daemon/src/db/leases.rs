@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension as _, Row, Transaction, params};
 
 use super::{Db, DbError};
 use crate::model::{
-    LeaseEnd, LeaseId, LeaseRecord, Timestamp, WorkspaceId, WorkspaceState, duration_millis,
+    LeaseEnd, LeaseId, LeaseRecord, RepoId, Timestamp, WorkspaceId, WorkspaceState, duration_millis,
 };
 
 const WHAT: &str = "lease";
@@ -95,6 +95,8 @@ pub enum Renewal {
     /// The workspace was released or reclaimed; `at` is when its last lease
     /// ended.
     Ended {
+        /// The workspace's repository.
+        repo: RepoId,
         /// `released` or `reclaimed`.
         state: WorkspaceState,
         /// When its last lease ended, if it had one.
@@ -107,6 +109,8 @@ pub enum Renewal {
     /// The lease is past its grace; the next expiry tick reclaims the
     /// workspace.
     PastGrace {
+        /// The workspace's repository.
+        repo: RepoId,
         /// `expires_at + grace_ms`.
         grace_ended_at: Timestamp,
     },
@@ -268,14 +272,14 @@ impl Db {
         now: Timestamp,
     ) -> Result<Renewal, DbError> {
         self.in_transaction(|tx| {
-            let row: Option<(WorkspaceState, Option<LeaseId>)> = tx
+            let row: Option<(WorkspaceState, Option<LeaseId>, RepoId)> = tx
                 .query_row(
-                    "SELECT state, lease_id FROM workspaces WHERE id = ?1",
+                    "SELECT state, lease_id, repo_id FROM workspaces WHERE id = ?1",
                     [workspace],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            let Some((state, current)) = row else {
+            let Some((state, current, repo)) = row else {
                 return Ok(Renewal::NoWorkspace);
             };
             match state {
@@ -287,7 +291,7 @@ impl Db {
                         [workspace],
                         |row| row.get(0),
                     )?;
-                    return Ok(Renewal::Ended { state, at });
+                    return Ok(Renewal::Ended { repo, state, at });
                 }
             }
             if current != Some(lease) {
@@ -305,7 +309,10 @@ impl Db {
                     .saturating_add(duration_millis(record.grace)),
             );
             if now > grace_ended_at {
-                return Ok(Renewal::PastGrace { grace_ended_at });
+                return Ok(Renewal::PastGrace {
+                    repo,
+                    grace_ended_at,
+                });
             }
             let expires_at = Timestamp(now.0.saturating_add(duration_millis(record.length)));
             tx.execute(
@@ -567,6 +574,7 @@ mod tests {
         assert_eq!(
             db.renew_lease(ws, l.id, Timestamp(3_701)).unwrap(),
             Renewal::PastGrace {
+                repo: repo_id,
                 grace_ended_at: Timestamp(3_700)
             }
         );
@@ -598,6 +606,7 @@ mod tests {
         assert_eq!(
             db.renew_lease(ws, l.id, Timestamp(2_600)).unwrap(),
             Renewal::Ended {
+                repo: repo_id,
                 state: WorkspaceState::Reclaimed,
                 at: Some(Timestamp(2_500))
             }

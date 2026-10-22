@@ -23,11 +23,14 @@ use tracing::Instrument as _;
 
 use crate::config::LeaseSection;
 use crate::db::{Db, DbError, Renewal};
+use crate::error::{Advice, Advise};
 use crate::model::{
     LeaseId, LeaseRecord, ReclaimReason, RepoId, Timestamp, WorkspaceId, WorkspaceRecord,
     WorkspaceState, duration_millis,
 };
-use crate::workspace::{Manager, ManagerError, ReclaimOutcome, ReleaseSpec};
+use crate::workspace::{
+    Manager, ManagerError, ReclaimOutcome, ReleaseSpec, gone_advice, releasing_advice,
+};
 
 /// The shortest lease a request may ask for, so `heartbeat_every` (a third
 /// of the length at most) stays a real interval.
@@ -105,6 +108,8 @@ pub enum LeaseError {
     Reclaimed {
         /// The workspace.
         workspace: WorkspaceId,
+        /// Its repository, for the advice to create another.
+        repo: RepoId,
         /// `released` or `reclaimed`.
         state: WorkspaceState,
         /// When its lease ended.
@@ -119,6 +124,8 @@ pub enum LeaseError {
     Expired {
         /// The workspace.
         workspace: WorkspaceId,
+        /// Its repository, for the advice to create another.
+        repo: RepoId,
         /// The lease.
         lease: LeaseId,
         /// `expires_at + grace`.
@@ -150,6 +157,30 @@ impl Classify for LeaseError {
             Self::Releasing(_) => ErrorKind::Unavailable,
             Self::TooLong { .. } | Self::TooShort(_) => ErrorKind::InvalidArgument,
             Self::Db(error) => error.kind(),
+        }
+    }
+}
+
+impl Advise for LeaseError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Reclaimed {
+                workspace,
+                repo,
+                state,
+                ..
+            } => Some(gone_advice(*workspace, *state, *repo)),
+            Self::Expired {
+                workspace, repo, ..
+            } => Some(Advice::run(
+                format!(
+                    "The lease of workspace {workspace} ran out; it is being reclaimed. Create a new workspace."
+                ),
+                ["reef", "ws", "create", "--repo", &repo.as_hex()],
+            )),
+            Self::Releasing(_) => Some(releasing_advice()),
+            Self::Db(error) => error.advice(),
+            _ => None,
         }
     }
 }
@@ -308,8 +339,9 @@ impl LeaseManager {
                 Ok(record)
             }
             Renewal::NoWorkspace => Err(LeaseError::NotFound(ws)),
-            Renewal::Ended { state, at } => Err(LeaseError::Reclaimed {
+            Renewal::Ended { repo, state, at } => Err(LeaseError::Reclaimed {
                 workspace: ws,
+                repo,
                 state,
                 at,
             }),
@@ -318,8 +350,12 @@ impl LeaseManager {
                 workspace: ws,
                 lease,
             }),
-            Renewal::PastGrace { grace_ended_at } => Err(LeaseError::Expired {
+            Renewal::PastGrace {
+                repo,
+                grace_ended_at,
+            } => Err(LeaseError::Expired {
                 workspace: ws,
+                repo,
                 lease,
                 grace_ended_at,
             }),
@@ -565,6 +601,7 @@ mod tests {
         );
         let reclaimed = LeaseError::Reclaimed {
             workspace: ws,
+            repo: "aaaa000000000001".parse().unwrap(),
             state: WorkspaceState::Reclaimed,
             at: Some(Timestamp(1_792_175_477_042)),
         };

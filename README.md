@@ -44,9 +44,10 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **Continuous snapshots.** A filesystem watcher (`notify`, or Watchman on large repositories) snapshots each workspace through jj-lib after every debounced write. Watcher snapshots are marked local-only and never leave the machine until a change is published.
 - **Garbage collection.** `reef ws gc` reclaims operations past the undo window, base cache entries no workspace uses, and stale workspace records, and reports what it freed.
 - **Shared dependency stores.** A `reef.toml` in the repository declares stores such as `node_modules` or `target`; `reef store build` builds one in a scratch workspace and seals it, and the daemon mounts it read-only into every workspace after verifying it against the lockfile hash.
+- **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, the agent-facing CLI contract (`reef guide`, `reef here`, hints on every error), `reef init` for writing agent configuration, prebuilt binaries with a one-line installer, and the quickstart.
+Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, `reef init` for writing agent configuration, prebuilt binaries with a one-line installer, and the quickstart.
 
 To try it from source:
 
@@ -58,7 +59,7 @@ cd /path/to/a/git/or/jj/repo
 reef ws run -- your-agent-command
 ```
 
-`reef --help` and `reef ws --help` list the rest. Output is JSON when stdout is not a terminal.
+`reef` alone prints the agent guide ([docs/agent-guide.md](docs/agent-guide.md)), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
 
 ## Roadmap
 

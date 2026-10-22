@@ -371,7 +371,7 @@ impl Manager {
                 workspace_id = %id,
                 store = %name,
                 commit_id = %outcome.commit_id,
-                "the workspace's lockfile no longer matches its mounted store; run reef store build, then reef ws move to remount"
+                "the workspace's lockfile no longer matches its mounted store; it needs a store build for the new lockfile and a ws move to remount"
             );
         }
         // A mark that says more (divergent, a failed final snapshot, an

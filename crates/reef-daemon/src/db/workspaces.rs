@@ -203,6 +203,32 @@ impl Db {
         })
     }
 
+    /// The active workspace whose path is `path` or an ancestor of it, the
+    /// deepest if several are (a workspace made with `--path` inside
+    /// another). `path` is compared as given, so the caller canonicalizes
+    /// it.
+    pub fn active_workspace_containing(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<WorkspaceRecord>, DbError> {
+        let path = path_text(path)?;
+        self.with(|conn| {
+            // A prefix test by `substr`, not `LIKE`: paths may hold `%` and
+            // `_`.
+            conn.query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM workspaces
+                     WHERE state = 'active'
+                       AND (path = ?1 OR substr(?1, 1, length(path) + 1) = path || '/')
+                     ORDER BY length(path) DESC LIMIT 1"
+                ),
+                [path],
+                from_row,
+            )
+            .optional()
+        })
+    }
+
     /// Workspaces in `repo` (every repository if `None`) whose state is one
     /// of `states` (any state if empty), oldest first.
     pub fn workspaces(

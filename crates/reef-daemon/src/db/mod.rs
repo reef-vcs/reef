@@ -21,6 +21,7 @@ use rand::RngExt as _;
 use reef_lib::error::{Classify, ErrorKind};
 use rusqlite::{Connection, ErrorCode, OptionalExtension as _, Transaction, TransactionBehavior};
 
+use crate::error::{Advice, Advise};
 use crate::model::{Timestamp, ids::ID_HEX_LEN};
 
 mod base_cache;
@@ -194,6 +195,35 @@ impl Classify for DbError {
             Self::Open { source, .. } | Self::Migrate { source, .. } | Self::Sqlite(source) => {
                 classify_sqlite(source)
             }
+        }
+    }
+}
+
+impl Advise for DbError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Ambiguous {
+                what,
+                prefix,
+                candidates,
+                truncated,
+            } => Some(Advice::hint(format!(
+                "Give more of the id: {prefix} matches {what} {}.",
+                candidates_text(candidates, *truncated)
+            ))),
+            Self::NotFound {
+                what: "workspace", ..
+            } => Some(Advice::run(
+                "List the workspaces to find its id.",
+                ["reef", "ws", "list", "--all"],
+            )),
+            Self::NotFound {
+                what: "repository", ..
+            } => Some(Advice::run(
+                "List the registered repositories to find its id, or name it by a path inside it.",
+                ["reef", "repo", "list"],
+            )),
+            _ => None,
         }
     }
 }

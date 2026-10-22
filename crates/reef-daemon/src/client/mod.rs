@@ -17,7 +17,7 @@ use tonic::transport::{Channel, Endpoint, Uri};
 
 pub use reef_lib::jj::settings::parse_byte_size;
 
-use crate::error::{detail_of, kind_from_status};
+use crate::error::{Advice, detail_of, kind_from_status};
 use crate::proto::v0::daemon_client::DaemonClient;
 use crate::proto::v0::maintenance_client::MaintenanceClient;
 use crate::proto::v0::register_request::IfNotJj;
@@ -79,6 +79,17 @@ impl From<tonic::Status> for ClientError {
             message: status.message().to_owned(),
             chain,
             status,
+        }
+    }
+}
+
+impl ClientError {
+    /// The fix the daemon attached to its error (`ErrorDetail.hint` and
+    /// `next`, R1.26), if any.
+    pub fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Connect { .. } => None,
+            Self::Rpc { status, .. } => detail_of(status).and_then(|d| Advice::from_detail(&d)),
         }
     }
 }
@@ -195,11 +206,18 @@ impl Client {
         workspace: &str,
         snapshot_first: bool,
     ) -> Result<InspectResponse, ClientError> {
-        let request = InspectRequest {
+        self.inspect(InspectRequest {
             repo: repo.to_owned(),
             workspace: workspace.to_owned(),
             snapshot_first,
-        };
+            skip_disk_usage: false,
+        })
+        .await
+    }
+
+    /// `Workspaces.Inspect` with every field of the request: `workspace`
+    /// may also be a path inside the workspace (R1.26).
+    pub async fn inspect(&self, request: InspectRequest) -> Result<InspectResponse, ClientError> {
         Ok(self.workspaces().inspect(request).await?.into_inner())
     }
 

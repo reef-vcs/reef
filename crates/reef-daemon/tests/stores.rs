@@ -251,9 +251,11 @@ async fn create_without_store_fails_unavailable() {
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
     let message = error.to_string();
     assert!(message.contains(&key_hash()), "{message}");
-    assert!(
-        message.contains("reef store build deps --repo"),
-        "{message}"
+    // The fix is the detail's `next` (R1.26), not part of the message.
+    let advice = error.advice().unwrap();
+    assert_eq!(
+        advice.next[..6],
+        ["reef", "store", "build", "deps", "--repo", repo.id.as_str()]
     );
     let listed = daemon
         .client

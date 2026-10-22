@@ -173,7 +173,7 @@ impl Workspaces for WorkspacesService {
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
         let inspected = manager
-            .inspect(record.id, request.snapshot_first)
+            .inspect(record.id, request.snapshot_first, !request.skip_disk_usage)
             .await
             .map_err(status)?;
         Ok(Response::new(InspectResponse {

@@ -1,7 +1,12 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
 //! through [`reef_daemon::client::Client`], except `config show`,
-//! `completions`, and `daemon run`. Output follows [`out`]'s rules and
-//! failures exit with their kind's code ([`error`]).
+//! `completions`, `guide`, and `daemon run`. Output follows [`out`]'s rules
+//! and failures exit with their kind's code ([`error`]).
+//!
+//! The agent-facing contract (R1.26, ADR 0025) is kept here and in
+//! [`out`]: never interactive, every known fix on the error, the guide on
+//! `reef` alone, `reef here`, and names that are only ever added (aliases
+//! and unique prefixes resolve; nothing is renamed).
 //!
 //! Later tickets fill in the stubs: `ws move` (R1.06), and `backup` and
 //! `restore` (R1.18).
@@ -12,6 +17,8 @@ mod config;
 mod daemon;
 mod env;
 mod error;
+mod guide;
+mod here;
 mod out;
 mod render;
 mod repo;
@@ -49,20 +56,30 @@ pub(crate) const REGISTER_TIMEOUT: Duration = Duration::from_mins(10);
     name = "reef",
     version,
     propagate_version = true,
-    about = "Reef: version control built for a world where AI agents write most of the code"
+    infer_subcommands = true,
+    about = "Reef: version control built for a world where AI agents write most of the code",
+    after_help = "New here? `reef guide` explains Reef in one screen; `reef here` says where you are."
 )]
 pub(crate) struct Cli {
     #[command(flatten)]
     global: Global,
+    /// None: print the guide (ADR 0025).
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// Flags every command takes.
 #[derive(Clone, Debug, clap::Args)]
 pub(crate) struct Global {
     /// Output format: `json` when stdout is not a terminal, `text` when it is.
-    #[arg(short, long, global = true, value_enum, value_name = "FORMAT")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_enum,
+        value_name = "FORMAT",
+        env = OUTPUT_ENV
+    )]
     output: Option<Output>,
     /// The daemon's state directory; overrides `REEF_STATE_DIR`.
     #[arg(long, global = true, value_name = "DIR")]
@@ -105,20 +122,54 @@ impl Global {
     fn load_config(&self) -> Result<Config, CliError> {
         Config::load(&self.overrides()).map_err(CliError::Config)
     }
+
+    /// `reef daemon start` with the flags that choose which daemon this
+    /// command line talks to, so the advice starts that one.
+    pub(crate) fn daemon_start(&self) -> Vec<String> {
+        let mut argv = vec!["reef".to_owned()];
+        for (flag, value) in [
+            ("--state-dir", &self.state_dir),
+            ("--socket", &self.socket),
+            ("--config", &self.config),
+        ] {
+            if let Some(value) = value {
+                argv.push(flag.to_owned());
+                argv.push(value.display().to_string());
+            }
+        }
+        argv.extend(["daemon".to_owned(), "start".to_owned()]);
+        argv
+    }
 }
 
+/// The default for `-o`, so a harness that gives its agent a terminal can
+/// still have JSON everywhere.
+const OUTPUT_ENV: &str = "REEF_OUTPUT";
+
+/// In the order `--help` lists them: the agent's path first.
 #[derive(Debug, clap::Subcommand)]
 enum Command {
+    /// Create, list, inspect, and release workspaces.
+    #[command(visible_alias = "workspace", infer_subcommands = true)]
+    Ws(ws::Args),
+    /// Show the workspace you are in, its lease, and what to do next.
+    #[command(after_help = "Example: reef here -o json | jq .next")]
+    Here(here::Args),
+    /// Print the agent guide: what Reef is and the commands that matter.
+    #[command(visible_alias = "agent-guide")]
+    Guide(guide::Args),
+    /// Register and forget repositories.
+    #[command(infer_subcommands = true)]
+    Repo(repo::Args),
+    /// Build and list shared dependency stores.
+    #[command(infer_subcommands = true)]
+    Store(store::Args),
     /// Run, start, stop, or query the daemon.
+    #[command(infer_subcommands = true)]
     Daemon(daemon::Args),
     /// Inspect the daemon's configuration.
+    #[command(infer_subcommands = true)]
     Config(config::Args),
-    /// Register and forget repositories.
-    Repo(repo::Args),
-    /// Create, list, inspect, and release workspaces.
-    Ws(ws::Args),
-    /// Build and list shared dependency stores.
-    Store(store::Args),
     /// Back up the daemon's state to a directory.
     Backup(backup::Args),
     /// Restore the daemon's state from a backup (offline).
@@ -260,23 +311,36 @@ pub(crate) fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage_error(&error, &args),
     };
+    let Cli { global, command } = cli;
+    let Some(command) = command else {
+        // `reef` alone: the guide, exit 0, never clap's usage error.
+        let out = Out::detect(global.output.or(Some(Output::Text)), global.quiet);
+        return match guide::print(&out, &guide::Args::default()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                out.error(&error);
+                ExitCode::from(error.exit_code())
+            }
+        };
+    };
     // Before logging and the runtime: the daemon installs its own and must
     // start before the process has any other thread.
     if let Command::Daemon(daemon::Args {
         command: daemon::DaemonCommand::Run,
-    }) = cli.command
+    }) = &command
     {
-        return daemon::run_foreground(&cli.global);
+        return daemon::run_foreground(&global);
     }
     // `config show` prints TOML unless asked for JSON; see its module. `ws
-    // run`'s stdout is its command's, so it prints JSON only when asked.
-    let flag = match &cli.command {
-        Command::Config(_) => cli.global.output.or(Some(Output::Text)),
-        Command::Ws(args) if args.is_run() => cli.global.output.or(Some(Output::Text)),
-        _ => cli.global.output,
+    // run`'s stdout is its command's, so it prints JSON only when asked. The
+    // guide is prose for a model to read; JSON escapes would cost it tokens.
+    let flag = match &command {
+        Command::Config(_) | Command::Guide(_) => global.output.or(Some(Output::Text)),
+        Command::Ws(args) if args.is_run() => global.output.or(Some(Output::Text)),
+        _ => global.output,
     };
-    let out = Out::detect(flag, cli.global.quiet);
-    let _logging = match init_logging(cli.global.verbose) {
+    let out = Out::detect(flag, global.quiet);
+    let _logging = match init_logging(global.verbose) {
         Ok(guard) => guard,
         Err(error) => {
             out.error(&error);
@@ -295,7 +359,7 @@ pub(crate) fn main() -> ExitCode {
             return ExitCode::from(error.exit_code());
         }
     };
-    match runtime.block_on(run(cli, &out)) {
+    match runtime.block_on(run(global, command, &out)) {
         Ok(code) => code,
         Err(error) => {
             out.error(&error);
@@ -314,9 +378,10 @@ fn init_logging(verbose: u8) -> Result<logging::LoggingGuard, CliError> {
     logging::init(&options).map_err(CliError::Logging)
 }
 
-async fn run(cli: Cli, out: &Out) -> Result<ExitCode, CliError> {
-    let Cli { global, command } = cli;
+async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, CliError> {
     let done = match command {
+        Command::Guide(args) => guide::print(out, &args),
+        Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global.overrides(), out),
         Command::Completions { shell } => {
@@ -355,6 +420,8 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
         Err(ClientError::Connect { .. }) => {
             return Err(CliError::NotRunning {
                 socket: socket.clone(),
+                start: global.daemon_start(),
+                autostart_off: true,
             });
         }
         Err(error) => return Err(CliError::Daemon(error)),
@@ -369,7 +436,15 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
 }
 
 /// The output mode a command line asks for, read from the raw arguments
-/// for when clap could not parse them.
+/// for when clap could not parse them, else from `REEF_OUTPUT`.
+fn output_mode(args: &[OsString]) -> Option<Output> {
+    output_flag(args).or_else(|| {
+        let value = std::env::var(OUTPUT_ENV).ok()?;
+        <Output as clap::ValueEnum>::from_str(&value, false).ok()
+    })
+}
+
+/// The output mode the raw arguments ask for with `-o`.
 fn output_flag(args: &[OsString]) -> Option<Output> {
     let parse = |value: &str| match value {
         "json" => Some(Output::Json),
@@ -400,7 +475,7 @@ fn output_flag(args: &[OsString]) -> Option<Output> {
 
 /// clap could not parse the command line: help and version print as clap
 /// prints them; anything else is a usage error, exit 2, with the JSON error
-/// object on stdout in JSON mode.
+/// object on stdout in JSON mode, its hint the usage line.
 fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
     use clap::error::ErrorKind as Clap;
     if matches!(error.kind(), Clap::DisplayHelp | Clap::DisplayVersion) {
@@ -408,8 +483,12 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
         let _ = error.print();
         return ExitCode::SUCCESS;
     }
-    let out = Out::detect(output_flag(args), false);
+    let out = Out::detect(output_mode(args), false);
     let rendered = error.render().to_string();
+    let usage = rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Usage: "));
     let message = match error.kind() {
         // clap renders the command's help, whose first line is its `about`.
         Clap::DisplayHelpOnMissingArgumentOrSubcommand | Clap::MissingSubcommand => {
@@ -422,7 +501,7 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
             .trim_start_matches("error: ")
             .to_owned(),
     };
-    out.usage_error(&rendered, &message);
+    out.usage_error(&rendered, &message, usage);
     ExitCode::from(ErrorKind::InvalidArgument.exit_code())
 }
 
@@ -499,6 +578,36 @@ mod tests {
     #[test]
     fn the_command_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    /// Help written for a model (ADR 0025): one line of `about`, at most
+    /// five of `long_about` at 100 columns (clap joins a paragraph's lines).
+    #[test]
+    fn help_text_is_short() {
+        fn check(command: &clap::Command, path: &str, long: &mut Vec<String>) {
+            if let Some(about) = command.get_about() {
+                let about = about.to_string();
+                if about.contains('\n') || about.len() > 100 {
+                    long.push(format!("{path}: about: {about}"));
+                }
+            }
+            if let Some(text) = command.get_long_about() {
+                let lines: usize = text
+                    .to_string()
+                    .lines()
+                    .map(|line| line.len().div_ceil(100).max(1))
+                    .sum();
+                if lines > 5 {
+                    long.push(format!("{path}: long_about is {lines} lines"));
+                }
+            }
+            for child in command.get_subcommands() {
+                check(child, &format!("{path} {}", child.get_name()), long);
+            }
+        }
+        let mut long = Vec::new();
+        check(&Cli::command(), "reef", &mut long);
+        assert!(long.is_empty(), "{long:#?}");
     }
 
     #[test]
