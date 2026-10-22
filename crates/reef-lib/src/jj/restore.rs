@@ -160,7 +160,7 @@ impl Repo {
         // Debug: `reef restore` runs this in the CLI, which reports it.
         tracing::debug!(
             op_id = %OperationIdHex::of(repo.op_id()),
-            added = summary.added,
+            added_count = summary.added,
             "default working copy recreated"
         );
         Ok((Repo { workspace, repo }, summary))
