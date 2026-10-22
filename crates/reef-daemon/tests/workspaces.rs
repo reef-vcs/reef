@@ -1406,3 +1406,94 @@ async fn move_of_released_workspace_is_conflict() {
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::Conflict);
 }
+
+/// Everything the daemons in this process logged, for
+/// [`create_reports_timings`].
+static LOGS: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+struct Capture;
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        LOGS.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// R1.29: the response and the `workspace created` line time every step,
+/// and attaching the watcher is cheap. On macOS `watch_ms` is mostly
+/// `FSEvents` registering the stream, which fseventsd makes wait in
+/// proportion to the entries beside the test binary and to its own load
+/// (0.7 to 10 s seen in a crowded `target/debug/deps`; `docs/benchmarks.md`,
+/// R1.29), so the bound is Linux's; `watcher::notify::tests` bound the
+/// attach itself over that registration.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_reports_timings() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("reef_daemon=info"))
+        .with_ansi(false)
+        .with_writer(|| Capture)
+        .try_init();
+    let (daemon, repo) = fixture().await;
+    for _ in 0..2 {
+        let created = daemon
+            .client
+            .create_workspace(request(&repo, None))
+            .await
+            .unwrap();
+        let timings = created.timings.expect("timings in the response");
+        let steps = [
+            timings.resolve_ms,
+            timings.base_ms,
+            timings.materialize_ms,
+            timings.mount_ms,
+            timings.jj_ms,
+            timings.seed_ms,
+            timings.insert_ms,
+            timings.watch_ms,
+        ];
+        assert!(timings.total_ms >= steps.iter().sum::<u64>(), "{timings:?}");
+        assert!(timings.total_ms > 0, "{timings:?}");
+        if cfg!(target_os = "linux") {
+            assert!(timings.watch_ms < 1000, "{timings:?}");
+        }
+        assert_eq!(
+            created.materialize_ms,
+            timings.base_ms + timings.materialize_ms
+        );
+        eprintln!(
+            "create timings (base cached: {}): {timings:?}",
+            created.base_was_cached
+        );
+
+        let id = created.workspace.unwrap().id;
+        let logs = LOGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let logs = String::from_utf8_lossy(&logs);
+        let line = logs
+            .lines()
+            .find(|line| line.contains("workspace created") && line.contains(&id))
+            .unwrap_or_else(|| panic!("no `workspace created` line for {id}:\n{logs}"));
+        for field in [
+            "resolve_ms",
+            "base_ms",
+            "materialize_ms",
+            "mount_ms",
+            "jj_ms",
+            "seed_ms",
+            "insert_ms",
+            "watch_ms",
+            "total_ms",
+        ] {
+            assert!(line.contains(&format!(" {field}=")), "{field} in {line}");
+        }
+    }
+}

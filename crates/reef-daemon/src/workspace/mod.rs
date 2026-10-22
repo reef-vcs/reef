@@ -197,12 +197,38 @@ pub struct Created {
     /// Another Reef workspace's working-copy commit was already the edited
     /// commit.
     pub shared_change: bool,
-    /// Wall time of ensuring the base and the backend's materialization.
-    pub materialize: Duration,
+    /// How long each step took.
+    pub timings: CreateTimings,
     /// Whether the base cache already held the tree.
     pub base_was_cached: bool,
     /// The shared stores mounted in it (R1.20).
     pub stores: Vec<MountedStore>,
+}
+
+/// How long each step of [`Manager::create`] took, in milliseconds (R1.29).
+/// The steps are those of `workspace/create.rs`; step 1 counts only in the
+/// total.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CreateTimings {
+    /// Step 2: resolving the start revision, reading `reef.toml`, and
+    /// looking the stores up.
+    pub resolve_ms: u64,
+    /// Step 3: ensuring the base.
+    pub base_ms: u64,
+    /// Step 4: the backend's materialization alone.
+    pub materialize_ms: u64,
+    /// Step 4: mounting the stores.
+    pub mount_ms: u64,
+    /// Step 5: the jj workspace.
+    pub jj_ms: u64,
+    /// Step 6: seeding the working copy's `tree_state`.
+    pub seed_ms: u64,
+    /// Step 7: the row and the lease.
+    pub insert_ms: u64,
+    /// Loading the workspace and attaching its watcher.
+    pub watch_ms: u64,
+    /// The whole create.
+    pub total_ms: u64,
 }
 
 /// What [`Manager::move_to`] did (R1.06).

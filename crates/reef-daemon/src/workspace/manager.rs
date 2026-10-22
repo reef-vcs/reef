@@ -24,7 +24,7 @@ use crate::model::{
 use crate::proto::v0::register_request::IfNotJj;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
-use crate::snapshot::{Scheduler, SnapshotKind};
+use crate::snapshot::{Scheduler, SnapshotKind, TrackReason};
 use crate::store::StoreManager;
 use crate::watcher::{WatchError, select_watcher};
 
@@ -133,14 +133,14 @@ impl Manager {
     /// the new skip list. Create sets the spec from `reef.toml` (R1.19);
     /// tests set it here.
     #[cfg(any(test, feature = "testing"))]
-    pub fn set_snapshot_spec(
+    pub async fn set_snapshot_spec(
         &self,
         id: WorkspaceId,
         spec: super::SnapshotSpec,
     ) -> Result<(), ManagerError> {
         let entry = self.entry(id).ok_or(ManagerError::NotLoaded(id))?;
         *entry.spec.lock().unwrap_or_else(PoisonError::into_inner) = spec;
-        self.scheduler.rewatch(id);
+        self.scheduler.rewatch(id).await;
         Ok(())
     }
 
@@ -633,7 +633,7 @@ impl Manager {
                 stores: Mutex::new(stores),
             };
             self.insert_entry(id, Arc::new(entry));
-            self.scheduler.track(id);
+            self.scheduler.track(id, TrackReason::Loaded).await;
             loaded += 1;
         }
         if rematerialize && !rematerialize_failed {

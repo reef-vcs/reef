@@ -24,7 +24,7 @@ pub mod watchman;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use reef_lib::error::{Classify, ErrorKind};
@@ -51,6 +51,26 @@ pub struct WatchEvent {
 /// `attention = 'watch-failed'` from it.
 pub type HealthHook = Arc<dyn Fn(WorkspaceId, bool) + Send + Sync>;
 
+/// When the latest workspace create started (R1.29). `Manager::create`
+/// stamps it; the Watchman watcher holds a just-created workspace's
+/// subscription until creates have been quiet for
+/// `watcher.watchman_attach_quiet`, so its crawl does not slow the next
+/// create's clone.
+#[derive(Debug, Default)]
+pub struct CreateClock(Mutex<Option<Instant>>);
+
+impl CreateClock {
+    /// Records that a create started now.
+    pub fn stamp(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// When the latest create started, if any has.
+    pub fn last(&self) -> Option<Instant> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Watches workspace roots and reports changes as [`WatchEvent`]s.
 pub trait Watcher: Send + Sync {
     /// Which mechanism this is.
@@ -64,15 +84,24 @@ pub trait Watcher: Send + Sync {
     }
     /// Starts watching `root`, recursively, for `workspace`. Changes under
     /// any of `skip` (absolute prefixes under `root`) are not reported.
-    /// Watching a workspace again replaces its root and skip list.
+    /// Watching a workspace again replaces its root and skip list. `defer`
+    /// (a workspace just created) lets a watcher whose set-up competes with
+    /// the next create wait for creates to go quiet; only Watchman does
+    /// (R1.29).
     fn watch(
         &self,
         workspace: WorkspaceId,
         root: &Path,
         skip: Vec<PathBuf>,
+        defer: bool,
     ) -> Result<(), WatchError>;
     /// Stops watching `workspace`. Not watching it is not an error.
     fn unwatch(&self, workspace: WorkspaceId) -> Result<(), WatchError>;
+    /// Whether `workspace`'s watch is deferred, waiting for creates to go
+    /// quiet (R1.29).
+    fn waiting(&self, _workspace: WorkspaceId) -> bool {
+        false
+    }
 }
 
 /// Failure of a watcher.
@@ -189,16 +218,18 @@ pub(crate) fn watchman_on_path() -> bool {
 }
 
 /// A watcher of `kind`, sending to `events`, with `config.debounce`.
-/// `health` is given to watchers that report it ([`Watcher::reports_health`]).
+/// `health` is given to watchers that report it ([`Watcher::reports_health`]),
+/// and `creates` to Watchman, which defers new subscriptions by it.
 pub fn new_watcher(
     kind: WatcherKind,
     config: &WatcherSection,
     events: mpsc::Sender<WatchEvent>,
     health: HealthHook,
+    creates: Arc<CreateClock>,
 ) -> Result<Box<dyn Watcher>, WatchError> {
     match kind {
         WatcherKind::Notify => {
-            drop(health);
+            drop((health, creates));
             Ok(Box::new(notify::NotifyWatcher::new(
                 config.debounce,
                 events,
@@ -209,10 +240,15 @@ pub fn new_watcher(
             config.debounce,
             events,
             health,
+            watchman::Deferral {
+                quiet: config.watchman_attach_quiet,
+                max: config.watchman_attach_defer_max,
+                creates,
+            },
         )?)),
         #[cfg(not(feature = "watchman"))]
         WatcherKind::Watchman => {
-            drop((events, health));
+            drop((events, health, creates));
             Err(WatchError::FeatureDisabled("watchman"))
         }
     }
@@ -231,7 +267,7 @@ impl Watcher for NoWatcher {
         self.kind
     }
 
-    fn watch(&self, _: WorkspaceId, _: &Path, _: Vec<PathBuf>) -> Result<(), WatchError> {
+    fn watch(&self, _: WorkspaceId, _: &Path, _: Vec<PathBuf>, _: bool) -> Result<(), WatchError> {
         Err(WatchError::Unavailable(self.kind.as_str()))
     }
 

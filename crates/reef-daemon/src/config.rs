@@ -99,6 +99,8 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "fallback_interval",
             "max_concurrent_scans",
             "watchman_threshold_files",
+            "watchman_attach_quiet",
+            "watchman_attach_defer_max",
         ],
     ),
     (
@@ -346,6 +348,17 @@ pub struct WatcherSection {
     pub max_concurrent_scans: Option<usize>,
     /// Tracked files above which `auto` picks Watchman. Default 50,000.
     pub watchman_threshold_files: u64,
+    /// A Watchman workspace's subscription starts only once no workspace
+    /// create has started for this long, so Watchman's crawl of it does not
+    /// slow the next create's clone (R1.29). Default 2 s; `0s` subscribes
+    /// at once.
+    #[serde(with = "duration")]
+    pub watchman_attach_quiet: Duration,
+    /// The longest a new Watchman workspace's subscription waits for that
+    /// quiet window, from when it was tracked. Default 10 s; `0s` subscribes
+    /// at once.
+    #[serde(with = "duration")]
+    pub watchman_attach_defer_max: Duration,
 }
 
 impl Default for WatcherSection {
@@ -357,6 +370,8 @@ impl Default for WatcherSection {
             fallback_interval: Duration::from_secs(60),
             max_concurrent_scans: None,
             watchman_threshold_files: 50_000,
+            watchman_attach_quiet: Duration::from_secs(2),
+            watchman_attach_defer_max: Duration::from_secs(10),
         }
     }
 }
@@ -1126,6 +1141,8 @@ impl Config {
                         w.max_concurrent_scans.unwrap_or_default().to_string(),
                     ),
                     ("watchman_threshold_files", n(w.watchman_threshold_files)),
+                    ("watchman_attach_quiet", d(w.watchman_attach_quiet)),
+                    ("watchman_attach_defer_max", d(w.watchman_attach_defer_max)),
                 ],
             ),
             (

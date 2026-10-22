@@ -90,6 +90,9 @@ message Workspace {
   // The shared stores mounted in it (R1.20). Empty for a workspace that is
   // not active or not loaded.
   repeated MountedStore stores = 18;
+  // `waiting` while its Watchman subscription is deferred until a burst of
+  // workspace creates ends (R1.29); empty otherwise.
+  string watch_state = 19;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).

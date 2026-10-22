@@ -49,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{WatcherBackend, WatcherSection};
 use crate::model::{WatcherKind, WorkspaceId};
 use crate::watcher::{
-    HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
+    CreateClock, HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
 };
 use crate::workspace::{Manager, ManagerError};
 
@@ -192,6 +192,21 @@ pub struct SnapshotOutcome {
     pub scan_ms: u64,
 }
 
+/// Why [`Scheduler::track`] is watching a workspace (R1.29). Only a create
+/// lets the watcher defer the watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackReason {
+    /// The workspace was just created.
+    Created,
+    /// The daemon started and loaded it.
+    Loaded,
+    /// A release or reclaim was aborted and it is active again.
+    Restored,
+    /// Its skip list or mount changed: a move (R1.06), or a test setting
+    /// its spec.
+    Rewatched,
+}
+
 /// A post-snapshot hook; see [`Scheduler::on_snapshot`].
 pub type SnapshotHook = Box<dyn Fn(&SnapshotOutcome) + Send + Sync>;
 
@@ -223,6 +238,8 @@ struct Inner {
     events: Mutex<Option<mpsc::Receiver<WatchEvent>>>,
     /// Given to watchers that report health.
     health: HealthHook,
+    /// When the latest create started; the Watchman watcher defers by it.
+    creates: Arc<CreateClock>,
     entries: Mutex<HashMap<WorkspaceId, Entry>>,
     scans: Arc<Semaphore>,
     hooks: RwLock<Vec<SnapshotHook>>,
@@ -303,6 +320,7 @@ impl Scheduler {
                 events_tx: tx,
                 events: Mutex::new(Some(rx)),
                 health: health_hook(weak.clone()),
+                creates: Arc::new(CreateClock::default()),
                 entries: Mutex::new(HashMap::new()),
                 scans: Arc::new(Semaphore::new(max_scans)),
                 hooks: RwLock::new(Vec::new()),
@@ -354,52 +372,39 @@ impl Scheduler {
     /// snapshotted on the fallback timer alone; a Watchman workspace is
     /// marked (and cleared) as its subscription goes down and comes up.
     /// Tracking a tracked workspace again re-reads its skip list.
-    pub fn track(&self, ws: WorkspaceId) {
-        let Some(manager) = self.inner.manager.upgrade() else {
-            return;
-        };
-        let Some(entry) = manager.entry(ws) else {
-            return;
-        };
-        let kind = entry.record().watcher;
-        self.inner
-            .lock_entries()
-            .entry(ws)
-            .or_insert_with(|| Entry {
-                watcher: kind,
-                dirty_since: None,
-                paths_count: 0,
-                task: false,
-                last_completed: Instant::now(),
-                paused: 0,
-                untracked_reported: HashSet::new(),
-            });
-        // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
-        let root =
-            std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
-        let spec = entry.spec();
-        let skip = skip_prefixes(&root, &spec.excludes, &spec.mounts);
-        let watcher = self.inner.watcher(kind);
-        let outcome = if self.inner.refuse_watches.load(Ordering::Relaxed) {
-            Err(WatchError::Unavailable(kind.as_str()))
-        } else {
-            watcher.watch(ws, &root, skip)
-        };
-        match outcome {
-            Err(error) => {
-                tracing::warn!(
-                    workspace_id = %ws,
-                    path = %root.display(),
-                    watcher = kind.as_str(),
-                    error = %ErrorChain(&error),
-                    "cannot watch the workspace; it is snapshotted on the fallback timer only"
-                );
-                manager.mark_watch_failed(&entry);
-            }
-            // The health hook reports the outcome.
-            Ok(()) if watcher.reports_health() => {}
-            Ok(()) => manager.clear_watch_failed(&entry),
+    ///
+    /// The watch is attached on the blocking pool, and this returns once it
+    /// is (R1.29): a write right after is seen without waiting for the
+    /// fallback timer, and whatever a watcher does to attach never holds a
+    /// runtime worker. For [`TrackReason::Created`], a Watchman watch may
+    /// wait for a burst of creates to end before subscribing; its first
+    /// result snapshots whatever was written meanwhile.
+    pub async fn track(&self, ws: WorkspaceId, reason: TrackReason) {
+        let inner = Arc::clone(&self.inner);
+        let defer = reason == TrackReason::Created;
+        if let Err(error) = tokio::task::spawn_blocking(move || inner.track(ws, defer)).await {
+            tracing::error!(workspace_id = %ws, %error, "watch task failed");
         }
+    }
+
+    /// Records that a workspace create started now (R1.29).
+    pub fn create_started(&self) {
+        self.inner.creates.stamp();
+    }
+
+    /// Whether `ws`'s watch is deferred, waiting for creates to go quiet
+    /// (R1.29).
+    pub fn watch_waiting(&self, ws: WorkspaceId) -> bool {
+        let Some(kind) = self
+            .inner
+            .lock_entries()
+            .get(&ws)
+            .map(|entry| entry.watcher)
+        else {
+            return false;
+        };
+        let watcher = lock(&self.inner.watchers).get(&kind).cloned();
+        watcher.is_some_and(|watcher| watcher.waiting(ws))
     }
 
     /// Stops watching `ws` and scheduling its snapshots; events still in
@@ -637,9 +642,9 @@ impl Scheduler {
     /// Watches a tracked workspace again with its current skip list: after
     /// a test changes its spec, or a move (R1.06) changes the spec or
     /// remounts an overlay.
-    pub(crate) fn rewatch(&self, ws: WorkspaceId) {
+    pub(crate) async fn rewatch(&self, ws: WorkspaceId) {
         if self.is_tracked(ws) {
-            self.track(ws);
+            self.track(ws, TrackReason::Rewatched).await;
         }
     }
 }
@@ -710,6 +715,52 @@ impl Drop for ScanPermit {
 }
 
 impl Inner {
+    /// [`Scheduler::track`]'s work, on the calling thread.
+    fn track(&self, ws: WorkspaceId, defer: bool) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let Some(entry) = manager.entry(ws) else {
+            return;
+        };
+        let kind = entry.record().watcher;
+        self.lock_entries().entry(ws).or_insert_with(|| Entry {
+            watcher: kind,
+            dirty_since: None,
+            paths_count: 0,
+            task: false,
+            last_completed: Instant::now(),
+            paused: 0,
+            untracked_reported: HashSet::new(),
+        });
+        // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
+        let root =
+            std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
+        let spec = entry.spec();
+        let skip = skip_prefixes(&root, &spec.excludes, &spec.mounts);
+        let watcher = self.watcher(kind);
+        let outcome = if self.refuse_watches.load(Ordering::Relaxed) {
+            Err(WatchError::Unavailable(kind.as_str()))
+        } else {
+            watcher.watch(ws, &root, skip, defer)
+        };
+        match outcome {
+            Err(error) => {
+                tracing::warn!(
+                    workspace_id = %ws,
+                    path = %root.display(),
+                    watcher = kind.as_str(),
+                    error = %ErrorChain(&error),
+                    "cannot watch the workspace; it is snapshotted on the fallback timer only"
+                );
+                manager.mark_watch_failed(&entry);
+            }
+            // The health hook reports the outcome.
+            Ok(()) if watcher.reports_health() => {}
+            Ok(()) => manager.clear_watch_failed(&entry),
+        }
+    }
+
     fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<WorkspaceId, Entry>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -738,6 +789,7 @@ impl Inner {
             &self.config,
             self.events_tx.clone(),
             Arc::clone(&self.health),
+            Arc::clone(&self.creates),
         );
         let watcher: Arc<dyn Watcher> = match started {
             Ok(watcher) => Arc::from(watcher),

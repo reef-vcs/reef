@@ -16,7 +16,7 @@ use crate::backend::fs_util::allocated_bytes;
 use crate::model::{
     Attention, LeaseEnd, ReclaimReason, ReclaimRecord, Timestamp, WorkspaceId, WorkspaceState,
 };
-use crate::snapshot::{SnapshotKind, description};
+use crate::snapshot::{SnapshotKind, TrackReason, description};
 
 /// The `reclaims.detail` of a workspace whose root was gone when it was
 /// reclaimed, so no final snapshot could be taken.
@@ -229,7 +229,7 @@ impl Manager {
             Err(error) => {
                 let attention = (attention != Some(Attention::MountFailed))
                     .then_some(Attention::FinalSnapshotFailed);
-                self.back_to_active(entry, attention);
+                self.back_to_active(entry, attention).await;
                 Err(ManagerError::FinalSnapshotFailed {
                     id,
                     source: Box::new(error),
@@ -249,7 +249,7 @@ impl Manager {
         match forget_jj_workspace(&entry.repo, id, "reef: release workspace {id}").await {
             Ok(op_id) => Ok(op_id),
             Err(error) if !spec.force => {
-                self.back_to_active(entry, None);
+                self.back_to_active(entry, None).await;
                 Err(error)
             }
             Err(error) => {
@@ -299,14 +299,14 @@ impl Manager {
     /// Rolls an aborted release or reclaim back to `active`, setting
     /// `attention` if given. Failures are logged; the next daemon start
     /// also reverts a `releasing` row.
-    fn back_to_active(&self, entry: &WorkspaceEntry, attention: Option<Attention>) {
+    async fn back_to_active(&self, entry: &WorkspaceEntry, attention: Option<Attention>) {
         let id = entry.paths.id;
         if let Err(error) = self.db.set_workspace_state(id, WorkspaceState::Active) {
             tracing::error!(error = %ErrorChain(&error), "cannot roll the release back");
             return;
         }
         entry.update_record(|record| record.state = WorkspaceState::Active);
-        self.scheduler.track(id);
+        self.scheduler.track(id, TrackReason::Restored).await;
         if let Some(attention) = attention {
             match self.db.set_workspace_attention(id, Some(attention), None) {
                 Ok(()) => entry.update_record(|record| record.attention = Some(attention)),
