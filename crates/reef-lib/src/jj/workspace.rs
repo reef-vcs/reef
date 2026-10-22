@@ -152,6 +152,10 @@ pub enum CreateWorkspaceError {
     /// The view already has a working-copy commit for this workspace name.
     #[error("workspace {0} already exists")]
     WorkspaceExists(String),
+    /// The view has no working-copy commit for this workspace name
+    /// ([`Repo::attach_workspace_with`]).
+    #[error("workspace {0} has no working-copy commit")]
+    NoSuchWorkspace(String),
     /// The workspace root does not exist or could not be resolved.
     #[error("failed to resolve workspace root {}", path.display())]
     Root {
@@ -203,6 +207,7 @@ impl Classify for CreateWorkspaceError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::WorkspaceExists(_) | Self::StateDirExists(_) => ErrorKind::AlreadyExists,
+            Self::NoSuchWorkspace(_) => ErrorKind::NotFound,
             Self::Root { source, .. } if source.kind() == io::ErrorKind::NotFound => {
                 ErrorKind::NotFound
             }
@@ -600,7 +605,7 @@ impl Repo {
 
     /// The steps of [`Repo::create_workspace`] after its operation: the
     /// working-copy state, the jj `Workspace`, and its registration.
-    fn attach_new_workspace(
+    pub(crate) fn attach_new_workspace(
         &self,
         name: &WorkspaceNameBuf,
         root: &Path,
@@ -1013,7 +1018,7 @@ fn resolved(commit: &Commit, via: ResolvedVia) -> Resolved {
 }
 
 /// Creates `state_dir`, and its parents if needed, refusing one that exists.
-fn create_state_dir(state_dir: &Path) -> Result<(), CreateWorkspaceError> {
+pub(crate) fn create_state_dir(state_dir: &Path) -> Result<(), CreateWorkspaceError> {
     let failed = |source| CreateWorkspaceError::StateDir {
         path: state_dir.to_owned(),
         source,

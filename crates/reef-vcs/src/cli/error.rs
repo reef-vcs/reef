@@ -61,7 +61,7 @@ pub(crate) enum CliError {
     #[error("install signal handlers")]
     Signals(#[source] io::Error),
     /// A command refused with a kind of its own, such as `repo register` on
-    /// a registered repository (`AlreadyExists`) or a stub (`Internal`).
+    /// a registered repository (`AlreadyExists`).
     #[error("{message}")]
     Refused {
         /// The kind, and so the exit code.
@@ -91,15 +91,6 @@ pub(crate) enum CliError {
 }
 
 impl CliError {
-    /// A stub's failure: the command arrives with `ticket`.
-    pub(crate) fn not_implemented(ticket: &str) -> Self {
-        Self::Refused {
-            kind: ErrorKind::Internal,
-            message: format!("not implemented until {ticket}"),
-            advice: None,
-        }
-    }
-
     /// How to fix the failure, when that is known: the daemon's advice for
     /// its own errors, the command's for the rest.
     pub(crate) fn advice(&self) -> Option<Advice> {
@@ -194,6 +185,5 @@ mod tests {
             autostart_off: true,
         };
         assert_eq!(not_running.exit_code(), 6);
-        assert_eq!(CliError::not_implemented("R1.17").exit_code(), 1);
     }
 }

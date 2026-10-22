@@ -659,23 +659,47 @@ async fn repo_forget() {
     );
 }
 
-/// Stubs fail with their ticket and never start a daemon.
+/// `reef restore` (R1.18) is offline: a backup that is not there fails
+/// with `not_found` and no daemon is started.
 #[test]
-fn stubs_exit_1_without_a_daemon() {
+fn restore_never_starts_a_daemon() {
     let tmp = short_tempdir();
     let state = tmp.path().join("state");
-    for (args, ticket) in [
-        (&["backup", "/tmp/x"][..], "R1.18"),
-        (&["restore", "/tmp/x"], "R1.18"),
-    ] {
-        let output = reef_in(&state).args(args).output().unwrap();
-        let text = failed(&output, 1, "internal");
-        assert!(
-            text.contains(&format!("not implemented until {ticket}")),
-            "{text}"
-        );
-    }
+    let missing = tmp.path().join("no-backup");
+    let output = reef_in(&state)
+        .args(["restore", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = failed(&output, 3, "not_found");
+    assert!(text.contains("manifest.json"), "{text}");
     assert!(!state.exists(), "no daemon was started");
+}
+
+/// `reef backup` (R1.18) writes a backup and prints its manifest; a second
+/// into the same directory is `already_exists`; `reef restore` refuses
+/// while the daemon runs and names the command that stops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_then_restore_refuses_a_running_daemon() {
+    let (daemon, repo) = with_repo().await;
+    let dest = daemon.tmp.path().join("backup");
+    let dest_text = dest.to_str().unwrap();
+    let manifest = json(&run(reef(&daemon), &["backup", dest_text]).await);
+    assert_eq!(manifest["complete"], true, "{manifest}");
+    assert_eq!(manifest["repos"][0]["id"], repo.id.as_str(), "{manifest}");
+    assert!(dest.join("manifest.json").is_file());
+    assert!(dest.join("reef.sqlite3").is_file());
+
+    let again = run(reef(&daemon), &["backup", dest_text]).await;
+    failed(&again, 4, "already_exists");
+
+    let restore = run(reef(&daemon), &["restore", dest_text, "--force"]).await;
+    failed(&restore, 6, "unavailable");
+    let value: Value = serde_json::from_str(&stdout(&restore)).unwrap();
+    assert_eq!(
+        value["error"]["next"],
+        serde_json::json!(["reef", "daemon", "stop"]),
+        "{value}"
+    );
 }
 
 /// `ws gc --dry-run` (R1.17, moved here from R1.22 with the subcommand):

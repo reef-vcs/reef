@@ -22,6 +22,7 @@ mod gc;
 mod manager;
 mod move_;
 mod reclaim;
+mod rematerialize;
 mod snapshot;
 mod stores;
 
@@ -411,6 +412,17 @@ pub enum ManagerError {
         #[source]
         source: Box<ManagerError>,
     },
+    /// A stored workspace or commit value does not parse (a row this
+    /// binary did not write, R1.18's rematerialization).
+    #[error("workspace {id} has an invalid {what} {value:?}")]
+    InvalidRecord {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Which field.
+        what: &'static str,
+        /// What it holds.
+        value: String,
+    },
     /// A blocking task panicked or was cancelled.
     #[error("a workspace task failed")]
     Task(#[from] tokio::task::JoinError),
@@ -495,7 +507,7 @@ impl Classify for ManagerError {
                 ErrorKind::Conflict
             }
             Self::NotRegistered(_) => ErrorKind::NotFound,
-            Self::Task(_) => ErrorKind::Internal,
+            Self::Task(_) | Self::InvalidRecord { .. } => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
             Self::Settings(error) => error.kind(),
             Self::WorkingCopyCheck { source, .. } => source.kind(),

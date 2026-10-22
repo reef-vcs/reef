@@ -19,7 +19,10 @@ use tonic::{Code, Status};
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
 use crate::lease::LeaseError;
+use crate::maintenance::backup::{BackupError, ManifestError};
 use crate::maintenance::gc::GcRunError;
+use crate::maintenance::quiesce::QuiesceError;
+use crate::maintenance::restore::RestoreError;
 use crate::proto::v0::ErrorDetail;
 use crate::repo::RegisterError;
 use crate::snapshot::index::ReindexError;
@@ -101,6 +104,14 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<ReindexError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<GcRunError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<BackupError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<QuiesceError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<RestoreError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<ManifestError>() {
             error.advice()
         } else {
             None
@@ -445,6 +456,26 @@ mod tests {
             "{gone:?}"
         );
         assert_eq!(gone.next, ["reef", "repo", "list"]);
+    }
+
+    #[test]
+    fn backup_and_quiesce_refusals_carry_their_hints() {
+        let busy = status(BackupError::DestNotEmpty("/b".into()));
+        assert_eq!(busy.code(), Code::AlreadyExists);
+        assert!(
+            advice_in(&busy).hint.contains("never overwrites"),
+            "{busy:?}"
+        );
+        let quiesced = status(QuiesceError::Quiesced {
+            until: crate::model::Timestamp(1_792_175_477_042),
+        });
+        assert_eq!(quiesced.code(), Code::Unavailable);
+        assert!(
+            advice_in(&quiesced)
+                .hint
+                .contains("2026-10-16T18:31:17.042Z"),
+            "{quiesced:?}"
+        );
     }
 
     fn status_from_missing(path: &str) -> Advice {

@@ -1,5 +1,6 @@
-// Maintenance of the daemon's repositories and state (R1.17). R1.18 adds
-// Backup, Quiesce, and Resume to the same service.
+// Maintenance of the daemon's repositories and state: garbage collection
+// (R1.17), and backup and quiesce (R1.18, ADR 0020). Restore is offline
+// (`reef restore`) and has no RPC.
 syntax = "proto3";
 
 package reef.daemon.v0;
@@ -12,6 +13,23 @@ service Maintenance {
   // records, and unused stores. Refused with UNAVAILABLE while another
   // maintenance task (GC, backup, quiesce) runs.
   rpc Gc(GcRequest) returns (GcResponse);
+  // A consistent copy of the daemon's state (the whole database and each
+  // repository's jj state) into a new or empty directory, while agents keep
+  // writing; each repository's thread is paused only while its operation
+  // files are copied. Progress as it goes; the last message has `done` and
+  // the manifest's path. UNAVAILABLE while another maintenance task runs;
+  // ALREADY_EXISTS if `dest` is not empty.
+  rpc Backup(BackupRequest) returns (stream BackupProgress);
+  // Holds the daemon still for a filesystem snapshot of its state
+  // directory: no jj operation is written, no automatic snapshot or lease
+  // reclaim starts, heartbeats are refused (UNAVAILABLE), and SQLite's WAL
+  // is checkpointed into the database file. Ends on Resume with the token,
+  // or by itself at `auto_resume_at`. UNAVAILABLE while another quiesce or
+  // maintenance task is in effect.
+  rpc Quiesce(QuiesceRequest) returns (QuiesceResponse);
+  // Ends a quiesce; every active lease then has at least `lease.grace`
+  // left. NOT_FOUND for a token not in effect.
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
 }
 
 message GcRequest {
@@ -52,4 +70,52 @@ message GcReport {
 message GcResponse {
   // One per repository, in registration order.
   repeated GcReport reports = 1;
+}
+
+message BackupRequest {
+  // An absolute directory, new or empty, outside the state directory.
+  string dest = 1;
+  // As GcRequest.repo; empty for every registered repository. The database
+  // is copied whole either way.
+  string repo = 2;
+}
+
+message BackupProgress {
+  // Empty for the database step.
+  string repo_id = 1;
+  // `sqlite`, `operations` (under the pause), `objects`, `heads`, or
+  // `done`.
+  string step = 2;
+  // What the step copied.
+  uint64 files = 3;
+  uint64 bytes = 4;
+  // The last message: the backup is complete.
+  bool done = 5;
+  // On the last message: `<dest>/manifest.json`.
+  string manifest_path = 6;
+}
+
+message QuiesceRequest {
+  // As GcRequest.repo: only this repository's thread is paused (snapshots,
+  // reclaims, and GC are held off for every repository either way); empty
+  // for every repository.
+  string repo = 1;
+  // Resume by itself after this long; 0 or more than `backup.quiesce_max`
+  // is `backup.quiesce_max`.
+  uint64 max_ms = 2;
+}
+
+message QuiesceResponse {
+  string token = 1;
+  google.protobuf.Timestamp quiesced_at = 2;
+  google.protobuf.Timestamp auto_resume_at = 3;
+}
+
+message ResumeRequest {
+  string token = 1;
+}
+
+message ResumeResponse {
+  // How long the quiesce lasted.
+  uint64 paused_ms = 1;
 }

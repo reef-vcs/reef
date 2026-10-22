@@ -15,7 +15,7 @@ use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
-use crate::db::{Db, DbError};
+use crate::db::{Db, DbError, META_REMATERIALIZE_PENDING};
 use crate::lease::LeaseManager;
 use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
@@ -547,15 +547,23 @@ impl Manager {
     /// gone is reclaimed (`reclaims.detail` = "directory missing at start"),
     /// since nothing can be snapshotted. One whose jj handle cannot be
     /// reopened is loaded without it ([`ManagerError::NotLoaded`] for
-    /// snapshots; a release without a final snapshot removes it). Workspaces of a repository that failed to open are
-    /// skipped. Returns how many were loaded.
+    /// snapshots; a release without a final snapshot removes it).
+    /// Workspaces of a repository that failed to open are skipped. Returns
+    /// how many were loaded.
     ///
-    /// R1.18 adds: with `meta.rematerialize_pending` set, a missing
-    /// directory is rematerialized instead.
+    /// After a restore (`meta.rematerialize_pending`, R1.18), every one is
+    /// rematerialized first (`workspace/rematerialize.rs`): a missing
+    /// directory is rebuilt, and every working copy is recreated, since a
+    /// surviving one may name an operation the restore took back. One that
+    /// fails or cannot be loaded is logged and left unloaded, not
+    /// reclaimed, and the flag stays set so the next start tries again. It
+    /// is cleared once every one succeeds.
     pub async fn load_active(&self) -> Result<usize, ManagerError> {
         let rows = self
             .db
             .workspaces(None, &[WorkspaceState::Active, WorkspaceState::Releasing])?;
+        let rematerialize = self.db.meta(META_REMATERIALIZE_PENDING)?.is_some();
+        let mut rematerialize_failed = false;
         let mut loaded = 0;
         for mut record in rows {
             let id = record.id;
@@ -570,9 +578,21 @@ impl Manager {
                     repo = %record.repo_id,
                     "the workspace's repository is not open; workspace not loaded"
                 );
+                rematerialize_failed |= rematerialize;
                 continue;
             };
-            if std::fs::symlink_metadata(&record.path).is_err() {
+            let missing = std::fs::symlink_metadata(&record.path).is_err();
+            if rematerialize {
+                if let Err(error) = self.rematerialize(&mut record, &handle).await {
+                    tracing::error!(
+                        workspace_id = %id,
+                        error = %ErrorChain(&error),
+                        "cannot rematerialize the workspace after a restore; it is not loaded"
+                    );
+                    rematerialize_failed = true;
+                    continue;
+                }
+            } else if missing {
                 self.reclaim_missing(&record, &handle).await;
                 continue;
             }
@@ -580,6 +600,7 @@ impl Manager {
                 Ok(kind) => kind,
                 Err(error) => {
                     tracing::error!(workspace_id = %id, error = %error, "workspace not loaded");
+                    rematerialize_failed |= rematerialize;
                     continue;
                 }
             };
@@ -614,6 +635,10 @@ impl Manager {
             self.insert_entry(id, Arc::new(entry));
             self.scheduler.track(id);
             loaded += 1;
+        }
+        if rematerialize && !rematerialize_failed {
+            self.db.delete_meta(META_REMATERIALIZE_PENDING)?;
+            tracing::info!("restore finished: every active workspace is rematerialized");
         }
         Ok(loaded)
     }

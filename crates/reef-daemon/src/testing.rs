@@ -137,6 +137,51 @@ impl TestDaemon {
         self.handle.shutdown();
         self.handle.join().await.expect("the daemon stops cleanly");
     }
+
+    /// Shuts the daemon down and waits for it to stop, keeping its
+    /// temporary directory, so a test can change the state directory with
+    /// no daemon running (R1.18's restore) and [`StoppedDaemon::start`] one
+    /// there again.
+    pub async fn stop_keeping(self) -> StoppedDaemon {
+        let TestDaemon {
+            handle,
+            client,
+            tmp,
+            config,
+        } = self;
+        drop(client);
+        handle.shutdown();
+        handle.join().await.expect("the daemon stops cleanly");
+        StoppedDaemon { tmp, config }
+    }
+}
+
+/// A [`TestDaemon`] stopped by [`TestDaemon::stop_keeping`].
+#[derive(Debug)]
+pub struct StoppedDaemon {
+    /// The temporary directory, as [`TestDaemon::tmp`].
+    pub tmp: TempDir,
+    /// The configuration it ran with.
+    pub config: Config,
+}
+
+impl StoppedDaemon {
+    /// Starts a daemon on the same state directory and configuration.
+    pub async fn start(self) -> TestDaemon {
+        let StoppedDaemon { tmp, config } = self;
+        let handle = Daemon::start(config.clone())
+            .await
+            .expect("start the daemon again");
+        let client = Client::connect(handle.socket_path())
+            .await
+            .expect("connect to the daemon");
+        TestDaemon {
+            handle,
+            client,
+            tmp,
+            config,
+        }
+    }
 }
 
 /// A synthetic repository registered with a [`TestDaemon`].

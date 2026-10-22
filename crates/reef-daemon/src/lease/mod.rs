@@ -11,6 +11,7 @@
 //! from the owner, who is informational (RX.01 reviews this).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -195,6 +196,9 @@ pub struct LeaseManager {
     failures: Mutex<HashMap<WorkspaceId, u32>>,
     /// Stops the expiry loop, between ticks and between reclaims.
     stop: CancellationToken,
+    /// Open [`TickPause`]s: while any is, ticks reclaim nothing (a
+    /// quiesce, R1.18).
+    tick_pauses: AtomicUsize,
 }
 
 impl std::fmt::Debug for LeaseManager {
@@ -214,6 +218,7 @@ impl LeaseManager {
             manager,
             failures: Mutex::new(HashMap::new()),
             stop: CancellationToken::new(),
+            tick_pauses: AtomicUsize::new(0),
         }
     }
 
@@ -414,12 +419,44 @@ impl LeaseManager {
         self.stop.cancel();
     }
 
+    /// Holds off reclaims until the guard drops: a tick meanwhile does
+    /// nothing. A quiesce (R1.18) holds it, then
+    /// [`LeaseManager::extend_after_pause`].
+    pub fn pause_ticks(self: &Arc<Self>) -> TickPause {
+        self.tick_pauses.fetch_add(1, Ordering::SeqCst);
+        TickPause {
+            leases: Arc::clone(self),
+        }
+    }
+
+    /// Gives every unended lease at least `lease.grace` from now, after a
+    /// quiesce in which no heartbeat could renew it (R1.18). Returns how
+    /// many leases moved.
+    pub fn extend_after_pause(&self) -> Result<usize, LeaseError> {
+        let at_least = Timestamp(
+            Timestamp::now()
+                .0
+                .saturating_add(duration_millis(self.config.grace)),
+        );
+        let extended = self.db.extend_all_active_leases_to(at_least)?;
+        tracing::info!(
+            extended_count = extended,
+            grace_ms = duration_millis(self.config.grace),
+            "leases extended after the pause"
+        );
+        Ok(extended)
+    }
+
     /// One tick: reclaims, one at a time, every workspace whose lease is
     /// past its grace now. Returns the workspaces reclaimed. A reclaim that
     /// fails (its final snapshot, say) leaves the workspace `active` with
     /// its lease open, so the next tick retries; the error is logged on the
     /// first failing tick and every tenth after.
     pub async fn tick_once(&self) -> Result<Vec<WorkspaceId>, LeaseError> {
+        if self.tick_pauses.load(Ordering::SeqCst) > 0 {
+            tracing::debug!("lease expiry tick skipped: paused");
+            return Ok(Vec::new());
+        }
         let now = Timestamp::now();
         let expired = self.db.leases_expired_before(now)?;
         let Some(manager) = self.manager.upgrade() else {
@@ -514,6 +551,24 @@ impl LeaseManager {
         let outcome = tokio::spawn(task.instrument(tracing::Span::current())).await?;
         tracing::debug!(workspace_id = %ws, elapsed_ms = elapsed_ms(begun), ok = outcome.is_ok(), "reclaim finished");
         outcome
+    }
+}
+
+/// Holds lease expiry ticks off; see [`LeaseManager::pause_ticks`].
+#[must_use = "dropping the guard resumes reclaims at once"]
+pub struct TickPause {
+    leases: Arc<LeaseManager>,
+}
+
+impl std::fmt::Debug for TickPause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TickPause")
+    }
+}
+
+impl Drop for TickPause {
+    fn drop(&mut self) {
+        self.leases.tick_pauses.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

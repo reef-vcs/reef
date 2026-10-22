@@ -34,7 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -229,6 +229,9 @@ struct Inner {
     tasks: Mutex<JoinSet<()>>,
     stats: Mutex<Stats>,
     stop: CancellationToken,
+    /// Open [`AllPauseGuard`]s: while any is, no automatic snapshot of any
+    /// workspace starts (a quiesce, R1.18).
+    paused_all: AtomicUsize,
     /// Test hook: drop every event, as if the watcher had lost them.
     drop_events: AtomicBool,
     /// Test hook: fail every watch, as if no watcher could start.
@@ -306,6 +309,7 @@ impl Scheduler {
                 tasks: Mutex::new(JoinSet::new()),
                 stats: Mutex::new(Stats::default()),
                 stop: CancellationToken::new(),
+                paused_all: AtomicUsize::new(0),
                 drop_events: AtomicBool::new(false),
                 refuse_watches: AtomicBool::new(false),
             }),
@@ -452,6 +456,16 @@ impl Scheduler {
         PauseGuard {
             inner: tracked.then(|| Arc::downgrade(&self.inner)),
             ws,
+        }
+    }
+
+    /// Holds off watcher and fallback snapshots of every workspace until the
+    /// guard drops, as [`Scheduler::pause`] does for one; events still mark
+    /// workspaces dirty. A quiesce (R1.18) holds it.
+    pub fn pause_all(&self) -> AllPauseGuard {
+        self.inner.paused_all.fetch_add(1, Ordering::SeqCst);
+        AllPauseGuard {
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
@@ -653,6 +667,22 @@ impl Drop for PauseGuard {
     }
 }
 
+/// Holds off automatic snapshots of every workspace; see
+/// [`Scheduler::pause_all`].
+#[must_use = "dropping the guard resumes automatic snapshots at once"]
+#[derive(Debug)]
+pub struct AllPauseGuard {
+    inner: Weak<Inner>,
+}
+
+impl Drop for AllPauseGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.paused_all.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
 /// A scan slot and its thread pool; released on drop.
 pub(crate) struct ScanPermit {
     _permit: Option<OwnedSemaphorePermit>,
@@ -795,7 +825,7 @@ impl Inner {
     /// Starts every snapshot that is due: dirty workspaces past
     /// `min_interval`, and clean ones past `fallback_interval`.
     fn start_due(self: &Arc<Self>) {
-        if self.stop.is_cancelled() {
+        if self.stop.is_cancelled() || self.paused_all.load(Ordering::SeqCst) > 0 {
             return;
         }
         let now = Instant::now();

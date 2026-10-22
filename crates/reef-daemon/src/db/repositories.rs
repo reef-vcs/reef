@@ -87,6 +87,30 @@ impl Db {
         Ok(())
     }
 
+    /// Moves a repository to `root` with its `.jj/repo` at `jj_repo_path`
+    /// (both canonical): a restore to a new root (R1.18).
+    pub fn set_repository_paths(
+        &self,
+        id: RepoId,
+        root: &Path,
+        jj_repo_path: &Path,
+    ) -> Result<(), DbError> {
+        let (root, jj_repo_path) = (path_text(root)?, path_text(jj_repo_path)?);
+        let changed = self.with(|conn| {
+            conn.execute(
+                "UPDATE repositories SET root = ?2, jj_repo_path = ?3 WHERE id = ?1",
+                params![id, root, jj_repo_path],
+            )
+        })?;
+        if changed == 0 {
+            return Err(DbError::NotFound {
+                what: WHAT,
+                id: id.as_hex(),
+            });
+        }
+        Ok(())
+    }
+
     /// The repository with this id.
     pub fn repository(&self, id: RepoId) -> Result<RepositoryRecord, DbError> {
         self.with(|conn| {

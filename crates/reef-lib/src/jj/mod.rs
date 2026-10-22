@@ -9,12 +9,18 @@
 //! and moves a `Repo` between threads by ownership or behind a `Mutex`, never
 //! shares one through an `Arc` alone (ADR 0008, R1.03).
 
+/// The jj-lib version Reef is built against, recorded in backup manifests
+/// (R1.18). The workspace pins jj-lib exactly; a test checks this against
+/// `Cargo.lock`.
+pub const JJ_LIB_VERSION: &str = "0.46.0";
+
 pub mod gc;
 pub mod git;
 pub mod ignore;
 pub mod materialize;
 pub mod oplog;
 pub mod repo;
+pub mod restore;
 pub mod settings;
 pub mod snapshot;
 pub mod spec;
@@ -29,6 +35,7 @@ pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
     Repo,
 };
+pub use restore::RecreateWorkingCopyError;
 pub use snapshot::{
     Behind, PendingSnapshot, SnapshotCommit, SnapshotError, SnapshotPlan, commit_snapshot,
 };
@@ -52,3 +59,21 @@ pub use workspace::{
     CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
     MovePointerError, PointerMove, ResolveError, Resolved, ResolvedVia, StartPoint,
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn jj_lib_version_matches_the_lockfile() {
+        let lock = include_str!("../../../../Cargo.lock");
+        let pinned = lock
+            .split("[[package]]")
+            .find(|package| package.contains("name = \"jj-lib\""))
+            .and_then(|package| {
+                package
+                    .lines()
+                    .find_map(|line| line.strip_prefix("version = \""))
+            })
+            .and_then(|version| version.strip_suffix('"'));
+        assert_eq!(pinned, Some(super::JJ_LIB_VERSION));
+    }
+}
