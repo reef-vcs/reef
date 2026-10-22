@@ -1,7 +1,8 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
 //! through [`reef_daemon::client::Client`], except `config show`,
-//! `completions`, `guide`, and `daemon run`. Output follows [`out`]'s rules
-//! and failures exit with their kind's code ([`error`]).
+//! `completions`, `guide`, `init` when it registers nothing (`--check`,
+//! `--print`, `--no-register`), and `daemon run`. Output follows [`out`]'s
+//! rules and failures exit with their kind's code ([`error`]).
 //!
 //! The agent-facing contract (R1.26, ADR 0025) is kept here and in
 //! [`out`]: never interactive, every known fix on the error, the guide on
@@ -19,6 +20,7 @@ mod env;
 mod error;
 mod guide;
 mod here;
+mod init;
 mod out;
 mod render;
 mod repo;
@@ -158,6 +160,9 @@ enum Command {
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
+    /// Set up a repository for coding agents: register it and write AGENTS.md and the like.
+    #[command(after_help = "Example: reef init --check   # in CI: exit 3 if a file is stale")]
+    Init(init::Args),
     /// Register and forget repositories.
     #[command(infer_subcommands = true)]
     Repo(repo::Args),
@@ -337,6 +342,7 @@ pub(crate) fn main() -> ExitCode {
     let flag = match &command {
         Command::Config(_) | Command::Guide(_) => global.output.or(Some(Output::Text)),
         Command::Ws(args) if args.is_run() => global.output.or(Some(Output::Text)),
+        Command::Init(args) if args.prints_text() => global.output.or(Some(Output::Text)),
         _ => global.output,
     };
     let out = Out::detect(flag, global.quiet);
@@ -382,6 +388,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
         Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
+        Command::Init(args) => init::run(&global, out, args).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global.overrides(), out),
         Command::Completions { shell } => {

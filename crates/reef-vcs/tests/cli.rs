@@ -121,6 +121,7 @@ fn help_lists_every_command() {
         "ws",
         "here",
         "guide",
+        "init",
         "daemon",
         "config",
         "repo",

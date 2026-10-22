@@ -87,6 +87,9 @@ jobs:
         run: just lint
       - name: Build
         run: just build
+      # The committed agent files are what `reef init` writes (R1.27).
+      - name: Agent files
+        run: just agent-files
       # The daemon builds without Watchman too, and its unit tests (and
       # reef-lib's) pass that way.
       - name: Check without default features

@@ -47,7 +47,7 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, `reef init` for writing agent configuration, prebuilt binaries with a one-line installer, and the quickstart.
+Still to come in Phase 1: moving a workspace between changes, a reflink backend for btrfs and XFS, backup and restore, crash and load tests at 200 workspaces, prebuilt binaries with a one-line installer, and the quickstart.
 
 To try it from source:
 
@@ -59,7 +59,7 @@ cd /path/to/a/git/or/jj/repo
 reef ws run -- your-agent-command
 ```
 
-`reef` alone prints the agent guide ([docs/agent-guide.md](docs/agent-guide.md)), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
+`reef` alone prints the agent guide ([docs/agent-guide.md](docs/agent-guide.md)), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init` writes that guide into the repository's `AGENTS.md` (and `CLAUDE.md`, a Claude Code skill, and a Cursor rule when the repository uses them), so an agent starts in a workspace without being told; `reef init --check` in CI keeps them current. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
 
 ## Roadmap
 
