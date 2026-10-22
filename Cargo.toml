@@ -119,6 +119,15 @@ unimplemented = "warn"
 [profile.release]
 debug = 1          # keep symbols for profiling benches
 
+# Release binaries (R1.28, `.github/workflows/release.yml`): smaller and a little faster than
+# `release`, which keeps its symbols and build times for benches.
+[profile.dist]
+inherits = "release"
+debug = 0
+strip = true
+lto = "thin"
+codegen-units = 1
+
 # Generating synthetic trees dominates test time in debug builds (46 s for the large preset
 # unoptimized, about 10 s optimized), so the generator and its RNG are optimized even in dev.
 [profile.dev.package.reef-testing]

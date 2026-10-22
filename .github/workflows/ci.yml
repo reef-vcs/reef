@@ -90,6 +90,13 @@ jobs:
       # The committed agent files are what `reef init` writes (R1.27).
       - name: Agent files
         run: just agent-files
+      # install.sh against a tarball of the build above (R1.28). shellcheck is on the Ubuntu
+      # image only; the lint is the same on both.
+      - name: Installer lint
+        if: runner.os == 'Linux'
+        run: just installer-lint
+      - name: Installer
+        run: scripts/test-install.sh --build-dir target/debug
       # The daemon builds without Watchman too, and its unit tests (and
       # reef-lib's) pass that way.
       - name: Check without default features

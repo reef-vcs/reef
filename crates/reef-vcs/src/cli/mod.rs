@@ -50,11 +50,22 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// takes minutes on a large one.
 pub(crate) const REGISTER_TIMEOUT: Duration = Duration::from_mins(10);
 
+/// `reef --version`: the version, then the commit and target the binary was
+/// built from (`build.rs`, R1.28), so a bug report names the exact binary.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("REEF_BUILD_COMMIT"),
+    ", ",
+    env!("REEF_BUILD_TARGET"),
+    ")"
+);
+
 /// `reef`.
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "reef",
-    version,
+    version = VERSION,
     propagate_version = true,
     infer_subcommands = true,
     about = "Reef: version control built for a world where AI agents write most of the code",

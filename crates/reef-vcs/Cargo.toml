@@ -15,6 +15,13 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# `cargo binstall reef-vcs` (R1.28): the release workflow's tarballs. binstall falls back from a
+# Linux gnu target to musl, the only Linux build.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/reef-{ version }-{ target }.tar.gz"
+bin-dir = "reef-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [[bin]]
 name = "reef"
 path = "src/main.rs"

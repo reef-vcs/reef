@@ -143,8 +143,10 @@ pub fn filesystem_name(dir: &Path) -> io::Result<String> {
 #[cfg(target_os = "linux")]
 pub fn filesystem_name(dir: &Path) -> io::Result<String> {
     use nix::sys::statfs::{
-        BTRFS_SUPER_MAGIC, EXT4_SUPER_MAGIC, OVERLAYFS_SUPER_MAGIC, TMPFS_MAGIC, XFS_SUPER_MAGIC,
+        BTRFS_SUPER_MAGIC, EXT4_SUPER_MAGIC, FsType, OVERLAYFS_SUPER_MAGIC, TMPFS_MAGIC,
     };
+    // nix leaves XFS's out on musl, which the release binaries use (R1.28).
+    const XFS_SUPER_MAGIC: FsType = FsType(0x5846_5342);
 
     let fs_type = nix::sys::statfs::statfs(dir)
         .map_err(io::Error::from)?

@@ -1,0 +1,301 @@
+name: Release
+
+# Prebuilt binaries (R1.28). A `v<version>` tag matching Cargo.toml's workspace version builds the
+# four targets, tests the tarballs through install.sh, Homebrew, and cargo-binstall, publishes a
+# GitHub Release with the tarballs, SHA256SUMS, install.sh, and CHANGELOG.md's section, and pushes
+# the formula to the Homebrew tap. A dry run, `workflow_dispatch` with `dry_run` or a pull
+# request that touches the release machinery, does everything but publish, and the tarballs stay
+# on the run as artifacts. Unsigned until R4.17.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - install.sh
+      - packaging/**
+      - scripts/**
+      - crates/reef-vcs/build.rs
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and test only; keep the tarballs on the run, not a Release
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: check version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Inputs go through env rather than being spliced into the script.
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: |
+          version="$(scripts/version.sh)"
+          publish=false
+          if [[ "$EVENT" == push || ( "$EVENT" == workflow_dispatch && "$DRY_RUN" == false ) ]]; then
+            publish=true
+            if [[ "$REF" != "refs/tags/v$version" ]]; then
+              echo "::error::publishing reef $version needs the tag v$version, Cargo.toml's workspace version; this run is for $REF"
+              exit 1
+            fi
+            # Fail now, not after the builds, if the release would have no notes.
+            scripts/release-notes.sh "$version" >/dev/null
+          fi
+          echo "reef $version, publish: $publish"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "publish=$publish" >>"$GITHUB_OUTPUT"
+
+  # Every target builds on a native runner, so each binary runs its own smoke test.
+  build:
+    name: build ${{ matrix.target }}
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # A release builds from scratch; dry runs reuse a cache.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+          cache: ${{ needs.check-version.outputs.publish != 'true' }}
+          cache-key: ${{ matrix.target }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: |
+          if [[ "$TARGET" == *-linux-musl ]]; then
+            # Bundled SQLite and BLAKE3 compile C, which must target musl too.
+            export "CC_${TARGET//-/_}=musl-gcc"
+          fi
+          cargo build --profile dist --locked --target "$TARGET" -p reef-vcs -p reef-daemon
+      - name: Smoke test
+        run: |
+          bin="target/$TARGET/dist"
+          ls -l "$bin/reef" "$bin/reef-daemon"
+          "$bin/reef" --version | tee version.txt
+          grep -Eqx "reef ${VERSION//./\\.} \([0-9a-f]{12}, $TARGET\)" version.txt
+          "$bin/reef-daemon" --version
+          "$bin/reef" guide >guide.txt
+          head -1 guide.txt
+          if [[ "$TARGET" == *-linux-musl ]]; then
+            # Static (`file` says "statically linked" on arm64, "static-pie linked" on x86_64), so it
+            # runs where there is no glibc at all.
+            file "$bin/reef" "$bin/reef-daemon" | tee file.txt
+            [[ "$(grep -Ec 'static(ally|-pie) linked' file.txt)" -eq 2 ]]
+            docker run --rm -v "$PWD/$bin:/reef:ro" alpine:3.22 /reef/reef --version
+          fi
+      - name: Package
+        run: scripts/package.sh "target/$TARGET/dist" "$VERSION" "$TARGET" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reef-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  checksums:
+    name: checksums
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: reef-*
+          merge-multiple: true
+          path: dist
+      - run: |
+          cd dist
+          [[ "$(ls ./*.tar.gz | wc -l)" -eq 4 ]]
+          sha256sum ./*.tar.gz | sed 's| \./| |' >SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # install.sh, unattended, against this run's tarballs: on every target's runner, and under
+  # busybox in Alpine, the smallest container an agent is likely to start in.
+  install:
+    name: install.sh on ${{ matrix.os }}
+    needs: checksums
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - run: scripts/test-install.sh --dist dist
+      - name: Alpine
+        if: runner.os == 'Linux'
+        run: docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 sh -c 'apk add -q --no-cache bash curl && scripts/test-install.sh --dist dist'
+
+  # The tap's formula, rendered against this run's tarballs and installed from a scratch tap:
+  # Homebrew refuses a formula file outside a tap.
+  homebrew-test:
+    name: brew install
+    needs: [check-version, checksums]
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - run: |
+          scripts/update-tap.sh "$VERSION" dist/SHA256SUMS --base-url "file://$PWD/dist" --out reef.rb
+          brew tap-new --no-git reef-vcs/scratch
+          cp reef.rb "$(brew --repository)/Library/Taps/reef-vcs/homebrew-scratch/Formula/reef.rb"
+          brew install --formula reef-vcs/scratch/reef
+          brew test reef-vcs/scratch/reef
+          "$(brew --prefix)/bin/reef" --version
+          test -f "$(brew --prefix)/share/zsh/site-functions/_reef"
+
+  # `cargo binstall reef-vcs` resolves the URL this workflow publishes to, and the tarball has the
+  # binary where the metadata's bin-dir says. Before the release exists the download itself 404s.
+  binstall:
+    name: cargo binstall
+    needs: [check-version, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - run: |
+          cargo binstall --manifest-path crates/reef-vcs --dry-run --no-confirm --no-track \
+            --disable-strategies quick-install,compile --log-level debug reef-vcs >binstall.log 2>&1 || true
+          name="reef-$VERSION-x86_64-unknown-linux-musl"
+          if ! grep -qF "https://github.com/reef-vcs/reef/releases/download/v$VERSION/$name.tar.gz" binstall.log; then
+            cat binstall.log
+            echo "::error::cargo binstall did not resolve $name.tar.gz"
+            exit 1
+          fi
+          tar -tzf "dist/$name.tar.gz" | grep -qx "$name/reef"
+
+  release:
+    name: publish
+    needs: [check-version, checksums, install, homebrew-test, binstall]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release-notes.sh "$VERSION" >notes.md
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Reef $VERSION" --notes-file notes.md \
+            dist/*.tar.gz dist/SHA256SUMS install.sh
+
+  # Pushes the formula `homebrew-test` installed to the tap's main, with the tap's deploy key (write
+  # access to that repository only). A failure here does not fail the release: the formula can be
+  # updated by hand with `scripts/update-tap.sh <version> SHA256SUMS`.
+  homebrew:
+    name: homebrew tap
+    needs: [check-version, release]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+      - env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          advice="update it by hand: scripts/update-tap.sh $VERSION SHA256SUMS (SHA256SUMS from the release)"
+          if [[ -z "$DEPLOY_KEY" ]]; then
+            echo "::warning::no HOMEBREW_TAP_DEPLOY_KEY secret, so the tap was not updated; $advice"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/tap-key" hosts="$RUNNER_TEMP/known_hosts"
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" >"$key")
+          # GitHub's host keys over HTTPS, rather than trusting the first SSH connection.
+          curl -fsSL https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' >"$hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes"
+          if ! scripts/update-tap.sh "$VERSION" SHA256SUMS; then
+            echo "::warning::pushing to the tap failed; $advice"
+          fi
+          rm -f "$key"

@@ -74,8 +74,19 @@ synth-digest:
 completions shell="zsh":
     cargo run -q -p reef-vcs -- completions "$1"
 
+# install.sh and the release scripts (R1.28): shellcheck, then a parse by dash, the strictest
+# POSIX sh at hand. Needs shellcheck (`brew install shellcheck`, `apt-get install shellcheck`).
+installer-lint:
+    shellcheck install.sh scripts/*.sh
+    if command -v dash >/dev/null; then dash -n install.sh; else sh -n install.sh; fi
+
+# install.sh against a tarball of the debug build, into a scratch HOME (R1.28). Run `just build`
+# first.
+installer: installer-lint
+    scripts/test-install.sh --build-dir "${CARGO_TARGET_DIR:-target}/debug"
+
 # Everything CI runs, in CI order.
-ci: fmt-check lint build agent-files test doc deny
+ci: fmt-check lint build agent-files installer test doc deny
 
 clean:
     cargo clean
