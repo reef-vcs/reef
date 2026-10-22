@@ -2,8 +2,8 @@ name: Release
 
 # Prebuilt binaries (R1.28). A `v<version>` tag matching Cargo.toml's workspace version builds the
 # four targets, tests the tarballs through install.sh, Homebrew, and cargo-binstall, publishes a
-# GitHub Release with the tarballs, SHA256SUMS, install.sh, and CHANGELOG.md's section, and opens
-# a pull request on the Homebrew tap. A dry run, `workflow_dispatch` with `dry_run` or a pull
+# GitHub Release with the tarballs, SHA256SUMS, install.sh, and CHANGELOG.md's section, and pushes
+# the formula to the Homebrew tap. A dry run, `workflow_dispatch` with `dry_run` or a pull
 # request that touches the release machinery, does everything but publish, and the tarballs stay
 # on the run as artifacts. Unsigned until R4.17.
 
@@ -118,9 +118,10 @@ jobs:
           "$bin/reef" guide >guide.txt
           head -1 guide.txt
           if [[ "$TARGET" == *-linux-musl ]]; then
-            # Static, so it runs where there is no glibc at all.
+            # Static (`file` says "statically linked" on arm64, "static-pie linked" on x86_64), so it
+            # runs where there is no glibc at all.
             file "$bin/reef" "$bin/reef-daemon" | tee file.txt
-            [[ "$(grep -Ec 'static(-pie)? linked' file.txt)" -eq 2 ]]
+            [[ "$(grep -Ec 'static(ally|-pie) linked' file.txt)" -eq 2 ]]
             docker run --rm -v "$PWD/$bin:/reef:ro" alpine:3.22 /reef/reef --version
           fi
       - name: Package
@@ -263,8 +264,9 @@ jobs:
             --title "Reef $VERSION" --notes-file notes.md \
             dist/*.tar.gz dist/SHA256SUMS install.sh
 
-  # A failure here does not fail the release: the formula can be updated by hand with
-  # `scripts/update-tap.sh <version> SHA256SUMS`.
+  # Pushes the formula `homebrew-test` installed to the tap's main, with the tap's deploy key (write
+  # access to that repository only). A failure here does not fail the release: the formula can be
+  # updated by hand with `scripts/update-tap.sh <version> SHA256SUMS`.
   homebrew:
     name: homebrew tap
     needs: [check-version, release]
@@ -281,13 +283,19 @@ jobs:
         with:
           name: SHA256SUMS
       - env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           advice="update it by hand: scripts/update-tap.sh $VERSION SHA256SUMS (SHA256SUMS from the release)"
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "::warning::no HOMEBREW_TAP_TOKEN secret, so the tap was not updated; $advice"
+          if [[ -z "$DEPLOY_KEY" ]]; then
+            echo "::warning::no HOMEBREW_TAP_DEPLOY_KEY secret, so the tap was not updated; $advice"
             exit 0
           fi
-          if ! { gh auth setup-git && scripts/update-tap.sh "$VERSION" SHA256SUMS; }; then
-            echo "::warning::the tap pull request failed; $advice"
+          key="$RUNNER_TEMP/tap-key" hosts="$RUNNER_TEMP/known_hosts"
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" >"$key")
+          # GitHub's host keys over HTTPS, rather than trusting the first SSH connection.
+          curl -fsSL https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' >"$hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes"
+          if ! scripts/update-tap.sh "$VERSION" SHA256SUMS; then
+            echo "::warning::pushing to the tap failed; $advice"
           fi
+          rm -f "$key"
