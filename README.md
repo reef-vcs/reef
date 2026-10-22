@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 0 (foundations) is complete and Phase 1 (leased copy-on-write workspaces) is most of the way through. A daemon and `reef` CLI build from source and run today on macOS and Linux, but there is no installer or quickstart yet, and the CLI is not stable. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-1/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 0 (foundations) is complete and Phase 1 (leased copy-on-write workspaces) is most of the way through. A daemon and `reef` CLI build from source and run today on macOS and Linux. Prebuilt binaries and a one-line installer arrive with the first release, 0.1.0, at Phase 1's close; there is no quickstart yet, and the CLI is not stable. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-1/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -48,9 +48,19 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: crash and load tests at 200 workspaces, prebuilt binaries with a one-line installer, and the quickstart.
+Still to come in Phase 1: crash and load tests at 200 workspaces, the quickstart, and the first release.
 
-To try it from source:
+From the first release on, prebuilt binaries for macOS and Linux on arm64 and x86_64 install with any one of these (the Linux binaries are static, so they run in any container):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh   # ~/.local/bin, no sudo
+brew install reef-vcs/tap/reef
+cargo binstall --git https://github.com/reef-vcs/reef reef-vcs
+```
+
+The installer verifies the tarball against the release's `SHA256SUMS`, never prompts, and takes `REEF_VERSION` to pin a release and `REEF_INSTALL_DIR` to install elsewhere. The binaries are not signed or notarized yet (R4.17). `reef --version` names the commit and target a binary was built from.
+
+From source, with a Rust toolchain: `cargo install --git https://github.com/reef-vcs/reef reef-vcs`, which installs only `reef` (it runs the daemon itself), or in a checkout:
 
 ```sh
 cargo build --release

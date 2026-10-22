@@ -111,6 +111,33 @@ async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Value {
     json(&run(reef(daemon), &["ws", "create", "--repo", &repo.id]).await)
 }
 
+/// R1.28: `reef --version` names the commit and target, so a bug report
+/// names the exact binary. The commit is `unknown` outside a git checkout
+/// (a source tarball, a Reef workspace).
+#[test]
+fn version_names_commit_and_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = reef_in(tmp.path()).arg("--version").output().unwrap();
+    assert!(output.status.success());
+    let text = stdout(&output);
+    let rest = text
+        .trim_end()
+        .strip_prefix(concat!("reef ", env!("CARGO_PKG_VERSION"), " ("))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("unexpected --version: {text}"));
+    let (commit, target) = rest.split_once(", ").unwrap();
+    assert!(
+        commit == "unknown"
+            || (commit.len() == 12 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())),
+        "{commit}"
+    );
+    assert!(target.starts_with(std::env::consts::ARCH), "{target}");
+    assert!(target.contains(match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        os => os,
+    }));
+}
+
 // 1
 #[test]
 fn help_lists_every_command() {

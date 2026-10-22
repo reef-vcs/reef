@@ -1,0 +1,41 @@
+# Rendered by scripts/update-tap.sh from reef-vcs/reef's
+# packaging/homebrew/reef.rb.tmpl (R1.28); edit the template, not the tap.
+class Reef < Formula
+  desc "Version control for fleets of coding agents"
+  homepage "https://github.com/reef-vcs/reef"
+  version "@VERSION@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "@BASE_URL@/reef-@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "@BASE_URL@/reef-@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@BASE_URL@/reef-@VERSION@-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_aarch64-unknown-linux-musl@"
+    end
+    on_intel do
+      url "@BASE_URL@/reef-@VERSION@-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_x86_64-unknown-linux-musl@"
+    end
+  end
+
+  def install
+    bin.install "reef", "reef-daemon"
+    bash_completion.install "completions/reef.bash" => "reef"
+    zsh_completion.install "completions/_reef"
+    fish_completion.install "completions/reef.fish"
+  end
+
+  test do
+    assert_match "reef #{version} (", shell_output("#{bin}/reef --version")
+  end
+end

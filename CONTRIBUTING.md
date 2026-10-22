@@ -20,6 +20,8 @@ just ci      # everything CI runs, in CI order
 
 `just` with no arguments lists every recipe; read the [justfile](justfile) for what each one does. The pre-commit hook runs rustfmt and clippy; skip it with `git commit --no-verify` or `REEF_SKIP_HOOKS=1` when you need to.
 
+`just ci` also lints the installer with [ShellCheck](https://www.shellcheck.net) (`brew install shellcheck` or `apt-get install shellcheck`).
+
 [jj](https://github.com/jj-vcs/jj) is optional. One test, `open_repo_created_by_jj_cli` in `crates/reef-lib/tests/jj_spike.rs`, uses the `jj` binary and skips itself when `jj` is not on `PATH`.
 
 ## Workflow
