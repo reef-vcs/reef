@@ -27,8 +27,8 @@
 //! has passed (R1.29). Watchman's crawl of a new workspace's files, and the
 //! snapshot its first result asks for, otherwise run while the next
 //! workspace is cloned: on APFS that doubled the clone of a 100,000-file
-//! tree. Nothing is lost while it waits: the first result snapshots what was
-//! written meanwhile, and the fallback timer still runs.
+//! tree. Nothing is lost while it waits: the subscription, once up,
+//! snapshots what was written meanwhile, and the fallback timer still runs.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -570,15 +570,26 @@ impl Task {
     }
 
     /// Delivers the subscription's batches as debounced events until it
-    /// ends. Every subscription starts with a fresh-instance result, and
-    /// Watchman sends another after it restarts or recrawls; each asks for
-    /// one snapshot, since changes made before (or while Watchman was not
-    /// watching) were seen by nobody. jj's own clock decides how much that
-    /// snapshot scans.
+    /// ends. Each new subscription asks for one snapshot at once, since
+    /// changes made before it (or while Watchman was not watching) were
+    /// seen by nobody; a fresh-instance result, which Watchman sends after
+    /// it restarts or recrawls, asks for another. jj's own clock decides how
+    /// much each scans.
+    ///
+    /// The snapshot is asked for here rather than left to the
+    /// subscription's first result: with Watchman 4.9.0 (Ubuntu 24.04's
+    /// package) no snapshot followed a new subscription, so a write made
+    /// before it (during an R1.29 deferral, say) waited for the fallback
+    /// timer. A fresh-instance first result, where Watchman sends one,
+    /// arrives within the debounce and joins the same batch.
     async fn pump(&self, subscription: &mut Subscription<NameOnly>) -> Ended {
         let mut first = true;
-        let mut pending: Option<Pending> = None;
-        let mut deadline = tokio::time::Instant::now();
+        let mut pending = Some(Pending {
+            at: Instant::now(),
+            paths: Vec::new(),
+            rescan: true,
+        });
+        let mut deadline = tokio::time::Instant::now() + self.shared.debounce;
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => return Ended::Stopped,
