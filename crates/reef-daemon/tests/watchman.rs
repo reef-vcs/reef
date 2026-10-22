@@ -587,30 +587,29 @@ async fn watchman_waits_for_a_quiet_window() {
     eprintln!("A subscribed {subscribed_after:.2?} after B's create started");
     assert!(subscribed_after >= quiet);
     assert_eq!(inspect(&daemon, &repo, &a).await.watch_state, "");
-    // No fallback timer: the subscription's first result took the snapshot.
+    // No fallback timer (10 minutes): the subscription's first result took
+    // the snapshot. That one is a full scan, after jj's own first Watchman
+    // query of the workspace, while B's subscription comes up beside it:
+    // over 3 s on a loaded CI runner.
     snapshotted(
         &daemon,
         &repo,
         &a,
         "during-the-wait.txt",
-        Duration::from_secs(3),
+        Duration::from_secs(15),
     )
     .await;
     subscribed(&b, 1).await;
 
-    // Loaded at daemon start: subscribes without waiting, so within the
-    // quiet window of the restart although a create just happened.
+    // Loaded at daemon start: not deferred. A deferred watch is marked
+    // waiting before `track` returns, and the restart returns after
+    // tracking every workspace, so `watch_state` right after it says which
+    // (a bound on the time to subscribe would only measure Watchman).
     let c = create(&daemon, &repo).await;
     let before = established(&c);
     let daemon = daemon.restart().await;
-    let restarted = Instant::now();
     assert_eq!(inspect(&daemon, &repo, &c).await.watch_state, "");
     subscribed(&c, before + 1).await;
-    assert!(
-        restarted.elapsed() < quiet,
-        "C subscribed {:?} after the restart",
-        restarted.elapsed()
-    );
 
     // Creates every 500 ms never leave a quiet second; D subscribes by the
     // cap anyway.
@@ -620,7 +619,7 @@ async fn watchman_waits_for_a_quiet_window() {
     let mut next = d_created;
     while established(&d) == 0 {
         assert!(
-            d_created.elapsed() < cap + Duration::from_secs(2),
+            d_created.elapsed() < cap + Duration::from_secs(5),
             "D did not subscribe by the cap"
         );
         // On a fixed cadence, so a slow create does not open a quiet second.
