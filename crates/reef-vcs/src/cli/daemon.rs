@@ -87,6 +87,7 @@ async fn connect_only(global: &Global, socket: &Path) -> Result<Client, CliError
         Err(ClientError::Connect { .. }) => Err(CliError::NotRunning {
             socket: socket.to_owned(),
             start: global.daemon_start(),
+            autostart_off: false,
         }),
         Err(error) => Err(CliError::Daemon(error)),
     }

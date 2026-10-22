@@ -466,6 +466,7 @@ impl Advise for ManagerError {
     fn advice(&self) -> Option<Advice> {
         match self {
             Self::Db(error) => error.advice(),
+            Self::BaseCache(error) => error.advice(),
             Self::Lease(error) => error.advice(),
             Self::Register(error) => error.advice(),
             Self::Store(error) => error.advice(),
@@ -474,9 +475,7 @@ impl Advise for ManagerError {
                 WorkspaceState::Released | WorkspaceState::Reclaimed => {
                     Some(gone_advice(*id, *state, *repo))
                 }
-                WorkspaceState::Releasing => Some(Advice::hint(
-                    "It is being released now; it cannot be used again.",
-                )),
+                WorkspaceState::Releasing => Some(releasing_advice()),
                 WorkspaceState::Active => None,
             },
             Self::FinalSnapshotFailed { id, .. } => Some(Advice::run(
@@ -505,6 +504,12 @@ fn unregistered_advice(path: &std::path::Path) -> Advice {
         ),
         ["reef", "repo", "list"],
     )
+}
+
+/// The advice for a workspace being released: wait, since a release whose
+/// final snapshot fails puts it back to `active`.
+pub(crate) fn releasing_advice() -> Advice {
+    Advice::hint("It is being released; retry in a moment (a release that fails leaves it active).")
 }
 
 /// The advice for a workspace that was released or reclaimed: its

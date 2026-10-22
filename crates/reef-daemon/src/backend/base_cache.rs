@@ -38,6 +38,7 @@ use reef_lib::telemetry::elapsed_ms;
 use super::BackendError;
 use super::fs_util::allocated_bytes;
 use crate::db::{Db, DbError};
+use crate::error::{Advice, Advise};
 use crate::model::{BaseCacheRecord, RepoId, Timestamp};
 
 /// Suffix of an entry's state directory, beside the tree.
@@ -168,6 +169,16 @@ pub enum BaseCacheError {
     /// Measuring an entry's disk use failed.
     #[error(transparent)]
     Backend(#[from] BackendError),
+}
+
+/// Only the database's advice; nothing else here has a known fix.
+impl Advise for BaseCacheError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Db(error) => error.advice(),
+            _ => None,
+        }
+    }
 }
 
 impl Classify for BaseCacheError {

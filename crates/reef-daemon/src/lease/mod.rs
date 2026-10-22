@@ -28,7 +28,9 @@ use crate::model::{
     LeaseId, LeaseRecord, ReclaimReason, RepoId, Timestamp, WorkspaceId, WorkspaceRecord,
     WorkspaceState, duration_millis,
 };
-use crate::workspace::{Manager, ManagerError, ReclaimOutcome, ReleaseSpec, gone_advice};
+use crate::workspace::{
+    Manager, ManagerError, ReclaimOutcome, ReleaseSpec, gone_advice, releasing_advice,
+};
 
 /// The shortest lease a request may ask for, so `heartbeat_every` (a third
 /// of the length at most) stays a real interval.
@@ -176,7 +178,7 @@ impl Advise for LeaseError {
                 ),
                 ["reef", "ws", "create", "--repo", &repo.as_hex()],
             )),
-            Self::Releasing(_) => Some(Advice::hint("Retry in a moment.")),
+            Self::Releasing(_) => Some(releasing_advice()),
             Self::Db(error) => error.advice(),
             _ => None,
         }
@@ -337,9 +339,9 @@ impl LeaseManager {
                 Ok(record)
             }
             Renewal::NoWorkspace => Err(LeaseError::NotFound(ws)),
-            Renewal::Ended { state, at } => Err(LeaseError::Reclaimed {
+            Renewal::Ended { repo, state, at } => Err(LeaseError::Reclaimed {
                 workspace: ws,
-                repo: self.db.workspace(ws)?.repo_id,
+                repo,
                 state,
                 at,
             }),
@@ -348,9 +350,12 @@ impl LeaseManager {
                 workspace: ws,
                 lease,
             }),
-            Renewal::PastGrace { grace_ended_at } => Err(LeaseError::Expired {
+            Renewal::PastGrace {
+                repo,
+                grace_ended_at,
+            } => Err(LeaseError::Expired {
                 workspace: ws,
-                repo: self.db.workspace(ws)?.repo_id,
+                repo,
                 lease,
                 grace_ended_at,
             }),

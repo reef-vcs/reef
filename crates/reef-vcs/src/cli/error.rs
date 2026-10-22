@@ -29,6 +29,9 @@ pub(crate) enum CliError {
         /// The `reef daemon start` that starts it, with the global flags
         /// that chose the socket.
         start: Vec<String>,
+        /// Whether `--no-autostart` is why it was not started; `daemon
+        /// status` and `stop` never start one.
+        autostart_off: bool,
     },
     /// Starting the daemon failed.
     #[error("could not start the daemon: {reason}")]
@@ -102,14 +105,22 @@ impl CliError {
     pub(crate) fn advice(&self) -> Option<Advice> {
         match self {
             Self::Daemon(error) => error.advice(),
-            Self::NotRunning { start, .. } => Some(Advice {
-                hint: "Start the daemon, or drop --no-autostart to let any command start it."
-                    .to_owned(),
+            Self::NotRunning {
+                start,
+                autostart_off,
+                ..
+            } => Some(Advice {
+                hint: if *autostart_off {
+                    "Start the daemon, or drop --no-autostart to let any command start it."
+                } else {
+                    "Start the daemon."
+                }
+                .to_owned(),
                 next: start.clone(),
             }),
             Self::Refused { advice, .. } => advice.clone(),
             Self::Timeout { .. } => Some(Advice::hint(
-                "Retry with a longer --timeout; the daemon keeps working on the request.",
+                "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create.",
             )),
             _ => None,
         }
@@ -180,6 +191,7 @@ mod tests {
         let not_running = CliError::NotRunning {
             socket: "/s".into(),
             start: Vec::new(),
+            autostart_off: true,
         };
         assert_eq!(not_running.exit_code(), 6);
         assert_eq!(CliError::not_implemented("R1.17").exit_code(), 1);

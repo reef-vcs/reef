@@ -27,7 +27,7 @@ We will hold the CLI to five rules. Every later command, including R2.05's rewri
    - divergent or flagged: `reef ws inspect <id>`;
    - released, reclaimed, or expired: `reef ws create --repo <id>`.
 
-   Outside every workspace, `here` exits 0 and names the registered repository that contains the directory, if any. Its `next` is `["reef", "ws", "run", "--"]`, the one `next` that is a prefix: the command to append is the agent's own, and the hint says so.
+   Outside every workspace, `here` exits 0 and names the registered repository that contains the directory, if any. Its `next` is `["reef", "ws", "run", "--"]`, the one `next` that is a prefix: the command to append is the agent's own, and the hint says so. Like every command that talks to the daemon, `here` starts it when nothing answers: the daemon is the only thing that knows the answer, and starting it also gives leases their restart grace.
 5. **Names are additive.** Every command name in R1.22's surface stays valid for the 0.x line. New names arrive as visible aliases (`workspace` for `ws`, `new` for `ws create`, `ls` for every `list`, `rm` for `ws release`, `agent-guide` for `guide`) and unique prefixes (`infer_subcommands` on the root and every noun). An ambiguous prefix is a usage error, never a guess. `status` is not an alias, because R2.02 owns `reef status`.
 
 Two smaller defaults come with the contract:
@@ -38,7 +38,8 @@ Two smaller defaults come with the contract:
 ## Consequences
 
 - An agent that runs `reef`, fails, or gets lost is one command away from the next step. RX.07 measures whether that is true in practice.
-- Every new error the daemon or the CLI returns is a question: is the fix known? If it is, the fix goes in `advice()`, not the message. `every_next_is_a_real_command` drives the daemon's cases through the binary and checks each `next` against the command tree, so a renamed command breaks a test, not an agent.
+- Every new error the daemon or the CLI returns is a question: is the fix known? If it is, the fix goes in `advice()`, not the message. A unit test in the CLI builds every advised daemon error and checks each `next` against clap's command tree, and `every_next_is_a_real_command` drives the common cases through the binary and runs some of them verbatim, so a renamed command breaks a test, not an agent.
+- An error type with a `#[error(transparent)]` variant around an advised error must implement `Advise` too and be listed in `advice_of`, because a transparent variant's `source()` skips the error it wraps.
 - The guide is the most-read text Reef ships to agents. The byte budget is the stopping rule for arguments about what goes in it: something new comes in only when something else goes out.
 - `reef guide` embeds a file outside the crate (`../../../../docs/agent-guide.md`). Publishing `reef-vcs` to crates.io would need the file copied into the crate first. Binaries (R1.28) are unaffected.
 - `ErrorDetail` grew two fields. Old clients ignore them. A client that reads them from an older daemon gets none and behaves as before.

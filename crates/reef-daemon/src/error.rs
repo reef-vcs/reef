@@ -16,10 +16,13 @@ use prost::Message as _;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use tonic::{Code, Status};
 
+use crate::backend::BaseCacheError;
 use crate::db::DbError;
 use crate::lease::LeaseError;
+use crate::maintenance::gc::GcRunError;
 use crate::proto::v0::ErrorDetail;
 use crate::repo::RegisterError;
+use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::workspace::ManagerError;
 
@@ -67,7 +70,10 @@ impl Advice {
     }
 }
 
-/// An error that knows how it is fixed.
+/// An error that knows how it is fixed. Every error type with a
+/// `#[error(transparent)]` variant wrapping one of these implements it too,
+/// delegating, and is in [`advice_of`]'s list: a transparent variant's
+/// `source()` skips the error it wraps.
 pub trait Advise {
     /// The fix, when this error has a known one.
     fn advice(&self) -> Option<Advice>;
@@ -89,6 +95,12 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<RegisterError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<DbError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<BaseCacheError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<ReindexError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<GcRunError>() {
             error.advice()
         } else {
             None
@@ -461,6 +473,26 @@ mod tests {
             advice.hint,
             "Give more of the id: abcd matches workspace abcd000000000001, abcd000000000002."
         );
+    }
+
+    #[test]
+    fn every_db_wrapper_passes_its_advice_on() {
+        let not_found = || DbError::NotFound {
+            what: "workspace",
+            id: "abcd".into(),
+        };
+        let list = ["reef", "ws", "list", "--all"];
+        for status in [
+            status(BaseCacheError::Db(not_found())),
+            status(ReindexError::Db(not_found())),
+            status(GcRunError::Db(not_found())),
+            status(ManagerError::BaseCache(BaseCacheError::Db(not_found()))),
+            status(LeaseError::Db(not_found())),
+            status(RegisterError::Db(not_found())),
+            status(StoreError::Db(not_found())),
+        ] {
+            assert_eq!(advice_in(&status).next, list, "{status:?}");
+        }
     }
 
     #[test]

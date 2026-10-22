@@ -1102,53 +1102,73 @@ fn help_fits_sixty_lines() {
 }
 
 /// Every command finishes with stdin closed: none prompts, pages, or
-/// waits on input. `daemon run` and `daemon start` start a daemon by design
-/// and are left out; autostart's tests cover them.
-#[test]
-fn every_command_completes_with_stdin_closed() {
-    let tmp = short_tempdir();
-    let state = tmp.path().join("state");
-    let _guard = StopOnDrop(state.clone());
+/// waits on input. Run against a live daemon from a registered checkout,
+/// so each command gets past connecting; `ws run -- cat` is the one whose
+/// child reads stdin. `daemon run`, `start`, and `stop` are left out: they
+/// start a daemon or signal this process, which hosts the test daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_command_completes_with_stdin_closed() {
+    let (daemon, repo) = with_repo().await;
+    let state = daemon.state_dir().to_owned();
     let mut lines: Vec<Vec<String>> = Vec::new();
     for command in leaf_commands(&state) {
-        if command == ["daemon", "run"] || command == ["daemon", "start"] {
+        if command.first().is_some_and(|noun| noun == "daemon")
+            && command.get(1).is_some_and(|verb| verb != "status")
+        {
             continue;
         }
-        let mut bogus = command.clone();
-        bogus.push("bogus".to_owned());
+        // `ws run bogus` would make a workspace to fail in; `ws run -- cat`
+        // below covers the command that runs.
+        if command != ["ws", "run"] {
+            let mut bogus = command.clone();
+            bogus.push("bogus".to_owned());
+            lines.push(bogus);
+        }
         lines.push(command);
-        lines.push(bogus);
     }
-    lines.push(["ws", "run", "--", "true"].map(str::to_owned).to_vec());
-    lines.push(Vec::new());
-    for line in lines {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_reef"));
-        for var in [
-            "REEF_SOCKET",
-            "REEF_CONFIG",
-            "REEF_OUTPUT",
-            "REEF_WORKSPACE",
-        ] {
-            command.env_remove(var);
-        }
-        command
-            .env("REEF_STATE_DIR", &state)
-            .arg("--no-autostart")
-            .args(&line)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn().unwrap();
-        let started = Instant::now();
-        while child.try_wait().unwrap().is_none() {
-            if started.elapsed() > Duration::from_secs(5) {
-                let _ = child.kill();
-                panic!("reef {} did not finish with stdin closed", line.join(" "));
+    for line in [
+        &["ws", "run", "--", "cat"][..],
+        &["repo", "register", "."],
+        &[],
+    ] {
+        lines.push(line.iter().map(|word| (*word).to_owned()).collect());
+    }
+    let root = repo.root.clone();
+    tokio::task::spawn_blocking(move || {
+        for line in lines {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_reef"));
+            for var in [
+                "REEF_SOCKET",
+                "REEF_CONFIG",
+                "REEF_OUTPUT",
+                "REEF_WORKSPACE",
+            ] {
+                command.env_remove(var);
             }
-            std::thread::sleep(Duration::from_millis(20));
+            command
+                .env("REEF_STATE_DIR", &state)
+                .current_dir(&root)
+                .arg("--no-autostart")
+                .args(&line)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let mut child = command.spawn().unwrap();
+            let started = Instant::now();
+            // Generous: a real `ws gc` or `ws create` under a loaded test
+            // run takes seconds. A command waiting on stdin never finishes.
+            while child.try_wait().unwrap().is_none() {
+                if started.elapsed() > Duration::from_secs(60) {
+                    let _ = child.kill();
+                    panic!("reef {} did not finish with stdin closed", line.join(" "));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            eprintln!("TIMING {:?} {}", started.elapsed(), line.join(" "));
         }
-    }
-    assert!(!state.join("daemon.pid").exists(), "no daemon was started");
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

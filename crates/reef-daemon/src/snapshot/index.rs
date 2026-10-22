@@ -40,6 +40,7 @@ use rusqlite::{Connection, OptionalExtension as _, Row, params};
 
 use super::SnapshotKind;
 use crate::db::{Db, DbError};
+use crate::error::{Advice, Advise};
 use crate::model::{RepoId, Timestamp, WorkspaceId};
 use crate::repo::{RepoHandle, RepoHead, RepoThreadError};
 
@@ -234,6 +235,16 @@ pub enum ReindexError {
     /// The operation log could not be read.
     #[error("read the operation log")]
     OpLog(#[from] OpLogError),
+}
+
+/// Only the database's advice; nothing else here has a known fix.
+impl Advise for ReindexError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Db(error) => error.advice(),
+            _ => None,
+        }
+    }
 }
 
 impl Classify for ReindexError {

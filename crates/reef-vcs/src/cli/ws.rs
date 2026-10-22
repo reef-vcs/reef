@@ -39,13 +39,14 @@ enum WsCommand {
         /// Include released and reclaimed workspaces.
         #[arg(long)]
         all: bool,
-        /// Show at most this many, the newest; 0 for all.
+        /// Show at most this many, the newest; 0 for all. A cut is noted on
+        /// stderr, so exactly N may mean there are more.
         #[arg(long, value_name = "N", default_value_t = LIST_LIMIT)]
         limit: usize,
     },
     /// Show one workspace, after a snapshot of its files.
     Inspect {
-        /// A workspace id or unique prefix.
+        /// A workspace id, unique prefix, or path inside it.
         workspace: String,
         /// Report the last snapshot instead of taking one.
         #[arg(long)]
@@ -54,7 +55,7 @@ enum WsCommand {
     /// Snapshot a workspace, then remove its directory and end its lease.
     #[command(visible_alias = "rm")]
     Release {
-        /// A workspace id or unique prefix.
+        /// A workspace id, unique prefix, or path inside it.
         workspace: String,
         /// Skip the final snapshot; unsnapshotted edits are lost.
         #[arg(long)]

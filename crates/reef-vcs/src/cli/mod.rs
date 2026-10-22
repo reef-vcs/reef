@@ -311,9 +311,10 @@ pub(crate) fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage_error(&error, &args),
     };
-    let Some(command) = &cli.command else {
+    let Cli { global, command } = cli;
+    let Some(command) = command else {
         // `reef` alone: the guide, exit 0, never clap's usage error.
-        let out = Out::detect(cli.global.output.or(Some(Output::Text)), cli.global.quiet);
+        let out = Out::detect(global.output.or(Some(Output::Text)), global.quiet);
         return match guide::print(&out, &guide::Args::default()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -326,20 +327,20 @@ pub(crate) fn main() -> ExitCode {
     // start before the process has any other thread.
     if let Command::Daemon(daemon::Args {
         command: daemon::DaemonCommand::Run,
-    }) = command
+    }) = &command
     {
-        return daemon::run_foreground(&cli.global);
+        return daemon::run_foreground(&global);
     }
     // `config show` prints TOML unless asked for JSON; see its module. `ws
     // run`'s stdout is its command's, so it prints JSON only when asked. The
     // guide is prose for a model to read; JSON escapes would cost it tokens.
-    let flag = match command {
-        Command::Config(_) | Command::Guide(_) => cli.global.output.or(Some(Output::Text)),
-        Command::Ws(args) if args.is_run() => cli.global.output.or(Some(Output::Text)),
-        _ => cli.global.output,
+    let flag = match &command {
+        Command::Config(_) | Command::Guide(_) => global.output.or(Some(Output::Text)),
+        Command::Ws(args) if args.is_run() => global.output.or(Some(Output::Text)),
+        _ => global.output,
     };
-    let out = Out::detect(flag, cli.global.quiet);
-    let _logging = match init_logging(cli.global.verbose) {
+    let out = Out::detect(flag, global.quiet);
+    let _logging = match init_logging(global.verbose) {
         Ok(guard) => guard,
         Err(error) => {
             out.error(&error);
@@ -358,7 +359,7 @@ pub(crate) fn main() -> ExitCode {
             return ExitCode::from(error.exit_code());
         }
     };
-    match runtime.block_on(run(cli, &out)) {
+    match runtime.block_on(run(global, command, &out)) {
         Ok(code) => code,
         Err(error) => {
             out.error(&error);
@@ -377,11 +378,7 @@ fn init_logging(verbose: u8) -> Result<logging::LoggingGuard, CliError> {
     logging::init(&options).map_err(CliError::Logging)
 }
 
-async fn run(cli: Cli, out: &Out) -> Result<ExitCode, CliError> {
-    let Cli { global, command } = cli;
-    let Some(command) = command else {
-        return guide::print(out, &guide::Args::default()).map(|()| ExitCode::SUCCESS);
-    };
+async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, CliError> {
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
         Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
@@ -424,6 +421,7 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
             return Err(CliError::NotRunning {
                 socket: socket.clone(),
                 start: global.daemon_start(),
+                autostart_off: true,
             });
         }
         Err(error) => return Err(CliError::Daemon(error)),

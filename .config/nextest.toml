@@ -11,7 +11,8 @@ success-output = "immediate"
 # The Watchman tests (R1.14) share the machine's one Watchman server, and
 # `survives_watchman_restart` shuts it down, so they run one at a time.
 # The GC tests (R1.17) each run `git gc`, which packs on every core; one at a
-# time, they leave the timing-bound tests beside them their CPU.
+# time, they leave the timing-bound tests beside them their CPU. R1.26's
+# stdin test runs every command, `ws gc` among them.
 [test-groups]
 watchman = { max-threads = 1 }
 gc = { max-threads = 1 }
@@ -24,7 +25,7 @@ test-group = "watchman"
 success-output = "immediate"
 
 [[profile.default.overrides]]
-filter = "(package(reef-daemon) & binary(gc)) | (package(reef-lib) & binary(jj_gc))"
+filter = "(package(reef-daemon) & binary(gc)) | (package(reef-lib) & binary(jj_gc)) | (package(reef-vcs) & binary(cli) & test(every_command_completes_with_stdin_closed))"
 test-group = "gc"
 
 # The backend conformance suite (R1.11) prints each kind's timing row and

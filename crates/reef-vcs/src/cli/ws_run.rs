@@ -66,8 +66,8 @@ pub(crate) struct Args {
     /// The lease length [default: the daemon's lease.default].
     #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
     lease: Option<Duration>,
-    /// Run in this existing workspace (id or unique prefix) instead of
-    /// creating one.
+    /// Run in this existing workspace (id, unique prefix, or path inside
+    /// it) instead of creating one.
     #[arg(
         long,
         value_name = "WS",

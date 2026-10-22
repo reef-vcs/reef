@@ -5,8 +5,10 @@
 // `repo` accepts a repo id, a unique id prefix (4 or more hex characters),
 // or an absolute path inside a registered root. Where a workspace is named
 // too, `repo` may be empty and the workspace id or prefix is looked up in
-// every repository. Every mutating response carries the `op_id` of the
-// operation it recorded, empty when it recorded none.
+// every repository. A workspace may also be named by an absolute path inside
+// an active workspace's directory (R1.26), in every request that names one.
+// Every mutating response carries the `op_id` of the operation it recorded,
+// empty when it recorded none.
 syntax = "proto3";
 
 package reef.daemon.v0;
@@ -185,7 +187,7 @@ message SnapshotResponse {
 
 message HeartbeatRequest {
   string repo = 1;
-  // A workspace id or unique prefix.
+  // A workspace id or unique prefix, or a path inside it.
   string workspace_id = 2;
   // The lease being renewed: the capability. A lease that is not the
   // workspace's current one is `FAILED_PRECONDITION` (Conflict), as is a
