@@ -24,6 +24,8 @@ Output is JSON when piped; errors carry `hint` and `next`, a command to run.
 
 - `reef ws create` prints a new workspace's path; `reef ws release <id>`
   ends it. `reef ws list`, `reef ws inspect <id>`. Ids take 4+ characters.
+- `cd "$(reef ws move -o text <id> --new-on main)"` snapshots, then starts the next
+  task in the same directory and lease; `cd` again, as an overlay is remounted.
 - `--repo <path|id>` names the repository; default: the current directory's.
 
 ## Inside ws run

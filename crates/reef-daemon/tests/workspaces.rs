@@ -22,9 +22,11 @@ use reef_daemon::client::ClientError;
 use reef_daemon::error::detail_of;
 use reef_daemon::model::{ReclaimReason, WorkspaceState};
 use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace, create_request};
+use reef_daemon::proto::v0::{
+    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
+};
 use reef_lib::error::{Classify as _, ErrorKind};
-use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo};
+use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo, RepoPath};
 use reef_testing::synth::{self, Preset};
 
 const OWNER: &str = "tester@host";
@@ -1062,4 +1064,345 @@ async fn register_initializes_jj_alongside_git() {
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::NotFound);
     assert!(error.to_string().contains("run git init first"), "{error}");
+}
+
+// R1.06: moving a workspace between changes, numbered as its brief numbers
+// them.
+
+fn move_request(repo: &SyntheticRepo, ws: &Workspace, target: move_request::Target) -> MoveRequest {
+    MoveRequest {
+        repo: repo.id.clone(),
+        workspace: ws.id.clone(),
+        target: Some(target),
+        ..MoveRequest::default()
+    }
+}
+
+/// The contents of `path` in `commit`'s tree, read from the registered
+/// root's repository.
+async fn file_at(root: &Path, commit: &str, path: &str) -> Option<String> {
+    let commit: CommitIdHex = commit.parse().unwrap();
+    let blob = open(root)
+        .await
+        .file_blob_at(&commit, RepoPath::from_internal_string(path).unwrap())
+        .await
+        .unwrap()?;
+    Some(String::from_utf8(blob.bytes).unwrap())
+}
+
+/// A second change: a workspace on the default commit that wrote `name`
+/// and snapshotted it. Returns the snapshot's commit.
+async fn change_with_file(daemon: &TestDaemon, repo: &SyntheticRepo, name: &str) -> String {
+    let ws = create(daemon, repo).await;
+    std::fs::write(Path::new(&ws.path).join(name), "a second change\n").unwrap();
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    snapshot.commit_id
+}
+
+// R1.06 1
+#[tokio::test(flavor = "multi_thread")]
+async fn move_keeps_lease_and_path() {
+    let (daemon, repo) = fixture().await;
+    let base = default_wc(&repo.root).await;
+    let ws = create(&daemon, &repo).await;
+    let path = PathBuf::from(&ws.path);
+    std::fs::write(path.join("x.txt"), "x\n").unwrap();
+
+    let moved = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::NewOn(base.commit_id.to_string()),
+        ))
+        .await
+        .unwrap();
+    let after = moved.workspace.clone().unwrap();
+    assert_eq!(after.id, ws.id);
+    assert_eq!(after.path, ws.path);
+    assert_eq!(after.backend, ws.backend);
+    assert_eq!(after.state, "active");
+    let (lease, lease_after) = (ws.lease.unwrap(), after.lease.unwrap());
+    assert_eq!(lease_after.id, lease.id);
+    assert_eq!(
+        millis(lease_after.expires_at.as_ref().unwrap()),
+        millis(lease.expires_at.as_ref().unwrap()),
+        "a move is not a heartbeat"
+    );
+    assert_ne!(after.change_id, ws.change_id, "a new change");
+    let commit: CommitIdHex = after.commit_id.parse().unwrap();
+    assert_eq!(
+        open(&repo.root)
+            .await
+            .commit_parents(&commit)
+            .await
+            .unwrap(),
+        std::slice::from_ref(&base.commit_id)
+    );
+
+    assert!(!path.join("x.txt").exists(), "the new change's tree");
+    let manifest = synth::load_manifest(&repo.root).unwrap().unwrap();
+    assert!(path.join(&manifest.text_files[0]).is_file());
+    let left = open(&repo.root)
+        .await
+        .resolve_revision(&ws.change_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        file_at(&repo.root, left.commit_id.as_str(), "x.txt").await,
+        Some("x\n".to_owned()),
+        "the final snapshot holds the edit"
+    );
+
+    assert_ne!(moved.final_op_id, "");
+    assert_ne!(moved.op_id, "");
+    assert_ne!(moved.final_op_id, moved.op_id);
+    let log = open(&repo.root).await.op_log(20).await.unwrap();
+    let description = format!(
+        "reef: move workspace {} to a new change on {}",
+        ws.id, base.commit_id
+    );
+    let final_op = log
+        .iter()
+        .find(|op| op.id.as_str() == moved.final_op_id)
+        .unwrap();
+    assert!(final_op.is_snapshot);
+    assert_eq!(final_op.description, description);
+    let pointer_op = log.iter().find(|op| op.id.as_str() == moved.op_id).unwrap();
+    assert!(!pointer_op.is_snapshot);
+    assert_eq!(pointer_op.description, description);
+    let inspected = daemon
+        .client
+        .inspect_workspace(&repo.id, &ws.id, false)
+        .await
+        .unwrap();
+    assert_eq!(inspected.recent_snapshots[0].op_id, moved.final_op_id);
+    assert_eq!(inspected.recent_snapshots[0].kind, "move");
+    assert_eq!(inspected.workspace.unwrap().change_id, after.change_id);
+    assert_eq!(all_workspaces(&daemon).await.len(), 1, "no new row");
+}
+
+// R1.06 2
+#[tokio::test(flavor = "multi_thread")]
+async fn move_to_existing_change_edits_it() {
+    let (daemon, repo) = fixture().await;
+    let target = change_with_file(&daemon, &repo, "c.txt").await;
+    let target_change = open(&repo.root)
+        .await
+        .resolve_revision(&target)
+        .await
+        .unwrap()
+        .change_id;
+    let ws = create(&daemon, &repo).await;
+
+    let moved = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::Change(target_change.as_str()[..12].to_owned()),
+        ))
+        .await
+        .unwrap();
+    let after = moved.workspace.unwrap();
+    assert_eq!(after.commit_id, target);
+    assert_eq!(after.change_id, target_change.as_str());
+    assert_eq!(moved.final_op_id, "", "nothing to snapshot");
+    assert!(Path::new(&ws.path).join("c.txt").is_file());
+    let error = open(&repo.root)
+        .await
+        .resolve_revision(&ws.change_id)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::NotFound,
+        "the empty change it left is abandoned, as `jj edit` does"
+    );
+
+    std::fs::write(Path::new(&ws.path).join("d.txt"), "d\n").unwrap();
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    let rewritten = open(&repo.root)
+        .await
+        .resolve_revision(&snapshot.commit_id)
+        .await
+        .unwrap();
+    assert_eq!(rewritten.change_id, target_change, "the snapshot rewrote C");
+    assert_eq!(
+        file_at(&repo.root, &snapshot.commit_id, "c.txt").await,
+        Some("a second change\n".to_owned())
+    );
+}
+
+// R1.06 3
+#[tokio::test(flavor = "multi_thread")]
+async fn move_with_failing_snapshot_is_conflict() {
+    let (daemon, repo) = fixture().await;
+    let base = default_wc(&repo.root).await;
+    let ws = create(&daemon, &repo).await;
+    let path = PathBuf::from(&ws.path);
+    let blocked = path.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("inside.txt"), "unreadable\n").unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&blocked).is_ok() {
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: permissions are not enforced here (running as root?)");
+        return;
+    }
+
+    let error = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::NewOn(base.commit_id.to_string()),
+        ))
+        .await
+        .unwrap_err();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(kind_of(&error), ErrorKind::Conflict);
+    let ClientError::Rpc { status, .. } = &error else {
+        unreachable!()
+    };
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        status.message().contains("unsnapshotted write in flight"),
+        "{}",
+        status.message()
+    );
+    let advice = error.advice().expect("advice");
+    assert_eq!(advice.next, ["reef", "ws", "inspect", ws.id.as_str()]);
+
+    let row = daemon
+        .client
+        .inspect_workspace(&repo.id, &ws.id, false)
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    assert_eq!(row.change_id, ws.change_id);
+    assert_eq!(row.commit_id, ws.commit_id);
+    assert_eq!(row.path, ws.path);
+    assert!(
+        blocked.join("inside.txt").is_file(),
+        "the directory is intact"
+    );
+    let manifest = synth::load_manifest(&repo.root).unwrap().unwrap();
+    assert!(path.join(&manifest.text_files[0]).is_file());
+}
+
+// R1.06 4
+#[tokio::test(flavor = "multi_thread")]
+async fn move_is_cheap_on_shared_tree() {
+    let (daemon, repo) = fixture().await;
+    let target = change_with_file(&daemon, &repo, "one-more.txt").await;
+    let ws = create(&daemon, &repo).await;
+
+    let moved = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::NewOn(target),
+        ))
+        .await
+        .unwrap();
+    eprintln!(
+        "backend {}: tree_replaced {}, files {} updated, {} added, {} removed",
+        ws.backend,
+        moved.tree_replaced,
+        moved.files_updated,
+        moved.files_added,
+        moved.files_removed
+    );
+    if moved.tree_replaced {
+        assert_eq!(
+            moved.files_updated + moved.files_added + moved.files_removed,
+            0
+        );
+    } else {
+        assert_eq!(
+            moved.files_updated + moved.files_added + moved.files_removed,
+            1,
+            "{moved:?}"
+        );
+        assert_eq!(moved.files_added, 1);
+    }
+    assert!(Path::new(&ws.path).join("one-more.txt").is_file());
+}
+
+// R1.06 5
+#[tokio::test(flavor = "multi_thread")]
+async fn move_then_first_snapshot_is_noop() {
+    let (daemon, repo) = fixture().await;
+    let target = change_with_file(&daemon, &repo, "theirs.txt").await;
+    let ws = create(&daemon, &repo).await;
+    std::fs::write(Path::new(&ws.path).join("mine.txt"), "mine\n").unwrap();
+
+    let moved = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::NewOn(target.clone()),
+        ))
+        .await
+        .unwrap();
+    let after = moved.workspace.unwrap();
+    assert!(Path::new(&ws.path).join("theirs.txt").is_file());
+    assert!(!Path::new(&ws.path).join("mine.txt").exists());
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(!snapshot.changed, "{snapshot:?}");
+    assert_eq!(snapshot.commit_id, after.commit_id);
+
+    // Moving to the change it is on records no pointer operation.
+    let again = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::Change(after.change_id.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(again.op_id, "");
+    assert_eq!(again.final_op_id, "");
+    assert_eq!(again.workspace.unwrap().commit_id, after.commit_id);
+}
+
+/// A released workspace cannot move, and the advice is to create another.
+#[tokio::test(flavor = "multi_thread")]
+async fn move_of_released_workspace_is_conflict() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    daemon
+        .client
+        .release_workspace(&repo.id, &ws.id, true, false)
+        .await
+        .unwrap();
+    let error = daemon
+        .client
+        .move_workspace(move_request(
+            &repo,
+            &ws,
+            move_request::Target::NewOn("main".into()),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&error), ErrorKind::Conflict);
 }

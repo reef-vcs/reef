@@ -806,6 +806,131 @@ async fn workspaces_on_commit_wc_change_and_parents() {
     );
 }
 
+// R1.06: moving a workspace's pointer, then checking the new tree out in
+// its own working copy, writes only the files that differ.
+#[tokio::test]
+async fn move_pointer_then_check_out_tree() {
+    let (mut fx, commit) = Fixture::with_files().await;
+    let (mut ws, root, _) = fx.create("reef-x", StartPoint::NewOn(commit.clone())).await;
+    write(&root, "a.txt", "a\n");
+    write(&root, "dir/b.txt", "b\n");
+    ws.reset_to(&commit).await.unwrap();
+    write(&root, "c.txt", "c\n");
+    let edited = ws.snapshot("reef: snapshot workspace x").await.unwrap();
+    assert!(edited.changed);
+    fx.main.reload_at_head().await.unwrap();
+
+    let moved = fx
+        .main
+        .move_pointer(
+            "reef-x",
+            StartPoint::NewOn(commit.clone()),
+            "reef: move workspace x",
+        )
+        .await
+        .unwrap();
+    let op_id = moved.op_id.clone().expect("an operation");
+    assert_eq!(fx.main.op_id(), op_id, "the caller adopts the operation");
+    assert_eq!(
+        fx.main.op_log(1).await.unwrap()[0].description,
+        "reef: move workspace x"
+    );
+    assert_eq!(moved.from, edited.wc_commit);
+    assert_ne!(moved.wc.commit_id, edited.wc_commit);
+    assert_eq!(
+        fx.main.commit_parents(&moved.wc.commit_id).await.unwrap(),
+        std::slice::from_ref(&commit)
+    );
+    assert!(
+        fx.head_ids().contains(edited.wc_commit.as_str()),
+        "the commit it left holds an edit, so it stays"
+    );
+
+    ws.set_head(fx.main.readonly());
+    let summary = ws.check_out_tree(&moved.wc.commit_id).await.unwrap();
+    assert_eq!(
+        (
+            summary.updated,
+            summary.added,
+            summary.removed,
+            summary.skipped
+        ),
+        (0, 0, 1, 0),
+        "{summary:?}"
+    );
+    assert!(!root.join("c.txt").exists());
+    assert!(root.join("a.txt").is_file());
+    assert_eq!(ws.working_copy_op_id(), op_id);
+    let after = ws.snapshot("reef: snapshot workspace x").await.unwrap();
+    assert!(!after.changed, "{after:?}");
+    assert_eq!(after.wc_commit, moved.wc.commit_id);
+}
+
+#[tokio::test]
+async fn move_pointer_edits_abandons_and_refuses() {
+    let (mut fx, commit) = Fixture::with_files().await;
+    let (ws, _, _) = fx.create("reef-x", StartPoint::NewOn(commit.clone())).await;
+    let empty = wc_commit_id(&ws);
+    let before = fx.main.op_id();
+
+    // Editing the commit it is on records nothing and abandons nothing.
+    let same = fx
+        .main
+        .move_pointer("reef-x", StartPoint::Edit(empty.parse().unwrap()), "")
+        .await
+        .unwrap();
+    assert_eq!(same.op_id, None);
+    assert_eq!(same.wc.commit_id.as_str(), empty);
+    assert_eq!(fx.main.op_id(), before);
+    assert!(fx.head_ids().contains(&empty));
+
+    // Leaving an empty commit abandons it, as `jj edit` does.
+    let edited = fx
+        .main
+        .move_pointer("reef-x", StartPoint::Edit(commit.clone()), "reef: move")
+        .await
+        .unwrap();
+    assert!(edited.op_id.is_some());
+    assert_eq!(edited.wc.commit_id, commit);
+    assert_eq!(fx.main.workspaces_on_commit(&commit), ["default", "reef-x"]);
+    assert!(!fx.head_ids().contains(&empty), "empty commit abandoned");
+
+    // A failed move goes back without abandoning the commit it edited,
+    // even an empty head only it is on, and brings back the one it left.
+    let (other, _, _) = fx.create("reef-y", StartPoint::NewOn(commit.clone())).await;
+    let theirs = wc_commit_id(&other);
+    drop(other);
+    let theirs_id: CommitIdHex = theirs.parse().unwrap();
+    fx.main
+        .move_pointer("reef-x", StartPoint::Edit(theirs_id.clone()), "reef: move")
+        .await
+        .unwrap();
+    fx.main
+        .move_pointer("reef-y", StartPoint::Edit(commit.clone()), "reef: move")
+        .await
+        .unwrap();
+    assert_eq!(fx.main.workspaces_on_commit(&theirs_id), ["reef-x"]);
+    let restored = fx
+        .main
+        .restore_pointer("reef-x", &empty.parse().unwrap(), false, "reef: move back")
+        .await
+        .unwrap();
+    assert_eq!(fx.main.op_id(), restored);
+    assert!(fx.head_ids().contains(&empty), "visible again");
+    assert!(fx.head_ids().contains(&theirs), "the edited commit stays");
+
+    let error = fx
+        .main
+        .move_pointer("reef-nope", StartPoint::Edit(commit), "")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, reef_lib::jj::MovePointerError::NoSuchWorkspace(_)),
+        "{error:?}"
+    );
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+}
+
 fn git_available() -> bool {
     std::process::Command::new("git")
         .arg("--version")

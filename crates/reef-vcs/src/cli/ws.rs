@@ -1,5 +1,4 @@
-//! `reef ws create | list | inspect | release | run | gc`, and the
-//! subcommand a later ticket implements: `move` (R1.06).
+//! `reef ws create | list | inspect | release | move | run | gc`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -61,7 +60,10 @@ enum WsCommand {
         #[arg(long)]
         no_snapshot: bool,
     },
-    /// Move a workspace to another change.
+    /// Snapshot a workspace, then put another change's files in its
+    /// directory; its path and lease stay. On overlay backends the
+    /// directory is remounted, so a shell inside it must `cd` in again.
+    #[command(after_help = "Example: cd \"$(reef ws move -o text \"$PWD\" --new-on main)\"")]
     Move(ws_move::Args),
     /// Run a command in a new workspace, then release it.
     #[command(after_help = "Example: reef ws run -- cargo test")]
@@ -160,14 +162,6 @@ pub(crate) struct CreateArgs {
 }
 
 impl Args {
-    /// The ticket that implements the subcommand, if it is still a stub.
-    pub(crate) fn stub(&self) -> Option<&'static str> {
-        match self.command {
-            WsCommand::Move(_) => Some(ws_move::TICKET),
-            _ => None,
-        }
-    }
-
     /// Whether this is `ws run`, whose stdout belongs to its command.
     pub(crate) fn is_run(&self) -> bool {
         matches!(self.command, WsCommand::Run(_))
@@ -232,7 +226,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             let note = format!("released {}", released.id);
             ctx.out.done(&released, &note)
         }
-        WsCommand::Move(_) => Err(CliError::not_implemented(ws_move::TICKET)),
+        WsCommand::Move(args) => ws_move::run(ctx, args).await,
     };
     done.map(|()| ExitCode::SUCCESS)
 }

@@ -26,7 +26,7 @@ use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
 use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
 use jj_lib::transaction::TransactionCommitError;
-use jj_lib::working_copy::WorkingCopyStateError;
+use jj_lib::working_copy::{CheckoutError, WorkingCopyStateError};
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
 use jj_lib::workspace_store::WorkspaceStoreError;
 
@@ -286,6 +286,100 @@ impl Classify for ResetError {
             Self::Lookup(error) => error.kind(),
             Self::WorkingCopyState(error) => classify_by_source(error),
             Self::Reset(error) => classify_by_source(error),
+        }
+    }
+}
+
+/// What [`Repo::move_pointer`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointerMove {
+    /// The operation that moved the pointer; `None` when `Edit` named the
+    /// workspace's working-copy commit already, which records nothing.
+    pub op_id: Option<OperationIdHex>,
+    /// The workspace's working-copy commit before: what to `Edit` to move
+    /// it back.
+    pub from: CommitIdHex,
+    /// The workspace's working-copy commit afterwards.
+    pub wc: ChangeSummary,
+}
+
+/// Failure to move a workspace's working-copy pointer.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MovePointerError {
+    /// The view has no working-copy commit for this workspace name.
+    #[error("workspace {0} not found")]
+    NoSuchWorkspace(String),
+    /// The target commit could not be read.
+    #[error(transparent)]
+    Lookup(#[from] CommitLookupError),
+    /// A new working-copy commit could not be written on the target.
+    #[error("failed to check out the target commit")]
+    CheckOut(#[from] CheckOutCommitError),
+    /// The target commit could not become the working-copy commit.
+    #[error("failed to edit the target commit")]
+    Edit(#[from] EditCommitError),
+    /// Rebasing after the change failed.
+    #[error("failed to rebase descendants")]
+    Backend(#[from] BackendError),
+    /// The operation could not be committed.
+    #[error("failed to commit the move operation")]
+    Commit(#[from] TransactionCommitError),
+}
+
+impl Classify for MovePointerError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NoSuchWorkspace(_) => ErrorKind::NotFound,
+            Self::Edit(EditCommitError::RewriteRootCommit(_))
+            | Self::CheckOut(CheckOutCommitError::EditCommit(
+                EditCommitError::RewriteRootCommit(_),
+            )) => ErrorKind::Conflict,
+            Self::Lookup(error) => error.kind(),
+            Self::CheckOut(error) => classify_by_source(error),
+            Self::Edit(error) => classify_by_source(error),
+            Self::Backend(error) => classify_by_source(error),
+            Self::Commit(error) => classify_by_source(error),
+        }
+    }
+}
+
+/// What [`Repo::check_out_tree`] wrote, from jj's `CheckoutStats`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckoutSummary {
+    /// Files present before and after, rewritten.
+    pub updated: u32,
+    /// Files written that were not there.
+    pub added: u32,
+    /// Files removed.
+    pub removed: u32,
+    /// Files the target has that were not written because an untracked
+    /// (probably ignored) file was in the way.
+    pub skipped: u32,
+}
+
+/// Failure to check out a commit's tree in a workspace.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CheckoutTreeError {
+    /// The commit could not be read.
+    #[error(transparent)]
+    Lookup(#[from] CommitLookupError),
+    /// The working-copy state could not be locked or saved.
+    #[error("failed to lock or save the working-copy state")]
+    WorkingCopyState(#[from] WorkingCopyStateError),
+    /// Writing the files failed.
+    #[error("failed to check out the tree")]
+    Checkout(#[from] CheckoutError),
+}
+
+impl Classify for CheckoutTreeError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Lookup(error) => error.kind(),
+            Self::Checkout(CheckoutError::ConcurrentCheckout) => ErrorKind::Conflict,
+            Self::WorkingCopyState(error) => classify_by_source(error),
+            Self::Checkout(error) => classify_by_source(error),
         }
     }
 }
@@ -730,6 +824,158 @@ impl Repo {
         Ok(())
     }
 
+    /// Moves the working-copy pointer of the workspace `name` (R1.06):
+    /// `Edit` makes the commit its working-copy commit (`jj edit`), `NewOn`
+    /// a new empty commit on it, on a new change (`jj new`). One operation
+    /// with `description`, which this [`Repo`] adopts; none when `Edit`
+    /// names the working-copy commit already. As in jj, the commit the
+    /// workspace leaves is abandoned when it is empty, undescribed, a head,
+    /// and referenced by nothing else. The workspace's files and working
+    /// copy are not touched: the caller checks the new tree out
+    /// ([`Repo::check_out_tree`] on the workspace's own [`Repo`]) or resets
+    /// to it.
+    ///
+    /// Runs on any workspace's [`Repo`] (the daemon's repository thread
+    /// holds the user's `default`), as [`Repo::forget_workspace`] does.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
+    pub async fn move_pointer(
+        &mut self,
+        name: &str,
+        start: StartPoint,
+        description: &str,
+    ) -> Result<PointerMove, MovePointerError> {
+        let moved = self
+            .move_pointer_unlogged(name, start, description)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))?;
+        if let Some(op_id) = &moved.op_id {
+            tracing::info!(op_id = %op_id, commit_id = %moved.wc.commit_id, "working-copy pointer moved");
+        }
+        Ok(moved)
+    }
+
+    async fn move_pointer_unlogged(
+        &mut self,
+        name: &str,
+        start: StartPoint,
+        description: &str,
+    ) -> Result<PointerMove, MovePointerError> {
+        let name = WorkspaceNameBuf::from(name);
+        let current = self
+            .repo
+            .view()
+            .get_wc_commit_id(&name)
+            .cloned()
+            .ok_or_else(|| MovePointerError::NoSuchWorkspace(name.as_str().to_owned()))?;
+        let (target, new_on) = match &start {
+            StartPoint::Edit(id) => (id, false),
+            StartPoint::NewOn(id) => (id, true),
+        };
+        let commit = self.commit_by_id(target).await?;
+        if !new_on && commit.id() == &current {
+            // `edit` would abandon the commit it is about to edit if it is
+            // empty; jj's own `edit` refuses this as a no-op too.
+            return Ok(PointerMove {
+                op_id: None,
+                from: CommitIdHex::of(&current),
+                wc: summary(&commit),
+            });
+        }
+        let mut tx = self.repo.start_transaction();
+        let wc = if new_on {
+            tx.repo_mut().check_out(name.clone(), &commit).await?
+        } else {
+            tx.repo_mut().edit(name.clone(), &commit).await?;
+            commit
+        };
+        tx.repo_mut().rebase_descendants().await?;
+        self.repo = tx.commit(description).await?;
+        Ok(PointerMove {
+            op_id: Some(OperationIdHex::of(self.repo.op_id())),
+            from: CommitIdHex::of(&current),
+            wc: summary(&wc),
+        })
+    }
+
+    /// Moves the pointer of the workspace `name` back to `commit` after a
+    /// failed move (R1.06), in one operation with `description`, which this
+    /// [`Repo`] adopts: the inverse of [`Repo::move_pointer`]. `commit` is
+    /// made visible again if the move abandoned it. The commit the pointer
+    /// leaves is abandoned only with `abandon_left` (the empty commit a
+    /// `NewOn` made); a commit the move edited is the user's and stays even
+    /// if it is empty, where jj's `edit` would abandon it.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
+    pub async fn restore_pointer(
+        &mut self,
+        name: &str,
+        commit: &CommitIdHex,
+        abandon_left: bool,
+        description: &str,
+    ) -> Result<OperationIdHex, MovePointerError> {
+        self.restore_pointer_unlogged(name, commit, abandon_left, description)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    async fn restore_pointer_unlogged(
+        &mut self,
+        name: &str,
+        commit: &CommitIdHex,
+        abandon_left: bool,
+        description: &str,
+    ) -> Result<OperationIdHex, MovePointerError> {
+        let name = WorkspaceNameBuf::from(name);
+        if self.repo.view().get_wc_commit_id(&name).is_none() {
+            return Err(MovePointerError::NoSuchWorkspace(name.as_str().to_owned()));
+        }
+        let commit = self.commit_by_id(commit).await?;
+        let mut tx = self.repo.start_transaction();
+        if abandon_left {
+            tx.repo_mut().edit(name, &commit).await?;
+        } else {
+            tx.repo_mut().add_head(&commit).await?;
+            tx.repo_mut()
+                .set_wc_commit(name, commit.id().clone())
+                .map_err(EditCommitError::from)?;
+        }
+        tx.repo_mut().rebase_descendants().await?;
+        self.repo = tx.commit(description).await?;
+        Ok(OperationIdHex::of(self.repo.op_id()))
+    }
+
+    /// Checks `commit`'s tree out in this workspace (R1.06): jj applies the
+    /// diff from the tree the working copy last recorded to `commit`'s,
+    /// writing only the files that differ, and records them; then saves the
+    /// working-copy state at the loaded operation. Untracked and ignored
+    /// files stay. Point this [`Repo`] at the operation that moved the
+    /// pointer first ([`Repo::set_head`]).
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
+    pub async fn check_out_tree(
+        &mut self,
+        commit: &CommitIdHex,
+    ) -> Result<CheckoutSummary, CheckoutTreeError> {
+        self.check_out_tree_unlogged(commit)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    async fn check_out_tree_unlogged(
+        &mut self,
+        commit: &CommitIdHex,
+    ) -> Result<CheckoutSummary, CheckoutTreeError> {
+        let commit = self.commit_by_id(commit).await?;
+        let op_id = self.repo.op_id().clone();
+        let mut locked_ws = self.workspace.start_working_copy_mutation().await?;
+        let stats = locked_ws.locked_wc().check_out(&commit).await?;
+        locked_ws.finish(op_id).await?;
+        Ok(CheckoutSummary {
+            updated: stats.updated_files,
+            added: stats.added_files,
+            removed: stats.removed_files,
+            skipped: stats.skipped_files,
+        })
+    }
+
     /// Reads the commit with this full id.
     pub(crate) async fn commit_by_id(&self, id: &CommitIdHex) -> Result<Commit, CommitLookupError> {
         let commit_id = CommitId::try_from_hex(id.as_str())
@@ -745,6 +991,16 @@ impl Repo {
                 source,
             }),
         }
+    }
+}
+
+/// `commit` as a workspace's working-copy commit.
+fn summary(commit: &Commit) -> ChangeSummary {
+    ChangeSummary {
+        change_id: ChangeIdHex::of(commit.change_id()),
+        commit_id: CommitIdHex::of(commit.id()),
+        description: commit.description().to_owned(),
+        is_wc: true,
     }
 }
 

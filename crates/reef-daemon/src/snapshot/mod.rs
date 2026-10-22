@@ -620,8 +620,9 @@ impl Scheduler {
         }
     }
 
-    /// Watches a tracked workspace again with its current skip list.
-    #[cfg(any(test, feature = "testing"))]
+    /// Watches a tracked workspace again with its current skip list: after
+    /// a test changes its spec, or a move (R1.06) changes the spec or
+    /// remounts an overlay.
     pub(crate) fn rewatch(&self, ws: WorkspaceId) {
         if self.is_tracked(ws) {
             self.track(ws);

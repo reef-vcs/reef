@@ -382,6 +382,31 @@ impl Db {
         updated(id, changed)
     }
 
+    /// Records a workspace's move to another change (R1.06): its change,
+    /// commit, and base tree, `attention`, and `divergent` (cleared unless
+    /// it moved to the change it was on). Nothing else changes: id, path,
+    /// lease, and backend stay.
+    pub fn move_workspace(
+        &self,
+        id: WorkspaceId,
+        change_id: &str,
+        commit_id: &str,
+        base_tree_id: &str,
+        attention: Option<Attention>,
+        divergent: bool,
+    ) -> Result<(), DbError> {
+        let changed = self.with(|conn| {
+            conn.execute(
+                "UPDATE workspaces
+                 SET change_id = ?2, commit_id = ?3, base_tree_id = ?4, attention = ?5,
+                     divergent = ?6
+                 WHERE id = ?1",
+                params![id, change_id, commit_id, base_tree_id, attention, divergent],
+            )
+        })?;
+        updated(id, changed)
+    }
+
     /// Records the operation and time of a workspace's latest snapshot.
     pub fn record_snapshot(
         &self,

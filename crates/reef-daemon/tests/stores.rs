@@ -761,3 +761,77 @@ async fn gc_removes_unused_stores() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].lockfile_hash, v2.lockfile_hash);
 }
+
+/// R1.06: after a lockfile edit, a move to the workspace's own change
+/// fails while the new lockfile has no build, changing nothing, then
+/// remounts the store once it is built (ADR 0022's fix for a mismatch).
+#[tokio::test(flavor = "multi_thread")]
+async fn move_to_own_change_remounts_rebuilt_store() {
+    let (daemon, repo) = fixture().await;
+    build(&daemon, &repo).await;
+    let ws = create_ok(&daemon, &repo).await;
+    std::fs::write(Path::new(&ws.path).join("deps.lock"), "v2\n").unwrap();
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    let to_own_change = |change: String| v0::MoveRequest {
+        repo: repo.id.clone(),
+        workspace: ws.id.clone(),
+        target: Some(v0::move_request::Target::Change(change)),
+        ..v0::MoveRequest::default()
+    };
+
+    let error = daemon
+        .client
+        .move_workspace(to_own_change(ws.change_id.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable, "{error:?}");
+    let row = daemon
+        .client
+        .inspect_workspace(&repo.id, &ws.id, false)
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    assert_eq!(row.commit_id, snapshot.commit_id, "nothing moved");
+    assert_eq!(row.attention, "store-hash-mismatch");
+    assert_eq!(
+        row.stores[0].lockfile_hash,
+        key_hash(),
+        "the old store stays"
+    );
+    assert!(mount_of(&ws).join("manifest").is_file());
+
+    let mut stream = daemon
+        .client
+        .build_store(
+            &repo.id,
+            "deps",
+            &snapshot.commit_id,
+            Duration::from_mins(5),
+            false,
+        )
+        .await
+        .unwrap();
+    while stream.message().await.unwrap().is_some() {}
+    let moved = daemon
+        .client
+        .move_workspace(to_own_change(ws.change_id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(moved.op_id, "", "the pointer did not move");
+    let after = moved.workspace.unwrap();
+    assert_eq!(after.commit_id, snapshot.commit_id);
+    assert_eq!(after.attention, "");
+    assert_eq!(after.stores.len(), 1);
+    assert_eq!(after.stores[0].lockfile_hash, hash_lockfile(b"v2\n"));
+    assert!(after.stores[0].verified);
+    assert_eq!(
+        std::fs::read_to_string(mount_of(&ws).join("manifest")).unwrap(),
+        "v2\n"
+    );
+    assert_eq!(in_use(&daemon).await, 0, "the old store is free");
+}

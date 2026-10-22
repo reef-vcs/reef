@@ -20,7 +20,9 @@ use reef_daemon::Daemon;
 use reef_daemon::client::Client;
 use reef_daemon::db::Db;
 use reef_daemon::model::{RepoId, Timestamp, WorkspaceId};
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace, create_request};
+use reef_daemon::proto::v0::{
+    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
+};
 use reef_daemon::snapshot::SnapshotKind;
 use reef_daemon::snapshot::index::{self, ReindexReport, SnapshotEntry};
 use reef_lib::jj::Repo;
@@ -128,6 +130,24 @@ async fn explicit_snapshot(
     snapshot.op_id
 }
 
+/// Writes a file and moves the workspace to its own change (R1.06), which
+/// snapshots it first; returns that snapshot's operation.
+async fn move_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) -> String {
+    write(ws, "moved.txt", "written before a move\n");
+    let moved = daemon
+        .client
+        .move_workspace(MoveRequest {
+            repo: repo.id.clone(),
+            workspace: ws.id.clone(),
+            target: Some(move_request::Target::Change(ws.change_id.clone())),
+            ..MoveRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(!moved.final_op_id.is_empty(), "the move's snapshot wrote");
+    moved.final_op_id
+}
+
 /// Writes a file and releases with a final snapshot; returns the
 /// operation.
 async fn final_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) -> String {
@@ -218,8 +238,7 @@ async fn every_kind_is_recorded() {
     let watcher_op = watcher_snapshot(&daemon, &repo, &ws).await;
     quiesce(&daemon, &repo, &[&ws]).await;
     let explicit_op = explicit_snapshot(&daemon, &repo, &ws, "explicit.txt").await;
-    // A `Move` snapshot is not covered: R1.06 (workspace move) has not
-    // landed, so the daemon cannot take one yet.
+    let move_op = move_snapshot(&daemon, &repo, &ws).await;
     let final_op = final_snapshot(&daemon, &repo, &ws).await;
 
     let db = &daemon.handle.state().db;
@@ -233,6 +252,7 @@ async fn every_kind_is_recorded() {
         BTreeMap::from([
             (watcher_op, SnapshotKind::Watcher),
             (explicit_op.clone(), SnapshotKind::Explicit),
+            (move_op, SnapshotKind::Move),
             (final_op.clone(), SnapshotKind::Final),
         ])
     );
@@ -264,15 +284,15 @@ async fn every_kind_is_recorded() {
         .inspect_workspace(&repo.id, &ws.id, false)
         .await
         .unwrap();
-    assert_eq!(inspected.snapshot_count, 3);
-    assert_eq!(inspected.local_snapshot_count, 3);
-    assert_eq!(inspected.workspace.unwrap().local_snapshot_count, 3);
+    assert_eq!(inspected.snapshot_count, 4);
+    assert_eq!(inspected.local_snapshot_count, 4);
+    assert_eq!(inspected.workspace.unwrap().local_snapshot_count, 4);
     let recent: Vec<_> = inspected
         .recent_snapshots
         .iter()
         .map(|entry| (entry.op_id.as_str(), entry.kind.as_str(), entry.local))
         .collect();
-    assert_eq!(recent.len(), 3);
+    assert_eq!(recent.len(), 4);
     assert_eq!(
         recent[0],
         (final_op.as_str(), "final", true),
@@ -284,7 +304,7 @@ async fn every_kind_is_recorded() {
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].local_snapshot_count, 3);
+    assert_eq!(listed[0].local_snapshot_count, 4);
 }
 
 // 2
