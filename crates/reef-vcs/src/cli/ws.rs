@@ -60,9 +60,10 @@ enum WsCommand {
         #[arg(long)]
         no_snapshot: bool,
     },
-    /// Snapshot a workspace, then put another change's files in its
-    /// directory; its path and lease stay. On overlay backends the
-    /// directory is remounted, so a shell inside it must `cd` in again.
+    /// Snapshot a workspace, then put another change in its directory.
+    ///
+    /// Its path and lease stay. On overlay backends the directory is
+    /// remounted, so a shell inside it must `cd` in again.
     #[command(after_help = "Example: cd \"$(reef ws move -o text \"$PWD\" --new-on main)\"")]
     Move(ws_move::Args),
     /// Run a command in a new workspace, then release it.
