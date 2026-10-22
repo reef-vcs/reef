@@ -77,12 +77,34 @@ pub(crate) async fn store_targets(
     Ok(targets)
 }
 
-/// What a create does about stores: the ones to mount, and whether one was
-/// skipped as missing.
+/// What a create or a move does about stores: the ones to mount, and
+/// whether one was skipped as missing.
 #[derive(Debug, Default)]
 pub(super) struct StorePlan {
     pub mount: Vec<StoreTarget>,
     pub missing: Vec<StoreKey>,
+}
+
+/// How [`Manager::plan_stores`] treats a store with no sealed build.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StoreRules<'a> {
+    /// The repository, for the error's advice.
+    pub repo: RepoId,
+    /// Fail, or leave the store out.
+    pub missing: MissingStores,
+    /// A store left out without counting as missing.
+    pub skip: Option<&'a str>,
+}
+
+impl CreateSpec {
+    /// This create's [`StoreRules`].
+    pub(super) fn store_rules(&self) -> StoreRules<'_> {
+        StoreRules {
+            repo: self.repo,
+            missing: self.missing_stores,
+            skip: self.skip_store.as_deref(),
+        }
+    }
 }
 
 impl Manager {
@@ -107,31 +129,32 @@ impl Manager {
         counts
     }
 
-    /// Which of `targets` (the stores of `spec`'s start commit `commit`) a
-    /// create mounts: each needs a sealed store, else [`StoreError::Missing`]
-    /// unless `spec.missing_stores` is `Skip`. `spec.skip_store` (a store
-    /// build's own store) is left out without counting as missing.
+    /// Which of `targets` (the stores of the commit `commit`) a create or
+    /// a move mounts: each needs a sealed store, else
+    /// [`StoreError::Missing`] unless `rules.missing` is `Skip`.
+    /// `rules.skip` (a store build's own store) is left out without
+    /// counting as missing.
     pub(super) fn plan_stores(
         &self,
         targets: &[StoreTarget],
-        spec: &CreateSpec,
+        rules: &StoreRules<'_>,
         commit: &CommitIdHex,
     ) -> Result<StorePlan, ManagerError> {
         let mut plan = StorePlan::default();
         for target in targets {
-            if spec.skip_store.as_deref() == Some(target.key.name.as_str()) {
+            if rules.skip == Some(target.key.name.as_str()) {
                 continue;
             }
             if self.stores.sealed(&target.key)?.is_some() {
                 plan.mount.push(target.clone());
                 continue;
             }
-            match spec.missing_stores {
+            match rules.missing {
                 MissingStores::Fail => {
                     return Err(StoreError::Missing {
                         name: target.key.name.clone(),
                         hash: target.key.lockfile_hash.clone(),
-                        repo: spec.repo,
+                        repo: rules.repo,
                         commit: commit.to_string(),
                     }
                     .into());

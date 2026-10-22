@@ -1,5 +1,5 @@
 //! `reef.daemon.v0.Workspaces`: create, list, inspect, release, snapshot,
-//! heartbeat.
+//! heartbeat, move.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,8 +16,9 @@ use crate::model::{LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceStat
 use crate::proto::v0::workspaces_server::Workspaces;
 use crate::proto::v0::{
     self, CreateRequest, CreateResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest,
-    InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, ReleaseRequest,
-    ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
+    InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveRequest, MoveResponse,
+    ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
+    move_request,
 };
 use crate::snapshot::{SnapshotKind, index};
 use crate::workspace::{CreateSpec, MissingStores, ReleaseSpec, Start};
@@ -65,6 +66,13 @@ fn optional_millis(ms: u64) -> Option<Duration> {
     (ms != 0).then(|| Duration::from_millis(ms))
 }
 
+fn missing_stores(value: create_request::MissingStores) -> MissingStores {
+    match value {
+        create_request::MissingStores::Fail => MissingStores::Fail,
+        create_request::MissingStores::Skip => MissingStores::Skip,
+    }
+}
+
 #[tonic::async_trait]
 impl Workspaces for WorkspacesService {
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -75,10 +83,7 @@ impl Workspaces for WorkspacesService {
         let request = request.into_inner();
         let manager = &self.state.manager;
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
-        let missing_stores = match request.missing_stores() {
-            create_request::MissingStores::Fail => MissingStores::Fail,
-            create_request::MissingStores::Skip => MissingStores::Skip,
-        };
+        let missing_stores = missing_stores(request.missing_stores());
         let start = match request.start {
             Some(create_request::Start::Change(text)) => Start::Change(text),
             Some(create_request::Start::NewOn(text)) => Start::NewOn(text),
@@ -277,6 +282,44 @@ impl Workspaces for WorkspacesService {
             lease_id: renewed.id.as_hex(),
             expires_at: Some(timestamp(renewed.expires_at)),
             heartbeat_every: Some(proto_duration(leases.heartbeat_every(renewed.length))),
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn r#move(
+        &self,
+        request: Request<MoveRequest>,
+    ) -> Result<Response<MoveResponse>, Status> {
+        let request = request.into_inner();
+        let manager = &self.state.manager;
+        let record = manager
+            .resolve_workspace(&request.repo, &request.workspace)
+            .map_err(status)?;
+        record_ids(record.repo_id, record.id);
+        let missing_stores = missing_stores(request.missing_stores());
+        let start = match request.target {
+            Some(move_request::Target::Change(text)) => Start::Change(text),
+            Some(move_request::Target::NewOn(text)) => Start::NewOn(text),
+            None => Start::Default,
+        };
+        let moved = manager
+            .move_to(record.id, start, missing_stores)
+            .await
+            .map_err(status)?;
+        let (_, local_snapshot_count) = index::counts(&self.state.db, record.id).map_err(status)?;
+        Ok(Response::new(MoveResponse {
+            workspace: Some(Workspace::from(WorkspaceView {
+                record: &moved.record,
+                lease: self.lease_message(moved.lease.as_ref(), Timestamp::now()),
+                local_snapshot_count,
+                stores: &moved.stores,
+            })),
+            op_id: moved.op_id.unwrap_or_default(),
+            final_op_id: moved.final_op_id.unwrap_or_default(),
+            files_updated: moved.checkout.updated,
+            files_added: moved.checkout.added,
+            files_removed: moved.checkout.removed,
+            tree_replaced: moved.tree_replaced,
         }))
     }
 }

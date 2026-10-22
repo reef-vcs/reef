@@ -20,6 +20,7 @@
 mod create;
 mod gc;
 mod manager;
+mod move_;
 mod reclaim;
 mod snapshot;
 mod stores;
@@ -33,7 +34,8 @@ use reef_lib::jj::repo::ReadError;
 use reef_lib::jj::snapshot::SnapshotError;
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
-    CreateWorkspaceError, ForgetWorkspaceError, ImportRefsError, OpenError, Repo, ResolveError,
+    CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
+    ImportRefsError, MovePointerError, OpenError, Repo, ResolveError,
 };
 use reef_lib::spec::SpecError;
 
@@ -58,7 +60,8 @@ use crate::store::{MountedStore, StoreError};
 pub struct WorkspaceEntry {
     /// The row as last written by the manager.
     pub record: Mutex<WorkspaceRecord>,
-    /// Where its files are.
+    /// Where its files are. `store_mounts` is empty: the mounts change
+    /// with a move (R1.06), so disk usage takes them from `stores`.
     pub paths: WorkspacePaths,
     /// The backend that materialized it.
     pub backend: Box<dyn Backend>,
@@ -198,6 +201,29 @@ pub struct Created {
     /// Whether the base cache already held the tree.
     pub base_was_cached: bool,
     /// The shared stores mounted in it (R1.20).
+    pub stores: Vec<MountedStore>,
+}
+
+/// What [`Manager::move_to`] did (R1.06).
+#[derive(Clone, Debug)]
+pub struct Moved {
+    /// The row afterwards: same id, path, lease, and backend; the new
+    /// change, commit, and base tree.
+    pub record: WorkspaceRecord,
+    /// Its lease, untouched.
+    pub lease: Option<LeaseRecord>,
+    /// The operation that moved the pointer; `None` when the target was the
+    /// workspace's working-copy commit already.
+    pub op_id: Option<String>,
+    /// The operation holding the final snapshot of the change it left;
+    /// `None` when that snapshot found nothing to record.
+    pub final_op_id: Option<String>,
+    /// The files a check-out wrote (clone and copy backends); zero when the
+    /// backend replaced the tree.
+    pub checkout: CheckoutSummary,
+    /// The backend replaced the whole tree (overlay backends).
+    pub tree_replaced: bool,
+    /// The target's shared stores, mounted (R1.20).
     pub stores: Vec<MountedStore>,
 }
 
@@ -421,6 +447,22 @@ pub enum ManagerError {
     /// A lockfile could not be read from the tree (R1.20).
     #[error("read a store's lockfile")]
     ReadFile(#[from] reef_lib::jj::spec::ReadFileError),
+    /// A move's final snapshot failed, so the move was refused and nothing
+    /// changed (R1.06).
+    #[error("workspace {id} has an unsnapshotted write in flight")]
+    WriteInFlight {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Why the snapshot failed.
+        #[source]
+        source: SnapshotError,
+    },
+    /// A move could not move the working-copy pointer (R1.06).
+    #[error(transparent)]
+    MovePointer(#[from] MovePointerError),
+    /// A move could not check the target's tree out (R1.06).
+    #[error(transparent)]
+    CheckoutTree(#[from] CheckoutTreeError),
 }
 
 impl Classify for ManagerError {
@@ -449,7 +491,9 @@ impl Classify for ManagerError {
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
-            Self::NotActive { .. } | Self::LeaseNotExpired(_) => ErrorKind::Conflict,
+            Self::NotActive { .. } | Self::LeaseNotExpired(_) | Self::WriteInFlight { .. } => {
+                ErrorKind::Conflict
+            }
             Self::NotRegistered(_) => ErrorKind::NotFound,
             Self::Task(_) => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
@@ -458,6 +502,8 @@ impl Classify for ManagerError {
             Self::Rebind { source, .. } => classify_by_source(source),
             Self::Store(error) => error.kind(),
             Self::ReadFile(error) => error.kind(),
+            Self::MovePointer(error) => error.kind(),
+            Self::CheckoutTree(error) => error.kind(),
         }
     }
 }
@@ -480,6 +526,10 @@ impl Advise for ManagerError {
             },
             Self::FinalSnapshotFailed { id, .. } => Some(Advice::run(
                 "The workspace is kept; `reef ws release --no-snapshot` discards its unsnapshotted edits.",
+                ["reef", "ws", "inspect", &id.as_hex()],
+            )),
+            Self::WriteInFlight { id, .. } => Some(Advice::run(
+                "Nothing moved; the workspace's files could not be snapshotted. Inspect it, then retry the move.",
                 ["reef", "ws", "inspect", &id.as_hex()],
             )),
             _ => None,

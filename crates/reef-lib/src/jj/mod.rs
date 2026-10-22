@@ -49,5 +49,6 @@ pub use jj_lib::repo_path::RepoPath;
 pub use jj_lib::settings::UserSettings;
 pub use jj_lib::working_copy::WorkingCopyStateError;
 pub use workspace::{
-    CreateWorkspaceError, ForgetWorkspaceError, ResolveError, Resolved, ResolvedVia, StartPoint,
+    CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
+    MovePointerError, PointerMove, ResolveError, Resolved, ResolvedVia, StartPoint,
 };

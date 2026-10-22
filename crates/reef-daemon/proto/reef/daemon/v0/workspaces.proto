@@ -33,6 +33,16 @@ service Workspaces {
   rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
   // Renews a workspace's lease (R1.15). Never snapshots.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Moves a workspace to another change (R1.06): a final snapshot of the
+  // change it is on, then the new change's tree in the same directory. Id,
+  // path, lease (expiry included; a move is not a heartbeat), and backend
+  // stay. The target's shared stores are mounted, so a move to the same
+  // change remounts a rebuilt store. A final snapshot that fails refuses
+  // the move with FAILED_PRECONDITION and changes nothing. An overlay
+  // workspace is unmounted (lazily if busy) and mounted again: a process
+  // whose working directory is inside it keeps the old tree until it
+  // changes directory into the path again.
+  rpc Move(MoveRequest) returns (MoveResponse);
 }
 
 message CreateRequest {
@@ -201,4 +211,42 @@ message HeartbeatResponse {
   google.protobuf.Timestamp expires_at = 2;
   // When to heartbeat next; see `Lease.heartbeat_every`.
   google.protobuf.Duration heartbeat_every = 3;
+}
+
+message MoveRequest {
+  string repo = 1;
+  // A workspace id or unique prefix, or a path inside it.
+  string workspace = 2;
+  // Resolved as CreateRequest's `start`, after the final snapshot. Neither:
+  // a new change on the `main` bookmark if it exists, else on the `default`
+  // workspace's working-copy commit.
+  oneof target {
+    // Edit this change. The workspace's own change remounts its stores.
+    string change = 3;
+    // A new empty change on top of this revision.
+    string new_on = 4;
+  }
+  // As for a create: a store the target declares with no sealed build
+  // fails the move before anything changes, or is left out with
+  // `attention = store-missing`.
+  CreateRequest.MissingStores missing_stores = 5;
+}
+
+message MoveResponse {
+  // The workspace afterwards.
+  Workspace workspace = 1;
+  // The operation that moved the working-copy pointer; empty when the
+  // target was the workspace's working-copy commit already.
+  string op_id = 2;
+  // The final snapshot of the change it left; empty when there was nothing
+  // to record.
+  string final_op_id = 3;
+  // Files the check-out wrote (clone and copy backends; zero when
+  // `tree_replaced`).
+  uint32 files_updated = 4;
+  uint32 files_added = 5;
+  uint32 files_removed = 6;
+  // The backend replaced the whole tree (overlay backends: new lower
+  // layer, empty upper).
+  bool tree_replaced = 7;
 }

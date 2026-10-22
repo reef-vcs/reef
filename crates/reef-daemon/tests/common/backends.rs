@@ -10,13 +10,14 @@
 //! guarantee.
 //!
 //! Included by `tests/backend_conformance.rs` through `#[path]`, so the
-//! other test binaries do not compile it; R1.06 adds its move case here and
-//! R1.12's benchmarks reuse [`BaseFixture`].
+//! other test binaries do not compile it; R1.12's benchmarks reuse
+//! [`BaseFixture`]. Case 9 (`swap_base`) holds each backend to what a
+//! workspace move (R1.06) relies on.
 
 #![allow(
     dead_code,
     unreachable_pub,
-    reason = "R1.06 and R1.12 use parts the conformance tests do not"
+    reason = "R1.12's benchmarks use parts the conformance tests do not"
 )]
 #![allow(
     clippy::unwrap_used,

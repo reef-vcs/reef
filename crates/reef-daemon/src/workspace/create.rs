@@ -62,15 +62,15 @@ use crate::store::{MountedStore, StoreManager};
 /// The description of a colocated repository's ref import before a create.
 const IMPORT_DESCRIPTION: &str = "reef: import git refs";
 
-/// Step 2's answer.
-struct ResolvedStart {
-    start: StartPoint,
-    commit: CommitIdHex,
-    tree_key: String,
-    shared_change: bool,
-    spec: ResolvedSpec,
+/// Step 2's answer; also a move's (R1.06).
+pub(super) struct ResolvedStart {
+    pub start: StartPoint,
+    pub commit: CommitIdHex,
+    pub tree_key: String,
+    pub shared_change: bool,
+    pub spec: ResolvedSpec,
     /// The spec's stores, their lockfiles hashed in the commit's tree.
-    stores: Vec<StoreTarget>,
+    pub stores: Vec<StoreTarget>,
 }
 
 impl Manager {
@@ -102,7 +102,7 @@ impl Manager {
             .leases
             .length_with_spec(spec.lease, resolved.spec.lease)?;
         // Fails a create that would fail anyway before anything is made.
-        self.plan_stores(&resolved.stores, &spec, &resolved.commit)?;
+        self.plan_stores(&resolved.stores, &spec.store_rules(), &resolved.commit)?;
 
         // 3.
         let begun = Instant::now();
@@ -209,7 +209,7 @@ impl Manager {
     > {
         let mounting = self.stores.mounting.read().await;
         let plan = undo
-            .or_undo(self.plan_stores(&resolved.stores, spec, &resolved.commit))
+            .or_undo(self.plan_stores(&resolved.stores, &spec.store_rules(), &resolved.commit))
             .await?;
         let kind = undo.backend.as_ref().map(|(backend, _)| backend.kind());
         let mounted = match kind {
@@ -237,7 +237,6 @@ impl Manager {
         };
         // The entry owns the mounts now; release unmounts them.
         undo.stores = None;
-        let paths = paths.with_store_mounts(stores.iter().map(|store| store.mount.as_str()));
         let entry = WorkspaceEntry {
             record: Mutex::new(record.clone()),
             paths,
@@ -322,7 +321,7 @@ impl Manager {
     /// thread, under the base cache's lock for the tree. If the backend has
     /// a [`DirCloner`](crate::backend::DirCloner) and the cache another base, the most recently used one is cloned
     /// and only the diff checked out; if that fails, the whole tree is.
-    async fn ensure_base(
+    pub(super) async fn ensure_base(
         &self,
         handle: &RepoHandle,
         resolved: &ResolvedStart,
@@ -441,8 +440,11 @@ async fn materialize(
     }
 }
 
-/// Step 2, on the repository thread.
-async fn resolve_start(handle: &RepoHandle, start: Start) -> Result<ResolvedStart, ManagerError> {
+/// Step 2, on the repository thread; also a move's target (R1.06).
+pub(super) async fn resolve_start(
+    handle: &RepoHandle,
+    start: Start,
+) -> Result<ResolvedStart, ManagerError> {
     handle
         .call_async(move |head| {
             async move {

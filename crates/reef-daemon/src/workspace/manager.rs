@@ -520,9 +520,13 @@ impl Manager {
                 return None;
             }
         };
+        // The stores mounted now: a move (R1.06) may have changed them.
+        let paths = entry
+            .paths
+            .clone()
+            .with_store_mounts(entry.stores().iter().map(|store| store.mount.as_str()));
         let measured =
-            tokio::task::spawn_blocking(move || entry.backend.disk_usage(&base, &entry.paths))
-                .await;
+            tokio::task::spawn_blocking(move || entry.backend.disk_usage(&base, &paths)).await;
         match measured {
             Ok(Ok(usage)) => Some(usage),
             Ok(Err(error)) => {
@@ -597,7 +601,6 @@ impl Manager {
             let jj = self.reopen(&handle, &paths, settings).await;
             let spec = base_spec(&handle, &record).await;
             let stores = self.load_stores(&handle, &record).await;
-            let paths = paths.with_store_mounts(stores.iter().map(|store| store.mount.as_str()));
             let entry = WorkspaceEntry {
                 record: Mutex::new(record),
                 paths,

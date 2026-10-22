@@ -695,3 +695,42 @@ async fn medium_write_latency_with_twenty_workspaces() {
             .all(|waited| *waited < Duration::from_secs(2))
     );
 }
+
+/// R1.06: a moved workspace is still watched (an overlay's is a new mount),
+/// and the files the move itself wrote do not land in the new change.
+#[tokio::test(flavor = "multi_thread")]
+async fn moved_workspace_is_still_watched() {
+    let (daemon, repo) = fixture().await;
+    let other = create(&daemon, &repo, None).await;
+    write(&other, "theirs.txt", "a second tree\n");
+    let target = daemon
+        .client
+        .snapshot_workspace(&repo.id, &other.id, "")
+        .await
+        .unwrap()
+        .commit_id;
+    let ws = create(&daemon, &repo, None).await;
+    let moved = daemon
+        .client
+        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+            repo: repo.id.clone(),
+            workspace: ws.id.clone(),
+            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+
+    write(&ws, "after-move.txt", "seen by the watcher\n");
+    wait_for(Duration::from_secs(5), "a watcher snapshot", || async {
+        let row = inspect(&daemon, &repo, &ws).await;
+        row.commit_id != moved.commit_id
+            && tree_has(&repo.root, &row.commit_id, "after-move.txt").await
+    })
+    .await;
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert_eq!(row.change_id, moved.change_id, "the change moved to");
+    assert!(tree_has(&repo.root, &row.commit_id, "theirs.txt").await);
+}

@@ -308,6 +308,42 @@ impl Created {
     }
 }
 
+/// `Workspaces.Move`'s answer (R1.06): the workspace's fields, then the
+/// move's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Moved {
+    /// The workspace afterwards.
+    #[serde(flatten)]
+    pub workspace: Workspace,
+    /// The operation that moved the pointer, if it recorded one.
+    pub op_id: Option<String>,
+    /// The final snapshot of the change it left, if it recorded one.
+    pub final_op_id: Option<String>,
+    /// Files the check-out rewrote, wrote, and removed.
+    pub files_updated: u32,
+    /// See `files_updated`.
+    pub files_added: u32,
+    /// See `files_updated`.
+    pub files_removed: u32,
+    /// The backend replaced the whole tree instead (overlay backends).
+    pub tree_replaced: bool,
+}
+
+impl Moved {
+    /// From the response; `None` if it carries no workspace.
+    pub fn from_response(response: &v0::MoveResponse) -> Option<Self> {
+        Some(Self {
+            workspace: Workspace::from(response.workspace.as_ref()?),
+            op_id: text(&response.op_id),
+            final_op_id: text(&response.final_op_id),
+            files_updated: response.files_updated,
+            files_added: response.files_added,
+            files_removed: response.files_removed,
+            tree_replaced: response.tree_replaced,
+        })
+    }
+}
+
 /// `Workspaces.Inspect`'s answer: the workspace's fields, then the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Inspected {

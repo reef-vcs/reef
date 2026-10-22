@@ -9,8 +9,7 @@
 //! `reef` alone, `reef here`, and names that are only ever added (aliases
 //! and unique prefixes resolve; nothing is renamed).
 //!
-//! Later tickets fill in the stubs: `ws move` (R1.06), and `backup` and
-//! `restore` (R1.18).
+//! A later ticket fills in the stubs: `backup` and `restore` (R1.18).
 
 mod autostart;
 mod backup;
@@ -398,13 +397,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
             out.raw(&buffer)
         }
         Command::Repo(args) => repo::run(&connect(&global, out).await?, args).await,
-        Command::Ws(args) => {
-            // Stubs answer without a daemon, so they never start one.
-            if let Some(ticket) = args.stub() {
-                return Err(CliError::not_implemented(ticket));
-            }
-            return ws::run(&connect(&global, out).await?, args).await;
-        }
+        Command::Ws(args) => return ws::run(&connect(&global, out).await?, args).await,
         Command::Store(args) => return store::run(&connect(&global, out).await?, args).await,
         Command::Backup(args) => backup::run(args),
         Command::Restore(args) => restore::run(args),

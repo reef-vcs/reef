@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reef_daemon::client::json::{
-    Created, GcReport, Inspected, Lease, Repository, Status, Store, Workspace,
+    Created, GcReport, Inspected, Lease, Moved, Repository, Status, Store, Workspace,
 };
 
 use serde::Serialize;
@@ -197,6 +197,14 @@ impl TextRow for Store {
 
 /// Only the path, so `cd "$(reef ws create)"` works.
 impl TextRender for Created {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "{}", self.workspace.path)
+    }
+}
+
+/// The path, which a move keeps, so `cd "$(reef ws move -o text ...)"` works
+/// as after `ws create`.
+impl TextRender for Moved {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         writeln!(w, "{}", self.workspace.path)
     }

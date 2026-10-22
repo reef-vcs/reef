@@ -356,6 +356,45 @@ async fn ws_release() {
     assert_eq!(stderr(&output), "");
 }
 
+/// `ws move` (R1.06): a new change on the workspace's own, after a final
+/// snapshot that holds its edit; same id and path, the path printed in
+/// text mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_move() {
+    let (daemon, repo) = with_repo().await;
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap();
+    let path = created["path"].as_str().unwrap();
+    let change = created["change_id"].as_str().unwrap();
+    std::fs::write(Path::new(path).join("edit.txt"), "kept\n").unwrap();
+
+    let value = json(&run(reef(&daemon), &["ws", "move", path, "--new-on", change]).await);
+    assert_eq!(value["id"], id);
+    assert_eq!(value["path"], path);
+    assert_ne!(value["change_id"], change);
+    assert!(value["final_op_id"].is_string(), "{value}");
+    assert!(value["op_id"].is_string(), "{value}");
+    assert_eq!(value["files_added"], 0, "the same tree: {value}");
+    assert!(
+        Path::new(path).join("edit.txt").is_file(),
+        "on top of the edit"
+    );
+
+    let output = run(
+        reef(&daemon),
+        &["-o", "text", "ws", "move", &id[..6], "--change", change],
+    )
+    .await;
+    output.clone().assert().success();
+    assert_eq!(stdout(&output), format!("{path}\n"));
+
+    failed(
+        &run(reef(&daemon), &["ws", "move", id]).await,
+        2,
+        "invalid_argument",
+    );
+}
+
 // 7
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_codes() {
@@ -626,8 +665,7 @@ fn stubs_exit_1_without_a_daemon() {
     let tmp = short_tempdir();
     let state = tmp.path().join("state");
     for (args, ticket) in [
-        (&["ws", "move", "abcd", "--change", "x"][..], "R1.06"),
-        (&["backup", "/tmp/x"], "R1.18"),
+        (&["backup", "/tmp/x"][..], "R1.18"),
         (&["restore", "/tmp/x"], "R1.18"),
     ] {
         let output = reef_in(&state).args(args).output().unwrap();

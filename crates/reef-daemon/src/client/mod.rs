@@ -27,9 +27,9 @@ use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
     BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse, ForgetRequest, ForgetResponse,
     GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest, InspectResponse,
-    ListRepositoriesRequest, ListStoresRequest, ListWorkspacesRequest, RegisterRequest,
-    RegisterResponse, ReleaseRequest, ReleaseResponse, Repository, SnapshotRequest,
-    SnapshotResponse, StatusRequest, StatusResponse, StoreInfo, Workspace,
+    ListRepositoriesRequest, ListStoresRequest, ListWorkspacesRequest, MoveRequest, MoveResponse,
+    RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse, Repository,
+    SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, StoreInfo, Workspace,
 };
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
@@ -252,6 +252,12 @@ impl Client {
             description: description.to_owned(),
         };
         Ok(self.workspaces().snapshot(request).await?.into_inner())
+    }
+
+    /// `Workspaces.Move` (R1.06). `repo` may be empty to look the
+    /// workspace up in every repository.
+    pub async fn move_workspace(&self, request: MoveRequest) -> Result<MoveResponse, ClientError> {
+        Ok(self.workspaces().r#move(request).await?.into_inner())
     }
 
     /// `Workspaces.Heartbeat`: renews `lease_id` on the workspace. `repo`
