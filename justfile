@@ -14,6 +14,11 @@ setup:
 build:
     cargo build --workspace --all-targets
 
+# The committed AGENTS.md, CLAUDE.md, and Claude Code skill are what `reef init` writes (R1.27).
+# Fix a failure with `cargo run -p reef-vcs -- init --agents claude --no-register` and commit.
+agent-files:
+    cargo run -q -p reef-vcs -- init --agents claude --no-register --check -o text
+
 # Unit and integration tests via nextest when present, else cargo test. Doctests always via cargo test.
 test *ARGS:
     if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace "$@"; else cargo test --workspace "$@"; fi
@@ -70,7 +75,7 @@ completions shell="zsh":
     cargo run -q -p reef-vcs -- completions "$1"
 
 # Everything CI runs, in CI order.
-ci: fmt-check lint build test doc deny
+ci: fmt-check lint build agent-files test doc deny
 
 clean:
     cargo clean
