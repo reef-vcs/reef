@@ -77,6 +77,14 @@ pub const META_CREATED_AT: &str = "created_at";
 /// `meta` key of when the last backup was taken, as decimal unix
 /// milliseconds; written by R1.18's backup, read by R1.17's GC.
 pub const META_LAST_BACKUP_AT: &str = "last_backup_at";
+/// `meta` key set by a restore (R1.18): the daemon's next start
+/// rematerializes every active workspace whose directory or working-copy
+/// state is missing instead of reclaiming it, then clears it. `1` when set.
+pub const META_REMATERIALIZE_PENDING: &str = "rematerialize_pending";
+/// `meta` key of the backup directory the database was restored from.
+pub const META_RESTORED_FROM: &str = "restored_from";
+/// `meta` key of when the restore ran, as decimal unix milliseconds.
+pub const META_RESTORED_AT: &str = "restored_at";
 /// Prefix of the `meta` keys recording applied migrations, such as
 /// `migration:0001_initial`; the value is when it was applied, as decimal
 /// unix milliseconds.
@@ -333,13 +341,6 @@ impl Db {
         Ok(value)
     }
 
-    /// The connection, locked, for R1.18's online backup. Hold it only for
-    /// one backup step at a time.
-    #[expect(dead_code, reason = "R1.18's backup is the first caller")]
-    pub(crate) fn raw_connection_for_backup(&self) -> MutexGuard<'_, Connection> {
-        self.lock()
-    }
-
     /// The value stored under `key` in `meta`, if any.
     pub fn meta(&self, key: &str) -> Result<Option<String>, DbError> {
         self.with(|conn| {
@@ -347,6 +348,40 @@ impl Db {
                 row.get(0)
             })
             .optional()
+        })
+    }
+
+    /// Rewrites every path recorded under the state directory `from` to the
+    /// same place under `to`: workspace directories and state directories,
+    /// base cache entries, and stores. A restore into another state
+    /// directory does this (R1.18). Returns how many values changed.
+    pub fn relocate_state_dir(&self, from: &Path, to: &Path) -> Result<usize, DbError> {
+        let (from, to) = (path_text(from)?, path_text(to)?);
+        self.in_transaction(|tx| {
+            let mut changed = 0;
+            for (table, column) in [
+                ("workspaces", "path"),
+                ("workspaces", "state_dir"),
+                ("base_cache", "path"),
+                ("stores", "path"),
+            ] {
+                changed += tx.execute(
+                    &format!(
+                        "UPDATE {table} SET {column} = ?2 || substr({column}, length(?1) + 1)
+                         WHERE {column} = ?1 OR substr({column}, 1, length(?1) + 1) = ?1 || '/'"
+                    ),
+                    [from, to],
+                )?;
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Removes `key` from `meta`.
+    pub fn delete_meta(&self, key: &str) -> Result<(), DbError> {
+        self.with(|conn| {
+            conn.execute("DELETE FROM meta WHERE key = ?1", [key])
+                .map(drop)
         })
     }
 
@@ -694,6 +729,35 @@ mod tests {
             db.workspace(ws.id).unwrap().watcher,
             crate::model::WatcherKind::Notify
         );
+    }
+
+    // R1.18: a restore into another state directory moves every path under
+    // the old one, and only those; a path that merely shares the prefix
+    // text stays.
+    #[test]
+    fn relocate_moves_paths_under_the_state_dir_only() {
+        use crate::db::repositories::tests::repo;
+        use crate::db::workspaces::tests::workspace;
+        let db = Db::open_in_memory().unwrap();
+        let record = repo("aaaa000000000001", "/src/app");
+        db.insert_repository(&record).unwrap();
+        let mut inside = workspace(record.id, "bbbb000000000001", "/old/state/repos/a/ws/1");
+        inside.state_dir = "/old/state/repos/a/wc/1".into();
+        let mut outside = workspace(record.id, "bbbb000000000002", "/old/state-other/ws/2");
+        outside.state_dir = "/elsewhere/wc/2".into();
+        db.insert_workspace(&inside).unwrap();
+        db.insert_workspace(&outside).unwrap();
+
+        let changed = db
+            .relocate_state_dir(Path::new("/old/state"), Path::new("/new/state"))
+            .unwrap();
+        assert_eq!(changed, 2, "the path and state dir of the one inside");
+        let moved = db.workspace(inside.id).unwrap();
+        assert_eq!(moved.path, Path::new("/new/state/repos/a/ws/1"));
+        assert_eq!(moved.state_dir, Path::new("/new/state/repos/a/wc/1"));
+        let kept = db.workspace(outside.id).unwrap();
+        assert_eq!(kept.path, outside.path);
+        assert_eq!(kept.state_dir, outside.state_dir);
     }
 
     // R1.16: a database from before `0003_snapshots` landed has `0005`

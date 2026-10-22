@@ -30,8 +30,9 @@
 //!    each one's `snapshots` index from its operation log (R1.16) and log
 //!    the report, before any snapshot can add a row.
 //! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
-//!    one's jj handle; reclaim one whose directory is gone. Each is tracked
-//!    by the snapshot scheduler, which then starts (R1.13).
+//!    one's jj handle; reclaim one whose directory is gone, or after a
+//!    restore (`meta.rematerialize_pending`, R1.18) rebuild it instead. Each
+//!    is tracked by the snapshot scheduler, which then starts (R1.13).
 //! 7. Replace a stale socket file, bind the socket (`0600`), and serve.
 //! 8. Start the lease expiry loop (R1.15), its first tick `lease.tick`
 //!    later; after the bind, so a failed start leaves no loop running.
@@ -40,7 +41,8 @@
 //!
 //! [`DaemonHandle::shutdown`] cancels [`AppState::shutdown`]. The server stops
 //! accepting connections and in-flight requests get [`SHUTDOWN_GRACE`]; then
-//! the [`ShutdownHooks`] run (the snapshot scheduler stops and its snapshots
+//! the [`ShutdownHooks`] run (a quiesce in effect resumes, R1.18; the
+//! snapshot scheduler stops and its snapshots
 //! in flight end, R1.13; the lease expiry loop stops after any reclaim in
 //! progress, then every workspace with unsnapshotted events gets a
 //! `shutdown` snapshot, R1.15; leases are left as they are), every
@@ -107,6 +109,8 @@ pub struct AppState {
     pub reindexed: Mutex<HashMap<RepoId, ReindexReport>>,
     /// Held by GC (R1.17), backup and quiesce (R1.18).
     pub maintenance: crate::maintenance::Lock,
+    /// The quiesce in effect, if any (R1.18).
+    pub quiesce: crate::maintenance::quiesce::Quiescer,
 }
 
 impl fmt::Debug for AppState {
@@ -296,6 +300,7 @@ impl Daemon {
             hooks: ShutdownHooks::default(),
             reindexed: Mutex::new(HashMap::new()),
             maintenance: crate::maintenance::Lock::new(),
+            quiesce: crate::maintenance::quiesce::Quiescer::default(),
         });
 
         let listener = match bring_up(&state).await {
@@ -452,6 +457,16 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     }
     //    Then start the snapshot scheduler: watcher events, the fallback
     //    timer, and the summary line. Workspaces were tracked as they loaded.
+    //    A quiesce in effect at shutdown resumes first (R1.18), so the hooks
+    //    after it never wait on a paused repository thread.
+    let weak = Arc::downgrade(state);
+    state.hooks.add("quiesce", move || {
+        Box::pin(async move {
+            if let Some(state) = weak.upgrade() {
+                crate::maintenance::quiesce::resume_any(&state);
+            }
+        })
+    });
     state.manager.scheduler().start(&state.shutdown);
     let manager = Arc::clone(&state.manager);
     state.hooks.add("snapshot scheduler", move || {

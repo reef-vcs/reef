@@ -276,6 +276,9 @@ impl Workspaces for WorkspacesService {
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
         let lease_id: LeaseId = request.lease_id.trim().parse().map_err(status)?;
+        // A quiesce holds the database still (R1.18); its resume extends
+        // every lease, so the holder loses nothing by waiting.
+        self.state.quiesce.check().map_err(status)?;
         let leases = manager.leases();
         let renewed = leases.heartbeat(record.id, lease_id).map_err(status)?;
         Ok(Response::new(HeartbeatResponse {

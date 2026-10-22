@@ -316,22 +316,37 @@ impl Manager {
         Ok(WorkspacePaths::at(id, root, state_dir))
     }
 
-    /// Step 3: the base for the resolved commit's tree, and whether it was
-    /// already cached. A cold materialization runs on the repository
-    /// thread, under the base cache's lock for the tree. If the backend has
-    /// a [`DirCloner`](crate::backend::DirCloner) and the cache another base, the most recently used one is cloned
-    /// and only the diff checked out; if that fails, the whole tree is.
+    /// Step 3: [`Manager::ensure_base_of`] for the resolved commit; also a
+    /// move's (R1.06).
     pub(super) async fn ensure_base(
         &self,
         handle: &RepoHandle,
         resolved: &ResolvedStart,
         backend: &dyn Backend,
     ) -> Result<(BaseEntry, bool), ManagerError> {
+        self.ensure_base_of(handle, &resolved.commit, &resolved.tree_key, backend)
+            .await
+    }
+
+    /// The base for `commit`'s tree (`tree_key`), and whether it was
+    /// already cached; step 3, and a rematerialization's (R1.18). A cold
+    /// materialization runs on the repository thread, under the base
+    /// cache's lock for the tree. If the backend has a
+    /// [`DirCloner`](crate::backend::DirCloner) and the cache another base,
+    /// the most recently used one is cloned and only the diff checked out;
+    /// if that fails, the whole tree is.
+    pub(super) async fn ensure_base_of(
+        &self,
+        handle: &RepoHandle,
+        commit: &CommitIdHex,
+        tree_key: &str,
+        backend: &dyn Backend,
+    ) -> Result<(BaseEntry, bool), ManagerError> {
         let cache = self.base_cache(handle.id());
         let cloner = backend.dir_cloner();
         let handle = handle.clone();
-        let commit = resolved.commit.clone();
-        let key = resolved.tree_key.clone();
+        let commit = commit.clone();
+        let key = tree_key.to_owned();
         tokio::task::spawn_blocking(move || {
             // Cells, so the closure can be called twice (the fallback) while
             // the error of the first call is cleared in between.
@@ -608,7 +623,7 @@ async fn forget_on_thread(head: &mut crate::repo::RepoHead, name: &str, id: Work
 /// Step 6: copies the base's `tree_state` over the new working copy's, so
 /// the first snapshot is a no-op scan. If that fails, resets the working
 /// copy to `commit` instead (every file rehashed on the next snapshot).
-async fn seed(
+pub(super) async fn seed(
     mut ws: Repo,
     base: &BaseEntry,
     paths: &WorkspacePaths,

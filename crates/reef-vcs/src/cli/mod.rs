@@ -1,15 +1,14 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
 //! through [`reef_daemon::client::Client`], except `config show`,
 //! `completions`, `guide`, `init` when it registers nothing (`--check`,
-//! `--print`, `--no-register`), and `daemon run`. Output follows [`out`]'s
+//! `--print`, `--no-register`), `daemon run`, and `restore`, which is
+//! offline (R1.18). Output follows [`out`]'s
 //! rules and failures exit with their kind's code ([`error`]).
 //!
 //! The agent-facing contract (R1.26, ADR 0025) is kept here and in
 //! [`out`]: never interactive, every known fix on the error, the guide on
 //! `reef` alone, `reef here`, and names that are only ever added (aliases
 //! and unique prefixes resolve; nothing is renamed).
-//!
-//! A later ticket fills in the stubs: `backup` and `restore` (R1.18).
 
 mod autostart;
 mod backup;
@@ -399,8 +398,8 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Repo(args) => repo::run(&connect(&global, out).await?, args).await,
         Command::Ws(args) => return ws::run(&connect(&global, out).await?, args).await,
         Command::Store(args) => return store::run(&connect(&global, out).await?, args).await,
-        Command::Backup(args) => backup::run(args),
-        Command::Restore(args) => restore::run(args),
+        Command::Backup(args) => return backup::run(&connect(&global, out).await?, args).await,
+        Command::Restore(args) => restore::run(&global, out, &args),
     };
     done.map(|()| ExitCode::SUCCESS)
 }

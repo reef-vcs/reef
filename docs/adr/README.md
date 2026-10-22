@@ -31,6 +31,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0017](0017-daemon-api-v0-and-error-mapping.md) | Daemon API v0 and error mapping | accepted |
 | [0018](0018-snapshot-staleness-and-divergence.md) | Snapshot staleness and divergence | accepted |
 | [0019](0019-leases-and-reclaim.md) | Leases and reclaim | accepted |
+| [0020](0020-local-backup-format.md) | Local backup format | accepted |
 | [0021](0021-workspace-spec-file.md) | Workspace spec file | accepted |
 | [0022](0022-shared-dependency-stores.md) | Shared dependency stores | accepted |
 | [0023](0023-watchman-as-the-large-repository-watcher.md) | Watchman as the large-repository watcher | accepted |

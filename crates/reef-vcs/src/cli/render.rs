@@ -297,7 +297,7 @@ impl TextRender for Status {
     clippy::cast_precision_loss,
     reason = "a rounded display; f64 is exact far past any disk"
 )]
-fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;

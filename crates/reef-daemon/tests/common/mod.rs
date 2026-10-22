@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 pub use reef_daemon::testing::{
-    SyntheticRepo, TestDaemon, init_synthetic_repo, short_tmp, test_settings,
+    StoppedDaemon, SyntheticRepo, TestDaemon, init_synthetic_repo, short_tmp, test_settings,
 };
 use tempfile::TempDir;
 

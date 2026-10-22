@@ -25,11 +25,13 @@ use crate::proto::v0::repositories_client::RepositoriesClient;
 use crate::proto::v0::stores_client::StoresClient;
 use crate::proto::v0::workspaces_client::WorkspacesClient;
 use crate::proto::v0::{
-    BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse, ForgetRequest, ForgetResponse,
-    GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest, InspectResponse,
-    ListRepositoriesRequest, ListStoresRequest, ListWorkspacesRequest, MoveRequest, MoveResponse,
-    RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse, Repository,
-    SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, StoreInfo, Workspace,
+    BackupProgress, BackupRequest, BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse,
+    ForgetRequest, ForgetResponse, GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse,
+    InspectRequest, InspectResponse, ListRepositoriesRequest, ListStoresRequest,
+    ListWorkspacesRequest, MoveRequest, MoveResponse, QuiesceRequest, QuiesceResponse,
+    RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse, Repository, ResumeRequest,
+    ResumeResponse, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, StoreInfo,
+    Workspace,
 };
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
@@ -286,6 +288,48 @@ impl Client {
         };
         let mut client = MaintenanceClient::new(self.channel.clone());
         Ok(client.gc(request).await?.into_inner())
+    }
+
+    /// `Maintenance.Backup` (R1.18) of `repo` (empty for every repository)
+    /// into `dest`, absolute: progress as it goes, the last message with
+    /// `done`; an error ends the stream instead. Copies the whole state, so
+    /// the caller sets its own deadline.
+    pub async fn backup(
+        &self,
+        dest: &Path,
+        repo: &str,
+    ) -> Result<tonic::Streaming<BackupProgress>, ClientError> {
+        let request = BackupRequest {
+            dest: dest.display().to_string(),
+            repo: repo.to_owned(),
+        };
+        let mut client = MaintenanceClient::new(self.channel.clone());
+        Ok(client.backup(request).await?.into_inner())
+    }
+
+    /// `Maintenance.Quiesce` (R1.18) of `repo` (empty for every
+    /// repository), resuming by itself after `max` (zero for
+    /// `backup.quiesce_max`).
+    pub async fn quiesce(
+        &self,
+        repo: &str,
+        max: std::time::Duration,
+    ) -> Result<QuiesceResponse, ClientError> {
+        let request = QuiesceRequest {
+            repo: repo.to_owned(),
+            max_ms: u64::try_from(max.as_millis()).unwrap_or(u64::MAX),
+        };
+        let mut client = MaintenanceClient::new(self.channel.clone());
+        Ok(client.quiesce(request).await?.into_inner())
+    }
+
+    /// `Maintenance.Resume` (R1.18) of the quiesce `token` names.
+    pub async fn resume(&self, token: &str) -> Result<ResumeResponse, ClientError> {
+        let request = ResumeRequest {
+            token: token.to_owned(),
+        };
+        let mut client = MaintenanceClient::new(self.channel.clone());
+        Ok(client.resume(request).await?.into_inner())
     }
 
     /// `Stores.Build` (R1.20) of store `name` in `repo` at `rev` (empty
