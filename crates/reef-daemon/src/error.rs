@@ -1,9 +1,14 @@
 //! Errors at the API edge (ADR 0017): every handler's error becomes a
 //! [`tonic::Status`] whose code comes from the error's [`ErrorKind`], whose
 //! message is its [`ErrorChain`], and whose details carry a
-//! `reef.daemon.v0.ErrorDetail { kind, chain }` so clients get the kind
-//! back without parsing messages. [`kind_from_status`] is the client's
-//! inverse.
+//! `reef.daemon.v0.ErrorDetail { kind, chain, hint, next }` so clients get
+//! the kind back without parsing messages. [`kind_from_status`] is the
+//! client's inverse.
+//!
+//! `hint` and `next` (R1.26, ADR 0025) are the error's [`Advice`]: how to
+//! fix it, when the daemon knows. They come from [`Advise::advice`] on the
+//! errors that have a known fix, read here and nowhere else, so no handler
+//! formats a fix into a message.
 
 use std::error::Error;
 
@@ -11,7 +16,90 @@ use prost::Message as _;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use tonic::{Code, Status};
 
+use crate::db::DbError;
+use crate::lease::LeaseError;
 use crate::proto::v0::ErrorDetail;
+use crate::repo::RegisterError;
+use crate::store::StoreError;
+use crate::workspace::ManagerError;
+
+/// How to fix an error (R1.26, ADR 0025): `ErrorDetail.hint` and
+/// `ErrorDetail.next`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Advice {
+    /// One sentence; empty if there is only a command.
+    pub hint: String,
+    /// An argv an agent can run verbatim, starting `reef`; empty if there
+    /// is only a hint. Never a placeholder.
+    pub next: Vec<String>,
+}
+
+impl Advice {
+    /// A hint with no command.
+    pub fn hint(hint: impl Into<String>) -> Advice {
+        Advice {
+            hint: hint.into(),
+            next: Vec::new(),
+        }
+    }
+
+    /// A hint and the command that follows it.
+    pub fn run<I, S>(hint: impl Into<String>, next: I) -> Advice
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Advice {
+            hint: hint.into(),
+            next: next.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// The advice an error status carries, if any.
+    pub fn from_detail(detail: &ErrorDetail) -> Option<Advice> {
+        if detail.hint.is_empty() && detail.next.is_empty() {
+            return None;
+        }
+        Some(Advice {
+            hint: detail.hint.clone(),
+            next: detail.next.clone(),
+        })
+    }
+}
+
+/// An error that knows how it is fixed.
+pub trait Advise {
+    /// The fix, when this error has a known one.
+    fn advice(&self) -> Option<Advice>;
+}
+
+/// The advice for `error`: the first error in its source chain that is one
+/// of the daemon's [`Advise`] types and has advice. Wrapping variants
+/// delegate to what they wrap, since a `#[error(transparent)]` variant's
+/// source is its inner error's source, not the inner error.
+pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        let advice = if let Some(error) = error.downcast_ref::<ManagerError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<StoreError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<LeaseError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<RegisterError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<DbError>() {
+            error.advice()
+        } else {
+            None
+        };
+        if advice.is_some() {
+            return advice;
+        }
+        current = error.source();
+    }
+    None
+}
 
 /// Every kind, in the order the API documents them.
 pub const KINDS: [ErrorKind; 8] = [
@@ -71,9 +159,12 @@ pub fn status_from(error: &(dyn Error + 'static), kind: ErrorKind) -> Status {
     if !kind.is_caller_error() {
         tracing::error!(error = %message, ?kind, "request failed");
     }
+    let advice = advice_of(error).unwrap_or_default();
     let detail = ErrorDetail {
         kind: kind_name(kind).to_owned(),
         chain: chain(error),
+        hint: advice.hint,
+        next: advice.next,
     };
     Status::with_details(code_of(kind), message, detail.encode_to_vec().into())
 }
@@ -140,7 +231,7 @@ mod tests {
 
     use super::*;
     use crate::backend::{BackendError, BackendKind};
-    use crate::db::DbError;
+    use crate::model::{RepoId, WorkspaceId, WorkspaceState};
     use crate::repo::RepoThreadError;
 
     /// One real error per kind.
@@ -248,6 +339,136 @@ mod tests {
             detail_of(&status).unwrap().chain,
             ["walk /ws", "disk on fire"]
         );
+    }
+
+    fn ids() -> (WorkspaceId, RepoId) {
+        (
+            "bbbb000000000001".parse().unwrap(),
+            "aaaa000000000001".parse().unwrap(),
+        )
+    }
+
+    /// The advice a status carries, read back as a client reads it.
+    fn advice_in(status: &Status) -> Advice {
+        Advice::from_detail(&detail_of(status).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_missing_store_names_its_build() {
+        let (_, repo) = ids();
+        let missing = StoreError::Missing {
+            name: "deps".into(),
+            hash: "ff".into(),
+            repo,
+            commit: "c0ffee".into(),
+        };
+        // Wrapped, as `Create` returns it: the transparent variant delegates.
+        let status = status(ManagerError::Store(missing));
+        assert_eq!(
+            status.message(),
+            "store deps has no build for lockfile hash ff"
+        );
+        assert_eq!(
+            advice_in(&status).next,
+            [
+                "reef",
+                "store",
+                "build",
+                "deps",
+                "--repo",
+                "aaaa000000000001",
+                "--rev",
+                "c0ffee"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gone_workspace_advises_a_new_one() {
+        let (ws, repo) = ids();
+        let create = ["reef", "ws", "create", "--repo", "aaaa000000000001"];
+        for state in [WorkspaceState::Released, WorkspaceState::Reclaimed] {
+            let error = ManagerError::NotActive {
+                id: ws,
+                repo,
+                state,
+            };
+            assert_eq!(advice_in(&status(error)).next, create, "{state:?}");
+        }
+        let reclaimed = LeaseError::Reclaimed {
+            workspace: ws,
+            repo,
+            state: WorkspaceState::Reclaimed,
+            at: None,
+        };
+        assert_eq!(advice_in(&status(reclaimed)).next, create);
+        let expired = LeaseError::Expired {
+            workspace: ws,
+            repo,
+            lease: "cccc000000000001".parse().unwrap(),
+            grace_ended_at: crate::model::Timestamp(0),
+        };
+        assert_eq!(advice_in(&status(expired)).next, create);
+        let releasing = ManagerError::NotActive {
+            id: ws,
+            repo,
+            state: WorkspaceState::Releasing,
+        };
+        assert_eq!(advice_in(&status(releasing)).next, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_unregistered_path_advises_registering_it_if_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = status(ManagerError::NotRegistered(dir.path().to_owned()));
+        assert_eq!(status.code(), Code::NotFound);
+        assert!(status.message().starts_with("repository containing "));
+        assert_eq!(
+            advice_in(&status).next,
+            ["reef", "repo", "register", dir.path().to_str().unwrap()]
+        );
+        let gone = status_from_missing("/nonexistent/repo");
+        assert!(
+            gone.hint.starts_with("/nonexistent/repo does not exist"),
+            "{gone:?}"
+        );
+        assert_eq!(gone.next, ["reef", "repo", "list"]);
+    }
+
+    fn status_from_missing(path: &str) -> Advice {
+        advice_in(&status(ManagerError::NotRegistered(path.into())))
+    }
+
+    #[test]
+    fn lookups_advise_listing_or_more_characters() {
+        let not_found = DbError::NotFound {
+            what: "workspace",
+            id: "abcd".into(),
+        };
+        assert_eq!(
+            advice_in(&status(not_found)).next,
+            ["reef", "ws", "list", "--all"]
+        );
+        let ambiguous = DbError::Ambiguous {
+            what: "workspace",
+            prefix: "abcd".into(),
+            candidates: vec!["abcd000000000001".into(), "abcd000000000002".into()],
+            truncated: false,
+        };
+        let advice = advice_in(&status(ManagerError::Db(ambiguous)));
+        assert_eq!(advice.next, Vec::<String>::new());
+        assert_eq!(
+            advice.hint,
+            "Give more of the id: abcd matches workspace abcd000000000001, abcd000000000002."
+        );
+    }
+
+    #[test]
+    fn errors_without_a_known_fix_carry_none() {
+        let status = status(BackendError::RootExists("/ws".into()));
+        let detail = detail_of(&status).unwrap();
+        assert!(detail.hint.is_empty() && detail.next.is_empty());
+        assert_eq!(Advice::from_detail(&detail), None);
     }
 
     #[test]

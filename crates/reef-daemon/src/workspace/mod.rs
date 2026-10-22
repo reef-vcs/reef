@@ -47,6 +47,7 @@ use crate::backend::{
     Backend, BackendChoice, BackendError, BaseCacheError, DiskUsage, WorkspacePaths,
 };
 use crate::db::DbError;
+use crate::error::{Advice, Advise};
 use crate::lease::LeaseError;
 use crate::model::{LeaseRecord, RepoId, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::{RegisterError, RepoHandle, RepoThreadError};
@@ -360,9 +361,15 @@ pub enum ManagerError {
     NotActive {
         /// The workspace.
         id: WorkspaceId,
+        /// Its repository, for the advice to create another.
+        repo: RepoId,
         /// Its state.
         state: WorkspaceState,
     },
+    /// No registered repository contains an absolute path a request named.
+    /// The message is the one R1.25's implicit registration recognizes.
+    #[error("repository containing {} not found", .0.display())]
+    NotRegistered(PathBuf),
     /// The workspace's jj handle could not be reopened at start, or the
     /// workspace is not loaded yet. A release without a final snapshot
     /// (`skip_final_snapshot`, or `force`) can still remove it.
@@ -370,7 +377,7 @@ pub enum ManagerError {
     NotLoaded(WorkspaceId),
     /// The final snapshot before a release failed; the workspace is kept,
     /// marked `final-snapshot-failed`.
-    #[error("final snapshot of workspace {id} failed; release with force to discard it")]
+    #[error("final snapshot of workspace {id} failed")]
     FinalSnapshotFailed {
         /// The workspace.
         id: WorkspaceId,
@@ -443,6 +450,7 @@ impl Classify for ManagerError {
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
             Self::NotActive { .. } | Self::LeaseNotExpired(_) => ErrorKind::Conflict,
+            Self::NotRegistered(_) => ErrorKind::NotFound,
             Self::Task(_) => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
             Self::Settings(error) => error.kind(),
@@ -452,4 +460,61 @@ impl Classify for ManagerError {
             Self::ReadFile(error) => error.kind(),
         }
     }
+}
+
+impl Advise for ManagerError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::Db(error) => error.advice(),
+            Self::Lease(error) => error.advice(),
+            Self::Register(error) => error.advice(),
+            Self::Store(error) => error.advice(),
+            Self::NotRegistered(path) => Some(unregistered_advice(path)),
+            Self::NotActive { id, repo, state } => match state {
+                WorkspaceState::Released | WorkspaceState::Reclaimed => {
+                    Some(gone_advice(*id, *state, *repo))
+                }
+                WorkspaceState::Releasing => Some(Advice::hint(
+                    "It is being released now; it cannot be used again.",
+                )),
+                WorkspaceState::Active => None,
+            },
+            Self::FinalSnapshotFailed { id, .. } => Some(Advice::run(
+                "The workspace is kept; `reef ws release --no-snapshot` discards its unsnapshotted edits.",
+                ["reef", "ws", "inspect", &id.as_hex()],
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// The advice for a path in no registered repository: register it if it
+/// exists, else list what is registered.
+fn unregistered_advice(path: &std::path::Path) -> Advice {
+    if path.exists() {
+        let path = path.display().to_string();
+        return Advice::run(
+            "Register the repository (a plain git checkout gets jj alongside git).",
+            ["reef", "repo", "register", &path],
+        );
+    }
+    Advice::run(
+        format!(
+            "{} does not exist; name a directory inside a git or jj checkout, or a registered repository's id.",
+            path.display()
+        ),
+        ["reef", "repo", "list"],
+    )
+}
+
+/// The advice for a workspace that was released or reclaimed: its
+/// snapshots are kept, its directory is gone, so make another.
+pub(crate) fn gone_advice(id: WorkspaceId, state: WorkspaceState, repo: RepoId) -> Advice {
+    Advice::run(
+        format!(
+            "Workspace {id} was {}; its snapshots are kept but its directory is gone. Create a new workspace.",
+            state.as_str()
+        ),
+        ["reef", "ws", "create", "--repo", &repo.as_hex()],
+    )
 }

@@ -74,18 +74,19 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         DaemonCommand::Stop { force } => stop(global, out, force).await,
         DaemonCommand::Status => {
             let config = global.load_config()?;
-            let client = connect_only(&config.paths.socket).await?;
+            let client = connect_only(global, &config.paths.socket).await?;
             let status = status_of(&client, global).await?;
             out.object(&status)
         }
     }
 }
 
-async fn connect_only(socket: &Path) -> Result<Client, CliError> {
+async fn connect_only(global: &Global, socket: &Path) -> Result<Client, CliError> {
     match Client::connect(socket).await {
         Ok(client) => Ok(client),
         Err(ClientError::Connect { .. }) => Err(CliError::NotRunning {
             socket: socket.to_owned(),
+            start: global.daemon_start(),
         }),
         Err(error) => Err(CliError::Daemon(error)),
     }
@@ -139,6 +140,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
         return Err(CliError::Refused {
             kind: ErrorKind::NotFound,
             message: format!("no daemon answering at {}{detail}", socket.display()),
+            advice: None,
         });
     };
     let status = status_of(&client, global).await?;
@@ -160,6 +162,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
                 status.pid,
                 pid_file.display()
             ),
+            advice: None,
         });
     };
     let gone = Exited {
@@ -169,6 +172,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
     let pid = Pid::from_raw(i32::try_from(status.pid).map_err(|_| CliError::Refused {
         kind: ErrorKind::Internal,
         message: format!("the daemon reports pid {}, which is not a pid", status.pid),
+        advice: None,
     })?);
     signal(pid, Signal::SIGTERM)?;
     if !gone.wait(pid, STOP_TIMEOUT).await {
@@ -179,6 +183,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
                     "the daemon (pid {pid}) did not exit within {}s of SIGTERM; `reef daemon stop --force` kills it",
                     STOP_TIMEOUT.as_secs()
                 ),
+                advice: None,
             });
         }
         signal(pid, Signal::SIGKILL)?;
@@ -186,6 +191,7 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
             return Err(CliError::Refused {
                 kind: ErrorKind::Internal,
                 message: format!("the daemon (pid {pid}) survived SIGKILL"),
+                advice: None,
             });
         }
     }
@@ -211,6 +217,7 @@ fn signal(pid: Pid, signal: Signal) -> Result<(), CliError> {
                 ErrorKind::Internal
             },
             message: format!("send {signal} to the daemon (pid {pid}): {errno}"),
+            advice: None,
         }),
     }
 }

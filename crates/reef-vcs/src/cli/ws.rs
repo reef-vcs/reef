@@ -25,8 +25,13 @@ pub(crate) struct Args {
 #[derive(Debug, clap::Subcommand)]
 enum WsCommand {
     /// Create a workspace and print its path.
+    #[command(
+        visible_alias = "new",
+        after_help = "Example: cd \"$(reef ws create -o text --purpose 'fix the parser')\""
+    )]
     Create(CreateArgs),
-    /// List active workspaces.
+    /// List active workspaces, newest first.
+    #[command(visible_alias = "ls")]
     List {
         /// Only this repository's (id, id prefix, or path).
         #[arg(long, value_name = "REPO")]
@@ -34,6 +39,9 @@ enum WsCommand {
         /// Include released and reclaimed workspaces.
         #[arg(long)]
         all: bool,
+        /// Show at most this many, the newest; 0 for all.
+        #[arg(long, value_name = "N", default_value_t = LIST_LIMIT)]
+        limit: usize,
     },
     /// Show one workspace, after a snapshot of its files.
     Inspect {
@@ -44,6 +52,7 @@ enum WsCommand {
         no_snapshot: bool,
     },
     /// Snapshot a workspace, then remove its directory and end its lease.
+    #[command(visible_alias = "rm")]
     Release {
         /// A workspace id or unique prefix.
         workspace: String,
@@ -54,19 +63,14 @@ enum WsCommand {
     /// Move a workspace to another change.
     Move(ws_move::Args),
     /// Run a command in a new workspace, then release it.
+    #[command(after_help = "Example: reef ws run -- cargo test")]
     Run(ws_run::Args),
     /// Delete old operations, unused bases, and released workspace records.
     ///
-    /// Operations and git objects older than the daemon's `gc.undo_window`
-    /// (7 days by default) go, as do base cache entries no active workspace
-    /// uses and records of workspaces released longer ago than that. Every
-    /// active workspace is snapshotted first.
-    ///
-    /// GC rewrites the operations it keeps, so `jj` in the repository's own
-    /// checkout then reports a stale working copy; `jj workspace
-    /// update-stale` there resolves it. Exits 8 with the report printed if
-    /// the jj step failed (such as `git` missing); the other steps still
-    /// ran.
+    /// Removes what is older than `gc.undo_window` (7 days) and bases no
+    /// active workspace uses, after snapshotting every active workspace.
+    /// `jj` in the repository's own checkout then needs `jj workspace
+    /// update-stale`. Exits 8, report printed, if the jj step failed.
     Gc {
         /// Only this repository (id, id prefix, or path) [default: every
         /// registered repository].
@@ -174,7 +178,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Run(args) => return ws_run::run(ctx, args).await,
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, args).await,
-        WsCommand::List { repo, all } => {
+        WsCommand::List { repo, all, limit } => {
             let states = if all {
                 Vec::new()
             } else {
@@ -191,6 +195,14 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                 Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
                 None => ctx.call(list(String::new())).await?,
             };
+            let total = listed.len();
+            let listed = newest(listed, limit);
+            if listed.len() < total {
+                ctx.out.note(&format!(
+                    "reef: showing the newest {} of {total} workspaces; --limit 0 shows all",
+                    listed.len()
+                ));
+            }
             let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
             ctx.out.list(&listed)
         }
@@ -222,6 +234,23 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Move(_) => Err(CliError::not_implemented(ws_move::TICKET)),
     };
     done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `ws list`'s default `--limit`: the one list that grows without bound in
+/// Phase 1 (ADR 0025).
+const LIST_LIMIT: usize = 100;
+
+/// The `limit` newest of `listed` (all when 0), newest first.
+fn newest(
+    mut listed: Vec<reef_daemon::proto::v0::Workspace>,
+    limit: usize,
+) -> Vec<reef_daemon::proto::v0::Workspace> {
+    // The daemon lists oldest first.
+    listed.reverse();
+    if limit > 0 {
+        listed.truncate(limit);
+    }
+    listed
 }
 
 /// `ws gc`'s deadline when `--timeout` is not given: GC rebuilds the index

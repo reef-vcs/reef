@@ -98,11 +98,15 @@ message ListWorkspacesResponse {
 
 message InspectRequest {
   string repo = 1;
-  // A workspace id or unique prefix.
+  // A workspace id or unique prefix, or an absolute path inside an active
+  // workspace's directory (R1.26).
   string workspace = 2;
   // Snapshot first, so the answer reflects the files on disk. Off by
   // default in the API; the CLI turns it on.
   bool snapshot_first = 3;
+  // Leave `disk_usage` unset instead of walking the directory to measure
+  // it, for a caller that must be cheap (`reef here`, R1.26).
+  bool skip_disk_usage = 4;
 }
 
 message InspectResponse {

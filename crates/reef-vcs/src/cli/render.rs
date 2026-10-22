@@ -32,7 +32,7 @@ fn truncate(text: &str, width: usize) -> String {
     cut
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -41,7 +41,7 @@ fn now_ms() -> i64 {
 }
 
 /// A span as the largest whole unit: `45s`, `12m`, `3h`, `2d`.
-fn span(ms: i64) -> String {
+pub(super) fn span(ms: i64) -> String {
     let secs = ms.unsigned_abs() / 1000;
     match secs {
         0..60 => format!("{secs}s"),
@@ -53,7 +53,7 @@ fn span(ms: i64) -> String {
 
 /// `12m left`, `expired 3m ago`, `ended (released)`, or `-` without a
 /// lease.
-fn lease_text(lease: Option<&Lease>, now: i64) -> String {
+pub(super) fn lease_text(lease: Option<&Lease>, now: i64) -> String {
     if let Some(lease) = lease.filter(|lease| lease.state == "ended") {
         return match &lease.end_reason {
             Some(reason) => format!("ended ({reason})"),

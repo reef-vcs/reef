@@ -15,7 +15,7 @@ use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
-use crate::db::Db;
+use crate::db::{Db, DbError};
 use crate::lease::LeaseManager;
 use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
@@ -286,11 +286,16 @@ impl Manager {
         releasing_ok: bool,
     ) -> Result<Arc<WorkspaceEntry>, ManagerError> {
         if let Some(entry) = self.entry(id) {
-            let state = entry.record().state;
+            let record = entry.record();
+            let state = record.state;
             let allowed = state == WorkspaceState::Active
                 || (releasing_ok && state == WorkspaceState::Releasing);
             if !allowed {
-                return Err(ManagerError::NotActive { id, state });
+                return Err(ManagerError::NotActive {
+                    id,
+                    repo: record.repo_id,
+                    state,
+                });
             }
             return Ok(entry);
         }
@@ -298,6 +303,7 @@ impl Manager {
         if record.state != WorkspaceState::Active {
             return Err(ManagerError::NotActive {
                 id,
+                repo: record.repo_id,
                 state: record.state,
             });
         }
@@ -321,19 +327,18 @@ impl Manager {
             // Registered roots are canonical; a path that does not exist is
             // compared as given.
             let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-            return self.db.repository_containing(&path)?.ok_or_else(|| {
-                crate::db::DbError::NotFound {
-                    what: "repository containing",
-                    id: path.display().to_string(),
-                }
-                .into()
-            });
+            return self
+                .db
+                .repository_containing(&path)?
+                .ok_or(ManagerError::NotRegistered(path));
         }
         Ok(self.db.repository_by_prefix(text)?)
     }
 
     /// The workspace a request names by id or unique prefix, in the
     /// repository `repo` names, or in any repository when `repo` is empty.
+    /// An absolute path names the active workspace whose directory is it
+    /// or contains it (R1.26: `reef here` from a shell that `cd`'d in).
     pub fn resolve_workspace(
         &self,
         repo: &str,
@@ -348,6 +353,23 @@ impl Manager {
         } else {
             Some(self.resolve_repo(repo)?.id)
         };
+        let path = Path::new(workspace);
+        if path.is_absolute() {
+            // Workspace paths are canonical; a path that does not exist is
+            // compared as given.
+            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+            return self
+                .db
+                .active_workspace_containing(&path)?
+                .filter(|record| repo.is_none_or(|repo| record.repo_id == repo))
+                .ok_or_else(|| {
+                    DbError::NotFound {
+                        what: "workspace containing",
+                        id: path.display().to_string(),
+                    }
+                    .into()
+                });
+        }
         Ok(self.db.workspace_by_prefix(repo, workspace)?)
     }
 
@@ -431,10 +453,13 @@ impl Manager {
     /// snapshots (R1.16). With
     /// `snapshot_first`, takes an explicit snapshot before reading if the
     /// workspace is active (a released one has nothing to snapshot).
+    /// Without `measure_disk`, leaves the disk usage out rather than walk
+    /// the directory (`reef here`, R1.26).
     pub async fn inspect(
         &self,
         id: WorkspaceId,
         snapshot_first: bool,
+        measure_disk: bool,
     ) -> Result<Inspected, ManagerError> {
         let active = self.db.workspace(id)?.state == WorkspaceState::Active;
         let op_id = if snapshot_first && active {
@@ -446,7 +471,7 @@ impl Manager {
         let record = self.db.workspace(id)?;
         let lease = self.lease_of(&record)?;
         let disk_usage = match self.entry(id) {
-            Some(entry) if record.state == WorkspaceState::Active => {
+            Some(entry) if measure_disk && record.state == WorkspaceState::Active => {
                 self.disk_usage(entry, &record).await
             }
             _ => None,

@@ -1,7 +1,7 @@
 //! The `reef` CLI against a daemon (R1.22): output modes, exit codes,
 //! autostart, and `daemon start|stop|status`. Tests 1 to 11 are the brief's;
-//! R1.17 adds `ws_gc_dry_run`, R1.20 the store tests, and R1.25 the
-//! implicit registration tests at the end.
+//! R1.17 adds `ws_gc_dry_run`, R1.20 the store tests, R1.25 the implicit
+//! registration tests, and R1.26 the agent contract tests at the end.
 //!
 //! Most tests run a [`TestDaemon`] in this process and the `reef` binary
 //! against its socket with `--no-autostart`, so a mistake never starts a
@@ -15,7 +15,7 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
@@ -38,6 +38,8 @@ fn reef_in(state_dir: &Path) -> Command {
         "REEF_LOG",
         "RUST_LOG",
         "REEF_LOG_FORMAT",
+        "REEF_OUTPUT",
+        "REEF_WORKSPACE",
     ] {
         command.env_remove(var);
     }
@@ -116,10 +118,12 @@ fn help_lists_every_command() {
     let output = reef_in(tmp.path()).arg("--help").output().unwrap();
     let text = stdout(&output);
     for command in [
+        "ws",
+        "here",
+        "guide",
         "daemon",
         "config",
         "repo",
-        "ws",
         "store",
         "backup",
         "restore",
@@ -312,6 +316,9 @@ async fn ws_list_and_inspect() {
     );
     assert!(text.contains("ambiguous"), "{text}");
     assert!(text.contains(&id) && text.contains(&twin_id), "{text}");
+    // R1.26: a hint, and no command to run, since only the agent can pick.
+    assert!(text.contains("\nhint: Give more of the id: "), "{text}");
+    assert!(!text.contains("\nnext: "), "{text}");
 }
 
 // 6
@@ -368,6 +375,23 @@ async fn exit_codes() {
     .await;
     let text = failed(&output, 6, "unavailable");
     assert!(text.contains("daemon is not running"), "{text}");
+    // R1.26: the fix, with the flag that chose the socket.
+    assert!(
+        text.contains("\nnext: reef --socket /nonexistent/reef.sock daemon start\n"),
+        "{text}"
+    );
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        value["error"]["next"],
+        serde_json::json!([
+            "reef",
+            "--socket",
+            "/nonexistent/reef.sock",
+            "daemon",
+            "start"
+        ])
+    );
+    assert!(value["error"]["hint"].is_string(), "{value}");
 
     let text = failed(
         &run(reef(&daemon), &["ws", "create", "--change"]).await,
@@ -385,6 +409,7 @@ async fn exit_codes() {
         value["error"]["message"],
         "a subcommand is required; see --help"
     );
+    assert_eq!(value["error"]["hint"], "Usage: reef ws [OPTIONS] <COMMAND>");
     // `-o text` keeps stdout empty on a usage error.
     let output = run(reef(&daemon), &["-o", "text", "ws", "create", "--change"]).await;
     output.clone().assert().code(2);
@@ -768,7 +793,10 @@ async fn store_build_and_list() {
     // Without the store, a create fails unless told to skip it.
     let output = run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await;
     let text = failed(&output, 6, "unavailable");
-    assert!(text.contains("reef store build deps"), "{text}");
+    assert!(
+        text.contains("\nnext: reef store build deps --repo "),
+        "{text}"
+    );
     let ws = json(
         &run(
             reef(&daemon),
@@ -946,4 +974,520 @@ async fn repo_register_no_init() {
         "{}",
         stderr(&output)
     );
+}
+
+// R1.26: the agent-facing contract (ADR 0025).
+
+/// Every runnable command as its words, from the guide's JSON form.
+fn leaf_commands(state: &Path) -> Vec<Vec<String>> {
+    let value = json(&reef_in(state).args(["-o", "json"]).output().unwrap());
+    assert!(value["guide"].as_str().unwrap().starts_with("# Reef"));
+    serde_json::from_value(value["commands"].clone()).unwrap()
+}
+
+/// The subcommands `--help` lists for `path`, without clap's `help`.
+fn help_commands(state: &Path, path: &[String]) -> Vec<String> {
+    let output = reef_in(state).args(path).arg("--help").output().unwrap();
+    output.clone().assert().success();
+    stdout(&output)
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `next` is `reef`, then global flags with their values, then a
+/// command's words and its arguments.
+fn is_real_command(next: &[String], commands: &[Vec<String>]) -> bool {
+    let Some((first, mut rest)) = next.split_first() else {
+        return false;
+    };
+    if first != "reef" {
+        return false;
+    }
+    while let [flag, _value, tail @ ..] = rest {
+        if !flag.starts_with("--") {
+            break;
+        }
+        rest = tail;
+    }
+    commands
+        .iter()
+        .any(|command| rest.len() >= command.len() && rest[..command.len()] == command[..])
+}
+
+/// `error.next` of a failed command's JSON.
+fn next_of(output: &Output) -> Vec<String> {
+    let value: Value = serde_json::from_str(&stdout(output)).unwrap();
+    serde_json::from_value(value["error"]["next"].clone())
+        .unwrap_or_else(|e| panic!("{e}: {value}"))
+}
+
+fn words(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn no_args_prints_guide_and_exits_zero() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let output = reef_in(&state).output().unwrap();
+    output.clone().assert().success();
+    let text = stdout(&output);
+    assert!(text.starts_with("# Reef\n"), "{text}");
+    assert!(text.len() <= 1600, "{} bytes", text.len());
+    assert!(!text.contains("reef:long"), "{text}");
+    assert!(text.contains("reef ws run -- <command>"), "{text}");
+    for args in [&["guide"][..], &["agent-guide"], &["gui"]] {
+        let output = reef_in(&state).args(args).output().unwrap();
+        assert_eq!(stdout(&output), text, "{args:?}");
+    }
+    let short = stdout(&reef_in(&state).args(["guide", "--short"]).output().unwrap());
+    assert!(
+        text.starts_with(&short) && short.len() < text.len(),
+        "{short}"
+    );
+    assert!(short.lines().count() <= 40);
+    assert!(!state.exists(), "no daemon was started");
+}
+
+#[test]
+fn guide_json_lists_every_leaf_command() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let mut listed = leaf_commands(&state);
+    // The same tree, walked through `--help`.
+    let mut walked = Vec::new();
+    let mut pending = vec![Vec::<String>::new()];
+    while let Some(path) = pending.pop() {
+        let children = help_commands(&state, &path);
+        for child in &children {
+            let mut child_path = path.clone();
+            child_path.push(child.clone());
+            pending.push(child_path);
+        }
+        if children.is_empty() {
+            walked.push(path);
+        }
+    }
+    listed.sort();
+    walked.sort();
+    assert_eq!(listed, walked);
+    assert!(listed.contains(&vec!["ws".to_owned(), "run".to_owned()]));
+    assert!(listed.contains(&vec!["here".to_owned()]));
+}
+
+#[test]
+fn help_fits_sixty_lines() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let mut paths = vec![Vec::new()];
+    paths.extend(
+        help_commands(&state, &[])
+            .into_iter()
+            .map(|noun| vec![noun]),
+    );
+    for command in leaf_commands(&state) {
+        paths.push(command);
+    }
+    for path in paths {
+        let output = reef_in(&state).args(&path).arg("--help").output().unwrap();
+        let lines = stdout(&output).lines().count();
+        assert!(lines <= 60, "reef {} --help: {lines} lines", path.join(" "));
+    }
+}
+
+/// Every command finishes with stdin closed: none prompts, pages, or
+/// waits on input. `daemon run` and `daemon start` start a daemon by design
+/// and are left out; autostart's tests cover them.
+#[test]
+fn every_command_completes_with_stdin_closed() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let _guard = StopOnDrop(state.clone());
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    for command in leaf_commands(&state) {
+        if command == ["daemon", "run"] || command == ["daemon", "start"] {
+            continue;
+        }
+        let mut bogus = command.clone();
+        bogus.push("bogus".to_owned());
+        lines.push(command);
+        lines.push(bogus);
+    }
+    lines.push(["ws", "run", "--", "true"].map(str::to_owned).to_vec());
+    lines.push(Vec::new());
+    for line in lines {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_reef"));
+        for var in [
+            "REEF_SOCKET",
+            "REEF_CONFIG",
+            "REEF_OUTPUT",
+            "REEF_WORKSPACE",
+        ] {
+            command.env_remove(var);
+        }
+        command
+            .env("REEF_STATE_DIR", &state)
+            .arg("--no-autostart")
+            .args(&line)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let started = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed() > Duration::from_secs(5) {
+                let _ = child.kill();
+                panic!("reef {} did not finish with stdin closed", line.join(" "));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert!(!state.join("daemon.pid").exists(), "no daemon was started");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_store_error_carries_next() {
+    let (daemon, repo) = with_repo().await;
+    let spec = store_spec("mkdir -p \"$REEF_STORE_DIR\"");
+    commit_at_root(&repo.root, &[("reef.toml", &spec), ("deps.lock", "v1\n")]).await;
+
+    let output = run(
+        reef(&daemon),
+        &["ws", "create", "-o", "json", "--repo", &repo.id],
+    )
+    .await;
+    failed(&output, 6, "unavailable");
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        !message.contains("reef "),
+        "the fix is not in the message: {message}"
+    );
+    assert!(value["error"]["hint"].is_string(), "{value}");
+    let next = next_of(&output);
+    assert_eq!(next[..4], ["reef", "store", "build", "deps"]);
+    assert_eq!(next[4..6], ["--repo", repo.id.as_str()]);
+    assert_eq!(next[6], "--rev");
+    assert_eq!(next.len(), 8, "{next:?}");
+    assert!(is_real_command(&next, &leaf_commands(daemon.state_dir())));
+
+    let output = run(
+        reef(&daemon),
+        &["-o", "text", "ws", "create", "--repo", &repo.id],
+    )
+    .await;
+    output.clone().assert().code(6);
+    let text = stderr(&output);
+    assert!(
+        text.contains(&format!("\nnext: {}\n", next.join(" "))),
+        "{text}"
+    );
+
+    // Run verbatim, it fixes what it was given for.
+    json(&run(reef(&daemon), &words(&next[1..])).await);
+    json(&run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_next_is_a_real_command() {
+    let (daemon, repo) = with_repo().await;
+    let commands = leaf_commands(daemon.state_dir());
+    let mut nexts = Vec::new();
+
+    // A released workspace: create another, which works as given.
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap();
+    json(&run(reef(&daemon), &["ws", "release", id]).await);
+    let output = run(reef(&daemon), &["ws", "release", id]).await;
+    failed(&output, 5, "conflict");
+    let next = next_of(&output);
+    assert_eq!(next, ["reef", "ws", "create", "--repo", repo.id.as_str()]);
+    json(&run(reef(&daemon), &words(&next[1..])).await);
+    nexts.push(next);
+
+    // A workspace nobody has: list them.
+    let output = run(reef(&daemon), &["ws", "inspect", "abcdabcdabcdabcd"]).await;
+    failed(&output, 3, "not_found");
+    let next = next_of(&output);
+    assert_eq!(next, ["reef", "ws", "list", "--all"]);
+    nexts.push(next);
+
+    // A checkout no registered repository contains: register it, which
+    // works as given.
+    let plain = plain_git_repo(&daemon);
+    let output = run(reef_at(&daemon, &plain), &["--no-register", "ws", "create"]).await;
+    failed(&output, 3, "not_found");
+    let next = next_of(&output);
+    assert_eq!(next, ["reef", "repo", "register", plain.to_str().unwrap()]);
+    json(&run(reef(&daemon), &words(&next[1..])).await);
+    nexts.push(next);
+
+    // A path that does not exist: a hint, and the registered repositories.
+    let output = run(
+        reef(&daemon),
+        &["ws", "create", "--repo", "/nonexistent/repo"],
+    )
+    .await;
+    let text = failed(&output, 3, "not_found");
+    assert!(
+        text.contains("\nhint: /nonexistent/repo does not exist"),
+        "{text}"
+    );
+    let next = next_of(&output);
+    assert_eq!(next, ["reef", "repo", "list"]);
+    nexts.push(next);
+
+    // No daemon on the socket: start it.
+    let output = run(
+        reef(&daemon),
+        &["--socket", "/nonexistent/reef.sock", "ws", "list"],
+    )
+    .await;
+    failed(&output, 6, "unavailable");
+    nexts.push(next_of(&output));
+
+    for next in &nexts {
+        assert!(is_real_command(next, &commands), "{next:?} in {commands:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn here_inside_ws_run() {
+    let (daemon, repo) = with_repo().await;
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap();
+    let here = env!("CARGO_BIN_EXE_reef");
+
+    let output = run(
+        reef(&daemon),
+        &[
+            "ws",
+            "run",
+            "--workspace",
+            id,
+            "--keep",
+            "--",
+            here,
+            "here",
+            "-o",
+            "json",
+        ],
+    )
+    .await;
+    let value = json(&output);
+    assert_eq!(value["in_workspace"], true, "{value}");
+    assert_eq!(value["id"], id, "{value}");
+    assert_eq!(value["path"], created["path"], "{value}");
+    assert_eq!(value["lease"]["state"], "active", "{value}");
+    // `ws run` releases it, so there is nothing for the agent to run.
+    assert_eq!(value["next"], serde_json::json!([]), "{value}");
+    assert!(
+        value["hint"].as_str().unwrap().contains("ws run"),
+        "{value}"
+    );
+
+    let output = run(
+        reef(&daemon),
+        &[
+            "ws",
+            "run",
+            "--workspace",
+            id,
+            "--keep",
+            "--",
+            here,
+            "here",
+            "-o",
+            "text",
+        ],
+    )
+    .await;
+    output.clone().assert().success();
+    let text = stdout(&output);
+    assert!(text.lines().count() <= 12, "{text}");
+    assert!(
+        text.starts_with(&format!("workspace:     {id}\n")),
+        "{text}"
+    );
+    assert!(text.contains("\nlease:         active, "), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn here_by_path() {
+    let (daemon, repo) = with_repo().await;
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap();
+    let path = PathBuf::from(created["path"].as_str().unwrap());
+    let inside = first_entry(&path, true);
+
+    let value = json(&run(reef_at(&daemon, &inside), &["here"]).await);
+    assert_eq!(value["in_workspace"], true, "{value}");
+    assert_eq!(value["id"], id, "{value}");
+    // No snapshot without --snapshot, and no disk walk.
+    assert_eq!(
+        value["last_snapshot_op"], created["last_snapshot_op"],
+        "{value}"
+    );
+    assert!(value.get("disk_usage").is_none(), "{value}");
+    assert_eq!(
+        value["next"],
+        serde_json::json!(["reef", "ws", "release", id])
+    );
+
+    std::fs::write(inside.join("new-file"), "edit\n").unwrap();
+    let value = json(&run(reef_at(&daemon, &inside), &["here", "--snapshot"]).await);
+    assert!(value["last_snapshot_op"].is_string(), "{value}");
+
+    let output = run(reef_at(&daemon, &path), &["-o", "text", "here"]).await;
+    output.clone().assert().success();
+    let text = stdout(&output);
+    assert!(text.lines().count() <= 12, "{text}");
+    assert!(
+        text.ends_with(&format!("next:          reef ws release {id}\n")),
+        "{text}"
+    );
+
+    // Released: the directory is gone, and REEF_WORKSPACE still answers.
+    json(&run(reef(&daemon), &["ws", "release", id]).await);
+    let mut command = reef(&daemon);
+    command.env("REEF_WORKSPACE", id);
+    let value = json(&run(command, &["here"]).await);
+    assert_eq!(value["state"], "released", "{value}");
+    assert_eq!(
+        value["next"],
+        serde_json::json!(["reef", "ws", "create", "--repo", repo.id])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn here_outside() {
+    let (daemon, repo) = with_repo().await;
+    let output = run(reef_at(&daemon, &repo.root), &["here"]).await;
+    let value = json(&output);
+    assert_eq!(value["in_workspace"], false, "{value}");
+    assert_eq!(value["repo"]["id"], repo.id.as_str(), "{value}");
+    assert_eq!(
+        value["next"],
+        serde_json::json!(["reef", "ws", "run", "--"])
+    );
+
+    let elsewhere = new_dir(&daemon, "elsewhere");
+    let output = run(reef_at(&daemon, &elsewhere), &["-o", "text", "here"]).await;
+    output.clone().assert().success();
+    let text = stdout(&output);
+    assert!(
+        text.contains("\nrepo:      none registered here\n"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("next:      reef ws run -- <command>\n"),
+        "{text}"
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn aliases_and_prefixes_resolve() {
+    let (daemon, repo) = with_repo().await;
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap();
+    for args in [
+        &["workspace", "ls"][..],
+        &["ws", "ls"],
+        &["w", "l"],
+        &["ws", "li"],
+    ] {
+        let listed = json(&run(reef(&daemon), args).await);
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{args:?}");
+    }
+    json(&run(reef(&daemon), &["repo", "ls"]).await);
+    json(&run(reef(&daemon), &["store", "ls"]).await);
+    for args in [
+        &["ws", "cr", "--help"][..],
+        &["ws", "new", "--help"],
+        &["workspace", "create", "--help"],
+        &["ws", "rm", "--help"],
+        &["gu", "--short"],
+    ] {
+        run(reef(&daemon), args).await.assert().success();
+    }
+    // Ambiguous: release, rm, and run all start with r. clap refuses.
+    run(reef(&daemon), &["ws", "r", "--help"])
+        .await
+        .assert()
+        .code(2);
+    json(&run(reef(&daemon), &["ws", "rm", id]).await);
+}
+
+#[test]
+fn reef_output_env_sets_the_default() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let with = |value: &str, args: &[&str]| {
+        reef_in(&state)
+            .env("REEF_OUTPUT", value)
+            .arg("--no-autostart")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // Piped stdout defaults to JSON; REEF_OUTPUT=text overrides that.
+    let output = with("text", &["daemon", "status"]);
+    output.clone().assert().code(6);
+    assert_eq!(stdout(&output), "");
+    let output = with("json", &["daemon", "status"]);
+    failed(&output, 6, "unavailable");
+    // A usage error, read before clap has parsed anything.
+    let output = with("text", &["ws"]);
+    output.clone().assert().code(2);
+    assert_eq!(stdout(&output), "");
+    // -o beats REEF_OUTPUT.
+    let output = with("text", &["-o", "json", "daemon", "status"]);
+    failed(&output, 6, "unavailable");
+    // The guide is text unless JSON is asked for, by either.
+    let value = json(&with("json", &["guide"]));
+    assert!(value["guide"].is_string(), "{value}");
+    let output = with("json", &["-o", "text", "guide"]);
+    assert!(stdout(&output).starts_with("# Reef"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_list_limit_and_truncated() {
+    let (daemon, repo) = with_repo().await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(
+            create(&daemon, &repo).await["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let output = run(reef(&daemon), &["ws", "list", "--limit", "2"]).await;
+    let listed = json(&output);
+    let listed: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ws| ws["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [ids[2].as_str(), ids[1].as_str()], "newest first");
+    assert_eq!(
+        stderr(&output),
+        "reef: showing the newest 2 of 3 workspaces; --limit 0 shows all\n"
+    );
+    let all = json(&run(reef(&daemon), &["ws", "list", "--limit", "0"]).await);
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    let quiet = run(reef(&daemon), &["-q", "ws", "list", "--limit", "1"]).await;
+    assert_eq!(json(&quiet).as_array().unwrap().len(), 1);
+    assert_eq!(stderr(&quiet), "");
+    let output = run(reef(&daemon), &["ws", "list"]).await;
+    assert_eq!(json(&output).as_array().unwrap().len(), 3);
+    assert_eq!(stderr(&output), "");
 }

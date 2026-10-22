@@ -319,6 +319,7 @@ fn conflict(message: String) -> CliError {
     CliError::Refused {
         kind: ErrorKind::Conflict,
         message,
+        advice: None,
     }
 }
 

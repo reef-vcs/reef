@@ -13,6 +13,7 @@ use reef_lib::jj::{InitError, OpenError, Repo, UserSettings};
 use super::exclude::{exclude_path, write_jj_exclude};
 use super::{RegistryError, RepoRegistry};
 use crate::db::{Db, DbError};
+use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
 use crate::proto::v0::register_request::IfNotJj;
 
@@ -85,6 +86,21 @@ impl Classify for RegisterError {
             }
             Self::Db(error) => error.kind(),
             Self::Registry(error) => error.kind(),
+        }
+    }
+}
+
+impl Advise for RegisterError {
+    fn advice(&self) -> Option<Advice> {
+        match self {
+            Self::NotARepository(_) => Some(Advice::hint(
+                "Run `git init` there first, or name a directory inside a git or jj checkout.",
+            )),
+            Self::GitWorktree(_) => Some(Advice::hint(
+                "Name a directory in the main checkout; Reef workspaces replace git worktrees.",
+            )),
+            Self::Db(error) => error.advice(),
+            _ => None,
         }
     }
 }

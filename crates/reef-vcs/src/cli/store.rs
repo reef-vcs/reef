@@ -33,12 +33,10 @@ pub(crate) struct Args {
 enum StoreCommand {
     /// Build a store declared in reef.toml and seal it.
     ///
-    /// Runs the store's `build` command once, in a scratch workspace on the
-    /// revision, and seals what it wrote read-only. Its output is printed as
-    /// it runs (all on stderr in JSON mode). Exits with the command's exit
-    /// code if it fails. A store already built for the lockfile is not
-    /// rebuilt without --force. The command runs for at most --timeout
-    /// (default 30m).
+    /// Runs the store's `build` once in a scratch workspace on the revision
+    /// and seals what it wrote. Its output streams (to stderr in JSON mode);
+    /// a failure exits with its code. A built store is kept unless --force;
+    /// --timeout (default 30m) bounds the command.
     Build {
         /// The store's name in reef.toml.
         name: String,
@@ -56,6 +54,7 @@ enum StoreCommand {
         force: bool,
     },
     /// List built stores.
+    #[command(visible_alias = "ls")]
     List {
         /// Only the stores this repository built or mounts (id, id prefix,
         /// or path) [default: every store].

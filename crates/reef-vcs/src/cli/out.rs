@@ -1,12 +1,15 @@
 //! Output rules (README, CLI). JSON (`-o json`, or stdout not a terminal):
 //! exactly one JSON value on stdout per command, an object or, for lists,
-//! an array, and on failure `{"error": {"kind", "message"}}`. Text (`-o
-//! text`, or a terminal): `key: value` blocks and aligned columns. Errors
-//! always go to stderr as `error: <chain>`; notes such as `released <id>`
-//! go to stderr in text mode only, and `-q` silences them.
+//! an array, and on failure `{"error": {"kind", "message", "hint"?,
+//! "next"?}}`. Text (`-o text`, or a terminal): `key: value` blocks and
+//! aligned columns. Errors always go to stderr as `error: <chain>`,
+//! followed by `hint: <sentence>` and `next: <command>` when the error has
+//! advice (ADR 0025); notes such as `released <id>` go to stderr in text
+//! mode only, and `-q` silences them.
 
 use std::io::{self, IsTerminal as _, Write};
 
+use reef_daemon::error::Advice;
 use reef_lib::error::{Classify as _, ErrorChain};
 use serde::Serialize;
 
@@ -162,30 +165,60 @@ impl Out {
         eprintln!("{text}");
     }
 
-    /// `error: <chain>` on stderr; in JSON mode also the error object on
-    /// stdout.
+    /// `error: <chain>` on stderr, then `hint:` and `next:` lines when the
+    /// error has advice; in JSON mode also the error object on stdout.
     pub(crate) fn error(&self, error: &CliError) {
         let message = ErrorChain(error).to_string();
+        let advice = error.advice();
         self.error_line(&format!("error: {message}"));
+        if let Some(advice) = &advice {
+            if !advice.hint.is_empty() {
+                self.error_line(&format!("hint: {}", advice.hint));
+            }
+            if !advice.next.is_empty() {
+                self.error_line(&format!("next: {}", shell_line(&advice.next)));
+            }
+        }
         if self.mode == Output::Json {
-            self.error_object(kind_text(error.kind()), &message);
+            self.error_object(kind_text(error.kind()), &message, advice.as_ref());
         }
     }
 
-    /// clap's rendering of a usage error on stderr; in JSON mode also the
-    /// error object, with `message` as its first line.
+    /// clap's rendering of a usage error on stderr, which already ends in
+    /// the usage line; in JSON mode also the error object, with `message`
+    /// as its first line and the usage line as its hint.
     #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
-    pub(crate) fn usage_error(&self, rendered: &str, message: &str) {
+    pub(crate) fn usage_error(&self, rendered: &str, message: &str, usage: Option<&str>) {
         eprint!("{rendered}");
         if self.mode == Output::Json {
-            self.error_object("invalid_argument", message);
+            let advice = usage.map(Advice::hint);
+            self.error_object("invalid_argument", message, advice.as_ref());
         }
     }
 
-    fn error_object(&self, kind: &str, message: &str) {
-        let value = serde_json::json!({ "error": { "kind": kind, "message": message } });
+    fn error_object(&self, kind: &str, message: &str, advice: Option<&Advice>) {
+        /// The fields in the order a reader wants them.
+        #[derive(Serialize)]
+        struct ErrorObject<'a> {
+            kind: &'a str,
+            message: &'a str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            hint: &'a str,
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            next: &'a [String],
+        }
+        #[derive(Serialize)]
+        struct Wrapper<'a> {
+            error: ErrorObject<'a>,
+        }
+        let error = ErrorObject {
+            kind,
+            message,
+            hint: advice.map_or("", |advice| advice.hint.as_str()),
+            next: advice.map_or(&[], |advice| advice.next.as_slice()),
+        };
         let mut buffer = Vec::new();
-        json_into(&mut buffer, &value);
+        json_into(&mut buffer, &Wrapper { error });
         // Already failing; a closed stdout changes nothing.
         let _ = self.raw(&buffer);
     }
@@ -227,6 +260,25 @@ fn table(w: &mut Vec<u8>, header: &[&str], rows: &[Vec<String>]) {
     }
 }
 
+/// An argv as one line a POSIX shell reads back as the same words: words
+/// with anything but `[A-Za-z0-9@%+=:,./_-]` single-quoted.
+pub(crate) fn shell_line(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| {
+            let plain = !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./_-".contains(&b));
+            if plain {
+                word.clone()
+            } else {
+                format!("'{}'", word.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `key: value` lines with the values aligned.
 pub(crate) fn block(w: &mut dyn Write, pairs: &[(&str, String)]) -> io::Result<()> {
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
@@ -254,6 +306,21 @@ mod tests {
         assert_eq!(
             String::from_utf8(buffer).unwrap(),
             "ID    STATE   PATH\nabcd  active  /ws/1\nef            /ws/22\n"
+        );
+    }
+
+    #[test]
+    fn shell_lines_quote_only_what_needs_it() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            shell_line(&argv(&[
+                "reef", "store", "build", "deps", "--rev", "abc123"
+            ])),
+            "reef store build deps --rev abc123"
+        );
+        assert_eq!(
+            shell_line(&argv(&["reef", "repo", "register", "/a b/it's", ""])),
+            r"reef repo register '/a b/it'\''s' ''"
         );
     }
 

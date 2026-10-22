@@ -118,11 +118,16 @@ impl Manager {
         let entry = self.loaded_entry(id, releasing_ok)?;
         let _scan = entry.scan_lock.lock().await;
         // A release may have finished while this waited.
-        let state = entry.record().state;
+        let record = entry.record();
+        let state = record.state;
         let allowed =
             state == WorkspaceState::Active || (releasing_ok && state == WorkspaceState::Releasing);
         if !allowed {
-            return Err(ManagerError::NotActive { id, state });
+            return Err(ManagerError::NotActive {
+                id,
+                repo: record.repo_id,
+                state,
+            });
         }
         self.snapshot_locked(&entry, kind, description).await
     }

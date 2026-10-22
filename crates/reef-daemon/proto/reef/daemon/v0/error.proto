@@ -11,4 +11,12 @@ message ErrorDetail {
   string kind = 1;
   // The error's message, then each source's, outermost first.
   repeated string chain = 2;
+  // How to fix it, in one sentence, when the daemon knows (R1.26, ADR
+  // 0025); empty otherwise.
+  string hint = 3;
+  // A command line that fixes it or shows what to do next, as an argv an
+  // agent can run verbatim (`["reef", "store", "build", "deps", ...]`);
+  // empty when there is none. Never a placeholder: the daemon fills in the
+  // ids it knows.
+  repeated string next = 4;
 }

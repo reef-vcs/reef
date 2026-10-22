@@ -17,9 +17,10 @@ pub(crate) struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum RepoCommand {
-    /// Register the repository containing PATH (default: the current
-    /// directory). A git checkout without jj gets jj alongside git first: a
-    /// `.jj` directory and a `/.jj/` line in `.git/info/exclude`.
+    /// Register the repository containing PATH (default: the current directory).
+    ///
+    /// A git checkout without jj gets jj alongside git first: a `.jj`
+    /// directory and a `/.jj/` line in `.git/info/exclude`.
     Register {
         /// A path inside the repository.
         #[arg(default_value = ".")]
@@ -30,6 +31,7 @@ enum RepoCommand {
         no_init: bool,
     },
     /// List registered repositories.
+    #[command(visible_alias = "ls")]
     List,
     /// Unregister a repository; refused while it has active workspaces.
     Forget {
@@ -63,6 +65,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                         "repository {} is already registered as {}",
                         repo.root, repo.id
                     ),
+                    advice: None,
                 });
             }
             if response.initialized_jj {
@@ -98,5 +101,6 @@ pub(crate) fn missing(field: &str) -> CliError {
     CliError::Refused {
         kind: ErrorKind::Internal,
         message: format!("the daemon's answer has no {field}"),
+        advice: None,
     }
 }
