@@ -439,6 +439,9 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         }
         Err(error) => tracing::error!(error = %ErrorChain(&error), "cannot list repositories"),
     }
+    //    Then undo the creates a crash interrupted (R1.23): directories,
+    //    jj workspaces, and working-copy state that no row names.
+    sweep_abandoned_creates(state).await;
     //    Then rebuild each open repository's snapshot index, before the
     //    scheduler can record new rows.
     let reindexes = state
@@ -495,6 +498,17 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         })
     });
     Ok(listener)
+}
+
+/// The end of step 5: [`crate::workspace::Manager::sweep_abandoned_creates`]
+/// for every open repository.
+async fn sweep_abandoned_creates(state: &AppState) {
+    for id in state.repos.ids() {
+        let undone = state.manager.sweep_abandoned_creates(id).await;
+        if undone > 0 {
+            tracing::info!(repo = %id, undone_count = undone, "undid interrupted creates");
+        }
+    }
 }
 
 /// The end of step 3: the store builds a stop interrupted, and store trash

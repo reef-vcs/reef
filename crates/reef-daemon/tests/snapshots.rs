@@ -31,6 +31,8 @@ const OWNER: &str = "tester@host";
 const FALLBACK: Duration = Duration::from_secs(2);
 
 /// A daemon with the brief's test intervals and a small registered repo.
+/// Watched workspaces get the same short fallback, so the tests of lost
+/// events need not wait the default ten minutes.
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
     fixture_with(|_| {}).await
 }
@@ -48,6 +50,7 @@ async fn fixture_with(
         watcher.debounce = Duration::from_millis(100);
         watcher.min_interval = Duration::from_millis(100);
         watcher.fallback_interval = FALLBACK;
+        watcher.watched_fallback_interval = FALLBACK;
         configure(config);
     })
     .await
@@ -580,6 +583,48 @@ async fn no_watcher_falls_back_to_the_timer() {
     .await;
     let row = inspect(&daemon, &repo, &ws).await;
     assert!(tree_has(&repo.root, &row.commit_id, "unwatched.txt").await);
+}
+
+// A workspace whose watch works waits `watched_fallback_interval` for a
+// fallback snapshot, so idle watched workspaces are not all rescanned every
+// `fallback_interval` (R1.23); one whose watch failed waits only
+// `fallback_interval`.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_unwatched_workspaces_get_the_short_fallback() {
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+    })
+    .await;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    // Events are lost, so only a fallback snapshot can take the writes.
+    scheduler.pause_watcher();
+    let watched = create(&daemon, &repo, None).await;
+    scheduler.refuse_watches();
+    let unwatched = create(&daemon, &repo, None).await;
+    assert_eq!(inspect(&daemon, &repo, &watched).await.attention, "");
+    assert_eq!(
+        inspect(&daemon, &repo, &unwatched).await.attention,
+        "watch-failed"
+    );
+    write(&watched, "watched.txt", "x\n");
+    write(&unwatched, "unwatched.txt", "x\n");
+    wait_for(
+        FALLBACK + Duration::from_secs(1),
+        "a fallback snapshot of the unwatched workspace",
+        || async {
+            !inspect(&daemon, &repo, &unwatched)
+                .await
+                .last_snapshot_op
+                .is_empty()
+        },
+    )
+    .await;
+    tokio::time::sleep(FALLBACK).await;
+    assert_eq!(
+        inspect(&daemon, &repo, &watched).await.last_snapshot_op,
+        "",
+        "the watched workspace was not rescanned after {FALLBACK:?} twice over"
+    );
 }
 
 // Post-snapshot hooks see every snapshot that ends well, after the row.

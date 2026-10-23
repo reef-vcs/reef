@@ -24,6 +24,8 @@ pub use reef_daemon::testing::{
 };
 use tempfile::TempDir;
 
+pub mod spawned;
+
 /// How long the binary gets to bind its socket, and to exit after SIGTERM.
 pub const BINARY_TIMEOUT: Duration = Duration::from_secs(10);
 

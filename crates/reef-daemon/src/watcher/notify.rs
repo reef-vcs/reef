@@ -20,7 +20,7 @@ use notify_debouncer_full::{
 use reef_lib::error::ErrorChain;
 use tokio::sync::mpsc;
 
-use super::{Demux, WatchError, WatchEvent, Watcher, WatcherKind};
+use super::{Demux, HealthHook, WatchError, WatchEvent, Watcher, WatcherKind};
 use crate::model::WorkspaceId;
 
 /// How often dropped events are reported.
@@ -43,15 +43,21 @@ impl std::fmt::Debug for NotifyWatcher {
 
 impl NotifyWatcher {
     /// Starts the watcher, with nothing watched yet. Batches arrive
-    /// `debounce` after the last event in them. On Linux, logs the inotify
-    /// limits first.
-    pub fn new(debounce: Duration, events: mpsc::Sender<WatchEvent>) -> Result<Self, WatchError> {
+    /// `debounce` after the last event in them. A workspace whose new
+    /// directory cannot be watched is reported down to `health`. On Linux,
+    /// logs the inotify limits first.
+    pub fn new(
+        debounce: Duration,
+        events: mpsc::Sender<WatchEvent>,
+        health: HealthHook,
+    ) -> Result<Self, WatchError> {
         #[cfg(target_os = "linux")]
         log_inotify_limits();
         let demux = Arc::new(Mutex::new(Demux::default()));
         let handler = Handler {
             demux: Arc::clone(&demux),
             events,
+            health,
             dropped: 0,
             reported_at: Instant::now(),
         };
@@ -125,6 +131,7 @@ impl Watcher for NotifyWatcher {
 struct Handler {
     demux: Arc<Mutex<Demux>>,
     events: mpsc::Sender<WatchEvent>,
+    health: HealthHook,
     dropped: u64,
     reported_at: Instant,
 }
@@ -175,12 +182,15 @@ impl DebounceEventHandler for Handler {
                 }
             }
             Err(errors) => {
+                let mut unwatched = Vec::new();
                 let demux = lock(&self.demux);
                 for error in errors {
                     let workspace = error.paths.iter().find_map(|path| demux.route(path));
                     if is_limit(&error) {
                         // A new subdirectory could not be watched: its
-                        // subtree is covered by the fallback timer only.
+                        // subtree is covered by the fallback timer only, at
+                        // the unwatched interval.
+                        unwatched.extend(workspace);
                         let (watches, instances) = inotify_limits().unwrap_or_default();
                         tracing::error!(
                             workspace_id = %workspace.map(|ws| ws.to_string()).unwrap_or_default(),
@@ -200,6 +210,10 @@ impl DebounceEventHandler for Handler {
                     } else {
                         tracing::warn!(error = %ErrorChain(&error), "filesystem watcher error");
                     }
+                }
+                drop(demux);
+                for workspace in unwatched {
+                    (self.health)(workspace, false);
                 }
             }
         }
@@ -290,7 +304,7 @@ mod tests {
     fn watcher() -> (NotifyWatcher, mpsc::Receiver<WatchEvent>) {
         let (tx, rx) = mpsc::channel(64);
         (
-            NotifyWatcher::new(Duration::from_millis(50), tx).unwrap(),
+            NotifyWatcher::new(Duration::from_millis(50), tx, Arc::new(|_, _| {})).unwrap(),
             rx,
         )
     }

@@ -40,7 +40,7 @@ use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
 use crate::snapshot::index::{self, SnapshotEntry};
-use crate::snapshot::{ScanPermit, SnapshotKind, SnapshotOutcome, Trigger, description};
+use crate::snapshot::{ScanPermit, Scheduled, SnapshotKind, SnapshotOutcome, Trigger, description};
 
 /// The per-workspace ignore file, in gitignore syntax, at the workspace root.
 pub const REEFIGNORE: &str = ".reefignore";
@@ -180,29 +180,29 @@ impl Manager {
 
     /// A watcher (or, with `fallback`, a fallback timer) snapshot, from the
     /// scheduler. Failures are logged; the next event or the fallback timer
-    /// retries. Returns whether a snapshot ran.
-    pub(crate) async fn scheduled_snapshot(&self, id: WorkspaceId, fallback: bool) -> bool {
+    /// retries, the timer at its short interval after a failure.
+    pub(crate) async fn scheduled_snapshot(&self, id: WorkspaceId, fallback: bool) -> Scheduled {
         let Some(entry) = self.entry(id) else {
-            return false;
+            return Scheduled::Skipped;
         };
         let _scan = entry.scan_lock.lock().await;
         // A releasing workspace's final snapshot is the release's, and a
         // pause taken while this waited holds it off; the events stay
         // marked for after the pause.
         if entry.record().state != WorkspaceState::Active || self.scheduler.is_paused(id) {
-            return false;
+            return Scheduled::Skipped;
         }
         let trigger = self.scheduler.take_trigger(id);
         if trigger.first_event.is_none() && !fallback {
             // An explicit snapshot covered the events while this waited.
-            return false;
+            return Scheduled::Skipped;
         }
         let kind = SnapshotKind::Watcher;
         let ran = self
             .run_snapshot(&entry, kind, description(kind, id, None), trigger)
             .await;
         match ran {
-            Ok(_) => {}
+            Ok(_) => return Scheduled::Taken,
             Err(ManagerError::NotLoaded(_)) => {
                 // Its jj handle could not be reopened at start; logged then.
                 tracing::debug!(workspace_id = %id, "watcher snapshot skipped: not loaded");
@@ -215,10 +215,12 @@ impl Manager {
                 );
             }
             Err(error) => {
-                tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "watcher snapshot failed");
+                // The workspace's edits since its last snapshot are not in
+                // the store (a full disk, R1.23); the next trigger retries.
+                tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "watcher snapshot failed");
             }
         }
-        true
+        Scheduled::Failed
     }
 
     /// The pipeline; see the module docs.

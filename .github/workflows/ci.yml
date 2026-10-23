@@ -115,6 +115,14 @@ jobs:
           name: synth-digest-${{ matrix.os }}
           path: digest-${{ matrix.os }}.txt
           retention-days: 7
+      # The key sets of the CLI's JSON from R1.23's scripted session, compared across platforms
+      # by the cli-shape job.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-shape-${{ matrix.os }}
+          path: target/cli-shape-*.json
+          if-no-files-found: error
+          retention-days: 7
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
@@ -133,8 +141,11 @@ jobs:
           tool: cargo-nextest@0.9
       # btrfs-progs and xfsprogs make the reflink tests' filesystems (R1.10).
       - run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs btrfs-progs xfsprogs
+      # `reef` too: R1.23's integration tests run it, and `-p reef-daemon` does not build it.
       - name: Build the privileged tests
-        run: cargo nextest run -p reef-daemon --features privileged-tests --no-run
+        run: |
+          cargo nextest run -p reef-daemon --features privileged-tests --no-run
+          cargo build -p reef-vcs --bin reef
       # Unfiltered: with fuse-overlayfs installed, `auto` picks it, so every
       # daemon test also runs on overlay workspaces.
       - name: Daemon tests on fuse-overlayfs (unprivileged)
@@ -162,9 +173,10 @@ jobs:
           done
           if [[ -n "$failed" ]]; then echo "::error::reflink tests failed on:$failed"; exit 1; fi
       # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`. The
-      # `stores` binary as root gets read-only bind mounts (R1.20).
+      # `stores` binary as root gets read-only bind mounts (R1.20). R1.23: a killed daemon's
+      # kernel overlay and bind mounts across a restart, and the full disk on a tmpfs.
       - name: Kernel overlayfs and store bind mounts (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores)'
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/))'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target
@@ -191,12 +203,28 @@ jobs:
           [[ "$(ls digest-*.txt | wc -l)" -eq 2 ]]
           [[ "$(cat digest-*.txt crates/reef-testing/synth-small-seed1.sha256 | sort -u | wc -l)" -eq 1 ]]
 
+  # The CLI's JSON has the same keys on both platforms (R1.23, test 12).
+  cli-shape:
+    name: CLI shape
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-shape-*
+          merge-multiple: true
+      - run: |
+          ls cli-shape-*.json
+          [[ "$(ls cli-shape-*.json | wc -l)" -eq 2 ]]
+          diff cli-shape-linux.json cli-shape-macos.json
+
   ci-ok:
     name: CI passed
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, deny, check, overlayfs, synth-determinism]
+    needs: [fmt, deny, check, overlayfs, synth-determinism, cli-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -209,6 +237,7 @@ jobs:
           CHECK: ${{ needs.check.result }}
           OVERLAYFS: ${{ needs.overlayfs.result }}
           SYNTH: ${{ needs.synth-determinism.result }}
+          CLI_SHAPE: ${{ needs.cli-shape.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" ]]
+          [[ "$FMT" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" ]]

@@ -11,9 +11,18 @@
 //! dirty again, so exactly one more follows. A workspace never has more than
 //! one snapshot in flight, and the queue behind it is never deeper than one.
 //!
-//! Every `watcher.fallback_interval`, a workspace with no event since its
-//! last snapshot is snapshotted anyway, which covers lost events (queue
-//! overflow, `FSEvents` coalescing, a watch that failed to attach).
+//! A workspace with no event since its last snapshot is snapshotted anyway
+//! once that has lasted `watcher.fallback_interval` (60 s) if it has no
+//! working watch (a watch that failed to attach, a Watchman subscription
+//! that is down) or may hold writes no event reported (its last automatic
+//! snapshot failed, or it was tracked again after a time unwatched: a daemon
+//! restart, an aborted release, a rewatch), and
+//! `watcher.watched_fallback_interval` (10 minutes) otherwise. A working
+//! watch reports every change: a queue overflow or `FSEvents` dropping
+//! events marks every workspace changed. The long timer covers events the
+//! watcher dropped because the scheduler's queue was full. At 60 s for every
+//! workspace, the full scans of 200 idle 100,000-file workspaces outran the
+//! scan pool (R1.23, `docs/load-tests.md`).
 //!
 //! Explicit snapshots ([`Scheduler::snapshot_now`], the `Snapshot` RPC,
 //! `Inspect` with `snapshot_first`, release) wait for one in flight and then
@@ -266,6 +275,15 @@ struct Entry {
     paths_count: usize,
     /// A watcher or fallback snapshot has been started and has not ended.
     task: bool,
+    /// Its watch is working: attached, and for a watcher that reports
+    /// health, last reported up. Such a workspace waits
+    /// `watched_fallback_interval` for a fallback snapshot.
+    watched: bool,
+    /// It may hold writes no event reported: its last watcher or fallback
+    /// snapshot failed, or it was tracked for a reason other than a create
+    /// and none has run since. The next fallback waits only
+    /// `fallback_interval`.
+    behind: bool,
     /// When the last snapshot ended (or tracking began).
     last_completed: Instant,
     /// Open [`PauseGuard`]s.
@@ -286,6 +304,19 @@ struct Stats {
     window_scans: u64,
     window_queued_max: usize,
     window_wait_max: Duration,
+}
+
+/// How a watcher or fallback snapshot ended; see
+/// `Manager::scheduled_snapshot`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Scheduled {
+    /// None ran: the workspace is paused or no longer active, or an explicit
+    /// snapshot covered its events meanwhile.
+    Skipped,
+    /// It ran.
+    Taken,
+    /// It ran and failed, or could not run (the workspace is not loaded).
+    Failed,
 }
 
 /// What a snapshot run takes from its scheduler entry when it starts.
@@ -381,8 +412,7 @@ impl Scheduler {
     /// result snapshots whatever was written meanwhile.
     pub async fn track(&self, ws: WorkspaceId, reason: TrackReason) {
         let inner = Arc::clone(&self.inner);
-        let defer = reason == TrackReason::Created;
-        if let Err(error) = tokio::task::spawn_blocking(move || inner.track(ws, defer)).await {
+        if let Err(error) = tokio::task::spawn_blocking(move || inner.track(ws, reason)).await {
             tracing::error!(workspace_id = %ws, %error, "watch task failed");
         }
     }
@@ -716,7 +746,7 @@ impl Drop for ScanPermit {
 
 impl Inner {
     /// [`Scheduler::track`]'s work, on the calling thread.
-    fn track(&self, ws: WorkspaceId, defer: bool) {
+    fn track(&self, ws: WorkspaceId, reason: TrackReason) {
         let Some(manager) = self.manager.upgrade() else {
             return;
         };
@@ -724,15 +754,23 @@ impl Inner {
             return;
         };
         let kind = entry.record().watcher;
-        self.lock_entries().entry(ws).or_insert_with(|| Entry {
-            watcher: kind,
-            dirty_since: None,
-            paths_count: 0,
-            task: false,
-            last_completed: Instant::now(),
-            paused: 0,
-            untracked_reported: HashSet::new(),
-        });
+        let defer = reason == TrackReason::Created;
+        // Writes made before a restart, between a release's untrack and its
+        // abort, or while a move rewatched were never reported.
+        self.lock_entries()
+            .entry(ws)
+            .or_insert_with(|| Entry {
+                watcher: kind,
+                dirty_since: None,
+                paths_count: 0,
+                task: false,
+                watched: false,
+                behind: false,
+                last_completed: Instant::now(),
+                paused: 0,
+                untracked_reported: HashSet::new(),
+            })
+            .behind |= reason != TrackReason::Created;
         // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
         let root =
             std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
@@ -753,11 +791,22 @@ impl Inner {
                     error = %ErrorChain(&error),
                     "cannot watch the workspace; it is snapshotted on the fallback timer only"
                 );
+                self.set_watched(ws, false);
                 manager.mark_watch_failed(&entry);
             }
             // The health hook reports the outcome.
             Ok(()) if watcher.reports_health() => {}
-            Ok(()) => manager.clear_watch_failed(&entry),
+            Ok(()) => {
+                self.set_watched(ws, true);
+                manager.clear_watch_failed(&entry);
+            }
+        }
+    }
+
+    /// Records whether `ws`'s watch is working.
+    fn set_watched(&self, ws: WorkspaceId, watched: bool) {
+        if let Some(entry) = self.lock_entries().get_mut(&ws) {
+            entry.watched = watched;
         }
     }
 
@@ -875,21 +924,31 @@ impl Inner {
     }
 
     /// Starts every snapshot that is due: dirty workspaces past
-    /// `min_interval`, and clean ones past `fallback_interval`.
+    /// `min_interval`, and clean ones past their fallback interval (see the
+    /// module docs).
     fn start_due(self: &Arc<Self>) {
         if self.stop.is_cancelled() || self.paused_all.load(Ordering::SeqCst) > 0 {
             return;
         }
         let now = Instant::now();
+        let watched_fallback = self
+            .config
+            .watched_fallback_interval
+            .max(self.config.fallback_interval);
         let mut due = Vec::new();
         for (ws, entry) in self.lock_entries().iter_mut() {
             if entry.task || entry.paused > 0 {
                 continue;
             }
             let since = now.saturating_duration_since(entry.last_completed);
+            let fallback_after = if entry.watched && !entry.behind {
+                watched_fallback
+            } else {
+                self.config.fallback_interval
+            };
             let fallback = match entry.dirty_since {
                 Some(_) if since >= self.config.min_interval => false,
-                None if since >= self.config.fallback_interval => true,
+                None if since >= fallback_after => true,
                 _ => continue,
             };
             entry.task = true;
@@ -917,10 +976,13 @@ impl Inner {
         let _done = TaskDone(&self, ws);
         let ran = match self.manager.upgrade() {
             Some(manager) => manager.scheduled_snapshot(ws, fallback).await,
-            None => false,
+            None => Scheduled::Skipped,
         };
-        if ran && let Some(entry) = self.lock_entries().get_mut(&ws) {
+        if ran != Scheduled::Skipped
+            && let Some(entry) = self.lock_entries().get_mut(&ws)
+        {
             entry.last_completed = Instant::now();
+            entry.behind = ran == Scheduled::Failed;
         }
     }
 
@@ -949,14 +1011,16 @@ impl Inner {
 }
 
 /// The scheduler's [`HealthHook`]: marks or clears `watch-failed` on a
-/// tracked workspace as its watch goes down or comes up.
+/// tracked workspace, and its entry's `watched`, as its watch goes down or
+/// comes up.
 fn health_hook(inner: Weak<Inner>) -> HealthHook {
     Arc::new(move |ws, healthy| {
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        if !inner.lock_entries().contains_key(&ws) {
-            return;
+        match inner.lock_entries().get_mut(&ws) {
+            Some(entry) => entry.watched = healthy,
+            None => return,
         }
         let Some(manager) = inner.manager.upgrade() else {
             return;

@@ -1,0 +1,93 @@
+name: Load tests
+
+# The Phase 1 load test (R1.23, docs/load-tests.md): 200 workspaces with active watchers on one
+# daemon, gated on the steady-state write-to-snapshot p95. Weekly on medium, by hand on either
+# preset, and on a pull request that changes the test itself (a dispatch needs the workflow on
+# main first).
+on:
+  schedule:
+    - cron: "23 5 * * 0"     # Sundays 05:23 UTC, medium
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: Synthetic repo preset for the 200 workspaces
+        default: medium
+        type: choice
+        options: [medium, large]
+  pull_request:
+    paths:
+      - crates/reef-daemon/tests/load.rs
+      - .github/workflows/load.yml
+
+concurrency:
+  group: load-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  load:
+    name: load ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # `large` took over 4 hours on an M2 Max (docs/load-tests.md); 360 is the hosted maximum.
+    timeout-minutes: ${{ inputs.preset == 'large' && 360 || 90 }}
+    # Report-only on macOS: the 3-vCPU runner's full scans of `medium` (0.8 to 3 s each) cannot
+    # keep up with 200 writes a minute on 3 permits (docs/load-tests.md). Scanning only the paths
+    # the watcher reported, as Watchman workspaces do, is the follow-up that would gate it.
+    continue-on-error: ${{ matrix.os == 'macos-15' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      REEF_LOAD: "1"
+      REEF_LOAD_PRESET: ${{ inputs.preset || 'medium' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # ci.yml lints the test with warnings denied; a lint must not fail this run.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      # 200 large workspaces watch 1.67 million directories, above the default limit.
+      - name: Raise inotify limits for the large preset
+        if: runner.os == 'Linux' && env.REEF_LOAD_PRESET == 'large'
+        run: sudo sysctl -w fs.inotify.max_user_watches=4194304
+      - name: Record limits
+        if: runner.os == 'Linux'
+        run: sysctl fs.inotify
+      - name: Build
+        run: cargo nextest run --release -p reef-daemon --test load --run-ignored all --no-run
+      # On Linux as root, so `auto` picks kernel overlayfs, the tier the creation criterion
+      # names; the runner's ext4 cannot reflink, and the copy fallback would fill the disk with
+      # twenty copies of `large`.
+      - name: Load test
+        shell: bash
+        run: |
+          run=(cargo nextest run --release -p reef-daemon --test load --run-ignored all --no-fail-fast --no-capture)
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo -E env "PATH=$PATH" "${run[@]}"
+          else
+            "${run[@]}"
+          fi
+      - name: Give target/ back to the runner user
+        if: ${{ always() && runner.os == 'Linux' }}
+        run: sudo chown -R "$(id -un)" target
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: load-${{ matrix.os }}-${{ env.REEF_LOAD_PRESET }}-${{ github.sha }}-${{ github.run_id }}
+          path: target/load/
+          retention-days: 90
+      - name: Drop reports before the cache is saved
+        if: always()
+        run: rm -rf target/load
