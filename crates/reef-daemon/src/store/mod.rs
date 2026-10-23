@@ -8,10 +8,20 @@
 //!   `<state>/stores/<name>/<hash>/`; the row is in `stores`. Stores are
 //!   per daemon: two repositories with the same store name and lockfile
 //!   bytes share one.
+//! - **Layout**: the contents are one level down, in a directory named
+//!   after the last component of the mount path that built it
+//!   (`<hash>/node_modules/`), which the row's `path` records. A symlink
+//!   mount resolves to that directory, and tools that walk up a real path
+//!   looking for their own directory name find it: Node looks for a
+//!   package's dependencies in the `node_modules` above it. A row whose
+//!   `path` is `<hash>/` itself is from before this layout; it stays
+//!   mounted where it is, but counts as not built ([`StoreManager::sealed`]).
 //! - **Builds** ([`build`]) run the spec's `build` argv in a scratch
 //!   workspace with the store's mount path linked to
-//!   `<name>/<hash>.building/`. Exit 0 seals it; anything else renames it to
-//!   `<hash>.failed-<ms>/`, kept until GC. Only the daemon writes a store.
+//!   `<name>/<hash>.building/<leaf>/`, which a build that replaces the link
+//!   with a directory of its own (`npm ci`) gives way to. Exit 0 seals it;
+//!   anything else renames it to `<hash>.failed-<ms>/`, kept until GC. Only
+//!   the daemon writes a store.
 //! - **Mounts** (`mount`): a symlink at the mount path, or on Linux with
 //!   `CAP_SYS_ADMIN` a read-only bind mount, which a same-uid agent cannot
 //!   undo the way it can `chmod` a sealed store's files.
@@ -170,6 +180,20 @@ pub enum StoreError {
         /// The exit code; -1 for a signal.
         code: i32,
     },
+    /// The build exited 0 but did not leave its output where it can be
+    /// sealed: the link at the mount path is gone or points elsewhere, the
+    /// path is a file, an ancestor is no longer a directory, or a directory
+    /// replaced the link after the build wrote into the store (see
+    /// `mount::adopt_replaced_link`).
+    #[error("store {name} build replaced its link at {mount}: {found}")]
+    LinkReplaced {
+        /// The store.
+        name: String,
+        /// The mount path.
+        mount: String,
+        /// What is there now.
+        found: String,
+    },
     /// The build ran past its timeout; its process group was killed.
     #[error("store {name} build timed out after {secs}s")]
     BuildTimeout {
@@ -221,7 +245,9 @@ impl Classify for StoreError {
             }
             Self::NotDeclared { .. } => ErrorKind::NotFound,
             Self::BuildRunning { .. } => ErrorKind::AlreadyExists,
-            Self::BuildFailed { .. } | Self::BuildTimeout { .. } => ErrorKind::Internal,
+            Self::BuildFailed { .. } | Self::BuildTimeout { .. } | Self::LinkReplaced { .. } => {
+                ErrorKind::Internal
+            }
             Self::Spawn { source, .. } | Self::Io { source, .. } => classify_by_source(source),
             Self::Db(error) => error.kind(),
         }
@@ -234,7 +260,7 @@ impl Advise for StoreError {
             Self::Missing {
                 name, repo, commit, ..
             } => Some(Advice::run(
-                "Build the store for this lockfile first, or create the workspace with --skip-missing-stores.",
+                "Build the store for this lockfile first (a store built by an older Reef, or for a mount path with another name, is rebuilt the same way), or create the workspace with --skip-missing-stores.",
                 [
                     "reef",
                     "store",
@@ -318,6 +344,13 @@ impl StoreManager {
         self.dir.join(&key.name).join(&key.lockfile_hash)
     }
 
+    /// Where a store built for `mount` keeps its contents:
+    /// `<state>/stores/<name>/<hash>/<leaf>`, `<leaf>` being `mount`'s last
+    /// component (see the module docs).
+    pub fn content_dir(&self, key: &StoreKey, mount: &str) -> PathBuf {
+        self.dir(key).join(leaf(mount))
+    }
+
     /// `<state>/stores/<name>/<hash>.<suffix>`.
     fn sibling(&self, key: &StoreKey, suffix: &str) -> PathBuf {
         self.dir
@@ -330,12 +363,45 @@ impl StoreManager {
         self.sibling(key, BUILDING)
     }
 
-    /// The store's sealed row, if it has one.
-    pub fn sealed(&self, key: &StoreKey) -> Result<Option<StoreRecord>, StoreError> {
+    /// The contents directory inside [`StoreManager::building_dir`] for a
+    /// build for `mount`: what the build's link points at, and
+    /// `REEF_STORE_DIR`.
+    pub fn building_contents(&self, key: &StoreKey, mount: &str) -> PathBuf {
+        self.building_dir(key).join(leaf(mount))
+    }
+
+    /// The store's sealed row, if it was built for a mount path named like
+    /// `mount` ([`StoreManager::content_dir`]). Anything else is `None`, so
+    /// a create reports the store missing and a build rebuilds it, while
+    /// workspaces that already mount it keep it until they are released:
+    /// a row sealed before the contents moved one level down (its `path` is
+    /// the store directory itself), and a store another repository built
+    /// for a mount path with another last component, whose real path would
+    /// not end in this one's name.
+    pub fn sealed(&self, key: &StoreKey, mount: &str) -> Result<Option<StoreRecord>, StoreError> {
+        Ok(self
+            .sealed_any_layout(key)?
+            .filter(|row| row.path == self.content_dir(key, mount)))
+    }
+
+    /// The store's sealed row in either layout.
+    fn sealed_any_layout(&self, key: &StoreKey) -> Result<Option<StoreRecord>, StoreError> {
         Ok(self
             .db
             .store(&key.name, &key.lockfile_hash)?
             .filter(|row| row.sealed))
+    }
+
+    /// Where the sealed store `key`'s contents are, in either layout.
+    fn contents(&self, key: &StoreKey) -> Result<PathBuf, StoreError> {
+        self.sealed_any_layout(key)?
+            .map(|row| row.path)
+            .ok_or_else(|| {
+                StoreError::Db(DbError::NotFound {
+                    what: "store",
+                    id: key.to_string(),
+                })
+            })
     }
 
     /// Mounts the sealed store `key` at `mount` in the workspace at
@@ -348,7 +414,7 @@ impl StoreManager {
         mount: &str,
         bind_allowed: bool,
     ) -> Result<MountMode, StoreError> {
-        let store = self.dir(key);
+        let store = self.contents(key)?;
         #[cfg(target_os = "linux")]
         if self.privileged && bind_allowed {
             mount::bind_mount(&store, ws_root, mount)?;
@@ -370,7 +436,7 @@ impl StoreManager {
         mount: &str,
         bind_allowed: bool,
     ) -> Result<Option<MountMode>, StoreError> {
-        let store = self.dir(key);
+        let store = self.contents(key)?;
         let found = mount::find(&store, ws_root, mount)?;
         Ok(match found {
             mount::Found::Symlink => Some(MountMode::Symlink),
@@ -419,12 +485,18 @@ impl StoreManager {
             .contains(key)
     }
 
-    /// Seals the finished build in `building` as `key`: clears every write
-    /// bit, renames it into place (a store it replaces moves aside to
-    /// `<hash>.replaced-<ms>`) under the mount lock, and marks the row
-    /// sealed. Returns the row and the bytes it allocates. Blocks; call it
-    /// on the blocking pool.
-    pub fn seal(&self, building: &Path, key: &StoreKey) -> Result<(StoreRecord, u64), StoreError> {
+    /// Seals the finished build in `building` as `key`, built for `mount`:
+    /// clears every write bit, renames it into place (a store it replaces
+    /// moves aside to `<hash>.replaced-<ms>`) under the mount lock, and
+    /// marks the row sealed with its [`StoreManager::content_dir`]. Returns
+    /// the row and the bytes it allocates. Blocks; call it on the blocking
+    /// pool.
+    pub fn seal(
+        &self,
+        building: &Path,
+        key: &StoreKey,
+        mount: &str,
+    ) -> Result<(StoreRecord, u64), StoreError> {
         let bytes = mount::seal_tree(building)?;
         let dir = self.dir(key);
         // No create mounts the store while its directory is swapped.
@@ -435,8 +507,12 @@ impl StoreManager {
         }
         rename(building, &dir)?;
         let built_at = Timestamp::now();
-        self.db
-            .seal_store(&key.name, &key.lockfile_hash, built_at)?;
+        self.db.seal_store(
+            &key.name,
+            &key.lockfile_hash,
+            built_at,
+            &self.content_dir(key, mount),
+        )?;
         let row = self
             .db
             .store(&key.name, &key.lockfile_hash)?
@@ -561,7 +637,7 @@ impl StoreManager {
                     name: name_text.clone(),
                     lockfile_hash: file,
                 };
-                if matches!(self.sealed(&key), Ok(None)) {
+                if matches!(self.sealed_any_layout(&key), Ok(None)) {
                     found.push(key);
                 }
             }
@@ -628,6 +704,11 @@ impl Drop for BuildGuard<'_> {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.key);
     }
+}
+
+/// `mount`'s last component, the name of a store's contents directory.
+fn leaf(mount: &str) -> &str {
+    mount.rsplit('/').next().unwrap_or(mount)
 }
 
 fn rename(from: &Path, to: &Path) -> Result<(), StoreError> {
@@ -707,35 +788,42 @@ mod tests {
                 repo_id: "aaaa000000000001".parse().unwrap(),
                 name: key.name.clone(),
                 lockfile_hash: key.lockfile_hash.clone(),
-                path: stores.dir(&key),
+                path: stores.content_dir(&key, "vendor/deps"),
                 built_at: None,
                 sealed: false,
             })
             .unwrap();
         let building = stores.building_dir(&key);
-        std::fs::create_dir_all(&building).unwrap();
-        std::fs::write(building.join("manifest"), "v1").unwrap();
-        let (row, _) = stores.seal(&building, &key).unwrap();
+        std::fs::create_dir_all(building.join("deps")).unwrap();
+        std::fs::write(building.join("deps/manifest"), "v1").unwrap();
+        let (row, _) = stores.seal(&building, &key, "vendor/deps").unwrap();
         assert!(row.sealed);
-        assert_eq!(stores.sealed(&key).unwrap(), Some(row));
-        assert!(stores.dir(&key).join("manifest").is_file());
+        assert_eq!(row.path, stores.dir(&key).join("deps"));
+        assert_eq!(stores.sealed(&key, "vendor/deps").unwrap(), Some(row));
+        assert!(stores.sealed(&key, "deps").unwrap().is_some(), "same name");
+        assert_eq!(
+            stores.sealed(&key, "node_modules").unwrap(),
+            None,
+            "another name"
+        );
+        assert!(stores.dir(&key).join("deps/manifest").is_file());
 
         // A forced rebuild interrupted by a stop: its sealed row stays, its
         // directory goes aside as failed.
         std::fs::create_dir_all(&building).unwrap();
         assert_eq!(stores.sweep_interrupted(), 1);
         assert!(!building.exists());
-        assert!(stores.sealed(&key).unwrap().is_some());
+        assert!(stores.sealed(&key, "vendor/deps").unwrap().is_some());
         let leftovers = stores.leftovers();
         assert_eq!(leftovers.len(), 1);
         assert!(leftovers[0].1.contains(".failed-"), "{leftovers:?}");
 
         // A rebuild that seals moves the old store aside.
-        std::fs::create_dir_all(&building).unwrap();
-        std::fs::write(building.join("manifest"), "v2").unwrap();
-        stores.seal(&building, &key).unwrap();
+        std::fs::create_dir_all(building.join("deps")).unwrap();
+        std::fs::write(building.join("deps/manifest"), "v2").unwrap();
+        stores.seal(&building, &key, "vendor/deps").unwrap();
         assert_eq!(
-            std::fs::read_to_string(stores.dir(&key).join("manifest")).unwrap(),
+            std::fs::read_to_string(stores.dir(&key).join("deps/manifest")).unwrap(),
             "v2"
         );
         assert!(
@@ -745,6 +833,42 @@ mod tests {
                 .any(|(_, file, _)| file.contains(".replaced-"))
         );
         crate::backend::fs_util::remove_all(stores.root()).unwrap();
+    }
+
+    #[test]
+    fn a_store_sealed_in_the_old_layout_counts_as_not_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = manager(tmp.path());
+        let key = key();
+        let row = StoreRecord {
+            repo_id: "aaaa000000000001".parse().unwrap(),
+            name: key.name.clone(),
+            lockfile_hash: key.lockfile_hash.clone(),
+            path: stores.dir(&key),
+            built_at: None,
+            sealed: false,
+        };
+        stores.db.insert_store(&row).unwrap();
+        stores
+            .db
+            .seal_store(
+                &key.name,
+                &key.lockfile_hash,
+                Timestamp(1),
+                &stores.dir(&key),
+            )
+            .unwrap();
+        std::fs::create_dir_all(stores.dir(&key)).unwrap();
+        assert_eq!(
+            stores.sealed(&key, "vendor/deps").unwrap(),
+            None,
+            "a create reports it missing"
+        );
+        // A workspace that already mounts it still finds it after a restart,
+        // and the start-time sweep leaves it alone.
+        assert_eq!(stores.contents(&key).unwrap(), stores.dir(&key));
+        assert_eq!(stores.sweep_interrupted(), 0);
+        assert!(stores.dir(&key).exists());
     }
 
     #[test]

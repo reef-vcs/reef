@@ -145,7 +145,7 @@ impl Manager {
             if rules.skip == Some(target.key.name.as_str()) {
                 continue;
             }
-            if self.stores.sealed(&target.key)?.is_some() {
+            if self.stores.sealed(&target.key, &target.mount)?.is_some() {
                 plan.mount.push(target.clone());
                 continue;
             }
