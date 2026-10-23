@@ -17,6 +17,7 @@
 //! `Status` are not. A create waiting for another create of the same tree
 //! waits on the base cache's per-tree lock, not on the repository thread.
 
+mod abandoned;
 mod create;
 mod gc;
 mod manager;

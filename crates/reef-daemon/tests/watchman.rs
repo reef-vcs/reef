@@ -97,6 +97,9 @@ async fn fixture(
         watcher.debounce = Duration::from_millis(100);
         watcher.min_interval = Duration::from_millis(100);
         watcher.fallback_interval = FALLBACK;
+        // Tests that wait for a fallback snapshot of a subscribed workspace
+        // need not wait the default ten minutes.
+        watcher.watched_fallback_interval = FALLBACK;
         watcher.watchman_attach_quiet = Duration::ZERO;
         configure(config);
     })

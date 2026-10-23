@@ -47,7 +47,8 @@ pub struct WatchEvent {
 
 /// Hears whether a workspace's watch is up (`true`) or down (`false`), from
 /// a watcher that sets watches up in the background
-/// ([`Watcher::reports_health`]). The scheduler clears or sets
+/// ([`Watcher::reports_health`]), and from notify when a new directory in a
+/// watched workspace cannot be watched (R1.23). The scheduler clears or sets
 /// `attention = 'watch-failed'` from it.
 pub type HealthHook = Arc<dyn Fn(WorkspaceId, bool) + Send + Sync>;
 
@@ -218,8 +219,9 @@ pub(crate) fn watchman_on_path() -> bool {
 }
 
 /// A watcher of `kind`, sending to `events`, with `config.debounce`.
-/// `health` is given to watchers that report it ([`Watcher::reports_health`]),
-/// and `creates` to Watchman, which defers new subscriptions by it.
+/// `health` is given to watchers that report it ([`Watcher::reports_health`])
+/// and to notify, for a watch that breaks after attaching; `creates` to
+/// Watchman, which defers new subscriptions by it.
 pub fn new_watcher(
     kind: WatcherKind,
     config: &WatcherSection,
@@ -229,10 +231,11 @@ pub fn new_watcher(
 ) -> Result<Box<dyn Watcher>, WatchError> {
     match kind {
         WatcherKind::Notify => {
-            drop((health, creates));
+            drop(creates);
             Ok(Box::new(notify::NotifyWatcher::new(
                 config.debounce,
                 events,
+                health,
             )?))
         }
         #[cfg(feature = "watchman")]

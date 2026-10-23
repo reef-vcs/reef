@@ -164,6 +164,7 @@ fn defaults_load_with_no_file() {
     assert_eq!(f.watcher.debounce, Duration::from_millis(500));
     assert_eq!(f.watcher.min_interval, Duration::from_secs(1));
     assert_eq!(f.watcher.fallback_interval, Duration::from_secs(60));
+    assert_eq!(f.watcher.watched_fallback_interval, Duration::from_mins(10));
     assert_eq!(f.watcher.max_concurrent_scans, None);
     assert_eq!(
         config.max_concurrent_scans(),
