@@ -20,11 +20,21 @@
 //! reports the workspace unhealthy (`attention = 'watch-failed'`, on the
 //! fallback timer) and subscribes again after 1 s, 2 s, 4 s, and so on up
 //! to 30 s, until it succeeds or the workspace is unwatched.
+//!
+//! A workspace watched with `defer` (one just created) waits before its
+//! first subscription until no create has started for
+//! `watcher.watchman_attach_quiet`, or `watcher.watchman_attach_defer_max`
+//! has passed (R1.29). Watchman's crawl of a new workspace's files, and the
+//! snapshot its first result asks for, otherwise run while the next
+//! workspace is cloned: on APFS that doubled the clone of a 100,000-file
+//! tree. Nothing is lost while it waits: the subscription, once up,
+//! snapshots what was written meanwhile, and the fallback timer still runs.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -36,7 +46,9 @@ use reef_lib::jj::watchman_client::{self, Subscription, SubscriptionData};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{HealthHook, WatchError, WatchEvent, Watcher, WatcherKind, watchman_on_path};
+use super::{
+    CreateClock, HealthHook, WatchError, WatchEvent, Watcher, WatcherKind, watchman_on_path,
+};
 use crate::model::WorkspaceId;
 
 /// The first reconnect delay; it doubles with each failed attempt.
@@ -149,12 +161,26 @@ fn sockname() -> Result<PathBuf, String> {
     }
 }
 
+/// How a just-created workspace's first subscription waits (R1.29).
+#[derive(Clone, Debug)]
+pub struct Deferral {
+    /// No create may have started for this long; zero disables waiting.
+    pub quiet: Duration,
+    /// The longest wait, from the watch; zero disables waiting.
+    pub max: Duration,
+    /// When the latest create started.
+    pub creates: Arc<CreateClock>,
+}
+
 /// The Watchman watcher: a subscription task per workspace, one client for
 /// all of them.
 pub struct WatchmanWatcher {
     shared: Arc<Shared>,
     runtime: tokio::runtime::Handle,
     tasks: Mutex<HashMap<WorkspaceId, CancellationToken>>,
+    /// Numbers each task, so a replaced task does not clear its
+    /// successor's waiting mark.
+    generation: AtomicU64,
 }
 
 impl std::fmt::Debug for WatchmanWatcher {
@@ -173,17 +199,22 @@ struct Shared {
     events: mpsc::Sender<WatchEvent>,
     debounce: Duration,
     health: HealthHook,
+    deferral: Deferral,
+    /// Workspaces whose first subscription is deferred, by task generation.
+    waiting: Mutex<HashMap<WorkspaceId, u64>>,
 }
 
 impl WatchmanWatcher {
     /// A watcher with nothing watched yet, on the current tokio runtime.
     /// Nothing connects to Watchman until the first [`Watcher::watch`].
     /// Batches arrive `debounce` after the last change in them; `health`
-    /// hears when each workspace's subscription comes up or goes down.
+    /// hears when each workspace's subscription comes up or goes down;
+    /// `deferral` says how a deferred watch waits.
     pub fn new(
         debounce: Duration,
         events: mpsc::Sender<WatchEvent>,
         health: HealthHook,
+        deferral: Deferral,
     ) -> Result<Self, WatchError> {
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| WatchError::NoRuntime("watchman"))?;
@@ -193,9 +224,12 @@ impl WatchmanWatcher {
                 events,
                 debounce,
                 health,
+                deferral,
+                waiting: Mutex::new(HashMap::new()),
             }),
             runtime,
             tasks: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -228,10 +262,19 @@ impl Watcher for WatchmanWatcher {
         workspace: WorkspaceId,
         root: &Path,
         skip: Vec<PathBuf>,
+        defer: bool,
     ) -> Result<(), WatchError> {
         let stop = CancellationToken::new();
         if let Some(old) = lock(&self.tasks).insert(workspace, stop.clone()) {
             old.cancel();
+        }
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        if defer && self.shared.deferral.enabled() {
+            // Marked here, not in the task, so `waiting` holds as soon as
+            // the watch returns.
+            lock(&self.shared.waiting).insert(workspace, generation);
+        } else {
+            lock(&self.shared.waiting).remove(&workspace);
         }
         let task = Task {
             shared: Arc::clone(&self.shared),
@@ -239,6 +282,8 @@ impl Watcher for WatchmanWatcher {
             root: root.to_owned(),
             skip,
             stop,
+            defer: defer.then(Instant::now),
+            generation,
         };
         self.runtime.spawn(task.run());
         Ok(())
@@ -248,7 +293,30 @@ impl Watcher for WatchmanWatcher {
         if let Some(stop) = lock(&self.tasks).remove(&workspace) {
             stop.cancel();
         }
+        lock(&self.shared.waiting).remove(&workspace);
         Ok(())
+    }
+
+    fn waiting(&self, workspace: WorkspaceId) -> bool {
+        lock(&self.shared.waiting).contains_key(&workspace)
+    }
+}
+
+impl Deferral {
+    /// Whether a deferred watch waits at all: neither setting is zero.
+    fn enabled(&self) -> bool {
+        !self.quiet.is_zero() && !self.max.is_zero()
+    }
+
+    /// When a watch deferred at `tracked` may subscribe, as of now: once no
+    /// create has started for `quiet`, and at the latest `max` after
+    /// `tracked`.
+    fn subscribe_at(&self, tracked: Instant) -> Instant {
+        let cap = tracked + self.max;
+        self.creates
+            .last()
+            .map_or(tracked, |started| started + self.quiet)
+            .min(cap)
     }
 }
 
@@ -345,12 +413,22 @@ struct Task {
     root: PathBuf,
     skip: Vec<PathBuf>,
     stop: CancellationToken,
+    /// When a deferred watch was made (R1.29).
+    defer: Option<Instant>,
+    generation: u64,
 }
 
 impl Task {
-    /// The state machine: subscribed, reconnecting(attempt), stopped.
+    /// The state machine: (deferred,) subscribed, reconnecting(attempt),
+    /// stopped.
     async fn run(self) {
         let ws = self.workspace;
+        if let Some(tracked) = self.defer
+            && self.shared.deferral.enabled()
+            && !self.wait_for_quiet(tracked).await
+        {
+            return;
+        }
         let mut established = false;
         let mut attempt: u32 = 0;
         loop {
@@ -433,6 +511,36 @@ impl Task {
         }
     }
 
+    /// Waits until [`Deferral::subscribe_at`], which moves later with each
+    /// create that starts meanwhile; then clears the waiting mark. False if
+    /// the workspace was unwatched first.
+    async fn wait_for_quiet(&self, tracked: Instant) -> bool {
+        let deferral = &self.shared.deferral;
+        let waited = loop {
+            let at = deferral.subscribe_at(tracked);
+            if at <= Instant::now() {
+                break true;
+            }
+            tokio::select! {
+                () = self.stop.cancelled() => break false,
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+            }
+        };
+        let mut waiting = lock(&self.shared.waiting);
+        if waiting.get(&self.workspace) == Some(&self.generation) {
+            waiting.remove(&self.workspace);
+        }
+        drop(waiting);
+        if waited {
+            tracing::debug!(
+                workspace_id = %self.workspace,
+                waited_ms = u64::try_from(tracked.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "subscribing to watchman after creates went quiet"
+            );
+        }
+        waited
+    }
+
     /// Connects (or reuses the connection), resolves the root, and
     /// subscribes. The client is returned with an error after connecting,
     /// so a lost connection can be dropped.
@@ -462,15 +570,26 @@ impl Task {
     }
 
     /// Delivers the subscription's batches as debounced events until it
-    /// ends. Every subscription starts with a fresh-instance result, and
-    /// Watchman sends another after it restarts or recrawls; each asks for
-    /// one snapshot, since changes made before (or while Watchman was not
-    /// watching) were seen by nobody. jj's own clock decides how much that
-    /// snapshot scans.
+    /// ends. Each new subscription asks for one snapshot at once, since
+    /// changes made before it (or while Watchman was not watching) were
+    /// seen by nobody; a fresh-instance result, which Watchman sends after
+    /// it restarts or recrawls, asks for another. jj's own clock decides how
+    /// much each scans.
+    ///
+    /// The snapshot is asked for here rather than left to the
+    /// subscription's first result: with Watchman 4.9.0 (Ubuntu 24.04's
+    /// package) no snapshot followed a new subscription, so a write made
+    /// before it (during an R1.29 deferral, say) waited for the fallback
+    /// timer. A fresh-instance first result, where Watchman sends one,
+    /// arrives within the debounce and joins the same batch.
     async fn pump(&self, subscription: &mut Subscription<NameOnly>) -> Ended {
         let mut first = true;
-        let mut pending: Option<Pending> = None;
-        let mut deadline = tokio::time::Instant::now();
+        let mut pending = Some(Pending {
+            at: Instant::now(),
+            paths: Vec::new(),
+            rescan: true,
+        });
+        let mut deadline = tokio::time::Instant::now() + self.shared.debounce;
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => return Ended::Stopped,

@@ -171,6 +171,9 @@ pub struct Workspace {
     pub lease: Option<Lease>,
     /// What triggers its snapshots: `notify` or `watchman`.
     pub watcher: String,
+    /// `waiting` while its Watchman subscription waits for a burst of
+    /// creates to end (R1.29).
+    pub watch_state: Option<String>,
     /// How many of its snapshots have not been published; 0 in `ws create`.
     pub local_snapshot_count: u64,
     /// The shared stores mounted in it (R1.20).
@@ -228,6 +231,7 @@ impl From<&v0::Workspace> for Workspace {
             last_snapshot_op: text(&ws.last_snapshot_op),
             lease: ws.lease.as_ref().map(Lease::from),
             watcher: ws.watcher.clone(),
+            watch_state: text(&ws.watch_state),
             local_snapshot_count: ws.local_snapshot_count,
             stores: ws.stores.iter().map(MountedStore::from).collect(),
         }
@@ -293,6 +297,8 @@ pub struct Created {
     pub materialize_ms: u64,
     /// Whether the base cache already held the tree.
     pub base_was_cached: bool,
+    /// How long each step took (R1.29).
+    pub timings: CreateTimings,
 }
 
 impl Created {
@@ -304,7 +310,51 @@ impl Created {
             shared_change: response.shared_change,
             materialize_ms: response.materialize_ms,
             base_was_cached: response.base_was_cached,
+            timings: response
+                .timings
+                .as_ref()
+                .map(CreateTimings::from)
+                .unwrap_or_default(),
         })
+    }
+}
+
+/// A create's steps, in milliseconds; see `v0::CreateTimings`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CreateTimings {
+    /// Resolving the start revision.
+    pub resolve_ms: u64,
+    /// Ensuring the base.
+    pub base_ms: u64,
+    /// The backend's materialization alone.
+    pub materialize_ms: u64,
+    /// Mounting the shared stores.
+    pub mount_ms: u64,
+    /// Creating the jj workspace.
+    pub jj_ms: u64,
+    /// Seeding the working copy's tree state.
+    pub seed_ms: u64,
+    /// Writing the row and issuing the lease.
+    pub insert_ms: u64,
+    /// Attaching the file watcher.
+    pub watch_ms: u64,
+    /// The whole create.
+    pub total_ms: u64,
+}
+
+impl From<&v0::CreateTimings> for CreateTimings {
+    fn from(timings: &v0::CreateTimings) -> Self {
+        Self {
+            resolve_ms: timings.resolve_ms,
+            base_ms: timings.base_ms,
+            materialize_ms: timings.materialize_ms,
+            mount_ms: timings.mount_ms,
+            jj_ms: timings.jj_ms,
+            seed_ms: timings.seed_ms,
+            insert_ms: timings.insert_ms,
+            watch_ms: timings.watch_ms,
+            total_ms: timings.total_ms,
+        }
     }
 }
 

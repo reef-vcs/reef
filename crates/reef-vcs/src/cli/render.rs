@@ -141,7 +141,7 @@ fn workspace_pairs(ws: &Workspace) -> Vec<(&'static str, String)> {
         ("owner", ws.owner.clone()),
         ("purpose", ws.purpose.clone()),
         ("backend", ws.backend.clone()),
-        ("watcher", ws.watcher.clone()),
+        ("watcher", watcher_text(ws)),
         ("divergent", ws.divergent.to_string()),
         ("attention", or_dash(ws.attention.as_deref())),
         ("created_at", or_dash(ws.created_at.as_deref())),
@@ -154,6 +154,16 @@ fn workspace_pairs(ws: &Workspace) -> Vec<(&'static str, String)> {
         ),
         ("stores", stores_text(ws)),
     ]
+}
+
+/// `watchman`, or `watchman (waiting for creates to finish)` while its
+/// subscription is deferred (R1.29).
+fn watcher_text(ws: &Workspace) -> String {
+    match ws.watch_state.as_deref() {
+        Some("waiting") => format!("{} (waiting for creates to finish)", ws.watcher),
+        Some(state) => format!("{} ({state})", ws.watcher),
+        None => ws.watcher.clone(),
+    }
 }
 
 /// `deps at vendor/deps (symlink), tools at .tools (bind, lockfile

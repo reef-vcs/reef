@@ -25,6 +25,7 @@ use jj_lib::settings::UserSettings;
 use reef_daemon::backend::{
     Availability, BackendKind, BaseCache, BaseEntry, OverlayConfig, WorkspacePaths, probe,
 };
+use reef_daemon::config::WatcherBackend;
 use reef_daemon::db::Db;
 use reef_daemon::model::{RepoId, WorkspaceId};
 use reef_lib::error::ErrorChain;
@@ -76,6 +77,17 @@ pub(crate) fn preset() -> Preset {
         Ok("medium") | Err(std::env::VarError::NotPresent) => Preset::Medium,
         Ok("large") => Preset::Large,
         other => panic!("REEF_BENCH_PRESET must be small, medium, or large, not {other:?}"),
+    }
+}
+
+/// The watcher `REEF_BENCH_WATCHER` names for `create_api`'s daemon:
+/// `notify`, `watchman`, or unset for `auto` (R1.29).
+pub(crate) fn watcher() -> WatcherBackend {
+    match std::env::var("REEF_BENCH_WATCHER").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("auto") => WatcherBackend::Auto,
+        Ok("notify") => WatcherBackend::Notify,
+        Ok("watchman") => WatcherBackend::Watchman,
+        other => panic!("REEF_BENCH_WATCHER must be notify, watchman, or auto, not {other:?}"),
     }
 }
 

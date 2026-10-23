@@ -9,6 +9,7 @@ use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
 use crate::proto::v0;
 use crate::snapshot::index::SnapshotEntry;
 use crate::store::{MountMode, MountedStore};
+use crate::workspace::CreateTimings;
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
 pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
@@ -73,13 +74,14 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
     }
 }
 
-/// A workspace row, its lease, its local snapshot count, and its mounted
-/// stores, as one message.
+/// A workspace row, its lease, its local snapshot count, its mounted
+/// stores, and whether its watch is deferred, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
     pub(super) lease: Option<v0::Lease>,
     pub(super) local_snapshot_count: u64,
     pub(super) stores: &'a [MountedStore],
+    pub(super) watch_waiting: bool,
 }
 
 impl From<WorkspaceView<'_>> for v0::Workspace {
@@ -107,6 +109,7 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             watcher: record.watcher.as_str().to_owned(),
             local_snapshot_count: view.local_snapshot_count,
             stores: view.stores.iter().map(v0::MountedStore::from).collect(),
+            watch_state: if view.watch_waiting { "waiting" } else { "" }.to_owned(),
         }
     }
 }
@@ -144,6 +147,22 @@ impl From<&DiskUsage> for v0::DiskUsage {
         Self {
             allocated_bytes: usage.allocated_bytes,
             files_changed: usage.files_changed,
+        }
+    }
+}
+
+impl From<&CreateTimings> for v0::CreateTimings {
+    fn from(timings: &CreateTimings) -> Self {
+        Self {
+            resolve_ms: timings.resolve_ms,
+            base_ms: timings.base_ms,
+            materialize_ms: timings.materialize_ms,
+            mount_ms: timings.mount_ms,
+            jj_ms: timings.jj_ms,
+            seed_ms: timings.seed_ms,
+            insert_ms: timings.insert_ms,
+            watch_ms: timings.watch_ms,
+            total_ms: timings.total_ms,
         }
     }
 }

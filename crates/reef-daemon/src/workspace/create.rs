@@ -28,6 +28,11 @@
 //! 7. (async) Insert the row and issue the lease in one transaction
 //!    ([`crate::lease::LeaseManager::issue_with_workspace`]).
 //!
+//! Then the workspace is loaded and its watcher attached, on the blocking
+//! pool ([`crate::snapshot::Scheduler::track`]); the create returns once it
+//! is watched. Each step's time is in [`CreateTimings`], the response, and
+//! the `workspace created` log line (R1.29).
+//!
 //! A failure after step 4 unmounts the stores and tears the directory down;
 //! after step 5 also forgets the jj workspace and removes its state
 //! directory. Partial state never leaves a row behind. From mounting the
@@ -39,7 +44,7 @@ use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
@@ -52,10 +57,13 @@ use reef_lib::telemetry::elapsed_ms;
 
 use super::manager::{forget_jj_workspace, remove_state_dir};
 use super::stores::{StorePlan, StoreTarget, TreeAt, store_targets};
-use super::{CreateSpec, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry};
+use super::{
+    CreateSpec, CreateTimings, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry,
+};
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::repo::RepoHandle;
+use crate::snapshot::TrackReason;
 use crate::spec::ResolvedSpec;
 use crate::store::{MountedStore, StoreManager};
 
@@ -77,7 +85,12 @@ impl Manager {
     /// Creates a workspace; see the module docs for the steps.
     #[tracing::instrument(skip_all, fields(repo = %spec.repo, workspace_id))]
     pub async fn create(&self, spec: CreateSpec) -> Result<Created, ManagerError> {
-        // 1.
+        let started = Instant::now();
+        let mut lap = Lap(started);
+        let mut timings = CreateTimings::default();
+        // 1. Stamped first, so a Watchman subscription of the previous
+        // create holds off until this one is done.
+        self.scheduler.create_started();
         if spec.owner.trim().is_empty() {
             return Err(ManagerError::EmptyOwner);
         }
@@ -95,6 +108,7 @@ impl Manager {
         tracing::Span::current().record("workspace_id", tracing::field::display(id));
         let paths = self.new_paths(repo.id, id, spec.path.as_deref())?;
         let backend = self.select_backend(spec.backend, repo.id, &paths).await?;
+        lap.next();
 
         // 2.
         let resolved = resolve_start(&handle, spec.start.clone()).await?;
@@ -103,18 +117,20 @@ impl Manager {
             .length_with_spec(spec.lease, resolved.spec.lease)?;
         // Fails a create that would fail anyway before anything is made.
         self.plan_stores(&resolved.stores, &spec.store_rules(), &resolved.commit)?;
+        timings.resolve_ms = lap.next();
 
         // 3.
-        let begun = Instant::now();
         let (base, base_was_cached) = self.ensure_base(&handle, &resolved, &*backend).await?;
+        timings.base_ms = lap.next();
 
         // 4.
         let mut undo = Undo::new(handle.clone(), id);
         materialize(backend, &base, &paths, &mut undo).await?;
-        let materialize = begun.elapsed();
+        timings.materialize_ms = lap.next();
         let (_mounting, plan, mounted) = self
             .mount_planned(&resolved, &spec, &paths.root, &mut undo)
             .await?;
+        timings.mount_ms = lap.next();
 
         // 5.
         let created =
@@ -122,11 +138,13 @@ impl Manager {
         let (ws, op_id, wc) = undo.or_undo(created).await?;
         undo.jj_workspace = true;
         undo.state_dir = Some(paths.state_dir.clone());
+        timings.jj_ms = lap.next();
 
         // 6.
         let ws = undo
             .or_undo(seed(ws, &base, &paths, &wc.commit_id).await)
             .await?;
+        timings.seed_ms = lap.next();
 
         // 7.
         let now = Timestamp::now();
@@ -156,6 +174,7 @@ impl Manager {
             undo.run().await;
             return Err(error.into());
         }
+        timings.insert_ms = lap.next();
         self.load_created(
             &record,
             &mut undo,
@@ -163,29 +182,25 @@ impl Manager {
             handle,
             resolved.spec.snapshot.clone(),
             mounted.clone(),
-        );
-        tracing::info!(
-            path = %record.path.display(),
-            backend = %record.backend,
-            change_id = %record.change_id,
-            %op_id,
-            shared_change = resolved.shared_change,
-            stores = resolved.spec.spec.stores.len(),
-            stores_mounted = mounted.len(),
-            stores_missing = plan.missing.len(),
-            base_was_cached,
-            materialize_ms = u64::try_from(materialize.as_millis()).unwrap_or(u64::MAX),
-            "workspace created"
-        );
-        Ok(Created {
+        )
+        .await;
+        timings.watch_ms = lap.next();
+        timings.total_ms = millis(started.elapsed());
+        let created = Created {
             record,
             lease,
             op_id,
             shared_change: resolved.shared_change,
-            materialize,
+            timings,
             base_was_cached,
             stores: mounted,
-        })
+        };
+        log_created(
+            &created,
+            resolved.spec.spec.stores.len(),
+            plan.missing.len(),
+        );
+        Ok(created)
     }
 
     /// The end of step 4: the stores looked up again under the store
@@ -223,7 +238,7 @@ impl Manager {
 
     /// The end of step 7: loads the new workspace, taking the backend from
     /// `undo`, and starts scheduling its snapshots.
-    fn load_created(
+    async fn load_created(
         &self,
         record: &WorkspaceRecord,
         undo: &mut Undo,
@@ -248,7 +263,7 @@ impl Manager {
             stores: Mutex::new(stores),
         };
         self.insert_entry(record.id, Arc::new(entry));
-        self.scheduler.track(record.id);
+        self.scheduler.track(record.id, TrackReason::Created).await;
     }
 
     /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the
@@ -405,6 +420,49 @@ impl Manager {
         })
         .await?
     }
+}
+
+/// The `workspace created` line: what was made and each step's time.
+fn log_created(created: &Created, stores: usize, stores_missing: usize) {
+    let (record, timings) = (&created.record, &created.timings);
+    tracing::info!(
+        path = %record.path.display(),
+        backend = %record.backend,
+        change_id = %record.change_id,
+        op_id = %created.op_id,
+        shared_change = created.shared_change,
+        stores,
+        stores_mounted = created.stores.len(),
+        stores_missing,
+        base_was_cached = created.base_was_cached,
+        resolve_ms = timings.resolve_ms,
+        base_ms = timings.base_ms,
+        materialize_ms = timings.materialize_ms,
+        mount_ms = timings.mount_ms,
+        jj_ms = timings.jj_ms,
+        seed_ms = timings.seed_ms,
+        insert_ms = timings.insert_ms,
+        watch_ms = timings.watch_ms,
+        total_ms = timings.total_ms,
+        "workspace created"
+    );
+}
+
+/// A stopwatch for [`CreateTimings`]: the time since the previous lap.
+struct Lap(Instant);
+
+impl Lap {
+    /// Milliseconds since the previous call (or the start), restarting.
+    fn next(&mut self) -> u64 {
+        let now = Instant::now();
+        let lap = now.duration_since(self.0);
+        self.0 = now;
+        millis(lap)
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The base to clone a new base for `tree_id` from: the most recently used

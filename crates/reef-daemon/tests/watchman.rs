@@ -80,6 +80,8 @@ fn logged(message: &str, workspace: &str) -> usize {
 
 /// A daemon with R1.13's test intervals, `watcher.backend = "watchman"`
 /// unless `configure` changes it, and a `preset` repository registered.
+/// Subscriptions are not deferred (R1.29) unless `configure` sets
+/// `watchman_attach_quiet` again.
 async fn fixture(
     preset: Preset,
     configure: impl FnOnce(&mut Config),
@@ -95,6 +97,7 @@ async fn fixture(
         watcher.debounce = Duration::from_millis(100);
         watcher.min_interval = Duration::from_millis(100);
         watcher.fallback_interval = FALLBACK;
+        watcher.watchman_attach_quiet = Duration::ZERO;
         configure(config);
     })
     .await
@@ -350,6 +353,7 @@ async fn excluded_dirs_do_not_trigger() {
                 mounts: vec![],
             },
         )
+        .await
         .unwrap();
     subscribed(&ws, 2).await;
     for i in 0..100 {
@@ -513,4 +517,120 @@ async fn missing_binary_is_unavailable() {
         stderr.contains("no watcher for the repository's new workspaces"),
         "registration warned:\n{stderr}"
     );
+}
+
+/// R1.29: a write made the moment `Create` returns is snapshotted with no
+/// fallback timer. The subscription comes up after the write, deferred for
+/// up to `watchman_attach_defer_max`; its first (fresh-instance) result
+/// snapshots the workspace anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_right_after_create_is_snapshotted() {
+    require_watchman!();
+    let _serial = SERIAL.lock().await;
+    let (daemon, repo) = fixture(Preset::Small, |config| {
+        let defaults = reef_daemon::config::WatcherSection::default();
+        let watcher = &mut config.file.watcher;
+        watcher.fallback_interval = Duration::from_mins(10);
+        watcher.watchman_attach_quiet = defaults.watchman_attach_quiet;
+        watcher.watchman_attach_defer_max = defaults.watchman_attach_defer_max;
+    })
+    .await;
+    let watcher = &daemon.config.file.watcher;
+    let bound = watcher.watchman_attach_defer_max
+        + watcher.min_interval
+        + watcher.debounce
+        + Duration::from_secs(2);
+    let ws = create(&daemon, &repo).await;
+    write(&ws, "right-after-create.txt", "hello\n");
+    assert_eq!(ws.watcher, "watchman");
+    let waited = snapshotted(&daemon, &repo, &ws, "right-after-create.txt", bound).await;
+    eprintln!("a write right after create reached the operation log in {waited:.2?}");
+}
+
+/// R1.29: a just-created workspace's subscription waits until no create has
+/// started for `watchman_attach_quiet`, at most `watchman_attach_defer_max`;
+/// what is written meanwhile is in its first snapshot; a workspace loaded
+/// at daemon start does not wait.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchman_waits_for_a_quiet_window() {
+    require_watchman!();
+    let _serial = SERIAL.lock().await;
+    let quiet = Duration::from_secs(1);
+    let cap = Duration::from_secs(5);
+    let (daemon, repo) = fixture(Preset::Small, |config| {
+        let watcher = &mut config.file.watcher;
+        watcher.fallback_interval = Duration::from_mins(10);
+        watcher.watchman_attach_quiet = quiet;
+        watcher.watchman_attach_defer_max = cap;
+    })
+    .await;
+    let established = |ws: &Workspace| logged("watchman subscription established", &ws.id);
+
+    // The first create builds the base, which can take longer than the
+    // quiet window; a create that did has nothing left to wait for.
+    create(&daemon, &repo).await;
+
+    // A, then B 500 ms later: A waits for B's create to be 1 s old.
+    let a = create(&daemon, &repo).await;
+    assert_eq!(a.watch_state, "waiting");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let b_started = Instant::now();
+    let b = create(&daemon, &repo).await;
+    write(&a, "during-the-wait.txt", "x\n");
+    tokio::time::sleep_until((b_started + Duration::from_millis(900)).into()).await;
+    assert_eq!(established(&a), 0, "A subscribed within 1 s of B's create");
+    let inspected = inspect(&daemon, &repo, &a).await;
+    assert_eq!(inspected.watch_state, "waiting");
+    assert_eq!(inspected.attention, "", "waiting is not watch-failed");
+    subscribed(&a, 1).await;
+    let subscribed_after = b_started.elapsed();
+    eprintln!("A subscribed {subscribed_after:.2?} after B's create started");
+    assert!(subscribed_after >= quiet);
+    assert_eq!(inspect(&daemon, &repo, &a).await.watch_state, "");
+    // No fallback timer (10 minutes): the subscription's first result took
+    // the snapshot. That one is a full scan, after jj's own first Watchman
+    // query of the workspace, while B's subscription comes up beside it:
+    // over 3 s on a loaded CI runner.
+    snapshotted(
+        &daemon,
+        &repo,
+        &a,
+        "during-the-wait.txt",
+        Duration::from_secs(15),
+    )
+    .await;
+    subscribed(&b, 1).await;
+
+    // Loaded at daemon start: not deferred. A deferred watch is marked
+    // waiting before `track` returns, and the restart returns after
+    // tracking every workspace, so `watch_state` right after it says which
+    // (a bound on the time to subscribe would only measure Watchman).
+    let c = create(&daemon, &repo).await;
+    let before = established(&c);
+    let daemon = daemon.restart().await;
+    assert_eq!(inspect(&daemon, &repo, &c).await.watch_state, "");
+    subscribed(&c, before + 1).await;
+
+    // Creates every 500 ms never leave a quiet second; D subscribes by the
+    // cap anyway.
+    let d = create(&daemon, &repo).await;
+    let d_created = Instant::now();
+    let mut others = Vec::new();
+    let mut next = d_created;
+    while established(&d) == 0 {
+        assert!(
+            d_created.elapsed() < cap + Duration::from_secs(5),
+            "D did not subscribe by the cap"
+        );
+        // On a fixed cadence, so a slow create does not open a quiet second.
+        next += Duration::from_millis(500);
+        tokio::time::sleep_until(next.into()).await;
+        others.push(create(&daemon, &repo).await);
+    }
+    let waited = d_created.elapsed();
+    eprintln!(
+        "D subscribed {waited:.2?} after its create, with {} creates meanwhile",
+        others.len()
+    );
+    assert!(waited >= Duration::from_millis(4500), "{waited:?}");
 }

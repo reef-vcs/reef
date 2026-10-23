@@ -236,6 +236,7 @@ async fn excluded_paths_do_not_trigger() {
                 mounts: vec![],
             },
         )
+        .await
         .unwrap();
     for i in 0..100 {
         write(&ws, &format!("target/debug/{i}.o"), "obj\n");
@@ -733,4 +734,30 @@ async fn moved_workspace_is_still_watched() {
     let row = inspect(&daemon, &repo, &ws).await;
     assert_eq!(row.change_id, moved.change_id, "the change moved to");
     assert!(tree_has(&repo.root, &row.commit_id, "theirs.txt").await);
+}
+
+/// R1.29: a write made the moment `Create` returns is snapshotted by the
+/// watcher, which is attached by then, not by the fallback timer. Tracking
+/// starts the `min_interval` clock, so the first snapshot can start that
+/// long after the create; the Watchman variant is in `tests/watchman.rs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_right_after_create_is_snapshotted() {
+    let (daemon, repo) = fixture_with(|config| {
+        let watcher = &mut config.file.watcher;
+        watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        watcher.fallback_interval = Duration::from_mins(10);
+    })
+    .await;
+    let watcher = &daemon.config.file.watcher;
+    let bound = watcher.min_interval + watcher.debounce + Duration::from_secs(2);
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "right-after-create.txt", "hello\n");
+    assert_eq!(ws.watcher, "notify");
+    let waited = wait_for(bound, "a watcher snapshot", || async {
+        let row = inspect(&daemon, &repo, &ws).await;
+        !row.last_snapshot_op.is_empty()
+            && tree_has(&repo.root, &row.commit_id, "right-after-create.txt").await
+    })
+    .await;
+    eprintln!("a write right after create reached the operation log in {waited:.2?}");
 }

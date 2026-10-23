@@ -89,10 +89,38 @@ message CreateResponse {
   // commit (allowed; the divergence rule applies, R1.13).
   bool shared_change = 3;
   // Wall time of making the directory: ensuring the base and the
-  // backend's materialization.
+  // backend's materialization (`timings.base_ms` plus
+  // `timings.materialize_ms`).
   uint64 materialize_ms = 4;
   // Whether the base cache already held the tree.
   bool base_was_cached = 5;
+  // How long each step took (R1.29).
+  CreateTimings timings = 6;
+}
+
+// The steps of a create, in milliseconds; the daemon's
+// `workspace/create.rs` documents them. Step 1 (validation, paths, the
+// backend probe) counts only in `total_ms`.
+message CreateTimings {
+  // Step 2: resolving the start revision, reading `reef.toml`, looking the
+  // stores up.
+  uint64 resolve_ms = 1;
+  // Step 3: ensuring the base (zero-cost when cached).
+  uint64 base_ms = 2;
+  // Step 4: the backend's materialization from the base, alone.
+  uint64 materialize_ms = 3;
+  // Step 4: mounting the shared stores.
+  uint64 mount_ms = 4;
+  // Step 5: creating the jj workspace.
+  uint64 jj_ms = 5;
+  // Step 6: seeding the working copy's tree state.
+  uint64 seed_ms = 6;
+  // Step 7: writing the row and issuing the lease.
+  uint64 insert_ms = 7;
+  // Loading the workspace and attaching its file watcher.
+  uint64 watch_ms = 8;
+  // The whole create, from the request to the response.
+  uint64 total_ms = 9;
 }
 
 message ListWorkspacesRequest {

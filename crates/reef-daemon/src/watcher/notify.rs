@@ -1,4 +1,13 @@
 //! [`NotifyWatcher`]: one debounced `notify` watcher for every workspace.
+//!
+//! The debouncer keeps no file ID cache ([`NoCache`]; on Linux it never
+//! did). The cache only stitches the two halves of an `FSEvents` rename into
+//! one event, and Reef reads an event's paths only to route it to a
+//! workspace by prefix, which either half does. Building it walked and
+//! stat'ed every file of a new root (following symlinks, so every store
+//! mounted into it too) under the lock that delivers every workspace's
+//! events: 1.1 to 1.3 s inside each create of a 100,000-file workspace on
+//! APFS (R1.12), and again on every rescan and every new directory (R1.29).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -6,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventHandler, DebounceEventResult, Debouncer, RecommendedCache, new_debouncer_opt,
+    DebounceEventHandler, DebounceEventResult, Debouncer, NoCache, new_debouncer_opt,
 };
 use reef_lib::error::ErrorChain;
 use tokio::sync::mpsc;
@@ -20,7 +29,7 @@ const DROP_REPORT_INTERVAL: Duration = Duration::from_mins(1);
 /// The `notify` watcher: inotify on Linux, `FSEvents` on macOS, behind
 /// `notify-debouncer-full` so a burst of writes arrives as one batch.
 pub struct NotifyWatcher {
-    debouncer: Mutex<Debouncer<RecommendedWatcher, RecommendedCache>>,
+    debouncer: Mutex<Debouncer<RecommendedWatcher, NoCache>>,
     demux: Arc<Mutex<Demux>>,
 }
 
@@ -49,12 +58,8 @@ impl NotifyWatcher {
         // Store mounts (R1.20) are symlinks; following them would watch the
         // shared store from every workspace.
         let config = notify::Config::default().with_follow_symlinks(false);
-        let debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
-            debounce,
-            None,
-            handler,
-            RecommendedCache::new(),
-            config,
+        let debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
+            debounce, None, handler, NoCache, config,
         )
         .map_err(|source| WatchError::Start {
             kind: "notify",
@@ -77,6 +82,9 @@ impl Watcher for NotifyWatcher {
         workspace: WorkspaceId,
         root: &Path,
         skip: Vec<PathBuf>,
+        // Attaching is one stream restart (inotify: a watch per directory);
+        // nothing to wait out.
+        _defer: bool,
     ) -> Result<(), WatchError> {
         let mut debouncer = lock(&self.debouncer);
         // Route first, so nothing observed between the two is lost.
@@ -268,4 +276,134 @@ fn log_limit_hit(workspace: WorkspaceId, root: &Path) {
         instances_count = instances,
         "the watch limit is reached; {LIMIT_HINT}"
     );
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    use super::*;
+
+    /// The longest a watch may take to attach beyond `FSEvents`' own
+    /// registration (R1.29).
+    const ATTACH_BOUND: Duration = Duration::from_millis(50);
+
+    fn watcher() -> (NotifyWatcher, mpsc::Receiver<WatchEvent>) {
+        let (tx, rx) = mpsc::channel(64);
+        (
+            NotifyWatcher::new(Duration::from_millis(50), tx).unwrap(),
+            rx,
+        )
+    }
+
+    /// How long watching `root` as `id` took.
+    fn timed_watch(watcher: &NotifyWatcher, id: WorkspaceId, root: &Path) -> Duration {
+        let begun = Instant::now();
+        watcher.watch(id, root, Vec::new(), false).unwrap();
+        begun.elapsed()
+    }
+
+    /// How long a watch of an empty root takes in this process: the
+    /// `FSEvents` stream restart alone, the fastest of three. Registering a
+    /// stream makes fseventsd do work in proportion to the entries in the
+    /// directory of the running executable (about 2 µs each on an M2 Max,
+    /// macOS 27): 0.7 s for a test binary in a `target/debug/deps` of
+    /// 370,000 files, about a millisecond for `~/.cargo/bin`. The bounds
+    /// below are over this.
+    fn registration(watcher: &NotifyWatcher, dir: &Path) -> Duration {
+        (0..3_u8)
+            .map(|n| {
+                let empty = dir.join(format!("empty-{n}"));
+                std::fs::create_dir(&empty).unwrap();
+                let id: WorkspaceId = format!("00000000000000e{n}").parse().unwrap();
+                timed_watch(watcher, id, &empty)
+            })
+            .min()
+            .unwrap()
+    }
+
+    /// Writes a file under `root` until an event for `id` arrives, failing
+    /// after five seconds. (`FSEvents` may not report a write made the
+    /// instant a stream starts.)
+    async fn delivered(events: &mut mpsc::Receiver<WatchEvent>, id: WorkspaceId, root: &Path) {
+        let begun = Instant::now();
+        for i in 0.. {
+            std::fs::write(root.join(format!("written-{i}.txt")), "x\n").unwrap();
+            let wait = tokio::time::timeout(Duration::from_millis(500), async {
+                while let Some(event) = events.recv().await {
+                    if event.workspace == id {
+                        return true;
+                    }
+                }
+                false
+            });
+            if wait.await == Ok(true) {
+                return;
+            }
+            assert!(
+                begun.elapsed() < Duration::from_secs(5),
+                "no event for the workspace"
+            );
+        }
+    }
+
+    /// 1. The debouncer does not walk a new root: a fresh APFS clone of the
+    /// `large` preset attaches in under 50 ms. Run by hand (and in the PR):
+    /// `cargo test -p reef-daemon --lib notify::tests -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "generates the 100,000-file preset; run by hand to record the number"]
+    #[allow(clippy::print_stderr, reason = "reports the timing")]
+    async fn notify_watch_is_cheap_on_a_large_tree() {
+        use reef_testing::synth::{self, Preset, Spec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let tree = dir.join("large");
+        let manifest = synth::generate(&tree, &Spec::preset(Preset::Large), 42, false).unwrap();
+        let root = dir.join("clone");
+        crate::backend::apfs::clonefile(&tree, &root, 0).unwrap();
+        let (watcher, mut events) = watcher();
+        let registration = registration(&watcher, &dir);
+        let id: WorkspaceId = "00000000000000a1".parse().unwrap();
+        let took = timed_watch(&watcher, id, &root);
+        eprintln!(
+            "notify watch of an APFS clone of large ({} files): {took:.2?}, of an empty root {registration:.2?}",
+            manifest.files
+        );
+        assert!(
+            took < registration + ATTACH_BOUND,
+            "attaching took {took:?}, {registration:?} for an empty root"
+        );
+        delivered(&mut events, id, &root).await;
+    }
+
+    /// 4. Store mounts (symlinks on macOS, R1.20) are not followed when a
+    /// watch attaches: a root with a 30,000-file store linked in attaches
+    /// in under 50 ms. (The brief's 10,000 files walked in about 65 ms with
+    /// the file ID cache, too close to the bound to catch it reliably.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn store_mounts_are_not_walked_on_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let store = dir.join("store");
+        for d in 0..300 {
+            let sub = store.join(format!("pkg-{d}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for f in 0..100 {
+                std::fs::write(sub.join(format!("{f}.js")), "module.exports = 1;\n").unwrap();
+            }
+        }
+        let root = dir.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "a workspace\n").unwrap();
+        std::os::unix::fs::symlink(&store, root.join("node_modules")).unwrap();
+        let (watcher, mut events) = watcher();
+        let registration = registration(&watcher, &dir);
+        let id: WorkspaceId = "00000000000000a2".parse().unwrap();
+        let took = timed_watch(&watcher, id, &root);
+        assert!(
+            took < registration + ATTACH_BOUND,
+            "attaching took {took:?}, {registration:?} for an empty root"
+        );
+        delivered(&mut events, id, &root).await;
+    }
 }

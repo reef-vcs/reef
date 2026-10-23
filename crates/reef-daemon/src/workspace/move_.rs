@@ -187,7 +187,7 @@ impl Manager {
         };
         // A remounted overlay is a new mount to watch.
         if spec_changed || swapped.tree_replaced {
-            self.scheduler.rewatch(id);
+            self.scheduler.rewatch(id).await;
         }
 
         let record = entry.record();

@@ -10,8 +10,9 @@
 //! - `tear_down/<preset>/<kind>`: tearing down one workspace, deletion
 //!   included.
 //! - `create_api/<preset>/<kind>/<n>`: `n` `Workspaces.Create` calls to an
-//!   in-process daemon on the `auto` backend, which resolves to `<kind>`.
-//!   This is the exit criterion's measurement.
+//!   in-process daemon on the `auto` backend, which resolves to `<kind>`,
+//!   and the watcher `REEF_BENCH_WATCHER` names (`auto` when unset). This
+//!   is the exit criterion's measurement.
 //!
 //! Criterion's times are per workspace: each iteration's total divided by
 //! `n`. After each `create` and `create_api` benchmark, a disk pass creates
@@ -51,7 +52,7 @@ use reef_daemon::backend::{
     Backend, BackendKind, OverlayConfig, WorkspacePaths, backend_for, probe,
 };
 use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, CreateResponse, Workspace};
+use reef_daemon::proto::v0::{CreateRequest, CreateResponse, CreateTimings, Workspace};
 use reef_daemon::testing::{TestDaemon, short_tmp};
 use reef_testing::synth::{self, MutateOps, Preset};
 
@@ -154,6 +155,7 @@ fn bench_create(c: &mut Criterion, fixture: &Fixture, base: &BenchBase, kinds: &
                 n,
                 p50_create: p50(created),
                 p50_materialize: None,
+                p50_timings: None,
                 watcher: None,
                 target: target_for(n, &counts),
                 disk,
@@ -209,6 +211,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
     for &n in &counts {
         let created = RefCell::new(Vec::new());
         let materialized = RefCell::new(Vec::new());
+        let steps = RefCell::new(Vec::new());
         let id = BenchmarkId::new(format!("{preset}/{kind}"), n);
         group.bench_function(id, |b| {
             let api = api();
@@ -225,6 +228,9 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
                         materialized
                             .borrow_mut()
                             .push(Duration::from_millis(response.materialize_ms));
+                        steps
+                            .borrow_mut()
+                            .push(response.timings.unwrap_or_default());
                         workspaces.push(ws);
                     }
                     for ws in &workspaces {
@@ -262,6 +268,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
             n,
             p50_create: p50(created),
             p50_materialize: Some(p50(materialized.into_inner())),
+            p50_timings: Some(p50_timings(&steps.into_inner())),
             watcher: Some(&api.watcher),
             target: target_for(n, &counts),
             disk,
@@ -306,7 +313,10 @@ impl Api {
             .build()
             .expect("build the tokio runtime");
         let (daemon, repo) = rt.block_on(async {
-            let daemon = TestDaemon::start().await;
+            let daemon = TestDaemon::start_with(|config| {
+                config.file.watcher.backend = common::watcher();
+            })
+            .await;
             let registered = daemon
                 .client
                 .register_repository(&fixture.root, IfNotJj::Fail)
@@ -552,6 +562,30 @@ fn p50(mut times: Vec<Duration>) -> Duration {
     times[times.len().saturating_sub(1) / 2]
 }
 
+/// The median of each step of `timings`, taken separately (so the steps
+/// need not add up to `total_ms`).
+fn p50_timings(timings: &[CreateTimings]) -> CreateTimings {
+    let field = |get: fn(&CreateTimings) -> u64| {
+        let mut values: Vec<u64> = timings.iter().map(get).collect();
+        values.sort_unstable();
+        values
+            .get(values.len().saturating_sub(1) / 2)
+            .copied()
+            .unwrap_or_default()
+    };
+    CreateTimings {
+        resolve_ms: field(|t| t.resolve_ms),
+        base_ms: field(|t| t.base_ms),
+        materialize_ms: field(|t| t.materialize_ms),
+        mount_ms: field(|t| t.mount_ms),
+        jj_ms: field(|t| t.jj_ms),
+        seed_ms: field(|t| t.seed_ms),
+        insert_ms: field(|t| t.insert_ms),
+        watch_ms: field(|t| t.watch_ms),
+        total_ms: field(|t| t.total_ms),
+    }
+}
+
 /// One benchmark's row.
 struct Row<'a> {
     group: &'static str,
@@ -565,6 +599,8 @@ struct Row<'a> {
     /// creates; the rest of a create is resolving the start, the jj
     /// workspace, seeding `tree_state`, the row, and the RPC.
     p50_materialize: Option<Duration>,
+    /// For `create_api`, the median of each step the daemon timed (R1.29).
+    p50_timings: Option<CreateTimings>,
     /// For `create_api`, the daemon's watcher, which starts within the
     /// create.
     watcher: Option<&'a str>,
@@ -621,17 +657,8 @@ fn report(row: &Row<'_>, tree: Option<&Path>) {
         "proportional ({}/{}/{}/{}): {check}",
         row.group, row.preset, row.kind, row.n
     );
-    if let Some(materialize) = row.p50_materialize {
-        eprintln!(
-            "breakdown ({}/{}/{}/{}): p50 materialize {:.1} ms of {:.1} ms per create, watcher {}",
-            row.group,
-            row.preset,
-            row.kind,
-            row.n,
-            millis(materialize),
-            millis(row.p50_create),
-            row.watcher.unwrap_or("unknown"),
-        );
+    if let Some(steps) = &row.p50_timings {
+        print_breakdown(row, steps);
     }
     let target = row.target.map(|from_one| {
         print_target(row, from_one);
@@ -646,6 +673,17 @@ fn report(row: &Row<'_>, tree: Option<&Path>) {
         "privileged": common::privileged(),
         "p50_create_ms": millis(row.p50_create),
         "p50_materialize_ms": row.p50_materialize.map(millis),
+        "timings": row.p50_timings.as_ref().map(|steps| serde_json::json!({
+            "resolve_ms": steps.resolve_ms,
+            "base_ms": steps.base_ms,
+            "materialize_ms": steps.materialize_ms,
+            "mount_ms": steps.mount_ms,
+            "jj_ms": steps.jj_ms,
+            "seed_ms": steps.seed_ms,
+            "insert_ms": steps.insert_ms,
+            "watch_ms": steps.watch_ms,
+            "total_ms": steps.total_ms,
+        })),
         "watcher": row.watcher,
         "disk_per_ws_mib": disk.per_ws,
         "disk_per_ws_modified_mib": disk.per_ws_modified,
@@ -663,6 +701,29 @@ fn report(row: &Row<'_>, tree: Option<&Path>) {
         .open(&path)
         .expect("open target/bench-ws.json");
     writeln!(file, "{line}").expect("append to target/bench-ws.json");
+}
+
+/// Prints `create_api`'s `breakdown` line: the median of each step the
+/// daemon timed, and the watcher.
+fn print_breakdown(row: &Row<'_>, steps: &CreateTimings) {
+    eprintln!(
+        "breakdown ({}/{}/{}/{}): p50 per create {:.1} ms (daemon {} ms): resolve {}, base {}, materialize {}, mount {}, jj {}, seed {}, insert {}, watch {} ms; watcher {}",
+        row.group,
+        row.preset,
+        row.kind,
+        row.n,
+        millis(row.p50_create),
+        steps.total_ms,
+        steps.resolve_ms,
+        steps.base_ms,
+        steps.materialize_ms,
+        steps.mount_ms,
+        steps.jj_ms,
+        steps.seed_ms,
+        steps.insert_ms,
+        steps.watch_ms,
+        row.watcher.unwrap_or("unknown"),
+    );
 }
 
 /// Prints the target line for `row`; only `large`'s is the phase exit
