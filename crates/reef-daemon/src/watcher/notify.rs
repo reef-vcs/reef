@@ -9,13 +9,15 @@
 //! events: 1.1 to 1.3 s inside each create of a 100,000-file workspace on
 //! APFS (R1.12), and again on every rescan and every new directory (R1.29).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventHandler, DebounceEventResult, Debouncer, NoCache, new_debouncer_opt,
+    DebounceEventHandler, DebounceEventResult, DebouncedEvent, Debouncer, NoCache,
+    new_debouncer_opt,
 };
 use reef_lib::error::ErrorChain;
 use tokio::sync::mpsc;
@@ -60,6 +62,7 @@ impl NotifyWatcher {
             health,
             dropped: 0,
             reported_at: Instant::now(),
+            lost: HashSet::new(),
         };
         // Store mounts (R1.20) are symlinks; following them would watch the
         // shared store from every workspace.
@@ -134,50 +137,23 @@ struct Handler {
     health: HealthHook,
     dropped: u64,
     reported_at: Instant,
+    /// Workspaces an event was dropped for: their next event says anything
+    /// may have changed, since a narrowed scan would miss the dropped paths
+    /// (R1.30).
+    lost: HashSet<WorkspaceId>,
 }
 
 impl DebounceEventHandler for Handler {
     fn handle_event(&mut self, result: DebounceEventResult) {
         match result {
             Ok(batch) => {
-                let mut earliest = None::<Instant>;
-                let mut paths = Vec::new();
-                let mut rescan = false;
-                for event in &batch {
-                    // inotify's queue overflowed (or FSEvents dropped
-                    // events): anything under any root may have changed.
-                    if event.event.need_rescan() {
-                        rescan = true;
-                        earliest = Some(earliest.map_or(event.time, |at| at.min(event.time)));
-                        continue;
-                    }
-                    // Reads, including the scan's own, are not changes.
-                    if matches!(event.event.kind, EventKind::Access(_)) {
-                        continue;
-                    }
-                    earliest = Some(earliest.map_or(event.time, |at| at.min(event.time)));
-                    paths.extend(event.event.paths.iter().map(PathBuf::as_path));
-                }
-                let Some(at) = earliest else { return };
-                let grouped = {
-                    let demux = lock(&self.demux);
-                    let mut grouped = demux.group(paths);
-                    if rescan {
-                        tracing::warn!("watch events were lost; rescanning every workspace");
-                        for workspace in demux.workspaces() {
-                            grouped.entry(workspace).or_default();
-                        }
-                    }
-                    grouped
-                };
-                for (workspace, paths) in grouped {
-                    let sent = self.events.try_send(WatchEvent {
-                        workspace,
-                        paths,
-                        at,
-                    });
-                    if let Err(mpsc::error::TrySendError::Full(_)) = sent {
+                let events = route_batch(&lock(&self.demux), &batch);
+                for mut event in events {
+                    let workspace = event.workspace;
+                    event.everything |= self.lost.remove(&workspace);
+                    if let Err(mpsc::error::TrySendError::Full(_)) = self.events.try_send(event) {
                         self.dropped += 1;
+                        self.lost.insert(workspace);
                     }
                 }
             }
@@ -227,6 +203,51 @@ impl DebounceEventHandler for Handler {
             self.reported_at = Instant::now();
         }
     }
+}
+
+/// One event per workspace a debounced batch touches.
+///
+/// A rescan event (inotify's queue overflowed, or `FSEvents` coalesced or
+/// dropped events) makes the event of every workspace `everything`, even
+/// one that also has paths in the batch (R1.30). `FSEvents` names the
+/// directory to rescan, but the debouncer keeps only the latest rescan of
+/// a window and drops the ones before it, whose directories may lie under
+/// other workspaces or above every root; so the directory is not used.
+fn route_batch(demux: &Demux, batch: &[DebouncedEvent]) -> Vec<WatchEvent> {
+    let mut earliest = None::<Instant>;
+    let mut paths = Vec::new();
+    let mut rescan = false;
+    for event in batch {
+        // Reads, including the scan's own, are not changes.
+        if !event.event.need_rescan() && matches!(event.event.kind, EventKind::Access(_)) {
+            continue;
+        }
+        earliest = Some(earliest.map_or(event.time, |at| at.min(event.time)));
+        if event.event.need_rescan() {
+            rescan = true;
+        } else {
+            paths.extend(event.event.paths.iter().map(PathBuf::as_path));
+        }
+    }
+    let Some(at) = earliest else {
+        return Vec::new();
+    };
+    let mut grouped = demux.group(paths);
+    if rescan {
+        tracing::warn!("watch events were lost; rescanning every workspace");
+        for workspace in demux.workspaces() {
+            grouped.entry(workspace).or_default();
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(workspace, paths)| WatchEvent {
+            workspace,
+            paths,
+            everything: rescan,
+            at,
+        })
+        .collect()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -290,6 +311,77 @@ fn log_limit_hit(workspace: WorkspaceId, root: &Path) {
         instances_count = instances,
         "the watch limit is reached; {LIMIT_HINT}"
     );
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use notify::event::{CreateKind, Flag};
+    use notify::{Event, EventKind};
+
+    use super::*;
+
+    fn id(n: u8) -> WorkspaceId {
+        format!("{n:016x}").parse().unwrap()
+    }
+
+    fn demux() -> Demux {
+        let mut demux = Demux::default();
+        demux.insert(id(1), PathBuf::from("/w/a"), vec![]);
+        demux.insert(id(2), PathBuf::from("/w/b"), vec![]);
+        demux.insert(id(3), PathBuf::from("/w/c"), vec![]);
+        demux
+    }
+
+    fn write(path: &str, at: Instant) -> DebouncedEvent {
+        let event = Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from(path));
+        DebouncedEvent::new(event, at)
+    }
+
+    fn rescan(path: Option<&str>, at: Instant) -> DebouncedEvent {
+        let mut event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        if let Some(path) = path {
+            event = event.add_path(PathBuf::from(path));
+        }
+        DebouncedEvent::new(event, at)
+    }
+
+    /// R1.30, 2: a lost-events rescan in a batch makes every workspace's event
+    /// `everything`, including one that also has paths in the batch.
+    #[test]
+    fn overflow_with_paths_is_everything() {
+        let demux = demux();
+        let at = Instant::now();
+        let events = route_batch(&demux, &[write("/w/a/x.txt", at), rescan(None, at)]);
+        assert_eq!(events.len(), 3, "{events:?}");
+        let a = events
+            .iter()
+            .find(|event| event.workspace == id(1))
+            .unwrap();
+        assert_eq!(a.paths, [PathBuf::from("/w/a/x.txt")]);
+        assert!(events.iter().all(|event| event.everything), "{events:?}");
+
+        // FSEvents names a directory, but the debouncer keeps only the
+        // latest rescan of a window: the directory is not trusted to be
+        // the only one.
+        let events = route_batch(&demux, &[rescan(Some("/w/b/sub"), at)]);
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.everything && event.paths.is_empty())
+        );
+
+        let events = route_batch(&demux, &[write("/w/c/y.txt", at)]);
+        assert_eq!(
+            events,
+            [WatchEvent {
+                workspace: id(3),
+                paths: vec![PathBuf::from("/w/c/y.txt")],
+                everything: false,
+                at,
+            }]
+        );
+    }
 }
 
 #[cfg(test)]

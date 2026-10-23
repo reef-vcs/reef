@@ -247,7 +247,7 @@ Initial capacity targets. Each is measured by a load test ticket in its phase an
 
 | Phase | Target |
 | --- | --- |
-| 1 | 200 workspaces with active watchers on one machine, each on a 10,000-file repository, with a write reaching the store as a snapshot within 5 seconds at that load (revised by R1.23's measurement: it holds on a 12-core Mac and a 4-vCPU Linux runner, not on a 3-vCPU macOS runner, and not at 100,000 files, where every notify snapshot's full scan saturates the daemon; `docs/load-tests.md`) |
+| 1 | 200 workspaces with active watchers on one machine, each on a 10,000-file repository, with a write reaching the store as a snapshot within 5 seconds at that load (revised by R1.23's and R1.30's measurements: it holds on a 12-core Mac at 10,000 and at 100,000 files (p95 729 and 794 ms), since a notify watcher snapshot scans only the paths its events named (ADR 0026), and on 4-vCPU Linux and 3-vCPU macOS runners at 10,000 files; `docs/load-tests.md`) |
 | 2 | 500 subscribers on one daemon receiving 1,000 operations per minute, each delivered within 100 ms |
 | 4 | One store serving 1,000 concurrent agents across repositories at 10,000 operations per minute with p99 API latency under 200 ms, and 50 agents proposing against one repository without the landing queue growing without bound |
 

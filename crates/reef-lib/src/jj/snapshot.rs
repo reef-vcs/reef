@@ -14,7 +14,25 @@
 //!    operation, back on the workspace's thread.
 //!
 //! [`Repo::snapshot`] runs the three in one place.
+//!
+//! # Narrowed scans
+//!
+//! A caller that knows which paths changed passes them to
+//! [`Repo::begin_snapshot`] (R1.30, ADR 0026). The working copy is still
+//! locked, and its freshness checked, as for any snapshot; a fresh working
+//! copy with a working-copy commit in the view is then scanned through a
+//! second, narrowed load of its tree state: jj's test monitor
+//! (`FsmonitorSettings::Test`) given each path and, for each, the
+//! `.gitignore` under it, which jj turns into a rescan of everything under
+//! the path. A path covers itself and, if it is or was a directory,
+//! everything under it, on disk and in the recorded tree, so deletions under
+//! it are found too. [`PendingSnapshot::finish`] saves that tree state before
+//! jj saves the operation. The locked working copy itself is not scanned, so
+//! jj's `finish` saves only the operation, and the in-memory working copy
+//! keeps the tree it was locked with: `Repo::recorded_tree` reads the
+//! recorded one from disk.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -22,7 +40,9 @@ use futures::StreamExt as _;
 use jj_lib::backend::{BackendError, CommitId, TreeId};
 use jj_lib::commit::Commit;
 use jj_lib::conflict_labels::ConflictLabels;
+use jj_lib::fsmonitor::FsmonitorSettings;
 use jj_lib::gitignore::GitIgnoreError;
+use jj_lib::local_working_copy::{LocalWorkingCopy, TreeState, TreeStateError, TreeStateSettings};
 use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
@@ -33,7 +53,8 @@ use jj_lib::repo::{ReadonlyRepo, Repo as _, RewriteRootCommit};
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::{
-    CheckoutError, SnapshotOptions, UntrackedReason, WorkingCopyFreshness, WorkingCopyStateError,
+    CheckoutError, SnapshotOptions, SnapshotStats, UntrackedReason, WorkingCopyFreshness,
+    WorkingCopyStateError,
 };
 use jj_lib::workspace::LockedWorkspace;
 
@@ -128,6 +149,9 @@ pub enum SnapshotError {
     /// The working-copy state could not be locked, read, or saved.
     #[error("failed to lock or save the working-copy state")]
     WorkingCopyState(#[from] WorkingCopyStateError),
+    /// A narrowed scan's tree state could not be read or saved.
+    #[error("failed to read or save the working-copy state")]
+    TreeState(#[from] TreeStateError),
     /// The operation log could not be read to check the working copy's
     /// freshness.
     #[error("failed to read the operation log")]
@@ -168,6 +192,7 @@ impl Classify for SnapshotError {
             Self::Read(error) => error.kind(),
             Self::Ignores(error) => classify_by_source(error),
             Self::WorkingCopyState(error) => classify_by_source(error),
+            Self::TreeState(error) => classify_by_source(error),
             Self::OpStore(error) => classify_by_source(error),
             Self::Snapshot(error) => classify_by_source(error),
             Self::Checkout(error) => classify_by_source(error),
@@ -214,7 +239,20 @@ pub struct PendingSnapshot<'a> {
     wc_change: Option<ChangeIdHex>,
     untracked: Vec<(String, UntrackedReasonKind)>,
     scan: Duration,
+    load: Duration,
+    walk: Duration,
     updated_files: u32,
+    narrowed: Option<Narrowed>,
+}
+
+/// A narrowed scan's own load of the tree state, saved by
+/// [`PendingSnapshot::finish`] (see the module docs).
+struct Narrowed {
+    tree_state: TreeState,
+    /// The scan changed it: files, the tree, or refreshed file metadata.
+    dirty: bool,
+    /// Loading it.
+    load: Duration,
 }
 
 impl std::fmt::Debug for PendingSnapshot<'_> {
@@ -224,6 +262,7 @@ impl std::fmt::Debug for PendingSnapshot<'_> {
             .field("changed", &self.changed)
             .field("adopted", &self.adopted)
             .field("head_op", &self.head_op)
+            .field("narrowed", &self.narrowed.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -258,6 +297,25 @@ impl PendingSnapshot<'_> {
         self.scan
     }
 
+    /// Whether the scan covered only the paths given to
+    /// [`Repo::begin_snapshot`] (see the module docs).
+    pub fn narrowed(&self) -> bool {
+        self.narrowed.is_some()
+    }
+
+    /// The part of [`PendingSnapshot::scan_time`] spent locking the working
+    /// copy, which makes jj re-read its whole tree state from disk, and for
+    /// a narrowed scan reading it once more (R1.30).
+    pub fn load_time(&self) -> Duration {
+        self.load
+    }
+
+    /// The part of [`PendingSnapshot::scan_time`] spent walking the files and
+    /// hashing changed ones (R1.30).
+    pub fn walk_time(&self) -> Duration {
+        self.walk
+    }
+
     /// The operation the repository was loaded at when the scan began: what
     /// to finish at when nothing is committed.
     pub fn head_op(&self) -> &OperationIdHex {
@@ -288,6 +346,14 @@ impl PendingSnapshot<'_> {
     pub async fn finish(self, op_id: &OperationIdHex) -> Result<(), SnapshotError> {
         let id = OperationId::try_from_hex(op_id.as_str())
             .ok_or_else(|| SnapshotError::InvalidOperationId(op_id.clone()))?;
+        // The tree state before the operation, as jj's own `finish` orders
+        // them: a crash between the two leaves a working copy whose files
+        // already are its commit's, which the next snapshot adopts.
+        if let Some(mut narrowed) = self.narrowed
+            && narrowed.dirty
+        {
+            narrowed.tree_state.save()?;
+        }
         self.locked.finish(id).await?;
         Ok(())
     }
@@ -494,7 +560,9 @@ impl Repo {
         let begun = Instant::now();
         let head = Arc::clone(&self.repo);
         let name = self.workspace_name().to_owned();
-        let pending = self.begin_snapshot(None, &IgnoreSources::default()).await?;
+        let pending = self
+            .begin_snapshot(None, &IgnoreSources::default(), None)
+            .await?;
         let scan = pending.scan_time();
         let untracked = pending.untracked().to_vec();
         if !untracked.is_empty() {
@@ -580,19 +648,33 @@ impl Repo {
     /// - no working-copy commit in the view (the workspace was forgotten):
     ///   plan a new commit on `expected_commit`'s parents
     ///   ([`SnapshotPlan::recover`]).
+    ///
+    /// `prefixes`, workspace-relative paths, narrows the scan to them and
+    /// everything under them when the working copy is fresh and the view has
+    /// its working-copy commit (see the module docs); `None` scans
+    /// everything. A path that cannot be narrowed to (the root, `..`, not
+    /// UTF-8, or on macOS one whose spelling on disk cannot be read) scans
+    /// everything. Pass prefixes only for a working copy loaded with the
+    /// repository's own settings, without Watchman.
     pub async fn begin_snapshot(
         &mut self,
         expected_commit: Option<&CommitIdHex>,
         extra: &IgnoreSources<'_>,
+        prefixes: Option<&[PathBuf]>,
     ) -> Result<PendingSnapshot<'_>, SnapshotError> {
         let max_new_file_size = max_new_file_size(self.workspace.settings())?;
         let base_ignores = self.ignores(extra)?;
         let repo = Arc::clone(&self.repo);
         let name = self.workspace.workspace_name().to_owned();
         let head_op = OperationIdHex::of(repo.op_id());
+        let narrow = match prefixes {
+            Some(prefixes) => self.narrow_to(prefixes)?,
+            None => None,
+        };
 
         let start = Instant::now();
         let mut locked = self.workspace.start_working_copy_mutation().await?;
+        let mut load = start.elapsed();
         let view_wc = match repo.view().get_wc_commit_id(&name) {
             Some(id) => Some(
                 repo.store()
@@ -610,20 +692,7 @@ impl Repo {
             .clone()
             .unwrap_or_else(|| repo.store().root_commit());
         let wc_op = locked.locked_wc().old_operation_id().clone();
-        let behind = |kind| SnapshotError::RepoBehind {
-            kind,
-            wc_op: OperationIdHex::of(&wc_op),
-            repo_op: head_op.clone(),
-        };
-        let stale =
-            match WorkingCopyFreshness::check_stale(locked.locked_wc(), &probe, &repo).await? {
-                WorkingCopyFreshness::Fresh => false,
-                WorkingCopyFreshness::WorkingCopyStale => true,
-                WorkingCopyFreshness::Updated(_) => return Err(behind(Behind::WorkingCopyNewer)),
-                WorkingCopyFreshness::SiblingOperation => {
-                    return Err(behind(Behind::SiblingOperation));
-                }
-            };
+        let stale = is_stale(&mut locked, &probe, &repo, &head_op).await?;
 
         let old_tree = locked.locked_wc().old_tree().clone();
         let options = SnapshotOptions {
@@ -633,7 +702,13 @@ impl Repo {
             force_tracking_matcher: &NothingMatcher,
             max_new_file_size,
         };
-        let (new_tree, stats) = locked.locked_wc().snapshot(&options).await?;
+        // Stale or forgotten working copies adopt, diverge, or recover from
+        // a full scan.
+        let narrow = narrow.filter(|_| !stale && view_wc.is_some());
+        let (new_tree, stats, walk, narrowed) = scan(&mut locked, narrow, &repo, &options).await?;
+        load += narrowed
+            .as_ref()
+            .map_or(Duration::ZERO, |narrowed| narrowed.load);
         let untracked = untracked(stats.untracked_paths);
         let (tree_ids, labels) = new_tree.tree_ids_and_labels();
         let (tree_ids, labels) = (tree_ids.clone(), labels.clone());
@@ -690,8 +765,69 @@ impl Repo {
             wc_change: view_wc.as_ref().map(|wc| ChangeIdHex::of(wc.change_id())),
             untracked,
             scan: start.elapsed(),
+            load,
+            walk,
             updated_files,
+            narrowed,
         })
+    }
+
+    /// How to load the tree state for a scan narrowed to `prefixes`; `None`
+    /// to scan everything (see [`Repo::begin_snapshot`]).
+    fn narrow_to(&self, prefixes: &[PathBuf]) -> Result<Option<NarrowedLoad>, SnapshotError> {
+        let Some(local) = self
+            .workspace
+            .working_copy()
+            .downcast_ref::<LocalWorkingCopy>()
+        else {
+            return Ok(None);
+        };
+        let root = self.workspace_root().to_owned();
+        let Some(changed_files) = monitor_paths(&root, prefixes) else {
+            return Ok(None);
+        };
+        let mut settings = TreeStateSettings::try_from_user_settings(self.workspace.settings())
+            .map_err(|error| WorkingCopyStateError {
+                message: "Failed to read the tree state settings".to_owned(),
+                err: error.into(),
+            })?;
+        settings.fsmonitor_settings = FsmonitorSettings::Test { changed_files };
+        Ok(Some(NarrowedLoad {
+            root,
+            state_path: local.state_path().to_owned(),
+            settings,
+        }))
+    }
+
+    /// The tree this workspace's working copy recorded last, read from its
+    /// state on disk. The in-memory working copy keeps the tree it was
+    /// locked with, which a narrowed snapshot does not update (see the
+    /// module docs).
+    pub(crate) fn recorded_tree(&self) -> Result<MergedTree, WorkingCopyStateError> {
+        let wc = self.workspace.working_copy();
+        let state_path = wc
+            .downcast_ref::<LocalWorkingCopy>()
+            .map(LocalWorkingCopy::state_path)
+            // A missing tree state would be created by the load, unlocked.
+            .filter(|path| path.join("tree_state").is_file());
+        let Some(state_path) = state_path else {
+            return Ok(wc.tree()?.clone());
+        };
+        let wrap =
+            |message: &str, err: Box<dyn std::error::Error + Send + Sync>| WorkingCopyStateError {
+                message: message.to_owned(),
+                err,
+            };
+        let settings = TreeStateSettings::try_from_user_settings(self.workspace.settings())
+            .map_err(|error| wrap("Failed to read the tree state settings", error.into()))?;
+        let tree_state = TreeState::load(
+            Arc::clone(self.repo.store()),
+            self.workspace_root().to_owned(),
+            state_path.to_owned(),
+            &settings,
+        )
+        .map_err(|error| wrap("Failed to read working copy state", error.into()))?;
+        Ok(tree_state.current_tree().clone())
     }
 
     /// Paths that differ between the working-copy commit and its parent, in
@@ -724,6 +860,193 @@ impl Repo {
             });
         }
         Ok(changed)
+    }
+}
+
+/// Walks the working copy: narrowed through its own load of the tree state
+/// when `narrow` says how, else through the locked working copy. Returns
+/// the scanned tree, jj's stats, the walk's time, and the narrowed load.
+async fn scan(
+    locked: &mut LockedWorkspace<'_>,
+    narrow: Option<NarrowedLoad>,
+    repo: &ReadonlyRepo,
+    options: &SnapshotOptions<'_>,
+) -> Result<(MergedTree, SnapshotStats, Duration, Option<Narrowed>), SnapshotError> {
+    let Some(narrow) = narrow else {
+        let walk_start = Instant::now();
+        let (new_tree, stats) = locked.locked_wc().snapshot(options).await?;
+        return Ok((new_tree, stats, walk_start.elapsed(), None));
+    };
+    let load_start = Instant::now();
+    let mut tree_state = TreeState::load(
+        Arc::clone(repo.store()),
+        narrow.root,
+        narrow.state_path,
+        &narrow.settings,
+    )?;
+    let load = load_start.elapsed();
+    let walk_start = Instant::now();
+    let (dirty, stats) = tree_state.snapshot(options).await?;
+    let walk = walk_start.elapsed();
+    let new_tree = tree_state.current_tree().clone();
+    let narrowed = Narrowed {
+        tree_state,
+        dirty,
+        load,
+    };
+    Ok((new_tree, stats, walk, Some(narrowed)))
+}
+
+/// Whether the locked working copy is stale against `repo`, by jj's
+/// freshness check; [`SnapshotError::RepoBehind`] when it is newer than
+/// `repo` or a sibling of it (ADR 0018). `probe` is the view's working-copy
+/// commit.
+async fn is_stale(
+    locked: &mut LockedWorkspace<'_>,
+    probe: &Commit,
+    repo: &ReadonlyRepo,
+    head_op: &OperationIdHex,
+) -> Result<bool, SnapshotError> {
+    let behind = |kind, locked: &mut LockedWorkspace<'_>| SnapshotError::RepoBehind {
+        kind,
+        wc_op: OperationIdHex::of(locked.locked_wc().old_operation_id()),
+        repo_op: head_op.clone(),
+    };
+    match WorkingCopyFreshness::check_stale(locked.locked_wc(), probe, repo).await? {
+        WorkingCopyFreshness::Fresh => Ok(false),
+        WorkingCopyFreshness::WorkingCopyStale => Ok(true),
+        WorkingCopyFreshness::Updated(_) => Err(behind(Behind::WorkingCopyNewer, locked)),
+        WorkingCopyFreshness::SiblingOperation => Err(behind(Behind::SiblingOperation, locked)),
+    }
+}
+
+/// Where and how a narrowed scan loads the tree state.
+struct NarrowedLoad {
+    root: PathBuf,
+    state_path: PathBuf,
+    /// The repository's, with jj's test monitor reporting the paths.
+    settings: TreeStateSettings,
+}
+
+/// The changed files jj's test monitor reports for `prefixes`: each path,
+/// which covers it as a file, and the `.gitignore` under it, which jj's
+/// `make_fsmonitor_matcher` turns into a rescan of everything under the
+/// path, which covers it as a directory. On macOS also each path's spelling
+/// on disk where it differs, since jj compares paths byte for byte and a
+/// case-insensitive volume reports the spelling a writer used. `None` when a
+/// path cannot be narrowed to (see [`Repo::begin_snapshot`]).
+fn monitor_paths(root: &Path, prefixes: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    let spelling = spelling::Resolver::new(root);
+    #[cfg(not(target_os = "macos"))]
+    let _ = root;
+    let mut paths = Vec::with_capacity(prefixes.len() * 2);
+    let mut push = |path: &Path| {
+        paths.push(path.to_owned());
+        paths.push(path.join(".gitignore"));
+    };
+    for prefix in prefixes {
+        let repo_path = RepoPathBuf::from_relative_path(prefix).ok()?;
+        if repo_path.is_root() {
+            return None;
+        }
+        push(prefix);
+        #[cfg(target_os = "macos")]
+        {
+            let spelled = spelling.on_disk(prefix)?;
+            if spelled != *prefix {
+                push(&spelled);
+            }
+        }
+    }
+    Some(paths)
+}
+
+/// The spelling of a path on a case-insensitive volume (R1.30).
+#[cfg(target_os = "macos")]
+mod spelling {
+    use std::ffi::{CString, OsStr};
+    use std::io;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Path, PathBuf};
+
+    /// Resolves paths under one root.
+    pub(super) struct Resolver<'a> {
+        root: &'a Path,
+        /// The root as the volume spells it; `None` if it cannot be read.
+        spelled_root: Option<PathBuf>,
+    }
+
+    impl<'a> Resolver<'a> {
+        pub(super) fn new(root: &'a Path) -> Self {
+            Self {
+                root,
+                spelled_root: get_path(root).ok(),
+            }
+        }
+
+        /// `relative` as the volume spells it: the longest part of it that
+        /// exists, spelled from disk, then the rest as given. `None` when it
+        /// cannot be read (a permission, a hard link to outside the root).
+        pub(super) fn on_disk(&self, relative: &Path) -> Option<PathBuf> {
+            let mut existing = relative.to_path_buf();
+            let mut missing = Vec::new();
+            loop {
+                if existing.as_os_str().is_empty() {
+                    return Some(relative.to_owned());
+                }
+                match std::fs::symlink_metadata(self.root.join(&existing)) {
+                    Ok(_) => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        missing.push(existing.file_name()?.to_owned());
+                        existing.pop();
+                    }
+                    Err(_) => return None,
+                }
+            }
+            let spelled = get_path(&self.root.join(&existing)).ok()?;
+            let mut spelled = spelled
+                .strip_prefix(self.spelled_root.as_deref()?)
+                .ok()?
+                .to_path_buf();
+            spelled.extend(missing.iter().rev());
+            Some(spelled)
+        }
+    }
+
+    /// `fcntl(F_GETPATH)` on `path` itself (a symlink is not followed): the
+    /// path as the volume spells it.
+    fn get_path(path: &Path) -> io::Result<PathBuf> {
+        let c_path = CString::new(path.as_os_str().as_bytes())?;
+        let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_SYMLINK;
+        #[allow(unsafe_code, reason = "FFI; the path is a NUL-terminated string")]
+        // SAFETY: `c_path` is a valid C string for the whole call.
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        #[allow(unsafe_code, reason = "taking ownership of a descriptor just opened")]
+        // SAFETY: `fd` is open and owned by nothing else.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut buf = vec![0_u8; usize::try_from(libc::PATH_MAX).unwrap_or(1024)];
+        #[allow(
+            unsafe_code,
+            reason = "FFI; the buffer is PATH_MAX bytes, as F_GETPATH needs"
+        )]
+        // SAFETY: `F_GETPATH` writes at most `PATH_MAX` bytes, NUL included,
+        // into `buf`, which is that long.
+        let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let len = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
+        Ok(PathBuf::from(OsStr::from_bytes(&buf[..len])))
     }
 }
 

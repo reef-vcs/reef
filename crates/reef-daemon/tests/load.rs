@@ -11,8 +11,11 @@
 //!
 //! Knobs: `REEF_LOAD_PRESET` (`medium`, or `large`), `REEF_LOAD_WORKSPACES`
 //! (200), `REEF_LOAD_STEADY_SECS` (300), `REEF_LOAD_WRITE_PERIOD_SECS`
-//! (60). The report is `target/load/<os>-<preset>-<timestamp>.json`, and a
-//! Markdown summary is printed.
+//! (60), `REEF_LOAD_WATCHER` (`notify`, or `watchman`),
+//! `REEF_LOAD_NARROWED_MAX_PATHS` (the daemon's default; `0` scans every
+//! tracked file on every snapshot, as before R1.30). The report is
+//! `target/load/<os>-<preset>-<timestamp>.json`, and a Markdown summary is
+//! printed.
 
 #![allow(
     clippy::unwrap_used,
@@ -64,6 +67,8 @@ struct Params {
     workspaces: usize,
     steady: Duration,
     period: Duration,
+    watcher: WatcherBackend,
+    narrowed_max_paths: Option<usize>,
 }
 
 impl Params {
@@ -78,11 +83,23 @@ impl Params {
             Ok("large") => Preset::Large,
             Ok(other) => panic!("REEF_LOAD_PRESET={other}: expected medium or large"),
         };
+        let watcher = match std::env::var("REEF_LOAD_WATCHER").as_deref() {
+            Err(_) | Ok("" | "notify") => WatcherBackend::Notify,
+            Ok("watchman") => WatcherBackend::Watchman,
+            Ok(other) => panic!("REEF_LOAD_WATCHER={other}: expected notify or watchman"),
+        };
         Params {
             preset,
             workspaces: usize::try_from(number("REEF_LOAD_WORKSPACES", 200)).unwrap(),
             steady: Duration::from_secs(number("REEF_LOAD_STEADY_SECS", 300)),
             period: Duration::from_secs(number("REEF_LOAD_WRITE_PERIOD_SECS", 60)),
+            watcher,
+            narrowed_max_paths: std::env::var("REEF_LOAD_NARROWED_MAX_PATHS")
+                .ok()
+                .map(|text| {
+                    text.parse()
+                        .unwrap_or_else(|_| panic!("REEF_LOAD_NARROWED_MAX_PATHS={text}"))
+                }),
         }
     }
 }
@@ -107,9 +124,13 @@ fn bytes_needed(preset: Preset, workspaces: usize) -> u64 {
     3 * tree + workspaces as u64 * tree_state
 }
 
-fn configure(config: &mut FileConfig) {
-    // Watchman is a follow-up profile (the brief's out of scope).
-    config.watcher.backend = WatcherBackend::Notify;
+fn configure(config: &mut FileConfig, params: &Params) {
+    // Notify unless asked: `auto` would pick Watchman for `large` where it is
+    // installed (R1.30 compares the two).
+    config.watcher.backend = params.watcher;
+    if let Some(max) = params.narrowed_max_paths {
+        config.watcher.narrowed_max_paths = max;
+    }
     // Longer than the run: the heartbeats stop after the burst, and
     // creating and releasing 200 `large` workspaces on macOS each take more
     // than the default 30 minutes. An expiry would reclaim a workspace
@@ -130,7 +151,7 @@ async fn load_profile() {
     }
     let params = Params::from_env();
     let started_at = utc_stamp();
-    let daemon = SpawnedDaemon::spawn(configure).await;
+    let daemon = SpawnedDaemon::spawn(|config| configure(config, &params)).await;
     let free_at_start = free_bytes(daemon.root());
     let needed = bytes_needed(Preset::Large, LARGE_CREATES)
         + if params.preset == Preset::Large {
@@ -153,6 +174,8 @@ async fn load_profile() {
         "params": {
             "preset": preset_name(params.preset),
             "workspaces": params.workspaces,
+            "watcher": params.watcher.as_str(),
+            "narrowed_max_paths": params.narrowed_max_paths,
             "steady_secs": params.steady.as_secs(),
             "write_period_secs": params.period.as_secs(),
             "create_concurrency": CREATE_CONCURRENCY,
@@ -236,8 +259,13 @@ async fn load_profile() {
         .into_iter()
         .map(|(response, _)| response.workspace.unwrap())
         .collect();
+    let mut watchers = HashMap::<&str, usize>::new();
+    for ws in &workspaces {
+        *watchers.entry(ws.watcher.as_str()).or_default() += 1;
+    }
     report["creates"] = json!({
         "backend": workspaces[0].backend,
+        "watchers": watchers,
         "base_build_ms": preset_base_ms,
         "total_ms": all_ms,
         "ms": create_ms,
@@ -253,6 +281,7 @@ async fn load_profile() {
     let load = Arc::new(Load::new(&daemon, &repo, &workspaces));
     let heartbeats = load.heartbeat(&workspaces);
     let sampler = load.sample();
+    let steady_from = utc_stamp();
     let steady = load.steady(&params).await;
     eprintln!("load: steady state done");
     let burst = load.burst().await;
@@ -273,6 +302,7 @@ async fn load_profile() {
     // Limits, then the watcher's own account.
     report["limits"] = limits(&daemon);
     report["watcher_summaries"] = watcher_summaries(&daemon);
+    report["watcher_scans"] = watcher_scans(&daemon, &steady_from);
 
     // Teardown.
     let begun = Instant::now();
@@ -869,6 +899,38 @@ fn watcher_summaries(daemon: &SpawnedDaemon) -> Value {
     })
 }
 
+/// The p50 and p95 of the `scan_ms`, `load_ms` and `walk_ms` of the
+/// watcher snapshots logged from `from` (a [`utc_stamp`]) on: the steady
+/// state, the burst and the teardown's final snapshots are not in it, since
+/// those are `final` (R1.30).
+fn watcher_scans(daemon: &SpawnedDaemon, from: &str) -> Value {
+    let lines: Vec<Value> = daemon
+        .log_lines("watcher snapshot taken")
+        .into_iter()
+        .filter(|event| {
+            event["timestamp"]
+                .as_str()
+                .is_some_and(|at| at.get(..19) >= from.get(..19))
+        })
+        .collect();
+    let field = |name: &str| {
+        let mut values: Vec<u64> = lines
+            .iter()
+            .filter_map(|event| event[name].as_u64())
+            .collect();
+        values.sort_unstable();
+        json!({ "p50": percentile(&values, 50), "p95": percentile(&values, 95), "max": values.last() })
+    };
+    json!({
+        "count": lines.len(),
+        "narrowed": lines.iter().filter(|event| event["narrowed"] == true).count(),
+        "scan_ms": field("scan_ms"),
+        "load_ms": field("load_ms"),
+        "walk_ms": field("walk_ms"),
+        "paths_count": field("paths_count"),
+    })
+}
+
 /// Where the program runs.
 fn machine() -> Value {
     let (model, memory) = if cfg!(target_os = "linux") {
@@ -957,9 +1019,10 @@ fn markdown(report: &Value) -> String {
         (
             "backend used".to_owned(),
             format!(
-                "{} ({preset}: {})",
+                "{} ({preset}: {}), watchers {}",
                 large["backend"].as_str().unwrap_or("?"),
-                creates["backend"].as_str().unwrap_or("?")
+                creates["backend"].as_str().unwrap_or("?"),
+                creates["watchers"]
             ),
         ),
         (
@@ -990,6 +1053,18 @@ fn markdown(report: &Value) -> String {
             triple(&report["steady"]),
         ),
         ("burst p50 / p95 / max".to_owned(), triple(&report["burst"])),
+        ("watcher scan p50 / p95: scan, load, walk".to_owned(), {
+            let scans = &report["watcher_scans"];
+            let pair = |name: &str| format!("{} / {}", scans[name]["p50"], scans[name]["p95"]);
+            format!(
+                "{}, {}, {} ms ({} scans, {} narrowed)",
+                pair("scan_ms"),
+                pair("load_ms"),
+                pair("walk_ms"),
+                scans["count"],
+                scans["narrowed"]
+            )
+        }),
         (
             "scans queued max, wait max".to_owned(),
             format!(

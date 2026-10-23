@@ -37,7 +37,7 @@ We will use Watchman for large repositories, through jj-lib's own integration, w
 
 ## Alternatives considered
 
-- **A notify-based narrowing through an upstream jj-lib change**, letting a caller pass changed paths to `snapshot`. It is the better long-term design, one watcher for both jobs, and is upstream contribution 2 in [0008](0008-jj-lib-embedding-findings.md). It is not available in jj-lib 0.46.
+- **A notify-based narrowing through an upstream jj-lib change**, letting a caller pass changed paths to `snapshot`. It is the better long-term design, one watcher for both jobs, and is upstream contribution 2 in [0008](0008-jj-lib-embedding-findings.md). It is not available in jj-lib 0.46. R1.30 narrowed notify snapshots without it, through jj-lib's public `TreeState` API ([0026](0026-narrowed-notify-snapshots.md)); the upstream change remains the better design.
 - **Caching the Watchman client in Reef** instead of exporting `WATCHMAN_SOCK`. jj builds its own connector in `Fsmonitor::init` and offers no way to pass a client or a socket, so this would mean forking that code. If the per-query cost matters in R1.23, the fix belongs upstream.
 - **FSEvents on macOS only.** It avoids the per-directory cost on macOS but not on Linux, where the watch limit bites.
 - **Polling.** It is O(files) per tick, which is the cost this decision exists to avoid.
@@ -52,3 +52,7 @@ R1.12 found `create_api/large/apfs/20` at 1.93 s per workspace against the one-s
 
 The cap is the trade-off: raising it keeps long bursts clean but leaves each workspace's first snapshots later. R1.29 records the numbers and does not tune it; R1.23 measures the phase at steady state, after the creates.
 - **A new subscription asks for its snapshot itself.** Decision 2 said every subscription's first result asks for one snapshot. With Watchman 4.9.0, the `watchman` package on Ubuntu 24.04 (and CI's), no snapshot followed a new subscription, so on Linux a write made before it waited for the fallback timer; the deferral made that window seconds instead of milliseconds, and R1.29's tests caught it. The subscription task now asks for one snapshot as soon as the subscription is established, and a fresh-instance first result, where Watchman sends one, joins the same debounced batch.
+
+## Amendment, 2026-10-23 (R1.30): measured at 200 workspaces; notify narrows too
+
+R1.30 ran R1.23's load profile with Watchman: 200 `large` workspaces on an M2 Max, release build. The steady-state write-to-snapshot p95 was 809 ms, with nothing unsnapshotted after 30 s, against 174.7 s for notify's full scans at the time. A watcher scan took 50 ms at the median (15 ms locking and reloading the tree state, 25 ms walking the reported paths). Watchman's crawl of the new workspaces doubled the 200 creates' total, 450 s against 228 s with notify. Notify workspaces' watcher snapshots are now narrowed to their reported paths as well ([0026](0026-narrowed-notify-snapshots.md)), so the threshold that picks Watchman under `auto` is about inotify's per-directory watches and Watchman's own costs, not about full scans. Watchman events now say "anything may have changed" with `WatchEvent::everything` instead of an empty path list.
