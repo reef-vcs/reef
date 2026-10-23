@@ -383,10 +383,20 @@ pub(crate) fn main() -> ExitCode {
     }
 }
 
+/// The CLI's filter when neither `REEF_LOG` nor `RUST_LOG` is set and no
+/// `-v` is given. A command that runs daemon code in this process
+/// (`restore`) logs its `info` events for the daemon's log, not for the
+/// person at the terminal; `reef daemon run` sets up its own logging.
+const CLI_DEFAULT_FILTER: &str = "warn";
+
 fn init_logging(verbose: u8) -> Result<logging::LoggingGuard, CliError> {
     let mut options = LogOptions::from_env().map_err(CliError::Logging)?;
     match verbose {
-        0 => {}
+        0 => {
+            options
+                .filter
+                .get_or_insert_with(|| CLI_DEFAULT_FILTER.to_owned());
+        }
         1 => options.filter = Some("debug".to_owned()),
         _ => options.filter = Some("trace".to_owned()),
     }

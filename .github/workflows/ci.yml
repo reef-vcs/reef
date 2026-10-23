@@ -36,6 +36,7 @@ jobs:
         with:
           just-version: "1"
       - run: just fmt-check
+      - run: just doc-links
 
   deny:
     name: cargo deny

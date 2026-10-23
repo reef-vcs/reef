@@ -958,3 +958,20 @@ impl std::io::Write for LogCapture {
         Ok(())
     }
 }
+
+/// A restore is offline and never uses a socket, so a state directory too
+/// deep for the default one (`<state>/daemon.sock` over the 103-byte limit)
+/// is restorable; the daemon there takes `REEF_SOCKET` or the config file's.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_into_a_deep_state_directory() {
+    let (daemon, _repo) = fixture().await;
+    let dest = daemon.tmp.path().join("backup");
+    backup(&daemon, &dest, "").await;
+    let into = daemon.tmp.path().join("deep".repeat(30)).join("state");
+    assert!(into.join("daemon.sock").as_os_str().len() > 103);
+    let report = run_restore(&dest, options(&daemon.config, &into))
+        .await
+        .unwrap();
+    assert_eq!(report.repos.len(), 1, "{report:?}");
+    assert!(into.join("reef.sqlite3").is_file());
+}

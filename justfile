@@ -85,8 +85,12 @@ installer-lint:
 installer: installer-lint
     scripts/test-install.sh --build-dir "${CARGO_TARGET_DIR:-target}/debug"
 
+# Every relative link in the repository's Markdown resolves (R1.24).
+doc-links:
+    scripts/doc-links.sh
+
 # Everything CI runs, in CI order.
-ci: fmt-check lint build agent-files installer test doc deny
+ci: fmt-check doc-links lint build agent-files installer test doc deny
 
 clean:
     cargo clean

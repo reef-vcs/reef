@@ -1601,3 +1601,81 @@ async fn ws_list_limit_and_truncated() {
     assert_eq!(json(&output).as_array().unwrap().len(), 3);
     assert_eq!(stderr(&output), "");
 }
+
+/// Every `reef` invocation in `docs/quickstart.md` (R1.24), in its `sh`
+/// blocks and in inline code elsewhere: its first two words name a command
+/// `reef --help` knows, and each flag it passes is in that command's help.
+/// Removing or renaming a command or flag the quickstart uses fails here;
+/// the page must change with it.
+#[test]
+fn quickstart_commands_exist() {
+    let page = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/quickstart.md");
+    let text = std::fs::read_to_string(&page).unwrap();
+    // Shell lines from `sh` blocks, and `reef ...` code spans outside blocks.
+    let mut commands: Vec<String> = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        if let Some(info) = line.strip_prefix("```") {
+            fence = if fence.is_some() { None } else { Some(info) };
+            continue;
+        }
+        match fence {
+            Some("sh") => commands.push(line.to_owned()),
+            Some(_) => {}
+            None => commands.extend(
+                line.split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .filter(|span| *span == "reef" || span.starts_with("reef "))
+                    .map(str::to_owned),
+            ),
+        }
+    }
+    let mut checked = 0;
+    for line in &commands {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for (at, token) in tokens.iter().enumerate() {
+            if *token != "reef" && !token.ends_with("(reef") {
+                continue;
+            }
+            // Its arguments, up to the end of the command.
+            let args: Vec<&str> = tokens[at + 1..]
+                .iter()
+                .copied()
+                .take_while(|arg| {
+                    !matches!(*arg, "&&" | "||" | "|" | ";" | "--") && !arg.starts_with(')')
+                })
+                .collect();
+            let words: Vec<&str> = args
+                .iter()
+                .copied()
+                .take_while(|arg| !arg.starts_with('-'))
+                .take(2)
+                .collect();
+            let mut help = reef_in(Path::new("/nonexistent"));
+            help.args(&words).arg("--help");
+            let output = help.output().unwrap();
+            let shown = stdout(&output);
+            assert!(
+                output.status.success(),
+                "`reef {}` in the quickstart is not a command:\n{line}\n{}",
+                words.join(" "),
+                stderr(&output)
+            );
+            for flag in args.iter().filter(|arg| arg.starts_with("--")) {
+                let flag = flag.split('=').next().unwrap_or(flag);
+                assert!(
+                    shown.contains(flag),
+                    "`reef {}` has no {flag}, which the quickstart passes:\n{line}",
+                    words.join(" ")
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 12,
+        "only {checked} reef invocations found in {}",
+        page.display()
+    );
+}

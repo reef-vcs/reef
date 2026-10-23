@@ -25,7 +25,8 @@ fn reef_config_show(vars: &[(&str, &str)]) -> std::process::Output {
 }
 
 /// `starting` is a debug event (R1.04 made it one, so commands print
-/// nothing on stderr at the default `info`), written as JSON to stderr.
+/// nothing on stderr at the default filter, `warn` for the CLI), written as
+/// JSON to stderr.
 #[test]
 fn logs_starting_as_json_to_stderr() {
     let quiet = reef_config_show(&[]);
