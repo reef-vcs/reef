@@ -22,7 +22,7 @@ reef-testing = { path = "crates/reef-testing", version = "0.0.0" }   # unpublish
 jj-lib = "=0.46.0"
 # Only to name gix::hash::Kind when creating repositories (`Repo::init_internal_git` and test
 # fixtures); jj-lib does not re-export gix. Must match the gix version jj-lib depends on exactly.
-gix = { version = "=0.88.0", default-features = false }
+gix = { version = "=0.89.0", default-features = false }
 # Decodes jj-lib's own protobuf messages (`tree_state`, R1.02; jj-lib does not re-export prost)
 # and the daemon API's generated code (R1.03). Same major as jj-lib's and tonic-prost's.
 prost = "0.14"
