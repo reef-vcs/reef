@@ -278,7 +278,10 @@ fn spawn_writer(dir: PathBuf, stop: Arc<AtomicBool>) -> tokio::task::JoinHandle<
                 .append(true)
                 .open(dir.join("load.txt"))
                 .unwrap();
-            writeln!(file, "line {written}").unwrap();
+            // One `write`: `writeln!` on a `File` writes each formatted piece
+            // separately, and a snapshot between them captures a torn line.
+            file.write_all(format!("line {written}\n").as_bytes())
+                .unwrap();
             written += 1;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
