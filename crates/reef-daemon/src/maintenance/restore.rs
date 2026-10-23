@@ -47,7 +47,7 @@ use super::backup::{
     Existing, HEADS_FILE, MANIFEST_VERSION, Manifest, ManifestError, RepoManifest, SQLITE_FILE,
     copy_tree, copy_tree_with, read_op_heads, repo_dir,
 };
-use crate::config::{Config, ConfigError, LeaseSection, Paths};
+use crate::config::{Config, ConfigError, DB_FILE, LOCK_FILE, LeaseSection};
 use crate::db::{
     Db, DbError, META_LAST_BACKUP_AT, META_REMATERIALIZE_PENDING, META_RESTORED_AT,
     META_RESTORED_FROM, SCHEMA_VERSION,
@@ -90,6 +90,26 @@ impl RestoreOptions {
                 .jj_settings()
                 .map_err(|error| RestoreError::Settings(error.to_string()))?,
         })
+    }
+}
+
+/// The state directory's files a restore writes. A restore runs offline,
+/// so unlike [`crate::config::Paths`] this has no socket: a state directory
+/// too deep for one (with the socket moved by `REEF_SOCKET` or the config
+/// file) is restorable.
+struct StateFiles {
+    state_dir: PathBuf,
+    db: PathBuf,
+    lock: PathBuf,
+}
+
+impl StateFiles {
+    fn in_dir(state_dir: &Path) -> StateFiles {
+        StateFiles {
+            state_dir: state_dir.to_owned(),
+            db: state_dir.join(DB_FILE),
+            lock: state_dir.join(LOCK_FILE),
+        }
     }
 }
 
@@ -274,7 +294,7 @@ pub fn restore(src: &Path, opts: &RestoreOptions) -> Result<RestoreReport, Resto
     if schema > SCHEMA_VERSION {
         return Err(RestoreError::SchemaTooNew { found: schema });
     }
-    let paths = Paths::in_state_dir(&opts.into)?;
+    let paths = StateFiles::in_dir(&opts.into);
     {
         use std::os::unix::fs::DirBuilderExt as _;
         fs::DirBuilder::new()
@@ -356,7 +376,7 @@ fn finish_db(
     src: &Path,
     manifest: &Manifest,
     targets: &[Target<'_>],
-    paths: &Paths,
+    paths: &StateFiles,
     opts: &RestoreOptions,
 ) -> Result<(usize, usize), RestoreError> {
     let db = Arc::new(Db::open(&paths.db)?);

@@ -8,7 +8,7 @@ Reef is in Phase 1: leased copy-on-write workspaces. Phase 0 (foundations) is co
 
 ## Setup
 
-macOS and Linux are supported. Windows is not yet; whether and how to support it is ticket RX.05.
+macOS and Linux are supported. Windows is not yet; whether and how to support it is ticket RX.05. To run Reef rather than build it, follow the [quickstart](docs/quickstart.md).
 
 ```sh
 # Install rustup from https://rustup.rs. rust-toolchain.toml pins the toolchain,

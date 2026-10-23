@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 0 (foundations) is complete and Phase 1 (leased copy-on-write workspaces) is most of the way through. A daemon and `reef` CLI build from source and run today on macOS and Linux. Prebuilt binaries and a one-line installer arrive with the first release, 0.1.0, at Phase 1's close; there is no quickstart yet, and the CLI is not stable. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-1/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is nearly complete, and runs today on macOS and Linux. Start with the [quickstart](docs/quickstart.md). Prebuilt binaries and the one-line installer arrive with the first release, 0.1.0, at Phase 1's close; until then, build from source. The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-1/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -48,7 +48,7 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: crash and load tests at 200 workspaces, the quickstart, and the first release.
+Still to come in Phase 1: the agent onboarding benchmark (RX.07) and the first release.
 
 From the first release on, prebuilt binaries for macOS and Linux on arm64 and x86_64 install with any one of these (the Linux binaries are static, so they run in any container):
 
@@ -102,7 +102,9 @@ The full design document is at [docs/design.md](docs/design.md). The work is bro
 
 Architecture decisions are recorded in [docs/adr](docs/adr/README.md).
 
-Benchmarks, what they measure, and their baseline numbers are in [docs/benchmarks.md](docs/benchmarks.md).
+Benchmarks, what they measure, and their baseline numbers are in [docs/benchmarks.md](docs/benchmarks.md); the crash, reclaim, and load tests at 200 workspaces are in [docs/load-tests.md](docs/load-tests.md).
+
+The [quickstart](docs/quickstart.md) takes you from installing Reef to an agent's reclaimed workspace.
 
 ## Contributing
 

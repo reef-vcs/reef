@@ -118,6 +118,11 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ("repo", &["auto_register"]),
 ];
 
+/// The metadata database's file name in the state directory.
+pub const DB_FILE: &str = "reef.sqlite3";
+/// The single-instance lock's file name in the state directory.
+pub const LOCK_FILE: &str = "daemon.lock";
+
 /// Every path the daemon uses, resolved and absolute.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
@@ -888,8 +893,8 @@ impl Layered {
         };
         let paths = Paths {
             config_file: self.config_file,
-            db: state_dir.join("reef.sqlite3"),
-            lock: state_dir.join("daemon.lock"),
+            db: state_dir.join(DB_FILE),
+            lock: state_dir.join(LOCK_FILE),
             pid,
             logs: state_dir.join("logs"),
             repos: state_dir.join("repos"),

@@ -296,12 +296,36 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     let volume = volume_or_skip!();
     let mut daemon = SpawnedDaemon::spawn_in(volume.path(), configure).await;
     let repo = daemon.register_synth(Preset::Small).await;
-    // Long enough to fill the disk before it expires.
     let ws = create(&daemon, &repo.id, 8_000).await;
     let path = PathBuf::from(&ws.path);
-    fill_around(volume.path(), || {
-        std::fs::write(path.join("while-full.txt"), "written while full\n").unwrap();
+    // Heartbeat while the disk fills, which can outlast the lease on a slow
+    // runner; the lease then expires on a full disk. A heartbeat that fails
+    // once the disk is full only stops extending it.
+    let filling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let beating = tokio::spawn({
+        let (client, id, lease) = (
+            daemon.client.clone(),
+            ws.id.clone(),
+            ws.lease.clone().unwrap().id,
+        );
+        let filling = std::sync::Arc::clone(&filling);
+        async move {
+            while filling.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = client.heartbeat_workspace("", &id, &lease).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
     });
+    let (volume_path, written) = (volume.path().to_owned(), path.clone());
+    tokio::task::spawn_blocking(move || {
+        fill_around(&volume_path, || {
+            std::fs::write(written.join("while-full.txt"), "written while full\n").unwrap();
+        });
+    })
+    .await
+    .unwrap();
+    filling.store(false, std::sync::atomic::Ordering::Relaxed);
+    beating.await.unwrap();
 
     // The reclaim is refused one of two ways: the final snapshot fails
     // (`final-snapshot-failed`), or, as on a fresh daemon whose SQLite log
