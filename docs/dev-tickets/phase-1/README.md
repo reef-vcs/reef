@@ -37,6 +37,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.27 | [R1.27-agent-config-init.md](R1.27-agent-config-init.md) | S | R1.25, R1.26 | R1.24, R2.13, R2.25, RX.07 |
 | R1.28 | [R1.28-prebuilt-binaries-and-installer.md](R1.28-prebuilt-binaries-and-installer.md) | M | R0.03, R1.22 | R1.24, R4.17, RX.07 |
 | R1.29 | [R1.29-create-latency-off-the-watcher-path.md](R1.29-create-latency-off-the-watcher-path.md) | M | R1.12, R1.13, R1.14 | The APFS half of the first exit criterion, RX.06 |
+| R1.30 | [R1.30-incremental-notify-snapshots.md](R1.30-incremental-notify-snapshots.md) | L | R1.13, R1.14, R1.23 | The `large` half of R1.23's measurement, gating `load.yml` on `macos-15` again |
 | RX.07 | [RX.07-agent-onboarding-benchmark.md](RX.07-agent-onboarding-benchmark.md) | M | R1.25, R1.26, R1.27, R1.28 | R2.17 (cross-cutting; first needed for the Phase 1 release) |
 
 ## Suggested execution order
