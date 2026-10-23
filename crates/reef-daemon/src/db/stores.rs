@@ -6,7 +6,7 @@
 //! daemon, and the daemon never inserts a second row for a key that has
 //! one, so every query here goes by `(name, lockfile_hash)`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{ErrorCode, OptionalExtension as _, Row, params};
 
@@ -99,18 +99,20 @@ impl Db {
         })
     }
 
-    /// Marks the store built and read-only at `built_at`.
-    /// [`DbError::NotFound`] if there is no row.
+    /// Marks the store built and read-only at `built_at`, with its contents
+    /// at `path`. [`DbError::NotFound`] if there is no row.
     pub fn seal_store(
         &self,
         name: &str,
         lockfile_hash: &str,
         built_at: Timestamp,
+        path: &Path,
     ) -> Result<(), DbError> {
+        let path = path_text(path)?;
         let changed = self.with(|conn| {
             conn.execute(
-                "UPDATE stores SET sealed = 1, built_at = ?3 WHERE name = ?1 AND lockfile_hash = ?2",
-                params![name, lockfile_hash, built_at],
+                "UPDATE stores SET sealed = 1, built_at = ?3, path = ?4 WHERE name = ?1 AND lockfile_hash = ?2",
+                params![name, lockfile_hash, built_at, path],
             )
         })?;
         if changed == 0 {
@@ -195,11 +197,15 @@ mod tests {
         assert_eq!(db.store("deps", "00").unwrap(), None);
         assert_eq!(db.stores().unwrap(), [deps.clone(), tools.clone()]);
 
-        db.seal_store("deps", HASH, Timestamp(2_000)).unwrap();
+        db.seal_store("deps", HASH, Timestamp(2_000), Path::new("/s/deps/x/deps"))
+            .unwrap();
         let sealed = db.store("deps", HASH).unwrap().unwrap();
         assert!(sealed.sealed);
         assert_eq!(sealed.built_at, Some(Timestamp(2_000)));
-        let missing = db.seal_store("other", HASH, Timestamp(1)).unwrap_err();
+        assert_eq!(sealed.path, Path::new("/s/deps/x/deps"));
+        let missing = db
+            .seal_store("other", HASH, Timestamp(1), Path::new("/s"))
+            .unwrap_err();
         assert_eq!(missing.kind(), ErrorKind::NotFound);
 
         assert_eq!(db.delete_store("deps", HASH).unwrap(), Some(sealed));

@@ -159,12 +159,14 @@ fn expects_bind(daemon: &TestDaemon, ws: &Workspace) -> bool {
     daemon.handle.state().manager.stores().privileged() && ws.backend != "fuse-overlayfs"
 }
 
+/// Where the store's contents are: `<hash>/<mount's last component>/`.
 fn store_dir(daemon: &TestDaemon) -> PathBuf {
     daemon
         .state_dir()
         .join("stores")
         .join("deps")
         .join(key_hash())
+        .join("deps")
 }
 
 async fn in_use(daemon: &TestDaemon) -> u32 {
@@ -486,7 +488,7 @@ async fn build_failure_keeps_failed_dir() {
     assert!(!done.sealed);
     assert!(done.path.contains(".failed-"), "{}", done.path);
     assert_eq!(
-        std::fs::read_to_string(Path::new(&done.path).join("partial")).unwrap(),
+        std::fs::read_to_string(Path::new(&done.path).join("deps/partial")).unwrap(),
         "partial\n"
     );
     assert!(!store_dir(&daemon).exists());
@@ -834,4 +836,143 @@ async fn move_to_own_change_remounts_rebuilt_store() {
         "v2\n"
     );
     assert_eq!(in_use(&daemon).await, 0, "the old store is free");
+}
+
+// A package manager that deletes its output directory first (`npm ci`
+// removes `node_modules`) replaces the build's link into the store with a
+// directory of its own; that directory is what gets sealed.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_that_replaces_the_link_is_sealed() {
+    let (daemon, repo) = fixture().await;
+    let replacing = spec_building(
+        "rm vendor/deps && mkdir vendor/deps && echo installed > vendor/deps/pkg && echo built",
+    );
+    commit_at_root(&repo.root, &[("reef.toml", &replacing)]).await;
+    let done = build(&daemon, &repo).await;
+    assert!(done.sealed, "{done:?}");
+    let dir = store_dir(&daemon);
+    assert_eq!(Path::new(&done.path), dir);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("pkg")).unwrap(),
+        "installed\n"
+    );
+    assert_sealed(&dir);
+
+    let ws = create_ok(&daemon, &repo).await;
+    assert_eq!(
+        std::fs::read_to_string(mount_of(&ws).join("pkg")).unwrap(),
+        "installed\n"
+    );
+    // The mount's real path ends in the mount's own name, as Node needs to
+    // find a package's dependencies in the `node_modules` above it.
+    let real = std::fs::canonicalize(mount_of(&ws)).unwrap();
+    assert_eq!(real.file_name().unwrap(), "deps", "{}", real.display());
+}
+
+// A build that exits 0 but leaves nothing it can seal fails, and nothing is
+// sealed: removing the link, or replacing it after writing into the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_that_breaks_the_link_fails() {
+    let (daemon, repo) = fixture().await;
+    for command in [
+        "rm vendor/deps",
+        "rm vendor/deps && ln -s /tmp vendor/deps",
+        "rm vendor/deps && touch vendor/deps",
+        "rm -rf vendor && touch vendor",
+        "echo half > \"$REEF_STORE_DIR/half\" && rm vendor/deps && mkdir vendor/deps",
+    ] {
+        commit_at_root(&repo.root, &[("reef.toml", &spec_building(command))]).await;
+        let built = build_with(&daemon, &repo, Duration::from_mins(5)).await;
+        let error = built.error.expect(command);
+        assert_eq!(error.kind(), ErrorKind::Internal, "{command}: {error}");
+        assert!(
+            error
+                .to_string()
+                .contains("build replaced its link at vendor/deps"),
+            "{command}: {error}"
+        );
+        assert!(!store_dir(&daemon).exists(), "{command}");
+        assert!(
+            daemon.client.list_stores("").await.unwrap().is_empty(),
+            "{command}: nothing sealed"
+        );
+    }
+}
+
+// A store sealed before its contents moved one level down: workspaces that
+// mount it keep it, a create reports it missing, and its build waits for
+// them to be released, then seals it in the new layout.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_in_the_old_layout_is_rebuilt() {
+    let (daemon, repo) = fixture().await;
+    build(&daemon, &repo).await;
+    let mounted = create_ok(&daemon, &repo).await;
+    // The row as the old layout wrote it: the store directory itself.
+    let root = store_dir(&daemon).parent().unwrap().to_owned();
+    reef_daemon::db::Db::open(&daemon.state_dir().join("reef.sqlite3"))
+        .unwrap()
+        .seal_store("deps", &key_hash(), reef_daemon::model::Timestamp(1), &root)
+        .unwrap();
+
+    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
+    let refused = build_with(&daemon, &repo, Duration::from_mins(5)).await;
+    let error = refused.error.expect("refused while mounted");
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error}");
+    assert_eq!(
+        std::fs::read_to_string(mount_of(&mounted).join("manifest")).unwrap(),
+        LOCKFILE,
+        "the mounted workspace keeps it"
+    );
+
+    daemon
+        .client
+        .release_workspace(&repo.id, &mounted.id, true, false)
+        .await
+        .unwrap();
+    let done = build(&daemon, &repo).await;
+    assert!(done.sealed && !done.already_built, "{done:?}");
+    assert_eq!(Path::new(&done.path), store_dir(&daemon));
+    let ws = create_ok(&daemon, &repo).await;
+    assert_eq!(
+        std::fs::read_to_string(mount_of(&ws).join("manifest")).unwrap(),
+        LOCKFILE
+    );
+    // A symlink leads into the new layout; a bind mount's real path is the
+    // workspace's own.
+    if !expects_bind(&daemon, &ws) {
+        let real = std::fs::canonicalize(mount_of(&ws)).unwrap();
+        assert_eq!(real, std::fs::canonicalize(store_dir(&daemon)).unwrap());
+    }
+}
+
+// A store is offered only to mounts with the name it was built for: one
+// built at `vendor/deps` is missing for a spec that mounts it at `deps`
+// under another directory name, and rebuilding it renames its contents.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_built_for_another_mount_name_is_rebuilt() {
+    let (daemon, repo) = fixture().await;
+    build(&daemon, &repo).await;
+    let elsewhere = SPEC.replace("mount = \"vendor/deps\"", "mount = \"lib/node_modules\"");
+    commit_at_root(&repo.root, &[("reef.toml", &elsewhere)]).await;
+    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
+    let done = build(&daemon, &repo).await;
+    assert!(done.sealed && !done.already_built, "{done:?}");
+    let contents = store_dir(&daemon).parent().unwrap().join("node_modules");
+    assert_eq!(Path::new(&done.path), contents);
+    let ws = create_ok(&daemon, &repo).await;
+    let mount = Path::new(&ws.path).join("lib/node_modules");
+    assert_eq!(
+        std::fs::read_to_string(mount.join("manifest")).unwrap(),
+        LOCKFILE
+    );
+    assert_eq!(
+        std::fs::canonicalize(&mount).unwrap().file_name().unwrap(),
+        "node_modules"
+    );
 }

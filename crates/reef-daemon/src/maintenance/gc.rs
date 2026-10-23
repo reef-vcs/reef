@@ -390,10 +390,13 @@ async fn remove_stores(
         if !ours || !row.sealed || !old || keep.contains(&key) || stores.is_building(&key) {
             continue;
         }
-        bytes += measure(std::slice::from_ref(&row.path)).await;
+        // The whole store directory: `row.path` is its contents, one level
+        // down (or, for a store sealed before that layout, the directory).
+        let dir = stores.dir(&key);
+        bytes += measure(std::slice::from_ref(&dir)).await;
         if !dry_run {
             state.db.delete_store(&key.name, &key.lockfile_hash)?;
-            remove_store_dir(&row.path).await?;
+            remove_store_dir(&dir).await?;
         }
         tracing::info!(store = %key.name, lockfile_hash = %key.lockfile_hash, "unused store removed");
         removed += 1;

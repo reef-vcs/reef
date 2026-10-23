@@ -96,6 +96,99 @@ pub(crate) fn symlink_mount(store: &Path, ws_root: &Path, mount: &str) -> Result
     })
 }
 
+/// After a build that exited 0, makes sure what it installed is in
+/// `contents`, the directory about to be sealed. The build ran with a
+/// symlink at `mount` pointing there ([`symlink_mount`]); a package
+/// manager that deletes its output directory first (`npm ci` removes
+/// `node_modules`) replaces that symlink with a directory of its own and
+/// installs into it. That directory is moved to `contents`, which must
+/// still be empty, or copied there when the workspace is on another
+/// filesystem. Returns whether one was moved.
+///
+/// Anything else at `mount` (nothing, a file, a symlink elsewhere, an
+/// ancestor that is no longer a directory, or a directory beside a
+/// non-empty `contents`) is [`StoreError::LinkReplaced`]: sealing would
+/// seal an empty or partial store.
+pub(crate) fn adopt_replaced_link(
+    contents: &Path,
+    ws_root: &Path,
+    mount: &str,
+    name: &str,
+) -> Result<bool, StoreError> {
+    let replaced = |found: String| StoreError::LinkReplaced {
+        name: name.to_owned(),
+        mount: mount.to_owned(),
+        found,
+    };
+    let target = match checked_path(ws_root, mount, false) {
+        Ok(target) => target,
+        Err(StoreError::MountBlocked { path, .. }) => {
+            return Err(replaced(format!(
+                "{} is no longer a directory",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let io = |op, path: &Path, source| StoreError::Io {
+        op,
+        path: path.to_owned(),
+        source,
+    };
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(replaced("it removed the link and left nothing".to_owned()));
+        }
+        Err(source) => return Err(io("stat", &target, source)),
+    };
+    if meta.file_type().is_symlink() {
+        let points_at =
+            fs::read_link(&target).map_err(|source| io("read link", &target, source))?;
+        if points_at == contents {
+            return Ok(false);
+        }
+        return Err(replaced(format!(
+            "it is now a symlink to {}",
+            points_at.display()
+        )));
+    }
+    if !meta.is_dir() {
+        return Err(replaced("it is now a file".to_owned()));
+    }
+    let mut entries =
+        fs::read_dir(contents).map_err(|source| io("read directory", contents, source))?;
+    if entries.next().is_some() {
+        return Err(replaced(
+            "it is now a directory, and the build also wrote into the store".to_owned(),
+        ));
+    }
+    fs::remove_dir(contents).map_err(|source| io("remove directory", contents, source))?;
+    let moved = match crate::backend::fs_util::rename_even_read_only(&target, contents) {
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            crate::backend::fs_util::copy_tree(
+                &target,
+                contents,
+                &crate::backend::copy::CopyBackend,
+            )
+            .map(drop)
+            .map_err(io::Error::other)
+        }
+        moved => moved,
+    };
+    if let Err(source) = moved {
+        // Leave an (empty) contents directory, as before, for the failed
+        // build's move aside; a partial copy goes aside with it.
+        let _ = fs::create_dir(contents);
+        return Err(io(
+            "move the build's directory into the store at",
+            contents,
+            source,
+        ));
+    }
+    Ok(true)
+}
+
 /// A read-only bind mount of `store` at `mount` in the workspace: an empty
 /// directory, bound, then remounted read-only (a bind mount cannot be made
 /// read-only in one call).

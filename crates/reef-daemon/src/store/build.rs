@@ -12,18 +12,24 @@
 //!    new change on the revision, owner `reef-store-build`, the copy
 //!    backend (a build must not depend on a clone or overlay backend), the
 //!    other stores mounted where built, and its watcher snapshots paused.
-//!    Link the store's mount path to `<hash>.building/`.
+//!    Link the store's mount path to `<hash>.building/<leaf>/`, `<leaf>`
+//!    being the mount path's last component (see the module docs of
+//!    [`super`]).
 //! 4. Run the argv with the scratch root as its working directory, in its
 //!    own process group, with `PATH`, `HOME`, `LANG`, and `TMPDIR` from the
-//!    daemon, then `[store.env]`, then `REEF_STORE_DIR` (the building
-//!    directory) and `REEF_STORE_NAME`. Output lines are forwarded as they
+//!    daemon, then `[store.env]`, then `REEF_STORE_DIR` (the contents
+//!    directory the link points at) and `REEF_STORE_NAME`. Output lines are forwarded as they
 //!    come; lines a slow client cannot take are dropped and counted (by the
 //!    service, at the client's channel). The scratch lease is renewed while
 //!    it runs. When it exits, past the timeout, or when the daemon shuts
 //!    down, whatever is left of the process group is killed.
-//! 5. Unlink the store, release the scratch workspace without a final
-//!    snapshot (`reclaims.detail = 'store build'`), and seal (exit 0) or
-//!    move the directory aside as `<hash>.failed-<ms>/` (anything else).
+//! 5. If the command exited 0 but replaced the link with a directory of its
+//!    own (`npm ci` deletes `node_modules` before installing), move that
+//!    directory into `<hash>.building/<leaf>/`; anything else in the link's place
+//!    fails the build. Unlink the store, release the scratch workspace
+//!    without a final snapshot (`reclaims.detail = 'store build'`), and
+//!    seal (exit 0) or move the directory aside as `<hash>.failed-<ms>/`
+//!    (anything else).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -138,7 +144,7 @@ pub async fn run(
     let stores = Arc::clone(manager.stores());
     let key = target.key.clone();
     if !request.force
-        && let Some(row) = stores.sealed(&key)?
+        && let Some(row) = stores.sealed(&key, &target.mount)?
     {
         tracing::info!(lockfile_hash = %key.lockfile_hash, "store is already built");
         return Ok(BuildResult {
@@ -166,12 +172,13 @@ pub async fn run(
 
     // 2.
     let _running = stores.start_build(&key)?;
-    let inserted = record_building(&manager, &stores, &key, request.repo)?;
+    let inserted = record_building(&manager, &stores, &key, &target.mount, request.repo)?;
     let building = stores.building_dir(&key);
+    let contents = stores.building_contents(&key, &target.mount);
     let ran = async {
-        prepare_building(&building)?;
+        prepare_building(&building, &contents)?;
         build_in_scratch(
-            &manager, &request, &commit, &store, &target, &building, lines, &shutdown,
+            &manager, &request, &commit, &store, &target, &contents, lines, &shutdown,
         )
         .await
     }
@@ -200,7 +207,8 @@ pub async fn run(
         let sealed = tokio::task::spawn_blocking({
             let stores = Arc::clone(&stores);
             let (building, key) = (building.clone(), result.key.clone());
-            move || stores.seal(&building, &key)
+            let mount = target.mount.clone();
+            move || stores.seal(&building, &key, &mount)
         })
         .await
         .map_err(ManagerError::from)
@@ -242,6 +250,7 @@ fn record_building(
     manager: &Manager,
     stores: &StoreManager,
     key: &StoreKey,
+    mount: &str,
     repo: RepoId,
 ) -> Result<bool, ManagerError> {
     if stores.db.store(&key.name, &key.lockfile_hash)?.is_some() {
@@ -251,16 +260,19 @@ fn record_building(
         repo_id: repo,
         name: key.name.clone(),
         lockfile_hash: key.lockfile_hash.clone(),
-        path: stores.dir(key),
+        path: stores.content_dir(key, mount),
         built_at: None,
         sealed: false,
     })?;
     Ok(true)
 }
 
-/// An empty `<hash>.building/`; a leftover one (which the start-time sweep
+/// An empty `<hash>.building/<leaf>/`; a leftover `<hash>.building/` (which the start-time sweep
 /// should have moved) is removed first.
-fn prepare_building(building: &std::path::Path) -> Result<(), StoreError> {
+fn prepare_building(
+    building: &std::path::Path,
+    contents: &std::path::Path,
+) -> Result<(), StoreError> {
     let io = |op, source| StoreError::Io {
         op,
         path: building.to_owned(),
@@ -272,7 +284,12 @@ fn prepare_building(building: &std::path::Path) -> Result<(), StoreError> {
     if let Some(parent) = building.parent() {
         std::fs::create_dir_all(parent).map_err(|source| io("create directory", source))?;
     }
-    std::fs::create_dir(building).map_err(|source| io("create directory", source))
+    std::fs::create_dir(building).map_err(|source| io("create directory", source))?;
+    std::fs::create_dir(contents).map_err(|source| StoreError::Io {
+        op: "create directory",
+        path: contents.to_owned(),
+        source,
+    })
 }
 
 /// A build that will not be sealed: its directory goes aside as failed and
@@ -310,7 +327,7 @@ async fn build_in_scratch(
     commit: &reef_lib::jj::CommitIdHex,
     store: &StoreSpec,
     target: &StoreTarget,
-    building: &std::path::Path,
+    contents: &std::path::Path,
     lines: mpsc::Sender<OutputLine>,
     shutdown: &CancellationToken,
 ) -> Result<(std::process::ExitStatus, Option<String>), ManagerError> {
@@ -333,7 +350,7 @@ async fn build_in_scratch(
     // No watcher snapshot of what the build writes; the release takes none
     // either, so nothing the build does reaches the repository.
     let pause = manager.scheduler().pause(ws);
-    let linked = mount::symlink_mount(building, &root, &target.mount);
+    let linked = mount::symlink_mount(contents, &root, &target.mount);
     let ran = match linked {
         Ok(()) => {
             let lease = (
@@ -346,7 +363,7 @@ async fn build_in_scratch(
                 lease,
                 store,
                 &root,
-                building,
+                contents,
                 request.timeout,
                 lines,
                 shutdown,
@@ -355,6 +372,25 @@ async fn build_in_scratch(
         }
         Err(error) => Err(error),
     };
+    // 5.
+    let adopted = match &ran {
+        Ok(status) if status.success() => {
+            mount::adopt_replaced_link(contents, &root, &target.mount, &store.name)
+        }
+        _ => Ok(false),
+    };
+    match &adopted {
+        Ok(true) => tracing::info!(
+            mount = %target.mount,
+            "the build replaced the store's link with a directory; sealing that directory"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            mount = %target.mount,
+            error = %ErrorChain(error),
+            "the build exited 0 but left nothing to seal"
+        ),
+    }
     if let Err(error) = mount::unmount(&root, &target.mount, MountMode::Symlink) {
         tracing::warn!(error = %ErrorChain(&error), "cannot unlink the store from the scratch workspace");
     }
@@ -375,7 +411,9 @@ async fn build_in_scratch(
         }
     };
     drop(pause);
-    Ok((ran?, op_id))
+    let status = ran?;
+    adopted?;
+    Ok((status, op_id))
 }
 
 /// Step 4: runs the build command to completion, the timeout, or shutdown,
@@ -392,7 +430,7 @@ async fn run_command(
     (lease, heartbeat_every): (crate::model::LeaseId, Duration),
     store: &StoreSpec,
     root: &std::path::Path,
-    building: &std::path::Path,
+    contents: &std::path::Path,
     timeout: Duration,
     lines: mpsc::Sender<OutputLine>,
     shutdown: &CancellationToken,
@@ -419,7 +457,7 @@ async fn run_command(
     }
     command
         .envs(&store.env)
-        .env("REEF_STORE_DIR", building)
+        .env("REEF_STORE_DIR", contents)
         .env("REEF_STORE_NAME", &store.name);
     let mut child = command.spawn().map_err(|source| StoreError::Spawn {
         name: store.name.clone(),
