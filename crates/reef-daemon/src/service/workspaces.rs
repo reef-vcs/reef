@@ -124,6 +124,7 @@ impl Workspaces for WorkspacesService {
                 .saturating_add(created.timings.materialize_ms),
             base_was_cached: created.base_was_cached,
             timings: Some(v0::CreateTimings::from(&created.timings)),
+            start: created.default_start.unwrap_or_default(),
         }))
     }
 

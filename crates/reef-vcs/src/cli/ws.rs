@@ -8,6 +8,7 @@ use reef_daemon::client::default_owner;
 use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
 use reef_daemon::proto::v0::create_request::MissingStores;
 use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, create_request};
+use reef_daemon::workspace::ROOT_CHECKOUT;
 use reef_lib::error::ErrorKind;
 
 use super::render::GcReports;
@@ -96,8 +97,9 @@ pub(crate) struct CreateTarget {
     /// Edit this change (a change id prefix, commit id prefix, or bookmark).
     #[arg(long, value_name = "REV", conflicts_with = "new_on")]
     pub(crate) change: Option<String>,
-    /// Start a new change on this revision [default: the `main` bookmark,
-    /// else the default workspace's change].
+    /// Start a new change on this revision [default: the first bookmark of
+    /// `main`, origin's HEAD, `master`, `trunk`, then the same on `origin`;
+    /// else the root checkout's change].
     #[arg(long, value_name = "REV")]
     pub(crate) new_on: Option<String>,
     /// Create the workspace at this directory, which must not exist.
@@ -315,5 +317,16 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
         })
         .await?;
     let created = Created::from_response(&response).ok_or_else(|| missing("workspace"))?;
+    note_default_start(ctx, &response.start);
     ctx.out.object(&created)
+}
+
+/// The stderr line when a create without a start revision found no
+/// bookmark to start on (R1.31); shared with `ws run`.
+pub(crate) fn note_default_start(ctx: &Ctx, start: &str) {
+    if start == ROOT_CHECKOUT {
+        ctx.out.note(
+            "reef: no main, master or trunk bookmark; starting on the root checkout's change (pass --new-on <branch>)",
+        );
+    }
 }

@@ -30,7 +30,7 @@ message BuildStoreRequest {
   // The `[[store]] name`.
   string name = 2;
   // The revision whose `reef.toml` and lockfile to build from; empty for
-  // the `main` bookmark, else the `default` workspace's change.
+  // CreateRequest's default start (`main`, origin's HEAD, `master`, ...).
   string rev = 3;
   // How long the command may run; unset for 30 minutes.
   google.protobuf.Duration timeout = 4;

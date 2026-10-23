@@ -9,6 +9,7 @@
 use jj_lib::backend::BackendError;
 use jj_lib::config::ConfigGetError;
 use jj_lib::git::{GitImportError, GitImportOptions, GitSettings};
+use jj_lib::repo::Repo as _;
 use jj_lib::transaction::TransactionCommitError;
 
 use super::repo::{OperationIdHex, Repo};
@@ -122,5 +123,33 @@ impl Repo {
             abandoned_commits: stats.abandoned_commits.len(),
             failed_refs,
         })
+    }
+}
+
+impl Repo {
+    /// The branch the git remote `remote` names as its default: the target
+    /// of `refs/remotes/<remote>/HEAD`, which `git clone` sets, without the
+    /// `refs/remotes/<remote>/` prefix (`main`). `None` if the repository has
+    /// no git store, the ref is missing or not symbolic, or reading it fails
+    /// (logged at `warn`): a default to try, never an error.
+    pub fn git_remote_head(&self, remote: &str) -> Option<String> {
+        let git = jj_lib::git::get_git_repo(self.repo.store()).ok()?;
+        let name = format!("refs/remotes/{remote}/HEAD");
+        let reference = match git.try_find_reference(name.as_str()) {
+            Ok(reference) => reference?,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::error::ErrorChain(&error),
+                    "cannot read {name}; not using it as a default"
+                );
+                return None;
+            }
+        };
+        let gix::refs::TargetRef::Symbolic(target) = reference.target() else {
+            return None;
+        };
+        let prefix = format!("refs/remotes/{remote}/");
+        let branch = target.as_bstr().strip_prefix(prefix.as_bytes())?;
+        std::str::from_utf8(branch).ok().map(str::to_owned)
     }
 }

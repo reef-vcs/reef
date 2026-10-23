@@ -270,7 +270,7 @@ async fn create_new_on_bookmark() {
 
     for start in [
         Some(create_request::Start::NewOn("main".into())),
-        None, // the default is the `main` bookmark when it exists
+        None, // the default is the `main` bookmark when it exists (R1.31)
     ] {
         let ws = daemon
             .client

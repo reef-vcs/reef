@@ -23,7 +23,7 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 
 - Watcher snapshots are local: they stay in the repository on this machine and are never pushed or exported to git.
 - Two workspaces editing one change make it divergent. Nothing is lost; resolving it is a jj operation for now.
-- New workspaces start on the `main` bookmark. In a repository without one they start on the checkout's own working-copy change; pass `--new-on <branch>`.
+- New workspaces start on `main`, `origin/HEAD`'s branch, `master` or `trunk`. In a repository with none of these they start on the checkout's own working-copy change, and a `jj` command in the checkout rebases them; pass `--new-on <branch>`.
 - In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one.
 - A workspace directory has neither `.git` nor `.jj`, so `git` and `jj` commands inside it fail: agents work on files, and you run `git` and `jj` in your checkout.
 - `reef.toml` is read from the commit a workspace starts on, not from disk: commit it before it takes effect.
