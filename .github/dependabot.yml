@@ -18,3 +18,6 @@ updates:
       # jj-lib is bumped deliberately, see ADR 0002 and ADR 0008. This also silences Dependabot
       # security PRs for it; `just deny-advisories` in CI is the signal for jj-lib advisories.
       - dependency-name: jj-lib
+      # Pinned to exactly the gix jj-lib depends on (Cargo.toml), so it moves with jj-lib; as
+      # for jj-lib, `cargo deny` in CI reports its advisories.
+      - dependency-name: gix
