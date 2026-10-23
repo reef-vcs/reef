@@ -17,8 +17,9 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Output};
 use std::time::{Duration, Instant};
 
 use common::spawned::{
@@ -46,6 +47,11 @@ const FALLBACK: Duration = Duration::from_secs(5);
 /// How long a test waits for a reclaim it expects: length, grace, a tick,
 /// and the final snapshot, with room for a loaded CI machine.
 const RECLAIM_BOUND: Duration = Duration::from_secs(15);
+/// How long a test waits for setup it does not measure: `ws run` creating
+/// its workspace and starting the command, the command's first writes, a
+/// create's directory appearing. A loaded 3-vCPU `macos-15` runner took
+/// longer than [`RECLAIM_BOUND`] to start a `ws run` (main, 2026-10-23).
+const SETUP_BOUND: Duration = Duration::from_secs(60);
 
 fn configure(config: &mut FileConfig) {
     let lease = &mut config.lease;
@@ -176,16 +182,38 @@ fn env_arg(name: &str, path: &Path) -> String {
     format!("{name}={}", path.display())
 }
 
-/// The trimmed contents of `path` once it has a full line.
-async fn read_line_of(path: &Path) -> String {
-    let mut line = String::new();
-    wait_for(RECLAIM_BOUND, &format!("{}", path.display()), || {
-        line = std::fs::read_to_string(path).unwrap_or_default();
-        let done = line.ends_with('\n');
-        async move { done }
-    })
-    .await;
-    line.trim().to_owned()
+/// The trimmed contents of `path` once `agent`, a `ws run`, or its command
+/// has written a full line to it. Fails as soon as `agent` exits without
+/// writing it, or after [`SETUP_BOUND`], with `ws run`'s exit status and
+/// stderr, which say whether it was slow or failed.
+async fn read_line_of(path: &Path, agent: &mut Child) -> String {
+    let begun = Instant::now();
+    loop {
+        // Before the read, so a line written just before exiting is seen.
+        let exited = agent.try_wait().unwrap();
+        let line = std::fs::read_to_string(path).unwrap_or_default();
+        if line.ends_with('\n') {
+            return line.trim().to_owned();
+        }
+        if exited.is_some() || begun.elapsed() >= SETUP_BOUND {
+            let status = if let Some(status) = exited {
+                format!("exited with {status}")
+            } else {
+                let _ = agent.kill();
+                format!("still running after {SETUP_BOUND:?}")
+            };
+            agent.wait().unwrap();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = agent.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!(
+                "{}: no line; `ws run` {status}; its stderr:\n{stderr}",
+                path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 // 1
@@ -210,12 +238,12 @@ async fn agent_killed_mid_edit_leaves_snapshot_and_no_directory() {
         ],
     );
     let mut guard = KillOnDrop(vec![agent.id()]);
-    let id = read_line_of(&id_file).await;
-    let child: u32 = read_line_of(&pid_file).await.parse().unwrap();
+    let id = read_line_of(&id_file, &mut agent).await;
+    let child: u32 = read_line_of(&pid_file, &mut agent).await.parse().unwrap();
     guard.0.push(child);
     let path = PathBuf::from(inspect(&daemon.client, &id).await.path);
     let log = path.join("log.txt");
-    wait_for(RECLAIM_BOUND, "100 lines written", || async {
+    wait_for(SETUP_BOUND, "100 lines written", || async {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
             .lines()
@@ -278,7 +306,7 @@ async fn agent_killed_with_unsnapshotted_write() {
         std::os::unix::process::ExitStatusExt::signal(&status),
         Some(9)
     );
-    let id = read_line_of(&id_file).await;
+    let id = read_line_of(&id_file, &mut agent).await;
     let path = PathBuf::from(inspect(&daemon.client, &id).await.path);
     wait_for_state(&daemon.client, &id, "reclaimed").await;
     assert!(!path.exists());
@@ -550,7 +578,7 @@ async fn daemon_killed_during_create() {
         let watch = ws_root.clone();
         let appeared = tokio::task::spawn_blocking(move || {
             let begun = Instant::now();
-            while begun.elapsed() < RECLAIM_BOUND {
+            while begun.elapsed() < SETUP_BOUND {
                 if workspace_dirs(&watch).difference(&known).next().is_some() {
                     return true;
                 }
