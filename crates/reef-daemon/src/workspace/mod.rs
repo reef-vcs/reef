@@ -41,6 +41,7 @@ use reef_lib::jj::{
 };
 use reef_lib::spec::SpecError;
 
+pub use create::ROOT_CHECKOUT;
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
@@ -155,8 +156,9 @@ pub enum Start {
     Change(String),
     /// A new change on top of the commit this revision names.
     NewOn(String),
-    /// A new change on the `main` bookmark if it exists, else on the
-    /// `default` workspace's working-copy commit.
+    /// A new change on the default start (R1.31): the first bookmark of
+    /// `main`, origin's HEAD, `master`, `trunk`, then the same on `origin`;
+    /// else the `default` workspace's working-copy commit.
     Default,
 }
 
@@ -198,6 +200,9 @@ pub struct Created {
     /// Another Reef workspace's working-copy commit was already the edited
     /// commit.
     pub shared_change: bool,
+    /// The bookmark a create without a start revision chose, or
+    /// [`ROOT_CHECKOUT`]; `None` when the request named one (R1.31).
+    pub default_start: Option<String>,
     /// How long each step took.
     pub timings: CreateTimings,
     /// Whether the base cache already held the tree.

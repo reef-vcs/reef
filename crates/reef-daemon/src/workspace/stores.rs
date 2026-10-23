@@ -415,9 +415,9 @@ impl Manager {
         }
     }
 
-    /// The stores the default start revision of `handle`'s repository (the
-    /// `main` bookmark, else the `default` workspace's commit) declares,
-    /// with its lockfiles' hashes: what GC keeps besides the stores in use.
+    /// The stores the default start revision of `handle`'s repository
+    /// (`create::default_start`, R1.31) declares, with its lockfiles'
+    /// hashes: what GC keeps besides the stores in use.
     pub(crate) async fn default_store_keys(
         &self,
         handle: &RepoHandle,
@@ -425,10 +425,10 @@ impl Manager {
         handle
             .call_async(move |head| {
                 async move {
-                    // `main` may have moved on the root since the thread
-                    // last reloaded.
+                    // The default start's bookmarks may have moved on the
+                    // root since the thread last reloaded.
                     super::create::refresh_for_resolve(head).await?;
-                    let commit = super::create::default_start(&head.repo).await?;
+                    let commit = super::create::default_start(&head.repo).await?.commit;
                     let Some(spec) = head.repo.spec_at(&commit).await? else {
                         return Ok(Vec::new());
                     };
@@ -444,8 +444,8 @@ impl Manager {
 
 impl Manager {
     /// What a store build of `name` in `repo` builds: the commit `rev`
-    /// resolves to (default: the `main` bookmark, else the `default`
-    /// workspace's commit), the store's `[[store]]` in that commit's
+    /// resolves to (default: a workspace's default start, R1.31), the
+    /// store's `[[store]]` in that commit's
     /// `reef.toml`, and its lockfile hashed there.
     /// [`StoreError::NotDeclared`] if the spec has no such store.
     pub(crate) async fn resolve_store(
@@ -461,7 +461,7 @@ impl Manager {
                     super::create::refresh_for_resolve(head).await?;
                     let commit = match rev {
                         Some(text) => head.repo.resolve_revision(&text).await?.commit_id,
-                        None => super::create::default_start(&head.repo).await?,
+                        None => super::create::default_start(&head.repo).await?.commit,
                     };
                     let spec = head.repo.spec_at(&commit).await?;
                     let Some(store) = spec.as_ref().and_then(|spec| spec.store(&name)).cloned()

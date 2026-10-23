@@ -63,14 +63,14 @@ ID                ROOT                             COLOCATED  REGISTERED
 
 That added a `.jj/` directory and one line, `/.jj/`, to `.git/info/exclude`, so `git status` stays clean. `git` keeps working as before. To undo it: `reef repo forget .` and `rm -rf .jj`. `reef repo register` does the same registration explicitly.
 
-Reef starts each new workspace on your `main` branch. This repository's branch is `master`, so the examples below pass `--new-on master`; in a repository with `main`, leave it out. Without either, a workspace starts on top of your checkout's own uncommitted state ([R1.31](dev-tickets/phase-1/R1.31-default-start-revision.md) will find `master` by itself).
+Reef starts each new workspace on your default branch: `main`, else the branch `origin/HEAD` names (`git clone` sets it), else `master` or `trunk`, else the same on `origin`. Here that is `master`. In a repository with none of these, a workspace starts on top of your checkout's own uncommitted state, and `reef ws create` and `reef ws run` say so; pass `--new-on <branch>` there.
 
 ## Run an agent in a workspace
 
 `reef ws run` creates a workspace, runs a command in it, keeps the lease alive while the command runs, and releases the workspace when it exits. Reef does not start or configure the agent; it runs whatever you give it.
 
 ```sh
-reef ws run --new-on master --purpose "add a usage note" -- claude --permission-mode acceptEdits \
+reef ws run --purpose "add a usage note" -- claude --permission-mode acceptEdits \
   -p "Create NOTES.md with two short lines: what this library does, and the one function most callers use."
 ```
 
@@ -123,7 +123,7 @@ wrote /Users/you/.claude/skills/reef/SKILL.md
 A workspace whose agent stops heartbeating is reclaimed: a final snapshot, then the directory goes. Make one with a one-minute lease, write a file, and walk away:
 
 ```sh
-cd "$(reef ws create --new-on master --lease 1m --purpose 'reclaim demo')"
+cd "$(reef ws create --lease 1m --purpose 'reclaim demo')"
 echo "notes from an agent that went away" > NOTES.md
 cd ~/src/path-to-regexp
 ```
@@ -173,9 +173,9 @@ mount = "node_modules"
 build = ["npm", "ci", "--ignore-scripts"]
 EOF
 git add reef.toml && git commit -m "Share node_modules between agent workspaces"
-reef store build node_modules --rev master
+reef store build node_modules
 reef store list
-reef ws run --new-on master -- npm run build
+reef ws run -- npm run build
 ```
 
 ```text
@@ -232,7 +232,7 @@ undo_window = "7d"   # snapshots and operations kept at least this long
 
 - Watcher snapshots are local: they stay in the repository on this machine and are never pushed or exported to git.
 - Two workspaces editing one change make it divergent. Nothing is lost; resolving it is a jj operation for now ([ADR 0018](adr/0018-snapshot-staleness-and-divergence.md)).
-- New workspaces start on the `main` bookmark. In a repository without one they start on the checkout's own working-copy change; pass `--new-on <branch>`.
+- New workspaces start on `main`, `origin/HEAD`'s branch, `master` or `trunk` ([ADR 0022](adr/0022-shared-dependency-stores.md) decision 8 has the order). In a repository with none of these they start on the checkout's own working-copy change, and a `jj` command in the checkout rebases them; pass `--new-on <branch>`.
 - In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one ([ADR 0024](adr/0024-repository-onboarding.md)).
 - A workspace directory has neither `.git` nor `.jj`, so `git` and `jj` commands inside it fail: agents work on files, and you run `git` and `jj` in your checkout ([ADR 0014](adr/0014-workspace-model-on-jj.md)).
 - `reef.toml` is read from the commit a workspace starts on, not from disk: commit it before it takes effect.

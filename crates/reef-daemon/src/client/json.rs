@@ -299,6 +299,9 @@ pub struct Created {
     pub base_was_cached: bool,
     /// How long each step took (R1.29).
     pub timings: CreateTimings,
+    /// What the default start chose: a bookmark, or `root checkout`; `None`
+    /// when the request named a start (R1.31).
+    pub start: Option<String>,
 }
 
 impl Created {
@@ -315,6 +318,7 @@ impl Created {
                 .as_ref()
                 .map(CreateTimings::from)
                 .unwrap_or_default(),
+            start: text(&response.start),
         })
     }
 }

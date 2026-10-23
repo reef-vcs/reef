@@ -946,6 +946,107 @@ async fn ws_run_registers_a_plain_git_repo() {
     assert_eq!(listed[0]["colocated"], true);
 }
 
+/// R1.31: a git checkout as `git clone` leaves it, from a remote whose
+/// default branch is `develop`: `develop` checked out, `origin/HEAD`
+/// pointing at it, and `main` only on the remote. Made with gix, as a clone
+/// lays the refs out.
+fn cloned_with_default_develop(daemon: &TestDaemon) -> PathBuf {
+    use reef_testing::git::{commit, init_repo};
+    let root = new_dir(daemon, "clone");
+    let main = init_repo(&root, &[("README", "main\n")]);
+    let develop = commit(
+        &root,
+        "refs/remotes/origin/develop",
+        Some(&main),
+        &[("README", "main\n"), ("DEVELOP", "develop\n")],
+    );
+    let git = root.join(".git");
+    std::fs::rename(
+        git.join("refs/heads/main"),
+        git.join("refs/remotes/origin/main"),
+    )
+    .unwrap();
+    std::fs::write(git.join("refs/heads/develop"), format!("{develop}\n")).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/develop\n").unwrap();
+    std::fs::write(
+        git.join("refs/remotes/origin/HEAD"),
+        "ref: refs/remotes/origin/develop\n",
+    )
+    .unwrap();
+    root
+}
+
+/// R1.31 test 2: with no local `main`, a create without a start follows
+/// `origin/HEAD` to `develop` and says which bookmark it chose.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_start_follows_origin_head() {
+    let daemon = TestDaemon::start().await;
+    let root = cloned_with_default_develop(&daemon);
+
+    let output = run(reef_at(&daemon, &root), &["ws", "create", "-o", "json"]).await;
+    let created = json(&output);
+    assert_eq!(created["start"], "develop", "{created}");
+    let path = Path::new(created["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(path.join("DEVELOP")).unwrap(),
+        "develop\n"
+    );
+    assert!(
+        !stderr(&output).contains("root checkout"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A named start reports none.
+    let output = run(
+        reef_at(&daemon, &root),
+        &["ws", "create", "--new-on", "develop", "-o", "json"],
+    )
+    .await;
+    assert_eq!(json(&output)["start"], Value::Null);
+}
+
+/// R1.31 test 3: with none of the bookmarks, `ws create` and `ws run` start
+/// on the root checkout's change, report it, and say so on stderr.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_start_falls_back_and_says_so() {
+    let daemon = TestDaemon::start().await;
+    let root = new_dir(&daemon, "feature-only");
+    reef_testing::git::init_repo(&root, &[("README", "feature\n")]);
+    let git = root.join(".git");
+    std::fs::rename(git.join("refs/heads/main"), git.join("refs/heads/feature")).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+    let line = "reef: no main, master or trunk bookmark; starting on the root checkout's change (pass --new-on <branch>)";
+
+    let output = run(reef_at(&daemon, &root), &["ws", "create", "-o", "json"]).await;
+    let created = json(&output);
+    assert_eq!(created["start"], "root checkout", "{created}");
+    assert!(stderr(&output).contains(line), "{}", stderr(&output));
+    let path = Path::new(created["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(path.join("README")).unwrap(),
+        "feature\n"
+    );
+
+    let output = run(
+        reef_at(&daemon, &root),
+        &["ws", "run", "-o", "json", "--", "true"],
+    )
+    .await;
+    let report = json(&output);
+    assert_eq!(report["start"], "root checkout", "{report}");
+    assert!(stderr(&output).contains(line), "{}", stderr(&output));
+
+    // `--new-on` names the start: no line.
+    let output = run(
+        reef_at(&daemon, &root),
+        &["ws", "create", "--new-on", "feature", "-o", "json"],
+    )
+    .await;
+    assert_eq!(json(&output)["start"], Value::Null);
+    assert!(!stderr(&output).contains(line), "{}", stderr(&output));
+}
+
 /// R1.25: an existing jj repository is registered without initializing
 /// anything, and only the first command says so.
 #[tokio::test(flavor = "multi_thread")]

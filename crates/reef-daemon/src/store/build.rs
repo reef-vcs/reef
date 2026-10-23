@@ -74,8 +74,8 @@ pub struct BuildRequest {
     pub repo: RepoId,
     /// The store's name.
     pub name: String,
-    /// The revision to build from; `None` for the default start (the
-    /// `main` bookmark, else the `default` workspace's commit).
+    /// The revision to build from; `None` for a create's default start
+    /// (R1.31).
     pub rev: Option<String>,
     /// How long the build command may run.
     pub timeout: Duration,

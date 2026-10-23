@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use super::env::reef_env;
 use super::error::kind_text;
 use super::repo::missing;
-use super::ws::{CreateTarget, lease_millis};
+use super::ws::{CreateTarget, lease_millis, note_default_start};
 use super::{CliError, Ctx, Out};
 
 /// Each heartbeat's deadline.
@@ -135,6 +135,9 @@ struct Report {
     workspace_id: String,
     path: String,
     change_id: String,
+    /// What the default start chose (a bookmark, or `root checkout`);
+    /// `None` when `--change`, `--new-on` or `--workspace` named it.
+    start: Option<String>,
     exit_code: u8,
     /// The signal that killed the command, if one did.
     signal: Option<i32>,
@@ -165,8 +168,8 @@ struct Outcome {
 }
 
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
-    let ws = match &args.workspace {
-        Some(workspace) => attach(ctx, workspace, args.owner.as_deref()).await?,
+    let (ws, start) = match &args.workspace {
+        Some(workspace) => (attach(ctx, workspace, args.owner.as_deref()).await?, None),
         None => create(ctx, &args).await?,
     };
     // The workspace exists from here on: a failure before the command runs
@@ -210,6 +213,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         workspace_id: ws.id.clone(),
         path: ws.path.clone(),
         change_id: ws.change_id.clone(),
+        start,
         exit_code: code,
         signal: end.signal(),
         kept: outcome.kept,
@@ -240,8 +244,9 @@ fn prepare(ctx: &Ctx, ws: &Workspace) -> Result<(Heartbeater, Signals), CliError
     Ok((heartbeater, Signals::install()?))
 }
 
-/// `Workspaces.Create` with `ws run`'s defaults.
-async fn create(ctx: &Ctx, args: &Args) -> Result<Workspace, CliError> {
+/// `Workspaces.Create` with `ws run`'s defaults: the workspace, and what
+/// the default start chose, if the flags named no start.
+async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), CliError> {
     let request = CreateRequest {
         owner: args
             .owner
@@ -262,7 +267,10 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<Workspace, CliError> {
             })
         })
         .await?;
-    response.workspace.ok_or_else(|| missing("workspace"))
+    note_default_start(ctx, &response.start);
+    let start = (!response.start.is_empty()).then_some(response.start);
+    let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
+    Ok((ws, start))
 }
 
 /// The command line, cut to [`PURPOSE_MAX_CHARS`].

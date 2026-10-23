@@ -22,7 +22,7 @@ use jj_lib::index::IndexError;
 use jj_lib::local_working_copy::LocalWorkingCopy;
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::OperationId;
-use jj_lib::ref_name::{RefName, WorkspaceNameBuf};
+use jj_lib::ref_name::{RefName, RemoteName, WorkspaceNameBuf};
 use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
 use jj_lib::transaction::TransactionCommitError;
@@ -68,7 +68,8 @@ pub enum ResolvedVia {
     ChangeId,
     /// A commit id prefix.
     CommitId,
-    /// A local bookmark name.
+    /// A bookmark name: local, or remote-tracking from
+    /// [`Repo::resolve_bookmark`].
     Bookmark,
 }
 
@@ -441,15 +442,44 @@ impl Repo {
                 }
             }
         }
-        let target = self.repo.view().get_local_bookmark(RefName::new(text));
+        self.resolve_bookmark(text, None)
+            .await?
+            .ok_or_else(|| ResolveError::NoMatch(text.to_owned()))
+    }
+
+    /// The commit the bookmark `name` points at: the local bookmark, or with
+    /// `remote` the remote-tracking bookmark `name@remote`, tracked or not.
+    /// `None` if there is no such bookmark;
+    /// [`ResolveError::ConflictedBookmark`] if it points at more than one
+    /// commit. Unlike [`Repo::resolve_revision`], `name` is never tried as an
+    /// id prefix, so `trunk` (all reverse-hex letters) is a bookmark here.
+    pub async fn resolve_bookmark(
+        &self,
+        name: &str,
+        remote: Option<&str>,
+    ) -> Result<Option<Resolved>, ResolveError> {
+        let view = self.repo.view();
+        let target = match remote {
+            None => view.get_local_bookmark(RefName::new(name)),
+            Some(remote) => {
+                &view
+                    .get_remote_bookmark(
+                        RefName::new(name).to_remote_symbol(RemoteName::new(remote)),
+                    )
+                    .target
+            }
+        };
         if target.is_absent() {
-            return Err(ResolveError::NoMatch(text.to_owned()));
+            return Ok(None);
         }
-        let id = target
-            .as_normal()
-            .ok_or_else(|| ResolveError::ConflictedBookmark(text.to_owned()))?;
+        let id = target.as_normal().ok_or_else(|| {
+            ResolveError::ConflictedBookmark(match remote {
+                None => name.to_owned(),
+                Some(remote) => format!("{name}@{remote}"),
+            })
+        })?;
         let commit = self.repo.store().get_commit_async(id).await?;
-        Ok(resolved(&commit, ResolvedVia::Bookmark))
+        Ok(Some(resolved(&commit, ResolvedVia::Bookmark)))
     }
 
     /// The visible commit of the one change matching `prefix`, or `None` if

@@ -45,7 +45,8 @@ enum StoreCommand {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
         /// The revision whose reef.toml and lockfile to build from
-        /// [default: the `main` bookmark, else the default workspace's
+        /// [default: the first bookmark of `main`, origin's HEAD, `master`,
+        /// `trunk`, then the same on `origin`; else the root checkout's
         /// change].
         #[arg(long, value_name = "REV")]
         rev: Option<String>,

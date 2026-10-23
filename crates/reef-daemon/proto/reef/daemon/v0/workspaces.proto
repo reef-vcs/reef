@@ -49,8 +49,11 @@ message CreateRequest {
   string repo = 1;
   // Where the working-copy commit starts. Revisions resolve as a change id
   // prefix (hex or jj's reverse hex), a commit id prefix, or a local
-  // bookmark, in that order. Neither: a new change on the `main` bookmark if
-  // it exists, else on the `default` workspace's working-copy commit.
+  // bookmark, in that order. Neither: a new change on the default start
+  // (R1.31), the first bookmark that exists of `main`; the branch
+  // `origin/HEAD` names, local then `<name>@origin`; `master`; `trunk`;
+  // `main@origin`, `master@origin`, `trunk@origin`; else the `default`
+  // workspace's working-copy commit. `CreateResponse.start` says which.
   oneof start {
     // Edit this change: the workspace's working-copy commit is its commit.
     string change = 2;
@@ -96,6 +99,10 @@ message CreateResponse {
   bool base_was_cached = 5;
   // How long each step took (R1.29).
   CreateTimings timings = 6;
+  // What the default start chose when the request named no start: the
+  // bookmark (`main`, `master@origin`), or `root checkout` when none
+  // exists. Empty when the request named a start (R1.31).
+  string start = 7;
 }
 
 // The steps of a create, in milliseconds; the daemon's
@@ -246,8 +253,8 @@ message MoveRequest {
   // A workspace id or unique prefix, or a path inside it.
   string workspace = 2;
   // Resolved as CreateRequest's `start`, after the final snapshot. Neither:
-  // a new change on the `main` bookmark if it exists, else on the `default`
-  // workspace's working-copy commit.
+  // a new change on CreateRequest's default start (not reported back; the
+  // CLI always names a target).
   oneof target {
     // Edit this change. The workspace's own change remounts its stores.
     string change = 3;

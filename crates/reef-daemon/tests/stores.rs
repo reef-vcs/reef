@@ -29,7 +29,7 @@ use reef_daemon::proto::v0::{
 };
 use reef_daemon::store::hash_lockfile;
 use reef_lib::error::{Classify as _, ErrorKind};
-use reef_lib::jj::Repo;
+use reef_lib::jj::{CommitIdHex, Repo, StartPoint};
 use reef_testing::synth::Preset;
 
 const OWNER: &str = "tester@host";
@@ -975,4 +975,72 @@ async fn store_built_for_another_mount_name_is_rebuilt() {
         std::fs::canonicalize(&mount).unwrap().file_name().unwrap(),
         "node_modules"
     );
+}
+
+/// R1.31: a build without a revision uses the default start, so with only
+/// a `master` bookmark it builds `master`'s lockfile, not the one in the
+/// root checkout's newer change.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_build_without_rev_uses_master() {
+    let (daemon, repo) = fixture().await;
+    let root = repo.root.clone();
+    tokio::task::spawn_blocking(move || {
+        pollster::block_on(async {
+            let mut checkout = Repo::open(&root, &test_settings()).await.unwrap();
+            assert!(
+                checkout
+                    .resolve_bookmark("main", None)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the fixture has no `main`, which would win over `master`"
+            );
+            let master = checkout.wc_change().unwrap().commit_id;
+            // `jj new`, then `jj bookmark set master -r @-`.
+            let moved = checkout
+                .move_pointer("default", StartPoint::NewOn(master.clone()), "new")
+                .await
+                .unwrap();
+            checkout.check_out_tree(&moved.wc.commit_id).await.unwrap();
+            drop(checkout);
+            set_bookmark(&root, "master", &master);
+        });
+    })
+    .await
+    .unwrap();
+    commit_at_root(&repo.root, &[("deps.lock", "v2\n")]).await;
+
+    let done = build(&daemon, &repo).await;
+    assert!(done.sealed, "{done:?}");
+    assert_eq!(done.lockfile_hash, key_hash(), "master's lockfile");
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&done.path).join("manifest")).unwrap(),
+        LOCKFILE
+    );
+}
+
+/// Sets a local bookmark the way `jj bookmark set` does.
+fn set_bookmark(root: &Path, name: &str, commit: &CommitIdHex) {
+    use jj_lib::backend::CommitId;
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories,
+    };
+    use jj_lib::op_store::RefTarget;
+    use jj_lib::ref_name::RefName;
+    use jj_lib::workspace::Workspace;
+
+    let workspace = Workspace::load(
+        &test_settings(),
+        root,
+        &default_backend_factories(),
+        &default_working_copy_factories(),
+    )
+    .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head()).unwrap();
+    let mut tx = repo.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        RefName::new(name),
+        RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
+    );
+    pollster::block_on(tx.commit("bookmark set")).unwrap();
 }
