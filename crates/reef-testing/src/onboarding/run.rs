@@ -830,6 +830,16 @@ mod tests {
         );
     }
 
+    /// The check holds against a real B trial: Claude Code 2.1.310 lists
+    /// the skill `reef init` wrote in its `init` event.
+    #[test]
+    fn a_recorded_b_trial_loaded_the_reef_skill() {
+        let transcript = Transcript::parse(include_str!(
+            "../../onboarding/fixtures/claude-2.1.310-scenario-b.jsonl"
+        ));
+        assert_eq!(skill_missing(Scenario::B, &transcript), None);
+    }
+
     #[test]
     fn reads_the_commit_from_reef_version() {
         assert_eq!(

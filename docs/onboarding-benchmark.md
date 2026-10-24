@@ -84,28 +84,32 @@ A last job collects the artifacts and adds the rows to this page. It then opens 
 
 Newest rows last. Columns are as described in [What is measured](#what-is-measured).
 
-No baseline yet: the first rows come from the first live run.
+The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase 1 targets: A's medians are 4 calls to success and 1 failed `reef` call, B's are 2 and 0. Neither of A's failed calls was a `reef` error. In each, the agent `cd`'d into its workspace and released it in the same `Bash` call, and the shell's working directory went away under it. The D trial that failed answered after one shell command (`pwd`, `ls`, `git status`) without running `reef`: nothing on disk in a workspace says it is one, and the agent didn't look at `REEF_WORKSPACE`.
 
 ### Scenario A: in-band only
 
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 4 | 4 | 1 | 5 | 17,810 | 467 | $0.02 | 12 s | 0/3 | First baseline. Both failed calls released the workspace the shell was in. |
 <!-- onboarding-rows:A -->
 
 ### Scenario B: after `reef init`
 
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 2 | 2 | 0 | 4 | 53,985 | 233 | $0.02 | 8 s | 0/3 | First baseline. |
 <!-- onboarding-rows:B -->
 
 ### Scenario C: from nothing
 
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 5 | 6 | 0 | 7 | 45,816 | 1,179 | $0.04 | 109 s | 0/3 | First baseline. Installer from a local mirror (before 0.1.0). |
 <!-- onboarding-rows:C -->
 
 ### Scenario D: oriented
 
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 2/3 | 3 | 3 | 0 | 4 | 14,102 | 406 | $0.01 | 10 s | 0/3 | First baseline. Trial 1 answered without running `reef`. |
 <!-- onboarding-rows:D -->

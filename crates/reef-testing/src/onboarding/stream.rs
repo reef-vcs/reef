@@ -440,6 +440,47 @@ mod tests {
         assert_eq!(metrics.permission_denials, 0);
     }
 
+    /// A real scenario B trial on Claude Code 2.1.310 (the first live
+    /// baseline): the agent loads the `reef` skill, then one `reef ws run`
+    /// does the work. Local paths and ids replaced.
+    #[test]
+    fn parses_a_recorded_scenario_b_stream() {
+        let transcript = Transcript::parse(include_str!(
+            "../../onboarding/fixtures/claude-2.1.310-scenario-b.jsonl"
+        ));
+        assert_eq!(transcript.unparsed_lines, 0);
+        assert_eq!(transcript.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(transcript.claude_code_version.as_deref(), Some("2.1.310"));
+        let commands = transcript.slash_commands.as_deref().unwrap();
+        assert!(commands.iter().any(|c| c == "reef"), "{commands:?}");
+        let calls: Vec<_> = transcript
+            .tool_calls
+            .iter()
+            .map(|call| (call.name.as_str(), call.is_error))
+            .collect();
+        assert_eq!(calls, [("Skill", Some(false)), ("Bash", Some(false))]);
+        assert!(
+            transcript.tool_calls[1]
+                .command
+                .as_deref()
+                .unwrap()
+                .starts_with("reef ws run -- sh -c ")
+        );
+        assert!(transcript.final_text().ends_with("\n7cd07ef68318a348"));
+        let metrics = transcript.metrics(1_000);
+        assert_eq!(metrics.tool_calls, 2);
+        assert_eq!(metrics.reef_calls, 1);
+        assert_eq!(metrics.failed_reef_calls, 0);
+        assert_eq!(metrics.calls_to_success, Some(2));
+        assert_eq!(metrics.git_escapes, Vec::<String>::new());
+        assert_eq!(metrics.num_turns, Some(4));
+        // From the result event: 6 + 6,933 cache writes + 47,046 cache reads.
+        assert_eq!(metrics.input_tokens, 53_985);
+        assert_eq!(metrics.output_tokens, 252);
+        assert_eq!(metrics.total_cost_usd, Some(0.024_569_1));
+        assert_eq!(metrics.permission_denials, 0);
+    }
+
     #[test]
     fn bad_lines_are_counted_not_fatal() {
         let transcript = Transcript::parse("not json\n[1]\n{\"type\":\"other\"}\n");
