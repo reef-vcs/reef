@@ -6,7 +6,7 @@ It must not depend on any other Reef crate, so that `reef-lib` and the others ca
 
 Only dev-dependencies and benchmarks reach this crate. It is excluded from the workspace's `default-members`, so build it with `--workspace` or `-p reef-testing`.
 
-Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool. The first is `reef-synth`.
+Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool: `reef-synth` and `reef-onboarding`.
 
 ## Synthetic repositories
 
@@ -73,3 +73,14 @@ Measured on an Apple M2 Max (APFS, macOS 27.0.1) with a release build, seed 42:
 The same spec and seed produce byte-identical trees, symlinks included, on every platform. All randomness comes from one `rand_chacha::ChaCha8Rng` seeded with `seed_from_u64(seed)` and drawn in a fixed order. The integer and float draws are implemented in `synth/dist.rs` with basic IEEE 754 arithmetic only, never with libm's `exp` or `ln` (whose results differ between macOS and glibc) and never with `rand`'s distributions (whose output may change between `rand` releases). On Windows the symlinks are planned but not written, so everything else still matches. CI's `synth-determinism` job checks that the `just synth-digest` output on macOS and on Linux both equal the digest pinned in `synth-small-seed1.sha256`, on every push.
 
 **`generator_version` rule.** `GENERATOR_VERSION` in `synth/mod.rs` is stored in every manifest. Bump it in any change that alters the tree written for an existing `(Spec, seed)`: the word list, the extension weights, the size distribution, the order of draws, or anything else. In the same change, update `synth-small-seed1.sha256` to the new `just synth-digest` output; CI fails until both are done, even when the new output is identical on every platform. A tree whose manifest has another version is regenerated rather than reused.
+
+## Onboarding benchmark
+
+`reef_testing::onboarding` and `reef-onboarding` (RX.07) run a real Claude Code agent against a build of Reef in four scenarios and report what it spent to reach a working `reef ws run`. `just onboarding scenario=A trials=3` runs it, with `ANTHROPIC_API_KEY` set. [docs/onboarding-benchmark.md](../../docs/onboarding-benchmark.md) describes the scenarios, the metrics, and the results.
+
+- `stream`: parses `claude -p --output-format stream-json --verbose` and counts tool calls, `reef` calls, and escapes to git.
+- `judge`: decides success from `reef ws list --all` and the snapshot's `README.md`, never from the agent's words.
+- `report`: medians per scenario, `latest.md`, and the dated rows of the results page.
+- `run`: each trial's fresh home, state directory, and clone; the cleared environment; the timeout; the scrubbed stream; cleanup.
+
+The prompts are in `onboarding/prompts/`, and changing one starts a new baseline. `onboarding/fixtures/` holds recorded streams for the parser's tests, with local paths replaced. Since this crate cannot depend on the Reef crates, the harness drives the `reef` binary under test and reads its JSON output.

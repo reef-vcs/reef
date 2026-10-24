@@ -18,6 +18,7 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 - `reef backup` and `reef restore`, and a quiesce RPC for filesystem snapshots.
 - Prebuilt binaries for macOS and Linux on arm64 and x86_64, a one-line installer, a Homebrew tap, and `cargo binstall` metadata.
 - Benchmarks for workspace creation and a load test at 200 workspaces ([docs/benchmarks.md](docs/benchmarks.md), [docs/load-tests.md](docs/load-tests.md)).
+- An agent onboarding benchmark: what a Claude Code agent new to Reef spends to reach a working `reef ws run`, in four scenarios, weekly in CI ([docs/onboarding-benchmark.md](docs/onboarding-benchmark.md)).
 
 ### Known limitations
 

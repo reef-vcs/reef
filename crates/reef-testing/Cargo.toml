@@ -21,10 +21,14 @@ anyhow.workspace = true          # binary edge only
 thiserror.workspace = true
 # `git::init_repo` (R1.25): a git repository with one commit, without a `git` binary.
 gix = { workspace = true, features = ["sha1"] }
-
-[dev-dependencies]
+# The onboarding benchmark (RX.07): trial directories and the dates results are filed under.
 tempfile.workspace = true
+time.workspace = true
 
 [[bin]]
 name = "reef-synth"
 path = "src/bin/reef_synth.rs"   # exception to the one-main rule: reef-testing may grow several tools
+
+[[bin]]
+name = "reef-onboarding"
+path = "src/bin/onboarding.rs"   # the agent onboarding benchmark (RX.07)

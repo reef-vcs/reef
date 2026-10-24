@@ -53,7 +53,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A workspace moves to another change without losing its lease or leaving a directory behind.
 - Two hundred workspaces with active watchers on one machine, each on a 10,000-file repository (the `medium` preset), with a write reaching the store as a snapshot within five seconds at that load. Revised by R1.23 and R1.30, and stated as measured. Since R1.30 a notify workspace's watcher snapshot scans only the paths its events named (ADR 0026), and the target holds on a 12-core M2 Max on `medium` (p95 729 ms) and on 100,000-file repositories (`large`, p95 794 ms; 174 s before R1.30, when each notify snapshot scanned every tracked file), and on a 4-vCPU `ubuntu-24.04` runner on `medium` (p95 under 0.8 s). It now holds on a 3-vCPU `macos-15` runner on `medium` as well (p95 854 ms, from 149 s), and `load.yml` gates on it again (`docs/load-tests.md`).
 - A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
-- On the onboarding benchmark's scenario A (RX.07), an agent with no Reef configuration and only `reef` on `PATH` reaches a successful `reef ws run` in at most eight tool calls and with at most two failed `reef` invocations, median of three trials.
+- On the onboarding benchmark's scenario A (RX.07), an agent with no Reef configuration and only `reef` on `PATH` reaches a successful `reef ws run` in at most eight tool calls and with at most two failed `reef` invocations, median of three trials. Met by the first baseline (2026-10-24, macOS, Claude Code 2.1.310, `claude-sonnet-5-5`): a median of 4 calls and 1 failed `reef` invocation, all three trials successful ([`onboarding-benchmark.md`](onboarding-benchmark.md)).
 
 ### Workstream: workspace model and daemon skeleton
 
@@ -358,7 +358,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 | RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases, with `llms.txt` and `llms-full.txt` at the root and the agent guide (R1.26) at a stable URL, so an agent with web access finds the answer in one fetch. | M | Phase 1 release |
 | RX.05 | Windows support decision | Whether and how to support Windows workspaces. No copy-on-write primitive comparable to APFS or overlayfs; options are ReFS block cloning, a VFS, or Linux-only via WSL. ADR. | S | Phase 1 |
 | RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.12 run in CI with a threshold that fails the build. | S | Phase 1 |
-| RX.07 | Agent onboarding benchmark | A real agent (Claude Code headless first, Codex second) in a fresh container, with no Reef configuration, after `reef init`, from nothing, and inside `ws run`: tool calls, failed `reef` invocations, tokens, and cost to a working workspace, three trials, weekly, published like the benchmarks. Phase 1's agent exit criterion. Brief in `dev-tickets/phase-1/`. | M | Phase 1 release |
+| RX.07 | Agent onboarding benchmark | A real agent (Claude Code headless first, Codex second) in a fresh container, with no Reef configuration, after `reef init`, from nothing, and inside `ws run`: tool calls, failed `reef` invocations, tokens, and cost to a working workspace, three trials, weekly, published like the benchmarks. Phase 1's agent exit criterion. Brief in `dev-tickets/phase-1/`; results in [`onboarding-benchmark.md`](onboarding-benchmark.md). | M | Phase 1 release |
 
 ---
 

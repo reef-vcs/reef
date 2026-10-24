@@ -50,7 +50,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 5. R1.17 and R1.21 (need R1.15 and R1.22; R1.17 also needs R1.16).
 6. R1.25 and R1.26 (need R1.21 and R1.22, both merged) in parallel; R1.28 (needs only R0.03 and R1.22) alongside them. R1.27 after both R1.25 and R1.26.
 7. R1.29 (needs only merged tickets) any time before R1.23: R1.12 found `create_api/large/apfs/20` at 1.93 s, and R1.23 should measure the phase with the fix in.
-8. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test and needs R1.24's quickstart and R1.28's installer published to run scenario C.
+8. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test. Its scenario C runs the installer against a local copy of the build under test until 0.1.0 is published.
 
 ## Phase exit criteria (from dev-phases.md)
 

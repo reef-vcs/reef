@@ -48,7 +48,9 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 
-Still to come in Phase 1: the agent onboarding benchmark (RX.07) and the first release.
+- **An onboarding benchmark.** A real Claude Code agent that has never seen Reef, given only `reef` on `PATH`, after `reef init`, with Reef not yet installed, and inside `reef ws run`: tool calls, failed `reef` calls, tokens, and cost to a working workspace, three trials each, weekly in CI. See [docs/onboarding-benchmark.md](docs/onboarding-benchmark.md).
+
+Still to come in Phase 1: the first release.
 
 From the first release on, prebuilt binaries for macOS and Linux on arm64 and x86_64 install with any one of these (the Linux binaries are static, so they run in any container):
 
