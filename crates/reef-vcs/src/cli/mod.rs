@@ -36,6 +36,7 @@ use std::time::Duration;
 use clap::{ArgAction, CommandFactory as _, Parser as _};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, PathOverrides};
+use reef_daemon::error::Advice;
 use reef_daemon::logging::{self, LogOptions};
 use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_lib::error::ErrorKind;
@@ -493,9 +494,17 @@ fn output_flag(args: &[OsString]) -> Option<Output> {
     found
 }
 
+/// Commands an agent guesses when it wants to know where it is, which
+/// Reef does not have: every agent in RX.07's scenario D tried `reef
+/// status` before `reef here`. A hint, never an alias: R2.02 owns `reef
+/// status` (ADR 0025). Unique prefixes of real commands (`st` for `store`)
+/// never get here.
+const ORIENTATION_GUESSES: &[&str] = &["status", "info", "where", "whereami", "whoami"];
+
 /// clap could not parse the command line: help and version print as clap
 /// prints them; anything else is a usage error, exit 2, with the JSON error
-/// object on stdout in JSON mode, its hint the usage line.
+/// object on stdout in JSON mode, its hint the usage line, or `reef here`
+/// for a top-level orientation guess.
 fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
     use clap::error::ErrorKind as Clap;
     if matches!(error.kind(), Clap::DisplayHelp | Clap::DisplayVersion) {
@@ -505,10 +514,7 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
     }
     let out = Out::detect(output_mode(args), false);
     let rendered = error.render().to_string();
-    let usage = rendered
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("Usage: "));
+    let usage = usage_line(&rendered);
     let message = match error.kind() {
         // clap renders the command's help, whose first line is its `about`.
         Clap::DisplayHelpOnMissingArgumentOrSubcommand | Clap::MissingSubcommand => {
@@ -521,8 +527,67 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
             .trim_start_matches("error: ")
             .to_owned(),
     };
-    out.usage_error(&rendered, &message, usage);
+    let fix = orientation_guess(error, usage).map(|guess| {
+        Advice::run(
+            format!(
+                "Reef has no `{guess}`; `reef here` shows the workspace you are in and its change."
+            ),
+            here_argv(args),
+        )
+    });
+    out.usage_error(&rendered, &message, usage, fix.as_ref());
     ExitCode::from(ErrorKind::InvalidArgument.exit_code())
+}
+
+/// The usage line of clap's rendering of an error.
+fn usage_line(rendered: &str) -> Option<&str> {
+    rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Usage: "))
+}
+
+/// `reef here` with the raw arguments' `--state-dir`, `--socket`, and
+/// `--config`, for when clap could not parse them: it asks the daemon the
+/// command line addressed, as [`Global::daemon_start`] does.
+fn here_argv(args: &[OsString]) -> Vec<String> {
+    const FLAGS: [&str; 3] = ["--state-dir", "--socket", "--config"];
+    let mut next = vec!["reef".to_owned()];
+    let mut iter = args.iter().skip(1).filter_map(|arg| arg.to_str());
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        for flag in FLAGS {
+            let value = if arg == flag {
+                iter.next()
+            } else {
+                arg.strip_prefix(flag)
+                    .and_then(|rest| rest.strip_prefix('='))
+            };
+            if let Some(value) = value {
+                next.extend([flag.to_owned(), value.to_owned()]);
+            }
+        }
+    }
+    next.push("here".to_owned());
+    next
+}
+
+/// The unknown command, if clap rejected one of [`ORIENTATION_GUESSES`]
+/// in `reef`'s own position (`reef status`, not `reef ws status`): the
+/// usage line clap rendered is the root command's.
+fn orientation_guess<'a>(error: &'a clap::Error, usage: Option<&str>) -> Option<&'a str> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind as Clap};
+    if error.kind() != Clap::InvalidSubcommand {
+        return None;
+    }
+    let Some(ContextValue::String(name)) = error.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+    let root = Cli::command().render_usage().to_string();
+    (ORIENTATION_GUESSES.contains(&name.as_str()) && usage == Some(root.trim()))
+        .then_some(name.as_str())
 }
 
 /// A repository as a command line names it (`--repo`, `repo forget`).
@@ -647,6 +712,61 @@ mod tests {
         );
         assert_eq!(output_flag(&args(&["reef", "ws", "list"])), None);
         assert_eq!(output_flag(&args(&["reef", "--", "-o", "json"])), None);
+    }
+
+    #[test]
+    fn orientation_guesses_at_the_root_only() {
+        let guess = |list: &[&str]| {
+            let error = Cli::try_parse_from(args(list)).unwrap_err();
+            let rendered = error.render().to_string();
+            orientation_guess(&error, usage_line(&rendered)).map(str::to_owned)
+        };
+        for word in ORIENTATION_GUESSES {
+            assert_eq!(guess(&["reef", word]).as_deref(), Some(*word));
+        }
+        assert_eq!(
+            guess(&["reef", "-o", "json", "--state-dir", "/x", "status"]).as_deref(),
+            Some("status")
+        );
+        assert_eq!(guess(&["reef", "ws", "status"]), None);
+        assert_eq!(guess(&["reef", "frobnicate"]), None);
+        assert_eq!(guess(&["reef", "ws", "create", "--change"]), None);
+        // A unique prefix of a real command parses: `st` is `store`.
+        assert!(Cli::try_parse_from(args(&["reef", "st", "ls"])).is_ok());
+    }
+
+    #[test]
+    fn here_keeps_the_daemon_the_command_line_named() {
+        assert_eq!(
+            here_argv(&args(&["reef", "-o", "json", "status"])),
+            ["reef", "here"]
+        );
+        assert_eq!(
+            here_argv(&args(&[
+                "reef",
+                "--socket",
+                "/s.sock",
+                "--state-dir=/st",
+                "-q",
+                "--config",
+                "/c.toml",
+                "status",
+            ])),
+            [
+                "reef",
+                "--socket",
+                "/s.sock",
+                "--state-dir",
+                "/st",
+                "--config",
+                "/c.toml",
+                "here"
+            ]
+        );
+        assert_eq!(
+            here_argv(&args(&["reef", "--", "status", "--socket", "/s"])),
+            ["reef", "here"]
+        );
     }
 
     #[test]

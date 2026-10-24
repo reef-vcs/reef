@@ -477,6 +477,44 @@ async fn exit_codes() {
         "a subcommand is required; see --help"
     );
     assert_eq!(value["error"]["hint"], "Usage: reef ws [OPTIONS] <COMMAND>");
+    // A guess at "where am I" points at `reef here` (RX.07), in both modes;
+    // the same word under a noun keeps the usage line.
+    let output = run(reef(&daemon), &["status"]).await;
+    let text = stderr(&output);
+    output.clone().assert().code(2);
+    assert!(text.contains("\nnext: reef here\n"), "{text}");
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["error"]["kind"], "invalid_argument");
+    assert_eq!(
+        value["error"]["message"],
+        "unrecognized subcommand 'status'"
+    );
+    assert_eq!(
+        value["error"]["hint"],
+        "Reef has no `status`; `reef here` shows the workspace you are in and its change."
+    );
+    assert_eq!(value["error"]["next"], serde_json::json!(["reef", "here"]));
+    let output = run(
+        reef(&daemon),
+        &["-o", "text", "--state-dir", "/nonexistent/state", "whoami"],
+    )
+    .await;
+    output.clone().assert().code(2);
+    assert_eq!(stdout(&output), "");
+    let text = stderr(&output);
+    assert!(
+        text.contains("\nhint: Reef has no `whoami`; `reef here`"),
+        "{text}"
+    );
+    // `next` asks the daemon this command line named.
+    assert!(
+        text.ends_with("\nnext: reef --state-dir /nonexistent/state here\n"),
+        "{text}"
+    );
+    let output = run(reef(&daemon), &["ws", "status"]).await;
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["error"]["hint"], "Usage: reef ws [OPTIONS] <COMMAND>");
+    assert!(value["error"].get("next").is_none(), "{value}");
     // `-o text` keeps stdout empty on a usage error.
     let output = run(reef(&daemon), &["-o", "text", "ws", "create", "--change"]).await;
     output.clone().assert().code(2);
