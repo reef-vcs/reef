@@ -179,6 +179,140 @@ async fn state_dir_mode_is_0700() {
     daemon.stop().await;
 }
 
+/// The JSON events of the log file in `state_dir`.
+fn log_events(state_dir: &std::path::Path) -> Vec<Value> {
+    log_files(state_dir)
+        .iter()
+        .flat_map(|file| {
+            std::fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect::<Vec<Value>>()
+        })
+        .collect()
+}
+
+/// Whether the tests run as root, which the ownership tests need to
+/// `chown`.
+fn is_root() -> bool {
+    nix::unistd::geteuid().is_root()
+}
+
+// RX.01 test 1 (S-01).
+#[test]
+fn state_dir_with_group_or_other_bits_is_tightened() {
+    let tmp = short_tempdir();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = daemon_command(tmp.path(), &[]).spawn().unwrap();
+    assert!(wait_for_socket(&mut child, &tmp.path().join("daemon.sock")));
+    let output = terminate(child);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(mode(tmp.path()), 0o700);
+    let events = log_events(tmp.path());
+    assert!(
+        events.iter().any(|event| event["level"] == "WARN"
+            && event["mode"] == "0755"
+            && event["path"] == tmp.path().display().to_string()),
+        "{events:?}"
+    );
+}
+
+/// Runs the binary on `state_dir`, which it must refuse; returns its
+/// stderr after checking it exited 7 and created nothing there.
+#[cfg(feature = "privileged-tests")]
+fn refused_start(state_dir: &std::path::Path, vars: &[(&str, &str)]) -> String {
+    let child = daemon_command(state_dir, vars).spawn().unwrap();
+    let output = common::wait_with_timeout(child);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(7), "{stderr}");
+    assert!(
+        stderr.contains(&state_dir.display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("owned by uid 1"), "{stderr}");
+    assert_eq!(
+        std::fs::read_dir(state_dir).unwrap().count(),
+        0,
+        "nothing was created in the refused directory"
+    );
+    stderr
+}
+
+// RX.01 test 2 (S-01).
+#[cfg(feature = "privileged-tests")]
+#[test]
+fn state_dir_owned_by_another_user_refuses_start() {
+    if !is_root() {
+        eprintln!("skipped: needs root to chown");
+        return;
+    }
+    let tmp = short_tempdir();
+    std::os::unix::fs::chown(tmp.path(), Some(1), None).unwrap();
+    refused_start(tmp.path(), &[]);
+}
+
+// RX.01 test 5a (S-01): no exception for root, `SUDO_UID` or not.
+#[cfg(feature = "privileged-tests")]
+#[test]
+fn root_state_dir_owned_by_the_sudo_user_is_refused() {
+    if !is_root() {
+        eprintln!("skipped: needs root to chown");
+        return;
+    }
+    let tmp = short_tempdir();
+    std::os::unix::fs::chown(tmp.path(), Some(1), None).unwrap();
+    let stderr = refused_start(tmp.path(), &[("SUDO_UID", "1")]);
+    assert!(stderr.contains("REEF_STATE_DIR"), "{stderr}");
+}
+
+// RX.01 test 3 (S-01): private whatever the umask.
+#[tokio::test(flavor = "multi_thread")]
+async fn database_file_mode_is_0600() {
+    let daemon = TestDaemon::start().await;
+    let db = daemon.state_dir().join("reef.sqlite3");
+    assert_eq!(mode(&db), 0o600);
+    for journal in ["reef.sqlite3-wal", "reef.sqlite3-shm"] {
+        let path = daemon.state_dir().join(journal);
+        if path.exists() {
+            assert_eq!(mode(&path), 0o600, "{journal}");
+        }
+    }
+    daemon.stop().await;
+}
+
+// RX.01 test 3: an existing database with group and other bits is
+// restricted at the next start.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_database_is_restricted_at_start() {
+    let daemon = TestDaemon::start().await;
+    let db = daemon.state_dir().join("reef.sqlite3");
+    let daemon = daemon.stop_keeping().await;
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let daemon = daemon.start().await;
+    assert_eq!(mode(&db), 0o600);
+    daemon.stop().await;
+}
+
+// RX.01 test 4 (S-04): a root daemon says so; any other does not.
+#[test]
+fn root_daemon_warns_at_start() {
+    let (output, tmp) = run_binary(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let warned = log_events(tmp.path()).iter().any(|event| {
+        event["level"] == "WARN" && event["message"] == reef_daemon::daemon::ROOT_WARNING
+    });
+    assert_eq!(warned, is_root());
+}
+
 #[test]
 fn log_file_is_json_lines() {
     let (output, tmp) = run_binary(&[]);
@@ -198,8 +332,9 @@ fn log_file_is_json_lines() {
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
         .collect();
     // A fresh state directory logs its migration first, on Linux the watcher
-    // its inotify limits (R1.13), and with `watchman` installed the socket it
-    // found (R1.14); nothing else at info comes before the start event.
+    // its inotify limits (R1.13), with `watchman` installed the socket it
+    // found (R1.14), a tightened state directory, the uids registration
+    // accepts and, as root, a warning (RX.01); nothing else at info comes before the start event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
@@ -210,6 +345,10 @@ fn log_file_is_json_lines() {
         "watchman socket found; WATCHMAN_SOCK set",
         "using WATCHMAN_SOCK from the environment",
         "cannot find the watchman socket; each Watchman snapshot will look for it",
+        "registration accepts repositories these uids own",
+        // The temporary directory may be created 0755.
+        "a private directory had group or other permissions; changed it to 0700",
+        reef_daemon::daemon::ROOT_WARNING,
     ];
     assert!(
         events[..started]

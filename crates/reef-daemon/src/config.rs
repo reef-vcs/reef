@@ -116,7 +116,8 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["retention", "quiesce_max", "sqlite_pages_per_step"],
     ),
     ("snapshot", &["max_new_file_size"]),
-    ("repo", &["auto_register"]),
+    ("repo", &["auto_register", "allow_foreign_owner"]),
+    ("store", &["allow_builds"]),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -217,6 +218,8 @@ pub struct FileConfig {
     pub snapshot: SnapshotSection,
     /// `[repo]`.
     pub repo: RepoSection,
+    /// `[store]`.
+    pub store: StoreSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -531,13 +534,34 @@ pub struct RepoSection {
     /// (initializing jj alongside a plain git checkout) and retries once.
     /// Default true; `--no-register` turns it off for one command.
     pub auto_register: bool,
+    /// Registration accepts a repository whose `.jj` or `.git` another user
+    /// owns (RX.01, S-02). Default false: only the daemon's euid, or under
+    /// `sudo` the `SUDO_UID`, as git's `safe.directory` has it. Read by the
+    /// daemon.
+    pub allow_foreign_owner: bool,
 }
 
 impl Default for RepoSection {
     fn default() -> Self {
         Self {
             auto_register: true,
+            allow_foreign_owner: false,
         }
+    }
+}
+
+/// `[store]`: what the daemon does with stores (RX.01, S-03).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StoreSection {
+    /// `Stores.Build` runs a repository's declared build command. Default
+    /// true; false refuses every build with `PermissionDenied`.
+    pub allow_builds: bool,
+}
+
+impl Default for StoreSection {
+    fn default() -> Self {
+        Self { allow_builds: true }
     }
 }
 
@@ -1122,6 +1146,10 @@ impl Config {
         clippy::many_single_char_names,
         reason = "one-letter formatters keep the table one entry per line"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table entry per key, in KEYS order"
+    )]
     fn effective_entries(&self) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
         let f = self.effective_file();
         let s = |text: &str| toml::Value::String(text.to_owned()).to_string();
@@ -1216,7 +1244,17 @@ impl Config {
             ),
             (
                 "repo",
-                vec![("auto_register", f.repo.auto_register.to_string())],
+                vec![
+                    ("auto_register", f.repo.auto_register.to_string()),
+                    (
+                        "allow_foreign_owner",
+                        f.repo.allow_foreign_owner.to_string(),
+                    ),
+                ],
+            ),
+            (
+                "store",
+                vec![("allow_builds", f.store.allow_builds.to_string())],
             ),
         ]
     }

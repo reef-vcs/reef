@@ -128,3 +128,51 @@ pub fn log_files(state_dir: &Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
+
+/// The daemon's log lines in this test process, from the one subscriber
+/// every test here installs (the first call wins; nextest runs each test in
+/// its own process, `cargo test` shares one). `TEST_LOG=reef_daemon=debug`
+/// also prints them.
+pub fn logs() -> &'static LogCapture {
+    static LOGS: std::sync::OnceLock<LogCapture> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let echo = std::env::var("TEST_LOG").ok();
+        let capture = LogCapture(std::sync::Arc::default(), echo.is_some());
+        let writer = capture.clone();
+        let filter = echo.unwrap_or_else(|| "reef_daemon=info".to_owned());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .try_init();
+        capture
+    })
+}
+
+/// Captured log text, and whether to echo it; see [`logs`].
+#[derive(Clone)]
+pub struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>, bool);
+
+impl LogCapture {
+    /// Whether one line holds every one of `parts`.
+    pub fn has_line(&self, parts: &[&str]) -> bool {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .any(|line| parts.iter().all(|part| line.contains(part)))
+    }
+}
+
+impl std::io::Write for LogCapture {
+    #[allow(clippy::print_stderr, reason = "TEST_LOG echoes the daemon's logs")]
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        if self.1 {
+            eprint!("{}", String::from_utf8_lossy(bytes));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

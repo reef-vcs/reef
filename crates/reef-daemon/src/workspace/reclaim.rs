@@ -22,6 +22,11 @@ use crate::snapshot::{SnapshotKind, TrackReason, description};
 /// reclaimed, so no final snapshot could be taken.
 const ROOT_MISSING: &str = "workspace root missing";
 
+/// The `reclaims.detail` of a workspace whose root had been replaced by a
+/// symlink, which a final snapshot would have scanned through (RX.01); the
+/// tear-down unlinks it.
+const ROOT_SYMLINK: &str = "workspace root replaced by a symlink";
+
 /// The `reclaims.detail` of an overlay workspace whose upper directory was
 /// gone when it was reclaimed (R1.09).
 const UPPER_MISSING: &str = "overlay upper directory missing";
@@ -204,6 +209,17 @@ impl Manager {
                 "workspace root is missing; reclaiming it without a final snapshot"
             );
             details.push(ROOT_MISSING.to_owned());
+            return Ok((false, None));
+        }
+        if tokio::fs::symlink_metadata(&entry.paths.root)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            tracing::warn!(
+                path = %entry.paths.root.display(),
+                "workspace root is a symlink; reclaiming it without a final snapshot"
+            );
+            details.push(ROOT_SYMLINK.to_owned());
             return Ok((false, None));
         }
         let attention = entry.record().attention;

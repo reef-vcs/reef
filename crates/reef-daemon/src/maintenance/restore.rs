@@ -48,6 +48,7 @@ use super::backup::{
     copy_tree, copy_tree_with, read_op_heads, repo_dir,
 };
 use crate::config::{Config, ConfigError, DB_FILE, LOCK_FILE, LeaseSection};
+use crate::daemon::PrivateDirError;
 use crate::db::{
     Db, DbError, META_LAST_BACKUP_AT, META_REMATERIALIZE_PENDING, META_RESTORED_AT,
     META_RESTORED_FROM, SCHEMA_VERSION,
@@ -179,6 +180,16 @@ pub enum RestoreError {
         /// Its `.jj/repo`.
         path: PathBuf,
     },
+    /// The target state directory is another user's (RX.01, S-01).
+    #[error("{} is owned by uid {uid}, not by uid {euid}, which runs the restore", path.display())]
+    NotOwned {
+        /// The state directory.
+        path: PathBuf,
+        /// Its owner.
+        uid: u32,
+        /// The restore's effective uid.
+        euid: u32,
+    },
     /// A daemon holds the state directory.
     #[error(transparent)]
     Lock(#[from] LockError),
@@ -224,6 +235,7 @@ impl Classify for RestoreError {
             | Self::BadManifest { .. }
             | Self::Settings(_) => ErrorKind::InvalidArgument,
             Self::NoSuchRepo(_) => ErrorKind::NotFound,
+            Self::NotOwned { .. } => ErrorKind::PermissionDenied,
             Self::DbExists(_) => ErrorKind::AlreadyExists,
             Self::SchemaTooNew { .. } | Self::NewerLive { .. } => ErrorKind::Conflict,
             Self::Lock(error) => error.kind(),
@@ -242,6 +254,9 @@ impl Advise for RestoreError {
             Self::Lock(_) => Some(Advice::run(
                 "Restore is offline: stop the daemon first.",
                 ["reef", "daemon", "stop"],
+            )),
+            Self::NotOwned { .. } => Some(Advice::hint(
+                "Restore as the user who owns that state directory, or into a new one with --into.",
             )),
             Self::DbExists(_) => Some(Advice::hint(
                 "Pass --force to replace the daemon's current state with the backup's.",
@@ -295,13 +310,13 @@ pub fn restore(src: &Path, opts: &RestoreOptions) -> Result<RestoreReport, Resto
         return Err(RestoreError::SchemaTooNew { found: schema });
     }
     let paths = StateFiles::in_dir(&opts.into);
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&paths.state_dir)
-            .map_err(io_at(&paths.state_dir))?;
+    match crate::daemon::ensure_private_dir(&paths.state_dir, true) {
+        Ok(Some(mode)) => crate::daemon::log_tightened(&paths.state_dir, mode),
+        Ok(None) => {}
+        Err(PrivateDirError::NotOwned { path, uid, euid }) => {
+            return Err(RestoreError::NotOwned { path, uid, euid });
+        }
+        Err(PrivateDirError::Io { path, source }) => return Err(RestoreError::Io { path, source }),
     }
     let _lock = InstanceLock::acquire(&paths.lock)?;
 

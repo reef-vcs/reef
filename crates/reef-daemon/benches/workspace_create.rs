@@ -315,6 +315,10 @@ impl Api {
         let (daemon, repo) = rt.block_on(async {
             let daemon = TestDaemon::start_with(|config| {
                 config.file.watcher.backend = common::watcher();
+                // The fixture is the bench's own, whichever uid built it:
+                // a privileged run registers what an unprivileged one made
+                // (RX.01, S-02).
+                config.file.repo.allow_foreign_owner = true;
             })
             .await;
             let registered = daemon

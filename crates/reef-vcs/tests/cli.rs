@@ -840,6 +840,43 @@ fn store_spec(script: &str) -> String {
     )
 }
 
+/// RX.01 test 10 (S-03): `store build` shows the command the daemon runs,
+/// from the repository's `reef.toml`, on stderr before its output, in
+/// either mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_build_prints_the_command_first() {
+    let (daemon, repo) = with_repo().await;
+    let spec = format!(
+        "{}[store.env]\nNODE_ENV = \"production\"\n",
+        store_spec("echo first >&2; mkdir -p \"$REEF_STORE_DIR\"")
+    );
+    commit_at_root(&repo.root, &[("reef.toml", &spec), ("deps.lock", "v1\n")]).await;
+    for mode in ["text", "json"] {
+        let output = run(
+            reef(&daemon),
+            &[
+                "-o", mode, "store", "build", "deps", "--force", "--repo", &repo.id,
+            ],
+        )
+        .await;
+        output.clone().assert().success();
+        let text = stderr(&output);
+        let mut lines = text.lines();
+        let first = lines.next().unwrap_or_default();
+        assert!(
+            first.starts_with("reef: building deps at ")
+                && first.ends_with(": sh -c 'echo first >&2; mkdir -p \"$REEF_STORE_DIR\"'"),
+            "{mode}: {text}"
+        );
+        assert_eq!(
+            lines.next(),
+            Some("reef: env: NODE_ENV=production"),
+            "{mode}: {text}"
+        );
+        assert_eq!(lines.next(), Some("first"), "{mode}: {text}");
+    }
+}
+
 /// `store build` and `store list` (R1.20) in JSON and text: the build's
 /// output streams through (all on stderr in JSON mode), JSON mode prints
 /// one result, and a failed build exits with its command's code.

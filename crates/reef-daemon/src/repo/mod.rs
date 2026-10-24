@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::LocalBoxFuture;
 use reef_lib::error::{Classify, ErrorKind};
-use reef_lib::jj::{OpenError, ReadonlyRepo, Repo, UserSettings};
+use reef_lib::jj::{CheckedTrees, OpenError, ReadonlyRepo, Repo, UserSettings};
 use tokio::sync::oneshot;
 
 use crate::model::{RepoId, RepositoryRecord};
@@ -28,7 +28,7 @@ mod exclude;
 mod registry;
 mod thread;
 
-pub use registry::{RegisterError, Registered};
+pub use registry::{OwnerPolicy, RegisterError, Registered};
 use thread::{Message, RepoThread};
 
 /// A repository as its thread holds it.
@@ -43,7 +43,11 @@ pub struct RepoHead {
     pub settings: UserSettings,
     /// The user's `default` workspace, loaded at head.
     pub repo: Repo,
+    /// Trees [`Repo::check_tree_names`] found readable (RX.01).
+    pub checked_trees: CheckedTrees,
     dirty: bool,
+    /// A job panicked: reopen the repository rather than reload it.
+    reopen: bool,
 }
 
 impl RepoHead {
@@ -52,11 +56,28 @@ impl RepoHead {
         self.repo.readonly()
     }
 
-    /// Reloads [`RepoHead::repo`] at the head operation.
+    /// Reloads [`RepoHead::repo`] at the head operation; after a panicked
+    /// job, opens the repository afresh instead.
     pub async fn reload(&mut self) -> Result<(), OpenError> {
-        self.repo.reload_at_head().await?;
+        if self.reopen {
+            // The panic may have poisoned a lock in jj-lib's store (its git
+            // backend's mutex, RX.01), which a reload keeps: a new store
+            // has none.
+            self.repo = Repo::open(&self.root, &self.settings).await?;
+            self.reopen = false;
+            tracing::info!(repo = %self.id, "repository reopened after a panicked job");
+        } else {
+            self.repo.reload_at_head().await?;
+        }
         self.dirty = false;
         Ok(())
+    }
+
+    /// Records that the current job panicked: the thread reopens the
+    /// repository when it returns.
+    pub(super) fn note_panicked(&mut self) {
+        self.dirty = true;
+        self.reopen = true;
     }
 
     /// The repository at head, reloading first if anything (the `jj` CLI,
@@ -100,7 +121,7 @@ pub enum RepoThreadError {
         /// The repository.
         id: RepoId,
     },
-    /// The job panicked. The thread survives and reloads at head.
+    /// The job panicked. The thread survives and reopens the repository.
     #[error("a job on repository {id} panicked")]
     Panicked {
         /// The repository.
@@ -177,7 +198,7 @@ impl RepoHandle {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(head)));
             let outcome = outcome.map_err(|_| {
                 tracing::error!(repo = %id, "repository job panicked");
-                head.note_committed();
+                head.note_panicked();
                 RepoThreadError::Panicked { id }
             });
             // The caller may have stopped waiting; the job ran either way.
@@ -242,12 +263,23 @@ pub struct RepoRegistry {
     closed: Mutex<Vec<RepoThread>>,
     /// Held for the whole of each [`RepoRegistry::register`].
     register_turn: Mutex<()>,
+    /// Whose repositories [`RepoRegistry::register`] accepts (RX.01, S-02).
+    owners: OwnerPolicy,
 }
 
 impl RepoRegistry {
-    /// An empty registry.
+    /// An empty registry, accepting repositories owned by the daemon's
+    /// user ([`OwnerPolicy::from_env`] without `allow_foreign_owner`).
     pub fn new() -> RepoRegistry {
         RepoRegistry::default()
+    }
+
+    /// An empty registry accepting the repositories `owners` does.
+    pub fn with_owners(owners: OwnerPolicy) -> RepoRegistry {
+        RepoRegistry {
+            owners,
+            ..RepoRegistry::default()
+        }
     }
 
     /// Starts the thread for `record`, which loads the repository's default

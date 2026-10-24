@@ -92,6 +92,27 @@ pub enum OutputStream {
     Stderr,
 }
 
+/// What a build sends its caller while it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildOutput {
+    /// The command is about to run; sent once, before any line (RX.01,
+    /// S-03).
+    Started(BuildStarted),
+    /// A line of its output.
+    Line(OutputLine),
+}
+
+/// The command a build runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildStarted {
+    /// The `[[store]] build` argv.
+    pub argv: Vec<String>,
+    /// `[store.env]`, in key order.
+    pub env: Vec<(String, String)>,
+    /// The commit it runs on.
+    pub rev: String,
+}
+
 /// One line of the build command's output, without its line ending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputLine {
@@ -125,15 +146,15 @@ pub struct BuildResult {
     pub already_built: bool,
 }
 
-/// Runs the build; see the module docs. `lines` gets the output, best
-/// effort. A command that exits non-zero is a result with `sealed =
+/// Runs the build; see the module docs. `lines` gets what the command is
+/// ([`BuildOutput::Started`]) and then its output, best effort. A command that exits non-zero is a result with `sealed =
 /// false`; a timeout, a shutdown, or a command that cannot start is an
 /// error.
 #[tracing::instrument(skip_all, fields(repo = %request.repo, store = %request.name, force = request.force))]
 pub async fn run(
     manager: Arc<Manager>,
     request: BuildRequest,
-    lines: mpsc::Sender<OutputLine>,
+    lines: mpsc::Sender<BuildOutput>,
     shutdown: CancellationToken,
 ) -> Result<BuildResult, ManagerError> {
     let begun = Instant::now();
@@ -328,7 +349,7 @@ async fn build_in_scratch(
     store: &StoreSpec,
     target: &StoreTarget,
     contents: &std::path::Path,
-    lines: mpsc::Sender<OutputLine>,
+    lines: mpsc::Sender<BuildOutput>,
     shutdown: &CancellationToken,
 ) -> Result<(std::process::ExitStatus, Option<String>), ManagerError> {
     // 3.
@@ -357,6 +378,7 @@ async fn build_in_scratch(
                 created.lease.id,
                 manager.leases().heartbeat_every(created.lease.length),
             );
+            announce(store, commit, &lines).await;
             run_command(
                 manager,
                 ws,
@@ -416,6 +438,34 @@ async fn build_in_scratch(
     Ok((status, op_id))
 }
 
+/// Logs the command a build is about to run and sends it to the caller
+/// (RX.01, S-03): the build runs the repository's own argv, so the user
+/// sees it before any of its output.
+async fn announce(
+    store: &StoreSpec,
+    commit: &reef_lib::jj::CommitIdHex,
+    lines: &mpsc::Sender<BuildOutput>,
+) {
+    let env_keys: Vec<&String> = store.env.keys().collect();
+    tracing::info!(
+        argv = ?store.build,
+        ?env_keys,
+        rev = %commit,
+        "running the store's build command"
+    );
+    let started = BuildStarted {
+        argv: store.build.clone(),
+        env: store
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        rev: commit.to_string(),
+    };
+    // A caller that is gone does not stop the build.
+    let _ = lines.send(BuildOutput::Started(started)).await;
+}
+
 /// Step 4: runs the build command to completion, the timeout, or shutdown,
 /// then kills whatever is left of its process group either way: a
 /// background process the build started must not keep writing into the
@@ -432,7 +482,7 @@ async fn run_command(
     root: &std::path::Path,
     contents: &std::path::Path,
     timeout: Duration,
-    lines: mpsc::Sender<OutputLine>,
+    lines: mpsc::Sender<BuildOutput>,
     shutdown: &CancellationToken,
 ) -> Result<std::process::ExitStatus, StoreError> {
     let (program, args) = store.build.split_first().ok_or_else(|| StoreError::Spawn {
@@ -555,7 +605,7 @@ fn kill_group(pid: Option<u32>) -> bool {
 async fn forward(
     reader: impl AsyncRead + Unpin,
     stream: OutputStream,
-    lines: mpsc::Sender<OutputLine>,
+    lines: mpsc::Sender<BuildOutput>,
 ) {
     let mut reader = BufReader::new(reader);
     let mut buffer = Vec::new();
@@ -572,7 +622,7 @@ async fn forward(
             text: String::from_utf8_lossy(&buffer).into_owned(),
             stream,
         };
-        if lines.send(line).await.is_err() {
+        if lines.send(BuildOutput::Line(line)).await.is_err() {
             return;
         }
     }

@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::backend::fs_util::restore_mtime;
-use crate::daemon::AppState;
+use crate::daemon::{AppState, PrivateDirError};
 use crate::db::{DbError, META_DAEMON_INSTANCE_ID, META_LAST_BACKUP_AT};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
@@ -229,6 +229,17 @@ pub enum BackupError {
     /// The destination is inside the state directory.
     #[error("{} is inside the daemon's state directory", .0.display())]
     DestInStateDir(PathBuf),
+    /// The destination is an empty directory another user owns (RX.01,
+    /// S-01).
+    #[error("{} is owned by uid {uid}, not by uid {euid}, which runs the daemon", path.display())]
+    DestNotOwned {
+        /// The destination.
+        path: PathBuf,
+        /// Its owner.
+        uid: u32,
+        /// The daemon's effective uid.
+        euid: u32,
+    },
     /// Another maintenance task holds the lock.
     #[error(transparent)]
     Busy(#[from] super::Busy),
@@ -263,6 +274,7 @@ impl Classify for BackupError {
         match self {
             Self::NotAbsolute(_) | Self::DestInStateDir(_) => ErrorKind::InvalidArgument,
             Self::DestNotEmpty(_) => ErrorKind::AlreadyExists,
+            Self::DestNotOwned { .. } => ErrorKind::PermissionDenied,
             Self::Busy(error) => error.kind(),
             Self::Io { source, .. } => classify_by_source(source),
             Self::Sqlite(_) => ErrorKind::Io,
@@ -278,6 +290,9 @@ impl Advise for BackupError {
         match self {
             Self::DestNotEmpty(_) => Some(Advice::hint(
                 "Name a new directory, or an empty one; a backup never overwrites another.",
+            )),
+            Self::DestNotOwned { .. } => Some(Advice::hint(
+                "Name a new directory, or an empty one the daemon's user owns; a backup is private to that user.",
             )),
             Self::Db(error) => error.advice(),
             _ => None,
@@ -387,7 +402,8 @@ pub fn repo_dir(dest: &Path, id: RepoId) -> PathBuf {
 }
 
 /// Checks the destination and creates it (`0700`): absolute, outside the
-/// state directory, and new or an empty directory. [`run`] does this
+/// state directory, and new or an empty directory, which must be the
+/// daemon's user's and is `chmod`ed `0700` (RX.01, S-01). [`run`] does this
 /// itself; `Maintenance.Backup` also does it before answering, so a bad
 /// destination is the RPC's status rather than its stream's first item.
 pub fn prepare_dest(state: &AppState, dest: &Path) -> Result<(), BackupError> {
@@ -414,6 +430,16 @@ pub fn prepare_dest(state: &AppState, dest: &Path) -> Result<(), BackupError> {
         Ok(mut entries) => {
             if entries.next().is_some() {
                 return Err(BackupError::DestNotEmpty(dest.to_owned()));
+            }
+            match crate::daemon::ensure_private_dir(dest, false) {
+                Ok(Some(mode)) => crate::daemon::log_tightened(dest, mode),
+                Ok(None) => {}
+                Err(PrivateDirError::NotOwned { path, uid, euid }) => {
+                    return Err(BackupError::DestNotOwned { path, uid, euid });
+                }
+                Err(PrivateDirError::Io { path, source }) => {
+                    return Err(BackupError::Io { path, source });
+                }
             }
             Ok(())
         }
@@ -447,6 +473,8 @@ fn backup_sqlite(db: &Path, to: &Path, pages_per_step: u32) -> Result<SqliteMani
     source
         .busy_timeout(Duration::from_secs(5))
         .map_err(BackupError::Sqlite)?;
+    // Private whatever the umask (RX.01, S-01).
+    crate::db::private_file(to).map_err(io_at(to))?;
     let mut dest = Connection::open(to).map_err(BackupError::Sqlite)?;
     {
         let backup =

@@ -5,7 +5,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use reef_lib::error::ErrorChain;
-use reef_lib::jj::{Repo, UserSettings};
+use reef_lib::jj::{CheckedTrees, Repo, UserSettings};
 use tokio::sync::oneshot;
 
 use super::{RegistryError, RepoHandle, RepoHead};
@@ -76,7 +76,9 @@ impl RepoThread {
                     colocated: record.colocated,
                     settings,
                     repo,
+                    checked_trees: CheckedTrees::default(),
                     dirty: false,
+                    reopen: false,
                 };
                 run(head, &rx);
             })
@@ -133,7 +135,7 @@ fn run(mut head: RepoHead, rx: &mpsc::Receiver<Message>) {
                 // against anything else.
                 let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut head)));
                 if ran.is_err() {
-                    head.dirty = true;
+                    head.note_panicked();
                 }
                 if head.dirty {
                     reload(&mut head);

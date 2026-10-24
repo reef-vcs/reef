@@ -113,6 +113,16 @@ pub enum DbError {
         #[source]
         source: rusqlite::Error,
     },
+    /// The database file could not be created or restricted to `0600`
+    /// (RX.01, S-01).
+    #[error("restrict database {} to 0600", path.display())]
+    Mode {
+        /// The file.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The database was written by a newer daemon. Downgrades are not
     /// supported.
     #[error("database schema version {found} is newer than this daemon supports ({supported})")]
@@ -200,6 +210,7 @@ impl Classify for DbError {
             Self::AlreadyExists { .. } => ErrorKind::AlreadyExists,
             Self::Conflict { .. } => ErrorKind::Conflict,
             Self::TooNew { .. } => ErrorKind::Internal,
+            Self::Mode { source, .. } => reef_lib::error::classify_by_source(source),
             Self::Open { source, .. } | Self::Migrate { source, .. } | Self::Sqlite(source) => {
                 classify_sqlite(source)
             }
@@ -251,16 +262,52 @@ fn classify_sqlite(error: &rusqlite::Error) -> ErrorKind {
     }
 }
 
+/// Creates the SQLite file `path` with mode `0600` if it is missing, and
+/// `chmod`s it and any `-wal` and `-shm` beside it to `0600` if they have
+/// group or other bits (RX.01, S-01). SQLite gives the journal files it
+/// creates the database's mode, so they follow.
+pub(crate) fn private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let restrict = |file: &std::fs::File| -> std::io::Result<()> {
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    restrict(&file)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut journal = path.as_os_str().to_owned();
+        journal.push(suffix);
+        match std::fs::OpenOptions::new().write(true).open(&journal) {
+            Ok(file) => restrict(&file)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 impl Db {
     /// Opens the database at `path`, creating the file if it does not exist,
     /// sets the connection's pragmas (WAL, foreign keys, a 5 s busy timeout,
     /// `synchronous = NORMAL`), and applies pending migrations. The parent
-    /// directory must exist.
+    /// directory must exist. The file is `0600` whatever the umask, an
+    /// existing one `chmod`ed (RX.01).
     pub fn open(path: &Path) -> Result<Db, DbError> {
         let open = |source| DbError::Open {
             path: path.to_owned(),
             source,
         };
+        private_file(path).map_err(|source| DbError::Mode {
+            path: path.to_owned(),
+            source,
+        })?;
         let conn = Connection::open(path).map_err(open)?;
         // Before switching to WAL, which needs a lock another process may hold.
         conn.busy_timeout(BUSY_TIMEOUT).map_err(open)?;

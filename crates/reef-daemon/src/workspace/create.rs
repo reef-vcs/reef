@@ -550,6 +550,10 @@ pub(super) async fn resolve_start(
                         (StartPoint::NewOn(default.commit.clone()), default.commit)
                     }
                 };
+                // Before anything reads its tree (RX.01).
+                head.repo
+                    .check_tree_names(&commit, &mut head.checked_trees)
+                    .await?;
                 let shared_change = matches!(start, StartPoint::Edit(_))
                     && head.repo.workspaces_on_commit(&commit).iter().any(|name| {
                         name.starts_with(reef_lib::jj::workspace::REEF_WORKSPACE_PREFIX)

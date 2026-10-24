@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, logs, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use reef_daemon::client::json::millis_of;
@@ -911,54 +911,6 @@ async fn medium_pause_is_short() {
     assert!(entry.pause_ms < 100, "pause {} ms", entry.pause_ms);
 }
 
-/// The daemon's log lines in this test process, from the one subscriber
-/// every test here installs (the first call wins; nextest runs each test in
-/// its own process, `cargo test` shares one). `TEST_LOG=reef_daemon=debug`
-/// also prints them.
-fn logs() -> &'static LogCapture {
-    static LOGS: std::sync::OnceLock<LogCapture> = std::sync::OnceLock::new();
-    LOGS.get_or_init(|| {
-        let echo = std::env::var("TEST_LOG").ok();
-        let capture = LogCapture(Arc::default(), echo.is_some());
-        let writer = capture.clone();
-        let filter = echo.unwrap_or_else(|| "reef_daemon=info".to_owned());
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .try_init();
-        capture
-    })
-}
-
-/// Captured log text, and whether to echo it; see [`logs`].
-#[derive(Clone)]
-struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>, bool);
-
-impl LogCapture {
-    /// Whether one line holds every one of `parts`.
-    fn has_line(&self, parts: &[&str]) -> bool {
-        String::from_utf8_lossy(&self.0.lock().unwrap())
-            .lines()
-            .any(|line| parts.iter().all(|part| line.contains(part)))
-    }
-}
-
-impl std::io::Write for LogCapture {
-    #[allow(clippy::print_stderr, reason = "TEST_LOG echoes the daemon's logs")]
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        if self.1 {
-            eprint!("{}", String::from_utf8_lossy(bytes));
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// A restore is offline and never uses a socket, so a state directory too
 /// deep for the default one (`<state>/daemon.sock` over the 103-byte limit)
 /// is restorable; the daemon there takes `REEF_SOCKET` or the config file's.
@@ -974,4 +926,20 @@ async fn restore_into_a_deep_state_directory() {
         .unwrap();
     assert_eq!(report.repos.len(), 1, "{report:?}");
     assert!(into.join("reef.sqlite3").is_file());
+}
+
+/// RX.01 test 5 (S-01): a destination that exists empty with group and
+/// other bits is tightened to `0700`, and the database copy is `0600`
+/// whatever the umask.
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_dir_and_database_are_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let (daemon, repo) = fixture().await;
+    let dest = daemon.tmp.path().join("backup");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    backup(&daemon, &dest, &repo.id).await;
+    assert_eq!(mode(&dest), 0o700);
+    assert_eq!(mode(&dest.join("reef.sqlite3")), 0o600);
 }

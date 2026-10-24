@@ -40,6 +40,7 @@ use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
 
 use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
+use crate::backend::BackendError;
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
 use crate::snapshot::index::{self, SnapshotEntry};
@@ -262,6 +263,7 @@ impl Manager {
             let spec = entry.spec();
             let prefixes = trigger.prefixes().map(<[PathBuf]>::to_vec);
             tokio::task::spawn_blocking(move || {
+                refuse_symlinked_root(&entry.paths.root)?;
                 // An overlay whose mount is gone would scan as empty.
                 entry.backend.check_materialized(&entry.paths)?;
                 let jj = Arc::clone(&entry.jj);
@@ -544,6 +546,15 @@ impl Pipeline<'_> {
         });
         (ran, new_head)
     }
+}
+
+/// Refuses a root replaced by a symlink, which a scan would follow, taking
+/// whatever it points at into the change (RX.01).
+fn refuse_symlinked_root(root: &Path) -> Result<(), BackendError> {
+    if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(BackendError::RootIsSymlink(root.to_owned()));
+    }
+    Ok(())
 }
 
 /// Writes a committed snapshot to the workspace's row, in the database and

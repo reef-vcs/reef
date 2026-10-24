@@ -21,7 +21,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, logs, test_settings};
 use reef_daemon::client::ClientError;
 use reef_daemon::proto::v0::{
     self, CreateRequest, ListWorkspacesRequest, Workspace, build_event, create_request,
@@ -110,6 +110,8 @@ async fn create_ok(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
 /// What a `Stores.Build` stream carried.
 #[derive(Debug, Default)]
 struct Built {
+    /// Each `Started` event, with how many lines came before it.
+    started: Vec<(usize, v0::BuildStarted)>,
     lines: Vec<v0::OutputLine>,
     done: Option<v0::BuildResult>,
     error: Option<ClientError>,
@@ -131,6 +133,9 @@ async fn build_with(daemon: &TestDaemon, repo: &SyntheticRepo, timeout: Duration
     loop {
         match stream.message().await {
             Ok(Some(event)) => match event.event.unwrap() {
+                build_event::Event::Started(started) => {
+                    built.started.push((built.lines.len(), started));
+                }
                 build_event::Event::Line(line) => built.lines.push(line),
                 build_event::Event::Done(done) => built.done = Some(done),
             },
@@ -141,6 +146,16 @@ async fn build_with(daemon: &TestDaemon, repo: &SyntheticRepo, timeout: Duration
             }
         }
     }
+}
+
+/// The first event after the build's `Started` (RX.01), which comes first.
+async fn first_line(events: &mut tonic::Streaming<v0::BuildEvent>) -> v0::BuildEvent {
+    let started = events.message().await.unwrap().unwrap();
+    assert!(
+        matches!(started.event, Some(build_event::Event::Started(_))),
+        "{started:?}"
+    );
+    events.message().await.unwrap().unwrap()
 }
 
 async fn build(daemon: &TestDaemon, repo: &SyntheticRepo) -> v0::BuildResult {
@@ -538,7 +553,7 @@ async fn build_timeout_kills_process_group() {
         .await
         .unwrap();
     // Timed from the command's start, not the scratch workspace's create.
-    let started = events.message().await.unwrap().unwrap();
+    let started = first_line(&mut events).await;
     assert!(
         matches!(started.event, Some(build_event::Event::Line(ref line)) if line.text == "started"),
         "{started:?}"
@@ -605,7 +620,7 @@ async fn concurrent_build_rejected() {
         .build_store(&repo.id, "deps", "", Duration::from_mins(1), false)
         .await
         .unwrap();
-    let started = first.message().await.unwrap().unwrap();
+    let started = first_line(&mut first).await;
     assert!(
         matches!(started.event, Some(build_event::Event::Line(ref line)) if line.text == "started"),
         "{started:?}"
@@ -1043,4 +1058,64 @@ fn set_bookmark(root: &Path, name: &str, commit: &CommitIdHex) {
         RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
     );
     pollster::block_on(tx.commit("bookmark set")).unwrap();
+}
+
+// RX.01 test 8 (S-03): `[store] allow_builds = false` refuses every build,
+// before anything is written, and a create still names the build as the
+// fix.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_is_refused_when_builds_are_off() {
+    let (daemon, repo) = fixture_with(|config| config.file.store.allow_builds = false).await;
+    let built = build_with(&daemon, &repo, Duration::from_mins(5)).await;
+    let error = built.error.expect("refused");
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+    let hint = error.advice().unwrap().hint;
+    assert!(hint.contains("[store] allow_builds"), "{hint}");
+    assert!(built.started.is_empty() && built.lines.is_empty());
+    let stores = daemon.state_dir().join("stores");
+    assert!(
+        std::fs::read_dir(&stores).map_or(true, |mut entries| entries.next().is_none()),
+        "nothing under {}",
+        stores.display()
+    );
+    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
+    assert_eq!(
+        error.advice().unwrap().next[..3],
+        ["reef", "store", "build"]
+    );
+}
+
+// RX.01 test 9 (S-03): the first event says what the daemon runs, and the
+// daemon logs it.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_announces_its_command() {
+    logs();
+    let (daemon, repo) = fixture().await;
+    let spec = format!("{SPEC}[store.env]\nNODE_ENV = \"production\"\nA = \"1\"\n");
+    commit_at_root(&repo.root, &[("reef.toml", &spec)]).await;
+    let built = build_with(&daemon, &repo, Duration::from_mins(5)).await;
+    assert!(built.error.is_none(), "{:?}", built.error);
+    assert_eq!(built.started.len(), 1, "{:?}", built.started);
+    let (lines_before, started) = &built.started[0];
+    assert_eq!(*lines_before, 0, "before any output line");
+    assert_eq!(started.argv[..2], ["sh", "-c"]);
+    assert!(
+        started.argv[2].contains("REEF_STORE_DIR"),
+        "{:?}",
+        started.argv
+    );
+    assert_eq!(started.env, ["A=1", "NODE_ENV=production"]);
+    assert_eq!(started.rev.len(), 40, "{}", started.rev);
+    assert!(
+        logs().has_line(&[
+            "INFO",
+            "running the store's build command",
+            "argv=[\"sh\", \"-c\"",
+            "env_keys=[\"A\", \"NODE_ENV\"]",
+        ]),
+        "no info line with the argv"
+    );
 }
