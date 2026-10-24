@@ -394,12 +394,22 @@ async fn reefignore_change_scans_everything() {
         .await;
     let before = outcomes.len();
 
-    // Reef's own ignore file: jj does not rescan for it.
+    // Reef's own ignore file: jj does not rescan for it. Wait for the
+    // snapshot that has the emptied file, not the first with the secret: an
+    // event for `hidden/` from the setup can arrive after the first
+    // snapshot, and its narrowed scan, reading the new rules, records the
+    // secret before the `.reefignore` event arrives (overlayfs on CI).
     write(&ws, ".reefignore", "");
     let outcome = outcomes
-        .holding(&repo, before, "hidden/secret.txt", Some("s\n"))
+        .holding(&repo, before, ".reefignore", Some(""))
         .await;
     assert!(!outcome.narrowed, "{outcome:?}");
+    assert_eq!(
+        file_at(&repo.root, &outcome.commit_id, "hidden/secret.txt")
+            .await
+            .as_deref(),
+        Some("s\n")
+    );
     let before = outcomes.len();
 
     // A `.gitignore`: jj rescans its directory, narrowed.
