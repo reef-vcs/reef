@@ -1,0 +1,35 @@
+[
+  {
+    "id": "7770cce017a81eaf",
+    "repo_id": "e76fe09dc8277e8c",
+    "owner": "agent@host:35232",
+    "purpose": "sh -c echo appended by fake >> README.md",
+    "change_id": "dccd40302122a8ec839974e3748742ba",
+    "change_id_reverse_hex": "mnnmvzwzxyxxprlnrwqqsvlwsvrsvxop",
+    "commit_id": "7206a045dd2223e9e891eaac9b4986b23578c472",
+    "backend": "apfs",
+    "path": "/tmp/reef-onboarding/tYJKVb5/s/repos/e76fe09dc8277e8c/ws/7770cce017a81eaf",
+    "state": "released",
+    "divergent": false,
+    "attention": null,
+    "created_at": "2026-10-24T06:07:42.633Z",
+    "last_snapshot_at": "2026-10-24T06:07:42.69Z",
+    "last_snapshot_op": "13749f6c9f6cf1ee914c535aaa3e8a43384ca2da86ca20ea6ed91ea24cdaf955c7adf35ea90c5fb81b2c4c40aaccf1ec962f8e7332b04ecbf18273f3e75514c6",
+    "lease": {
+      "id": "eae009fbb0b9b716",
+      "owner": "agent@host:35232",
+      "issued_at": "2026-10-24T06:07:42.633Z",
+      "expires_at": "2026-10-24T06:37:42.633Z",
+      "last_heartbeat_at": "2026-10-24T06:07:42.633Z",
+      "length_ms": 1800000,
+      "grace_ms": 300000,
+      "state": "ended",
+      "end_reason": "released",
+      "heartbeat_every_ms": 60000
+    },
+    "watcher": "notify",
+    "watch_state": null,
+    "local_snapshot_count": 1,
+    "stores": []
+  }
+]

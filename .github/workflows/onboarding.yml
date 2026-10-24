@@ -1,0 +1,139 @@
+name: Onboarding benchmark
+
+# RX.07: a real Claude Code agent, new to Reef, from nothing to a working `reef ws run`, three
+# trials per scenario. Weekly and on demand, never on pull requests: every trial spends real money
+# (up to $2, `--max-budget-usd`), and the ANTHROPIC_API_KEY secret is not available to pull
+# requests from forks. Each run opens a pull request adding its rows to
+# docs/onboarding-benchmark.md. See that page for what is measured.
+on:
+  schedule:
+    - cron: "41 7 * * 1"     # Mondays 07:41 UTC
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Scenarios, comma-separated
+        default: A,B,C,D
+        type: string
+      trials:
+        description: Trials per scenario
+        default: "3"
+        type: string
+      note:
+        description: Notes column for the new rows (what changed since the last run)
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# One run at a time: two would share the API key's rate limit and both measure slower agents.
+concurrency:
+  group: onboarding
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The pins every row reports. Changing either starts a new baseline.
+  CLAUDE_CODE_VERSION: 2.1.310
+  REEF_ONBOARDING_MODEL: claude-sonnet-5-5
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      scenarios: ${{ steps.plan.outputs.scenarios }}
+    steps:
+      - id: plan
+        env:
+          SCENARIOS: ${{ inputs.scenarios || 'A,B,C,D' }}
+        run: echo "scenarios=$(jq -Rc 'split(",") | map(gsub("\\s"; "")) | map(select(. != ""))' <<<"$SCENARIOS")" >>"$GITHUB_OUTPUT"
+
+  trials:
+    name: scenario ${{ matrix.scenario }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    # Three trials of at most 10 minutes each, plus the build.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.plan.outputs.scenarios) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      # Unprivileged overlay workspaces, as an agent on a developer's Linux machine gets them.
+      - name: Install fuse-overlayfs
+        run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
+      - name: Install Claude Code ${{ env.CLAUDE_CODE_VERSION }}
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/claude" "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+          echo "$RUNNER_TEMP/claude/bin" >>"$GITHUB_PATH"
+      - run: claude --version
+      - name: Build
+        run: cargo build -p reef-vcs -p reef-daemon -p reef-testing --bins
+      # A failed trial is a result, not a failed step; the step fails only when the harness does.
+      - name: Run trials
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SCENARIO: ${{ matrix.scenario }}
+          TRIALS: ${{ inputs.trials || '3' }}
+        run: |
+          target/debug/reef-onboarding run --scenario "$SCENARIO" --trials "$TRIALS" \
+            --reef-bin-dir target/debug --out "results/$SCENARIO"
+          cat "results/$SCENARIO/latest.md" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: onboarding-${{ matrix.scenario }}-${{ github.run_id }}
+          path: results/
+          retention-days: 90
+          # A re-run of a failed scenario replaces its first attempt's results.
+          overwrite: true
+
+  publish:
+    name: publish
+    needs: trials
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - run: cargo build -p reef-testing --bin reef-onboarding
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: onboarding-*-${{ github.run_id }}
+          path: results
+      - name: Summary
+        run: target/debug/reef-onboarding report --results results | tee summary.md >>"$GITHUB_STEP_SUMMARY"
+      # The pull request is opened with the workflow's token, so GitHub does not run CI on it:
+      # close and reopen it to start the checks. The commit is signed off for the DCO check.
+      - name: Open the results pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTE: ${{ inputs.note }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          target/debug/reef-onboarding report --results results --docs docs/onboarding-benchmark.md --note "$NOTE"
+          date=$(date -u +%F)
+          branch="onboarding/$date-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add docs/onboarding-benchmark.md
+          git commit -s -m "Onboarding benchmark results, $date" -m "From $RUN_URL."
+          git push origin "$branch"
+          { echo "Rows from [this run]($RUN_URL); every trial's stream is in its artifacts."; echo; cat summary.md; } >body.md
+          gh pr create --base main --head "$branch" --title "Onboarding benchmark results, $date" --body-file body.md

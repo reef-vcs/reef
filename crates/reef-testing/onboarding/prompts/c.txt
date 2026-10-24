@@ -1,0 +1,1 @@
+Use Reef (the `reef` command) to make this change in an isolated workspace: append a line to README.md. When done, print the Reef workspace id on the last line. Reef is not installed; install it from https://github.com/reef-vcs/reef first.

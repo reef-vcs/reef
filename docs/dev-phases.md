@@ -358,7 +358,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 | RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases, with `llms.txt` and `llms-full.txt` at the root and the agent guide (R1.26) at a stable URL, so an agent with web access finds the answer in one fetch. | M | Phase 1 release |
 | RX.05 | Windows support decision | Whether and how to support Windows workspaces. No copy-on-write primitive comparable to APFS or overlayfs; options are ReFS block cloning, a VFS, or Linux-only via WSL. ADR. | S | Phase 1 |
 | RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.12 run in CI with a threshold that fails the build. | S | Phase 1 |
-| RX.07 | Agent onboarding benchmark | A real agent (Claude Code headless first, Codex second) in a fresh container, with no Reef configuration, after `reef init`, from nothing, and inside `ws run`: tool calls, failed `reef` invocations, tokens, and cost to a working workspace, three trials, weekly, published like the benchmarks. Phase 1's agent exit criterion. Brief in `dev-tickets/phase-1/`. | M | Phase 1 release |
+| RX.07 | Agent onboarding benchmark | A real agent (Claude Code headless first, Codex second) in a fresh container, with no Reef configuration, after `reef init`, from nothing, and inside `ws run`: tool calls, failed `reef` invocations, tokens, and cost to a working workspace, three trials, weekly, published like the benchmarks. Phase 1's agent exit criterion. Brief in `dev-tickets/phase-1/`; results in [`onboarding-benchmark.md`](onboarding-benchmark.md). | M | Phase 1 release |
 
 ---
 

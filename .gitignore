@@ -1,6 +1,9 @@
 # Rust
 target/
 
+# Onboarding benchmark output (RX.07): uploaded by CI, summarized in docs/onboarding-benchmark.md
+crates/reef-testing/onboarding/results/
+
 # OS
 .DS_Store
 

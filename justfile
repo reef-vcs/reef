@@ -85,6 +85,22 @@ installer-lint:
 installer: installer-lint
     scripts/test-install.sh --build-dir "${CARGO_TARGET_DIR:-target}/debug"
 
+# Agent onboarding benchmark (RX.07): a real Claude Code agent per trial, so it needs `claude` and
+# ANTHROPIC_API_KEY, and each trial may spend up to $2. Takes the brief's `scenario=A trials=1`
+# form or the binary's flags; results in crates/reef-testing/onboarding/results. See
+# docs/onboarding-benchmark.md.
+onboarding *ARGS:
+    cargo build -p reef-vcs -p reef-daemon -p reef-testing --bins
+    args=(run --reef-bin-dir "${CARGO_TARGET_DIR:-target}/debug"); \
+    for arg in "$@"; do \
+        case "$arg" in \
+            scenario=*) args+=(--scenario "${arg#scenario=}") ;; \
+            trials=*) args+=(--trials "${arg#trials=}") ;; \
+            *) args+=("$arg") ;; \
+        esac; \
+    done; \
+    "${CARGO_TARGET_DIR:-target}/debug/reef-onboarding" "${args[@]}"
+
 # Every relative link in the repository's Markdown resolves (R1.24).
 doc-links:
     scripts/doc-links.sh
