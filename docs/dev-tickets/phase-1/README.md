@@ -40,6 +40,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.30 | [R1.30-incremental-notify-snapshots.md](R1.30-incremental-notify-snapshots.md) | L | R1.13, R1.14, R1.23 | The `large` half of R1.23's measurement, gating `load.yml` on `macos-15` again |
 | R1.31 | [R1.31-default-start-revision.md](R1.31-default-start-revision.md) | S | R1.05, R1.20, R1.25 | The quickstart's no-setup promise for repositories whose default branch is not `main` |
 | RX.07 | [RX.07-agent-onboarding-benchmark.md](RX.07-agent-onboarding-benchmark.md) | M | R1.25, R1.26, R1.27, R1.28 | R2.17 (cross-cutting; first needed for the Phase 1 release) |
+| RX.01 | [RX.01-security-review-of-workspace-isolation.md](RX.01-security-review-of-workspace-isolation.md) | M | R1.20, R1.15, R1.25, R1.09, R1.18, R1.28 | The 0.1.0 release, R2.08 (its listener's requirements), RX.02 (cross-cutting; first needed for the Phase 1 release) |
 
 ## Suggested execution order
 
@@ -51,6 +52,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 6. R1.25 and R1.26 (need R1.21 and R1.22, both merged) in parallel; R1.28 (needs only R0.03 and R1.22) alongside them. R1.27 after both R1.25 and R1.26.
 7. R1.29 (needs only merged tickets) any time before R1.23: R1.12 found `create_api/large/apfs/20` at 1.93 s, and R1.23 should measure the phase with the fix in.
 8. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test. Its scenario C runs the installer against a local copy of the build under test until 0.1.0 is published.
+9. RX.01 after everything above has merged and before 0.1.0 is tagged: it reviews what ships, and its fixes and known-limitations entries are part of the release.
 
 ## Phase exit criteria (from dev-phases.md)
 
@@ -75,6 +77,7 @@ These were decided while writing the briefs. `dev-phases.md` was edited to match
 - **R1.05 adds a `Repositories` service.** "Every request names a registered repository" needs a way to register one. `Register`, `List`, and `Forget` are part of R1.05.
 - **R1.13 fixes the staleness policy** ADR 0008 left open, and the behavior when two workspaces edit one change. See "Snapshots, staleness, and divergence".
 - **R1.22 adds `reef completions <shell>`** (shell completions through `clap_complete`), which the `dev-phases.md` row did not list, and **`reef ws gc` moves to R1.17**, which owns the `Gc` RPC. R1.22 builds the CLI skeleton with a stub for `ws gc`, and R1.17 replaces the stub, so R1.22 no longer waits for R1.17.
+- **RX.01 widens from three items to a threat model (2026-10-24).** `dev-phases.md` scoped it as "shared stores as a lateral movement path, daemon socket permissions, lease hijacking". The brief makes it the Phase 1 threat model (`docs/threat-model.md`, ADR 0027): one uid is one trust domain, so a same-uid agent is not something the daemon can defend against, and the review's boundaries are other local users, repository content, and the installer. Two of the three named items are answered by that decision rather than by code (stores stay `chmod`-sealed in the symlink tier; the lease id stays the only credential, and every client can read it), and the fixes it does make are elsewhere: state-directory ownership and modes, registration refusing repositories owned by another user (git's `safe.directory` rule, since implicit registration walks to `/`), store builds announced and switchable off, a root daemon warning, release provenance attestations, and the documents' claims brought in line with the code. Two config keys are added (`[repo] allow_foreign_owner = false`, `[store] allow_builds = true`). R2.08's threat model is in scope as a requirements section, not as a review of code that does not exist. `dev-phases.md` was edited to match.
 - **R1.25 to R1.28 and RX.07 were added on 2026-10-21**, after R1.01 to R1.22 had merged, to make Phase 1 usable by an agent with no setup: implicit registration and jj alongside git (R1.25), the agent-facing CLI contract with `reef guide`, error hints, and `reef here` (R1.26), `reef init` writing harness files (R1.27), prebuilt binaries and an installer pulled forward from R4.17 (R1.28), and an onboarding benchmark that becomes a Phase 1 exit criterion (RX.07). **R1.24 changes scope**: it no longer requires an existing jj repository or a `repo register` step, installs with the installer rather than two `cargo install` commands (R1.22's autostart already runs the daemon from the `reef` binary, so one binary was always enough), and gains a "set up your agent" section; it now depends on the four new tickets. R2.13, R2.17, RX.04, and R4.17 rows were amended and R2.24 to R2.26 added in `dev-phases.md` in the same change.
 
 ## Decisions fixed across all Phase 1 tickets
@@ -273,6 +276,8 @@ Allocated here so parallel tickets do not collide. The index row in `docs/adr/RE
 | 0023 | Watchman as the large-repository watcher | R1.14 |
 | 0024 | Repository onboarding: implicit registration and jj alongside git | R1.25 |
 | 0025 | Agent-facing CLI contract | R1.26 |
+| 0026 | Narrowed notify snapshots | R1.30 |
+| 0027 | Trust boundaries in Phase 1 | RX.01 |
 
 ### Platform and CI
 
