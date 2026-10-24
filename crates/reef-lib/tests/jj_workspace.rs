@@ -662,7 +662,7 @@ async fn stale_adopts_when_clean() {
 
     y.set_head(Arc::clone(x.head()));
     let pending = y
-        .begin_snapshot(Some(&shared), &IgnoreSources::default())
+        .begin_snapshot(Some(&shared), &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.adopted());
@@ -698,7 +698,7 @@ async fn stale_diverges_when_dirty() {
 
     y.set_head(Arc::clone(x.head()));
     let pending = y
-        .begin_snapshot(Some(&shared.commit_id), &IgnoreSources::default())
+        .begin_snapshot(Some(&shared.commit_id), &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.changed());
@@ -752,7 +752,7 @@ async fn forgotten_workspace_is_recovered() {
 
     x.set_head(Arc::clone(fx.main.head()));
     let pending = x
-        .begin_snapshot(Some(&before.commit_id), &IgnoreSources::default())
+        .begin_snapshot(Some(&before.commit_id), &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.changed());

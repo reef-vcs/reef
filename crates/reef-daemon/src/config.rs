@@ -98,6 +98,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "min_interval",
             "fallback_interval",
             "watched_fallback_interval",
+            "narrowed_max_paths",
             "max_concurrent_scans",
             "watchman_threshold_files",
             "watchman_attach_quiet",
@@ -353,14 +354,21 @@ pub struct WatcherSection {
     #[serde(with = "duration")]
     pub fallback_interval: Duration,
     /// The same for a workspace whose watch is working, which reports every
-    /// change (an overflow marks every workspace changed): a full scan that
-    /// covers events dropped while the scheduler was behind. The scheduler
+    /// change (an overflow marks every workspace changed): a full scan, the
+    /// backstop for a change a narrowed snapshot missed
+    /// ([`WatcherSection::narrowed_max_paths`], R1.30) and for events
+    /// dropped while the scheduler was behind. The scheduler
     /// raises it to [`WatcherSection::fallback_interval`] when it is
     /// shorter, so a long `fallback_interval` alone turns both timers down.
     /// Default 10 minutes; at 60 s, the scans of 200 idle 100,000-file
     /// workspaces outran the scan pool (R1.23).
     #[serde(with = "duration")]
     pub watched_fallback_interval: Duration,
+    /// A watcher snapshot of a notify workspace scans only the paths
+    /// reported since the last snapshot, and everything under them, until
+    /// more than this many distinct paths were reported (R1.30, ADR 0026).
+    /// Default 1,000; `0` scans every tracked file every time.
+    pub narrowed_max_paths: usize,
     /// Scans running at once. Default: the number of CPUs
     /// ([`Config::max_concurrent_scans`]).
     pub max_concurrent_scans: Option<usize>,
@@ -387,6 +395,7 @@ impl Default for WatcherSection {
             min_interval: Duration::from_secs(1),
             fallback_interval: Duration::from_secs(60),
             watched_fallback_interval: Duration::from_mins(10),
+            narrowed_max_paths: 1000,
             max_concurrent_scans: None,
             watchman_threshold_files: 50_000,
             watchman_attach_quiet: Duration::from_secs(2),
@@ -1156,6 +1165,7 @@ impl Config {
                     ("min_interval", d(w.min_interval)),
                     ("fallback_interval", d(w.fallback_interval)),
                     ("watched_fallback_interval", d(w.watched_fallback_interval)),
+                    ("narrowed_max_paths", w.narrowed_max_paths.to_string()),
                     (
                         "max_concurrent_scans",
                         w.max_concurrent_scans.unwrap_or_default().to_string(),

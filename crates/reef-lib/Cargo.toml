@@ -38,6 +38,9 @@ toml.workspace = true
 serde.workspace = true
 humantime-serde.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true            # fcntl(F_GETPATH): a reported path's spelling on disk (R1.30)
+
 [dev-dependencies]
 reef-testing.workspace = true
 tokio.workspace = true

@@ -34,12 +34,8 @@ jobs:
   load:
     name: load ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # `large` took over 4 hours on an M2 Max (docs/load-tests.md); 360 is the hosted maximum.
+    # `large` takes about an hour on an M2 Max (docs/load-tests.md); 360 is the hosted maximum.
     timeout-minutes: ${{ inputs.preset == 'large' && 360 || 90 }}
-    # Report-only on macOS: the 3-vCPU runner's full scans of `medium` (0.8 to 3 s each) cannot
-    # keep up with 200 writes a minute on 3 permits (docs/load-tests.md). Scanning only the paths
-    # the watcher reported, as Watchman workspaces do, is the follow-up that would gate it.
-    continue-on-error: ${{ matrix.os == 'macos-15' }}
     strategy:
       fail-fast: false
       matrix:

@@ -19,14 +19,34 @@
 //! restart, an aborted release, a rewatch), and
 //! `watcher.watched_fallback_interval` (10 minutes) otherwise. A working
 //! watch reports every change: a queue overflow or `FSEvents` dropping
-//! events marks every workspace changed. The long timer covers events the
-//! watcher dropped because the scheduler's queue was full. At 60 s for every
+//! events marks every workspace changed, and so does a workspace's next
+//! event after the scheduler's queue was full and one of its events was
+//! dropped. The long timer covers a workspace with no next event, and any
+//! change a narrowed scan missed. At 60 s for every
 //! workspace, the full scans of 200 idle 100,000-file workspaces outran the
 //! scan pool (R1.23, `docs/load-tests.md`).
 //!
 //! Explicit snapshots ([`Scheduler::snapshot_now`], the `Snapshot` RPC,
 //! `Inspect` with `snapshot_first`, release) wait for one in flight and then
 //! run, so they always see the files as they are when they start.
+//!
+//! # Narrowed scans
+//!
+//! Each entry keeps the paths reported since its last snapshot, relative to
+//! the workspace's canonical root (R1.30, ADR 0026). A watcher snapshot of
+//! a notify workspace scans only those paths and everything under them,
+//! not every tracked file. The set is taken once the snapshot holds its
+//! scan permit, so events that arrive while it waits for one join it, and
+//! events during the scan go to the next. It becomes *everything*, a full
+//! scan, on an event that says anything may have changed (an overflow),
+//! when it would grow past `watcher.narrowed_max_paths` (`0` turns
+//! narrowing off), and when `.reefignore` or the root itself is among the
+//! paths. Full scans also remain for explicit snapshots, fallback
+//! snapshots, a workspace whose watch is not working or that is `behind`,
+//! Watchman workspaces (jj narrows those itself, R1.14), and a working copy
+//! that is stale or has no working-copy commit in the view
+//! (`Repo::begin_snapshot`). The watched fallback is the backstop for a
+//! change a narrowed scan missed.
 //!
 //! # Concurrency
 //!
@@ -41,7 +61,8 @@
 //! daemon finishes only when the slowest one it touched does (a workspace
 //! hashing ten thousand new files would hold up all the others).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -60,7 +81,7 @@ use crate::model::{WatcherKind, WorkspaceId};
 use crate::watcher::{
     CreateClock, HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
 };
-use crate::workspace::{Manager, ManagerError};
+use crate::workspace::{Manager, ManagerError, REEFIGNORE};
 
 pub mod index;
 
@@ -193,12 +214,21 @@ pub struct SnapshotOutcome {
     /// From the first event that triggered it (or from the request) to the
     /// working-copy state being saved.
     pub latency_ms: u64,
-    /// Paths the watcher reported since the previous snapshot.
+    /// Distinct paths the watcher reported since the previous snapshot, as
+    /// of its scan; 0 when they became *everything* (see the module docs).
     pub paths_count: usize,
-    /// How long jj's scan of the working copy took, in milliseconds: all
-    /// tracked files for a notify workspace, the paths Watchman reported
-    /// for a Watchman one (R1.14).
+    /// The scan covered only the reported paths, and everything under them
+    /// (R1.30).
+    pub narrowed: bool,
+    /// How long jj's scan of the working copy took, in milliseconds: the
+    /// reported paths for a narrowed scan or a Watchman workspace (R1.14),
+    /// all tracked files otherwise.
     pub scan_ms: u64,
+    /// The part of `scan_ms` spent locking the working copy, which reloads
+    /// jj's tree state from disk (R1.30).
+    pub load_ms: u64,
+    /// The part of `scan_ms` spent walking the files (R1.30).
+    pub walk_ms: u64,
 }
 
 /// Why [`Scheduler::track`] is watching a workspace (R1.29). Only a create
@@ -262,17 +292,34 @@ struct Inner {
     drop_events: AtomicBool,
     /// Test hook: fail every watch, as if no watcher could start.
     refuse_watches: AtomicBool,
+    /// Test hook: while [`Scheduler::hold_scans`]' guard holds it for
+    /// writing, every snapshot waits after taking its trigger.
+    #[cfg(any(test, feature = "testing"))]
+    scan_hold: Arc<tokio::sync::RwLock<()>>,
+    /// Test hook: snapshots waiting at the hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held: AtomicUsize,
 }
 
 /// One tracked workspace.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the workspace, not states of one machine"
+)]
 struct Entry {
     /// Which watcher watches it.
     watcher: WatcherKind,
+    /// The workspace root, canonical as the watchers report paths.
+    root: PathBuf,
     /// When the first event since the last snapshot began arrived.
     dirty_since: Option<Instant>,
-    /// Paths reported since then.
-    paths_count: usize,
+    /// Paths reported since the last scan began, relative to `root`; empty
+    /// once `everything`.
+    paths: BTreeSet<PathBuf>,
+    /// Anything may have changed since the last scan began (see the module
+    /// docs).
+    everything: bool,
     /// A watcher or fallback snapshot has been started and has not ended.
     task: bool,
     /// Its watch is working: attached, and for a watcher that reports
@@ -319,13 +366,36 @@ pub(crate) enum Scheduled {
     Failed,
 }
 
-/// What a snapshot run takes from its scheduler entry when it starts.
-#[derive(Clone, Copy, Debug, Default)]
+/// What a snapshot run takes from its scheduler entry: when it starts
+/// ([`Scheduler::take_trigger`]), and once it holds a scan permit
+/// ([`Scheduler::take_reported`]).
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Trigger {
     /// The first event since the previous snapshot, if any.
     pub(crate) first_event: Option<Instant>,
-    /// Paths reported since then.
-    pub(crate) paths_count: usize,
+    /// Started by events, not by the fallback timer or a request: the scan
+    /// may be narrowed.
+    pub(crate) from_events: bool,
+    /// Paths reported since the previous scan began, relative to the
+    /// workspace root; empty when `everything`.
+    pub(crate) paths: Vec<PathBuf>,
+    /// Anything may have changed since then.
+    pub(crate) everything: bool,
+    /// The workspace's watch reports every change: a notify watch that is
+    /// working, with no unreported writes behind it.
+    pub(crate) narrowable: bool,
+}
+
+impl Trigger {
+    /// The paths to narrow the scan to, if it may be (see the module docs).
+    pub(crate) fn prefixes(&self) -> Option<&[PathBuf]> {
+        (self.from_events && self.narrowable && !self.everything).then_some(self.paths.as_slice())
+    }
+
+    /// Distinct paths reported; 0 for *everything*.
+    pub(crate) fn paths_count(&self) -> usize {
+        self.paths.len()
+    }
 }
 
 impl Scheduler {
@@ -361,6 +431,10 @@ impl Scheduler {
                 paused_all: AtomicUsize::new(0),
                 drop_events: AtomicBool::new(false),
                 refuse_watches: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                scan_hold: Arc::new(tokio::sync::RwLock::new(())),
+                #[cfg(any(test, feature = "testing"))]
+                held: AtomicUsize::new(0),
             }),
         };
         if config.backend != WatcherBackend::Watchman {
@@ -555,6 +629,51 @@ impl Scheduler {
         self.inner.refuse_watches.store(true, Ordering::Relaxed);
     }
 
+    /// Test hook: undoes [`Scheduler::pause_watcher`]; events from now on
+    /// are delivered again. Those dropped meanwhile stay lost.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn resume_watcher(&self) {
+        self.inner.drop_events.store(false, Ordering::Relaxed);
+    }
+
+    /// Test hook: delivers an event for `ws` as a watcher would, also while
+    /// [`Scheduler::pause_watcher`] drops the watchers' own.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn inject_event(&self, ws: WorkspaceId, paths: Vec<PathBuf>, everything: bool) {
+        self.inner.record_event(&WatchEvent {
+            workspace: ws,
+            paths,
+            everything,
+            at: Instant::now(),
+        });
+    }
+
+    /// Test hook: until the guard drops, every snapshot, scheduled or
+    /// explicit, waits after it has taken its trigger and its scan permit
+    /// and before it scans.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_scans(&self) -> ScanHold {
+        ScanHold(Arc::clone(&self.inner.scan_hold).write_owned().await)
+    }
+
+    /// Test hook: how many snapshots wait at [`Scheduler::hold_scans`]'
+    /// hold now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_scans(&self) -> usize {
+        self.inner.held.load(Ordering::SeqCst)
+    }
+
+    /// Where a snapshot waits while `Scheduler::hold_scans` (a test hook)
+    /// holds it.
+    pub(crate) async fn scan_hold_point(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.inner.held.fetch_add(1, Ordering::SeqCst);
+            drop(self.inner.scan_hold.read().await);
+            self.inner.held.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     /// Whether automatic snapshots of `ws` are paused.
     pub(crate) fn is_paused(&self, ws: WorkspaceId) -> bool {
         self.inner
@@ -612,8 +731,22 @@ impl Scheduler {
         };
         Trigger {
             first_event: entry.dirty_since.take(),
-            paths_count: std::mem::take(&mut entry.paths_count),
+            ..Trigger::default()
         }
+    }
+
+    /// Moves the paths reported for `ws` into `trigger`, just before its
+    /// scan: the scan covers every event so far, so its dirty mark is
+    /// cleared again.
+    pub(crate) fn take_reported(&self, ws: WorkspaceId, trigger: &mut Trigger) {
+        let mut entries = self.inner.lock_entries();
+        let Some(entry) = entries.get_mut(&ws) else {
+            return;
+        };
+        entry.dirty_since = None;
+        trigger.paths = std::mem::take(&mut entry.paths).into_iter().collect();
+        trigger.everything = std::mem::take(&mut entry.everything);
+        trigger.narrowable = entry.watcher == WatcherKind::Notify && entry.watched && !entry.behind;
     }
 
     /// Records that a snapshot of `ws` ended.
@@ -678,6 +811,14 @@ impl Scheduler {
         }
     }
 }
+
+/// Holds every snapshot before its scan; see [`Scheduler::hold_scans`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held snapshots scan at once"]
+#[derive(Debug)]
+pub struct ScanHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
 
 /// The error of [`Scheduler::snapshot_now`].
 pub type SnapshotFailure = ManagerError;
@@ -755,25 +896,33 @@ impl Inner {
         };
         let kind = entry.record().watcher;
         let defer = reason == TrackReason::Created;
-        // Writes made before a restart, between a release's untrack and its
-        // abort, or while a move rewatched were never reported.
-        self.lock_entries()
-            .entry(ws)
-            .or_insert_with(|| Entry {
+        // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
+        let root =
+            std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
+        {
+            let mut entries = self.lock_entries();
+            let tracked = entries.entry(ws).or_insert_with(|| Entry {
                 watcher: kind,
+                root: root.clone(),
                 dirty_since: None,
-                paths_count: 0,
+                paths: BTreeSet::new(),
+                everything: false,
                 task: false,
                 watched: false,
                 behind: false,
                 last_completed: Instant::now(),
                 paused: 0,
                 untracked_reported: HashSet::new(),
-            })
-            .behind |= reason != TrackReason::Created;
-        // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
-        let root =
-            std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
+            });
+            tracked.root.clone_from(&root);
+            // Writes made before a restart, between a release's untrack and
+            // its abort, or while a move rewatched were never reported.
+            if reason != TrackReason::Created {
+                tracked.behind = true;
+                tracked.paths.clear();
+                tracked.everything = true;
+            }
+        }
         let spec = entry.spec();
         let skip = skip_prefixes(&root, &spec.excludes, &spec.mounts);
         let watcher = self.watcher(kind);
@@ -913,6 +1062,12 @@ impl Inner {
         if self.drop_events.load(Ordering::Relaxed) {
             return;
         }
+        self.record_event(event);
+    }
+
+    /// Marks the event's workspace dirty and adds its paths to the set
+    /// (see the module docs).
+    fn record_event(&self, event: &WatchEvent) {
         let mut entries = self.lock_entries();
         // Events for an untracked workspace (released, or racing its
         // unwatch) are ignored.
@@ -920,7 +1075,24 @@ impl Inner {
             return;
         };
         entry.dirty_since.get_or_insert(event.at);
-        entry.paths_count += event.paths.len();
+        entry.everything |= event.everything;
+        for path in &event.paths {
+            if entry.everything {
+                break;
+            }
+            let Ok(relative) = path.strip_prefix(&entry.root) else {
+                continue;
+            };
+            // jj rescans under a changed `.gitignore` itself, not under
+            // Reef's own ignore file.
+            entry.everything = relative.as_os_str().is_empty()
+                || relative == Path::new(REEFIGNORE)
+                || (entry.paths.insert(relative.to_owned())
+                    && entry.paths.len() > self.config.narrowed_max_paths);
+        }
+        if entry.everything {
+            entry.paths.clear();
+        }
     }
 
     /// Starts every snapshot that is due: dirty workspaces past

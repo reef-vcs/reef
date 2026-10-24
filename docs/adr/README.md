@@ -37,3 +37,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0023](0023-watchman-as-the-large-repository-watcher.md) | Watchman as the large-repository watcher | accepted |
 | [0024](0024-repository-onboarding.md) | Repository onboarding: implicit registration and jj alongside git | accepted |
 | [0025](0025-agent-facing-cli-contract.md) | Agent-facing CLI contract | accepted |
+| [0026](0026-narrowed-notify-snapshots.md) | Narrowed notify snapshots | accepted |

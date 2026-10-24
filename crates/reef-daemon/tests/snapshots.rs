@@ -806,3 +806,47 @@ async fn write_right_after_create_is_snapshotted() {
     .await;
     eprintln!("a write right after create reached the operation log in {waited:.2?}");
 }
+
+// R1.30, 1: a watcher snapshot reports how its scan split between jj's
+// working-copy load and the walk, both inside `scan_ms`.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_split_is_reported() {
+    let (daemon, repo) = fixture().await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .on_snapshot(Box::new(move |outcome| {
+            sink.lock().unwrap().push(outcome.clone());
+        }));
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "split.txt", "x\n");
+    let id = id_of(&ws);
+    let watcher = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|outcome| {
+                outcome.workspace == id
+                    && outcome.kind == reef_daemon::snapshot::SnapshotKind::Watcher
+                    && outcome.changed
+            })
+            .cloned()
+    };
+    wait_for(Duration::from_secs(10), "a watcher snapshot", || async {
+        watcher().is_some()
+    })
+    .await;
+    let outcome = watcher().unwrap();
+    assert!(
+        outcome.load_ms + outcome.walk_ms <= outcome.scan_ms,
+        "load {} + walk {} > scan {}",
+        outcome.load_ms,
+        outcome.walk_ms,
+        outcome.scan_ms
+    );
+}

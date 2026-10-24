@@ -321,7 +321,7 @@ impl Repo {
             return Ok(false);
         };
         let commit = self.repo.store().get_commit(id).map_err(ReadError::from)?;
-        let recorded = self.workspace.working_copy().tree()?;
+        let recorded = self.recorded_tree()?;
         Ok(recorded.tree_ids_and_labels() == commit.tree().tree_ids_and_labels())
     }
 

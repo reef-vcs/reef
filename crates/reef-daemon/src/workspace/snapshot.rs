@@ -3,7 +3,10 @@
 //! held.
 //!
 //! 1. (async) Take a scan permit; ask the repository thread for its head,
-//!    reloaded first if an operation was written outside the daemon.
+//!    reloaded first if an operation was written outside the daemon. Take
+//!    the paths reported since the last scan, which a watcher snapshot of a
+//!    notify workspace narrows its scan to (R1.30, see
+//!    [`crate::snapshot`]).
 //! 2. (blocking) Lock the jj handle, point it at that head, and
 //!    `begin_snapshot`: lock the working copy, check freshness, scan. If the
 //!    working copy is ahead of the head (the `jj` CLI ran on the registered
@@ -22,7 +25,7 @@
 //! of its index row, so a crash between the two leaves rows naming an
 //! operation that exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
@@ -54,6 +57,12 @@ struct Ran {
     untracked: Vec<(String, UntrackedReasonKind)>,
     /// jj's scan.
     scan_ms: u64,
+    /// Its working-copy lock and tree-state reload.
+    load_ms: u64,
+    /// Its walk of the files.
+    walk_ms: u64,
+    /// It covered only the reported paths.
+    narrowed: bool,
 }
 
 /// Whether the snapshot wrote an operation.
@@ -192,7 +201,8 @@ impl Manager {
         if entry.record().state != WorkspaceState::Active || self.scheduler.is_paused(id) {
             return Scheduled::Skipped;
         }
-        let trigger = self.scheduler.take_trigger(id);
+        let mut trigger = self.scheduler.take_trigger(id);
+        trigger.from_events = !fallback;
         if trigger.first_event.is_none() && !fallback {
             // An explicit snapshot covered the events while this waited.
             return Scheduled::Skipped;
@@ -229,7 +239,7 @@ impl Manager {
         entry: &Arc<WorkspaceEntry>,
         kind: SnapshotKind,
         description: String,
-        trigger: Trigger,
+        mut trigger: Trigger,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let begun = Instant::now();
         let started = trigger.first_event.unwrap_or(begun);
@@ -242,12 +252,15 @@ impl Manager {
             .call_async(|head| head.refresh().boxed_local())
             .await??;
         let permit = self.scheduler.acquire().await;
+        self.scheduler.scan_hold_point().await;
+        self.scheduler.take_reported(id, &mut trigger);
         let ran = {
             let entry = Arc::clone(entry);
             let db = Arc::clone(&self.db);
             let expected = record.commit_id.parse::<CommitIdHex>().ok();
             let reefignore = entry.paths.root.join(REEFIGNORE);
             let spec = entry.spec();
+            let prefixes = trigger.prefixes().map(<[PathBuf]>::to_vec);
             tokio::task::spawn_blocking(move || {
                 // An overlay whose mount is gone would scan as empty.
                 entry.backend.check_materialized(&entry.paths)?;
@@ -263,6 +276,7 @@ impl Manager {
                     reefignore: &reefignore,
                     spec: &spec,
                     description: &description,
+                    prefixes: prefixes.as_deref(),
                 };
                 pipeline.run(repo, head, permit)
             })
@@ -270,65 +284,89 @@ impl Manager {
         };
         self.scheduler.report_untracked(id, &ran.untracked);
 
-        let outcome = match &ran.recorded {
-            Recorded::Committed(committed) => {
-                // The row, in the database and in memory, was written by
-                // the blocking half before the working-copy state.
-                SnapshotOutcome {
-                    workspace: id,
-                    kind,
-                    changed: true,
-                    adopted: false,
-                    divergent: committed.divergent,
-                    recovered: ran.recovered,
-                    op_id: committed.op_id.clone(),
-                    commit_id: committed.commit_id.clone(),
-                    change_id: committed.change_id.to_string(),
-                    latency_ms: elapsed_ms(started),
-                    paths_count: trigger.paths_count,
-                    scan_ms: ran.scan_ms,
+        let (changed, adopted, divergent, recovered, op_id, commit_id, change_id) =
+            match &ran.recorded {
+                // The row, in the database and in memory, was written by the
+                // blocking half before the working-copy state.
+                Recorded::Committed(committed) => (
+                    true,
+                    false,
+                    committed.divergent,
+                    ran.recovered,
+                    committed.op_id.clone(),
+                    committed.commit_id.clone(),
+                    committed.change_id.to_string(),
+                ),
+                Recorded::Unchanged {
+                    head_op,
+                    wc_commit,
+                    wc_change,
+                } => {
+                    self.follow_view(entry, wc_commit, wc_change)?;
+                    let (op, commit) = (head_op.clone(), wc_commit.clone());
+                    (
+                        false,
+                        ran.adopted,
+                        false,
+                        false,
+                        op,
+                        commit,
+                        wc_change.to_string(),
+                    )
                 }
-            }
-            Recorded::Unchanged {
-                head_op,
-                wc_commit,
-                wc_change,
-            } => {
-                if wc_commit.as_str() != record.commit_id || wc_change.as_str() != record.change_id
-                {
-                    // Adopted another workspace's rewrite of the shared
-                    // commit, or the view moved the workspace (`jj abandon`).
-                    self.db.set_workspace_commit(
-                        id,
-                        wc_change.as_str(),
-                        wc_commit.as_str(),
-                        None,
-                    )?;
-                    entry.update_record(|record| {
-                        record.commit_id = wc_commit.to_string();
-                        record.change_id = wc_change.to_string();
-                    });
-                }
-                SnapshotOutcome {
-                    workspace: id,
-                    kind,
-                    changed: false,
-                    adopted: ran.adopted,
-                    divergent: false,
-                    recovered: false,
-                    op_id: head_op.clone(),
-                    commit_id: wc_commit.clone(),
-                    change_id: wc_change.to_string(),
-                    latency_ms: elapsed_ms(started),
-                    paths_count: trigger.paths_count,
-                    scan_ms: ran.scan_ms,
-                }
-            }
+            };
+        let outcome = SnapshotOutcome {
+            workspace: id,
+            kind,
+            changed,
+            adopted,
+            divergent,
+            recovered,
+            op_id,
+            commit_id,
+            change_id,
+            latency_ms: elapsed_ms(started),
+            paths_count: trigger.paths_count(),
+            narrowed: ran.narrowed,
+            scan_ms: ran.scan_ms,
+            load_ms: ran.load_ms,
+            walk_ms: ran.walk_ms,
         };
-        log_outcome(&outcome, record.repo_id, ran.updated_files, begun);
+        log_outcome(
+            &outcome,
+            record.repo_id,
+            ran.updated_files,
+            trigger.everything,
+            begun,
+        );
         self.verify_stores(entry, &outcome, &record.commit_id).await;
         self.scheduler.run_hooks(&outcome);
         Ok(outcome)
+    }
+}
+
+impl Manager {
+    /// Points the row, in the database and in memory, at the view's
+    /// working-copy commit after an unchanged snapshot, if it moved: the
+    /// workspace adopted another's rewrite of the shared commit, or the view
+    /// moved it (`jj abandon`).
+    fn follow_view(
+        &self,
+        entry: &WorkspaceEntry,
+        wc_commit: &CommitIdHex,
+        wc_change: &ChangeIdHex,
+    ) -> Result<(), ManagerError> {
+        let record = entry.record();
+        if wc_commit.as_str() == record.commit_id && wc_change.as_str() == record.change_id {
+            return Ok(());
+        }
+        self.db
+            .set_workspace_commit(record.id, wc_change.as_str(), wc_commit.as_str(), None)?;
+        entry.update_record(|record| {
+            record.commit_id = wc_commit.to_string();
+            record.change_id = wc_change.to_string();
+        });
+        Ok(())
     }
 }
 
@@ -342,6 +380,8 @@ struct Pipeline<'a> {
     reefignore: &'a Path,
     spec: &'a SnapshotSpec,
     description: &'a str,
+    /// What to narrow the scan to; `None` scans everything.
+    prefixes: Option<&'a [PathBuf]>,
 }
 
 impl Pipeline<'_> {
@@ -357,13 +397,14 @@ impl Pipeline<'_> {
             repo: &'r mut Repo,
             expected: Option<&CommitIdHex>,
             sources: &IgnoreSources<'_>,
+            prefixes: Option<&[PathBuf]>,
         ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
-            pollster::block_on(repo.begin_snapshot(expected, sources))
+            pollster::block_on(repo.begin_snapshot(expected, sources, prefixes))
         }
-        let expected = self.expected;
+        let (expected, prefixes) = (self.expected, self.prefixes);
         match permit.pool() {
-            Some(pool) => pool.install(move || scan(repo, expected, sources)),
-            None => scan(repo, expected, sources),
+            Some(pool) => pool.install(move || scan(repo, expected, sources, prefixes)),
+            None => scan(repo, expected, sources, prefixes),
         }
     }
 
@@ -429,7 +470,12 @@ impl Pipeline<'_> {
     ) -> (Result<Ran, ManagerError>, Option<Arc<ReadonlyRepo>>) {
         let adopted = pending.adopted();
         let updated_files = pending.updated_files();
-        let scan_ms = u64::try_from(pending.scan_time().as_millis()).unwrap_or(u64::MAX);
+        let millis =
+            |time: std::time::Duration| u64::try_from(time.as_millis()).unwrap_or(u64::MAX);
+        let scan_ms = millis(pending.scan_time());
+        let load_ms = millis(pending.load_time());
+        let walk_ms = millis(pending.walk_time());
+        let narrowed = pending.narrowed();
         let untracked = pending.untracked().to_vec();
         if !pending.changed() {
             let head_op = pending.head_op().clone();
@@ -453,6 +499,9 @@ impl Pipeline<'_> {
                     updated_files,
                     untracked,
                     scan_ms,
+                    load_ms,
+                    walk_ms,
+                    narrowed,
                 })
                 .map_err(ManagerError::from);
             return (ran, None);
@@ -489,6 +538,9 @@ impl Pipeline<'_> {
             updated_files,
             untracked,
             scan_ms,
+            load_ms,
+            walk_ms,
+            narrowed,
         });
         (ran, new_head)
     }
@@ -551,10 +603,13 @@ fn record_commit(
 
 /// The snapshot's log event: `info` when it wrote an operation or adopted a
 /// rewrite, `warn` when it diverged or recovered, `debug` otherwise.
+/// `everything`: an event since the previous snapshot said anything may
+/// have changed.
 fn log_outcome(
     outcome: &SnapshotOutcome,
     repo: crate::model::RepoId,
     updated_files: u32,
+    everything: bool,
     begun: Instant,
 ) {
     let kind = outcome.kind.as_str();
@@ -585,7 +640,11 @@ fn log_outcome(
             elapsed_ms = elapsed_ms(begun),
             latency_ms = outcome.latency_ms,
             scan_ms = outcome.scan_ms,
+            load_ms = outcome.load_ms,
+            walk_ms = outcome.walk_ms,
             paths_count = outcome.paths_count,
+            everything,
+            narrowed = outcome.narrowed,
             "{kind} snapshot taken"
         );
     } else if outcome.adopted {
@@ -603,6 +662,8 @@ fn log_outcome(
             %repo,
             elapsed_ms = elapsed_ms(begun),
             paths_count = outcome.paths_count,
+            everything,
+            narrowed = outcome.narrowed,
             "{kind} snapshot found no changes"
         );
     }

@@ -47,7 +47,8 @@ pub const WATCHMAN_REGISTER_TRIGGER_KEY: &str = "fsmonitor.watchman.register-sna
 /// paths.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Fsmonitor {
-    /// None: every snapshot scans every tracked file.
+    /// None: every snapshot scans every tracked file, unless its caller
+    /// narrows it ([`super::Repo::begin_snapshot`]).
     #[default]
     None,
     /// Watchman: a snapshot scans only the paths Watchman reports changed

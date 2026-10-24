@@ -9,7 +9,8 @@
 //! - **notify** ([`notify::NotifyWatcher`]): one debounced watcher for every
 //!   notify workspace. Its events are mapped back to workspaces by root
 //!   (`Demux`): workspace roots never nest, so the root a path falls under
-//!   is unambiguous. Every snapshot scans every tracked file (ADR 0008).
+//!   is unambiguous. The scheduler keeps the paths, and a watcher snapshot
+//!   scans only them and everything under them (R1.30, ADR 0026).
 //! - **watchman** (`watchman::WatchmanWatcher`, with the `watchman`
 //!   feature): a Watchman subscription per workspace, and scans narrowed by
 //!   jj's own Watchman query (ADR 0023). For repositories at or above
@@ -39,9 +40,13 @@ use crate::model::WorkspaceId;
 pub struct WatchEvent {
     /// The workspace.
     pub workspace: WorkspaceId,
-    /// The changed paths, absolute. Empty means "anything may have changed".
+    /// The changed paths, absolute.
     pub paths: Vec<PathBuf>,
-    /// When the earliest of them was observed.
+    /// Anything under the workspace may have changed, whatever `paths`
+    /// holds: events were lost (an inotify queue overflow, `FSEvents`
+    /// dropping events), or Watchman's view started over (R1.30).
+    pub everything: bool,
+    /// When the earliest change was observed.
     pub at: Instant,
 }
 

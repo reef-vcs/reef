@@ -652,15 +652,10 @@ impl Task {
     }
 
     fn send(&self, batch: Pending) {
-        // An empty path list is the scheduler's "anything may have changed".
-        let paths = if batch.rescan {
-            Vec::new()
-        } else {
-            batch.paths
-        };
         let sent = self.shared.events.try_send(WatchEvent {
             workspace: self.workspace,
-            paths,
+            paths: batch.paths,
+            everything: batch.rescan,
             at: batch.at,
         });
         if let Err(mpsc::error::TrySendError::Full(_)) = sent {
