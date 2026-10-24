@@ -618,10 +618,18 @@ fn autostart_spawns_daemon() {
     assert!(started.elapsed() < Duration::from_secs(15));
     assert_eq!(stderr(&output), format!("stopped daemon (pid {pid})\n"));
     assert!(!pid_file.exists());
-    assert_eq!(
-        kill(Pid::from_raw(i32::try_from(pid).unwrap()), None),
-        Err(Errno::ESRCH)
-    );
+    // `stop` returns once the pid file is gone and the socket refuses, the
+    // last step of shutdown; the process may take a moment more to exit and
+    // be reaped, longer on a loaded runner.
+    let pid = Pid::from_raw(i32::try_from(pid).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while kill(pid, None) != Err(Errno::ESRCH) {
+        assert!(
+            Instant::now() < deadline,
+            "pid {pid} still exists 10 s after stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let output = reef().args(["daemon", "status"]).output().unwrap();
     failed(&output, 6, "unavailable");
 }
