@@ -248,10 +248,7 @@ impl Manager {
         let id = record.id;
         // The head first: a permit is a scan slot, not held while the
         // repository thread is busy.
-        let head = entry
-            .repo
-            .call_async(|head| head.refresh().boxed_local())
-            .await??;
+        let head = self.workspace_head(entry, true).await?;
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
         self.scheduler.take_reported(id, &mut trigger);

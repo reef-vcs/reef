@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,9 @@ pub struct RepoHead {
     dirty: bool,
     /// A job panicked: reopen the repository rather than reload it.
     reopen: bool,
+    /// How many times the repository was reopened; shared with every
+    /// [`RepoHandle`].
+    generation: Arc<AtomicU64>,
 }
 
 impl RepoHead {
@@ -65,12 +69,27 @@ impl RepoHead {
             // has none.
             self.repo = Repo::open(&self.root, &self.settings).await?;
             self.reopen = false;
+            self.generation.fetch_add(1, Ordering::Relaxed);
             tracing::info!(repo = %self.id, "repository reopened after a panicked job");
         } else {
             self.repo.reload_at_head().await?;
         }
         self.dirty = false;
         Ok(())
+    }
+
+    /// How many times [`RepoHead::reload`] has reopened the repository
+    /// after a panicked job. A [`Repo`] opened from [`RepoHead::repo`]
+    /// shares its store, so one opened at an earlier generation may hold a
+    /// store the panic poisoned (#63).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether a job panicked and the reopen after it has not succeeded
+    /// yet; [`RepoHead::refresh`] retries it.
+    pub fn reopen_pending(&self) -> bool {
+        self.reopen
     }
 
     /// Records that the current job panicked: the thread reopens the
@@ -178,12 +197,19 @@ impl Classify for RegistryError {
 pub struct RepoHandle {
     id: RepoId,
     tx: std::sync::mpsc::Sender<Message>,
+    generation: Arc<AtomicU64>,
 }
 
 impl RepoHandle {
     /// The repository.
     pub fn id(&self) -> RepoId {
         self.id
+    }
+
+    /// [`RepoHead::generation`], read without a job: it may lag a reopen
+    /// the thread is making.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Runs `f` on the repository thread after every job sent before it,

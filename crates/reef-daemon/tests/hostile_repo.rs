@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::TestDaemon;
+use reef_daemon::backend::fs_util::TRASH_INFIX;
 use reef_daemon::client::ClientError;
 use reef_daemon::config::Config;
 use reef_daemon::proto::v0::register_request::IfNotJj;
@@ -118,12 +119,15 @@ impl Fixture {
             .join("ws")
     }
 
-    /// The workspace directories under [`Fixture::ws_root`].
+    /// The workspace directories under [`Fixture::ws_root`], without the
+    /// `.trash-*` ones a failed create or a release is still deleting in
+    /// the background.
     fn workspace_dirs(&self) -> BTreeSet<String> {
         std::fs::read_dir(self.ws_root())
             .map(|entries| {
                 entries
                     .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .filter(|name| !name.contains(TRASH_INFIX))
                     .collect()
             })
             .unwrap_or_default()
@@ -226,7 +230,9 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
 
 // 12b: the guard's backstop. A job that panics anyway (here jj-lib, handed
 // the tree directly) leaves no poisoned store behind: the thread reopens
-// the repository, so the next job and the next create work.
+// the repository, so the next job and the next create work, and a
+// workspace opened before the panic snapshots on a fresh store too, and
+// so does GC after another panic (#63).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicked_job_reopens_the_repository() {
     use futures::FutureExt as _;
@@ -235,6 +241,7 @@ async fn a_panicked_job_reopens_the_repository() {
     use reef_lib::jj::CommitIdHex;
 
     let f = fixture().await;
+    let before = f.create_on("main", "").await.unwrap();
     let canary = blob(&f.root, b"escaped\n");
     let name = format!("a/{CANARY}");
     let hostile: CommitIdHex = f
@@ -243,18 +250,22 @@ async fn a_panicked_job_reopens_the_repository() {
         .unwrap();
     let id: RepoId = f.repo.parse().unwrap();
     let handle = f.daemon.handle.state().repos.get(id).unwrap();
-    let panicked = handle
-        .call_async(move |head| {
-            async move {
-                let _ = head.repo.spec_at(&hostile).await;
-            }
-            .boxed_local()
-        })
-        .await;
-    assert!(
-        matches!(panicked, Err(RepoThreadError::Panicked { .. })),
-        "{panicked:?}"
-    );
+    let panic = async || {
+        let hostile = hostile.clone();
+        let panicked = handle
+            .call_async(move |head| {
+                async move {
+                    let _ = head.repo.spec_at(&hostile).await;
+                }
+                .boxed_local()
+            })
+            .await;
+        assert!(
+            matches!(panicked, Err(RepoThreadError::Panicked { .. })),
+            "{panicked:?}"
+        );
+    };
+    panic().await;
     let main: CommitIdHex = f.main.parse().unwrap();
     handle
         .call_async(move |head| {
@@ -264,6 +275,19 @@ async fn a_panicked_job_reopens_the_repository() {
         .unwrap()
         .unwrap();
     f.create_on("main", "").await.unwrap();
+    std::fs::write(Path::new(&before.path).join("after-panic"), "kept\n").unwrap();
+    let snapshot = f
+        .daemon
+        .client
+        .snapshot_workspace(&f.repo, &before.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed, "{snapshot:?}");
+
+    panic().await;
+    let reports = f.daemon.client.gc(&f.repo, false).await.unwrap().reports;
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].jj_error.is_empty(), "{}", reports[0].jj_error);
 }
 
 // 13

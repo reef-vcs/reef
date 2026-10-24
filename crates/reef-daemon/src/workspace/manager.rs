@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::settings::Fsmonitor;
-use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, UserSettings};
+use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, ReadonlyRepo, UserSettings};
 
 use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
@@ -619,6 +620,7 @@ impl Manager {
                     self.settings.clone()
                 }
             };
+            let generation = handle.generation();
             let jj = self.reopen(&handle, &paths, settings).await;
             let spec = base_spec(&handle, &record).await;
             let stores = self.load_stores(&handle, &record).await;
@@ -627,6 +629,7 @@ impl Manager {
                 paths,
                 backend: backend_for(kind, &self.config.file.workspace.overlay()),
                 jj: Arc::new(Mutex::new(jj)),
+                jj_generation: AtomicU64::new(generation),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
                 spec: Mutex::new(spec),
@@ -682,6 +685,75 @@ impl Manager {
                 None
             }
         }
+    }
+
+    /// The repository thread's head, refreshed first ([`RepoHead::refresh`])
+    /// if `refresh`, else as it stands (a reopen that failed after a panic
+    /// is retried either way), with the workspace's jj handle reopened on
+    /// the repository's
+    /// store if the thread has reopened the repository after a panicked job
+    /// since the handle was opened (#63). The handle shares the store it was
+    /// opened on, and a panic inside jj-lib can leave that store's locks
+    /// poisoned, failing every scan until the daemon restarts. The
+    /// generations are compared in the same job that reads the head, so a
+    /// reopen queued ahead of it is seen; one landing after it fails one scan, and
+    /// the next renews. A handle that is gone (released, or not reopened at
+    /// start) stays gone. The caller holds the workspace's scan lock.
+    ///
+    /// [`RepoHead::refresh`]: crate::repo::RepoHead::refresh
+    pub(super) async fn workspace_head(
+        &self,
+        entry: &Arc<WorkspaceEntry>,
+        refresh: bool,
+    ) -> Result<Arc<ReadonlyRepo>, ManagerError> {
+        let id = entry.paths.id;
+        let loaded = entry
+            .jj
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        let opened_at = entry.jj_generation.load(Ordering::Relaxed);
+        // As at start, a Watchman workspace whose settings cannot be built
+        // falls back to the default ones (logged by `load_active`).
+        let settings = self
+            .wc_settings(entry.record().watcher)
+            .unwrap_or_else(|_| self.settings.clone());
+        let root = entry.paths.root.clone();
+        let state_dir = entry.paths.state_dir.clone();
+        let (head, renewed) = entry
+            .repo
+            .call_async(move |head| {
+                async move {
+                    let readonly = if refresh || head.reopen_pending() {
+                        head.refresh().await?
+                    } else {
+                        head.readonly()
+                    };
+                    let generation = head.generation();
+                    if !loaded || generation == opened_at {
+                        return Ok((readonly, None));
+                    }
+                    let ws = head
+                        .repo
+                        .open_workspace_with(&root, &state_dir, &settings)?;
+                    Ok::<_, ManagerError>((readonly, Some((ws, generation))))
+                }
+                .boxed_local()
+            })
+            .await??;
+        if let Some((ws, generation)) = renewed {
+            let entry = Arc::clone(entry);
+            tokio::task::spawn_blocking(move || {
+                let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
+                if guard.is_some() {
+                    *guard = Some(ws);
+                    entry.jj_generation.store(generation, Ordering::Relaxed);
+                    tracing::info!(workspace_id = %id, "workspace reopened after its repository was");
+                }
+            })
+            .await?;
+        }
+        Ok(head)
     }
 
     /// Reclaims a workspace whose directory is gone: forgets its jj
