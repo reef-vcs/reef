@@ -13,7 +13,7 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 - No setup step: the first `reef` command in a git checkout registers it and initializes jj alongside git (`.jj/` and one line in `.git/info/exclude`).
 - Continuous snapshots driven by a filesystem watcher (notify; Watchman for large repositories when installed), with staleness and divergence handling that never discards an agent's edits.
 - Leases with heartbeats, expiry, and reclaim with a final snapshot; `reef ws run` as the agent entry point.
-- `reef init`, `reef guide`, and `reef here`: `AGENTS.md`, `CLAUDE.md`, and a Claude Code skill that start agents in a workspace on their own, and errors that carry a `hint` and the `next` command to run.
+- `reef init`, `reef guide`, and `reef here`: `AGENTS.md`, `CLAUDE.md`, and a Claude Code skill that start agents in a workspace on their own, and errors that carry a `hint` and the `next` command to run. `reef status` and similar guesses at "where am I" point at `reef here`.
 - `reef.toml` workspace spec: lease default, snapshot excludes, and shared dependency stores built once per lockfile and mounted read-only (`reef store build|list`).
 - `reef backup` and `reef restore`, and a quiesce RPC for filesystem snapshots.
 - Prebuilt binaries for macOS and Linux on arm64 and x86_64, a one-line installer, a Homebrew tap, and `cargo binstall` metadata.

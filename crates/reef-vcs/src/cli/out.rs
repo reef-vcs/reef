@@ -185,13 +185,24 @@ impl Out {
     }
 
     /// clap's rendering of a usage error on stderr, which already ends in
-    /// the usage line; in JSON mode also the error object, with `message`
-    /// as its first line and the usage line as its hint.
+    /// the usage line, then `hint:` and `next:` lines for a known `fix`; in
+    /// JSON mode also the error object, with `message` as its first line
+    /// and the fix as its advice, else the usage line as its hint.
     #[expect(clippy::print_stderr, reason = "the CLI reports its own failures")]
-    pub(crate) fn usage_error(&self, rendered: &str, message: &str, usage: Option<&str>) {
+    pub(crate) fn usage_error(
+        &self,
+        rendered: &str,
+        message: &str,
+        usage: Option<&str>,
+        fix: Option<&Advice>,
+    ) {
         eprint!("{rendered}");
+        if let Some(fix) = fix {
+            self.error_line(&format!("hint: {}", fix.hint));
+            self.error_line(&format!("next: {}", shell_line(&fix.next)));
+        }
         if self.mode == Output::Json {
-            let advice = usage.map(Advice::hint);
+            let advice = fix.cloned().or_else(|| usage.map(Advice::hint));
             self.error_object("invalid_argument", message, advice.as_ref());
         }
     }
