@@ -1,5 +1,7 @@
 //! The repository thread's loop.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -57,6 +59,8 @@ impl RepoThread {
         let (loaded_tx, loaded) = mpsc::channel();
         let root = record.root.clone();
         let record = record.clone();
+        let generation = Arc::new(AtomicU64::new(0));
+        let shared = Arc::clone(&generation);
         let join = std::thread::Builder::new()
             .name(format!("reef-repo-{id}"))
             .spawn(move || {
@@ -79,13 +83,14 @@ impl RepoThread {
                     checked_trees: CheckedTrees::default(),
                     dirty: false,
                     reopen: false,
+                    generation: shared,
                 };
                 run(head, &rx);
             })
             .map_err(|source| RegistryError::Spawn { id, source })?;
         match loaded.recv() {
             Ok(Ok(())) => Ok(RepoThread {
-                handle: RepoHandle { id, tx },
+                handle: RepoHandle { id, tx, generation },
                 join,
             }),
             Ok(Err(source)) => {

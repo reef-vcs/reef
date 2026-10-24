@@ -28,6 +28,7 @@ mod snapshot;
 mod stores;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -72,6 +73,10 @@ pub struct WorkspaceEntry {
     /// after a restart or once it is released. Locked by scans on the
     /// blocking pool; never held across an `.await`.
     pub jj: Arc<Mutex<Option<Repo>>>,
+    /// The [`RepoHandle::generation`] read before `jj` was opened: when the
+    /// repository's is later, `Manager::workspace_head` reopens `jj` on
+    /// the repository's new store.
+    pub jj_generation: AtomicU64,
     /// Its repository's thread.
     pub repo: RepoHandle,
     /// Serializes snapshots and release of this workspace.

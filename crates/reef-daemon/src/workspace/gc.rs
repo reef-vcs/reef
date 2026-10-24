@@ -148,12 +148,25 @@ impl Manager {
     async fn settle(&self, handle: &RepoHandle, active: &[&Arc<WorkspaceEntry>]) -> Vec<String> {
         // A working copy an interrupted GC left on an abandoned operation
         // cannot snapshot; move it first if its files are its commit's.
-        if let Ok(Ok(head)) = handle.call_async(|head| head.refresh().boxed_local()).await {
-            for entry in active {
-                if let Err(error) = repair(entry, &head).await {
-                    tracing::warn!(workspace_id = %entry.paths.id, error = %ErrorChain(&error), "cannot check the working copy before GC");
+        // A handle that cannot be renewed after a panicked job is on a
+        // poisoned store, and GC's rebind would panic on it: unsafe.
+        let mut unrenewed = Vec::new();
+        for entry in active {
+            match self.workspace_head(entry, true).await {
+                Ok(head) => {
+                    if let Err(error) = repair(entry, &head).await {
+                        tracing::warn!(workspace_id = %entry.paths.id, error = %ErrorChain(&error), "cannot check the working copy before GC");
+                    }
                 }
+                Err(error) => unrenewed.push(format!(
+                    "workspace {}: {}",
+                    entry.paths.id,
+                    ErrorChain(&error)
+                )),
             }
+        }
+        if !unrenewed.is_empty() {
+            return unrenewed;
         }
         let mut pending: Vec<&Arc<WorkspaceEntry>> = active.to_vec();
         let mut problems = Vec::new();

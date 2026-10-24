@@ -152,7 +152,7 @@ impl Manager {
         let old_stores = entry.stores();
         let mut details = Vec::new();
         self.unmount_stores(&entry, &mut details).await;
-        let swapped = match swap(&entry, &from, &base, &handle, &pointer).await {
+        let swapped = match swap(self, &entry, &from, &base, &pointer).await {
             Ok(swapped) => swapped,
             Err(failed) => {
                 let abandon_left = matches!(resolved.start, StartPoint::NewOn(_));
@@ -451,17 +451,18 @@ async fn move_pointer(
 
 /// Step 5's tree, on the blocking pool with the jj handle locked: the
 /// backend's swap, then the check-out or the seeded reset at the operation
-/// that moved the pointer (the repository thread's head after it). A
-/// failure says whether the check-out had begun.
+/// that moved the pointer (the repository thread's head after it). The jj
+/// handle is renewed first if another job of the repository panicked since
+/// step 1's snapshot (#63). A failure says whether the check-out had begun.
 async fn swap(
+    manager: &Manager,
     entry: &Arc<WorkspaceEntry>,
     from: &BaseEntry,
     to: &BaseEntry,
-    handle: &RepoHandle,
     pointer: &PointerMove,
 ) -> Result<Swapped, SwapFailed> {
-    let head = handle
-        .call(|head| head.readonly())
+    let head = manager
+        .workspace_head(entry, false)
         .await
         .map_err(SwapFailed::before)?;
     let entry = Arc::clone(entry);

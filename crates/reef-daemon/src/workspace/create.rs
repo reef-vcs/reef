@@ -43,6 +43,7 @@
 use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -135,6 +136,7 @@ impl Manager {
         timings.mount_ms = lap.next();
 
         // 5.
+        let generation = handle.generation();
         let created =
             create_jj_workspace(&handle, id, &paths, resolved.start.clone(), wc_settings).await;
         let (ws, op_id, wc) = undo.or_undo(created).await?;
@@ -180,7 +182,7 @@ impl Manager {
         self.load_created(
             &record,
             &mut undo,
-            ws,
+            (ws, generation),
             handle,
             resolved.spec.snapshot.clone(),
             mounted.clone(),
@@ -241,7 +243,7 @@ impl Manager {
         &self,
         record: &WorkspaceRecord,
         undo: &mut Undo,
-        ws: Repo,
+        (ws, generation): (Repo, u64),
         handle: RepoHandle,
         spec: SnapshotSpec,
         stores: Vec<MountedStore>,
@@ -256,6 +258,7 @@ impl Manager {
             paths,
             backend,
             jj: Arc::new(Mutex::new(Some(ws))),
+            jj_generation: AtomicU64::new(generation),
             repo: handle,
             scan_lock: tokio::sync::Mutex::new(()),
             spec: Mutex::new(spec),
