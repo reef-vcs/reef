@@ -92,6 +92,7 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 4 | 4 | 1 | 5 | 17,810 | 467 | $0.02 | 12 s | 0/3 | First baseline. Both failed calls released the workspace the shell was in. |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 9b5583f5a3c0 | linux | 3/3 | 4 | 4 | 1 | 5 | 17,559 | 469 | $0.02 | 9 s | 0/3 | First Linux baseline (ubuntu-24.04, fuse-overlayfs) |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 4c966c7ba4e6 | linux | 3/3 | 4 | 4 | 0 | 5 | 17,547 | 451 | $0.02 | 9 s | 0/3 | pre-0.1.0 check, after RX.01 (#65) and #67 |
 <!-- onboarding-rows:A -->
 
 ### Scenario B: after `reef init`
@@ -100,6 +101,7 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 2 | 2 | 0 | 4 | 53,985 | 233 | $0.02 | 8 s | 0/3 | First baseline. |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 9b5583f5a3c0 | linux | 3/3 | 2 | 2 | 0 | 4 | 53,583 | 251 | $0.02 | 7 s | 0/3 | First Linux baseline (ubuntu-24.04, fuse-overlayfs) |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 4c966c7ba4e6 | linux | 3/3 | 2 | 2 | 0 | 4 | 53,580 | 250 | $0.02 | 6 s | 0/3 | pre-0.1.0 check, after RX.01 (#65) and #67 |
 <!-- onboarding-rows:B -->
 
 ### Scenario C: from nothing
@@ -108,6 +110,7 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 3/3 | 5 | 6 | 0 | 7 | 45,816 | 1,179 | $0.04 | 109 s | 0/3 | First baseline. Installer from a local mirror (before 0.1.0). |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 9b5583f5a3c0 | linux | 3/3 | 6 | 6 | 0 | 7 | 36,973 | 1,046 | $0.03 | 284 s | 0/3 | First Linux baseline (ubuntu-24.04, fuse-overlayfs) |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 4c966c7ba4e6 | linux | 3/3 | 5 | 7 | 0 | 8 | 38,198 | 1,116 | $0.03 | 295 s | 0/3 | pre-0.1.0 check, after RX.01 (#65) and #67 |
 <!-- onboarding-rows:C -->
 
 ### Scenario D: oriented
@@ -116,4 +119,5 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 1956cd007979 | macos | 2/3 | 3 | 3 | 0 | 4 | 14,102 | 406 | $0.01 | 10 s | 0/3 | First baseline. Trial 1 answered without running `reef`. |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 9b5583f5a3c0 | linux | 3/3 | 3 | 3 | 0 | 4 | 13,129 | 504 | $0.01 | 9 s | 0/3 | First Linux baseline (ubuntu-24.04, fuse-overlayfs) |
+| 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 4c966c7ba4e6 | linux | 3/3 | 3 | 3 | 0 | 4 | 12,814 | 499 | $0.01 | 9 s | 0/3 | pre-0.1.0 check, after RX.01 (#65) and #67 |
 <!-- onboarding-rows:D -->
