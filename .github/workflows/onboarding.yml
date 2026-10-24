@@ -1,13 +1,13 @@
 name: Onboarding benchmark
 
 # RX.07: a real Claude Code agent, new to Reef, from nothing to a working `reef ws run`, three
-# trials per scenario. Weekly and on demand, never on pull requests: every trial spends real money
-# (up to $2, `--max-budget-usd`), and the ANTHROPIC_API_KEY secret is not available to pull
-# requests from forks. Each run opens a pull request adding its rows to
+# trials per scenario. On demand only, never on pull requests: every trial spends real money (up
+# to $2, `--max-budget-usd`), and the ANTHROPIC_API_KEY secret is not available to pull requests
+# from forks. With the Claude Code version and model pinned, a run measures something new only
+# when Reef changed, so it is dispatched after changes to what a new agent sees, before a
+# release, and when a pin moves. Each run opens a pull request adding its rows to
 # docs/onboarding-benchmark.md. See that page for what is measured.
 on:
-  schedule:
-    - cron: "41 7 * * 1"     # Mondays 07:41 UTC
   workflow_dispatch:
     inputs:
       scenarios:
