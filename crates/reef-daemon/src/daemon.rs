@@ -8,7 +8,10 @@
 //!
 //! Later tickets extend this list in place, keeping its order:
 //!
-//! 1. Create the state directory (`0700`) and take the single-instance lock.
+//! 1. Create the state directory and the socket's directory (`0700`), or
+//!    refuse one another user owns and tighten one with group or other bits
+//!    (RX.01, S-01); then take the single-instance lock. A root daemon logs
+//!    a warning (S-04).
 //! 2. Open the database and apply migrations; write the pid file. Apply the
 //!    lease restart grace (R1.15): every unended lease gets at least
 //!    `lease.restart_grace` from now, before anything can reclaim. If that
@@ -33,7 +36,8 @@
 //!    one's jj handle; reclaim one whose directory is gone, or after a
 //!    restore (`meta.rematerialize_pending`, R1.18) rebuild it instead. Each
 //!    is tracked by the snapshot scheduler, which then starts (R1.13).
-//! 7. Replace a stale socket file, bind the socket (`0600`), and serve.
+//! 7. Replace a stale socket file, bind the socket (`0600`) in a directory
+//!    the daemon owns (S-01), and serve.
 //! 8. Start the lease expiry loop (R1.15), its first tick `lease.tick`
 //!    later; after the bind, so a failed start leaves no loop running.
 //!
@@ -52,7 +56,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -74,7 +78,7 @@ use crate::db::{Db, DbError};
 use crate::lease::LeaseError;
 use crate::lock::{InstanceLock, LockError};
 use crate::model::{RepoId, RepositoryRecord};
-use crate::repo::RepoRegistry;
+use crate::repo::{OwnerPolicy, RepoRegistry};
 use crate::server;
 use crate::snapshot::index::{self, ReindexReport};
 use crate::workspace::Manager;
@@ -173,6 +177,22 @@ pub enum StartError {
     /// The configuration did not resolve.
     #[error("invalid configuration")]
     Config(#[from] ConfigError),
+    /// A directory the daemon keeps private is another user's (RX.01,
+    /// S-01).
+    #[error(
+        "{} is owned by uid {uid}, not by uid {euid}, which runs the daemon; run the daemon as uid {uid}, or set {setting} to a directory of its own",
+        path.display()
+    )]
+    NotOwned {
+        /// The directory.
+        path: PathBuf,
+        /// Its owner.
+        uid: u32,
+        /// The daemon's effective uid.
+        euid: u32,
+        /// What to set instead, for the hint.
+        setting: &'static str,
+    },
     /// A directory could not be created.
     #[error("create {}", path.display())]
     CreateDir {
@@ -236,6 +256,7 @@ impl Classify for StartError {
             Self::RestartGrace(error) => error.kind(),
             Self::Settings(error) => error.kind(),
             Self::SocketInUse { .. } => ErrorKind::Unavailable,
+            Self::NotOwned { .. } => ErrorKind::PermissionDenied,
             Self::CreateDir { source, .. }
             | Self::PidFile { source, .. }
             | Self::Socket { source, .. } => {
@@ -266,7 +287,12 @@ impl Daemon {
     /// Runs the start sequence and returns once the socket is bound.
     pub async fn start(config: Config) -> Result<DaemonHandle, StartError> {
         let paths = config.paths.clone();
-        create_private_dir(&paths.state_dir)?;
+        // Before the lock, which creates a file in it.
+        if let Some(mode) = private_state_dir(&paths.state_dir)? {
+            log_tightened(&paths.state_dir, mode);
+        }
+        private_socket_dir(&paths.socket)?;
+        warn_if_root();
         let lock = InstanceLock::acquire(&paths.lock)?;
         let db = Arc::new(Db::open(&paths.db)?);
         std::fs::write(&paths.pid, format!("{}\n", std::process::id())).map_err(|source| {
@@ -282,7 +308,17 @@ impl Daemon {
                 return Err(error.into());
             }
         };
-        let repos = Arc::new(RepoRegistry::new());
+        let owners = OwnerPolicy::from_env(
+            config.file.repo.allow_foreign_owner,
+            paths.config_file.clone(),
+        );
+        tracing::info!(
+            euid = owners.euid,
+            sudo_uid = owners.sudo_uid,
+            allow_foreign_owner = owners.allow_foreign,
+            "registration accepts repositories these uids own"
+        );
+        let repos = Arc::new(RepoRegistry::with_owners(owners));
         let manager = Manager::new(
             config.clone(),
             Arc::clone(&db),
@@ -699,9 +735,8 @@ async fn bind(socket: &Path) -> Result<UnixListener, StartError> {
         path: socket.to_owned(),
         source,
     };
-    if let Some(parent) = socket.parent() {
-        create_private_dir(parent)?;
-    }
+    // Checked at start already; created again if it went meanwhile.
+    private_socket_dir(socket)?;
     let probe = tokio::time::timeout(
         SOCKET_PROBE_TIMEOUT,
         tokio::net::UnixStream::connect(socket),
@@ -769,17 +804,129 @@ async fn supervise(
         .map_err(StartError::Serve)
 }
 
-/// Creates `dir` and missing parents with mode `0700`. An existing
-/// directory is left as it is.
-pub(crate) fn create_private_dir(dir: &Path) -> Result<(), StartError> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|source| StartError::CreateDir {
+/// What a [`StartError::NotOwned`] for the state directory says to set.
+const STATE_SETTING: &str = "REEF_STATE_DIR (for example /var/lib/reef)";
+/// The same for the socket's directory.
+const SOCKET_SETTING: &str = "REEF_SOCKET";
+
+/// Why [`ensure_private_dir`] refused or failed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub(crate) enum PrivateDirError {
+    /// The directory is another user's.
+    #[error("{} is owned by uid {uid}, not by uid {euid}", path.display())]
+    NotOwned {
+        /// The directory.
+        path: PathBuf,
+        /// Its owner.
+        uid: u32,
+        /// The daemon's effective uid.
+        euid: u32,
+    },
+    /// It could not be created, read, or restricted.
+    #[error("create {}", path.display())]
+    Io {
+        /// The directory.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Makes `dir` a directory only the daemon's user can use (RX.01, S-01):
+/// an existing one owned by another uid is refused, root included (two uids
+/// sharing a state directory never works); one with any group or other bit
+/// is `chmod`ed `0700`, and its old mode returned for the caller to log. A
+/// missing one is created with missing parents, `0700`, when `create` is
+/// set, and is otherwise left missing.
+pub(crate) fn ensure_private_dir(dir: &Path, create: bool) -> Result<Option<u32>, PrivateDirError> {
+    let io_error = |source| PrivateDirError::Io {
+        path: dir.to_owned(),
+        source,
+    };
+    let metadata = match std::fs::metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if create {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+                    .map_err(io_error)?;
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    if !metadata.is_dir() {
+        return Err(io_error(io::ErrorKind::NotADirectory.into()));
+    }
+    let euid = nix::unistd::geteuid().as_raw();
+    if metadata.uid() != euid {
+        return Err(PrivateDirError::NotOwned {
             path: dir.to_owned(),
-            source,
-        })
+            uid: metadata.uid(),
+            euid,
+        });
+    }
+    let mode = metadata.mode() & 0o7777;
+    let group_or_other = mode & 0o077;
+    if group_or_other == 0 {
+        return Ok(None);
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    Ok(Some(mode))
+}
+
+/// Logs that [`ensure_private_dir`] tightened `dir` from `mode`.
+pub(crate) fn log_tightened(dir: &Path, mode: u32) {
+    tracing::warn!(
+        path = %dir.display(),
+        mode = format!("{mode:04o}"),
+        "a private directory had group or other permissions; changed it to 0700"
+    );
+}
+
+/// [`ensure_private_dir`] for the state directory, creating it; the binary
+/// calls it before logging starts, so the caller logs a tightened mode.
+pub(crate) fn private_state_dir(dir: &Path) -> Result<Option<u32>, StartError> {
+    ensure_private_dir(dir, true).map_err(|error| start_error(error, STATE_SETTING))
+}
+
+/// [`ensure_private_dir`] for the socket's directory, creating it, and
+/// logging a tightened mode.
+fn private_socket_dir(socket: &Path) -> Result<(), StartError> {
+    let Some(parent) = socket.parent() else {
+        return Ok(());
+    };
+    match ensure_private_dir(parent, true) {
+        Ok(Some(mode)) => log_tightened(parent, mode),
+        Ok(None) => {}
+        Err(error) => return Err(start_error(error, SOCKET_SETTING)),
+    }
+    Ok(())
+}
+
+fn start_error(error: PrivateDirError, setting: &'static str) -> StartError {
+    match error {
+        PrivateDirError::NotOwned { path, uid, euid } => StartError::NotOwned {
+            path,
+            uid,
+            euid,
+            setting,
+        },
+        PrivateDirError::Io { path, source } => StartError::CreateDir { path, source },
+    }
+}
+
+/// The warning a root daemon logs at start (RX.01, S-04).
+pub const ROOT_WARNING: &str = "running as root: every client of this socket is root, and store builds run repository commands as root; the kernel overlay tier is meant for a VM or container dedicated to the agents";
+
+fn warn_if_root() {
+    if nix::unistd::geteuid().is_root() {
+        tracing::warn!("{ROOT_WARNING}");
+    }
 }
 
 fn remove_if_present(path: &Path) {

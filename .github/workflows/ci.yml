@@ -175,9 +175,11 @@ jobs:
           if [[ -n "$failed" ]]; then echo "::error::reflink tests failed on:$failed"; exit 1; fi
       # `overlay`, not `overlayfs`: the backend's own tests are in `backend::overlay`. The
       # `stores` binary as root gets read-only bind mounts (R1.20). R1.23: a killed daemon's
-      # kernel overlay and bind mounts across a restart, and the full disk on a tmpfs.
+      # kernel overlay and bind mounts across a restart, and the full disk on a tmpfs. RX.01: the
+      # ownership tests, which chown to uid 1, the root daemon's warning, and hostile repository
+      # content on kernel overlay workspaces.
       - name: Kernel overlayfs and store bind mounts (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/))'
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/)) | test(/another_user|owned_root|sudo_user|root_daemon/) | binary(hostile_repo)'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target

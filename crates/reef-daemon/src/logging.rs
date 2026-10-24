@@ -17,7 +17,6 @@
 
 use std::ffi::OsString;
 use std::io::IsTerminal as _;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -28,6 +27,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::ParseError;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::UtcTime;
+
+use crate::daemon::PrivateDirError;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::{SubscriberInitExt as _, TryInitError};
 
@@ -133,6 +134,16 @@ pub enum LoggingError {
     /// A global subscriber was already installed.
     #[error("failed to install the log subscriber")]
     AlreadySet(#[source] TryInitError),
+    /// The log directory is another user's (RX.01, S-01).
+    #[error("log directory {} is owned by uid {uid}, not by uid {euid}", path.display())]
+    LogDirNotOwned {
+        /// The directory.
+        path: PathBuf,
+        /// Its owner.
+        uid: u32,
+        /// The daemon's effective uid.
+        euid: u32,
+    },
     /// The log directory could not be created.
     #[error("create log directory {}", path.display())]
     LogDir {
@@ -160,6 +171,7 @@ impl Classify for LoggingError {
                 ErrorKind::InvalidArgument
             }
             Self::AlreadySet(_) => ErrorKind::Internal,
+            Self::LogDirNotOwned { .. } => ErrorKind::PermissionDenied,
             Self::File { .. } | Self::LogDir { .. } => ErrorKind::Io,
         }
     }
@@ -232,10 +244,12 @@ pub fn init(opts: &LogOptions) -> Result<LoggingGuard, LoggingError> {
             .with_writer(std::io::stderr);
         (None, Some(layer))
     };
+    let mut tightened = None;
     let (file_layer, file_guard) = match &opts.file {
         Some(path) => {
-            let (writer, guard) =
-                tracing_appender::non_blocking(open_log_file(path, opts.keep_days)?);
+            let (appender, mode) = open_log_file(path, opts.keep_days)?;
+            tightened = mode.map(|mode| (path.parent().unwrap_or(path).to_owned(), mode));
+            let (writer, guard) = tracing_appender::non_blocking(appender);
             let layer = fmt::layer()
                 .json()
                 .flatten_event(true)
@@ -256,16 +270,20 @@ pub fn init(opts: &LogOptions) -> Result<LoggingGuard, LoggingError> {
         .try_init()
         .map_err(LoggingError::AlreadySet)?;
     tracing::debug!("logging initialized");
+    if let Some((dir, mode)) = tightened {
+        crate::daemon::log_tightened(&dir, mode);
+    }
     Ok(LoggingGuard { _file: file_guard })
 }
 
 /// Opens `path`'s directory as a daily-rotated appender named after `path`'s
 /// file name, creating the directory, and prunes all but the `keep_days`
-/// most recent files.
+/// most recent files. Returns the directory's old mode too if it had to be
+/// tightened, for the caller to log once logging is up.
 fn open_log_file(
     path: &std::path::Path,
     keep_days: u32,
-) -> Result<RollingFileAppender, LoggingError> {
+) -> Result<(RollingFileAppender, Option<u32>), LoggingError> {
     let error = |source| LoggingError::File {
         path: path.to_owned(),
         source,
@@ -277,20 +295,19 @@ fn open_log_file(
     // tracing-appender prunes before it creates the directory, and prints
     // to stderr if the directory is missing. Logs are private like the rest
     // of the state directory.
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|source| LoggingError::LogDir {
-            path: dir.to_owned(),
-            source,
-        })?;
-    RollingFileAppender::builder()
+    let tightened = crate::daemon::ensure_private_dir(dir, true).map_err(|error| match error {
+        PrivateDirError::NotOwned { path, uid, euid } => {
+            LoggingError::LogDirNotOwned { path, uid, euid }
+        }
+        PrivateDirError::Io { path, source } => LoggingError::LogDir { path, source },
+    })?;
+    let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
         .max_log_files(usize::try_from(keep_days.max(1)).unwrap_or(usize::MAX))
         .build(dir)
-        .map_err(error)
+        .map_err(error)?;
+    Ok((appender, tightened))
 }
 
 #[cfg(test)]

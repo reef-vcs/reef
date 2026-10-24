@@ -24,6 +24,7 @@ pub mod restore;
 pub mod settings;
 pub mod snapshot;
 pub mod spec;
+pub mod tree_names;
 pub mod undo;
 pub mod workspace;
 
@@ -39,6 +40,7 @@ pub use restore::RecreateWorkingCopyError;
 pub use snapshot::{
     Behind, PendingSnapshot, SnapshotCommit, SnapshotError, SnapshotPlan, commit_snapshot,
 };
+pub use tree_names::{CheckedTrees, TreeNameError, check_git_head_tree_names};
 
 // Watchman (R1.14): jj-lib's monitor, and the client crate at the version
 // jj-lib uses, for the daemon's trigger subscriptions.

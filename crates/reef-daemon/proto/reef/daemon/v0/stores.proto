@@ -43,7 +43,21 @@ message BuildEvent {
   oneof event {
     OutputLine line = 1;
     BuildResult done = 2;
+    // Sent once, before the first line, when the command is about to run
+    // (RX.01): what the daemon runs, for the client to show.
+    BuildStarted started = 3;
   }
+}
+
+// The command a build runs, as `reef.toml` at `rev` declares it.
+message BuildStarted {
+  // The `[[store]] build` argv.
+  repeated string argv = 1;
+  // `[store.env]`, as `KEY=VALUE`, sorted by key. Values are shown to the
+  // client: they are repository content, committed in `reef.toml`.
+  repeated string env = 2;
+  // The commit the build runs on, full hex.
+  string rev = 3;
 }
 
 // One line of the build command's output, without its line ending, lossily

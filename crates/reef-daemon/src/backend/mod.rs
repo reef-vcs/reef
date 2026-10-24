@@ -294,6 +294,10 @@ pub enum BackendError {
     /// `tear_down` was asked for a root that is already gone.
     #[error("workspace root {} does not exist", .0.display())]
     RootMissing(PathBuf),
+    /// The workspace root was replaced by a symlink, which a snapshot would
+    /// scan through (RX.01).
+    #[error("workspace root {} is a symlink, not the workspace's directory", .0.display())]
+    RootIsSymlink(PathBuf),
     /// A filesystem operation failed.
     #[error("{op} {}", path.display())]
     Io {
@@ -337,6 +341,7 @@ impl Classify for BackendError {
             Self::Unavailable { .. } => ErrorKind::Unavailable,
             Self::RootExists(_) => ErrorKind::AlreadyExists,
             Self::RootMissing(_) => ErrorKind::NotFound,
+            Self::RootIsSymlink(_) => ErrorKind::Conflict,
             // The workspace is in use.
             Self::Mount { source, .. } if source.kind() == io::ErrorKind::ResourceBusy => {
                 ErrorKind::Conflict

@@ -231,6 +231,9 @@ pub enum StoreError {
         #[source]
         source: io::Error,
     },
+    /// `[store] allow_builds` is false (RX.01, S-03).
+    #[error("store builds are off on this daemon")]
+    BuildsOff,
     /// The database failed.
     #[error("database")]
     Db(#[from] DbError),
@@ -244,6 +247,7 @@ impl Classify for StoreError {
                 ErrorKind::Conflict
             }
             Self::NotDeclared { .. } => ErrorKind::NotFound,
+            Self::BuildsOff => ErrorKind::PermissionDenied,
             Self::BuildRunning { .. } => ErrorKind::AlreadyExists,
             Self::BuildFailed { .. } | Self::BuildTimeout { .. } | Self::LinkReplaced { .. } => {
                 ErrorKind::Internal
@@ -277,6 +281,9 @@ impl Advise for StoreError {
             )),
             Self::BuildRunning { .. } => Some(Advice::hint(
                 "Another build of this store is running; retry when it finishes.",
+            )),
+            Self::BuildsOff => Some(Advice::hint(
+                "Store builds are off on this daemon (`[store] allow_builds`); build the store elsewhere or turn them on.",
             )),
             Self::Db(error) => error.advice(),
             _ => None,

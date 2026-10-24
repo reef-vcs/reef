@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use reef_daemon::client::ClientError;
 use reef_daemon::client::json::{BuiltStore, Store};
-use reef_daemon::proto::v0::{build_event, output_line};
+use reef_daemon::proto::v0::{BuildStarted, build_event, output_line};
 use reef_lib::error::ErrorKind;
 
+use super::out::shell_line;
 use super::repo::missing;
 use super::{CliError, Ctx, Output, RepoArg};
 
@@ -110,6 +111,9 @@ async fn build(
                 .await?;
             while let Some(event) = events.message().await.map_err(ClientError::from)? {
                 match event.event {
+                    Some(build_event::Event::Started(started)) => {
+                        ctx.out.note(&started_line(name, &started));
+                    }
                     Some(build_event::Event::Line(line)) => {
                         let stderr = line.stream() == output_line::Stream::Stderr;
                         ctx.out.passthrough(&line.text, stderr);
@@ -150,4 +154,65 @@ async fn build(
         .filter(|code| *code != 0)
         .unwrap_or_else(|| ErrorKind::Internal.exit_code());
     Ok(ExitCode::from(code))
+}
+
+/// What `store build` prints before the build's output (RX.01, S-03): the
+/// command the daemon runs, which comes from the repository's `reef.toml`.
+/// Control characters are shown escaped, so a word cannot rewrite the line
+/// on a terminal.
+fn started_line(name: &str, started: &BuildStarted) -> String {
+    let visible = |words: &[String]| {
+        let words: Vec<String> = words
+            .iter()
+            .map(|word| {
+                word.chars()
+                    .map(|c| {
+                        if c.is_control() {
+                            c.escape_default().to_string()
+                        } else {
+                            c.to_string()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        shell_line(&words)
+    };
+    let rev: String = started.rev.chars().take(12).collect();
+    let mut line = format!("reef: building {name} at {rev}: {}", visible(&started.argv));
+    if !started.env.is_empty() {
+        line.push_str("\nreef: env: ");
+        line.push_str(&visible(&started.env));
+    }
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn started_line_quotes_the_argv_and_lists_the_env() {
+        let started = BuildStarted {
+            argv: vec!["sh".into(), "-c".into(), "npm ci".into()],
+            env: vec!["NODE_ENV=production".into()],
+            rev: "0123456789abcdef".into(),
+        };
+        assert_eq!(
+            started_line("deps", &started),
+            "reef: building deps at 0123456789ab: sh -c 'npm ci'\nreef: env: NODE_ENV=production"
+        );
+        let bare = BuildStarted {
+            env: Vec::new(),
+            ..started
+        };
+        assert!(!started_line("deps", &bare).contains("env"));
+        let hidden = BuildStarted {
+            argv: vec!["sh".into(), "-c".into(), "evil\x1b[2K\rtrue".into()],
+            ..bare
+        };
+        let line = started_line("deps", &hidden);
+        assert!(!line.contains('\x1b') && !line.contains('\r'), "{line}");
+        assert!(line.contains(r"\u{1b}"), "{line}");
+    }
 }

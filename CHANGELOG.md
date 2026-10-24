@@ -19,6 +19,7 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 - Prebuilt binaries for macOS and Linux on arm64 and x86_64, a one-line installer, a Homebrew tap, and `cargo binstall` metadata.
 - Benchmarks for workspace creation and a load test at 200 workspaces ([docs/benchmarks.md](docs/benchmarks.md), [docs/load-tests.md](docs/load-tests.md)).
 - An agent onboarding benchmark: what a Claude Code agent new to Reef spends to reach a working `reef ws run`, in four scenarios, run in CI on demand ([docs/onboarding-benchmark.md](docs/onboarding-benchmark.md)).
+- A threat model ([docs/threat-model.md](docs/threat-model.md)) and the fixes from its review: the daemon refuses a state directory another user owns and keeps its state `0700` and its database `0600`; registration refuses a repository another user owns (`[repo] allow_foreign_owner`); `reef store build` prints the command it runs, and `[store] allow_builds = false` turns builds off; a root daemon warns at start; a commit with a tree entry jj cannot read is refused instead of crashing the repository; the release workflow attests each tarball's build provenance (`gh attestation verify`), first exercised by 0.1.0's release.
 
 ### Known limitations
 
@@ -30,6 +31,9 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 - `reef.toml` is read from the commit a workspace starts on, not from disk: commit it before it takes effect.
 - A shared store is read-only, so a tool that writes a cache into it fails (Vitest's `node_modules/.vitest-cache`; Vite's `cacheDir` setting moves it).
 - On macOS, and on Linux without `CAP_SYS_ADMIN`, a store is protected by file permissions only: a process running as the same user could make it writable again.
+- A workspace is not a sandbox: an agent runs as you and can do anything you can, including through the daemon's socket, and a harness sandbox that lets it reach the socket does not confine what the daemon does for it.
+- `reef store build` runs the repository's declared command as you, with network access.
+- The daemon's state directory and socket directory must be your own: a `REEF_SOCKET` directly in `/tmp`, or a state directory another user created, is refused at start.
 - Reef is built on jj-lib 0.46. A newer `jj` may upgrade the repository's on-disk formats when you run it there.
 - Tools that do not read `.git/info/exclude` see the `.jj/` directory.
 - The binaries are not signed or notarized. Windows is not supported.

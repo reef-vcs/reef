@@ -22,8 +22,10 @@ use crate::proto::v0::{
     self, BuildEvent, BuildStoreRequest, ListStoresRequest, ListStoresResponse, StoreInfo,
     build_event, output_line,
 };
-use crate::store::StoreKey;
-use crate::store::build::{self, BuildRequest, BuildResult, OutputLine, OutputStream};
+use crate::store::build::{
+    self, BuildOutput, BuildRequest, BuildResult, BuildStarted, OutputLine, OutputStream,
+};
+use crate::store::{StoreError, StoreKey};
 
 /// How many events a build may queue for a slow client before its output
 /// lines are dropped (and counted).
@@ -62,6 +64,29 @@ impl From<&OutputLine> for v0::OutputLine {
         Self {
             text: line.text.clone(),
             stream: stream.into(),
+        }
+    }
+}
+
+impl From<&BuildStarted> for v0::BuildStarted {
+    fn from(started: &BuildStarted) -> Self {
+        Self {
+            argv: started.argv.clone(),
+            env: started
+                .env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
+            rev: started.rev.clone(),
+        }
+    }
+}
+
+impl From<&BuildOutput> for build_event::Event {
+    fn from(output: &BuildOutput) -> Self {
+        match output {
+            BuildOutput::Started(started) => Self::Started(v0::BuildStarted::from(started)),
+            BuildOutput::Line(line) => Self::Line(v0::OutputLine::from(line)),
         }
     }
 }
@@ -108,6 +133,9 @@ impl Stores for StoresService {
         request: Request<BuildStoreRequest>,
     ) -> Result<Response<Self::BuildStream>, Status> {
         let request = request.into_inner();
+        if !self.state.config.file.store.allow_builds {
+            return Err(status(StoreError::BuildsOff));
+        }
         let manager = Arc::clone(&self.state.manager);
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
         let build = BuildRequest {
@@ -131,9 +159,9 @@ impl Stores for StoresService {
             // counted; once the client is gone the rest are drained, and
             // the build goes on.
             let mut dropped = 0u64;
-            while let Some(line) = output.recv().await {
+            while let Some(item) = output.recv().await {
                 let event = BuildEvent {
-                    event: Some(build_event::Event::Line(v0::OutputLine::from(&line))),
+                    event: Some(build_event::Event::from(&item)),
                 };
                 match events.try_send(Ok(event)) {
                     Ok(()) => {}

@@ -8,7 +8,8 @@
 //! is [`Manager::reclaim`], shared with `Release` and (R1.18) restore.
 //!
 //! The lease id is the capability: nothing checks that a heartbeat comes
-//! from the owner, who is informational (RX.01 reviews this).
+//! from the owner, who is informational. Every client of the socket is the
+//! user, so that is the boundary (ADR 0027).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -4,6 +4,7 @@
 //! the way (R1.25, ADR 0024).
 
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
@@ -57,6 +58,23 @@ pub enum RegisterError {
         #[source]
         source: io::Error,
     },
+    /// The repository's `.jj`, or the `.git` jj would be initialized
+    /// beside, is another user's (RX.01, S-02).
+    #[error(
+        "{} is owned by uid {uid}; Reef registers repositories owned by the user running the daemon (or the sudo user)",
+        root.display()
+    )]
+    ForeignOwner {
+        /// The repository's root.
+        root: PathBuf,
+        /// The owner of its `.jj` or `.git`.
+        uid: u32,
+        /// The daemon's configuration file, for the hint.
+        config_file: PathBuf,
+    },
+    /// The checkout's `HEAD` has a tree entry jj cannot read (RX.01).
+    #[error(transparent)]
+    TreeName(reef_lib::jj::TreeNameError),
     /// The repository's root could not be resolved.
     #[error("resolve {}", path.display())]
     Resolve {
@@ -79,6 +97,8 @@ impl Classify for RegisterError {
         match self {
             Self::NotAbsolute(_) | Self::GitWorktree(_) => ErrorKind::InvalidArgument,
             Self::NotARepository(_) => ErrorKind::NotFound,
+            Self::ForeignOwner { .. } => ErrorKind::PermissionDenied,
+            Self::TreeName(error) => error.kind(),
             Self::Open { source, .. } => source.kind(),
             Self::Init { source, .. } => source.kind(),
             Self::Resolve { source, .. } | Self::Exclude { source, .. } => {
@@ -99,9 +119,106 @@ impl Advise for RegisterError {
             Self::GitWorktree(_) => Some(Advice::hint(
                 "Name a directory in the main checkout; Reef workspaces replace git worktrees.",
             )),
+            Self::ForeignOwner { config_file, .. } => Some(Advice::hint(format!(
+                "Run the daemon as that user, or set `[repo] allow_foreign_owner = true` in {}.",
+                config_file.display()
+            ))),
+            Self::TreeName(_) => Some(Advice::hint(
+                "HEAD's tree has an entry git itself never writes, which jj cannot read; check out another commit first.",
+            )),
             Self::Db(error) => error.advice(),
             _ => None,
         }
+    }
+}
+
+/// Whose repositories registration accepts (RX.01, S-02): git's
+/// `safe.directory` rule. Registration walks up to `/` and then writes to
+/// the repository, materializes its trees, and runs `git gc` with its
+/// `.git/config`, so a `.git` another user planted in a shared directory
+/// (`/tmp`, a CI scratch volume) must not be taken for the user's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerPolicy {
+    /// The daemon's effective uid.
+    pub euid: u32,
+    /// The `sudo` user's uid (`SUDO_UID`, a decimal uid), read only when the
+    /// euid is 0.
+    pub sudo_uid: Option<u32>,
+    /// `[repo] allow_foreign_owner`: accept every owner.
+    pub allow_foreign: bool,
+    /// The configuration file the refusal's hint names.
+    pub config_file: PathBuf,
+}
+
+impl OwnerPolicy {
+    /// The policy for this process: its euid, and `SUDO_UID` when that is
+    /// 0.
+    pub fn from_env(allow_foreign: bool, config_file: PathBuf) -> OwnerPolicy {
+        let euid = nix::unistd::geteuid().as_raw();
+        OwnerPolicy {
+            euid,
+            sudo_uid: sudo_uid(euid, std::env::var("SUDO_UID").ok().as_deref()),
+            allow_foreign,
+            config_file,
+        }
+    }
+
+    /// Whether a repository whose `.jj` or `.git` `uid` owns is accepted.
+    pub fn accepts(&self, uid: u32) -> bool {
+        self.allow_foreign || uid == self.euid || self.sudo_uid == Some(uid)
+    }
+
+    /// Refuses `root` unless its `dir` (`.jj` or `.git`, not the root: on a
+    /// shared volume the root may be world-writable while the repository
+    /// is the user's) has an accepted owner. A `dir` that is a symlink must
+    /// have one too, as must what it points at: another user's `/tmp/.jj`
+    /// pointing at the user's own repository would otherwise register
+    /// `/tmp` as its root.
+    fn check(&self, root: &Path, dir: &Path) -> Result<(), RegisterError> {
+        if self.allow_foreign {
+            return Ok(());
+        }
+        let resolve = |source| RegisterError::Resolve {
+            path: dir.to_owned(),
+            source,
+        };
+        let link = std::fs::symlink_metadata(dir).map_err(resolve)?;
+        let uid = if link.file_type().is_symlink() && self.accepts(link.uid()) {
+            std::fs::metadata(dir).map_err(resolve)?.uid()
+        } else {
+            link.uid()
+        };
+        if self.accepts(uid) {
+            return Ok(());
+        }
+        tracing::warn!(
+            root = %root.display(),
+            uid,
+            euid = self.euid,
+            sudo_uid = self.sudo_uid,
+            "refused to register a repository another user owns"
+        );
+        Err(RegisterError::ForeignOwner {
+            root: root.to_owned(),
+            uid,
+            config_file: self.config_file.clone(),
+        })
+    }
+}
+
+/// `SUDO_UID` as a uid when `euid` is 0 and it is a decimal number, as git
+/// reads it.
+fn sudo_uid(euid: u32, var: Option<&str>) -> Option<u32> {
+    let var = var.filter(|_| euid == 0)?;
+    if var.is_empty() || !var.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    var.parse().ok()
+}
+
+impl Default for OwnerPolicy {
+    fn default() -> Self {
+        OwnerPolicy::from_env(false, PathBuf::from("config.toml"))
     }
 }
 
@@ -146,7 +263,7 @@ impl RepoRegistry {
             .register_turn
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (repo, initialized_jj) = Self::open_or_init(path, settings, if_not_jj)?;
+        let (repo, initialized_jj) = Self::open_or_init(path, settings, if_not_jj, &self.owners)?;
         let registered = |record, already_registered| Registered {
             record,
             already_registered,
@@ -217,12 +334,19 @@ impl RepoRegistry {
 
     /// The jj repository containing `path`, created alongside git first if
     /// there is none and `if_not_jj` allows it, and whether it was created.
+    /// Its `.jj`, or the `.git` it is created beside, must have an owner
+    /// `owners` accepts, checked before it is opened or written.
     fn open_or_init(
         path: &Path,
         settings: &UserSettings,
         if_not_jj: IfNotJj,
+        owners: &OwnerPolicy,
     ) -> Result<(Repo, bool), RegisterError> {
         let open = |at: &Path| {
+            // jj's own discovery: the nearest ancestor with a `.jj`.
+            if let Some(root) = at.ancestors().find(|dir| dir.join(".jj").is_dir()) {
+                owners.check(root, &root.join(".jj"))?;
+            }
             pollster::block_on(Repo::open(at, settings)).map_err(|source| RegisterError::Open {
                 path: path.to_owned(),
                 source,
@@ -242,6 +366,10 @@ impl RepoRegistry {
             Found::GitFile(root) => return Err(RegisterError::GitWorktree(root)),
             Found::Nothing => return Err(RegisterError::NotARepository(path.to_owned())),
         };
+        owners.check(&root, &root.join(".git"))?;
+        // jj checks HEAD out as it initializes, and a tree it cannot read
+        // panics it there, leaving a half-made `.jj`.
+        reef_lib::jj::check_git_head_tree_names(&root).map_err(RegisterError::TreeName)?;
         // The exclude line first: a failure or crash after it leaves only a
         // line that ignores a `.jj` that is not there, and the next attempt
         // finds the line and initializes.
@@ -305,4 +433,73 @@ fn registered_at(db: &Db, root: &Path) -> Result<Option<RepositoryRecord>, DbErr
     Ok(db
         .repository_containing(root)?
         .filter(|record| record.root == root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(euid: u32, sudo_uid: Option<u32>) -> OwnerPolicy {
+        OwnerPolicy {
+            euid,
+            sudo_uid,
+            allow_foreign: false,
+            config_file: PathBuf::from("/state/config.toml"),
+        }
+    }
+
+    #[test]
+    fn sudo_uid_counts_only_for_root_and_only_as_a_decimal() {
+        assert_eq!(sudo_uid(0, Some("1000")), Some(1000));
+        assert_eq!(sudo_uid(1000, Some("1000")), None);
+        assert_eq!(sudo_uid(0, None), None);
+        for bad in ["", "+1", "-1", " 1", "1 ", "0x10", "4294967296"] {
+            assert_eq!(sudo_uid(0, Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn owners_accepted_are_the_euid_and_the_sudo_user() {
+        let user = policy(1000, None);
+        assert!(user.accepts(1000));
+        assert!(!user.accepts(0) && !user.accepts(1001));
+        let sudo = policy(0, Some(1000));
+        assert!(sudo.accepts(0) && sudo.accepts(1000));
+        assert!(!sudo.accepts(1001));
+        let open = OwnerPolicy {
+            allow_foreign: true,
+            ..user
+        };
+        assert!(open.accepts(1001));
+    }
+
+    /// The check on a real directory, with the owner the policy expects
+    /// injected rather than chowned.
+    #[test]
+    fn a_dir_another_uid_owns_is_refused_with_the_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dot_git = tmp.path().join(".git");
+        std::fs::create_dir(&dot_git).unwrap();
+        let mine = std::fs::metadata(&dot_git).unwrap().uid();
+        policy(mine, None).check(tmp.path(), &dot_git).unwrap();
+        let other = mine.wrapping_add(1);
+        let error = policy(other, None).check(tmp.path(), &dot_git).unwrap_err();
+        assert!(
+            matches!(&error, RegisterError::ForeignOwner { uid, .. } if *uid == mine),
+            "{error:?}"
+        );
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        let hint = error.advice().unwrap().hint;
+        assert!(
+            hint.contains("[repo] allow_foreign_owner = true")
+                && hint.contains("/state/config.toml"),
+            "{hint}"
+        );
+        let open = OwnerPolicy {
+            allow_foreign: true,
+            ..policy(other, None)
+        };
+        open.check(tmp.path(), &dot_git).unwrap();
+        policy(0, Some(mine)).check(tmp.path(), &dot_git).unwrap();
+    }
 }

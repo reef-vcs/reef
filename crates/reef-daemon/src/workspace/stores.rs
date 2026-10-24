@@ -429,6 +429,9 @@ impl Manager {
                     // root since the thread last reloaded.
                     super::create::refresh_for_resolve(head).await?;
                     let commit = super::create::default_start(&head.repo).await?.commit;
+                    head.repo
+                        .check_tree_names(&commit, &mut head.checked_trees)
+                        .await?;
                     let Some(spec) = head.repo.spec_at(&commit).await? else {
                         return Ok(Vec::new());
                     };
@@ -463,6 +466,9 @@ impl Manager {
                         Some(text) => head.repo.resolve_revision(&text).await?.commit_id,
                         None => super::create::default_start(&head.repo).await?.commit,
                     };
+                    head.repo
+                        .check_tree_names(&commit, &mut head.checked_trees)
+                        .await?;
                     let spec = head.repo.spec_at(&commit).await?;
                     let Some(store) = spec.as_ref().and_then(|spec| spec.store(&name)).cloned()
                     else {

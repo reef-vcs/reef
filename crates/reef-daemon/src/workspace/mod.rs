@@ -366,6 +366,9 @@ pub enum ManagerError {
     /// A commit could not be read.
     #[error(transparent)]
     CommitLookup(#[from] CommitLookupError),
+    /// The commit's tree has an entry jj cannot read (RX.01).
+    #[error(transparent)]
+    TreeName(#[from] reef_lib::jj::TreeNameError),
     /// The target commit's `reef.toml` is invalid or could not be read.
     #[error("read the workspace spec")]
     Spec(#[from] SpecError),
@@ -525,6 +528,7 @@ impl Classify for ManagerError {
             Self::Forget(error) => error.kind(),
             Self::Read(error) => error.kind(),
             Self::CommitLookup(error) => error.kind(),
+            Self::TreeName(error) => error.kind(),
             Self::Reset(error) => error.kind(),
             Self::Spec(error) => error.kind(),
             Self::FinalSnapshotFailed { source, .. } => source.kind(),
@@ -571,6 +575,9 @@ impl Advise for ManagerError {
             Self::FinalSnapshotFailed { id, .. } => Some(Advice::run(
                 "The workspace is kept; `reef ws release --no-snapshot` discards its unsnapshotted edits.",
                 ["reef", "ws", "inspect", &id.as_hex()],
+            )),
+            Self::TreeName(_) => Some(Advice::hint(
+                "The commit has a tree entry git itself never writes, which jj cannot read; start from another revision.",
             )),
             Self::WriteInFlight { id, .. } => Some(Advice::run(
                 "Nothing moved; the workspace's files could not be snapshotted. Inspect it, then retry the move.",

@@ -5,7 +5,8 @@ name: Release
 # GitHub Release with the tarballs, SHA256SUMS, install.sh, and CHANGELOG.md's section, and pushes
 # the formula to the Homebrew tap. A dry run, `workflow_dispatch` with `dry_run` or a pull
 # request that touches the release machinery, does everything but publish, and the tarballs stay
-# on the run as artifacts. Unsigned until R4.17.
+# on the run as artifacts. Unsigned until R4.17; the publish job attests the tarballs' build
+# provenance (RX.01, S-06), which `gh attestation verify` checks.
 
 on:
   push:
@@ -246,6 +247,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      # Build provenance (RX.01, S-06): the OIDC token the attestation is signed with, and the
+      # repository's attestation store. This job only: dry runs attest nothing.
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
     steps:
@@ -256,6 +261,12 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      # Before the release exists, so a release never goes out without its attestation.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |

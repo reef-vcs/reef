@@ -918,3 +918,204 @@ fn file_config_round_trips() {
     let text = toml::to_string(&config).unwrap();
     assert_eq!(toml::from_str::<FileConfig>(&text).unwrap(), config);
 }
+
+// RX.01 S-02: registration refuses a repository another user owns. These
+// need root to `chown`; the privileged CI job runs them as root.
+
+/// Whether the tests run as root.
+#[cfg(feature = "privileged-tests")]
+fn is_root() -> bool {
+    nix::unistd::geteuid().is_root()
+}
+
+/// A plain git checkout at `root` with one commit, its `.git` owned by
+/// `uid` if given.
+#[cfg(feature = "privileged-tests")]
+fn git_checkout(root: &Path, uid: Option<u32>) -> PathBuf {
+    std::fs::create_dir_all(root).unwrap();
+    reef_testing::git::init_repo(root, &[("README", "git\n")]);
+    if let Some(uid) = uid {
+        std::os::unix::fs::chown(root.join(".git"), Some(uid), None).unwrap();
+    }
+    root.canonicalize().unwrap()
+}
+
+/// Whether `root`'s `.git/info/exclude` has the line registration adds.
+#[cfg(feature = "privileged-tests")]
+fn excludes_jj(root: &Path) -> bool {
+    std::fs::read_to_string(root.join(".git/info/exclude"))
+        .is_ok_and(|text| text.lines().any(|line| line == "/.jj/"))
+}
+
+// RX.01 test 6.
+#[cfg(feature = "privileged-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn register_refuses_a_root_owned_by_another_user() {
+    if !is_root() {
+        eprintln!("skipped: needs root to chown");
+        return;
+    }
+    let daemon = SpawnedDaemon::spawn(configure).await;
+    // Not under the daemon's directory, which goes with it.
+    let tmp = common::short_tempdir();
+    let root = git_checkout(&tmp.path().join("foreign"), Some(1));
+    let refused = |output: &Output| {
+        let stderr = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(7), "{stderr}");
+        assert!(stderr.contains("is owned by uid 1"), "{stderr}");
+        assert!(stderr.contains("allow_foreign_owner = true"), "{stderr}");
+    };
+    // Implicit, from a command run in the checkout.
+    let output = reef(&daemon)
+        .current_dir(&root)
+        .args(["ws", "run", "--", "true"])
+        .output()
+        .unwrap();
+    refused(&output);
+    // Explicit.
+    let output = reef(&daemon)
+        .args(["repo", "register", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    refused(&output);
+    assert!(!root.join(".jj").exists());
+    assert!(!excludes_jj(&root));
+    drop(daemon);
+
+    let daemon = SpawnedDaemon::spawn(|config| {
+        configure(config);
+        config.repo.allow_foreign_owner = true;
+    })
+    .await;
+    let output = reef(&daemon)
+        .args(["repo", "register", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_success(&["repo", "register"], &output);
+    assert!(root.join(".jj").is_dir());
+    assert!(excludes_jj(&root));
+}
+
+// RX.01 test 7: the walk up stops at the nearest repository, and refuses
+// it if it is another user's rather than going on.
+#[cfg(feature = "privileged-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn register_walks_up_only_to_an_owned_root() {
+    use reef_daemon::proto::v0::register_request::IfNotJj;
+    if !is_root() {
+        eprintln!("skipped: needs root to chown");
+        return;
+    }
+    let daemon = SpawnedDaemon::spawn(configure).await;
+    let scratch = git_checkout(&daemon.root().join("scratch"), Some(1));
+    let mine = git_checkout(&scratch.join("mine"), None);
+    std::fs::create_dir_all(mine.join("sub")).unwrap();
+    std::fs::create_dir_all(scratch.join("other")).unwrap();
+
+    let registered = daemon
+        .client
+        .register_repository(&mine.join("sub"), IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    assert_eq!(registered.repository.unwrap().root, mine.to_str().unwrap());
+    let error = daemon
+        .client
+        .register_repository(&scratch.join("other"), IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+    assert!(!scratch.join(".jj").exists());
+    assert!(!excludes_jj(&scratch));
+
+    // An existing jj repository is checked by its `.jj` before it is opened.
+    let jj = git_checkout(&daemon.root().join("jj"), None);
+    let registered = daemon
+        .client
+        .register_repository(&jj, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    daemon
+        .client
+        .forget_repository(&registered.repository.unwrap().id)
+        .await
+        .unwrap();
+    std::os::unix::fs::chown(jj.join(".jj"), Some(1), None).unwrap();
+    let error = daemon
+        .client
+        .register_repository(&jj, IfNotJj::Fail)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+}
+
+// RX.01 test 7a: under `sudo`, the `SUDO_UID` user's repository registers,
+// and the `.jj` a root daemon creates there is root's. The registry gets the
+// policy `from_env` would build from `SUDO_UID`, whose parsing the unit
+// tests cover.
+#[cfg(feature = "privileged-tests")]
+#[test]
+fn register_accepts_the_sudo_users_repository() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    use reef_daemon::db::Db;
+    use reef_daemon::proto::v0::register_request::IfNotJj;
+    use reef_daemon::repo::{OwnerPolicy, RegisterError, RepoRegistry};
+    if !is_root() {
+        eprintln!("skipped: needs root to chown");
+        return;
+    }
+    let tmp = common::short_tempdir();
+    let db = Db::open_in_memory().unwrap();
+    let registry = |sudo_uid| {
+        RepoRegistry::with_owners(OwnerPolicy {
+            euid: 0,
+            sudo_uid: Some(sudo_uid),
+            allow_foreign: false,
+            config_file: tmp.path().join("config.toml"),
+        })
+    };
+
+    let theirs = git_checkout(&tmp.path().join("theirs"), Some(1));
+    let accepting = registry(1);
+    accepting
+        .register(&db, &theirs, &test_settings(), IfNotJj::InitAlongsideGit)
+        .unwrap();
+    assert_eq!(std::fs::metadata(theirs.join(".jj")).unwrap().uid(), 0);
+    accepting.close_all();
+
+    let other = git_checkout(&tmp.path().join("other"), Some(1));
+    let refusing = registry(2);
+    let error = refusing
+        .register(&db, &other, &test_settings(), IfNotJj::InitAlongsideGit)
+        .unwrap_err();
+    assert!(
+        matches!(error, RegisterError::ForeignOwner { uid: 1, .. }),
+        "{error:?}"
+    );
+    assert!(!other.join(".jj").exists());
+    refusing.close_all();
+}
+
+// RX.01 test 7a end to end: a daemon started under `sudo` (CI's root step
+// runs `sudo -E`) reads `SUDO_UID` itself and accepts that user's checkout.
+#[cfg(feature = "privileged-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn register_accepts_the_sudo_users_repository_through_the_daemon() {
+    use reef_daemon::proto::v0::register_request::IfNotJj;
+    let sudo_uid = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|uid| uid.parse::<u32>().ok());
+    let (true, Some(uid)) = (is_root(), sudo_uid) else {
+        eprintln!("skipped: needs root under sudo, with SUDO_UID set");
+        return;
+    };
+    let daemon = SpawnedDaemon::spawn(configure).await;
+    let tmp = common::short_tempdir();
+    let root = git_checkout(&tmp.path().join("theirs"), Some(uid));
+    daemon
+        .client
+        .register_repository(&root, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    assert!(root.join(".jj").is_dir());
+}
