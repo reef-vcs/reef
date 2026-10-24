@@ -395,10 +395,11 @@ async fn reefignore_change_scans_everything() {
     let before = outcomes.len();
 
     // Reef's own ignore file: jj does not rescan for it. Wait for the
-    // snapshot that has the emptied file, not the first with the secret: an
-    // event for `hidden/` from the setup can arrive after the first
-    // snapshot, and its narrowed scan, reading the new rules, records the
-    // secret before the `.reefignore` event arrives (overlayfs on CI).
+    // snapshot that has the emptied file, not the first with the secret: the
+    // setup's events after `.reefignore`'s can come in a later debouncer
+    // batch, after the first snapshot took its set, and that batch's
+    // narrowed scan, reading the new rules, records the secret before the
+    // `.reefignore` event arrives (fuse-overlayfs on CI).
     write(&ws, ".reefignore", "");
     let outcome = outcomes
         .holding(&repo, before, ".reefignore", Some(""))
@@ -408,7 +409,8 @@ async fn reefignore_change_scans_everything() {
         file_at(&repo.root, &outcome.commit_id, "hidden/secret.txt")
             .await
             .as_deref(),
-        Some("s\n")
+        Some("s\n"),
+        "{outcome:?}"
     );
     let before = outcomes.len();
 
