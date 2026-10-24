@@ -373,15 +373,20 @@ async fn excluded_dirs_do_not_trigger() {
         "the subscription's first result or the fallback timer snapshotted it"
     );
 
-    // A write outside the excluded directory still triggers.
+    // A write outside the excluded directory still triggers. The fallback
+    // timer can snapshot it before Watchman's event arrives (Ubuntu's 4.9.0
+    // on a loaded runner), so wait for the triggered snapshot rather than
+    // expecting it to be the one with the file.
     write(&ws, "src/kept.rs", "fn main() {}\n");
     snapshotted(&daemon, &repo, &ws, "src/kept.rs", Duration::from_secs(3)).await;
     let row = inspect(&daemon, &repo, &ws).await;
     assert!(!tree_has(&repo.root, &row.commit_id, "target/debug/0.o").await);
-    assert!(
-        snapshots.lock().unwrap().iter().any(|paths| *paths > 0),
-        "the write outside target/ was a triggered snapshot"
-    );
+    wait_for(
+        Duration::from_secs(10),
+        "a snapshot triggered by the write outside target/",
+        || async { snapshots.lock().unwrap().iter().any(|paths| *paths > 0) },
+    )
+    .await;
 }
 
 // 4
