@@ -71,7 +71,7 @@ The results go to `crates/reef-testing/onboarding/results/`, which git ignores:
 
 ## CI
 
-[`.github/workflows/onboarding.yml`](../.github/workflows/onboarding.yml) runs weekly (Mondays 07:41 UTC) and on `workflow_dispatch`, never on pull requests. It costs money and needs the `ANTHROPIC_API_KEY` repository secret, which pull requests from forks don't get. Give that key a spend limit in the Anthropic console.
+[`.github/workflows/onboarding.yml`](../.github/workflows/onboarding.yml) runs on `workflow_dispatch` only, never on a schedule or on pull requests. With Claude Code and the model pinned, a run measures something new only when Reef changed, so dispatch it after a change to what a new agent sees (`reef guide`, error hints and `next`, `reef here`, the installer), before a release, and when a pin moves. It costs money and needs the `ANTHROPIC_API_KEY` repository secret, which pull requests from forks don't get. Give that key a spend limit in the Anthropic console.
 
 The workflow runs one job per scenario on `ubuntu-24.04`, with fuse-overlayfs and the pinned Claude Code. Each job uploads its results directory as an artifact (`onboarding-<scenario>-<run id>`, kept 90 days) and appends its summary to the job summary.
 
