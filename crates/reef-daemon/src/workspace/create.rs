@@ -28,10 +28,15 @@
 //! 7. (async) Insert the row and issue the lease in one transaction
 //!    ([`crate::lease::LeaseManager::issue_with_workspace`]).
 //!
-//! Then the workspace is loaded and its watcher attached, on the blocking
-//! pool ([`crate::snapshot::Scheduler::track`]); the create returns once it
-//! is watched. Each step's time is in [`CreateTimings`], the response, and
-//! the `workspace created` log line (R1.29).
+//! Then the workspace is loaded and its watch set up, on the blocking pool
+//! ([`crate::snapshot::Scheduler::track`]). The create returns once it is
+//! watched or its watch is pending (ADR 0028): a Watchman subscription
+//! waiting for creates to go quiet (R1.29), or on Linux a notify watch
+//! queued for the attach thread (R1.32), whose `watch` time is then only
+//! the queueing. Either way the first snapshot once the watch is up is a
+//! full scan, so a write right after the create is not lost. Each step's
+//! time is in [`CreateTimings`], the response, and the `workspace created`
+//! log line (R1.29).
 //!
 //! A failure after step 4 unmounts the stores and tears the directory down;
 //! after step 5 also forgets the jj workspace and removes its state

@@ -235,6 +235,10 @@ impl Manager {
     }
 
     /// The pipeline; see the module docs.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one snapshot's steps in order; the full-scan turn (R1.32) tipped it over"
+    )]
     async fn run_snapshot(
         &self,
         entry: &Arc<WorkspaceEntry>,
@@ -252,6 +256,11 @@ impl Manager {
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
         self.scheduler.take_reported(id, &mut trigger);
+        let full = trigger.prefixes().is_none();
+        let permit = self
+            .scheduler
+            .full_scan_turn(permit, kind, full, record.watcher)
+            .await;
         let ran = {
             let entry = Arc::clone(entry);
             let db = Arc::clone(&self.db);

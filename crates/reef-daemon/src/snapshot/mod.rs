@@ -79,7 +79,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{WatcherBackend, WatcherSection};
 use crate::model::{WatcherKind, WorkspaceId};
 use crate::watcher::{
-    CreateClock, HealthHook, NoWatcher, WatchError, WatchEvent, Watcher, new_watcher, skip_prefixes,
+    Attach, AttachGate, CreateClock, HealthHook, NoWatcher, PendingWatch, WatchError, WatchEvent,
+    Watcher, new_watcher, skip_prefixes,
 };
 use crate::workspace::{Manager, ManagerError, REEFIGNORE};
 
@@ -275,10 +276,13 @@ struct Inner {
     /// What every watcher sends to.
     events_tx: mpsc::Sender<WatchEvent>,
     events: Mutex<Option<mpsc::Receiver<WatchEvent>>>,
-    /// Given to watchers that report health.
+    /// Given to every watcher: a watch set up in the background comes up
+    /// or fails through it.
     health: HealthHook,
     /// When the latest create started; the Watchman watcher defers by it.
     creates: Arc<CreateClock>,
+    /// Holds notify's background attaches (a test hook).
+    attaches: Arc<AttachGate>,
     entries: Mutex<HashMap<WorkspaceId, Entry>>,
     scans: Arc<Semaphore>,
     hooks: RwLock<Vec<SnapshotHook>>,
@@ -322,14 +326,14 @@ struct Entry {
     everything: bool,
     /// A watcher or fallback snapshot has been started and has not ended.
     task: bool,
-    /// Its watch is working: attached, and for a watcher that reports
-    /// health, last reported up. Such a workspace waits
+    /// Its watch is working: attached, and for a watch set up in the
+    /// background, last reported up. Such a workspace waits
     /// `watched_fallback_interval` for a fallback snapshot.
     watched: bool,
     /// It may hold writes no event reported: its last watcher or fallback
-    /// snapshot failed, or it was tracked for a reason other than a create
-    /// and none has run since. The next fallback waits only
-    /// `fallback_interval`.
+    /// snapshot failed, or it was tracked for a reason other than a create,
+    /// or created with its watch pending (R1.32), and none has run since.
+    /// The next fallback waits only `fallback_interval`.
     behind: bool,
     /// When the last snapshot ended (or tracking began).
     last_completed: Instant,
@@ -422,6 +426,7 @@ impl Scheduler {
                 events: Mutex::new(Some(rx)),
                 health: health_hook(weak.clone()),
                 creates: Arc::new(CreateClock::default()),
+                attaches: Arc::new(AttachGate::default()),
                 entries: Mutex::new(HashMap::new()),
                 scans: Arc::new(Semaphore::new(max_scans)),
                 hooks: RwLock::new(Vec::new()),
@@ -478,12 +483,15 @@ impl Scheduler {
     /// marked (and cleared) as its subscription goes down and comes up.
     /// Tracking a tracked workspace again re-reads its skip list.
     ///
-    /// The watch is attached on the blocking pool, and this returns once it
-    /// is (R1.29): a write right after is seen without waiting for the
-    /// fallback timer, and whatever a watcher does to attach never holds a
-    /// runtime worker. For [`TrackReason::Created`], a Watchman watch may
-    /// wait for a burst of creates to end before subscribing; its first
-    /// result snapshots whatever was written meanwhile.
+    /// The watch is set up on the blocking pool, so whatever a watcher does
+    /// to attach never holds a runtime worker (R1.29), and this returns once
+    /// the workspace is watched, or its watch is pending with a full scan to
+    /// follow (ADR 0028): either way a write right after is seen without
+    /// waiting for the fallback timer. Only for [`TrackReason::Created`] may
+    /// the watch be pending: a Watchman subscription waits for a burst of
+    /// creates to end (R1.29), and on Linux a notify watch attaches on the
+    /// watcher's attach thread (R1.32). The first snapshot once it is up
+    /// covers whatever was written meanwhile.
     pub async fn track(&self, ws: WorkspaceId, reason: TrackReason) {
         let inner = Arc::clone(&self.inner);
         if let Err(error) = tokio::task::spawn_blocking(move || inner.track(ws, reason)).await {
@@ -496,19 +504,17 @@ impl Scheduler {
         self.inner.creates.stamp();
     }
 
-    /// Whether `ws`'s watch is deferred, waiting for creates to go quiet
-    /// (R1.29).
-    pub fn watch_waiting(&self, ws: WorkspaceId) -> bool {
-        let Some(kind) = self
+    /// Why `ws`'s watch is not up yet, if it is pending: a Watchman
+    /// subscription waiting for creates to go quiet (R1.29), or a notify
+    /// watch attaching (R1.32).
+    pub fn watch_pending(&self, ws: WorkspaceId) -> Option<PendingWatch> {
+        let kind = self
             .inner
             .lock_entries()
             .get(&ws)
-            .map(|entry| entry.watcher)
-        else {
-            return false;
-        };
+            .map(|entry| entry.watcher)?;
         let watcher = lock(&self.inner.watchers).get(&kind).cloned();
-        watcher.is_some_and(|watcher| watcher.waiting(ws))
+        watcher.and_then(|watcher| watcher.pending(ws))
     }
 
     /// Stops watching `ws` and scheduling its snapshots; events still in
@@ -648,6 +654,20 @@ impl Scheduler {
         });
     }
 
+    /// Test hook: until the guard drops, notify's background attaches
+    /// (Linux, R1.32) stay queued; one in flight finishes. Created
+    /// workspaces meanwhile are `attaching`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hold_attaches(&self) -> crate::watcher::AttachHold {
+        self.inner.attaches.hold()
+    }
+
+    /// Test hook: notify's background attaches queued or in flight.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn queued_attaches(&self) -> usize {
+        self.inner.attaches.queued()
+    }
+
     /// Test hook: until the guard drops, every snapshot, scheduled or
     /// explicit, waits after it has taken its trigger and its scan permit
     /// and before it scans.
@@ -720,7 +740,38 @@ impl Scheduler {
             _permit: permit,
             pool,
             inner: Arc::clone(&self.inner),
+            turn: None,
+            scanned: true,
         }
+    }
+
+    /// Before a scan of a workspace on `watcher` (`kind`; `full`, or
+    /// narrowed): for a full scan of a Linux notify workspace that is
+    /// watched, gives `permit` back, waits for the inotify turn it shares
+    /// with attaches ([`AttachGate::turn`]), and takes a permit again
+    /// holding the turn, released with it once the scan is done (R1.32). The
+    /// wait holds no permit, so narrowed scans of other workspaces go on.
+    /// Otherwise returns `permit` as it is: elsewhere a scan's reads do not
+    /// reach the watcher, and a final or shutdown snapshot runs after the
+    /// workspace was unwatched or the scheduler stopped.
+    pub(crate) async fn full_scan_turn(
+        &self,
+        mut permit: ScanPermit,
+        kind: SnapshotKind,
+        full: bool,
+        watcher: WatcherKind,
+    ) -> ScanPermit {
+        let unwatched = matches!(kind, SnapshotKind::Final | SnapshotKind::Shutdown);
+        if !full || unwatched || !cfg!(target_os = "linux") || watcher != WatcherKind::Notify {
+            return permit;
+        }
+        // Not a scan: the summary does not count it.
+        permit.scanned = false;
+        drop(permit);
+        let turn = self.inner.attaches.turn().await;
+        let mut permit = self.acquire().await;
+        permit.turn = turn;
+        permit
     }
 
     /// What a starting snapshot of `ws` covers: clears its dirty mark.
@@ -864,6 +915,12 @@ pub(crate) struct ScanPermit {
     _permit: Option<OwnedSemaphorePermit>,
     pool: Option<Arc<rayon::ThreadPool>>,
     inner: Arc<Inner>,
+    /// The inotify turn, for a full scan of a Linux notify workspace
+    /// ([`Scheduler::full_scan_turn`]).
+    turn: Option<OwnedSemaphorePermit>,
+    /// Whether the summary counts it as a scan when it drops: not a permit
+    /// given back to wait for the turn.
+    scanned: bool,
 }
 
 impl ScanPermit {
@@ -879,9 +936,12 @@ impl Drop for ScanPermit {
         if let Some(pool) = self.pool.take() {
             self.inner.lock_pools().push(pool);
         }
+        drop(self.turn.take());
         let mut stats = self.inner.lock_stats();
         stats.running = stats.running.saturating_sub(1);
-        stats.window_scans += 1;
+        if self.scanned {
+            stats.window_scans += 1;
+        }
     }
 }
 
@@ -943,9 +1003,18 @@ impl Inner {
                 self.set_watched(ws, false);
                 manager.mark_watch_failed(&entry);
             }
-            // The health hook reports the outcome.
-            Ok(()) if watcher.reports_health() => {}
-            Ok(()) => {
+            // The health hook reports the outcome, and a full scan follows.
+            // Until it has run, writes made before the watch was up are
+            // unreported: every scan is full, on the short fallback.
+            // Marked after `watch` returns, before the attach and its scan
+            // (at least `min_interval` later) can have run; were it marked
+            // late, the cost is one extra full scan at the fallback.
+            Ok(Attach::Pending) => {
+                if let Some(entry) = self.lock_entries().get_mut(&ws) {
+                    entry.behind = true;
+                }
+            }
+            Ok(Attach::Attached) => {
                 self.set_watched(ws, true);
                 manager.clear_watch_failed(&entry);
             }
@@ -988,6 +1057,7 @@ impl Inner {
             self.events_tx.clone(),
             Arc::clone(&self.health),
             Arc::clone(&self.creates),
+            Arc::clone(&self.attaches),
         );
         let watcher: Arc<dyn Watcher> = match started {
             Ok(watcher) => Arc::from(watcher),

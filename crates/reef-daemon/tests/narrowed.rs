@@ -51,6 +51,10 @@ async fn fixture_with(
         watcher.min_interval = Duration::from_millis(100);
         watcher.fallback_interval = Duration::from_hours(1);
         watcher.watched_fallback_interval = Duration::from_hours(1);
+        // A Linux background attach (R1.32) ends in a full scan, which would
+        // take the first write after a create; these tests are about the
+        // scans after it.
+        watcher.notify_attach_background = false;
         configure(config);
     })
     .await

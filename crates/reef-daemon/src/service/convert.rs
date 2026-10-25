@@ -9,6 +9,7 @@ use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
 use crate::proto::v0;
 use crate::snapshot::index::SnapshotEntry;
 use crate::store::{MountMode, MountedStore};
+use crate::watcher::PendingWatch;
 use crate::workspace::CreateTimings;
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
@@ -75,13 +76,13 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
 }
 
 /// A workspace row, its lease, its local snapshot count, its mounted
-/// stores, and whether its watch is deferred, as one message.
+/// stores, and why its watch is not up yet, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
     pub(super) lease: Option<v0::Lease>,
     pub(super) local_snapshot_count: u64,
     pub(super) stores: &'a [MountedStore],
-    pub(super) watch_waiting: bool,
+    pub(super) watch_pending: Option<PendingWatch>,
 }
 
 impl From<WorkspaceView<'_>> for v0::Workspace {
@@ -109,7 +110,11 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             watcher: record.watcher.as_str().to_owned(),
             local_snapshot_count: view.local_snapshot_count,
             stores: view.stores.iter().map(v0::MountedStore::from).collect(),
-            watch_state: if view.watch_waiting { "waiting" } else { "" }.to_owned(),
+            watch_state: view
+                .watch_pending
+                .map(PendingWatch::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }
     }
 }

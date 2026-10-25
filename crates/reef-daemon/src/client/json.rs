@@ -172,7 +172,8 @@ pub struct Workspace {
     /// What triggers its snapshots: `notify` or `watchman`.
     pub watcher: String,
     /// `waiting` while its Watchman subscription waits for a burst of
-    /// creates to end (R1.29).
+    /// creates to end (R1.29); `attaching` while its notify watch attaches
+    /// in the background (Linux, R1.32).
     pub watch_state: Option<String>,
     /// How many of its snapshots have not been published; 0 in `ws create`.
     pub local_snapshot_count: u64,

@@ -38,13 +38,15 @@ The `medium` run takes about 17 minutes on an M2 Max (six of them releasing the 
 One daemon with the default configuration except `watcher.backend = "notify"` (`watchman` with `REEF_LOAD_WATCHER`), two registered synthetic repositories (`large`, and the preset), and these phases:
 
 1. **Generate and register** both repositories, timed.
-2. **Twenty on `large`**, the creation criterion's repository. One create builds the base and is released; then twenty, one at a time, each timed by the client, with the free space before and after. On the copy-on-write tiers (APFS, kernel overlayfs) each must be under one second; on others the report names the backend and nothing is asserted. Then all twenty are released.
-3. **N on the preset**, eight creates in flight at once, after one that builds the base: each create's time, the wall time for all N, and the free space before and after.
-4. **Steady state.** Each workspace writes `write-<seq>.txt`, containing the time of the write, once per period, at an offset of `i × period / N`, so the daemon sees an even 3.3 writes per second for 200 workspaces. One client heartbeats every workspace every 20 seconds.
+2. **Twenty on `large`**, the creation criterion's repository. One create builds the base and is released; then twenty, one at a time, each timed by the client, with the free space before and after. On the copy-on-write tiers (APFS, kernel overlayfs) each must be under one second; on others the report names the backend and nothing is asserted. The test waits until none of their watches is still attaching (below), then releases all twenty.
+3. **N on the preset**, eight creates in flight at once, after one that builds the base: each create's time, the wall time for all N, and the free space before and after. Then the test waits until none of their watches is still attaching.
+4. **Steady state**, which starts once every watch is up. Each workspace writes `write-<seq>.txt`, containing the time of the write, once per period, at an offset of `i × period / N`, so the daemon sees an even 3.3 writes per second for 200 workspaces. One client heartbeats every workspace every 20 seconds.
 5. **Burst.** All N write once within one second.
 6. **Limits and teardown.** The limits below are read, every workspace is released (with its final snapshot), and no workspace directory may remain.
 
 A sampler lists the preset's workspaces every 250 ms (one `List`, which carries what `Inspect(snapshot_first = false)` does for every workspace at once; `snapshot_first` would make the sampler the trigger). A write's latency is the `last_snapshot_at` of the first listing in which the workspace's commit differs from its commit at the write and `last_snapshot_at` is no earlier than the write; `last_snapshot_at` is when the snapshot's commit was recorded, so the 250 ms poll does not add to it. Writes change content, so jj's scan always sees them.
+
+On Linux a created workspace's notify watch attaches in the background after the create returns, one workspace at a time ([ADR 0028](adr/0028-watch-attachment-off-the-create-path.md)), and is `attaching` meanwhile. The criterion is at steady state with active watchers, so the test polls `List` every 250 ms until no created workspace is `attaching`, and fails past `max(60 s, 2 s × count)`, naming those still attaching. It records how long that took as the attach drain. On macOS the watches attach inside the create, and the drain is 0.
 
 **The gate**, which fails the test: the steady state's p95 is at most 5 s, and no write is still unsnapshotted, or was snapshotted, more than 30 s after it was made. The burst is recorded, not gated: it measures scan throughput over `watcher.max_concurrent_scans` cores rather than the design's target. A run on a CoW tier also fails if a `large` create takes a second or more.
 
@@ -58,6 +60,7 @@ A sampler lists the preset's workspaces every 250 ms (one `List`, which carries 
 - `limits`: `max_concurrent_scans`, `peak_threads` and `peak_rss_bytes` of the daemon (sampled every 2 s from `/proc/<pid>/status` on Linux and `ps` on macOS) and, on Linux, `inotify_max_user_watches`, `inotify_max_user_instances`, and the daemon's own `inotify_instances` and `inotify_watches` (from `/proc/<pid>/fd` and `fdinfo`).
 - `watcher_summaries`: the daemon's per-minute `watcher summary: scans=N queued_max=M wait_max_ms=K` lines, parsed, with `queued_max` and `wait_max_ms` over the run.
 - `creates.steps`: the p50 and p95 of each step the daemon timed (R1.29's `CreateTimings`) over the N creates; `creates.watchers`: how many workspaces got each watcher.
+- `large_creates.attach` and `creates.attach` (R1.32): `drain_ms`, from the last create's return to no workspace `attaching`; `count`, the daemon's `workspace watch attached` lines for those workspaces; and the p50 and max of their `queued_ms` (from the create queueing the attach to its start) and `attach_ms` (the attach itself). On macOS the sections are present, with zeros.
 - `watcher_scans`: from the steady state on, the daemon's `watcher snapshot taken` lines: their `count`, how many were `narrowed`, and the p50, p95, and max of `scan_ms`, its parts `load_ms` (locking the working copy, which reloads jj's tree state, and for a narrowed scan loading it again) and `walk_ms` (walking and hashing), and `paths_count` (R1.30).
 - `teardown` (the total and each release's p50, p95, and max), `directories_left`, and `pass` (`gate`, `creates_under_1s`).
 
@@ -134,6 +137,28 @@ R1.30 split each scan into `load_ms` (locking the working copy, which makes jj r
 - **Watchman passes too, at twice the create time.** Its crawl of each new workspace ran while the next ones were cloned (R1.29), so the 200 creates took 450 s against 226 s, and one of the twenty timed creates took 12.8 s.
 - **Memory.** Peak resident size with narrowed scans was 3.7 GB, against 2.7 GB with full scans in this ticket and 2.7 and 3.6 GB in R1.23's two runs. A narrowed scan holds a second copy of its workspace's tree state (about 18 MB for `large`) while it runs, about 0.2 GB at 12 scans at once; the rest of the difference is within the variation between runs. The per-workspace finding below stands.
 - **Releases are unchanged** (2,377 s against 2,759 s): their time is the final snapshots, which stay full scans, and deleting 100,000-file trees, R1.23's teardown finding.
+
+### R1.32: watches attached after the create
+
+`load.yml` with `medium`, run [40170092354](https://github.com/reef-vcs/reef/actions/runs/40170092354) on R1.32's branch at `e8d94a6`, after Linux notify watches moved off the create path ([ADR 0028](adr/0028-watch-attachment-off-the-create-path.md)). Both runners passed the gate. `ubuntu-24.04` was a 4-vCPU AMD EPYC 9V74 with 16 GB (x86_64, kernel 6.17, as root), a different CPU from the baseline's EPYC 7763; `macos-15` was the same 3-vCPU M1 virtual machine with 7 GB.
+
+| Measurement | `ubuntu-24.04` | `macos-15` |
+| --- | ---: | ---: |
+| 20 × `large` create, max / mean | **47 / 41 ms** | 2,994 / 1,737 ms |
+| 20 × `large` attaches: each p50 / max, queued max, drain | 905 / 951 ms, 16.4 s, 17.4 s | n/a (inside the create) |
+| 200 × `medium` create, total (p95 each, 8 at once) | 2.0 s (125 ms) | 36.1 s (1,993 ms) |
+| 200 × `medium` attaches: each p50 / max, queued max, drain | 93 / 166 ms, 17.1 s, 17.4 s | n/a (inside the create) |
+| steady-state write-to-snapshot p50 / p95 / max | 633 / **774** / 3,229 ms | 704 / **845** / 938 ms |
+| writes unsnapshotted after 30 s | 0 of 1,000 | 0 of 1,000 |
+| burst p50 / p95 / max | 1.4 / 1.5 / 1.6 s | 2.8 / 3.7 / 3.9 s |
+| scans queued max, wait max | 16, 764 ms | 5, 63.2 s |
+| inotify watches used / limit | 200,000 / 655,360 (1 instance) | n/a |
+| daemon peak threads, RSS | 134, 1,168 MB | 146, 631 MB |
+| 200 releases, total | 9.7 s | 86.0 s |
+
+- **A `large` create on the Linux runner is now 41 ms**, against the baseline's 1,097 ms, which was nearly all inotify adding 8,336 watches. The attaches run after the creates return, one at a time, about 0.9 s each, so the twenty were all up 17.4 s after the last create returned. The 200 `medium` attaches took the same 17.4 s, at about 90 ms each.
+- **The Linux scan queue reached 16 once**, in the minute that held each attached workspace's one full scan ([ADR 0028](adr/0028-watch-attachment-off-the-create-path.md)): 200 of them, one at a time through the inotify turn, the longest wait 764 ms. The steady state's slowest write (3.2 s) was one of its first, made among those scans, as were 14 of its 22 writes over a second; the queue stayed at one from the next minute on, where the other eight (1.0 to 1.5 s) fell.
+- **macOS is unchanged in kind.** Watches still attach inside the create there. Its 63.2 s scan wait came while the twenty `large` workspaces were released, not in the steady state: their final snapshots are full scans of 100,000 files, eight releases in flight on three permits, and the releases took 88 to 208 s each, 6.7 minutes in all. The report's queue figures stop before the final teardown, where the 200 releases queued 65 scans with a 4.7 s wait.
 
 The macOS runs' twenty `large` creates before the change were also slower than in the `medium` run (1,652 ms mean against 982), with only the warm workspace before them. The volume was 97% full at the time; whether that is why was not established. After the change, with more room on the volume, they averaged 988 ms.
 

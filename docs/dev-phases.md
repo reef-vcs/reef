@@ -45,7 +45,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 **Exit criteria.**
 
-- Twenty workspaces on the 100k-file synthetic repo, each created in under one second on APFS and overlayfs, with disk usage per workspace proportional to modified files.
+- Twenty workspaces on the 100k-file synthetic repo, each created in under one second on APFS and overlayfs, with disk usage per workspace proportional to modified files. Met on APFS on the M2 Max (962 and 969 ms per create in R1.29 and R1.32) and on the `ubuntu-24.04` runner since R1.32: 19.5 ms per create on kernel overlayfs (1,006 ms before) and 22.3 ms on `fuse-overlayfs`, with a Linux workspace's notify watch attached after the create returns ([`benchmarks.md`](benchmarks.md#linux-workspace-creation-off-the-inotify-watch-path-r132)).
 - Killing an agent process mid-edit leaves a snapshot in the store and no directory on disk after the lease expires.
 - Two workspaces on the same change work without interfering.
 - A shared dependency store is mounted read-only into every workspace and verified against a lockfile hash.

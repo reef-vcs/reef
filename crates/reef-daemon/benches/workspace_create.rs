@@ -12,7 +12,11 @@
 //! - `create_api/<preset>/<kind>/<n>`: `n` `Workspaces.Create` calls to an
 //!   in-process daemon on the `auto` backend, which resolves to `<kind>`,
 //!   and the watcher `REEF_BENCH_WATCHER` names (`auto` when unset). This
-//!   is the exit criterion's measurement.
+//!   is the exit criterion's measurement. Before an iteration's releases,
+//!   it waits (untimed) until none of its workspaces' watches is still
+//!   attaching (Linux notify, R1.32), so later creates run beside earlier
+//!   ones' attaches and their full scans, as a client's would; the wait is
+//!   reported as the attach drain.
 //!
 //! Criterion's times are per workspace: each iteration's total divided by
 //! `n`. After each `create` and `create_api` benchmark, a disk pass creates
@@ -52,7 +56,9 @@ use reef_daemon::backend::{
     Backend, BackendKind, OverlayConfig, WorkspacePaths, backend_for, probe,
 };
 use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, CreateResponse, CreateTimings, Workspace};
+use reef_daemon::proto::v0::{
+    CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
+};
 use reef_daemon::testing::{TestDaemon, short_tmp};
 use reef_testing::synth::{self, MutateOps, Preset};
 
@@ -70,6 +76,9 @@ const CREATE_COUNTS: [u32; 3] = [1, 20, 100];
 const API_COUNTS: [u32; 2] = [1, 20];
 /// How long to wait for the daemon's background deletions after a release.
 const TRASH_WAIT: Duration = Duration::from_mins(15);
+/// How long to wait for an iteration's background attaches (R1.32): twenty
+/// `large` workspaces on fuse-overlayfs take about 48 s on a CI runner.
+const ATTACH_WAIT: Duration = Duration::from_mins(10);
 /// The owner of the daemon's workspaces.
 const OWNER: &str = "bench@reef.invalid";
 const MIB: f64 = (1u64 << 20) as f64;
@@ -156,6 +165,7 @@ fn bench_create(c: &mut Criterion, fixture: &Fixture, base: &BenchBase, kinds: &
                 p50_create: p50(created),
                 p50_materialize: None,
                 p50_timings: None,
+                attach_drain: None,
                 watcher: None,
                 target: target_for(n, &counts),
                 disk,
@@ -212,6 +222,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
         let created = RefCell::new(Vec::new());
         let materialized = RefCell::new(Vec::new());
         let steps = RefCell::new(Vec::new());
+        let drains = RefCell::new(Vec::new());
         let id = BenchmarkId::new(format!("{preset}/{kind}"), n);
         group.bench_function(id, |b| {
             let api = api();
@@ -233,6 +244,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
                             .push(response.timings.unwrap_or_default());
                         workspaces.push(ws);
                     }
+                    drains.borrow_mut().push(api.wait_attached(&workspaces));
                     for ws in &workspaces {
                         api.release(ws);
                     }
@@ -269,6 +281,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
             p50_create: p50(created),
             p50_materialize: Some(p50(materialized.into_inner())),
             p50_timings: Some(p50_timings(&steps.into_inner())),
+            attach_drain: Some(p50(drains.into_inner())),
             watcher: Some(&api.watcher),
             target: target_for(n, &counts),
             disk,
@@ -391,6 +404,34 @@ impl Api {
                     .release_workspace(&self.repo, &ws.id, false, false),
             )
             .expect("release a workspace");
+    }
+
+    /// Waits until none of `workspaces` is `attaching`, polling `List`
+    /// every 100 ms, and returns how long that took: called right after the
+    /// last create returns, the time to its last attach. Zero where watches
+    /// attach inside the create (macOS, Watchman's own deferral aside).
+    fn wait_attached(&self, workspaces: &[Workspace]) -> Duration {
+        let begun = Instant::now();
+        loop {
+            let listed = self
+                .rt
+                .block_on(self.daemon.client.list_workspaces(ListWorkspacesRequest {
+                    repo: self.repo.clone(),
+                    ..ListWorkspacesRequest::default()
+                }))
+                .expect("list workspaces");
+            let attaching = listed.iter().any(|listed| {
+                listed.watch_state == "attaching" && workspaces.iter().any(|ws| ws.id == listed.id)
+            });
+            if !attaching {
+                return begun.elapsed();
+            }
+            assert!(
+                begun.elapsed() < ATTACH_WAIT,
+                "watches still attaching after {ATTACH_WAIT:?}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Waits for the daemon's background deletions of released workspaces.
@@ -605,6 +646,10 @@ struct Row<'a> {
     p50_materialize: Option<Duration>,
     /// For `create_api`, the median of each step the daemon timed (R1.29).
     p50_timings: Option<CreateTimings>,
+    /// For `create_api`, the median over iterations of the time from the
+    /// last create's return to its workspaces' last background attach
+    /// (R1.32).
+    attach_drain: Option<Duration>,
     /// For `create_api`, the daemon's watcher, which starts within the
     /// create.
     watcher: Option<&'a str>,
@@ -689,6 +734,7 @@ fn report(row: &Row<'_>, tree: Option<&Path>) {
             "total_ms": steps.total_ms,
         })),
         "watcher": row.watcher,
+        "attach_drain_ms": row.attach_drain.map(millis),
         "disk_per_ws_mib": disk.per_ws,
         "disk_per_ws_modified_mib": disk.per_ws_modified,
         "modified_files_mib": disk.modified_files,
@@ -708,10 +754,10 @@ fn report(row: &Row<'_>, tree: Option<&Path>) {
 }
 
 /// Prints `create_api`'s `breakdown` line: the median of each step the
-/// daemon timed, and the watcher.
+/// daemon timed, the watcher, and the attach drain.
 fn print_breakdown(row: &Row<'_>, steps: &CreateTimings) {
     eprintln!(
-        "breakdown ({}/{}/{}/{}): p50 per create {:.1} ms (daemon {} ms): resolve {}, base {}, materialize {}, mount {}, jj {}, seed {}, insert {}, watch {} ms; watcher {}",
+        "breakdown ({}/{}/{}/{}): p50 per create {:.1} ms (daemon {} ms): resolve {}, base {}, materialize {}, mount {}, jj {}, seed {}, insert {}, watch {} ms; watcher {}; attach drain p50 {:.0} ms",
         row.group,
         row.preset,
         row.kind,
@@ -727,6 +773,7 @@ fn print_breakdown(row: &Row<'_>, steps: &CreateTimings) {
         steps.insert_ms,
         steps.watch_ms,
         row.watcher.unwrap_or("unknown"),
+        row.attach_drain.map_or(0.0, millis),
     );
 }
 
