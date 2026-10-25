@@ -1226,12 +1226,19 @@ async fn move_to_existing_change_edits_it() {
     );
 
     std::fs::write(Path::new(&ws.path).join("d.txt"), "d\n").unwrap();
+    // The watcher may snapshot the write first (on Linux the move
+    // re-attaches the watch in the background, and a full scan follows),
+    // leaving this one nothing to record: what matters is that C now holds
+    // the file, whichever snapshot wrote it.
     let snapshot = daemon
         .client
         .snapshot_workspace(&repo.id, &ws.id, "")
         .await
         .unwrap();
-    assert!(snapshot.changed);
+    assert_eq!(
+        file_at(&repo.root, &snapshot.commit_id, "d.txt").await,
+        Some("d\n".to_owned())
+    );
     let rewritten = open(&repo.root)
         .await
         .resolve_revision(&snapshot.commit_id)
