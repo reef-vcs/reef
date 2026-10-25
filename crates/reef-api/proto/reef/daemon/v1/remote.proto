@@ -65,8 +65,13 @@ message ListTokensResponse {
 
 // Which token to revoke.
 message RevokeTokenRequest {
-  // The token's name, or its id or a unique id prefix.
-  string token = 1;
+  // Exactly one is set.
+  oneof which {
+    // The token's id, or a unique id prefix.
+    string id = 1;
+    // The token's name.
+    string name = 2;
+  }
 }
 
 // The revoked token.

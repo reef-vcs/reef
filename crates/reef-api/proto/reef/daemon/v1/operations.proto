@@ -14,7 +14,7 @@ import "reef/daemon/v1/types.proto";
 
 // A repository's operation log.
 service Operations {
-  // Operations, newest first unless asked otherwise, a page at a time.
+  // Operations, newest first unless `oldest_first`, a page at a time.
   rpc Log(LogOperationsRequest) returns (LogOperationsResponse); // R2.02
   // One operation, with a summary of its view.
   rpc Get(GetOperationRequest) returns (GetOperationResponse); // R2.02
@@ -40,8 +40,8 @@ message LogOperationsRequest {
   string owner = 4;
   // Which page.
   Page page = 5;
-  // Greater than 0: only operations indexed after this sequence, oldest
-  // first, so a client can poll by sequence (R2.09).
+  // Greater than 0: only operations indexed after this sequence (R2.09).
+  // A client polling by sequence sets `oldest_first` too.
   uint64 after_seq = 6;
   // Only operations that ended at or after this time; unset for no bound.
   google.protobuf.Timestamp since = 7;
@@ -57,7 +57,7 @@ message LogOperationsRequest {
 
 // One page of operations.
 message LogOperationsResponse {
-  // Newest first, or oldest first with `after_seq` or `oldest_first`.
+  // Newest first, or oldest first with `oldest_first`.
   repeated Operation operations = 1;
   // Where the page ended.
   PageInfo page = 2;
@@ -69,7 +69,7 @@ message LogOperationsResponse {
 message GetOperationRequest {
   // The repository.
   string repo = 1;
-  // An operation id or unique prefix; `@` for the head operation.
+  // An operation id or unique prefix; `@` or empty for the head operation.
   string op = 2;
 }
 
@@ -98,7 +98,7 @@ message ViewSummary {
 message UndoRequest {
   // The repository.
   string repo = 1;
-  // An operation id or unique prefix; empty for the head operation.
+  // An operation id or unique prefix; `@` or empty for the head operation.
   string op = 2;
   // The workspace the client acts for, recorded in the operation; empty
   // for none.
@@ -113,7 +113,8 @@ message UndoResponse {
   string op_id = 2;
   // The operation undone.
   Operation undone = 3;
-  // The operation whose view the repository has now.
+  // The operation whose view was merged back in: `undone`'s parent (an
+  // undo merges views, R2.03).
   string restored_to = 4;
   // Reef workspaces checked out on a new commit.
   repeated string workspaces_updated = 5;
@@ -137,7 +138,9 @@ message SubscribeRequest {
   EventFilter filter = 3;
 }
 
-// Which point in the past (R2.12).
+// Which point in the past (R2.12). A point before the index's oldest, or
+// an operation GC removed, is NOT_FOUND naming the oldest that can be
+// replayed.
 message ReplayRequest {
   // What to reconstruct.
   enum Only {

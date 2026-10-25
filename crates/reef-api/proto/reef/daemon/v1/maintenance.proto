@@ -9,20 +9,25 @@ import "google/protobuf/timestamp.proto";
 
 // Keeping the daemon's state small and safe.
 service Maintenance {
-  // Garbage collection: jj's operations and git objects older than the undo
-  // window, base cache entries no active workspace uses, ended workspace
+  // Collects garbage in one repository or all of them.
+  //
+  // jj's operations and git objects older than the undo window, base cache
+  // entries no active workspace uses, ended workspace
   // records, and unused stores. Refused with UNAVAILABLE while another
   // maintenance task (GC, backup, quiesce) runs.
   rpc Gc(GcRequest) returns (GcResponse);
-  // A consistent copy of the daemon's state (the whole database and each
-  // repository's jj state) into a new or empty directory, while agents keep
-  // writing; each repository's thread is paused only while its operation
+  // Backs the daemon's state up into a new or empty directory.
+  //
+  // A consistent copy (the whole database and each repository's jj state)
+  // while agents keep writing; each repository's thread is paused only while its operation
   // files are copied. Progress as it goes; the last message has `done` and
-  // the manifest's path. UNAVAILABLE while another maintenance task runs;
+  // the manifest as `summary`. UNAVAILABLE while another maintenance task runs;
   // ALREADY_EXISTS if `dest` is not empty.
   rpc Backup(BackupRequest) returns (stream BackupProgress);
   // Holds the daemon still for a filesystem snapshot of its state
-  // directory: no jj operation is written, no automatic snapshot or lease
+  // directory.
+  //
+  // No jj operation is written, no automatic snapshot or lease
   // reclaim starts, heartbeats are refused (UNAVAILABLE), and SQLite's WAL
   // is checkpointed into the database file. Ends on Resume with the token,
   // or by itself at `auto_resume_at`. UNAVAILABLE while another quiesce or

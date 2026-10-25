@@ -49,18 +49,20 @@ message Event {
 message WorkspaceEvent {
   // What changed.
   enum Kind {
+    // Not set; the daemon never sends it.
+    KIND_UNSPECIFIED = 0;
     // It was created.
-    CREATED = 0;
+    CREATED = 1;
     // A snapshot recorded an operation.
-    SNAPSHOTTED = 1;
+    SNAPSHOTTED = 2;
     // It was released.
-    RELEASED = 2;
+    RELEASED = 3;
     // Its lease expired and it was reclaimed.
-    RECLAIMED = 3;
+    RECLAIMED = 4;
     // It moved to another change.
-    MOVED = 4;
+    MOVED = 5;
     // Its `attention` or `divergent` changed.
-    ATTENTION = 5;
+    ATTENTION = 6;
   }
   // What changed.
   Kind kind = 1;
@@ -68,13 +70,14 @@ message WorkspaceEvent {
   Workspace workspace = 2;
   // The operation that recorded it; empty when none did.
   string op_id = 3;
-  // What the index recorded with it: the reclaim's final operation and
-  // reason for RELEASED and RECLAIMED, `<attention>|<divergent>` for
-  // ATTENTION; empty otherwise.
-  string detail = 4;
+  // For RELEASED and RECLAIMED: why its lease ended (`released`,
+  // `expired`, `restored`); `op_id` is the final snapshot's. Empty for the
+  // other kinds; ATTENTION's new values are in `workspace`.
+  string reason = 4;
   // The lease involved, when there is one.
   string lease_id = 5;
-  // For RELEASED and RECLAIMED: bytes the workspace had allocated.
+  // For RELEASED and RECLAIMED: bytes the workspace had allocated
+  // (R2.20).
   uint64 freed_bytes = 6;
 }
 
@@ -83,12 +86,14 @@ message WorkspaceEvent {
 message LeaseEvent {
   // What changed.
   enum Kind {
+    // Not set; the daemon never sends it.
+    KIND_UNSPECIFIED = 0;
     // It was issued: with a create, or by a restore.
-    ISSUED = 0;
+    ISSUED = 1;
     // A heartbeat renewed it.
-    HEARTBEAT = 1;
+    HEARTBEAT = 2;
     // It passed its grace and its workspace is being reclaimed.
-    EXPIRED = 2;
+    EXPIRED = 3;
   }
   // What changed.
   Kind kind = 1;
@@ -102,12 +107,16 @@ message LeaseEvent {
 message Frame {
   // The events, oldest first.
   repeated Event events = 1;
-  // The first sequence the frame covers.
+  // The first indexed sequence the frame covers. Unindexed events (seq 0)
+  // do not move it: a frame of presence alone has `from_seq` and `to_seq`
+  // at the last indexed sequence delivered, and `Presence.Subscribe`'s
+  // first frame (the whole table) has both 0.
   uint64 from_seq = 2;
-  // The last sequence the frame covers.
+  // The last indexed sequence the frame covers.
   uint64 to_seq = 3;
-  // Events between `from_seq` and `to_seq` the filter excluded, so a
-  // client that counts sees every sequence once.
+  // Sequences between `from_seq` and `to_seq` not sent: excluded by the
+  // filter or the repository, so a client that counts sees every sequence
+  // exactly once (R2.09).
   uint32 coalesced = 4;
   // The subscriber fell behind: the daemon caught it up from the index
   // (`Operations.Subscribe`), or this frame resends every live entry

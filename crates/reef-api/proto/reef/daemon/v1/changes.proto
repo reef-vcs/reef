@@ -4,8 +4,8 @@
 // `rev` resolves as a change id prefix (hex or jj's reverse hex), a commit
 // id prefix, or a local bookmark, in that order, plus `@` (the `default`
 // workspace's working-copy commit), `<workspace-id>@` (a Reef workspace's),
-// and `<rev>-` (the first parent). Only `LogChangesRequest.revset` takes
-// jj's revset language. Reads answer from the daemon's current head and say
+// and `<rev>-` (the first parent). Only `LogChangesRequest.revset` and
+// `ReplayRequest.revset` take jj's revset language. Reads answer from the daemon's current head and say
 // which in `at_op`. Writes snapshot every workspace they would move first,
 // then check the new commits out in them: `snapshots` lists the snapshot
 // operations, `workspaces_updated` the workspaces checked out, and
@@ -64,7 +64,7 @@ message LogChangesResponse {
   // The head operation the answer was read from.
   string at_op = 4;
   // Bookmarks the log treats as trunk (the default start's), so a client
-  // can mark changes that landed.
+  // can mark changes that landed (R2.18).
   repeated string trunk_bookmarks = 5;
 }
 
@@ -80,16 +80,12 @@ message GetChangeRequest {
 message GetChangeResponse {
   // The change, at the commit `rev` resolved to.
   Change change = 1;
-  // Files that differ from its parents.
-  uint32 files_changed = 2;
-  // Lines added against its parents, over text files.
-  uint64 insertions = 3;
-  // Lines removed against its parents, over text files.
-  uint64 deletions = 4;
+  // Its diff stat against its parents.
+  DiffStat stat = 2;
   // The change's other visible commits, when it is divergent.
-  repeated ChangeRef other_commits = 5;
+  repeated ChangeRef other_commits = 3;
   // The head operation the answer was read from.
-  string at_op = 6;
+  string at_op = 4;
 }
 
 // What to diff, and how much detail to return.
@@ -139,14 +135,15 @@ message DiffRange {
 // The diff. Bounded by `[api] max_diff_bytes`: past it, `truncated` is set
 // and the client narrows with `paths`.
 message DiffResponse {
-  // The old side; for a change, its first parent.
+  // The old side: for a change, its first parent (the diff itself is
+  // against the parents' merged tree).
   ChangeRef from = 1;
   // The new side.
   ChangeRef to = 2;
   // Totals over the files returned.
   DiffStat stat = 3;
-  // One per changed file, by path; per-file counts for STAT, kinds for
-  // FILES, hunks for LINES; empty for SYMBOLS.
+  // One per changed file, by path: counts and kinds at every level, hunks
+  // for LINES only.
   repeated FileDiff files = 4;
   // The response hit the size bound and stops before `truncated_at`.
   bool truncated = 5;
@@ -192,9 +189,9 @@ message FileDiff {
   // Its line hunks, for LINES.
   repeated DiffHunk hunks = 9;
   // Lines added; 0 for a binary file.
-  uint32 insertions = 10;
+  uint64 insertions = 10;
   // Lines removed; 0 for a binary file.
-  uint32 deletions = 11;
+  uint64 deletions = 11;
   // A side is conflicted; that side's text is jj's materialized conflict,
   // markers included (the only place markers appear in the API).
   bool conflicted = 12;
@@ -218,12 +215,14 @@ message DiffHunk {
 message DiffLine {
   // Which side it belongs to.
   enum Kind {
+    // Not set; the daemon never sends it.
+    KIND_UNSPECIFIED = 0;
     // On both sides.
-    CONTEXT = 0;
+    CONTEXT = 1;
     // On the new side only.
-    ADDED = 1;
+    ADDED = 2;
     // On the old side only.
-    REMOVED = 2;
+    REMOVED = 3;
   }
   // Which side.
   Kind kind = 1;
@@ -269,7 +268,8 @@ message SymbolChange {
   string status = 1;
   // Its name.
   string name = 2;
-  // function, method, struct, class, ...: the language's kind.
+  // The symbol's kind in the index's one vocabulary across languages
+  // (function, method, class, ...; R2.14).
   string kind = 3;
   // The enclosing symbol's name; empty at file scope.
   string parent = 4;
@@ -391,8 +391,9 @@ message SquashChangeRequest {
   string rev = 2;
   // The revision to squash into; empty for the change's first parent.
   string into = 3;
-  // The result's description: empty keeps `into`'s; a leading `+` appends
-  // the rest to it.
+  // The result's description: empty keeps `into`'s; a leading `+`
+  // appends `rev`'s description to `into`'s (R2.03); anything else
+  // replaces it.
   string description = 4;
   // The workspace the client acts for, recorded in the operation; empty
   // for none.

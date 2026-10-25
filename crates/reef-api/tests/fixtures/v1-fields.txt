@@ -1,710 +1,788 @@
-AbandonChangeRequest force 4
-AbandonChangeRequest repo 1
-AbandonChangeRequest revs 2
-AbandonChangeRequest workspace 3
-AbandonChangeResponse abandoned 5
-AbandonChangeResponse new_changes 7
-AbandonChangeResponse op_id 2
-AbandonChangeResponse operation 1
-AbandonChangeResponse rebased 3
-AbandonChangeResponse seq 9
-AbandonChangeResponse snapshots 6
-AbandonChangeResponse workspaces_failed 8
-AbandonChangeResponse workspaces_updated 4
-AbortStoreBuildRequest build_id 1
-AbortStoreBuildRequest owner 3
-AbortStoreBuildRequest reason 2
-AbortStoreBuildResponse freed_bytes 2
-AbortStoreBuildResponse op_id 1
-AbortStoreBuildResponse seq 3
-ApplyEditsChunk edit 2
-ApplyEditsChunk header 1
-ApplyEditsResponse bytes_written 5
-ApplyEditsResponse files_written 4
-ApplyEditsResponse op_id 3
-ApplyEditsResponse operation 2
-ApplyEditsResponse result 1
-ApplyEditsResponse seq 9
-ApplyEditsResponse snapshots 6
-ApplyEditsResponse workspaces_failed 8
-ApplyEditsResponse workspaces_updated 7
-ApplyHeader allow_divergence 5
-ApplyHeader change 2
-ApplyHeader description 3
-ApplyHeader expected_commit 4
-ApplyHeader repo 1
-ApplyHeader workspace 6
-BackendProbe available 2
-BackendProbe filesystem 4
-BackendProbe kind 1
-BackendProbe reason 3
-BackupDatabase bytes 2
-BackupDatabase pages 1
-BackupProgress bytes 4
-BackupProgress done 5
-BackupProgress files 3
-BackupProgress manifest_path 6
-BackupProgress repo_id 1
-BackupProgress step 2
-BackupProgress summary 7
-BackupRepo bytes 7
-BackupRepo colocated 4
-BackupRepo files 6
-BackupRepo id 1
-BackupRepo jj_repo_path 3
-BackupRepo op_heads 5
-BackupRepo pause_ms 8
-BackupRepo root 2
-BackupRequest dest 1
-BackupRequest repo 2
-BackupSummary complete 9
-BackupSummary completed_at 10
-BackupSummary daemon_instance_id 3
-BackupSummary database 8
-BackupSummary jj_lib_version 5
-BackupSummary reef_version 4
-BackupSummary repos 7
-BackupSummary started_at 2
-BackupSummary state_dir 6
-BackupSummary version 1
-Bookmark change 2
-Bookmark name 1
-BuildEvent done 2
-BuildEvent line 1
-BuildEvent started 3
-BuildResult already_built 9
-BuildResult bytes 4
-BuildResult dropped_lines 8
-BuildResult exit_code 6
-BuildResult lockfile_hash 2
-BuildResult name 1
-BuildResult op_id 7
-BuildResult path 3
-BuildResult sealed 5
-BuildResult seq 10
-BuildStarted argv 1
-BuildStarted env 2
-BuildStarted rev 3
-BuildStoreRequest force 5
-BuildStoreRequest name 2
-BuildStoreRequest repo 1
-BuildStoreRequest rev 3
-BuildStoreRequest timeout 4
-CallSite enclosing_symbol 4
-CallSite kind 3
-CallSite line 2
-CallSite path 1
-Change author 4
-Change bookmarks 7
-Change change_id 1
-Change commit_id 2
-Change committer 5
-Change conflicted 9
-Change description 3
-Change divergent 8
-Change edges 14
-Change empty 10
-Change is_working_copy 12
-Change parents 6
-Change tree_id 13
-Change workspaces 11
-ChangeRef change_id 1
-ChangeRef commit_id 2
-CopyFrom path 2
-CopyFrom rev 1
-CreateRequest backend 6
-CreateRequest change 2
-CreateRequest lease_ms 8
-CreateRequest missing_stores 9
-CreateRequest new_on 3
-CreateRequest owner 4
-CreateRequest path 7
-CreateRequest purpose 5
-CreateRequest repo 1
-CreateResponse base_was_cached 5
-CreateResponse materialize_ms 4
-CreateResponse op_id 2
-CreateResponse seq 8
-CreateResponse shared_change 3
-CreateResponse start 7
-CreateResponse timings 6
-CreateResponse workspace 1
-CreateTimings base_ms 2
-CreateTimings insert_ms 7
-CreateTimings jj_ms 5
-CreateTimings materialize_ms 3
-CreateTimings mount_ms 4
-CreateTimings resolve_ms 1
-CreateTimings seed_ms 6
-CreateTimings total_ms 9
-CreateTimings watch_ms 8
-DaemonStatusResponse active_workspaces 9
-DaemonStatusResponse api_version 10
-DaemonStatusResponse backends 8
-DaemonStatusResponse events_buffer 16
-DaemonStatusResponse lease_max 19
-DaemonStatusResponse pid 2
-DaemonStatusResponse presence_entries 17
-DaemonStatusResponse presence_ttl 18
-DaemonStatusResponse remote_listen 14
-DaemonStatusResponse repositories 7
-DaemonStatusResponse schema_hash 11
-DaemonStatusResponse schema_version 6
-DaemonStatusResponse seq 15
-DaemonStatusResponse seqs 12
-DaemonStatusResponse socket 5
-DaemonStatusResponse state_dir 4
-DaemonStatusResponse ui_built_in 20
-DaemonStatusResponse uptime_ms 3
-DaemonStatusResponse version 1
-DaemonStatusResponse web_url 13
-DescribeChangeRequest description 3
-DescribeChangeRequest repo 1
-DescribeChangeRequest rev 2
-DescribeChangeRequest workspace 4
-DescribeChangeResponse change 1
-DescribeChangeResponse op_id 3
-DescribeChangeResponse operation 2
-DescribeChangeResponse seq 7
-DescribeChangeResponse snapshots 4
-DescribeChangeResponse workspaces_failed 6
-DescribeChangeResponse workspaces_updated 5
-DiffHunk lines 5
-DiffHunk new_lines 4
-DiffHunk new_start 3
-DiffHunk old_lines 2
-DiffHunk old_start 1
-DiffLine kind 1
-DiffLine text 2
-DiffRange from 1
-DiffRange to 2
-DiffRequest callers_of_added 7
-DiffRequest change 2
-DiffRequest context_lines 6
-DiffRequest level 4
-DiffRequest paths 5
-DiffRequest range 3
-DiffRequest repo 1
-DiffRequest summary 8
-DiffResponse at_op 7
-DiffResponse files 4
-DiffResponse from 1
-DiffResponse level 9
-DiffResponse stat 3
-DiffResponse symbols 8
-DiffResponse to 2
-DiffResponse truncated 5
-DiffResponse truncated_at 6
-DiffStat deletions 3
-DiffStat files_changed 1
-DiffStat insertions 2
-DirtyPath kind 2
-DirtyPath path 1
-DirtyPath since 3
-DiskUsage allocated_bytes 1
-DiskUsage files_changed 2
-Edit copy_from 5
-Edit delete 3
-Edit path 1
-Edit symlink 4
-Edit write 2
-ErrorDetail chain 2
-ErrorDetail hint 3
-ErrorDetail kind 1
-ErrorDetail next 4
-Event at 3
-Event lease 6
-Event operation 4
-Event presence 7
-Event repo_id 2
-Event seq 1
-Event workspace 5
-EventFilter changes 1
-EventFilter kinds 4
-EventFilter owners 3
-EventFilter workspaces 2
-FileChunk blob_id 6
-FileChunk conflicted 7
-FileChunk data 1
-FileChunk eof 3
-FileChunk kind 5
-FileChunk offset 2
-FileChunk total_size 4
-FileDiff binary 6
-FileDiff conflicted 12
-FileDiff deletions 11
-FileDiff hunks 9
-FileDiff insertions 10
-FileDiff new_kind 5
-FileDiff new_size 8
-FileDiff old_kind 4
-FileDiff old_path 2
-FileDiff old_size 7
-FileDiff path 1
-FileDiff state 3
-FileEntry blob_id 4
-FileEntry conflicted 6
-FileEntry kind 2
-FileEntry path 1
-FileEntry size 3
-FileEntry symlink_target 5
-FileStatus conflicted 5
-FileStatus kind 4
-FileStatus new_size 7
-FileStatus old_path 3
-FileStatus old_size 6
-FileStatus path 1
-FileStatus state 2
-FileSymbolDiff indexed 3
-FileSymbolDiff lang 4
-FileSymbolDiff path 1
-FileSymbolDiff source 5
-FileSymbolDiff status 2
-FileSymbolDiff symbols 6
-ForgetRequest repo 1
-ForgetResponse repository 1
-Frame coalesced 4
-Frame events 1
-Frame from_seq 2
-Frame lagged 5
-Frame to_seq 3
-GcReport base_bytes_freed 8
-GcReport base_entries_removed 7
-GcReport dry_run 14
-GcReport elapsed_ms 13
-GcReport jj_bytes_after 4
-GcReport jj_bytes_before 3
-GcReport jj_error 6
-GcReport keep_newer 2
-GcReport reindex_ms 5
-GcReport repo_id 1
-GcReport store_bytes_freed 12
-GcReport stores_removed 11
-GcReport symbol_rows_removed 15
-GcReport wc_bytes_freed 10
-GcReport workspace_rows_removed 9
-GcRequest dry_run 2
-GcRequest repo 1
-GcResponse reports 1
-GetChangeRequest repo 1
-GetChangeRequest rev 2
-GetChangeResponse at_op 6
-GetChangeResponse change 1
-GetChangeResponse deletions 4
-GetChangeResponse files_changed 2
-GetChangeResponse insertions 3
-GetChangeResponse other_commits 5
-GetOperationRequest op 2
-GetOperationRequest repo 1
-GetOperationResponse at_op 3
-GetOperationResponse operation 1
-GetOperationResponse view_summary 2
-GraphEdge kind 2
-GraphEdge target 1
-HeartbeatRequest lease_id 3
-HeartbeatRequest repo 1
-HeartbeatRequest workspace 2
-HeartbeatResponse expires_at 2
-HeartbeatResponse heartbeat_every 3
-HeartbeatResponse lease_id 1
-IndexSymbolsRequest repo 1
-IndexSymbolsRequest rev 2
-IndexSymbolsRequest scope 3
-IndexSymbolsResponse commit_id 1
-IndexSymbolsResponse elapsed_ms 8
-IndexSymbolsResponse files_indexed 3
-IndexSymbolsResponse files_seen 2
-IndexSymbolsResponse files_skipped_size 4
-IndexSymbolsResponse files_with_errors 5
-IndexSymbolsResponse refs 7
-IndexSymbolsResponse symbols 6
-IngestSymbolsChunk data 4
-IngestSymbolsChunk repo 1
-IngestSymbolsChunk rev 2
-IngestSymbolsChunk source 3
-IngestSymbolsResponse commit_id 1
-IngestSymbolsResponse documents 2
-IngestSymbolsResponse refs 5
-IngestSymbolsResponse skipped_documents 3
-IngestSymbolsResponse symbols 4
-InspectRequest repo 1
-InspectRequest skip_disk_usage 4
-InspectRequest snapshot_first 3
-InspectRequest workspace 2
-InspectResponse disk_usage 2
-InspectResponse local_snapshot_count 6
-InspectResponse op_id 4
-InspectResponse other_workspaces_on_change 3
-InspectResponse recent_snapshots 7
-InspectResponse snapshot_count 5
-InspectResponse workspace 1
-IssueTokenRequest expires_in 3
-IssueTokenRequest name 1
-IssueTokenRequest scopes 2
-IssueTokenResponse secret 2
-IssueTokenResponse token 1
-Lease end_reason 9
-Lease expires_at 4
-Lease grace_ms 7
-Lease heartbeat_every 10
-Lease id 1
-Lease issued_at 3
-Lease last_heartbeat_at 5
-Lease length_ms 6
-Lease owner 2
-Lease state 8
-LeaseEvent kind 1
-LeaseEvent lease 3
-LeaseEvent workspace 2
-LineRange end 2
-LineRange start 1
-ListQueriesResponse queries 1
-ListRepositoriesResponse repositories 1
-ListStoresRequest repo 1
-ListStoresResponse stores 1
-ListTokensResponse tokens 1
-ListTreeRequest page 5
-ListTreeRequest path 3
-ListTreeRequest recursive 4
-ListTreeRequest repo 1
-ListTreeRequest rev 2
-ListTreeRequest with_sizes 6
-ListTreeResponse at_commit 3
-ListTreeResponse at_op 4
-ListTreeResponse entries 1
-ListTreeResponse page 2
-ListTreeResponse sizes_omitted 5
-ListWorkspacesRequest owner 3
-ListWorkspacesRequest page 4
-ListWorkspacesRequest repo 1
-ListWorkspacesRequest states 2
-ListWorkspacesResponse page 2
-ListWorkspacesResponse workspaces 1
-LogChangesRequest page 3
-LogChangesRequest repo 1
-LogChangesRequest revset 2
-LogChangesRequest with_graph 4
-LogChangesResponse at_op 4
-LogChangesResponse changes 1
-LogChangesResponse page 2
-LogChangesResponse revset 3
-LogChangesResponse trunk_bookmarks 5
-LogOperationsRequest after_seq 6
-LogOperationsRequest before_seq 10
-LogOperationsRequest changes 9
-LogOperationsRequest kinds 2
-LogOperationsRequest oldest_first 11
-LogOperationsRequest owner 4
-LogOperationsRequest page 5
-LogOperationsRequest repo 1
-LogOperationsRequest since 7
-LogOperationsRequest until 8
-LogOperationsRequest workspace 3
-LogOperationsResponse at_op 3
-LogOperationsResponse operations 1
-LogOperationsResponse page 2
-LookupSymbolsRequest exact 5
-LookupSymbolsRequest kind 4
-LookupSymbolsRequest name 3
-LookupSymbolsRequest page 6
-LookupSymbolsRequest repo 1
-LookupSymbolsRequest rev 2
-LookupSymbolsResponse page 2
-LookupSymbolsResponse symbols 1
-MountedStore lockfile_hash 2
-MountedStore mode 4
-MountedStore mount 3
-MountedStore name 1
-MountedStore verified 5
-MoveRequest change 3
-MoveRequest missing_stores 5
-MoveRequest new_on 4
-MoveRequest repo 1
-MoveRequest workspace 2
-MoveResponse files_added 5
-MoveResponse files_removed 6
-MoveResponse files_updated 4
-MoveResponse final_op_id 3
-MoveResponse op_id 2
-MoveResponse seq 8
-MoveResponse tree_replaced 7
-MoveResponse workspace 1
-Operation attributes 14
-Operation changes 13
-Operation changes_truncated 15
-Operation description 3
-Operation end_at 11
-Operation external 9
-Operation gc_rewritten 16
-Operation hostname 7
-Operation is_snapshot 8
-Operation kind 4
-Operation op_id 1
-Operation parents 2
-Operation seq 12
-Operation start_at 10
-Operation username 6
-Operation workspace_id 5
-Operation.AttributesEntry key 1
-Operation.AttributesEntry value 2
-OutputLine stream 2
-OutputLine text 1
-Page page_size 1
-Page page_token 2
-PageInfo next_page_token 1
-PageInfo page_size 2
-PageInfo restarted 3
-ParamInfo description 4
-ParamInfo kind 2
-ParamInfo name 1
-ParamInfo required 3
-PrepareStoreBuildRequest force 5
-PrepareStoreBuildRequest lease_ms 4
-PrepareStoreBuildRequest name 2
-PrepareStoreBuildRequest owner 6
-PrepareStoreBuildRequest repo 1
-PrepareStoreBuildRequest rev 3
-PrepareStoreBuildResponse already_built 9
-PrepareStoreBuildResponse argv 4
-PrepareStoreBuildResponse build_id 1
-PrepareStoreBuildResponse env 5
-PrepareStoreBuildResponse lease 8
-PrepareStoreBuildResponse lockfile_hash 7
-PrepareStoreBuildResponse mount 12
-PrepareStoreBuildResponse result 10
-PrepareStoreBuildResponse rev 6
-PrepareStoreBuildResponse scratch_root 2
-PrepareStoreBuildResponse store_dir 3
-PrepareStoreBuildResponse workspace 11
-PresenceEntry activity 4
-PresenceEntry agent 1
-PresenceEntry change 3
-PresenceEntry detail 5
-PresenceEntry expires_at 8
-PresenceEntry kind 9
-PresenceEntry progress 6
-PresenceEntry reported_at 7
-PresenceEntry since 10
-PresenceEntry source 11
-PresenceEntry workspace 2
-PresenceUpdate activity 4
-PresenceUpdate agent 1
-PresenceUpdate change 3
-PresenceUpdate detail 5
-PresenceUpdate keepalive 7
-PresenceUpdate oneshot 8
-PresenceUpdate progress 6
-PresenceUpdate workspace 2
-Progress done 1
-Progress total 2
-QueryInfo columns 4
-QueryInfo description 2
-QueryInfo name 1
-QueryInfo params 3
-QuiesceRequest max_ms 2
-QuiesceRequest repo 1
-QuiesceResponse auto_resume_at 3
-QuiesceResponse quiesced_at 2
-QuiesceResponse token 1
-ReadFileRequest limit 5
-ReadFileRequest materialize_conflicts 6
-ReadFileRequest offset 4
-ReadFileRequest path 3
-ReadFileRequest repo 1
-ReadFileRequest rev 2
-RegisterRequest if_not_jj 2
-RegisterRequest path 1
-RegisterResponse already_registered 2
-RegisterResponse initialized_jj 3
-RegisterResponse repository 1
-ReleaseRequest force 3
-ReleaseRequest repo 1
-ReleaseRequest skip_final_snapshot 4
-ReleaseRequest workspace 2
-ReleaseResponse final_op_id 1
-ReleaseResponse freed_bytes 3
-ReleaseResponse seq 5
-ReleaseResponse snapshot_taken 2
-ReleaseResponse workspace_id 4
-ReplayRequest only 6
-ReplayRequest op 3
-ReplayRequest repo 1
-ReplayRequest revset 5
-ReplayRequest seq 2
-ReplayRequest time 4
-ReplayState at 3
-ReplayState bookmarks 6
-ReplayState changes 4
-ReplayState op_id 1
-ReplayState partial 7
-ReplayState seq 2
-ReplayState workspaces 5
-ReplayedWorkspace reconstructed 2
-ReplayedWorkspace workspace 1
-RepoSeq head_op_id 4
-RepoSeq op_heads_watch 3
-RepoSeq repo_id 1
-RepoSeq seq 2
-ReportPresenceResponse updates 1
-Repository colocated 3
-Repository id 1
-Repository registered_at 4
-Repository root 2
-ResumeRequest token 1
-ResumeResponse paused_ms 1
-RevokeTokenRequest token 1
-RevokeTokenResponse token 1
-RunQueryRequest name 2
-RunQueryRequest page 4
-RunQueryRequest params 3
-RunQueryRequest repo 1
-RunQueryRequest.ParamsEntry key 1
-RunQueryRequest.ParamsEntry value 2
-RunQueryResponse columns 1
-RunQueryResponse page 3
-RunQueryResponse rows 2
-SealStoreBuildRequest build_id 1
-SealStoreBuildRequest exit_code 2
-SealStoreBuildRequest owner 3
-Signature at 3
-Signature email 2
-Signature name 1
-Signature tz_offset_minutes 4
-SnapshotEntry commit_id 2
-SnapshotEntry kind 3
-SnapshotEntry local 4
-SnapshotEntry op_id 1
-SnapshotEntry taken_at 5
-SnapshotRequest description 3
-SnapshotRequest repo 1
-SnapshotRequest workspace 2
-SnapshotResponse changed 2
-SnapshotResponse commit_id 3
-SnapshotResponse op_id 1
-SnapshotResponse scan_ms 4
-SnapshotResponse seq 5
-SquashChangeRequest description 4
-SquashChangeRequest into 3
-SquashChangeRequest keep_emptied 6
-SquashChangeRequest repo 1
-SquashChangeRequest rev 2
-SquashChangeRequest workspace 5
-SquashChangeResponse abandoned 6
-SquashChangeResponse op_id 3
-SquashChangeResponse operation 2
-SquashChangeResponse result 1
-SquashChangeResponse result_conflicted 5
-SquashChangeResponse seq 9
-SquashChangeResponse snapshots 7
-SquashChangeResponse workspaces_failed 8
-SquashChangeResponse workspaces_updated 4
-StoreInfo built_at 5
-StoreInfo bytes 4
-StoreInfo in_use_by 7
-StoreInfo lockfile_hash 2
-StoreInfo name 1
-StoreInfo path 3
-StoreInfo repo_id 8
-StoreInfo sealed 6
-SubscribePresenceRequest filter 2
-SubscribePresenceRequest repo 1
-SubscribeRequest filter 3
-SubscribeRequest repo 1
-SubscribeRequest resume_after_seq 2
-Symbol blob_id 2
-Symbol end_col 10
-Symbol end_line 9
-Symbol kind 4
-Symbol name 3
-Symbol parent 5
-Symbol path 1
-Symbol signature 6
-Symbol source 11
-Symbol start_col 8
-Symbol start_line 7
-SymbolChange after 7
-SymbolChange before 6
-SymbolChange call_sites 8
-SymbolChange call_sites_truncated 9
-SymbolChange kind 3
-SymbolChange name 2
-SymbolChange parent 4
-SymbolChange signature 5
-SymbolChange status 1
-SymbolDiff files 1
-SymbolDiff from_commit 4
-SymbolDiff other_files 3
-SymbolDiff to_commit 5
-SymbolDiff unindexed_files 2
-Token created_at 4
-Token expires_at 5
-Token id 1
-Token last_used_at 6
-Token name 2
-Token revoked_at 7
-Token scopes 3
-UndoRequest op 2
-UndoRequest repo 1
-UndoRequest workspace 3
-UndoResponse op_id 2
-UndoResponse operation 1
-UndoResponse restored_to 4
-UndoResponse seq 8
-UndoResponse snapshots 6
-UndoResponse undone 3
-UndoResponse workspaces_failed 7
-UndoResponse workspaces_updated 5
-ViewSummary bookmarks 3
-ViewSummary heads 1
-ViewSummary workspaces 2
-ViewSummary.BookmarksEntry key 1
-ViewSummary.BookmarksEntry value 2
-ViewSummary.WorkspacesEntry key 1
-ViewSummary.WorkspacesEntry value 2
-Workspace attention 11
-Workspace backend 7
-Workspace change_id 5
-Workspace commit_id 6
-Workspace created_at 12
-Workspace divergent 10
-Workspace heartbeat_at 21
-Workspace id 1
-Workspace last_snapshot_at 13
-Workspace last_snapshot_op 14
-Workspace lease 15
-Workspace local_snapshot_count 17
-Workspace owner 3
-Workspace path 8
-Workspace presence 20
-Workspace purpose 4
-Workspace repo_id 2
-Workspace state 9
-Workspace stores 18
-Workspace watch_state 19
-Workspace watcher 16
-WorkspaceChange change 2
-WorkspaceChange workspace 1
-WorkspaceEvent detail 4
-WorkspaceEvent freed_bytes 6
-WorkspaceEvent kind 1
-WorkspaceEvent lease_id 5
-WorkspaceEvent op_id 3
-WorkspaceEvent workspace 2
-WorkspaceStatusRequest repo 1
-WorkspaceStatusRequest snapshot_first 3
-WorkspaceStatusRequest workspace 2
-WorkspaceStatusResponse at_op 11
-WorkspaceStatusResponse change 2
-WorkspaceStatusResponse conflicted_paths 5
-WorkspaceStatusResponse dirty 4
-WorkspaceStatusResponse divergent_commits 10
-WorkspaceStatusResponse files 3
-WorkspaceStatusResponse from_index 6
-WorkspaceStatusResponse hint 12
-WorkspaceStatusResponse index_reconciled_at 9
-WorkspaceStatusResponse next 13
-WorkspaceStatusResponse op_id 7
-WorkspaceStatusResponse stale_reason 8
-WorkspaceStatusResponse workspace 1
-WriteFile data 1
-WriteFile executable 2
+AbandonChangeRequest force 4 Optional Bool
+AbandonChangeRequest repo 1 Optional String
+AbandonChangeRequest revs 2 Repeated String
+AbandonChangeRequest workspace 3 Optional String
+AbandonChangeResponse abandoned 5 Repeated .reef.daemon.v1.ChangeRef
+AbandonChangeResponse new_changes 7 Repeated .reef.daemon.v1.WorkspaceChange
+AbandonChangeResponse op_id 2 Optional String
+AbandonChangeResponse operation 1 Optional .reef.daemon.v1.Operation
+AbandonChangeResponse rebased 3 Repeated .reef.daemon.v1.ChangeRef
+AbandonChangeResponse seq 9 Optional Uint64
+AbandonChangeResponse snapshots 6 Repeated String
+AbandonChangeResponse workspaces_failed 8 Repeated String
+AbandonChangeResponse workspaces_updated 4 Repeated String
+AbortStoreBuildRequest build_id 1 Optional String
+AbortStoreBuildRequest owner 3 Optional String
+AbortStoreBuildRequest reason 2 Optional String
+AbortStoreBuildResponse freed_bytes 2 Optional Uint64
+AbortStoreBuildResponse op_id 1 Optional String
+AbortStoreBuildResponse seq 3 Optional Uint64
+ApplyEditsChunk edit 2 Optional .reef.daemon.v1.Edit
+ApplyEditsChunk header 1 Optional .reef.daemon.v1.ApplyHeader
+ApplyEditsResponse bytes_written 5 Optional Uint64
+ApplyEditsResponse files_written 4 Optional Uint32
+ApplyEditsResponse op_id 3 Optional String
+ApplyEditsResponse operation 2 Optional .reef.daemon.v1.Operation
+ApplyEditsResponse result 1 Optional .reef.daemon.v1.ChangeRef
+ApplyEditsResponse seq 9 Optional Uint64
+ApplyEditsResponse snapshots 6 Repeated String
+ApplyEditsResponse workspaces_failed 8 Repeated String
+ApplyEditsResponse workspaces_updated 7 Repeated String
+ApplyHeader allow_divergence 5 Optional Bool
+ApplyHeader change 2 Optional String
+ApplyHeader description 3 Optional String
+ApplyHeader expected_commit 4 Optional String
+ApplyHeader repo 1 Optional String
+ApplyHeader workspace 6 Optional String
+BackendProbe available 2 Optional Bool
+BackendProbe filesystem 4 Optional String
+BackendProbe kind 1 Optional String
+BackendProbe reason 3 Optional String
+BackupDatabase bytes 2 Optional Uint64
+BackupDatabase pages 1 Optional Uint64
+BackupProgress bytes 4 Optional Uint64
+BackupProgress done 5 Optional Bool
+BackupProgress files 3 Optional Uint64
+BackupProgress manifest_path 6 Optional String
+BackupProgress repo_id 1 Optional String
+BackupProgress step 2 Optional String
+BackupProgress summary 7 Optional .reef.daemon.v1.BackupSummary
+BackupRepo bytes 7 Optional Uint64
+BackupRepo colocated 4 Optional Bool
+BackupRepo files 6 Optional Uint64
+BackupRepo id 1 Optional String
+BackupRepo jj_repo_path 3 Optional String
+BackupRepo op_heads 5 Repeated String
+BackupRepo pause_ms 8 Optional Uint64
+BackupRepo root 2 Optional String
+BackupRequest dest 1 Optional String
+BackupRequest repo 2 Optional String
+BackupSummary complete 9 Optional Bool
+BackupSummary completed_at 10 Optional .google.protobuf.Timestamp
+BackupSummary daemon_instance_id 3 Optional String
+BackupSummary database 8 Optional .reef.daemon.v1.BackupDatabase
+BackupSummary jj_lib_version 5 Optional String
+BackupSummary reef_version 4 Optional String
+BackupSummary repos 7 Repeated .reef.daemon.v1.BackupRepo
+BackupSummary started_at 2 Optional .google.protobuf.Timestamp
+BackupSummary state_dir 6 Optional String
+BackupSummary version 1 Optional Uint32
+Bookmark change 2 Optional .reef.daemon.v1.ChangeRef
+Bookmark name 1 Optional String
+BuildEvent done 2 Optional .reef.daemon.v1.BuildResult
+BuildEvent line 1 Optional .reef.daemon.v1.OutputLine
+BuildEvent started 3 Optional .reef.daemon.v1.BuildStarted
+BuildResult already_built 9 Optional Bool
+BuildResult bytes 4 Optional Uint64
+BuildResult dropped_lines 8 Optional Uint64
+BuildResult exit_code 6 Optional Int32
+BuildResult lockfile_hash 2 Optional String
+BuildResult name 1 Optional String
+BuildResult op_id 7 Optional String
+BuildResult path 3 Optional String
+BuildResult sealed 5 Optional Bool
+BuildResult seq 10 Optional Uint64
+BuildStarted argv 1 Repeated String
+BuildStarted env 2 Repeated String
+BuildStarted rev 3 Optional String
+BuildStoreRequest force 5 Optional Bool
+BuildStoreRequest name 2 Optional String
+BuildStoreRequest repo 1 Optional String
+BuildStoreRequest rev 3 Optional String
+BuildStoreRequest timeout 4 Optional .google.protobuf.Duration
+CallSite enclosing_symbol 4 Optional String
+CallSite kind 3 Optional String
+CallSite line 2 Optional Uint32
+CallSite path 1 Optional String
+Change author 4 Optional .reef.daemon.v1.Signature
+Change bookmarks 7 Repeated String
+Change change_id 1 Optional String
+Change commit_id 2 Optional String
+Change committer 5 Optional .reef.daemon.v1.Signature
+Change conflicted 9 Optional Bool
+Change description 3 Optional String
+Change divergent 8 Optional Bool
+Change edges 14 Repeated .reef.daemon.v1.GraphEdge
+Change empty 10 Optional Bool
+Change is_working_copy 12 Optional Bool
+Change parents 6 Repeated .reef.daemon.v1.ChangeRef
+Change tree_id 13 Optional String
+Change workspaces 11 Repeated String
+ChangeRef change_id 1 Optional String
+ChangeRef commit_id 2 Optional String
+CopyFrom path 2 Optional String
+CopyFrom rev 1 Optional String
+CreateRequest backend 6 Optional String
+CreateRequest change 2 Optional String
+CreateRequest lease_ms 8 Optional Uint64
+CreateRequest missing_stores 9 Optional .reef.daemon.v1.CreateRequest.MissingStores
+CreateRequest new_on 3 Optional String
+CreateRequest owner 4 Optional String
+CreateRequest path 7 Optional String
+CreateRequest purpose 5 Optional String
+CreateRequest repo 1 Optional String
+CreateRequest.MissingStores FAIL 0
+CreateRequest.MissingStores SKIP 1
+CreateResponse base_was_cached 5 Optional Bool
+CreateResponse materialize_ms 4 Optional Uint64
+CreateResponse op_id 2 Optional String
+CreateResponse seq 8 Optional Uint64
+CreateResponse shared_change 3 Optional Bool
+CreateResponse start 7 Optional String
+CreateResponse timings 6 Optional .reef.daemon.v1.CreateTimings
+CreateResponse workspace 1 Optional .reef.daemon.v1.Workspace
+CreateTimings base_ms 2 Optional Uint64
+CreateTimings insert_ms 7 Optional Uint64
+CreateTimings jj_ms 5 Optional Uint64
+CreateTimings materialize_ms 3 Optional Uint64
+CreateTimings mount_ms 4 Optional Uint64
+CreateTimings resolve_ms 1 Optional Uint64
+CreateTimings seed_ms 6 Optional Uint64
+CreateTimings total_ms 9 Optional Uint64
+CreateTimings watch_ms 8 Optional Uint64
+DaemonStatusResponse active_workspaces 9 Optional Uint32
+DaemonStatusResponse api_version 10 Optional String
+DaemonStatusResponse backends 8 Repeated .reef.daemon.v1.BackendProbe
+DaemonStatusResponse events_buffer 16 Optional Uint32
+DaemonStatusResponse lease_max 19 Optional .google.protobuf.Duration
+DaemonStatusResponse pid 2 Optional Uint32
+DaemonStatusResponse presence_entries 17 Optional Uint32
+DaemonStatusResponse presence_ttl 18 Optional .google.protobuf.Duration
+DaemonStatusResponse remote_listen 14 Optional String
+DaemonStatusResponse repositories 7 Optional Uint32
+DaemonStatusResponse schema_hash 11 Optional String
+DaemonStatusResponse schema_version 6 Optional Uint32
+DaemonStatusResponse seq 15 Optional Uint64
+DaemonStatusResponse seqs 12 Repeated .reef.daemon.v1.RepoSeq
+DaemonStatusResponse socket 5 Optional String
+DaemonStatusResponse state_dir 4 Optional String
+DaemonStatusResponse ui_built_in 20 Optional Bool
+DaemonStatusResponse uptime_ms 3 Optional Uint64
+DaemonStatusResponse version 1 Optional String
+DaemonStatusResponse web_url 13 Optional String
+DescribeChangeRequest description 3 Optional String
+DescribeChangeRequest repo 1 Optional String
+DescribeChangeRequest rev 2 Optional String
+DescribeChangeRequest workspace 4 Optional String
+DescribeChangeResponse change 1 Optional .reef.daemon.v1.Change
+DescribeChangeResponse op_id 3 Optional String
+DescribeChangeResponse operation 2 Optional .reef.daemon.v1.Operation
+DescribeChangeResponse seq 7 Optional Uint64
+DescribeChangeResponse snapshots 4 Repeated String
+DescribeChangeResponse workspaces_failed 6 Repeated String
+DescribeChangeResponse workspaces_updated 5 Repeated String
+DiffHunk lines 5 Repeated .reef.daemon.v1.DiffLine
+DiffHunk new_lines 4 Optional Uint32
+DiffHunk new_start 3 Optional Uint32
+DiffHunk old_lines 2 Optional Uint32
+DiffHunk old_start 1 Optional Uint32
+DiffLine kind 1 Optional .reef.daemon.v1.DiffLine.Kind
+DiffLine text 2 Optional Bytes
+DiffLine.Kind ADDED 2
+DiffLine.Kind CONTEXT 1
+DiffLine.Kind KIND_UNSPECIFIED 0
+DiffLine.Kind REMOVED 3
+DiffRange from 1 Optional String
+DiffRange to 2 Optional String
+DiffRequest callers_of_added 7 Optional Bool
+DiffRequest change 2 Optional String
+DiffRequest context_lines 6 Optional Uint32
+DiffRequest level 4 Optional .reef.daemon.v1.DiffRequest.Level
+DiffRequest paths 5 Repeated String
+DiffRequest range 3 Optional .reef.daemon.v1.DiffRange
+DiffRequest repo 1 Optional String
+DiffRequest summary 8 Optional Bool
+DiffRequest.Level FILES 1
+DiffRequest.Level LINES 2
+DiffRequest.Level STAT 0
+DiffRequest.Level SYMBOLS 3
+DiffResponse at_op 7 Optional String
+DiffResponse files 4 Repeated .reef.daemon.v1.FileDiff
+DiffResponse from 1 Optional .reef.daemon.v1.ChangeRef
+DiffResponse level 9 Optional .reef.daemon.v1.DiffRequest.Level
+DiffResponse stat 3 Optional .reef.daemon.v1.DiffStat
+DiffResponse symbols 8 Optional .reef.daemon.v1.SymbolDiff
+DiffResponse to 2 Optional .reef.daemon.v1.ChangeRef
+DiffResponse truncated 5 Optional Bool
+DiffResponse truncated_at 6 Optional String
+DiffStat deletions 3 Optional Uint64
+DiffStat files_changed 1 Optional Uint32
+DiffStat insertions 2 Optional Uint64
+DirtyPath kind 2 Optional .reef.daemon.v1.DirtyPath.Kind
+DirtyPath path 1 Optional String
+DirtyPath since 3 Optional .google.protobuf.Timestamp
+DirtyPath.Kind ADDED 1
+DirtyPath.Kind DELETED 3
+DirtyPath.Kind KIND_UNSPECIFIED 0
+DirtyPath.Kind MODIFIED 2
+DirtyPath.Kind TYPE_CHANGED 4
+DiskUsage allocated_bytes 1 Optional Uint64
+DiskUsage files_changed 2 Optional Uint64
+Edit copy_from 5 Optional .reef.daemon.v1.CopyFrom
+Edit delete 3 Optional .reef.daemon.v1.DeleteFile
+Edit path 1 Optional String
+Edit symlink 4 Optional .reef.daemon.v1.Symlink
+Edit write 2 Optional .reef.daemon.v1.WriteFile
+ErrorDetail chain 2 Repeated String
+ErrorDetail hint 3 Optional String
+ErrorDetail kind 1 Optional String
+ErrorDetail next 4 Repeated String
+Event at 3 Optional .google.protobuf.Timestamp
+Event lease 6 Optional .reef.daemon.v1.LeaseEvent
+Event operation 4 Optional .reef.daemon.v1.Operation
+Event presence 7 Optional .reef.daemon.v1.PresenceEntry
+Event repo_id 2 Optional String
+Event seq 1 Optional Uint64
+Event workspace 5 Optional .reef.daemon.v1.WorkspaceEvent
+EventFilter changes 1 Repeated String
+EventFilter kinds 4 Repeated String
+EventFilter owners 3 Repeated String
+EventFilter workspaces 2 Repeated String
+FileChunk blob_id 6 Optional String
+FileChunk conflicted 7 Optional Bool
+FileChunk data 1 Optional Bytes
+FileChunk eof 3 Optional Bool
+FileChunk kind 5 Optional .reef.daemon.v1.FileEntry.Kind
+FileChunk offset 2 Optional Uint64
+FileChunk total_size 4 Optional Uint64
+FileDiff binary 6 Optional Bool
+FileDiff conflicted 12 Optional Bool
+FileDiff deletions 11 Optional Uint64
+FileDiff hunks 9 Repeated .reef.daemon.v1.DiffHunk
+FileDiff insertions 10 Optional Uint64
+FileDiff new_kind 5 Optional .reef.daemon.v1.FileEntry.Kind
+FileDiff new_size 8 Optional Uint64
+FileDiff old_kind 4 Optional .reef.daemon.v1.FileEntry.Kind
+FileDiff old_path 2 Optional String
+FileDiff old_size 7 Optional Uint64
+FileDiff path 1 Optional String
+FileDiff state 3 Optional .reef.daemon.v1.FileStatus.State
+FileEntry blob_id 4 Optional String
+FileEntry conflicted 6 Optional Bool
+FileEntry kind 2 Optional .reef.daemon.v1.FileEntry.Kind
+FileEntry path 1 Optional String
+FileEntry size 3 Proto3Optional Uint64
+FileEntry symlink_target 5 Optional String
+FileEntry.Kind CONFLICT 6
+FileEntry.Kind DIRECTORY 4
+FileEntry.Kind EXECUTABLE 2
+FileEntry.Kind FILE 1
+FileEntry.Kind KIND_UNSPECIFIED 0
+FileEntry.Kind SUBMODULE 5
+FileEntry.Kind SYMLINK 3
+FileStatus conflicted 5 Optional Bool
+FileStatus executable_changed 8 Optional Bool
+FileStatus kind 4 Optional .reef.daemon.v1.FileEntry.Kind
+FileStatus new_size 7 Optional Uint64
+FileStatus old_path 3 Optional String
+FileStatus old_size 6 Optional Uint64
+FileStatus path 1 Optional String
+FileStatus state 2 Optional .reef.daemon.v1.FileStatus.State
+FileStatus.State ADDED 1
+FileStatus.State MODE_CHANGED 5
+FileStatus.State MODIFIED 2
+FileStatus.State REMOVED 3
+FileStatus.State RENAMED 4
+FileStatus.State STATE_UNSPECIFIED 0
+FileSymbolDiff indexed 3 Optional Bool
+FileSymbolDiff lang 4 Optional String
+FileSymbolDiff path 1 Optional String
+FileSymbolDiff source 5 Optional String
+FileSymbolDiff status 2 Optional String
+FileSymbolDiff symbols 6 Repeated .reef.daemon.v1.SymbolChange
+ForgetRequest repo 1 Optional String
+ForgetResponse repository 1 Optional .reef.daemon.v1.Repository
+Frame coalesced 4 Optional Uint32
+Frame events 1 Repeated .reef.daemon.v1.Event
+Frame from_seq 2 Optional Uint64
+Frame lagged 5 Optional Bool
+Frame to_seq 3 Optional Uint64
+GcReport base_bytes_freed 8 Optional Uint64
+GcReport base_entries_removed 7 Optional Uint32
+GcReport dry_run 14 Optional Bool
+GcReport elapsed_ms 13 Optional Uint64
+GcReport jj_bytes_after 4 Optional Uint64
+GcReport jj_bytes_before 3 Optional Uint64
+GcReport jj_error 6 Optional String
+GcReport keep_newer 2 Optional .google.protobuf.Timestamp
+GcReport reindex_ms 5 Optional Uint64
+GcReport repo_id 1 Optional String
+GcReport store_bytes_freed 12 Optional Uint64
+GcReport stores_removed 11 Optional Uint32
+GcReport symbol_rows_removed 15 Optional Uint64
+GcReport wc_bytes_freed 10 Optional Uint64
+GcReport workspace_rows_removed 9 Optional Uint32
+GcRequest dry_run 2 Optional Bool
+GcRequest repo 1 Optional String
+GcResponse reports 1 Repeated .reef.daemon.v1.GcReport
+GetChangeRequest repo 1 Optional String
+GetChangeRequest rev 2 Optional String
+GetChangeResponse at_op 4 Optional String
+GetChangeResponse change 1 Optional .reef.daemon.v1.Change
+GetChangeResponse other_commits 3 Repeated .reef.daemon.v1.ChangeRef
+GetChangeResponse stat 2 Optional .reef.daemon.v1.DiffStat
+GetOperationRequest op 2 Optional String
+GetOperationRequest repo 1 Optional String
+GetOperationResponse at_op 3 Optional String
+GetOperationResponse operation 1 Optional .reef.daemon.v1.Operation
+GetOperationResponse view_summary 2 Optional .reef.daemon.v1.ViewSummary
+GraphEdge kind 2 Optional .reef.daemon.v1.GraphEdge.Kind
+GraphEdge target 1 Optional .reef.daemon.v1.ChangeRef
+GraphEdge.Kind DIRECT 1
+GraphEdge.Kind INDIRECT 2
+GraphEdge.Kind KIND_UNSPECIFIED 0
+GraphEdge.Kind MISSING 3
+HeartbeatRequest lease_id 3 Optional String
+HeartbeatRequest repo 1 Optional String
+HeartbeatRequest workspace 2 Optional String
+HeartbeatResponse expires_at 2 Optional .google.protobuf.Timestamp
+HeartbeatResponse heartbeat_every 3 Optional .google.protobuf.Duration
+HeartbeatResponse lease_id 1 Optional String
+IndexSymbolsRequest repo 1 Optional String
+IndexSymbolsRequest rev 2 Optional String
+IndexSymbolsRequest scope 3 Optional .reef.daemon.v1.IndexSymbolsRequest.Scope
+IndexSymbolsRequest.Scope CHANGED 0
+IndexSymbolsRequest.Scope TREE 1
+IndexSymbolsResponse commit_id 1 Optional String
+IndexSymbolsResponse elapsed_ms 8 Optional Uint64
+IndexSymbolsResponse files_indexed 3 Optional Uint64
+IndexSymbolsResponse files_seen 2 Optional Uint64
+IndexSymbolsResponse files_skipped_size 4 Optional Uint64
+IndexSymbolsResponse files_with_errors 5 Optional Uint64
+IndexSymbolsResponse refs 7 Optional Uint64
+IndexSymbolsResponse symbols 6 Optional Uint64
+IngestSymbolsChunk data 4 Optional Bytes
+IngestSymbolsChunk repo 1 Optional String
+IngestSymbolsChunk rev 2 Optional String
+IngestSymbolsChunk source 3 Optional String
+IngestSymbolsResponse commit_id 1 Optional String
+IngestSymbolsResponse documents 2 Optional Uint32
+IngestSymbolsResponse refs 5 Optional Uint64
+IngestSymbolsResponse skipped_documents 3 Optional Uint32
+IngestSymbolsResponse symbols 4 Optional Uint64
+InspectRequest repo 1 Optional String
+InspectRequest skip_disk_usage 4 Optional Bool
+InspectRequest snapshot_first 3 Optional Bool
+InspectRequest workspace 2 Optional String
+InspectResponse disk_usage 2 Optional .reef.daemon.v1.DiskUsage
+InspectResponse local_snapshot_count 6 Optional Uint64
+InspectResponse op_id 4 Optional String
+InspectResponse other_workspaces_on_change 3 Repeated String
+InspectResponse recent_snapshots 7 Repeated .reef.daemon.v1.SnapshotEntry
+InspectResponse snapshot_count 5 Optional Uint64
+InspectResponse workspace 1 Optional .reef.daemon.v1.Workspace
+IssueTokenRequest expires_in 3 Optional .google.protobuf.Duration
+IssueTokenRequest name 1 Optional String
+IssueTokenRequest scopes 2 Repeated String
+IssueTokenResponse secret 2 Optional String
+IssueTokenResponse token 1 Optional .reef.daemon.v1.Token
+Lease end_reason 9 Optional String
+Lease expires_at 4 Optional .google.protobuf.Timestamp
+Lease grace_ms 7 Optional Uint64
+Lease heartbeat_every 10 Optional .google.protobuf.Duration
+Lease id 1 Optional String
+Lease issued_at 3 Optional .google.protobuf.Timestamp
+Lease last_heartbeat_at 5 Optional .google.protobuf.Timestamp
+Lease length_ms 6 Optional Uint64
+Lease owner 2 Optional String
+Lease state 8 Optional .reef.daemon.v1.Lease.State
+Lease.State ACTIVE 1
+Lease.State ENDED 4
+Lease.State EXPIRED 3
+Lease.State IN_GRACE 2
+Lease.State STATE_UNSPECIFIED 0
+Lease.State UNKNOWN 5
+LeaseEvent kind 1 Optional .reef.daemon.v1.LeaseEvent.Kind
+LeaseEvent lease 3 Optional .reef.daemon.v1.Lease
+LeaseEvent workspace 2 Optional String
+LeaseEvent.Kind EXPIRED 3
+LeaseEvent.Kind HEARTBEAT 2
+LeaseEvent.Kind ISSUED 1
+LeaseEvent.Kind KIND_UNSPECIFIED 0
+LineRange end 2 Optional Uint32
+LineRange start 1 Optional Uint32
+ListQueriesResponse queries 1 Repeated .reef.daemon.v1.QueryInfo
+ListRepositoriesResponse repositories 1 Repeated .reef.daemon.v1.Repository
+ListStoresRequest repo 1 Optional String
+ListStoresResponse stores 1 Repeated .reef.daemon.v1.StoreInfo
+ListTokensResponse tokens 1 Repeated .reef.daemon.v1.Token
+ListTreeRequest page 5 Optional .reef.daemon.v1.Page
+ListTreeRequest path 3 Optional String
+ListTreeRequest recursive 4 Optional Bool
+ListTreeRequest repo 1 Optional String
+ListTreeRequest rev 2 Optional String
+ListTreeRequest with_sizes 6 Optional Bool
+ListTreeResponse at_commit 3 Optional .reef.daemon.v1.ChangeRef
+ListTreeResponse at_op 4 Optional String
+ListTreeResponse entries 1 Repeated .reef.daemon.v1.FileEntry
+ListTreeResponse page 2 Optional .reef.daemon.v1.PageInfo
+ListTreeResponse sizes_omitted 5 Optional Bool
+ListWorkspacesRequest owner 3 Optional String
+ListWorkspacesRequest page 4 Optional .reef.daemon.v1.Page
+ListWorkspacesRequest repo 1 Optional String
+ListWorkspacesRequest states 2 Repeated String
+ListWorkspacesResponse page 2 Optional .reef.daemon.v1.PageInfo
+ListWorkspacesResponse workspaces 1 Repeated .reef.daemon.v1.Workspace
+LogChangesRequest page 3 Optional .reef.daemon.v1.Page
+LogChangesRequest repo 1 Optional String
+LogChangesRequest revset 2 Optional String
+LogChangesRequest with_graph 4 Optional Bool
+LogChangesResponse at_op 4 Optional String
+LogChangesResponse changes 1 Repeated .reef.daemon.v1.Change
+LogChangesResponse page 2 Optional .reef.daemon.v1.PageInfo
+LogChangesResponse revset 3 Optional String
+LogChangesResponse trunk_bookmarks 5 Repeated String
+LogOperationsRequest after_seq 6 Optional Uint64
+LogOperationsRequest before_seq 10 Optional Uint64
+LogOperationsRequest changes 9 Repeated String
+LogOperationsRequest kinds 2 Repeated String
+LogOperationsRequest oldest_first 11 Optional Bool
+LogOperationsRequest owner 4 Optional String
+LogOperationsRequest page 5 Optional .reef.daemon.v1.Page
+LogOperationsRequest repo 1 Optional String
+LogOperationsRequest since 7 Optional .google.protobuf.Timestamp
+LogOperationsRequest until 8 Optional .google.protobuf.Timestamp
+LogOperationsRequest workspace 3 Optional String
+LogOperationsResponse at_op 3 Optional String
+LogOperationsResponse operations 1 Repeated .reef.daemon.v1.Operation
+LogOperationsResponse page 2 Optional .reef.daemon.v1.PageInfo
+LookupSymbolsRequest exact 5 Optional Bool
+LookupSymbolsRequest kind 4 Optional String
+LookupSymbolsRequest name 3 Optional String
+LookupSymbolsRequest page 6 Optional .reef.daemon.v1.Page
+LookupSymbolsRequest repo 1 Optional String
+LookupSymbolsRequest rev 2 Optional String
+LookupSymbolsResponse page 2 Optional .reef.daemon.v1.PageInfo
+LookupSymbolsResponse symbols 1 Repeated .reef.daemon.v1.Symbol
+MountedStore lockfile_hash 2 Optional String
+MountedStore mode 4 Optional .reef.daemon.v1.MountedStore.Mode
+MountedStore mount 3 Optional String
+MountedStore name 1 Optional String
+MountedStore verified 5 Optional Bool
+MountedStore.Mode BIND 2
+MountedStore.Mode MODE_UNSPECIFIED 0
+MountedStore.Mode SYMLINK 1
+MoveRequest change 3 Optional String
+MoveRequest missing_stores 5 Optional .reef.daemon.v1.CreateRequest.MissingStores
+MoveRequest new_on 4 Optional String
+MoveRequest repo 1 Optional String
+MoveRequest workspace 2 Optional String
+MoveResponse files_added 5 Optional Uint32
+MoveResponse files_removed 6 Optional Uint32
+MoveResponse files_updated 4 Optional Uint32
+MoveResponse final_op_id 3 Optional String
+MoveResponse op_id 2 Optional String
+MoveResponse seq 8 Optional Uint64
+MoveResponse tree_replaced 7 Optional Bool
+MoveResponse workspace 1 Optional .reef.daemon.v1.Workspace
+Operation attributes 14 Repeated .reef.daemon.v1.Operation.AttributesEntry
+Operation changes 13 Repeated .reef.daemon.v1.ChangeRef
+Operation changes_truncated 15 Optional Bool
+Operation description 3 Optional String
+Operation end_at 11 Optional .google.protobuf.Timestamp
+Operation external 9 Optional Bool
+Operation gc_rewritten 16 Optional Bool
+Operation hostname 7 Optional String
+Operation is_snapshot 8 Optional Bool
+Operation kind 4 Optional String
+Operation op_id 1 Optional String
+Operation parents 2 Repeated String
+Operation seq 12 Optional Uint64
+Operation start_at 10 Optional .google.protobuf.Timestamp
+Operation username 6 Optional String
+Operation workspace_id 5 Optional String
+Operation.AttributesEntry key 1 Optional String
+Operation.AttributesEntry value 2 Optional String
+OutputLine stream 2 Optional .reef.daemon.v1.OutputLine.Stream
+OutputLine text 1 Optional String
+OutputLine.Stream STDERR 2
+OutputLine.Stream STDOUT 1
+OutputLine.Stream STREAM_UNSPECIFIED 0
+Page page_size 1 Optional Uint32
+Page page_token 2 Optional String
+PageInfo next_page_token 1 Optional String
+PageInfo page_size 2 Optional Uint32
+PageInfo restarted 3 Optional Bool
+ParamInfo description 4 Optional String
+ParamInfo kind 2 Optional String
+ParamInfo name 1 Optional String
+ParamInfo required 3 Optional Bool
+PrepareStoreBuildRequest force 5 Optional Bool
+PrepareStoreBuildRequest lease_ms 4 Optional Uint64
+PrepareStoreBuildRequest name 2 Optional String
+PrepareStoreBuildRequest owner 6 Optional String
+PrepareStoreBuildRequest repo 1 Optional String
+PrepareStoreBuildRequest rev 3 Optional String
+PrepareStoreBuildResponse already_built 9 Optional Bool
+PrepareStoreBuildResponse argv 4 Repeated String
+PrepareStoreBuildResponse build_id 1 Optional String
+PrepareStoreBuildResponse env 5 Repeated String
+PrepareStoreBuildResponse lease 8 Optional .reef.daemon.v1.Lease
+PrepareStoreBuildResponse lockfile_hash 7 Optional String
+PrepareStoreBuildResponse mount 12 Optional String
+PrepareStoreBuildResponse name 13 Optional String
+PrepareStoreBuildResponse result 10 Optional .reef.daemon.v1.BuildResult
+PrepareStoreBuildResponse rev 6 Optional String
+PrepareStoreBuildResponse scratch_root 2 Optional String
+PrepareStoreBuildResponse store_dir 3 Optional String
+PrepareStoreBuildResponse workspace 11 Optional .reef.daemon.v1.Workspace
+PresenceEntry activity 4 Optional .reef.daemon.v1.PresenceEntry.Activity
+PresenceEntry agent 1 Optional String
+PresenceEntry change 3 Optional String
+PresenceEntry detail 5 Optional String
+PresenceEntry expires_at 8 Optional .google.protobuf.Timestamp
+PresenceEntry kind 9 Optional .reef.daemon.v1.PresenceEntry.Kind
+PresenceEntry progress 6 Optional .reef.daemon.v1.Progress
+PresenceEntry reported_at 7 Optional .google.protobuf.Timestamp
+PresenceEntry since 10 Optional .google.protobuf.Timestamp
+PresenceEntry source 11 Optional .reef.daemon.v1.PresenceEntry.Source
+PresenceEntry workspace 2 Optional String
+PresenceEntry.Activity ACTIVITY_UNSPECIFIED 0
+PresenceEntry.Activity CUSTOM 6
+PresenceEntry.Activity EDITING 2
+PresenceEntry.Activity IDLE 1
+PresenceEntry.Activity RUNNING 3
+PresenceEntry.Activity TESTING 4
+PresenceEntry.Activity WAITING 5
+PresenceEntry.Kind CLEARED 2
+PresenceEntry.Kind KIND_UNSPECIFIED 0
+PresenceEntry.Kind SET 1
+PresenceEntry.Source CLIENT 1
+PresenceEntry.Source DAEMON 2
+PresenceEntry.Source SOURCE_UNSPECIFIED 0
+PresenceUpdate activity 4 Optional .reef.daemon.v1.PresenceEntry.Activity
+PresenceUpdate agent 1 Optional String
+PresenceUpdate change 3 Optional String
+PresenceUpdate detail 5 Optional String
+PresenceUpdate keepalive 7 Optional Bool
+PresenceUpdate oneshot 8 Optional Bool
+PresenceUpdate progress 6 Optional .reef.daemon.v1.Progress
+PresenceUpdate workspace 2 Optional String
+Progress done 1 Optional Uint64
+Progress total 2 Optional Uint64
+QueryInfo columns 4 Repeated String
+QueryInfo description 2 Optional String
+QueryInfo name 1 Optional String
+QueryInfo params 3 Repeated .reef.daemon.v1.ParamInfo
+QuiesceRequest max_ms 2 Optional Uint64
+QuiesceRequest repo 1 Optional String
+QuiesceResponse auto_resume_at 3 Optional .google.protobuf.Timestamp
+QuiesceResponse quiesced_at 2 Optional .google.protobuf.Timestamp
+QuiesceResponse token 1 Optional String
+ReadFileRequest limit 5 Optional Uint64
+ReadFileRequest materialize_conflicts 6 Optional Bool
+ReadFileRequest offset 4 Optional Uint64
+ReadFileRequest path 3 Optional String
+ReadFileRequest repo 1 Optional String
+ReadFileRequest rev 2 Optional String
+RegisterRequest if_not_jj 2 Optional .reef.daemon.v1.RegisterRequest.IfNotJj
+RegisterRequest path 1 Optional String
+RegisterRequest.IfNotJj FAIL 0
+RegisterRequest.IfNotJj INIT_ALONGSIDE_GIT 1
+RegisterResponse already_registered 2 Optional Bool
+RegisterResponse initialized_jj 3 Optional Bool
+RegisterResponse repository 1 Optional .reef.daemon.v1.Repository
+ReleaseRequest description 5 Optional String
+ReleaseRequest force 3 Optional Bool
+ReleaseRequest repo 1 Optional String
+ReleaseRequest skip_final_snapshot 4 Optional Bool
+ReleaseRequest workspace 2 Optional String
+ReleaseResponse final_op_id 1 Optional String
+ReleaseResponse freed_bytes 3 Optional Uint64
+ReleaseResponse seq 5 Optional Uint64
+ReleaseResponse snapshot_taken 2 Optional Bool
+ReleaseResponse workspace_id 4 Optional String
+ReplayRequest only 6 Optional .reef.daemon.v1.ReplayRequest.Only
+ReplayRequest op 3 Optional String
+ReplayRequest repo 1 Optional String
+ReplayRequest revset 5 Optional String
+ReplayRequest seq 2 Optional Uint64
+ReplayRequest time 4 Optional .google.protobuf.Timestamp
+ReplayRequest.Only ALL 0
+ReplayRequest.Only CHANGES 1
+ReplayRequest.Only WORKSPACES 2
+ReplayState at 3 Optional .google.protobuf.Timestamp
+ReplayState bookmarks 6 Repeated .reef.daemon.v1.Bookmark
+ReplayState changes 4 Repeated .reef.daemon.v1.Change
+ReplayState op_id 1 Optional String
+ReplayState partial 7 Optional Bool
+ReplayState seq 2 Optional Uint64
+ReplayState workspaces 5 Repeated .reef.daemon.v1.ReplayedWorkspace
+ReplayedWorkspace reconstructed 2 Optional Bool
+ReplayedWorkspace workspace 1 Optional .reef.daemon.v1.Workspace
+RepoSeq head_op_id 4 Optional String
+RepoSeq op_heads_watch 3 Optional Bool
+RepoSeq repo_id 1 Optional String
+RepoSeq seq 2 Optional Uint64
+ReportPresenceResponse updates 1 Optional Uint64
+Repository colocated 3 Optional Bool
+Repository id 1 Optional String
+Repository registered_at 4 Optional .google.protobuf.Timestamp
+Repository root 2 Optional String
+ResumeRequest token 1 Optional String
+ResumeResponse paused_ms 1 Optional Uint64
+RevokeTokenRequest id 1 Optional String
+RevokeTokenRequest name 2 Optional String
+RevokeTokenResponse token 1 Optional .reef.daemon.v1.Token
+RunQueryRequest name 2 Optional String
+RunQueryRequest page 4 Optional .reef.daemon.v1.Page
+RunQueryRequest params 3 Repeated .reef.daemon.v1.RunQueryRequest.ParamsEntry
+RunQueryRequest repo 1 Optional String
+RunQueryRequest.ParamsEntry key 1 Optional String
+RunQueryRequest.ParamsEntry value 2 Optional String
+RunQueryResponse columns 1 Repeated String
+RunQueryResponse page 3 Optional .reef.daemon.v1.PageInfo
+RunQueryResponse rows 2 Repeated .google.protobuf.ListValue
+SealStoreBuildRequest build_id 1 Optional String
+SealStoreBuildRequest exit_code 2 Optional Int32
+SealStoreBuildRequest owner 3 Optional String
+Signature at 3 Optional .google.protobuf.Timestamp
+Signature email 2 Optional String
+Signature name 1 Optional String
+Signature tz_offset_minutes 4 Optional Int32
+SnapshotEntry commit_id 2 Optional String
+SnapshotEntry kind 3 Optional String
+SnapshotEntry local 4 Optional Bool
+SnapshotEntry op_id 1 Optional String
+SnapshotEntry taken_at 5 Optional .google.protobuf.Timestamp
+SnapshotRequest description 3 Optional String
+SnapshotRequest repo 1 Optional String
+SnapshotRequest workspace 2 Optional String
+SnapshotResponse changed 2 Optional Bool
+SnapshotResponse commit_id 3 Optional String
+SnapshotResponse op_id 1 Optional String
+SnapshotResponse scan_ms 4 Optional Uint64
+SnapshotResponse seq 5 Optional Uint64
+SquashChangeRequest description 4 Optional String
+SquashChangeRequest into 3 Optional String
+SquashChangeRequest keep_emptied 6 Optional Bool
+SquashChangeRequest repo 1 Optional String
+SquashChangeRequest rev 2 Optional String
+SquashChangeRequest workspace 5 Optional String
+SquashChangeResponse abandoned 6 Repeated .reef.daemon.v1.ChangeRef
+SquashChangeResponse op_id 3 Optional String
+SquashChangeResponse operation 2 Optional .reef.daemon.v1.Operation
+SquashChangeResponse result 1 Optional .reef.daemon.v1.Change
+SquashChangeResponse result_conflicted 5 Optional Bool
+SquashChangeResponse seq 9 Optional Uint64
+SquashChangeResponse snapshots 7 Repeated String
+SquashChangeResponse workspaces_failed 8 Repeated String
+SquashChangeResponse workspaces_updated 4 Repeated String
+StoreInfo built_at 5 Optional .google.protobuf.Timestamp
+StoreInfo bytes 4 Optional Uint64
+StoreInfo in_use_by 7 Optional Uint32
+StoreInfo lockfile_hash 2 Optional String
+StoreInfo name 1 Optional String
+StoreInfo path 3 Optional String
+StoreInfo repo_id 8 Optional String
+StoreInfo sealed 6 Optional Bool
+SubscribePresenceRequest filter 2 Optional .reef.daemon.v1.EventFilter
+SubscribePresenceRequest repo 1 Optional String
+SubscribeRequest filter 3 Optional .reef.daemon.v1.EventFilter
+SubscribeRequest repo 1 Optional String
+SubscribeRequest resume_after_seq 2 Optional Uint64
+Symbol blob_id 2 Optional String
+Symbol end_col 10 Optional Uint32
+Symbol end_line 9 Optional Uint32
+Symbol kind 4 Optional String
+Symbol name 3 Optional String
+Symbol parent 5 Optional String
+Symbol path 1 Optional String
+Symbol signature 6 Optional String
+Symbol source 11 Optional String
+Symbol start_col 8 Optional Uint32
+Symbol start_line 7 Optional Uint32
+SymbolChange after 7 Optional .reef.daemon.v1.LineRange
+SymbolChange before 6 Optional .reef.daemon.v1.LineRange
+SymbolChange call_sites 8 Repeated .reef.daemon.v1.CallSite
+SymbolChange call_sites_truncated 9 Optional Bool
+SymbolChange kind 3 Optional String
+SymbolChange name 2 Optional String
+SymbolChange parent 4 Optional String
+SymbolChange signature 5 Optional String
+SymbolChange status 1 Optional String
+SymbolDiff files 1 Repeated .reef.daemon.v1.FileSymbolDiff
+SymbolDiff from_commit 4 Optional String
+SymbolDiff other_files 3 Optional Uint32
+SymbolDiff to_commit 5 Optional String
+SymbolDiff unindexed_files 2 Optional Uint32
+Symlink target 1 Optional String
+Token created_at 4 Optional .google.protobuf.Timestamp
+Token expires_at 5 Optional .google.protobuf.Timestamp
+Token id 1 Optional String
+Token last_used_at 6 Optional .google.protobuf.Timestamp
+Token name 2 Optional String
+Token revoked_at 7 Optional .google.protobuf.Timestamp
+Token scopes 3 Repeated String
+UndoRequest op 2 Optional String
+UndoRequest repo 1 Optional String
+UndoRequest workspace 3 Optional String
+UndoResponse op_id 2 Optional String
+UndoResponse operation 1 Optional .reef.daemon.v1.Operation
+UndoResponse restored_to 4 Optional String
+UndoResponse seq 8 Optional Uint64
+UndoResponse snapshots 6 Repeated String
+UndoResponse undone 3 Optional .reef.daemon.v1.Operation
+UndoResponse workspaces_failed 7 Repeated String
+UndoResponse workspaces_updated 5 Repeated String
+ViewSummary bookmarks 3 Repeated .reef.daemon.v1.ViewSummary.BookmarksEntry
+ViewSummary heads 1 Repeated .reef.daemon.v1.ChangeRef
+ViewSummary workspaces 2 Repeated .reef.daemon.v1.ViewSummary.WorkspacesEntry
+ViewSummary.BookmarksEntry key 1 Optional String
+ViewSummary.BookmarksEntry value 2 Optional String
+ViewSummary.WorkspacesEntry key 1 Optional String
+ViewSummary.WorkspacesEntry value 2 Optional .reef.daemon.v1.ChangeRef
+Workspace attention 11 Optional String
+Workspace backend 7 Optional String
+Workspace change_id 5 Optional String
+Workspace commit_id 6 Optional String
+Workspace created_at 12 Optional .google.protobuf.Timestamp
+Workspace divergent 10 Optional Bool
+Workspace heartbeat_at 21 Optional .google.protobuf.Timestamp
+Workspace id 1 Optional String
+Workspace last_snapshot_at 13 Optional .google.protobuf.Timestamp
+Workspace last_snapshot_op 14 Optional String
+Workspace lease 15 Optional .reef.daemon.v1.Lease
+Workspace local_snapshot_count 17 Optional Uint64
+Workspace owner 3 Optional String
+Workspace path 8 Optional String
+Workspace presence 20 Repeated .reef.daemon.v1.PresenceEntry
+Workspace purpose 4 Optional String
+Workspace repo_id 2 Optional String
+Workspace state 9 Optional String
+Workspace stores 18 Repeated .reef.daemon.v1.MountedStore
+Workspace watch_state 19 Optional String
+Workspace watcher 16 Optional String
+WorkspaceChange change 2 Optional .reef.daemon.v1.ChangeRef
+WorkspaceChange workspace 1 Optional String
+WorkspaceEvent freed_bytes 6 Optional Uint64
+WorkspaceEvent kind 1 Optional .reef.daemon.v1.WorkspaceEvent.Kind
+WorkspaceEvent lease_id 5 Optional String
+WorkspaceEvent op_id 3 Optional String
+WorkspaceEvent reason 4 Optional String
+WorkspaceEvent workspace 2 Optional .reef.daemon.v1.Workspace
+WorkspaceEvent.Kind ATTENTION 6
+WorkspaceEvent.Kind CREATED 1
+WorkspaceEvent.Kind KIND_UNSPECIFIED 0
+WorkspaceEvent.Kind MOVED 5
+WorkspaceEvent.Kind RECLAIMED 4
+WorkspaceEvent.Kind RELEASED 3
+WorkspaceEvent.Kind SNAPSHOTTED 2
+WorkspaceStatusRequest repo 1 Optional String
+WorkspaceStatusRequest snapshot_first 3 Optional Bool
+WorkspaceStatusRequest workspace 2 Optional String
+WorkspaceStatusResponse at_op 11 Optional String
+WorkspaceStatusResponse change 2 Optional .reef.daemon.v1.Change
+WorkspaceStatusResponse conflicted_paths 5 Repeated String
+WorkspaceStatusResponse dirty 4 Repeated .reef.daemon.v1.DirtyPath
+WorkspaceStatusResponse divergent_commits 10 Repeated String
+WorkspaceStatusResponse files 3 Repeated .reef.daemon.v1.FileStatus
+WorkspaceStatusResponse from_index 6 Optional Bool
+WorkspaceStatusResponse hint 12 Optional String
+WorkspaceStatusResponse index_reconciled_at 9 Optional .google.protobuf.Timestamp
+WorkspaceStatusResponse next 13 Repeated String
+WorkspaceStatusResponse op_id 7 Optional String
+WorkspaceStatusResponse stale_reason 8 Optional String
+WorkspaceStatusResponse workspace 1 Optional .reef.daemon.v1.Workspace
+WriteFile data 1 Optional Bytes
+WriteFile executable 2 Proto3Optional Bool

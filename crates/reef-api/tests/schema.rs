@@ -151,6 +151,20 @@ fn elements(file: &FileDescriptorProto) -> Vec<(Vec<i32>, String)> {
                 format!("{name}.{}", field.name()),
             ));
         }
+        for (i, oneof) in m.oneof_decl.iter().enumerate() {
+            // proto3 `optional` fields get a synthetic oneof of one.
+            let synthetic = m
+                .field
+                .iter()
+                .any(|field| field.proto3_optional() && field.oneof_index == Some(index(i)));
+            if synthetic {
+                continue;
+            }
+            out.push((
+                [path, &[8, index(i)]].concat(),
+                format!("{name}.{} (oneof)", oneof.name()),
+            ));
+        }
         for (i, nested) in m.nested_type.iter().enumerate() {
             message(out, &[path, &[3, index(i)]].concat(), &name, nested);
         }
@@ -207,9 +221,15 @@ fn every_field_and_rpc_is_documented() {
     );
 }
 
-/// `<message> <field> <number>` for every field, nested messages by their
-/// dotted name, sorted.
+/// `<message> <field> <number> <label> <type>` for every field (`<type>`
+/// is the message or enum name for those), `<enum> <VALUE> <number>` for
+/// every enum value, nested types by their dotted name, sorted.
 fn field_listing() -> String {
+    fn enum_values(out: &mut BTreeSet<String>, name: &str, e: &EnumDescriptorProto) {
+        for value in &e.value {
+            out.insert(format!("{name} {} {}", value.name(), value.number()));
+        }
+    }
     fn walk(out: &mut BTreeSet<String>, scope: &str, m: &DescriptorProto) {
         let name = if scope.is_empty() {
             m.name().to_owned()
@@ -217,7 +237,24 @@ fn field_listing() -> String {
             format!("{scope}.{}", m.name())
         };
         for field in &m.field {
-            out.insert(format!("{name} {} {}", field.name(), field.number()));
+            let ty = if field.type_name().is_empty() {
+                format!("{:?}", field.r#type())
+            } else {
+                field.type_name().to_owned()
+            };
+            let label = if field.proto3_optional() {
+                "Proto3Optional".to_owned()
+            } else {
+                format!("{:?}", field.label())
+            };
+            out.insert(format!(
+                "{name} {} {} {label} {ty}",
+                field.name(),
+                field.number()
+            ));
+        }
+        for e in &m.enum_type {
+            enum_values(out, &format!("{name}.{}", e.name()), e);
         }
         for nested in &m.nested_type {
             walk(out, &name, nested);
@@ -228,6 +265,9 @@ fn field_listing() -> String {
         for m in &file.message_type {
             walk(&mut lines, "", m);
         }
+        for e in &file.enum_type {
+            enum_values(&mut lines, e.name(), e);
+        }
     }
     let mut text = String::new();
     for line in lines {
@@ -236,7 +276,8 @@ fn field_listing() -> String {
     text
 }
 
-/// A field renumbered or renamed fails here; regenerate the fixture with
+/// A field renumbered, renamed, or retyped, or an enum value renumbered,
+/// fails here; regenerate the fixture with
 /// `REEF_UPDATE_FIXTURES=1 cargo test -p reef-api --test schema` only for an
 /// addition. Within v1 a field is never renumbered, renamed, or removed.
 #[test]

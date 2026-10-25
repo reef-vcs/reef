@@ -123,6 +123,7 @@ fn lease_state(state: v1::lease::State) -> &'static str {
         v1::lease::State::Expired => "expired",
         v1::lease::State::Ended => "ended",
         v1::lease::State::Unknown => "unknown",
+        v1::lease::State::Unspecified => "unspecified",
     }
 }
 
@@ -221,6 +222,7 @@ impl From<&v1::MountedStore> for MountedStore {
         let mode = match store.mode() {
             v1::mounted_store::Mode::Symlink => "symlink",
             v1::mounted_store::Mode::Bind => "bind",
+            v1::mounted_store::Mode::Unspecified => "unspecified",
         };
         Self {
             name: store.name.clone(),
@@ -792,6 +794,7 @@ mod tests {
             }),
             lease: Some(v1::Lease {
                 id: "00000000000000bb".into(),
+                state: v1::lease::State::Active.into(),
                 expires_at: Some(prost_types::Timestamp {
                     seconds: 1_792_175_478,
                     nanos: 0,

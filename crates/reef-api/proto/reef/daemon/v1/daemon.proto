@@ -62,7 +62,8 @@ message DaemonStatusResponse {
   // How long a presence entry lives without an update: `[presence] ttl`
   // (R2.11); unset until then.
   google.protobuf.Duration presence_ttl = 18;
-  // The longest lease a create may ask for: `lease.max` (R2.26).
+  // The longest lease a create may ask for: `lease.max`; `ws attach`'s
+  // default (R2.26).
   google.protobuf.Duration lease_max = 19;
   // Whether the web UI's files are built into this daemon (R2.18).
   bool ui_built_in = 20;
@@ -78,7 +79,8 @@ message RepoSeq {
   // Whether the daemon watches its operation heads, so operations written
   // outside it (jj by hand) are noticed at once (R2.09).
   bool op_heads_watch = 3;
-  // The head operation the daemon's reads answer from (R2.02).
+  // The head operation the daemon's reads answer from (R2.02); empty
+  // until then.
   string head_op_id = 4;
 }
 

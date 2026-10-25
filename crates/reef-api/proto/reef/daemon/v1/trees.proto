@@ -13,12 +13,16 @@ service Trees {
   // The entries under a path at a revision, a page at a time (page size
   // default 1,000, cap 10,000).
   rpc List(ListTreeRequest) returns (ListTreeResponse); // R2.04
-  // A file's content at a revision, or a range of it, in chunks of at most
-  // 64 KiB; the first chunk carries the metadata.
+  // A file's content at a revision, or a range of it.
+  //
+  // In chunks of at most 64 KiB; the first chunk carries the metadata.
   rpc Read(ReadFileRequest) returns (stream FileChunk); // R2.04
-  // Rewrites a change's commit with whole-file edits as one operation: a
-  // header, then edits, until the client half-closes. Conflicted paths are
-  // refused, not resolved.
+  // Rewrites a change's commit with whole-file edits, as one operation.
+  //
+  // The client sends a header, then edits, then half-closes. Conflicted
+  // paths are refused, not resolved. Client-streaming, so not reachable
+  // from a browser (gRPC-web carries unary and server-streaming calls
+  // only).
   rpc Apply(stream ApplyEditsChunk) returns (ApplyEditsResponse); // R2.04
 }
 
@@ -129,9 +133,9 @@ message Edit {
     WriteFile write = 2;
     // Delete the file, or everything under a directory; a missing path is
     // a no-op.
-    bool delete = 3;
-    // Make it a symlink to this target.
-    string symlink = 4;
+    DeleteFile delete = 3;
+    // Make it a symlink.
+    Symlink symlink = 4;
     // Set it to another revision's file, by blob id (no bytes move).
     CopyFrom copy_from = 5;
   }
@@ -144,6 +148,15 @@ message WriteFile {
   // The executable bit; unset keeps an existing file's, false for a new
   // one.
   optional bool executable = 2;
+}
+
+// A delete; no options yet.
+message DeleteFile {}
+
+// A symlink to write.
+message Symlink {
+  // Its target, as written.
+  string target = 1;
 }
 
 // Where to copy a file from.

@@ -91,7 +91,9 @@ async fn call(client: &Client, method: &str) -> Result<(), ClientError> {
             client.issue_token(Default::default()).await.map(drop)
         }
         "reef.daemon.v1.Remote/ListTokens" => client.list_tokens().await.map(drop),
-        "reef.daemon.v1.Remote/RevokeToken" => client.revoke_token("").await.map(drop),
+        "reef.daemon.v1.Remote/RevokeToken" => {
+            client.revoke_token(Default::default()).await.map(drop)
+        }
         "reef.daemon.v1.Stores/Prepare" => client
             .prepare_store_build(Default::default())
             .await

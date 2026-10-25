@@ -273,6 +273,7 @@ impl Client {
             workspace: workspace.to_owned(),
             force,
             skip_final_snapshot: !snapshot_first,
+            description: String::new(),
         };
         Ok(self.workspaces().release(request).await?.into_inner())
     }
@@ -636,12 +637,11 @@ impl Client {
         Ok(self.remote().list_tokens(request).await?.into_inner())
     }
 
-    /// `Remote.RevokeToken` (R2.08). `token` is a name, an id, or a unique
-    /// id prefix.
-    pub async fn revoke_token(&self, token: &str) -> Result<RevokeTokenResponse, ClientError> {
-        let request = RevokeTokenRequest {
-            token: token.to_owned(),
-        };
+    /// `Remote.RevokeToken` (R2.08), by id (or unique prefix) or name.
+    pub async fn revoke_token(
+        &self,
+        request: RevokeTokenRequest,
+    ) -> Result<RevokeTokenResponse, ClientError> {
         Ok(self.remote().revoke_token(request).await?.into_inner())
     }
 }

@@ -11,7 +11,8 @@ package reef.daemon.v1;
 message ErrorDetail {
   // The error's `ErrorKind`, by variant name: NotFound, AlreadyExists,
   // InvalidArgument, Conflict, Unavailable, PermissionDenied, Io, or
-  // Internal. Exit codes and retries key on this, not on the gRPC code (Io
+  // Internal. A status without an ErrorDetail (from the transport or a
+  // limit) maps back through its gRPC code. Exit codes and retries key on this, not on the gRPC code (Io
   // and Internal share INTERNAL).
   string kind = 1;
   // The error's message, then each source's, outermost first.

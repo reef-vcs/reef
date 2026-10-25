@@ -28,7 +28,7 @@ message IndexSymbolsRequest {
   }
   // The repository.
   string repo = 1;
-  // The revision.
+  // The revision; empty for `@`.
   string rev = 2;
   // Which files.
   Scope scope = 3;
@@ -58,7 +58,8 @@ message IndexSymbolsResponse {
 message IngestSymbolsChunk {
   // The repository; first chunk only.
   string repo = 1;
-  // The revision whose tree the index describes; first chunk only.
+  // The revision whose tree the index describes, empty for `@`; first
+  // chunk only.
   string rev = 2;
   // The index's format, `scip`; first chunk only.
   string source = 3;
@@ -90,7 +91,8 @@ message LookupSymbolsRequest {
   string name = 3;
   // Only this kind; empty for any.
   string kind = 4;
-  // Match `name` exactly instead of as a prefix.
+  // Match `name` exactly instead of as a prefix. Off by default in the
+  // API; the CLI turns it on.
   bool exact = 5;
   // Which page.
   Page page = 6;
@@ -113,7 +115,8 @@ message Symbol {
   string blob_id = 2;
   // Its name.
   string name = 3;
-  // function, method, struct, class, ...: the language's kind.
+  // Its kind in the index's one vocabulary across languages (function,
+  // method, class, ...; R2.14).
   string kind = 4;
   // The enclosing symbol's name; empty at file scope.
   string parent = 5;

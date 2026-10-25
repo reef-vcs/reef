@@ -6,8 +6,8 @@
 // too, `repo` may be empty and the workspace id or prefix is looked up in
 // every repository. A workspace may also be named by an absolute path inside
 // an active workspace's directory (R1.26), in every request that names one.
-// Every mutating response carries the `op_id` of the operation it recorded,
-// empty when it recorded none.
+// Every mutating response carries the operation it recorded (`op_id`;
+// `final_op_id` for a release), empty when it recorded none.
 syntax = "proto3";
 
 package reef.daemon.v1;
@@ -27,17 +27,20 @@ service Workspaces {
   // change.
   rpc Inspect(InspectRequest) returns (InspectResponse);
   // Takes a final snapshot, forgets the jj workspace, and removes the
-  // directory. The row stays, as `released`. The same pipeline reclaims a
-  // workspace whose lease expired (R1.15).
+  // directory.
+  //
+  // The row stays, as `released`. The same pipeline reclaims a workspace
+  // whose lease expired (R1.15).
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   // Snapshots the workspace's files into its working-copy commit.
   rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
   // Renews a workspace's lease (R1.15). Never snapshots.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-  // Moves a workspace to another change (R1.06): a final snapshot of the
-  // change it is on, then the new change's tree in the same directory. Id,
-  // path, lease (expiry included; a move is not a heartbeat), and backend
-  // stay. The target's shared stores are mounted, so a move to the same
+  // Moves a workspace to another change in the same directory.
+  //
+  // A final snapshot of the change it is on, then the new change's tree
+  // (R1.06). Id, path, lease (expiry included; a move is not a heartbeat),
+  // and backend stay. The target's shared stores are mounted, so a move to the same
   // change remounts a rebuilt store. A final snapshot that fails refuses
   // the move with FAILED_PRECONDITION and changes nothing. An overlay
   // workspace is unmounted (lazily if busy) and mounted again: a process
@@ -229,6 +232,9 @@ message ReleaseRequest {
   // default; `Client::release_workspace` takes `snapshot_first` and inverts
   // it.
   bool skip_final_snapshot = 4;
+  // The final snapshot's operation description; empty for the default
+  // (R2.13; ignored until then).
+  string description = 5;
 }
 
 // What the release did.
@@ -341,9 +347,10 @@ message MoveResponse {
 
 // Which workspace's status to report (R2.02).
 message WorkspaceStatusRequest {
-  // The repository; may be empty.
+  // The repository; may be empty, except with `default`.
   string repo = 1;
-  // A workspace id or unique prefix, or a path inside it.
+  // A workspace id or unique prefix, or a path inside it; `default` for
+  // the user's own checkout, which has no workspace row (R2.05, R2.23).
   string workspace = 2;
   // Snapshot first, so `files` includes everything on disk and `dirty` is
   // empty. Off by default in the API.
@@ -352,7 +359,8 @@ message WorkspaceStatusRequest {
 
 // What changed in a workspace (R2.02, R2.23).
 message WorkspaceStatusResponse {
-  // The workspace, after the snapshot if one was taken.
+  // The workspace, after the snapshot if one was taken; unset for
+  // `default`.
   Workspace workspace = 1;
   // Its change, at its working-copy commit; its `parents` are what `files`
   // is against.
@@ -367,8 +375,8 @@ message WorkspaceStatusResponse {
   bool from_index = 6;
   // The snapshot `snapshot_first` took, if it recorded one.
   string op_id = 7;
-  // Why the index was not used (R2.23): overflow, watch-down, ...; empty
-  // when it was.
+  // Why the index was not used (R2.23, which fixes the values); empty when
+  // it was.
   string stale_reason = 8;
   // The index's last reconciliation with a snapshot (R2.23).
   google.protobuf.Timestamp index_reconciled_at = 9;
@@ -379,8 +387,8 @@ message WorkspaceStatusResponse {
   // How to resolve a divergent workspace, in one sentence (R2.03); empty
   // otherwise.
   string hint = 12;
-  // The command that resolves it, as an argv (R2.03): a `reef squash` of
-  // the other commit into this one. Empty when there is none.
+  // The command that resolves it, as an argv (R2.03, R2.05): a
+  // `reef squash` or `reef abandon`. Empty when there is none.
   repeated string next = 13;
 }
 
@@ -388,14 +396,16 @@ message WorkspaceStatusResponse {
 message DirtyPath {
   // What happened to it, as the watcher saw it.
   enum Kind {
+    // Not set; the daemon never sends it.
+    KIND_UNSPECIFIED = 0;
     // It did not exist at the last snapshot.
-    ADDED = 0;
+    ADDED = 1;
     // Its content changed.
-    MODIFIED = 1;
+    MODIFIED = 2;
     // It was removed.
-    DELETED = 2;
-    // It changed between file, symlink, and directory.
-    TYPE_CHANGED = 3;
+    DELETED = 3;
+    // Its kind changed: between file and symlink, or its executable bit.
+    TYPE_CHANGED = 4;
   }
   // Repository-root relative.
   string path = 1;
@@ -409,17 +419,19 @@ message DirtyPath {
 message FileStatus {
   // How the file differs.
   enum State {
+    // Not set; the daemon never sends it.
+    STATE_UNSPECIFIED = 0;
     // New in the change.
-    ADDED = 0;
+    ADDED = 1;
     // Its content changed.
-    MODIFIED = 1;
+    MODIFIED = 2;
     // Removed by the change.
-    REMOVED = 2;
+    REMOVED = 3;
     // Moved from `old_path`, possibly modified too. Reserved: Phase 2
     // reports a rename as REMOVED and ADDED (R2.02).
-    RENAMED = 3;
+    RENAMED = 4;
     // Only its kind changed (executable bit, file to symlink).
-    MODE_CHANGED = 4;
+    MODE_CHANGED = 5;
   }
   // Repository-root relative.
   string path = 1;
@@ -435,4 +447,7 @@ message FileStatus {
   uint64 old_size = 6;
   // Bytes in the change; 0 for REMOVED.
   uint64 new_size = 7;
+  // Its executable bit differs from the parents' (with or without a
+  // content change, so MODIFIED can carry it too).
+  bool executable_changed = 8;
 }

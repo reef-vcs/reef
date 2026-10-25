@@ -45,7 +45,9 @@ message PresenceUpdate {
   string detail = 5;
   // How far along it is; unset when it cannot say.
   Progress progress = 6;
-  // Only renew the entry's expiry; leave its activity as it is (R2.11).
+  // Only renew the entry's expiry, leaving its activity as it is (R2.11).
+  // A keepalive for a key with no entry creates it from this update's
+  // fields, so a keepalive carries the full update.
   bool keepalive = 7;
   // Keep the entry until its TTL even after this stream ends (R2.11).
   bool oneshot = 8;

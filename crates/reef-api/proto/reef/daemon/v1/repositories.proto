@@ -7,8 +7,9 @@ import "reef/daemon/v1/types.proto";
 
 // The repositories the daemon serves.
 service Repositories {
-  // Registers the jj repository containing `path`, by its root. Registering
-  // a registered repository again succeeds with `already_registered`. With
+  // Registers the jj repository containing `path`, by its root.
+  //
+  // Registering a registered repository again succeeds with `already_registered`. With
   // `if_not_jj = INIT_ALONGSIDE_GIT`, a git checkout without jj gets a
   // colocated `.jj` first (R1.25).
   rpc Register(RegisterRequest) returns (RegisterResponse);

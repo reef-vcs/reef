@@ -40,8 +40,9 @@ message QueryInfo {
 message ParamInfo {
   // What `RunQueryRequest.params` keys it by.
   string name = 1;
-  // How its string value is read, such as `timestamp` (RFC 3339 or
-  // `1d ago`), `change` (a revision), `string`, or `integer`.
+  // How its string value is read; R2.16 fixes the vocabulary (text, an
+  // owner, a change id prefix, a path, a symbol name, a timestamp as RFC
+  // 3339 or `1d ago`, an operation kind).
   string kind = 2;
   // A run without it is INVALID_ARGUMENT.
   bool required = 3;
@@ -66,8 +67,8 @@ message RunQueryResponse {
   // The columns' names, in row order.
   repeated string columns = 1;
   // One value per column each: strings for ids, paths, and kinds, numbers
-  // for counts and sequences, RFC 3339 strings for `*_at` columns, null
-  // for NULL.
+  // for counts and sequences (doubles on the wire: exact below 2^53), RFC
+  // 3339 strings for `*_at` columns, null for NULL.
   repeated google.protobuf.ListValue rows = 2;
   // Where the page ended.
   PageInfo page = 3;

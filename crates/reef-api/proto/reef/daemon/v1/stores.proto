@@ -12,9 +12,10 @@ import "reef/daemon/v1/types.proto";
 
 // Shared dependency stores: built once, sealed, mounted everywhere.
 service Stores {
-  // Runs the store's `build` command in a scratch workspace and seals what
-  // it wrote: the command's output lines as they come, then the result. A
-  // build that exits non-zero ends with a result whose `sealed` is false.
+  // Runs the store's `build` command in the daemon and seals what it wrote.
+  //
+  // In a scratch workspace: the command's output lines as they come, then
+  // the result. A build that exits non-zero ends with a result whose `sealed` is false.
   // A sealed store for the lockfile's hash is the result at once, unless
   // `force`. Errors: NOT_FOUND (no such store at the revision),
   // ALREADY_EXISTS (a build of the same store and hash is running),
@@ -83,10 +84,12 @@ message BuildStarted {
 message OutputLine {
   // Which of the command's streams it came from.
   enum Stream {
+    // Not set; the daemon never sends it.
+    STREAM_UNSPECIFIED = 0;
     // Standard output.
-    STDOUT = 0;
+    STDOUT = 1;
     // Standard error.
-    STDERR = 1;
+    STDERR = 2;
   }
   // The line.
   string text = 1;
@@ -175,8 +178,10 @@ message PrepareStoreBuildRequest {
 }
 
 // Where and what to build (R2.27). Run `argv` in `scratch_root` with the
-// client's environment plus `env` and `REEF_STORE_DIR = store_dir`,
-// heartbeat `lease`, then Seal with the exit code.
+// client's environment, then `env`, then `REEF_STORE_DIR = store_dir`,
+// `REEF_STORE_NAME = name`, and `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`,
+// `REEF_REPO`, `REEF_SOCKET` for `workspace`; heartbeat `lease`; then Seal
+// with the exit code.
 message PrepareStoreBuildResponse {
   // Names the build in Seal and Abort.
   string build_id = 1;
@@ -203,6 +208,8 @@ message PrepareStoreBuildResponse {
   Workspace workspace = 11;
   // Where the store is mounted, repository-root relative.
   string mount = 12;
+  // The store's `[[store]] name`.
+  string name = 13;
 }
 
 // A prepared build to seal (R2.27).

@@ -6,7 +6,7 @@ Several services are written down before their implementation: the daemon answer
 
 ## Transport
 
-The daemon listens on a Unix socket: `<state>/daemon.sock` unless configured otherwise (`reef config show` prints it, and the CLI takes `--socket` or `REEF_SOCKET`; on macOS the state directory is `~/Library/Application Support/reef`). gRPC runs over HTTP/2 without TLS on that socket. A client connects with any URI (the authority is ignored) and a connector that opens the socket.
+The daemon listens on a Unix socket: `$XDG_RUNTIME_DIR/reef/daemon.sock` on Linux when that is set, else `<state>/daemon.sock`, unless configured otherwise (`reef config show` prints it, and the CLI takes `--socket` or `REEF_SOCKET`; on macOS the state directory is `~/Library/Application Support/reef`). gRPC runs over HTTP/2 without TLS on that socket. A client connects with any URI (the authority is ignored) and a connector that opens the socket.
 
 The socket serves gRPC server reflection (`grpc.reflection.v1`), so generic tools work against a running daemon:
 
@@ -26,11 +26,11 @@ Whoever can open the socket can call every RPC: the socket is created `0600` in 
 
 ## Compatibility
 
-Within v1 every change is additive. Fields and RPCs are added; none is renumbered, renamed, or removed. A field that stops being written keeps its number and a comment saying since when. A client must therefore ignore unknown fields (every protobuf library does) and treat an unset field as its default. A breaking change would be a new package, `reef.daemon.v2`.
+Within v1 every change is additive. Fields and RPCs are added; none is renumbered, renamed, or removed. A field that stops being written keeps its number and a comment saying since when. A client must therefore ignore unknown fields (every protobuf library does) and treat an unset field as its default. Every enum in a response has a zero value `*_UNSPECIFIED` that the daemon never sends, so a value a client does not know (from a newer daemon) is not mistaken for a real one; enums in requests keep a meaningful zero (`DiffRequest.Level.STAT`, `CreateRequest.MissingStores.FAIL`). A breaking change would be a new package, `reef.daemon.v2`.
 
 ## Names, ids, and revisions
 
-- **Requests name things by role**: `repo` a repository, `workspace` a workspace, `rev` a revision, `change` a change id, `op` an operation id.
+- **Requests name things by role**: `repo` a repository, `workspace` a workspace, `rev` a revision, `change` a change (a field that also takes any revision says so), `op` an operation.
 - **`repo`** accepts a repository id (16 hex characters), a unique id prefix of 4 or more characters, or an absolute path inside a registered root. Where a request also names a workspace, `repo` may be empty.
 - **`workspace`** accepts a workspace id, a unique prefix, or an absolute path inside an active workspace's directory.
 - **Ids** are lowercase hex: 16 characters for Reef's own (repositories, workspaces, leases, tokens), and jj's full hex for change, commit, and operation ids. Humans see change ids in jj's "reverse hex" (`z` to `k`); `rev` accepts both.
@@ -71,11 +71,13 @@ The status message is the error and its causes joined with `: `. The details (th
 - `hint`: one sentence on how to fix it, when the daemon knows.
 - `next`: a command line that fixes it or shows what to do next, as an argv an agent can run verbatim (`["reef", "store", "build", "deps", "--repo", "a3dda866c7e8f343"]`). Never a placeholder.
 
-A status without the detail (a dropped connection, a deadline) maps back through the code column, every unmapped code to `Internal`. `UNIMPLEMENTED` is used only for RPCs that are not implemented yet; their detail's kind is `Internal`.
+A status without the detail (a dropped connection, a deadline, a limit such as `RESOURCE_EXHAUSTED` or the TCP listeners' `UNAUTHENTICATED`) maps back through the code column, every unmapped code to `Internal`. `UNIMPLEMENTED` is used only for RPCs that are not implemented yet; their detail's kind is `Internal`.
 
 ## Mutations
 
-Every response to a request that writes carries `op_id`, the jj operation it recorded, empty when it recorded none (an unchanged snapshot). From R2.09 on it also carries `seq`, the operation's event sequence, so a client can wait for the event of its own write on a subscription. The R2.03 and R2.04 writes (`Changes.Describe`, `Abandon`, `Squash`, `Operations.Undo`, `Trees.Apply`) also snapshot every workspace they would move first and check the new commits out in them afterwards. Their responses list those snapshots (`snapshots`), the workspaces checked out (`workspaces_updated`), and those whose check-out failed (`workspaces_failed`, which then get `attention = checkout-failed`; the write stands).
+Every response to a request that writes carries `op_id` (`final_op_id` for a release), the jj operation it recorded, empty when it recorded none (an unchanged snapshot); where the response also carries the `Operation`, the two agree. From R2.09 on it also carries `seq`, the operation's event sequence, so a client can wait for the event of its own write on a subscription. The R2.03 and R2.04 writes (`Changes.Describe`, `Abandon`, `Squash`, `Operations.Undo`, `Trees.Apply`) also snapshot every workspace they would move first and check the new commits out in them afterwards. Their responses list those snapshots (`snapshots`), the workspaces checked out (`workspaces_updated`), and those whose check-out failed (`workspaces_failed`, which then get `attention = checkout-failed`; the write stands).
+
+Three RPCs are client-streaming: `Trees.Apply`, `Presence.Report`, and `Symbols.Ingest`. gRPC-web carries unary and server-streaming calls only, so a browser client cannot make them.
 
 ## Services
 
