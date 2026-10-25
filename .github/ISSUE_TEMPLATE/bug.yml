@@ -37,7 +37,7 @@ body:
     id: version
     attributes:
       label: Reef version or commit
-      placeholder: "0.0.0 or a commit hash"
+      placeholder: "0.1.0 or a commit hash"
   - type: input
     id: jj-version
     attributes:

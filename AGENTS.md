@@ -1,5 +1,5 @@
 <!-- reef:begin v1 -->
-Written by `reef init` (reef 0.0.0); `reef guide` prints the current guide.
+Written by `reef init` (reef 0.1.0); `reef guide` prints the current guide.
 
 # Reef
 

@@ -4,6 +4,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
 Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quickstart.md).
 
 ### Added

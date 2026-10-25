@@ -14,14 +14,14 @@ reef --version
 ```
 
 ```text
-reef install: downloading reef 0.0.0 for aarch64-apple-darwin
-reef install: installed reef 0.0.0 (21887d1cd101, aarch64-apple-darwin) in /Users/you/.local/bin
+reef install: downloading reef 0.1.0 for aarch64-apple-darwin
+reef install: installed reef 0.1.0 (21887d1cd101, aarch64-apple-darwin) in /Users/you/.local/bin
 reef install: /Users/you/.local/bin is not on PATH; add this line to your shell's profile:
   export PATH="$HOME/.local/bin:$PATH"
-reef 0.0.0 (21887d1cd101, aarch64-apple-darwin)
+reef 0.1.0 (21887d1cd101, aarch64-apple-darwin)
 ```
 
-Until 0.1.0 is released there is nothing for the installer to download; use the from-source line below. (The output above is the installer run against this build's own tarball.) The installer checks the tarball against the release's `SHA256SUMS`, never prompts, and never uses `sudo`. `REEF_VERSION=0.1.0` pins a release and `REEF_INSTALL_DIR` installs elsewhere. Or install with `brew install reef-vcs/tap/reef`, or `cargo binstall --git https://github.com/reef-vcs/reef reef-vcs`, or from source with `cargo install --git https://github.com/reef-vcs/reef reef-vcs`, which builds only `reef`; it runs the daemon itself. The tarballs and the formula carry shell completions; `reef completions zsh` prints them too. The binaries are not signed yet. From 0.1.0, the release workflow attests each tarball's build provenance: with a logged-in `gh`, `gh attestation verify reef-<version>-<target>.tar.gz --repo reef-vcs/reef` checks that a tarball was built by this repository's release workflow. The Linux binaries are static and run in any container.
+The installer checks the tarball against the release's `SHA256SUMS`, never prompts, and never uses `sudo`. `REEF_VERSION=0.1.0` pins a release and `REEF_INSTALL_DIR` installs elsewhere. Or install with `brew install reef-vcs/tap/reef`, or `cargo binstall --git https://github.com/reef-vcs/reef reef-vcs`, or from source with `cargo install --git https://github.com/reef-vcs/reef reef-vcs`, which builds only `reef`; it runs the daemon itself. The tarballs and the formula carry shell completions; `reef completions zsh` prints them too. The binaries are not signed yet. From 0.1.0, the release workflow attests each tarball's build provenance: with a logged-in `gh`, `gh attestation verify reef-<version>-<target>.tar.gz --repo reef-vcs/reef` checks that a tarball was built by this repository's release workflow. The Linux binaries are static and run in any container.
 
 Reef needs macOS 13 or later on APFS, or Linux with kernel overlayfs (a daemon with `CAP_SYS_ADMIN`, typically root in a VM or container) or `fuse-overlayfs` on `PATH`, or btrfs or XFS for reflinks. A root daemon makes every client of its socket root and runs store builds as root, so use the kernel tier in a VM or container dedicated to the agents, and give it a state directory of its own (`REEF_STATE_DIR=/var/lib/reef`, say): it refuses one another user owns, such as yours under `sudo -E`. Anywhere else it copies, which works but is slow on large trees. In a container, put the state directory on a volume: kernel overlayfs cannot stack on the container's own overlay filesystem, so without one Reef uses fuse-overlayfs. Reef itself doesn't need `jj`, but you'll use it to look at what agents did: install [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0), the version Reef is built on.
 
