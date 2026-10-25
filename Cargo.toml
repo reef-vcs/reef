@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/reef-lib", "crates/reef-daemon", "crates/reef-vcs"]
+default-members = ["crates/reef-api", "crates/reef-lib", "crates/reef-daemon", "crates/reef-vcs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ rust-version = "1.97.1"
 
 [workspace.dependencies]
 # Internal
+reef-api = { path = "crates/reef-api", version = "0.1.0" }
 reef-lib = { path = "crates/reef-lib", version = "0.1.0" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.1.0" }
 reef-testing = { path = "crates/reef-testing", version = "0.1.0" }   # unpublished; see reef-daemon's `testing` feature

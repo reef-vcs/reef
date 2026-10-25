@@ -8,9 +8,9 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use reef_daemon::client::ClientError;
-use reef_daemon::client::json::{Repository, Workspace, millis_of};
-use reef_daemon::proto::v0::{self, InspectRequest};
+use reef_api::client::ClientError;
+use reef_api::json::{Repository, Workspace, millis_of};
+use reef_api::proto::v1::{self, InspectRequest};
 use reef_lib::error::ErrorKind;
 use serde::Serialize;
 
@@ -110,7 +110,7 @@ fn is_not_found(error: &ClientError) -> bool {
 
 /// The answer for `ws`; `in_run` when `ws run` started this process, which
 /// releases the workspace itself.
-fn inside(ws: &v0::Workspace, in_run: bool) -> Inside {
+fn inside(ws: &v1::Workspace, in_run: bool) -> Inside {
     let workspace = Workspace::from(ws);
     let (hint, next) = advise(&workspace, in_run);
     Inside {
@@ -169,7 +169,7 @@ fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
 
 /// The answer outside every workspace, with the registered repository
 /// whose root contains `dir` (the deepest, as the daemon resolves it).
-fn outside(dir: &Path, repos: &[v0::Repository]) -> Outside {
+fn outside(dir: &Path, repos: &[v1::Repository]) -> Outside {
     let repo = repos
         .iter()
         .filter(|repo| dir.starts_with(&repo.root))
@@ -281,12 +281,12 @@ mod tests {
     use super::*;
 
     fn workspace(state: &str, lease: Option<&str>) -> Workspace {
-        let ws = v0::Workspace {
+        let ws = v1::Workspace {
             id: "0123456789abcdef".into(),
             repo_id: "fedcba9876543210".into(),
             state: state.into(),
-            lease: lease.map(|_| v0::Lease::default()),
-            ..v0::Workspace::default()
+            lease: lease.map(|_| v1::Lease::default()),
+            ..v1::Workspace::default()
         };
         let mut ws = Workspace::from(&ws);
         if let (Some(lease), Some(state)) = (ws.lease.as_mut(), lease) {
@@ -315,15 +315,15 @@ mod tests {
     #[test]
     fn outside_names_the_containing_repository() {
         let repos = [
-            v0::Repository {
+            v1::Repository {
                 id: "aaaa000000000001".into(),
                 root: "/src".into(),
-                ..v0::Repository::default()
+                ..v1::Repository::default()
             },
-            v0::Repository {
+            v1::Repository {
                 id: "aaaa000000000002".into(),
                 root: "/src/inner".into(),
-                ..v0::Repository::default()
+                ..v1::Repository::default()
             },
         ];
         let here = outside(Path::new("/src/inner/lib"), &repos);

@@ -22,8 +22,8 @@ use std::time::{Duration, SystemTime};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use reef_daemon::client::{ClientError, WorkspacesApi, default_owner};
-use reef_daemon::proto::v0::{CreateRequest, HeartbeatResponse, Lease, Workspace, lease};
+use reef_api::client::{ClientError, WorkspacesApi, default_owner};
+use reef_api::proto::v1::{CreateRequest, HeartbeatResponse, Lease, Workspace, lease};
 use reef_lib::error::{Classify as _, ErrorChain, ErrorKind};
 use serde::Serialize;
 use tokio::process::{Child, Command};
@@ -666,8 +666,8 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    use reef_daemon::proto::v0::register_request::IfNotJj;
-    use reef_daemon::proto::v0::{
+    use reef_api::proto::v1::register_request::IfNotJj;
+    use reef_api::proto::v1::{
         CreateResponse, ForgetResponse, InspectResponse, ListWorkspacesRequest, RegisterResponse,
         ReleaseResponse, Repository, SnapshotResponse, StatusResponse,
     };

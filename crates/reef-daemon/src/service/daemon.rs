@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Daemon`: the daemon's own status.
+//! `reef.daemon.v1.Daemon`: the daemon's own status.
 
 use std::sync::Arc;
 
@@ -9,8 +9,8 @@ use crate::daemon::AppState;
 use crate::db::SCHEMA_VERSION;
 use crate::error::status;
 use crate::model::WorkspaceState;
-use crate::proto::v0::daemon_server::Daemon;
-use crate::proto::v0::{BackendProbe, StatusRequest, StatusResponse};
+use reef_api::proto::v1::daemon_server::Daemon;
+use reef_api::proto::v1::{BackendProbe, StatusRequest, StatusResponse};
 
 /// Serves `Daemon`.
 #[derive(Debug)]

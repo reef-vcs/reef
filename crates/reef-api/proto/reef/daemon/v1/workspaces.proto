@@ -11,11 +11,11 @@
 // empty when it recorded none.
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
-import "reef/daemon/v0/types.proto";
+import "reef/daemon/v1/types.proto";
 
 service Workspaces {
   // Materializes a new workspace on a change and leases it.

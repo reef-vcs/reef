@@ -16,7 +16,7 @@ use super::{RegistryError, RepoRegistry};
 use crate::db::{Db, DbError};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
-use crate::proto::v0::register_request::IfNotJj;
+use reef_api::proto::v1::register_request::IfNotJj;
 
 /// Failure to register a repository.
 #[derive(Debug, thiserror::Error)]

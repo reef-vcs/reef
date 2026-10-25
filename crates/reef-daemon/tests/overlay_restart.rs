@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::{SyntheticRepo, TestDaemon};
+use reef_api::client::{Client, ClientError};
+use reef_api::proto::v1::{CreateRequest, InspectResponse, Workspace};
 use reef_daemon::backend::{Availability, BackendChoice, BackendKind, OverlayConfig, probe};
-use reef_daemon::client::{Client, ClientError};
 use reef_daemon::daemon::Daemon;
-use reef_daemon::proto::v0::{CreateRequest, InspectResponse, Workspace};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_testing::synth::Preset;
 

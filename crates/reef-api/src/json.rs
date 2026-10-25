@@ -8,12 +8,30 @@
 
 use serde::Serialize;
 
-use crate::model::Timestamp;
-use crate::proto::v0;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
-/// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision.
+use crate::proto::v1;
+
+/// What `CreateResponse.start` says when no bookmark exists and the
+/// default start fell back to the `default` workspace's working-copy commit
+/// (R1.31).
+pub const ROOT_CHECKOUT: &str = "root checkout";
+
+/// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision,
+/// trailing zeros of the fraction dropped (`2026-10-16T18:31:17.042Z`,
+/// `2026-10-16T18:31:18Z`). A time `time` cannot represent is
+/// `<millis>ms`.
 pub fn rfc3339(time: &prost_types::Timestamp) -> String {
-    Timestamp(millis_of(time)).to_rfc3339()
+    rfc3339_millis(millis_of(time))
+}
+
+/// Unix milliseconds as [`rfc3339`] formats them.
+pub fn rfc3339_millis(millis: i64) -> String {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+        .ok()
+        .and_then(|time| time.format(&Rfc3339).ok())
+        .unwrap_or_else(|| format!("{millis}ms"))
 }
 
 /// A `google.protobuf.Timestamp` as Unix milliseconds.
@@ -57,8 +75,8 @@ pub struct Repository {
     pub registered_at: Option<String>,
 }
 
-impl From<&v0::Repository> for Repository {
-    fn from(repo: &v0::Repository) -> Self {
+impl From<&v1::Repository> for Repository {
+    fn from(repo: &v1::Repository) -> Self {
         Self {
             id: repo.id.clone(),
             root: repo.root.clone(),
@@ -97,12 +115,12 @@ pub struct Lease {
 }
 
 /// A lease state's JSON name.
-fn lease_state(state: v0::lease::State) -> &'static str {
+fn lease_state(state: v1::lease::State) -> &'static str {
     match state {
-        v0::lease::State::Active => "active",
-        v0::lease::State::InGrace => "in_grace",
-        v0::lease::State::Expired => "expired",
-        v0::lease::State::Ended => "ended",
+        v1::lease::State::Active => "active",
+        v1::lease::State::InGrace => "in_grace",
+        v1::lease::State::Expired => "expired",
+        v1::lease::State::Ended => "ended",
     }
 }
 
@@ -115,8 +133,8 @@ fn duration_millis(duration: &prost_types::Duration) -> u64 {
     u64::try_from(millis).unwrap_or(0)
 }
 
-impl From<&v0::Lease> for Lease {
-    fn from(lease: &v0::Lease) -> Self {
+impl From<&v1::Lease> for Lease {
+    fn from(lease: &v1::Lease) -> Self {
         Self {
             id: lease.id.clone(),
             owner: lease.owner.clone(),
@@ -196,11 +214,11 @@ pub struct MountedStore {
     pub verified: bool,
 }
 
-impl From<&v0::MountedStore> for MountedStore {
-    fn from(store: &v0::MountedStore) -> Self {
+impl From<&v1::MountedStore> for MountedStore {
+    fn from(store: &v1::MountedStore) -> Self {
         let mode = match store.mode() {
-            v0::mounted_store::Mode::Symlink => "symlink",
-            v0::mounted_store::Mode::Bind => "bind",
+            v1::mounted_store::Mode::Symlink => "symlink",
+            v1::mounted_store::Mode::Bind => "bind",
         };
         Self {
             name: store.name.clone(),
@@ -212,8 +230,8 @@ impl From<&v0::MountedStore> for MountedStore {
     }
 }
 
-impl From<&v0::Workspace> for Workspace {
-    fn from(ws: &v0::Workspace) -> Self {
+impl From<&v1::Workspace> for Workspace {
+    fn from(ws: &v1::Workspace) -> Self {
         Self {
             id: ws.id.clone(),
             repo_id: ws.repo_id.clone(),
@@ -254,8 +272,8 @@ pub struct SnapshotEntry {
     pub taken_at: Option<String>,
 }
 
-impl From<&v0::SnapshotEntry> for SnapshotEntry {
-    fn from(entry: &v0::SnapshotEntry) -> Self {
+impl From<&v1::SnapshotEntry> for SnapshotEntry {
+    fn from(entry: &v1::SnapshotEntry) -> Self {
         Self {
             op_id: entry.op_id.clone(),
             commit_id: entry.commit_id.clone(),
@@ -275,8 +293,8 @@ pub struct DiskUsage {
     pub files_changed: u64,
 }
 
-impl From<&v0::DiskUsage> for DiskUsage {
-    fn from(usage: &v0::DiskUsage) -> Self {
+impl From<&v1::DiskUsage> for DiskUsage {
+    fn from(usage: &v1::DiskUsage) -> Self {
         Self {
             allocated_bytes: usage.allocated_bytes,
             files_changed: usage.files_changed,
@@ -307,7 +325,7 @@ pub struct Created {
 
 impl Created {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::CreateResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::CreateResponse) -> Option<Self> {
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
             op_id: text(&response.op_id),
@@ -324,7 +342,7 @@ impl Created {
     }
 }
 
-/// A create's steps, in milliseconds; see `v0::CreateTimings`.
+/// A create's steps, in milliseconds; see `v1::CreateTimings`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CreateTimings {
     /// Resolving the start revision.
@@ -347,8 +365,8 @@ pub struct CreateTimings {
     pub total_ms: u64,
 }
 
-impl From<&v0::CreateTimings> for CreateTimings {
-    fn from(timings: &v0::CreateTimings) -> Self {
+impl From<&v1::CreateTimings> for CreateTimings {
+    fn from(timings: &v1::CreateTimings) -> Self {
         Self {
             resolve_ms: timings.resolve_ms,
             base_ms: timings.base_ms,
@@ -386,7 +404,7 @@ pub struct Moved {
 
 impl Moved {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::MoveResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::MoveResponse) -> Option<Self> {
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
             op_id: text(&response.op_id),
@@ -419,7 +437,7 @@ pub struct Inspected {
 
 impl Inspected {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::InspectResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::InspectResponse) -> Option<Self> {
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
             disk_usage: response.disk_usage.as_ref().map(DiskUsage::from),
@@ -448,8 +466,8 @@ pub struct Released {
     pub freed_bytes: u64,
 }
 
-impl From<&v0::ReleaseResponse> for Released {
-    fn from(response: &v0::ReleaseResponse) -> Self {
+impl From<&v1::ReleaseResponse> for Released {
+    fn from(response: &v1::ReleaseResponse) -> Self {
         Self {
             id: response.workspace_id.clone(),
             final_op_id: text(&response.final_op_id),
@@ -472,8 +490,8 @@ pub struct BackendProbe {
     pub filesystem: String,
 }
 
-impl From<&v0::BackendProbe> for BackendProbe {
-    fn from(probe: &v0::BackendProbe) -> Self {
+impl From<&v1::BackendProbe> for BackendProbe {
+    fn from(probe: &v1::BackendProbe) -> Self {
         Self {
             kind: probe.kind.clone(),
             available: probe.available,
@@ -506,8 +524,8 @@ pub struct Status {
     pub backends: Vec<BackendProbe>,
 }
 
-impl From<&v0::StatusResponse> for Status {
-    fn from(status: &v0::StatusResponse) -> Self {
+impl From<&v1::StatusResponse> for Status {
+    fn from(status: &v1::StatusResponse) -> Self {
         Self {
             version: status.version.clone(),
             pid: status.pid,
@@ -543,8 +561,8 @@ pub struct Store {
     pub repo_id: String,
 }
 
-impl From<&v0::StoreInfo> for Store {
-    fn from(store: &v0::StoreInfo) -> Self {
+impl From<&v1::StoreInfo> for Store {
+    fn from(store: &v1::StoreInfo) -> Self {
         Self {
             name: store.name.clone(),
             lockfile_hash: store.lockfile_hash.clone(),
@@ -581,8 +599,8 @@ pub struct BuiltStore {
     pub already_built: bool,
 }
 
-impl From<&v0::BuildResult> for BuiltStore {
-    fn from(result: &v0::BuildResult) -> Self {
+impl From<&v1::BuildResult> for BuiltStore {
+    fn from(result: &v1::BuildResult) -> Self {
         Self {
             name: result.name.clone(),
             lockfile_hash: result.lockfile_hash.clone(),
@@ -630,8 +648,8 @@ pub struct GcReport {
     pub dry_run: bool,
 }
 
-impl From<&v0::GcReport> for GcReport {
-    fn from(report: &v0::GcReport) -> Self {
+impl From<&v1::GcReport> for GcReport {
+    fn from(report: &v1::GcReport) -> Self {
         Self {
             repo_id: report.repo_id.clone(),
             keep_newer: time(report.keep_newer.as_ref()),
@@ -665,7 +683,7 @@ mod tests {
 
     #[test]
     fn workspace_json_has_stable_names_and_nulls() {
-        let ws = v0::Workspace {
+        let ws = v1::Workspace {
             id: "00000000000000aa".into(),
             change_id: "01".into(),
             state: "active".into(),
@@ -673,15 +691,15 @@ mod tests {
                 seconds: 1_792_175_477,
                 nanos: 42_000_000,
             }),
-            lease: Some(v0::Lease {
+            lease: Some(v1::Lease {
                 id: "00000000000000bb".into(),
                 expires_at: Some(prost_types::Timestamp {
                     seconds: 1_792_175_478,
                     nanos: 0,
                 }),
-                ..v0::Lease::default()
+                ..v1::Lease::default()
             }),
-            ..v0::Workspace::default()
+            ..v1::Workspace::default()
         };
         let value = serde_json::to_value(Workspace::from(&ws)).unwrap();
         assert_eq!(value["id"], "00000000000000aa");
@@ -702,15 +720,15 @@ mod tests {
 
     #[test]
     fn mounted_stores_name_their_mode() {
-        let ws = v0::Workspace {
-            stores: vec![v0::MountedStore {
+        let ws = v1::Workspace {
+            stores: vec![v1::MountedStore {
                 name: "deps".into(),
                 lockfile_hash: "ab".into(),
                 mount: "vendor/deps".into(),
-                mode: v0::mounted_store::Mode::Bind.into(),
+                mode: v1::mounted_store::Mode::Bind.into(),
                 verified: true,
             }],
-            ..v0::Workspace::default()
+            ..v1::Workspace::default()
         };
         let value = serde_json::to_value(Workspace::from(&ws)).unwrap();
         assert_eq!(
@@ -727,19 +745,19 @@ mod tests {
 
     #[test]
     fn created_flattens_the_workspace() {
-        let response = v0::CreateResponse {
-            workspace: Some(v0::Workspace {
+        let response = v1::CreateResponse {
+            workspace: Some(v1::Workspace {
                 id: "00000000000000aa".into(),
                 path: "/ws".into(),
-                ..v0::Workspace::default()
+                ..v1::Workspace::default()
             }),
             op_id: "ff".into(),
-            ..v0::CreateResponse::default()
+            ..v1::CreateResponse::default()
         };
         let value = serde_json::to_value(Created::from_response(&response).unwrap()).unwrap();
         assert_eq!(value["id"], "00000000000000aa");
         assert_eq!(value["path"], "/ws");
         assert_eq!(value["op_id"], "ff");
-        assert!(Created::from_response(&v0::CreateResponse::default()).is_none());
+        assert!(Created::from_response(&v1::CreateResponse::default()).is_none());
     }
 }

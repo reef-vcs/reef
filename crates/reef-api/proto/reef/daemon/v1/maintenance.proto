@@ -3,7 +3,7 @@
 // (`reef restore`) and has no RPC.
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
 import "google/protobuf/timestamp.proto";
 

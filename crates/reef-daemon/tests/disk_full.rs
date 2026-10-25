@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 
 use common::short_tempdir;
 use common::spawned::{SpawnedDaemon, file_at};
+use reef_api::proto::v1::{CreateRequest, Workspace};
 use reef_daemon::config::FileConfig;
 use reef_daemon::model::{ReclaimReason, WorkspaceId};
-use reef_daemon::proto::v0::{CreateRequest, Workspace};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
 use serde_json::Value;

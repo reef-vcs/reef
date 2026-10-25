@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Workspaces`: create, list, inspect, release, snapshot,
+//! `reef.daemon.v1.Workspaces`: create, list, inspect, release, snapshot,
 //! heartbeat, move.
 
 use std::path::PathBuf;
@@ -13,15 +13,15 @@ use crate::backend::BackendChoice;
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::model::{LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceState};
-use crate::proto::v0::workspaces_server::Workspaces;
-use crate::proto::v0::{
+use crate::snapshot::{SnapshotKind, index};
+use crate::workspace::{CreateSpec, MissingStores, ReleaseSpec, Start};
+use reef_api::proto::v1::workspaces_server::Workspaces;
+use reef_api::proto::v1::{
     self, CreateRequest, CreateResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest,
     InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveRequest, MoveResponse,
     ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
     move_request,
 };
-use crate::snapshot::{SnapshotKind, index};
-use crate::workspace::{CreateSpec, MissingStores, ReleaseSpec, Start};
 
 /// A request field that does not parse.
 #[derive(Debug, thiserror::Error)]
@@ -47,7 +47,7 @@ impl WorkspacesService {
     }
 
     /// `record` as a message, its lease state computed at `now`.
-    fn lease_message(&self, record: Option<&LeaseRecord>, now: Timestamp) -> Option<v0::Lease> {
+    fn lease_message(&self, record: Option<&LeaseRecord>, now: Timestamp) -> Option<v1::Lease> {
         record.map(|record| lease(record, self.state.manager.leases(), now))
     }
 }
@@ -123,7 +123,7 @@ impl Workspaces for WorkspacesService {
                 .base_ms
                 .saturating_add(created.timings.materialize_ms),
             base_was_cached: created.base_was_cached,
-            timings: Some(v0::CreateTimings::from(&created.timings)),
+            timings: Some(v1::CreateTimings::from(&created.timings)),
             start: created.default_start.unwrap_or_default(),
         }))
     }
@@ -208,7 +208,7 @@ impl Workspaces for WorkspacesService {
             recent_snapshots: inspected
                 .recent_snapshots
                 .iter()
-                .map(v0::SnapshotEntry::from)
+                .map(v1::SnapshotEntry::from)
                 .collect(),
         }))
     }

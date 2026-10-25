@@ -11,9 +11,9 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use reef_daemon::client::json::Repository;
-use reef_daemon::error::Advice;
-use reef_daemon::proto::v0::register_request::IfNotJj;
+use reef_api::advice::Advice;
+use reef_api::json::Repository;
+use reef_api::proto::v1::register_request::IfNotJj;
 use reef_lib::error::ErrorKind;
 use serde::Serialize;
 

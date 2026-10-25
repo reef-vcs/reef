@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Maintenance`: garbage collection (R1.17), backup and
+//! `reef.daemon.v1.Maintenance`: garbage collection (R1.17), backup and
 //! quiesce (R1.18).
 
 use std::path::PathBuf;
@@ -18,8 +18,8 @@ use crate::error::status;
 use crate::maintenance::gc::{self, GcReport};
 use crate::maintenance::{Busy, backup, quiesce};
 use crate::model::RepoId;
-use crate::proto::v0::maintenance_server::Maintenance;
-use crate::proto::v0::{
+use reef_api::proto::v1::maintenance_server::Maintenance;
+use reef_api::proto::v1::{
     self, BackupProgress, BackupRequest, GcRequest, GcResponse, QuiesceRequest, QuiesceResponse,
     ResumeRequest, ResumeResponse,
 };
@@ -42,7 +42,7 @@ impl MaintenanceService {
     }
 }
 
-impl From<&GcReport> for v0::GcReport {
+impl From<&GcReport> for v1::GcReport {
     fn from(report: &GcReport) -> Self {
         Self {
             repo_id: report.repo_id.as_hex(),
@@ -107,7 +107,7 @@ impl Maintenance for MaintenanceService {
             .await
             .map_err(|error| Status::internal(format!("the GC task failed: {error}")))??;
         Ok(Response::new(GcResponse {
-            reports: reports.iter().map(v0::GcReport::from).collect(),
+            reports: reports.iter().map(v1::GcReport::from).collect(),
         }))
     }
 

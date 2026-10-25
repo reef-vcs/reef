@@ -18,13 +18,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, test_settings};
-use reef_daemon::client::ClientError;
-use reef_daemon::error::detail_of;
-use reef_daemon::model::{ReclaimReason, WorkspaceState};
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
+use reef_api::client::ClientError;
+use reef_api::error::detail_of;
+use reef_api::proto::v1::register_request::IfNotJj;
+use reef_api::proto::v1::{
     CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
 };
+use reef_daemon::model::{ReclaimReason, WorkspaceState};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo, RepoPath};
 use reef_testing::synth::{self, Preset};
@@ -76,7 +76,7 @@ fn kind_of(error: &ClientError) -> ErrorKind {
         panic!("not an RPC error: {error:?}");
     };
     let detail = detail_of(status).expect("an ErrorDetail in the status");
-    assert_eq!(detail.kind, reef_daemon::error::kind_name(*kind));
+    assert_eq!(detail.kind, reef_api::error::kind_name(*kind));
     assert_eq!(error.kind(), *kind);
     *kind
 }
@@ -524,7 +524,7 @@ async fn release_tears_down_and_keeps_row() {
     assert_eq!(listed[0].id, ws.id);
     assert_eq!(listed[0].state, "released");
     let lease = listed[0].lease.as_ref().expect("the lease it ended with");
-    assert_eq!(lease.state(), reef_daemon::proto::v0::lease::State::Ended);
+    assert_eq!(lease.state(), reef_api::proto::v1::lease::State::Ended);
     assert_eq!(lease.end_reason, "released");
     let active = daemon
         .client

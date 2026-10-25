@@ -16,13 +16,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, test_settings};
-use reef_daemon::Daemon;
-use reef_daemon::client::Client;
-use reef_daemon::db::Db;
-use reef_daemon::model::{RepoId, Timestamp, WorkspaceId};
-use reef_daemon::proto::v0::{
+use reef_api::client::Client;
+use reef_api::proto::v1::{
     CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
 };
+use reef_daemon::Daemon;
+use reef_daemon::db::Db;
+use reef_daemon::model::{RepoId, Timestamp, WorkspaceId};
 use reef_daemon::snapshot::SnapshotKind;
 use reef_daemon::snapshot::index::{self, ReindexReport, SnapshotEntry};
 use reef_lib::jj::Repo;

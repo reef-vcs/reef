@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, logs, test_settings};
-use reef_daemon::client::ClientError;
-use reef_daemon::proto::v0::{
+use reef_api::client::ClientError;
+use reef_api::proto::v1::{
     self, CreateRequest, ListWorkspacesRequest, Workspace, build_event, create_request,
     mounted_store, output_line,
 };
@@ -111,9 +111,9 @@ async fn create_ok(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
 #[derive(Debug, Default)]
 struct Built {
     /// Each `Started` event, with how many lines came before it.
-    started: Vec<(usize, v0::BuildStarted)>,
-    lines: Vec<v0::OutputLine>,
-    done: Option<v0::BuildResult>,
+    started: Vec<(usize, v1::BuildStarted)>,
+    lines: Vec<v1::OutputLine>,
+    done: Option<v1::BuildResult>,
     error: Option<ClientError>,
 }
 
@@ -149,7 +149,7 @@ async fn build_with(daemon: &TestDaemon, repo: &SyntheticRepo, timeout: Duration
 }
 
 /// The first event after the build's `Started` (RX.01), which comes first.
-async fn first_line(events: &mut tonic::Streaming<v0::BuildEvent>) -> v0::BuildEvent {
+async fn first_line(events: &mut tonic::Streaming<v1::BuildEvent>) -> v1::BuildEvent {
     let started = events.message().await.unwrap().unwrap();
     assert!(
         matches!(started.event, Some(build_event::Event::Started(_))),
@@ -158,7 +158,7 @@ async fn first_line(events: &mut tonic::Streaming<v0::BuildEvent>) -> v0::BuildE
     events.message().await.unwrap().unwrap()
 }
 
-async fn build(daemon: &TestDaemon, repo: &SyntheticRepo) -> v0::BuildResult {
+async fn build(daemon: &TestDaemon, repo: &SyntheticRepo) -> v1::BuildResult {
     let built = build_with(daemon, repo, Duration::from_mins(5)).await;
     assert!(built.error.is_none(), "{:?}", built.error);
     built.done.expect("a result")
@@ -818,11 +818,11 @@ async fn move_to_own_change_remounts_rebuilt_store() {
         .snapshot_workspace(&repo.id, &ws.id, "")
         .await
         .unwrap();
-    let to_own_change = |change: String| v0::MoveRequest {
+    let to_own_change = |change: String| v1::MoveRequest {
         repo: repo.id.clone(),
         workspace: ws.id.clone(),
-        target: Some(v0::move_request::Target::Change(change)),
-        ..v0::MoveRequest::default()
+        target: Some(v1::move_request::Target::Change(change)),
+        ..v1::MoveRequest::default()
     };
 
     let error = daemon

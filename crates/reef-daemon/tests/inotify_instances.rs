@@ -13,7 +13,7 @@
 mod common;
 
 use common::TestDaemon;
-use reef_daemon::proto::v0::CreateRequest;
+use reef_api::proto::v1::CreateRequest;
 use reef_testing::synth::Preset;
 
 /// Open file descriptors of this process that are inotify instances.

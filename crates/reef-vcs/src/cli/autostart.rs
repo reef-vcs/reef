@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use reef_daemon::client::Client;
+use reef_api::client::Client;
 use reef_daemon::config::Config;
 
 use super::{CliError, Global, absolute};

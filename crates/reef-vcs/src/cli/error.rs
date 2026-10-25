@@ -8,9 +8,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use reef_daemon::client::ClientError;
+use reef_api::advice::Advice;
+use reef_api::client::ClientError;
 use reef_daemon::config::ConfigError;
-use reef_daemon::error::Advice;
 use reef_daemon::logging::LoggingError;
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use reef_daemon::client::ClientError;
+use reef_api::client::ClientError;
 use reef_daemon::maintenance::backup::Manifest;
 
 use super::render::size;

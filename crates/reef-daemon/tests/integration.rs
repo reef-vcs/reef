@@ -27,13 +27,13 @@ use common::spawned::{
 };
 use common::{SyntheticRepo, test_settings};
 use nix::sys::signal::{Signal, kill};
-use reef_daemon::client::Client;
-use reef_daemon::config::FileConfig;
-use reef_daemon::model::{ReclaimReason, ReclaimRecord, WorkspaceId};
-use reef_daemon::proto::v0::{
+use reef_api::client::Client;
+use reef_api::proto::v1::{
     CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, build_event, create_request,
     move_request,
 };
+use reef_daemon::config::FileConfig;
+use reef_daemon::model::{ReclaimReason, ReclaimRecord, WorkspaceId};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
@@ -391,7 +391,7 @@ async fn two_workspaces_on_one_change() {
     let change = first.change_id.clone();
     // `change_id` is hex; `--change` takes jj's reverse hex, as the CLI
     // prints it.
-    let rev = reef_daemon::client::json::reverse_hex(&change);
+    let rev = reef_api::json::reverse_hex(&change);
     let on_change = || Some(create_request::Start::Change(rev.clone()));
     let a = create_with(client, &repo, on_change(), 60_000).await;
     let b = create_with(client, &repo, on_change(), 60_000).await;
@@ -838,9 +838,9 @@ async fn move_keeps_lease_and_directory() {
     let moved = client
         .move_workspace(MoveRequest {
             workspace: ws.id.clone(),
-            target: Some(move_request::Target::Change(
-                reef_daemon::client::json::reverse_hex(&other.change_id),
-            )),
+            target: Some(move_request::Target::Change(reef_api::json::reverse_hex(
+                &other.change_id,
+            ))),
             ..MoveRequest::default()
         })
         .await
@@ -1053,7 +1053,7 @@ async fn register_refuses_a_root_owned_by_another_user() {
 #[cfg(feature = "privileged-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn register_walks_up_only_to_an_owned_root() {
-    use reef_daemon::proto::v0::register_request::IfNotJj;
+    use reef_api::proto::v1::register_request::IfNotJj;
     if !is_root() {
         eprintln!("skipped: needs root to chown");
         return;
@@ -1109,8 +1109,8 @@ async fn register_walks_up_only_to_an_owned_root() {
 fn register_accepts_the_sudo_users_repository() {
     use std::os::unix::fs::MetadataExt as _;
 
+    use reef_api::proto::v1::register_request::IfNotJj;
     use reef_daemon::db::Db;
-    use reef_daemon::proto::v0::register_request::IfNotJj;
     use reef_daemon::repo::{OwnerPolicy, RegisterError, RepoRegistry};
     if !is_root() {
         eprintln!("skipped: needs root to chown");
@@ -1153,7 +1153,7 @@ fn register_accepts_the_sudo_users_repository() {
 #[cfg(feature = "privileged-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn register_accepts_the_sudo_users_repository_through_the_daemon() {
-    use reef_daemon::proto::v0::register_request::IfNotJj;
+    use reef_api::proto::v1::register_request::IfNotJj;
     let sudo_uid = std::env::var("SUDO_UID")
         .ok()
         .and_then(|uid| uid.parse::<u32>().ok());

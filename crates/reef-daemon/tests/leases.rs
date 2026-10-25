@@ -22,12 +22,12 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::client::{Client, ClientError};
+use reef_api::error::detail_of;
+use reef_api::proto::v1::{CreateRequest, Workspace, lease};
 use reef_daemon::backend::{BackendChoice, BackendKind};
-use reef_daemon::client::{Client, ClientError};
 use reef_daemon::daemon::Daemon;
-use reef_daemon::error::detail_of;
 use reef_daemon::model::{LeaseEnd, ReclaimReason, ReclaimRecord, WorkspaceId, WorkspaceState};
-use reef_daemon::proto::v0::{CreateRequest, Workspace, lease};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::{CommitIdHex, Repo};
@@ -136,7 +136,7 @@ fn kind_of(error: &ClientError) -> ErrorKind {
         panic!("not an RPC error: {error:?}");
     };
     let detail = detail_of(status).expect("an ErrorDetail in the status");
-    assert_eq!(detail.kind, reef_daemon::error::kind_name(*kind));
+    assert_eq!(detail.kind, reef_api::error::kind_name(*kind));
     if *kind == ErrorKind::Conflict {
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     }

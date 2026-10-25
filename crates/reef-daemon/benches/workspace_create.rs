@@ -51,13 +51,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
+use reef_api::proto::v1::register_request::IfNotJj;
+use reef_api::proto::v1::{
+    CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
+};
 use reef_daemon::backend::fs_util::{allocated_bytes, free_bytes};
 use reef_daemon::backend::{
     Backend, BackendKind, OverlayConfig, WorkspacePaths, backend_for, probe,
-};
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
-    CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
 };
 use reef_daemon::testing::{TestDaemon, short_tmp};
 use reef_testing::synth::{self, MutateOps, Preset};

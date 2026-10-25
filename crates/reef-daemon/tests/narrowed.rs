@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, test_settings};
+use reef_api::proto::v1::{CreateRequest, Workspace};
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, Workspace};
 use reef_daemon::snapshot::{SnapshotKind, SnapshotOutcome};
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::jj::{CommitIdHex, Repo, RepoPath};

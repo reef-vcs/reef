@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use reef_daemon::client::default_owner;
-use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
-use reef_daemon::proto::v0::create_request::MissingStores;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, create_request};
-use reef_daemon::workspace::ROOT_CHECKOUT;
+use reef_api::client::default_owner;
+use reef_api::json::ROOT_CHECKOUT;
+use reef_api::json::{Created, GcReport, Inspected, Released, Workspace};
+use reef_api::proto::v1::create_request::MissingStores;
+use reef_api::proto::v1::{CreateRequest, ListWorkspacesRequest, create_request};
 use reef_lib::error::ErrorKind;
 
 use super::render::GcReports;
@@ -240,9 +240,9 @@ const LIST_LIMIT: usize = 100;
 
 /// The `limit` newest of `listed` (all when 0), newest first.
 fn newest(
-    mut listed: Vec<reef_daemon::proto::v0::Workspace>,
+    mut listed: Vec<reef_api::proto::v1::Workspace>,
     limit: usize,
-) -> Vec<reef_daemon::proto::v0::Workspace> {
+) -> Vec<reef_api::proto::v1::Workspace> {
     // The daemon lists oldest first.
     listed.reverse();
     if limit > 0 {

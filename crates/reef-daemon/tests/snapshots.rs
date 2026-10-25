@@ -19,8 +19,8 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::proto::v1::{CreateRequest, Workspace, create_request};
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, Workspace, create_request};
 use reef_daemon::snapshot::PauseGuard;
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::jj::oplog::OpEntry;
@@ -764,10 +764,10 @@ async fn moved_workspace_is_still_watched() {
     let ws = create(&daemon, &repo, None).await;
     let moved = daemon
         .client
-        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+        .move_workspace(reef_api::proto::v1::MoveRequest {
             repo: repo.id.clone(),
             workspace: ws.id.clone(),
-            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            target: Some(reef_api::proto::v1::move_request::Target::NewOn(target)),
             ..Default::default()
         })
         .await
@@ -967,10 +967,10 @@ async fn release_and_move_during_a_pending_attach() {
 
     let moved = daemon
         .client
-        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+        .move_workspace(reef_api::proto::v1::MoveRequest {
             repo: repo.id.clone(),
             workspace: a.id.clone(),
-            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            target: Some(reef_api::proto::v1::move_request::Target::NewOn(target)),
             ..Default::default()
         })
         .await

@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 pub use ids::{LeaseId, ParseIdError, RepoId, WorkspaceId};
 
@@ -383,10 +382,7 @@ impl Timestamp {
     /// `2026-10-16T18:31:17.042Z`. A value outside the years 1 to 9999
     /// cannot be written that way and prints as `<millis>ms` instead.
     pub fn to_rfc3339(self) -> String {
-        OffsetDateTime::from_unix_timestamp_nanos(i128::from(self.0) * 1_000_000)
-            .ok()
-            .and_then(|time| time.format(&Rfc3339).ok())
-            .unwrap_or_else(|| format!("{}ms", self.0))
+        reef_api::json::rfc3339_millis(self.0)
     }
 }
 

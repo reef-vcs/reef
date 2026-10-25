@@ -9,7 +9,7 @@
 
 use std::io::{self, IsTerminal as _, Write};
 
-use reef_daemon::error::Advice;
+use reef_api::advice::Advice;
 use reef_lib::error::{Classify as _, ErrorChain};
 use serde::Serialize;
 

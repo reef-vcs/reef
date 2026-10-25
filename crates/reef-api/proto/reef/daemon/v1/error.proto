@@ -2,7 +2,7 @@
 // ADR 0017).
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
 message ErrorDetail {
   // The error's `reef_lib::error::ErrorKind`, by variant name: NotFound,

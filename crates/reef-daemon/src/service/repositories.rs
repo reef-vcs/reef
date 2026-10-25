@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Repositories`: register, list, forget.
+//! `reef.daemon.v1.Repositories`: register, list, forget.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,8 +7,8 @@ use tonic::{Request, Response, Status};
 
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::proto::v0::repositories_server::Repositories;
-use crate::proto::v0::{
+use reef_api::proto::v1::repositories_server::Repositories;
+use reef_api::proto::v1::{
     ForgetRequest, ForgetResponse, ListRepositoriesRequest, ListRepositoriesResponse,
     RegisterRequest, RegisterResponse, Repository,
 };

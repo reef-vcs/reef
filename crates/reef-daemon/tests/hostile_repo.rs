@@ -24,11 +24,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::TestDaemon;
+use reef_api::client::ClientError;
+use reef_api::proto::v1::register_request::IfNotJj;
+use reef_api::proto::v1::{CreateRequest, Workspace, create_request};
 use reef_daemon::backend::fs_util::TRASH_INFIX;
-use reef_daemon::client::ClientError;
 use reef_daemon::config::Config;
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, Workspace, create_request};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_testing::git::{blob, commit_tree, init_repo, raw_tree};
 
@@ -469,7 +469,7 @@ async fn store_mount_under_a_symlinked_ancestor_is_refused_end_to_end() {
         .unwrap();
     let mut sealed = false;
     while let Some(event) = events.message().await.unwrap() {
-        if let Some(reef_daemon::proto::v0::build_event::Event::Done(done)) = event.event {
+        if let Some(reef_api::proto::v1::build_event::Event::Done(done)) = event.event {
             sealed = done.sealed;
         }
     }
@@ -537,7 +537,7 @@ async fn reclaim_of_a_root_replaced_by_a_symlink_removes_only_the_link() {
     let listed = f
         .daemon
         .client
-        .list_workspaces(reef_daemon::proto::v0::ListWorkspacesRequest {
+        .list_workspaces(reef_api::proto::v1::ListWorkspacesRequest {
             repo: f.repo.clone(),
             ..Default::default()
         })

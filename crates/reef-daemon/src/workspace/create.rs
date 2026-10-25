@@ -616,7 +616,7 @@ pub(super) async fn refresh_for_resolve(
 
 /// What a create's default start (R1.31) reports as `CreateResponse.start` when
 /// no bookmark matched.
-pub const ROOT_CHECKOUT: &str = "root checkout";
+pub use reef_api::json::ROOT_CHECKOUT;
 
 /// The remote whose default branch and remote-tracking bookmarks
 /// [`default_start`] tries.

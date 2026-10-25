@@ -6,11 +6,11 @@ use std::time::Duration;
 use crate::backend::DiskUsage;
 use crate::lease::{LeaseManager, LeaseState};
 use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
-use crate::proto::v0;
 use crate::snapshot::index::SnapshotEntry;
 use crate::store::{MountMode, MountedStore};
 use crate::watcher::PendingWatch;
 use crate::workspace::CreateTimings;
+use reef_api::proto::v1;
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
 pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
@@ -34,7 +34,7 @@ pub(super) fn proto_duration(duration: Duration) -> prost_types::Duration {
     }
 }
 
-impl From<&RepositoryRecord> for v0::Repository {
+impl From<&RepositoryRecord> for v1::Repository {
     fn from(record: &RepositoryRecord) -> Self {
         Self {
             id: record.id.as_hex(),
@@ -45,7 +45,7 @@ impl From<&RepositoryRecord> for v0::Repository {
     }
 }
 
-impl From<LeaseState> for v0::lease::State {
+impl From<LeaseState> for v1::lease::State {
     fn from(state: LeaseState) -> Self {
         match state {
             LeaseState::Active => Self::Active,
@@ -57,8 +57,8 @@ impl From<LeaseState> for v0::lease::State {
 }
 
 /// A lease as a message, its state computed at `now`.
-pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v0::Lease {
-    v0::Lease {
+pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v1::Lease {
+    v1::Lease {
         id: lease.id.as_hex(),
         owner: lease.owner.clone(),
         issued_at: Some(timestamp(lease.issued_at)),
@@ -66,7 +66,7 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
         last_heartbeat_at: Some(timestamp(lease.last_heartbeat_at)),
         length_ms: millis(lease.length),
         grace_ms: millis(lease.grace),
-        state: v0::lease::State::from(LeaseState::of(lease, now)).into(),
+        state: v1::lease::State::from(LeaseState::of(lease, now)).into(),
         end_reason: lease
             .end_reason
             .map(|reason| reason.as_str().to_owned())
@@ -79,13 +79,13 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
 /// stores, and why its watch is not up yet, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
-    pub(super) lease: Option<v0::Lease>,
+    pub(super) lease: Option<v1::Lease>,
     pub(super) local_snapshot_count: u64,
     pub(super) stores: &'a [MountedStore],
     pub(super) watch_pending: Option<PendingWatch>,
 }
 
-impl From<WorkspaceView<'_>> for v0::Workspace {
+impl From<WorkspaceView<'_>> for v1::Workspace {
     fn from(view: WorkspaceView<'_>) -> Self {
         let record = view.record;
         Self {
@@ -109,7 +109,7 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             lease: view.lease,
             watcher: record.watcher.as_str().to_owned(),
             local_snapshot_count: view.local_snapshot_count,
-            stores: view.stores.iter().map(v0::MountedStore::from).collect(),
+            stores: view.stores.iter().map(v1::MountedStore::from).collect(),
             watch_state: view
                 .watch_pending
                 .map(PendingWatch::as_str)
@@ -119,11 +119,11 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
     }
 }
 
-impl From<&MountedStore> for v0::MountedStore {
+impl From<&MountedStore> for v1::MountedStore {
     fn from(store: &MountedStore) -> Self {
         let mode = match store.mode {
-            MountMode::Symlink => v0::mounted_store::Mode::Symlink,
-            MountMode::Bind => v0::mounted_store::Mode::Bind,
+            MountMode::Symlink => v1::mounted_store::Mode::Symlink,
+            MountMode::Bind => v1::mounted_store::Mode::Bind,
         };
         Self {
             name: store.key.name.clone(),
@@ -135,7 +135,7 @@ impl From<&MountedStore> for v0::MountedStore {
     }
 }
 
-impl From<&SnapshotEntry> for v0::SnapshotEntry {
+impl From<&SnapshotEntry> for v1::SnapshotEntry {
     fn from(entry: &SnapshotEntry) -> Self {
         Self {
             op_id: entry.op_id.to_string(),
@@ -147,7 +147,7 @@ impl From<&SnapshotEntry> for v0::SnapshotEntry {
     }
 }
 
-impl From<&DiskUsage> for v0::DiskUsage {
+impl From<&DiskUsage> for v1::DiskUsage {
     fn from(usage: &DiskUsage) -> Self {
         Self {
             allocated_bytes: usage.allocated_bytes,
@@ -156,7 +156,7 @@ impl From<&DiskUsage> for v0::DiskUsage {
     }
 }
 
-impl From<&CreateTimings> for v0::CreateTimings {
+impl From<&CreateTimings> for v1::CreateTimings {
     fn from(timings: &CreateTimings) -> Self {
         Self {
             resolve_ms: timings.resolve_ms,

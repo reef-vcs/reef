@@ -38,11 +38,11 @@ use std::time::{Duration, Instant};
 use common::SyntheticRepo;
 use common::spawned::{SpawnedDaemon, free_bytes, workspace_dirs};
 use futures::StreamExt as _;
-use reef_daemon::client::Client;
-use reef_daemon::config::{FileConfig, WatcherBackend};
-use reef_daemon::proto::v0::{
+use reef_api::client::Client;
+use reef_api::proto::v1::{
     CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
 };
+use reef_daemon::config::{FileConfig, WatcherBackend};
 use reef_testing::synth::Preset;
 use serde_json::{Value, json};
 

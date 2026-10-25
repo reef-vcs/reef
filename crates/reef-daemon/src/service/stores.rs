@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Stores`: build and list shared dependency stores
+//! `reef.daemon.v1.Stores`: build and list shared dependency stores
 //! (R1.20).
 
 use std::collections::{HashMap, HashSet};
@@ -17,15 +17,15 @@ use super::convert::timestamp;
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::model::WorkspaceState;
-use crate::proto::v0::stores_server::Stores;
-use crate::proto::v0::{
-    self, BuildEvent, BuildStoreRequest, ListStoresRequest, ListStoresResponse, StoreInfo,
-    build_event, output_line,
-};
 use crate::store::build::{
     self, BuildOutput, BuildRequest, BuildResult, BuildStarted, OutputLine, OutputStream,
 };
 use crate::store::{StoreError, StoreKey};
+use reef_api::proto::v1::stores_server::Stores;
+use reef_api::proto::v1::{
+    self, BuildEvent, BuildStoreRequest, ListStoresRequest, ListStoresResponse, StoreInfo,
+    build_event, output_line,
+};
 
 /// How many events a build may queue for a slow client before its output
 /// lines are dropped (and counted).
@@ -55,7 +55,7 @@ impl StoresService {
     }
 }
 
-impl From<&OutputLine> for v0::OutputLine {
+impl From<&OutputLine> for v1::OutputLine {
     fn from(line: &OutputLine) -> Self {
         let stream = match line.stream {
             OutputStream::Stdout => output_line::Stream::Stdout,
@@ -68,7 +68,7 @@ impl From<&OutputLine> for v0::OutputLine {
     }
 }
 
-impl From<&BuildStarted> for v0::BuildStarted {
+impl From<&BuildStarted> for v1::BuildStarted {
     fn from(started: &BuildStarted) -> Self {
         Self {
             argv: started.argv.clone(),
@@ -85,13 +85,13 @@ impl From<&BuildStarted> for v0::BuildStarted {
 impl From<&BuildOutput> for build_event::Event {
     fn from(output: &BuildOutput) -> Self {
         match output {
-            BuildOutput::Started(started) => Self::Started(v0::BuildStarted::from(started)),
-            BuildOutput::Line(line) => Self::Line(v0::OutputLine::from(line)),
+            BuildOutput::Started(started) => Self::Started(v1::BuildStarted::from(started)),
+            BuildOutput::Line(line) => Self::Line(v1::OutputLine::from(line)),
         }
     }
 }
 
-impl From<&BuildResult> for v0::BuildResult {
+impl From<&BuildResult> for v1::BuildResult {
     fn from(result: &BuildResult) -> Self {
         Self {
             name: result.key.name.clone(),
@@ -176,7 +176,7 @@ impl Stores for StoresService {
                 Ok(Ok(mut result)) => {
                     result.dropped_lines = dropped;
                     Ok(BuildEvent {
-                        event: Some(build_event::Event::Done(v0::BuildResult::from(&result))),
+                        event: Some(build_event::Event::Done(v1::BuildResult::from(&result))),
                     })
                 }
                 Ok(Err(error)) => Err(status(error)),

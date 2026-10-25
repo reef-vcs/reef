@@ -1,9 +1,9 @@
 //! `reef ws move` (R1.06): a workspace onto another change, keeping its
 //! directory and lease.
 
-use reef_daemon::client::json::Moved;
-use reef_daemon::proto::v0::create_request::MissingStores;
-use reef_daemon::proto::v0::{MoveRequest, move_request};
+use reef_api::json::Moved;
+use reef_api::proto::v1::create_request::MissingStores;
+use reef_api::proto::v1::{MoveRequest, move_request};
 
 use super::repo::missing;
 use super::{CliError, Ctx};

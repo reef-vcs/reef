@@ -1,8 +1,8 @@
 //! The daemon API's generated code, compiled from `proto/` by `build.rs`
 //! (`protox` and `tonic-prost-build`; generated code is not committed).
 //!
-//! [`v0`] is package `reef.daemon.v0`: messages, `daemon_server` for the
-//! daemon, `daemon_client` for [`crate::client::Client`].
+//! [`v1`] is package `reef.daemon.v1`: messages, `<service>_server` for the
+//! daemon, `<service>_client` for [`crate::client::Client`].
 
 /// The generated packages, nested as protobuf names them.
 #[allow(
@@ -16,11 +16,11 @@
 pub mod reef {
     /// Package `reef.daemon`.
     pub mod daemon {
-        /// Package `reef.daemon.v0`.
-        pub mod v0 {
-            tonic::include_proto!("reef.daemon.v0");
+        /// Package `reef.daemon.v1`.
+        pub mod v1 {
+            tonic::include_proto!("reef.daemon.v1");
         }
     }
 }
 
-pub use reef::daemon::v0;
+pub use reef::daemon::v1;

@@ -26,16 +26,16 @@ use std::time::{Duration, Instant, SystemTime};
 use common::{SyntheticRepo, TestDaemon, logs, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
-use reef_daemon::client::json::millis_of;
+use reef_api::json::millis_of;
+use reef_api::proto::v1::register_request::IfNotJj;
+use reef_api::proto::v1::{
+    BackupProgress, CreateRequest, ListWorkspacesRequest, Workspace, create_request,
+};
 use reef_daemon::config::Config;
 use reef_daemon::db::META_REMATERIALIZE_PENDING;
 use reef_daemon::maintenance::backup::{HEADS_FILE, MANIFEST_FILE, Manifest, read_op_heads};
 use reef_daemon::maintenance::restore::{RestoreError, RestoreOptions, RestoreReport, restore};
 use reef_daemon::model::{RepoId, Timestamp};
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
-    BackupProgress, CreateRequest, ListWorkspacesRequest, Workspace, create_request,
-};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{CommitIdHex, Repo, RepoPath};
 use reef_testing::synth::Preset;

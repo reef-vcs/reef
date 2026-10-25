@@ -6,16 +6,16 @@ use tonic::transport::Server;
 use tonic::transport::server::Router;
 
 use crate::daemon::AppState;
-use crate::proto::v0::daemon_server::DaemonServer;
-use crate::proto::v0::maintenance_server::MaintenanceServer;
-use crate::proto::v0::repositories_server::RepositoriesServer;
-use crate::proto::v0::stores_server::StoresServer;
-use crate::proto::v0::workspaces_server::WorkspacesServer;
 use crate::service::daemon::DaemonService;
 use crate::service::maintenance::MaintenanceService;
 use crate::service::repositories::RepositoriesService;
 use crate::service::stores::StoresService;
 use crate::service::workspaces::WorkspacesService;
+use reef_api::proto::v1::daemon_server::DaemonServer;
+use reef_api::proto::v1::maintenance_server::MaintenanceServer;
+use reef_api::proto::v1::repositories_server::RepositoriesServer;
+use reef_api::proto::v1::stores_server::StoresServer;
+use reef_api::proto::v1::workspaces_server::WorkspacesServer;
 
 /// The router over `state`, one `add_service` per service. Built here, not
 /// generically, so `Daemon::start` stays non-generic over tonic's layers.

@@ -1,30 +1,27 @@
-//! The daemon client the CLI and tests use. It wraps the generated clients,
-//! one method per RPC, so nothing else depends on their shape.
+//! The daemon client the CLI, the benchmarks, and the tests use. It wraps
+//! the generated clients, one method per RPC, so nothing else depends on
+//! their shape.
 //! [`WorkspacesApi`] is the same surface, less maintenance, as a trait, for
 //! code that wants to run against a fake daemon (R1.21's heartbeater);
-//! [`json`] is the stable JSON form of the responses that `reef -o json`
+//! [`crate::json`] is the stable JSON form of the responses that `reef -o json`
 //! prints (R1.22).
-
-pub mod json;
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use hyper_util::rt::TokioIo;
-use reef_lib::error::{Classify, ErrorKind};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 
-pub use reef_lib::jj::settings::parse_byte_size;
-
-use crate::error::{Advice, detail_of, kind_from_status};
-use crate::proto::v0::daemon_client::DaemonClient;
-use crate::proto::v0::maintenance_client::MaintenanceClient;
-use crate::proto::v0::register_request::IfNotJj;
-use crate::proto::v0::repositories_client::RepositoriesClient;
-use crate::proto::v0::stores_client::StoresClient;
-use crate::proto::v0::workspaces_client::WorkspacesClient;
-use crate::proto::v0::{
+use crate::advice::Advice;
+use crate::error::{Classify, ErrorKind, detail_of, kind_from_status};
+use crate::proto::v1::daemon_client::DaemonClient;
+use crate::proto::v1::maintenance_client::MaintenanceClient;
+use crate::proto::v1::register_request::IfNotJj;
+use crate::proto::v1::repositories_client::RepositoriesClient;
+use crate::proto::v1::stores_client::StoresClient;
+use crate::proto::v1::workspaces_client::WorkspacesClient;
+use crate::proto::v1::{
     BackupProgress, BackupRequest, BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse,
     ForgetRequest, ForgetResponse, GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse,
     InspectRequest, InspectResponse, ListRepositoriesRequest, ListStoresRequest,
@@ -505,11 +502,28 @@ impl WorkspacesApi for Client {
 /// the user the process runs as and the machine's full hostname (README,
 /// Owner).
 pub fn default_owner() -> String {
-    format!(
-        "{}@{}",
-        crate::config::os_username(),
-        crate::config::machine_hostname()
-    )
+    format!("{}@{}", os_username(), machine_hostname())
+}
+
+/// The machine's full hostname, or `localhost` if it has none.
+pub fn machine_hostname() -> String {
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// The name of the user the process runs as: the password database entry,
+/// else `$USER`, else the numeric uid.
+pub fn os_username() -> String {
+    let uid = nix::unistd::getuid();
+    nix::unistd::User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|user| user.name)
+        .or_else(|| std::env::var("USER").ok().filter(|name| !name.is_empty()))
+        .unwrap_or_else(|| uid.to_string())
 }
 
 #[cfg(test)]

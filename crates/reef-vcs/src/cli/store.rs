@@ -5,9 +5,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use reef_daemon::client::ClientError;
-use reef_daemon::client::json::{BuiltStore, Store};
-use reef_daemon::proto::v0::{BuildStarted, build_event, output_line};
+use reef_api::client::ClientError;
+use reef_api::json::{BuiltStore, Store};
+use reef_api::proto::v1::{BuildStarted, build_event, output_line};
 use reef_lib::error::ErrorKind;
 
 use super::out::shell_line;

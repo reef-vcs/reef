@@ -1,0 +1,45 @@
+[package]
+name = "reef-api"
+description = "Reef daemon API: the reef.daemon.v1 protobuf schema, its generated code, the Rust client, and the error kinds. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "jujutsu", "grpc"]
+categories = ["development-tools", "api-bindings"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+# Never jj-lib, gix, rusqlite, or another Reef crate (ADR 0029): SDKs, the MCP server, and
+# `reef schema` read this crate without linking the daemon. reef-testing's crate_graph test
+# enforces it.
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true     # google.protobuf.Timestamp and Duration in the API
+tokio = { workspace = true, features = ["net", "io-util"] }
+tokio-stream.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+time.workspace = true            # RFC 3339 in the JSON output types
+blake3.workspace = true          # SCHEMA_HASH
+nix = { workspace = true, features = ["hostname", "user"] }   # default_owner's user and host
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protox.workspace = true
+prost.workspace = true
+prost-types.workspace = true

@@ -93,9 +93,10 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 
 ## Repository layout
 
+- `crates/reef-api`: the daemon API. The `reef.daemon.v1` protobuf schema (`proto/reef/daemon/v1`), its generated code, the Rust client, and the error kinds. Depends on no other Reef crate and never on jj-lib.
 - `crates/reef-lib`: core library. Data model, jj-lib embedding, snapshots, operation log, undo.
-- `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC API (`proto/reef/daemon/v0`).
-- `crates/reef-vcs`: the `reef` binary and an umbrella library re-exporting the two above.
+- `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC services.
+- `crates/reef-vcs`: the `reef` binary and an umbrella library re-exporting the crates above.
 - `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.
 
 ## Design

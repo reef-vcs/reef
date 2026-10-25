@@ -19,7 +19,7 @@ use common::{
     terminate, test_settings, wait_for_socket,
 };
 use futures::FutureExt as _;
-use reef_daemon::client::Client;
+use reef_api::client::Client;
 use reef_daemon::config::{Config, ConfigError, PathOverrides, Paths, SOCKET_PATH_MAX};
 use reef_daemon::db::{Db, SCHEMA_VERSION};
 use reef_daemon::lock::LockError;

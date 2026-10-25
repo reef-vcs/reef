@@ -1,5 +1,5 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
-//! through [`reef_daemon::client::Client`], except `config show`,
+//! through [`reef_api::client::Client`], except `config show`,
 //! `completions`, `guide`, `init` when it registers nothing (`--check`,
 //! `--print`, `--no-register`), `daemon run`, and `restore`, which is
 //! offline (R1.18). Output follows [`out`]'s
@@ -34,11 +34,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{ArgAction, CommandFactory as _, Parser as _};
-use reef_daemon::client::{Client, ClientError};
+use reef_api::advice::Advice;
+use reef_api::client::{Client, ClientError};
+use reef_api::proto::v1::register_request::IfNotJj;
 use reef_daemon::config::{Config, PathOverrides};
-use reef_daemon::error::Advice;
 use reef_daemon::logging::{self, LogOptions};
-use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_lib::error::ErrorKind;
 
 pub(crate) use error::CliError;

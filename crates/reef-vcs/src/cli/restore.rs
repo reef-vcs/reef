@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use reef_daemon::error::Advise;
+use reef_api::advice::Advise;
 use reef_daemon::maintenance::backup::Manifest;
 use reef_daemon::maintenance::restore::{RestoreOptions, restore};
 use reef_daemon::model::RepoId;

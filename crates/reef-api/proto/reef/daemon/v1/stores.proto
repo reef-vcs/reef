@@ -4,7 +4,7 @@
 // names the repository whose `reef.toml` declares the store.
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";

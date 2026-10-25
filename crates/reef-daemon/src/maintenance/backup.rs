@@ -62,8 +62,8 @@ use crate::daemon::{AppState, PrivateDirError};
 use crate::db::{DbError, META_DAEMON_INSTANCE_ID, META_LAST_BACKUP_AT};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
-use crate::proto::v0::BackupProgress;
 use crate::repo::RepoThreadError;
+use reef_api::proto::v1::BackupProgress;
 
 /// The manifest's `version`.
 pub const MANIFEST_VERSION: u32 = 1;

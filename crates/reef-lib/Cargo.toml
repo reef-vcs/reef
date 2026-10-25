@@ -27,6 +27,7 @@ bench = false
 watchman = ["jj-lib/watchman", "dep:watchman_client"]
 
 [dependencies]
+reef-api.workspace = true        # ErrorKind and Classify live there (R2.01)
 jj-lib.workspace = true
 watchman_client = { workspace = true, optional = true }
 gix.workspace = true

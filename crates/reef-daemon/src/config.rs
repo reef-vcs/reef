@@ -1520,26 +1520,9 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
     }
 }
 
-/// The machine's full hostname, or `localhost` if it has none.
-pub(crate) fn machine_hostname() -> String {
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|name| name.into_string().ok())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "localhost".to_owned())
-}
-
-/// The name of the user the process runs as: the password database entry,
-/// else `$USER`, else the numeric uid.
-pub(crate) fn os_username() -> String {
-    let uid = nix::unistd::getuid();
-    nix::unistd::User::from_uid(uid)
-        .ok()
-        .flatten()
-        .map(|user| user.name)
-        .or_else(|| std::env::var("USER").ok().filter(|name| !name.is_empty()))
-        .unwrap_or_else(|| uid.to_string())
-}
+/// The machine's full hostname and the user the process runs as, as the
+/// client's `default_owner` names them.
+pub(crate) use reef_api::client::{machine_hostname, os_username};
 
 struct PlatformDefaults {
     state_dir: PathBuf,

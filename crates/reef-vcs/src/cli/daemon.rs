@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use reef_api::client::{Client, ClientError};
+use reef_api::json::Status;
 use reef_daemon::DaemonArgs;
-use reef_daemon::client::json::Status;
-use reef_daemon::client::{Client, ClientError};
 use reef_lib::error::ErrorKind;
 
 use super::{CliError, DEFAULT_TIMEOUT, Global, Out, Output, autostart};

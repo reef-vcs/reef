@@ -1,9 +1,9 @@
 // Registering the repositories workspaces are created in (R1.05).
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
-import "reef/daemon/v0/types.proto";
+import "reef/daemon/v1/types.proto";
 
 service Repositories {
   // Registers the jj repository containing `path`, by its root. Registering

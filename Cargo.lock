@@ -2906,6 +2906,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-api"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hyper-util",
+ "nix",
+ "prost",
+ "prost-types",
+ "protox",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "reef-daemon"
 version = "0.1.0"
 dependencies = [
@@ -2917,7 +2940,6 @@ dependencies = [
  "futures 0.3.34",
  "gix",
  "humantime-serde",
- "hyper-util",
  "jj-lib",
  "libc",
  "nix",
@@ -2926,9 +2948,9 @@ dependencies = [
  "pollster",
  "prost",
  "prost-types",
- "protox",
  "rand",
  "rayon",
+ "reef-api",
  "reef-daemon",
  "reef-lib",
  "reef-testing",
@@ -2945,9 +2967,6 @@ dependencies = [
  "tokio-util 0.7.20",
  "toml",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2965,6 +2984,7 @@ dependencies = [
  "jj-lib",
  "libc",
  "prost",
+ "reef-api",
  "reef-testing",
  "serde",
  "serde_json",
@@ -3004,6 +3024,7 @@ dependencies = [
  "jj-lib",
  "nix",
  "pollster",
+ "reef-api",
  "reef-daemon",
  "reef-lib",
  "reef-testing",

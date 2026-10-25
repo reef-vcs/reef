@@ -20,9 +20,9 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::proto::v1::{CreateRequest, GcReport, Workspace, create_request};
 use reef_daemon::config::Config;
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, GcReport, Workspace, create_request};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{Repo, ResolveError};
 use reef_testing::synth::Preset;
@@ -387,7 +387,7 @@ async fn dry_run_changes_nothing() {
     assert_eq!(
         daemon
             .client
-            .list_workspaces(reef_daemon::proto::v0::ListWorkspacesRequest::default())
+            .list_workspaces(reef_api::proto::v1::ListWorkspacesRequest::default())
             .await
             .unwrap()
             .len(),
@@ -550,7 +550,7 @@ async fn stranded_working_copy_is_repaired_at_start() {
     .unwrap();
 
     let handle = reef_daemon::Daemon::start(config.clone()).await.unwrap();
-    let client = reef_daemon::client::Client::connect(handle.socket_path())
+    let client = reef_api::client::Client::connect(handle.socket_path())
         .await
         .unwrap();
     let daemon = TestDaemon {

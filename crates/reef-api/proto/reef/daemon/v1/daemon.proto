@@ -1,9 +1,8 @@
-// The Reef daemon API, version 0 (R1.03). Phase 1's working schema; R2.01
-// replaces it with the reviewed v1. Clients use `reef_daemon::client::Client`,
-// never the generated stubs directly.
+// The Reef daemon API, version 1 (R2.01, ADR 0029). Rust clients use
+// `reef_api::client::Client`; other languages generate from these files.
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.daemon.v1;
 
 // The daemon itself.
 service Daemon {

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use reef_daemon::proto::v0::Workspace;
+use reef_api::proto::v1::Workspace;
 
 /// `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`, `REEF_REPO`, and `REEF_SOCKET`
 /// for a command running in `ws`, whose daemon listens on `socket`.

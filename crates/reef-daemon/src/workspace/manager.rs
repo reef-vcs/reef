@@ -22,12 +22,12 @@ use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
-use crate::proto::v0::register_request::IfNotJj;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind, TrackReason};
 use crate::store::StoreManager;
 use crate::watcher::{WatchError, select_watcher};
+use reef_api::proto::v1::register_request::IfNotJj;
 
 /// The `reclaims.detail` of a workspace whose directory was gone at start.
 pub(super) const DIRECTORY_MISSING: &str = "directory missing at start";

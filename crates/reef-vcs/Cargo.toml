@@ -33,6 +33,9 @@ default = ["watchman"]
 watchman = ["reef-daemon/watchman"]
 
 [dependencies]
+# The daemon API: the client, the generated messages, the JSON output types, and the error kinds
+# (R2.01).
+reef-api.workspace = true
 # Only for `reef_lib::error` (ErrorKind, Classify, ErrorChain); never `reef_lib::jj`, which
 # tests/cli.rs checks. R2.05 moves those types into the API crate and drops this dependency.
 reef-lib.workspace = true
