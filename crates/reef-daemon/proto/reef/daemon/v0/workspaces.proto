@@ -124,7 +124,9 @@ message CreateTimings {
   uint64 seed_ms = 6;
   // Step 7: writing the row and issuing the lease.
   uint64 insert_ms = 7;
-  // Loading the workspace and attaching its file watcher.
+  // Loading the workspace and attaching its file watcher, or only queueing
+  // the attach when the watch is pending (`watch_state = "attaching"`, Linux
+  // notify, R1.32).
   uint64 watch_ms = 8;
   // The whole create, from the request to the response.
   uint64 total_ms = 9;

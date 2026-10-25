@@ -90,8 +90,11 @@ message Workspace {
   // The shared stores mounted in it (R1.20). Empty for a workspace that is
   // not active or not loaded.
   repeated MountedStore stores = 18;
-  // `waiting` while its Watchman subscription is deferred until a burst of
-  // workspace creates ends (R1.29); empty otherwise.
+  // Why its watch is not up yet: `waiting` while its Watchman subscription
+  // is deferred until a burst of workspace creates ends (R1.29),
+  // `attaching` while its notify watch is queued or being attached in the
+  // background (Linux, R1.32); empty once it is up. A full scan follows the
+  // watch coming up, so nothing written meanwhile is lost.
   string watch_state = 19;
 }
 

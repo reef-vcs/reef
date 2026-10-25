@@ -697,7 +697,32 @@ async fn bind_mount_is_read_only() {
 async fn restart_finds_mounts_again() {
     let (daemon, repo) = fixture().await;
     build(&daemon, &repo).await;
+    let snapshotted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&snapshotted);
+    daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .on_snapshot(Box::new(move |outcome| {
+            sink.lock().unwrap().push(outcome.workspace);
+        }));
     let ws = create_ok(&daemon, &repo).await;
+    if cfg!(target_os = "linux") {
+        // The commit below rebases the workspace onto a new lockfile, which
+        // a snapshot of it then reports as `store-hash-mismatch`. On Linux
+        // its watch attaches in the background and a full scan follows
+        // (R1.32): let that one land first, as nothing snapshots it after.
+        let id: reef_daemon::model::WorkspaceId = ws.id.parse().unwrap();
+        let begun = Instant::now();
+        while !snapshotted.lock().unwrap().contains(&id) {
+            assert!(
+                begun.elapsed() < Duration::from_secs(30),
+                "the attach's snapshot"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     let skipped = {
         // A workspace created before the store was rebuilt for a new
         // lockfile, without it.

@@ -174,6 +174,7 @@ fn defaults_load_with_no_file() {
     assert_eq!(f.watcher.watchman_threshold_files, 50_000);
     assert_eq!(f.watcher.watchman_attach_quiet, Duration::from_secs(2));
     assert_eq!(f.watcher.watchman_attach_defer_max, Duration::from_secs(10));
+    assert!(f.watcher.notify_attach_background);
     assert_eq!(f.workspace.backend, BackendChoice::Auto);
     assert_eq!(f.workspace.root, "<state>/repos/<repo-id>/ws");
     assert_eq!(f.workspace.fuse_overlayfs, "fuse-overlayfs");

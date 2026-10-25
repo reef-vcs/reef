@@ -1427,7 +1427,8 @@ impl std::io::Write for Capture {
 }
 
 /// R1.29: the response and the `workspace created` line time every step,
-/// and attaching the watcher is cheap. On macOS `watch_ms` is mostly
+/// and attaching the watcher is cheap. On Linux the attach is queued for
+/// the attach thread (R1.32), so `watch_ms` is only the queueing. On macOS `watch_ms` is mostly
 /// `FSEvents` registering the stream, which fseventsd makes wait in
 /// proportion to the entries beside the test binary and to its own load
 /// (0.7 to 10 s seen in a crowded `target/debug/deps`; `docs/benchmarks.md`,
@@ -1460,8 +1461,14 @@ async fn create_reports_timings() {
         ];
         assert!(timings.total_ms >= steps.iter().sum::<u64>(), "{timings:?}");
         assert!(timings.total_ms > 0, "{timings:?}");
+        // R1.32: on Linux the attach is queued, not waited for (unless
+        // it is done by the time the response is built).
+        let watch_state = created.workspace.as_ref().unwrap().watch_state.as_str();
         if cfg!(target_os = "linux") {
-            assert!(timings.watch_ms < 1000, "{timings:?}");
+            assert!(timings.watch_ms < 100, "{timings:?}");
+            assert!(matches!(watch_state, "" | "attaching"), "{watch_state:?}");
+        } else {
+            assert_eq!(watch_state, "");
         }
         assert_eq!(
             created.materialize_ms,

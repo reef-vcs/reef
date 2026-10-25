@@ -40,11 +40,9 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
 async fn fixture_with(
     configure: impl FnOnce(&mut reef_daemon::config::Config),
 ) -> (TestDaemon, SyntheticRepo) {
-    // `TEST_LOG=reef_daemon=debug` shows the daemons' logs.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_env("TEST_LOG"))
-        .with_test_writer()
-        .try_init();
+    // Captured for the tests that count log lines;
+    // `TEST_LOG=reef_daemon=debug` also shows the daemons' logs.
+    common::logs();
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
         let watcher = &mut config.file.watcher;
         watcher.debounce = Duration::from_millis(100);
@@ -517,6 +515,11 @@ async fn forgotten_workspace_is_recovered() {
 async fn concurrency_is_bounded() {
     let (daemon, repo) = fixture_with(|config| {
         config.file.watcher.max_concurrent_scans = Some(2);
+        // On Linux a background attach leaves each workspace `behind`, so
+        // its first scans are full, and full scans of notify workspaces
+        // take turns (R1.32): attached inline, these scans are narrowed and
+        // run in parallel up to the bound.
+        config.file.watcher.notify_attach_background = false;
     })
     .await;
     let mut workspaces = Vec::new();
@@ -593,6 +596,9 @@ async fn no_watcher_falls_back_to_the_timer() {
 async fn only_unwatched_workspaces_get_the_short_fallback() {
     let (daemon, repo) = fixture_with(|config| {
         config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        // A background attach (Linux, R1.32) leaves the workspace `behind`
+        // until its first full scan, which the dropped events never start.
+        config.file.watcher.notify_attach_background = false;
     })
     .await;
     let scheduler = daemon.handle.state().manager.scheduler();
@@ -782,9 +788,11 @@ async fn moved_workspace_is_still_watched() {
 }
 
 /// R1.29: a write made the moment `Create` returns is snapshotted by the
-/// watcher, which is attached by then, not by the fallback timer. Tracking
-/// starts the `min_interval` clock, so the first snapshot can start that
-/// long after the create; the Watchman variant is in `tests/watchman.rs`.
+/// watcher, not by the fallback timer. On Linux the watch may still be
+/// attaching (R1.32); the attach's full scan then catches the write within
+/// the same bound on `small`. Tracking starts the `min_interval` clock, so
+/// the first snapshot can start that long after the create; the Watchman
+/// variant is in `tests/watchman.rs`.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_right_after_create_is_snapshotted() {
     let (daemon, repo) = fixture_with(|config| {
@@ -805,6 +813,255 @@ async fn write_right_after_create_is_snapshotted() {
     })
     .await;
     eprintln!("a write right after create reached the operation log in {waited:.2?}");
+}
+
+/// R1.32: a daemon whose notify watches attach in the background (Linux),
+/// with no fallback timer that could stand in for the attach's full scan.
+#[cfg(target_os = "linux")]
+async fn attach_fixture() -> (TestDaemon, SyntheticRepo) {
+    fixture_with(|config| {
+        let watcher = &mut config.file.watcher;
+        watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        watcher.fallback_interval = Duration::from_mins(10);
+        watcher.watched_fallback_interval = Duration::from_mins(10);
+    })
+    .await
+}
+
+/// The scheduler's snapshot outcomes from now on, as a hook collects them.
+#[cfg(target_os = "linux")]
+fn outcomes(
+    daemon: &TestDaemon,
+) -> std::sync::Arc<std::sync::Mutex<Vec<reef_daemon::snapshot::SnapshotOutcome>>> {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .on_snapshot(Box::new(move |outcome| {
+            sink.lock().unwrap().push(outcome.clone());
+        }));
+    seen
+}
+
+/// The first outcome in `seen` for `ws` that `wanted` accepts, once there
+/// is one, failing after `bound`. The hooks run after the row is written,
+/// so a test that saw the row waits here too.
+#[cfg(target_os = "linux")]
+async fn outcome_where(
+    seen: &std::sync::Mutex<Vec<reef_daemon::snapshot::SnapshotOutcome>>,
+    ws: &Workspace,
+    bound: Duration,
+    what: &str,
+    wanted: impl Fn(&reef_daemon::snapshot::SnapshotOutcome) -> bool,
+) -> reef_daemon::snapshot::SnapshotOutcome {
+    let id = id_of(ws);
+    let find = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .find(|outcome| outcome.workspace == id && wanted(outcome))
+            .cloned()
+    };
+    wait_for(bound, what, || async { find().is_some() }).await;
+    find().unwrap()
+}
+
+/// Background attaches the daemon logged for `ws`.
+#[cfg(target_os = "linux")]
+fn attached_lines(ws: &Workspace) -> usize {
+    common::logs().count(&["workspace watch attached", &ws.id])
+}
+
+/// R1.32, 3: a write made while the created workspace's watch is still
+/// queued is in its first watcher snapshot, a full scan taken once the
+/// watch is up.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn write_before_the_watch_attaches_is_snapshotted() {
+    let (daemon, repo) = attach_fixture().await;
+    let seen = outcomes(&daemon);
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_attaches();
+    let ws = create(&daemon, &repo, None).await;
+    assert_eq!(ws.watcher, "notify");
+    assert_eq!(ws.watch_state, "attaching");
+    assert_eq!(ws.attention, "", "attaching is not watch-failed");
+    write(&ws, "before-the-watch.txt", "early\n");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert_eq!(row.watch_state, "attaching");
+    assert_eq!(row.attention, "");
+    assert_eq!(row.last_snapshot_op, "", "nothing snapshots while held");
+    assert_eq!(scheduler.queued_attaches(), 1);
+
+    let watcher = &daemon.config.file.watcher;
+    let bound = watcher.min_interval + watcher.debounce + Duration::from_secs(2);
+    let released = Instant::now();
+    drop(hold);
+    wait_for(bound, "the attach's snapshot", || async {
+        let row = inspect(&daemon, &repo, &ws).await;
+        !row.last_snapshot_op.is_empty()
+            && tree_has(&repo.root, &row.commit_id, "before-the-watch.txt").await
+    })
+    .await;
+    eprintln!(
+        "a write before the watch attached reached the operation log {:.2?} after the release",
+        released.elapsed()
+    );
+    let first = outcome_where(&seen, &ws, bound, "the first snapshot's hook", |_| true).await;
+    assert_eq!(first.kind, reef_daemon::snapshot::SnapshotKind::Watcher);
+    assert!(first.changed);
+    assert!(!first.narrowed, "the attach's snapshot is a full scan");
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert_eq!(row.watch_state, "");
+    assert_eq!(row.attention, "");
+    assert_eq!(attached_lines(&ws), 1);
+
+    // The watch is up and reported: the next write's scan is narrowed.
+    write(&ws, "after-the-watch.txt", "later\n");
+    outcome_where(&seen, &ws, bound, "a narrowed snapshot", |outcome| {
+        outcome.kind == reef_daemon::snapshot::SnapshotKind::Watcher && outcome.narrowed
+    })
+    .await;
+}
+
+/// R1.32, 6: a release cancels a queued attach without waiting for it, and
+/// a move during one leaves the workspace watched: an overlay's move
+/// rewatches inline, taking the attach off the queue; otherwise the queued
+/// attach runs once the hold ends. A full scan follows either way (the
+/// rewatch's at the next event, the attach's at once).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn release_and_move_during_a_pending_attach() {
+    let (daemon, repo) = attach_fixture().await;
+    let other = create(&daemon, &repo, None).await;
+    write(&other, "theirs.txt", "a second tree\n");
+    let target = daemon
+        .client
+        .snapshot_workspace(&repo.id, &other.id, "")
+        .await
+        .unwrap()
+        .commit_id;
+    let seen = outcomes(&daemon);
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_attaches();
+    let a = create(&daemon, &repo, None).await;
+    let b = create(&daemon, &repo, None).await;
+    assert_eq!(
+        (&*a.watch_state, &*b.watch_state),
+        ("attaching", "attaching")
+    );
+
+    let begun = Instant::now();
+    daemon
+        .client
+        .release_workspace(&repo.id, &b.id, false, false)
+        .await
+        .unwrap();
+    eprintln!("released B in {:.2?}", begun.elapsed());
+    assert!(!Path::new(&b.path).exists());
+    assert_eq!(scheduler.queued_attaches(), 1);
+
+    let moved = daemon
+        .client
+        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+            repo: repo.id.clone(),
+            workspace: a.id.clone(),
+            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    let rewatched = a.backend.contains("overlayfs");
+    assert_eq!(
+        moved.watch_state,
+        if rewatched { "" } else { "attaching" },
+        "backend {}",
+        a.backend
+    );
+    let moved_at = Instant::now();
+    drop(hold);
+    wait_for(Duration::from_secs(10), "A's watch", || async {
+        inspect(&daemon, &repo, &a).await.watch_state.is_empty()
+    })
+    .await;
+    eprintln!("A watched {:.2?} after the move", moved_at.elapsed());
+    write(&a, "after-move.txt", "seen by the watcher\n");
+    wait_for(Duration::from_secs(5), "a watcher snapshot", || async {
+        let row = inspect(&daemon, &repo, &a).await;
+        tree_has(&repo.root, &row.commit_id, "after-move.txt").await
+    })
+    .await;
+    // The rewatch marked A for a full scan, which its next event starts;
+    // the queued attach's own event starts one.
+    outcome_where(
+        &seen,
+        &a,
+        Duration::from_secs(5),
+        "a full watcher scan of A after the move",
+        |outcome| outcome.kind == reef_daemon::snapshot::SnapshotKind::Watcher && !outcome.narrowed,
+    )
+    .await;
+    assert_eq!(attached_lines(&a), usize::from(!rewatched));
+    assert_eq!(attached_lines(&b), 0);
+    assert_eq!(scheduler.queued_attaches(), 0);
+    assert!(!common::logs().has_line(&["cannot stop watching"]));
+    assert_eq!(inspect(&daemon, &repo, &a).await.attention, "");
+}
+
+/// R1.32: `watcher.notify_attach_background = false` attaches inside the
+/// create again: never `attaching`, even with the attach thread held, no
+/// background attach logged, and a write right after is still snapshotted.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn background_attach_off_attaches_in_the_create() {
+    let (daemon, repo) = fixture_with(|config| {
+        let watcher = &mut config.file.watcher;
+        watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        watcher.fallback_interval = Duration::from_mins(10);
+        watcher.watched_fallback_interval = Duration::from_mins(10);
+        watcher.notify_attach_background = false;
+    })
+    .await;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let _hold = scheduler.hold_attaches();
+    let ws = create(&daemon, &repo, None).await;
+    assert_eq!(ws.watch_state, "");
+    assert_eq!(scheduler.queued_attaches(), 0);
+    write(&ws, "inline.txt", "x\n");
+    let watcher = &daemon.config.file.watcher;
+    let bound = watcher.min_interval + watcher.debounce + Duration::from_secs(2);
+    wait_for(bound, "a watcher snapshot", || async {
+        let row = inspect(&daemon, &repo, &ws).await;
+        tree_has(&repo.root, &row.commit_id, "inline.txt").await
+    })
+    .await;
+    assert_eq!(attached_lines(&ws), 0);
+}
+
+/// R1.32, 7: workspaces loaded at daemon start attach inline: right after
+/// the restart none is attaching, and no background attach was logged.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn loaded_workspaces_attach_inline() {
+    let (daemon, repo) = attach_fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    wait_for(Duration::from_secs(10), "the create's attach", || async {
+        attached_lines(&ws) == 1
+    })
+    .await;
+    let daemon = daemon.restart().await;
+    assert_eq!(inspect(&daemon, &repo, &ws).await.watch_state, "");
+    assert_eq!(
+        daemon.handle.state().manager.scheduler().queued_attaches(),
+        0
+    );
+    assert_eq!(attached_lines(&ws), 1, "the restart attached inline");
 }
 
 // R1.30, 1: a watcher snapshot reports how its scan split between jj's

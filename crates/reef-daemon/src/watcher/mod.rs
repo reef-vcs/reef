@@ -17,6 +17,20 @@
 //!   `watcher.watchman_threshold_files` under `watcher.backend = "auto"`.
 //!
 //! The daemon holds at most one watcher of each kind.
+//!
+//! # Attaching off the create path
+//!
+//! Both watchers make one promise to a create (ADR 0028): a write made
+//! after `Create` returns is in the workspace's first watcher snapshot,
+//! whether its watch was up at the time or not. A watch that is not up yet
+//! is *pending* ([`Attach::Pending`], [`PendingWatch`]); when it comes up,
+//! the watcher reports it through the [`HealthHook`] and sends an
+//! `everything` event, so the scheduler takes one full scan. Watchman
+//! defers a new subscription until creates go quiet (R1.29). On Linux,
+//! notify attaches a created workspace's inotify watches on a worker thread,
+//! one workspace at a time (R1.32): one `inotify_add_watch` per directory
+//! was 985 ms of a 1,006 ms `large` create on the CI runner. On macOS it
+//! attaches inline, one `FSEvents` stream restart (9 ms, R1.29).
 
 pub mod notify;
 #[cfg(feature = "watchman")]
@@ -25,6 +39,7 @@ pub mod watchman;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -51,9 +66,9 @@ pub struct WatchEvent {
 }
 
 /// Hears whether a workspace's watch is up (`true`) or down (`false`), from
-/// a watcher that sets watches up in the background
-/// ([`Watcher::reports_health`]), and from notify when a new directory in a
-/// watched workspace cannot be watched (R1.23). The scheduler clears or sets
+/// a watcher that sets a watch up in the background (after
+/// [`Attach::Pending`]), and from notify when a new directory in a watched
+/// workspace cannot be watched (R1.23). The scheduler clears or sets
 /// `attention = 'watch-failed'` from it.
 pub type HealthHook = Arc<dyn Fn(WorkspaceId, bool) + Send + Sync>;
 
@@ -77,36 +92,145 @@ impl CreateClock {
     }
 }
 
+/// What [`Watcher::watch`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attach {
+    /// The workspace is watched.
+    Attached,
+    /// The watch is being set up in the background. The outcome (and any
+    /// later loss and recovery) arrives through the watcher's
+    /// [`HealthHook`], and a watch that comes up is followed by an
+    /// `everything` event, so nothing written meanwhile is lost.
+    Pending,
+}
+
+/// Why a workspace's watch is not up yet (`watch_state`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingWatch {
+    /// A Watchman subscription waiting for creates to go quiet (R1.29).
+    Waiting,
+    /// A notify watch queued or being attached on Linux (R1.32).
+    Attaching,
+}
+
+impl PendingWatch {
+    /// `waiting` or `attaching`, as `watch_state` carries it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Attaching => "attaching",
+        }
+    }
+}
+
 /// Watches workspace roots and reports changes as [`WatchEvent`]s.
 pub trait Watcher: Send + Sync {
     /// Which mechanism this is.
     fn kind(&self) -> WatcherKind;
-    /// Whether [`Watcher::watch`] only starts setting the watch up, and the
-    /// outcome (and any later loss and recovery) arrives through the
-    /// watcher's [`HealthHook`]. When false, `watch` returning `Ok` means
-    /// the workspace is watched.
-    fn reports_health(&self) -> bool {
-        false
-    }
     /// Starts watching `root`, recursively, for `workspace`. Changes under
     /// any of `skip` (absolute prefixes under `root`) are not reported.
     /// Watching a workspace again replaces its root and skip list. `defer`
-    /// (a workspace just created) lets a watcher whose set-up competes with
-    /// the next create wait for creates to go quiet; only Watchman does
-    /// (R1.29).
+    /// (a workspace just created) lets a watcher set the watch up after
+    /// returning: Watchman once creates go quiet (R1.29), notify on Linux
+    /// on its attach thread (R1.32).
     fn watch(
         &self,
         workspace: WorkspaceId,
         root: &Path,
         skip: Vec<PathBuf>,
         defer: bool,
-    ) -> Result<(), WatchError>;
+    ) -> Result<Attach, WatchError>;
     /// Stops watching `workspace`. Not watching it is not an error.
     fn unwatch(&self, workspace: WorkspaceId) -> Result<(), WatchError>;
-    /// Whether `workspace`'s watch is deferred, waiting for creates to go
-    /// quiet (R1.29).
-    fn waiting(&self, _workspace: WorkspaceId) -> bool {
-        false
+    /// Why `workspace`'s watch is not up yet, if it is pending.
+    fn pending(&self, _workspace: WorkspaceId) -> Option<PendingWatch> {
+        None
+    }
+}
+
+/// Shared by the scheduler and notify's attach thread (R1.32): the inotify
+/// turn, a test hold on background attaches, and their count. Only the test
+/// methods are behind `testing`.
+#[derive(Debug)]
+pub struct AttachGate {
+    /// One background attach or one full scan of a notify workspace at a
+    /// time, on Linux ([`AttachGate::turn`]).
+    turn: Arc<tokio::sync::Semaphore>,
+    /// Open `AttachHold`s (a test hook): while any is, the attach thread
+    /// takes no root off its queue.
+    holds: AtomicUsize,
+    /// Attaches queued or in flight.
+    queued: AtomicUsize,
+}
+
+impl Default for AttachGate {
+    fn default() -> Self {
+        Self {
+            turn: Arc::new(tokio::sync::Semaphore::new(1)),
+            holds: AtomicUsize::new(0),
+            queued: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AttachGate {
+    /// Waits for the inotify turn: held by a background attach for its
+    /// length, and by a full scan of a notify workspace on Linux for the
+    /// scan's. A full scan opens every directory, and inotify reports each
+    /// open twice (to the directory's watch and its parent's), about 17,000
+    /// events for the `large` preset, more than the kernel's queue holds
+    /// (`fs.inotify.max_queued_events`, 16,384); while an attach adds
+    /// watches, notify's one thread reads none. Scans beside attaches, or
+    /// twenty scans at once, overflowed it, which makes every workspace
+    /// `everything`, whose full scans overflowed it again, in a loop that
+    /// did not end while the workspaces lived. One at a time, notify's
+    /// thread keeps up. FIFO, so neither side starves.
+    pub(crate) async fn turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        // `None` once the notify watcher closed it (`close_turn`).
+        Arc::clone(&self.turn).acquire_owned().await.ok()
+    }
+
+    /// Closes the inotify turn: waits for it end with `None`, and so does
+    /// every later [`AttachGate::turn`]. The notify watcher's drop calls it.
+    pub(crate) fn close_turn(&self) {
+        self.turn.close();
+    }
+
+    /// Whether a hold is open.
+    pub(crate) fn is_held(&self) -> bool {
+        self.holds.load(Ordering::SeqCst) > 0
+    }
+
+    /// Records how many attaches are queued or in flight.
+    pub(crate) fn set_queued(&self, count: usize) {
+        self.queued.store(count, Ordering::SeqCst);
+    }
+
+    /// Test hook: until the guard drops, no background attach starts; one
+    /// in flight finishes.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hold(self: &Arc<Self>) -> AttachHold {
+        self.holds.fetch_add(1, Ordering::SeqCst);
+        AttachHold(Arc::clone(self))
+    }
+
+    /// Test hook: how many background attaches are queued or in flight.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn queued(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
+    }
+}
+
+/// Holds background attaches; see [`AttachGate::hold`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the queued attaches run at once"]
+#[derive(Debug)]
+pub struct AttachHold(Arc<AttachGate>);
+
+#[cfg(any(test, feature = "testing"))]
+impl Drop for AttachHold {
+    fn drop(&mut self) {
+        self.0.holds.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -224,15 +348,18 @@ pub(crate) fn watchman_on_path() -> bool {
 }
 
 /// A watcher of `kind`, sending to `events`, with `config.debounce`.
-/// `health` is given to watchers that report it ([`Watcher::reports_health`])
-/// and to notify, for a watch that breaks after attaching; `creates` to
-/// Watchman, which defers new subscriptions by it.
+/// `health` hears a watch set up in the background come up or fail, and a
+/// notify watch that breaks after attaching; `creates` is given to
+/// Watchman, which defers new subscriptions by it; `gate` to notify, which
+/// attaches created workspaces in the background on Linux unless
+/// `watcher.notify_attach_background` is off.
 pub fn new_watcher(
     kind: WatcherKind,
     config: &WatcherSection,
     events: mpsc::Sender<WatchEvent>,
     health: HealthHook,
     creates: Arc<CreateClock>,
+    gate: Arc<AttachGate>,
 ) -> Result<Box<dyn Watcher>, WatchError> {
     match kind {
         WatcherKind::Notify => {
@@ -241,22 +368,27 @@ pub fn new_watcher(
                 config.debounce,
                 events,
                 health,
+                config.notify_attach_background && cfg!(target_os = "linux"),
+                gate,
             )?))
         }
         #[cfg(feature = "watchman")]
-        WatcherKind::Watchman => Ok(Box::new(watchman::WatchmanWatcher::new(
-            config.debounce,
-            events,
-            health,
-            watchman::Deferral {
-                quiet: config.watchman_attach_quiet,
-                max: config.watchman_attach_defer_max,
-                creates,
-            },
-        )?)),
+        WatcherKind::Watchman => {
+            drop(gate);
+            Ok(Box::new(watchman::WatchmanWatcher::new(
+                config.debounce,
+                events,
+                health,
+                watchman::Deferral {
+                    quiet: config.watchman_attach_quiet,
+                    max: config.watchman_attach_defer_max,
+                    creates,
+                },
+            )?))
+        }
         #[cfg(not(feature = "watchman"))]
         WatcherKind::Watchman => {
-            drop((events, health, creates));
+            drop((events, health, creates, gate));
             Err(WatchError::FeatureDisabled("watchman"))
         }
     }
@@ -275,7 +407,13 @@ impl Watcher for NoWatcher {
         self.kind
     }
 
-    fn watch(&self, _: WorkspaceId, _: &Path, _: Vec<PathBuf>, _: bool) -> Result<(), WatchError> {
+    fn watch(
+        &self,
+        _: WorkspaceId,
+        _: &Path,
+        _: Vec<PathBuf>,
+        _: bool,
+    ) -> Result<Attach, WatchError> {
         Err(WatchError::Unavailable(self.kind.as_str()))
     }
 
@@ -313,6 +451,11 @@ impl Demux {
         let old = self.remove(workspace);
         self.roots.insert(root, (workspace, skip));
         old
+    }
+
+    /// Whether `workspace` is routed.
+    pub(crate) fn has(&self, workspace: WorkspaceId) -> bool {
+        self.roots.values().any(|(id, _)| *id == workspace)
     }
 
     /// Stops routing to `workspace`; returns its root.

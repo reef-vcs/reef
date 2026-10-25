@@ -216,6 +216,7 @@ async fn load_profile() {
         large_ids.push(ws.id);
     }
     let free_after = free_bytes(daemon.root());
+    let large_drain_ms = wait_attached(client, &large_ids).await;
     let backend = workspace(client, &large_ids[0]).await.backend;
     let cow = matches!(backend.as_str(), "apfs" | "overlayfs");
     report["large_creates"] = json!({
@@ -226,6 +227,7 @@ async fn load_profile() {
         "max_ms": large_creates.iter().max(),
         "mean_ms": mean(&large_creates),
         "free_bytes_per_workspace": free_before.saturating_sub(free_after) / LARGE_CREATES as u64,
+        "attach": attach_section(&daemon, &large_ids, large_drain_ms),
     });
     release_all(client, &large_ids).await;
     eprintln!("load: {LARGE_CREATES} large creates done");
@@ -263,6 +265,9 @@ async fn load_profile() {
     for ws in &workspaces {
         *watchers.entry(ws.watcher.as_str()).or_default() += 1;
     }
+    // The criterion is at steady state with every watch up (R1.32).
+    let ids: Vec<String> = workspaces.iter().map(|ws| ws.id.clone()).collect();
+    let drain_ms = wait_attached(client, &ids).await;
     report["creates"] = json!({
         "backend": workspaces[0].backend,
         "watchers": watchers,
@@ -274,10 +279,11 @@ async fn load_profile() {
         "max_ms": create_ms.last(),
         "free_bytes_per_workspace": free_before.saturating_sub(free_after) / params.workspaces as u64,
         "steps": steps,
+        "attach": attach_section(&daemon, &ids, drain_ms),
     });
     eprintln!("load: {} creates in {all_ms} ms", params.workspaces);
 
-    // Steady state, then a burst.
+    // Steady state, once every watch is up, then a burst.
     let load = Arc::new(Load::new(&daemon, &repo, &workspaces));
     let heartbeats = load.heartbeat(&workspaces);
     let sampler = load.sample();
@@ -306,7 +312,6 @@ async fn load_profile() {
 
     // Teardown.
     let begun = Instant::now();
-    let ids: Vec<String> = workspaces.iter().map(|ws| ws.id.clone()).collect();
     let mut release_ms = Vec::new();
     let mut release_failures = Vec::new();
     for result in release_each(client, &ids).await {
@@ -397,6 +402,66 @@ fn step_percentiles(timings: impl Iterator<Item = CreateTimings>) -> Value {
         "insert_ms": step(|t| t.insert_ms),
         "watch_ms": step(|t| t.watch_ms),
         "total_ms": step(|t| t.total_ms),
+    })
+}
+
+/// Waits until none of `ids` is `attaching` (its watch queued or being
+/// attached in the background, Linux notify, R1.32), polling `List` every
+/// 250 ms, and returns how long that took. Fails past `max(60 s, 2 s ×
+/// count)`, naming the workspaces still attaching.
+async fn wait_attached(client: &Client, ids: &[String]) -> u64 {
+    let count = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+    let bound = Duration::from_mins(1).max(Duration::from_secs(2).saturating_mul(count));
+    let begun = Instant::now();
+    loop {
+        let listed = client
+            .list_workspaces(ListWorkspacesRequest::default())
+            .await
+            .unwrap();
+        let attaching: Vec<&str> = listed
+            .iter()
+            .filter(|ws| ws.watch_state == "attaching" && ids.contains(&ws.id))
+            .map(|ws| ws.id.as_str())
+            .collect();
+        if attaching.is_empty() {
+            return millis(begun.elapsed());
+        }
+        assert!(
+            begun.elapsed() < bound,
+            "{} workspaces still attaching after {bound:?}: {attaching:?}",
+            attaching.len()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The background attaches of `ids` (R1.32): the drain [`wait_attached`]
+/// measured, and the queue wait and attach time of each from the daemon's
+/// `workspace watch attached` lines. Zeros where watches attach inside the
+/// create (macOS).
+fn attach_section(daemon: &SpawnedDaemon, ids: &[String], drain_ms: u64) -> Value {
+    let lines: Vec<Value> = daemon
+        .log_lines("workspace watch attached")
+        .into_iter()
+        .filter(|event| {
+            event["workspace_id"]
+                .as_str()
+                .is_some_and(|id| ids.iter().any(|ws| ws == id))
+        })
+        .collect();
+    let field = |name: &str| {
+        let mut values: Vec<u64> = lines
+            .iter()
+            .filter_map(|event| event[name].as_u64())
+            .collect();
+        values.sort_unstable();
+        json!({ "p50": percentile(&values, 50), "max": values.last().copied().unwrap_or(0) })
+    };
+    json!({
+        "drain_ms": drain_ms,
+        "count": lines.len(),
+        "queued_ms": field("queued_ms"),
+        "attach_ms": field("attach_ms"),
     })
 }
 
@@ -1051,6 +1116,13 @@ fn markdown(report: &Value) -> String {
         (
             "steady-state write-to-snapshot p50 / p95 / max".to_owned(),
             triple(&report["steady"]),
+        ),
+        (
+            format!("attach drain after the {LARGE_CREATES} `large` / {n} `{preset}` creates"),
+            format!(
+                "{} / {} ms",
+                large["attach"]["drain_ms"], creates["attach"]["drain_ms"]
+            ),
         ),
         ("burst p50 / p95 / max".to_owned(), triple(&report["burst"])),
         ("watcher scan p50 / p95: scan, load, walk".to_owned(), {

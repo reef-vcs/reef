@@ -114,7 +114,7 @@ impl Workspaces for WorkspacesService {
                 lease: self.lease_message(Some(&created.lease), Timestamp::now()),
                 local_snapshot_count: 0,
                 stores: &created.stores,
-                watch_waiting: manager.scheduler().watch_waiting(created.record.id),
+                watch_pending: manager.scheduler().watch_pending(created.record.id),
             })),
             op_id: created.op_id,
             shared_change: created.shared_change,
@@ -166,7 +166,7 @@ impl Workspaces for WorkspacesService {
                     lease: self.lease_message(lease.as_ref(), now),
                     local_snapshot_count: local_counts.get(&record.id).copied().unwrap_or(0),
                     stores: &stores,
-                    watch_waiting: manager.scheduler().watch_waiting(record.id),
+                    watch_pending: manager.scheduler().watch_pending(record.id),
                 })
             })
             .collect();
@@ -194,7 +194,7 @@ impl Workspaces for WorkspacesService {
                 lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
                 local_snapshot_count: inspected.local_snapshot_count,
                 stores: &inspected.stores,
-                watch_waiting: manager.scheduler().watch_waiting(inspected.record.id),
+                watch_pending: manager.scheduler().watch_pending(inspected.record.id),
             })),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
             other_workspaces_on_change: inspected
@@ -324,7 +324,7 @@ impl Workspaces for WorkspacesService {
                 lease: self.lease_message(moved.lease.as_ref(), Timestamp::now()),
                 local_snapshot_count,
                 stores: &moved.stores,
-                watch_waiting: manager.scheduler().watch_waiting(moved.record.id),
+                watch_pending: manager.scheduler().watch_pending(moved.record.id),
             })),
             op_id: moved.op_id.unwrap_or_default(),
             final_op_id: moved.final_op_id.unwrap_or_default(),

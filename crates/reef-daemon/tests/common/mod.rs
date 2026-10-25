@@ -156,9 +156,15 @@ pub struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>, bool);
 impl LogCapture {
     /// Whether one line holds every one of `parts`.
     pub fn has_line(&self, parts: &[&str]) -> bool {
+        self.count(parts) > 0
+    }
+
+    /// How many lines hold every one of `parts`.
+    pub fn count(&self, parts: &[&str]) -> usize {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .lines()
-            .any(|line| parts.iter().all(|part| line.contains(part)))
+            .filter(|line| parts.iter().all(|part| line.contains(part)))
+            .count()
     }
 }
 

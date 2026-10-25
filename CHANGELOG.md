@@ -29,6 +29,7 @@ Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quick
 - In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one.
 - A workspace directory has neither `.git` nor `.jj`, so `git` and `jj` commands inside it fail: agents work on files, and you run `git` and `jj` in your checkout.
 - `reef.toml` is read from the commit a workspace starts on, not from disk: commit it before it takes effect.
+- On Linux a new workspace's watch attaches in the background after `reef ws create` returns, and `reef ws inspect` shows `notify (attaching)` meanwhile; writes made before it is up reach the store with its first snapshot.
 - A shared store is read-only, so a tool that writes a cache into it fails (Vitest's `node_modules/.vitest-cache`; Vite's `cacheDir` setting moves it).
 - On macOS, and on Linux without `CAP_SYS_ADMIN`, a store is protected by file permissions only: a process running as the same user could make it writable again.
 - A workspace is not a sandbox: an agent runs as you and can do anything you can, including through the daemon's socket, and a harness sandbox that lets it reach the socket does not confine what the daemon does for it.

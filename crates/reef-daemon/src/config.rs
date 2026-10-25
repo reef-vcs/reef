@@ -103,6 +103,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "watchman_threshold_files",
             "watchman_attach_quiet",
             "watchman_attach_defer_max",
+            "notify_attach_background",
         ],
     ),
     (
@@ -388,6 +389,14 @@ pub struct WatcherSection {
     /// at once.
     #[serde(with = "duration")]
     pub watchman_attach_defer_max: Duration,
+    /// On Linux, a created notify workspace's watch attaches after the
+    /// create returns, on the watcher's attach thread, and its first
+    /// snapshot once the watch is up is a full scan (R1.32, ADR 0028):
+    /// inotify adds one watch per directory, about a second for 8,000
+    /// directories on a CI runner. `false` attaches inside the create, as
+    /// before. Read only on Linux; macOS always attaches inline. Default
+    /// true.
+    pub notify_attach_background: bool,
 }
 
 impl Default for WatcherSection {
@@ -403,6 +412,7 @@ impl Default for WatcherSection {
             watchman_threshold_files: 50_000,
             watchman_attach_quiet: Duration::from_secs(2),
             watchman_attach_defer_max: Duration::from_secs(10),
+            notify_attach_background: true,
         }
     }
 }
@@ -1201,6 +1211,10 @@ impl Config {
                     ("watchman_threshold_files", n(w.watchman_threshold_files)),
                     ("watchman_attach_quiet", d(w.watchman_attach_quiet)),
                     ("watchman_attach_defer_max", d(w.watchman_attach_defer_max)),
+                    (
+                        "notify_attach_background",
+                        w.notify_attach_background.to_string(),
+                    ),
                 ],
             ),
             (

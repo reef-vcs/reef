@@ -157,7 +157,8 @@ fn workspace_pairs(ws: &Workspace) -> Vec<(&'static str, String)> {
 }
 
 /// `watchman`, or `watchman (waiting for creates to finish)` while its
-/// subscription is deferred (R1.29).
+/// subscription is deferred (R1.29); `notify (attaching)` while a notify
+/// watch attaches in the background (R1.32).
 fn watcher_text(ws: &Workspace) -> String {
     match ws.watch_state.as_deref() {
         Some("waiting") => format!("{} (waiting for creates to finish)", ws.watcher),

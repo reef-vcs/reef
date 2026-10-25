@@ -47,7 +47,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CreateClock, HealthHook, WatchError, WatchEvent, Watcher, WatcherKind, watchman_on_path,
+    Attach, CreateClock, HealthHook, PendingWatch, WatchError, WatchEvent, Watcher, WatcherKind,
+    watchman_on_path,
 };
 use crate::model::WorkspaceId;
 
@@ -253,17 +254,13 @@ impl Watcher for WatchmanWatcher {
         WatcherKind::Watchman
     }
 
-    fn reports_health(&self) -> bool {
-        true
-    }
-
     fn watch(
         &self,
         workspace: WorkspaceId,
         root: &Path,
         skip: Vec<PathBuf>,
         defer: bool,
-    ) -> Result<(), WatchError> {
+    ) -> Result<Attach, WatchError> {
         let stop = CancellationToken::new();
         if let Some(old) = lock(&self.tasks).insert(workspace, stop.clone()) {
             old.cancel();
@@ -286,7 +283,7 @@ impl Watcher for WatchmanWatcher {
             generation,
         };
         self.runtime.spawn(task.run());
-        Ok(())
+        Ok(Attach::Pending)
     }
 
     fn unwatch(&self, workspace: WorkspaceId) -> Result<(), WatchError> {
@@ -297,8 +294,10 @@ impl Watcher for WatchmanWatcher {
         Ok(())
     }
 
-    fn waiting(&self, workspace: WorkspaceId) -> bool {
-        lock(&self.shared.waiting).contains_key(&workspace)
+    fn pending(&self, workspace: WorkspaceId) -> Option<PendingWatch> {
+        lock(&self.shared.waiting)
+            .contains_key(&workspace)
+            .then_some(PendingWatch::Waiting)
     }
 }
 

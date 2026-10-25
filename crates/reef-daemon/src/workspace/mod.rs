@@ -236,7 +236,8 @@ pub struct CreateTimings {
     pub seed_ms: u64,
     /// Step 7: the row and the lease.
     pub insert_ms: u64,
-    /// Loading the workspace and attaching its watcher.
+    /// Loading the workspace and attaching its watcher, or queueing the
+    /// attach when it is pending (Linux notify, R1.32).
     pub watch_ms: u64,
     /// The whole create.
     pub total_ms: u64,

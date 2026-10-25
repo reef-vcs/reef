@@ -525,6 +525,58 @@ async fn daemon_killed_mid_snapshot_recovers() {
 }
 
 /// Every event in the daemon's log, oldest first.
+/// R1.32, 4: through `reef ws run`, a write the command makes at once,
+/// racing its workspace's background attach on Linux, is in a watcher
+/// snapshot while the command still runs, with no fallback timer (10
+/// minutes) to stand in. The attach of `small` takes milliseconds, so the
+/// write may land before or after it; `write_before_the_watch_attaches_is_snapshotted`
+/// holds the attach to make the race deterministic.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_write_before_the_watch_attaches_is_snapshotted() {
+    let daemon = SpawnedDaemon::spawn(|config| {
+        configure(config);
+        config.watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        config.watcher.fallback_interval = Duration::from_mins(10);
+        config.watcher.watched_fallback_interval = Duration::from_mins(10);
+    })
+    .await;
+    let repo = daemon.register_synth(Preset::Small).await;
+    let id_file = signal_file(&daemon, "id");
+    // Sleeps past the bound below, so `--keep`'s exit snapshot cannot be
+    // the one that is found.
+    let script = r#"echo "$REEF_WORKSPACE" > "$ID_FILE"; echo early > early.txt; sleep 30"#;
+    let mut agent = ws_run(
+        &daemon,
+        &repo.id,
+        &[
+            "--keep",
+            "--env",
+            &env_arg("ID_FILE", &id_file),
+            "--",
+            "sh",
+            "-c",
+            script,
+        ],
+    );
+    let _guard = KillOnDrop(vec![agent.id()]);
+    let id = read_line_of(&id_file, &mut agent).await;
+    let waited = wait_for(Duration::from_secs(10), "a watcher snapshot", || async {
+        let ws = inspect(&daemon.client, &id).await;
+        !ws.last_snapshot_op.is_empty()
+            && file_at(&repo.root, &ws.commit_id, "early.txt")
+                .await
+                .as_deref()
+                == Some(&b"early\n"[..])
+    })
+    .await;
+    assert!(
+        agent.try_wait().unwrap().is_none(),
+        "the command still runs"
+    );
+    eprintln!("`ws run`'s first write reached the operation log in {waited:.2?}");
+}
+
 fn log_events(daemon: &SpawnedDaemon) -> Vec<Value> {
     daemon.log_lines("")
 }
