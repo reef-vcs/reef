@@ -39,6 +39,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 | R1.29 | [R1.29-create-latency-off-the-watcher-path.md](R1.29-create-latency-off-the-watcher-path.md) | M | R1.12, R1.13, R1.14 | The APFS half of the first exit criterion, RX.06 |
 | R1.30 | [R1.30-incremental-notify-snapshots.md](R1.30-incremental-notify-snapshots.md) | L | R1.13, R1.14, R1.23 | The `large` half of R1.23's measurement, gating `load.yml` on `macos-15` again |
 | R1.31 | [R1.31-default-start-revision.md](R1.31-default-start-revision.md) | S | R1.05, R1.20, R1.25 | The quickstart's no-setup promise for repositories whose default branch is not `main` |
+| R1.32 | [R1.32-linux-create-off-the-inotify-watch-path.md](R1.32-linux-create-off-the-inotify-watch-path.md) | M | R1.12, R1.23, R1.29, R1.30 | The overlayfs half of the first exit criterion as the runners measure it; the 0.1.0 tag |
 | RX.07 | [RX.07-agent-onboarding-benchmark.md](RX.07-agent-onboarding-benchmark.md) | M | R1.25, R1.26, R1.27, R1.28 | R2.17 (cross-cutting; first needed for the Phase 1 release) |
 | RX.01 | [RX.01-security-review-of-workspace-isolation.md](RX.01-security-review-of-workspace-isolation.md) | M | R1.20, R1.15, R1.25, R1.09, R1.18, R1.28 | The 0.1.0 release, R2.08 (its listener's requirements), RX.02 (cross-cutting; first needed for the Phase 1 release) |
 
@@ -53,6 +54,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 7. R1.29 (needs only merged tickets) any time before R1.23: R1.12 found `create_api/large/apfs/20` at 1.93 s, and R1.23 should measure the phase with the fix in.
 8. R1.18, R1.23, R1.24, then RX.07 last. R1.23 is the phase's acceptance test and should run against everything else merged; RX.07 is the phase's agent acceptance test. Its scenario C runs the installer against a local copy of the build under test until 0.1.0 is published.
 9. RX.01 after everything above has merged and before 0.1.0 is tagged: it reviews what ships, and its fixes and known-limitations entries are part of the release.
+10. R1.32 after RX.01 has merged and before 0.1.0 is tagged: the first `large` bench on the `ubuntu-24.04` runner (2026-10-24, at `4c966c7`) missed the creation criterion by 6 ms, all of it inotify's attach inside `Create`. It is the last code change before the tag, and its runner run is the criterion's measurement for overlayfs.
 
 ## Phase exit criteria (from dev-phases.md)
 
@@ -66,7 +68,7 @@ Phase 0 is complete (R0.01 to R0.09 merged). What it left behind, and what every
 - A backup taken while agents are writing restores to a daemon that serves the same changes and operation log, with no workspace lost and no lease reclaimed on the first tick.
 - On the onboarding benchmark's scenario A (RX.07), an agent with no Reef configuration and only `reef` on `PATH` reaches a successful `reef ws run` in at most eight tool calls and with at most two failed `reef` invocations, median of three trials.
 
-Which ticket proves each criterion: R1.12 (creation time and disk), R1.23 (kill, 200 workspaces, same-change workspaces, both platforms), R1.20 (shared store), R1.06 (move), R1.18 (backup).
+Which ticket proves each criterion: R1.12 (creation time and disk; R1.29 made it hold on APFS and R1.32 on the Linux runner), R1.23 (kill, 200 workspaces, same-change workspaces, both platforms), R1.20 (shared store), R1.06 (move), R1.18 (backup).
 
 ## Departures from dev-phases.md
 
@@ -278,6 +280,7 @@ Allocated here so parallel tickets do not collide. The index row in `docs/adr/RE
 | 0025 | Agent-facing CLI contract | R1.26 |
 | 0026 | Narrowed notify snapshots | R1.30 |
 | 0027 | Trust boundaries in Phase 1 | RX.01 |
+| 0028 | Watch attachment off the create path | R1.32 |
 
 ### Platform and CI
 
