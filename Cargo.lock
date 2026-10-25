@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "reef-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "reef-lib"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "criterion",
  "futures 0.3.34",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "reef-testing"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "reef-vcs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
