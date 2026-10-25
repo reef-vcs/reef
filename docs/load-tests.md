@@ -138,6 +138,28 @@ R1.30 split each scan into `load_ms` (locking the working copy, which makes jj r
 - **Memory.** Peak resident size with narrowed scans was 3.7 GB, against 2.7 GB with full scans in this ticket and 2.7 and 3.6 GB in R1.23's two runs. A narrowed scan holds a second copy of its workspace's tree state (about 18 MB for `large`) while it runs, about 0.2 GB at 12 scans at once; the rest of the difference is within the variation between runs. The per-workspace finding below stands.
 - **Releases are unchanged** (2,377 s against 2,759 s): their time is the final snapshots, which stay full scans, and deleting 100,000-file trees, R1.23's teardown finding.
 
+### R1.32: watches attached after the create
+
+`load.yml` with `medium`, run [40170092354](https://github.com/reef-vcs/reef/actions/runs/40170092354) on R1.32's branch at `e8d94a6`, after Linux notify watches moved off the create path ([ADR 0028](adr/0028-watch-attachment-off-the-create-path.md)). Both runners passed the gate. `ubuntu-24.04` was a 4-vCPU AMD EPYC 9V74 with 16 GB (x86_64, kernel 6.17, as root), a different CPU from the baseline's EPYC 7763; `macos-15` was the same 3-vCPU M1 virtual machine with 7 GB.
+
+| Measurement | `ubuntu-24.04` | `macos-15` |
+| --- | ---: | ---: |
+| 20 × `large` create, max / mean | **47 / 41 ms** | 2,994 / 1,737 ms |
+| 20 × `large` attaches: each p50 / max, queued max, drain | 905 / 951 ms, 16.4 s, 17.4 s | n/a (inside the create) |
+| 200 × `medium` create, total (p95 each, 8 at once) | 2.0 s (125 ms) | 36.1 s (1,993 ms) |
+| 200 × `medium` attaches: each p50 / max, queued max, drain | 93 / 166 ms, 17.1 s, 17.4 s | n/a (inside the create) |
+| steady-state write-to-snapshot p50 / p95 / max | 633 / **774** / 3,229 ms | 704 / **845** / 938 ms |
+| writes unsnapshotted after 30 s | 0 of 1,000 | 0 of 1,000 |
+| burst p50 / p95 / max | 1.4 / 1.5 / 1.6 s | 2.8 / 3.7 / 3.9 s |
+| scans queued max, wait max | 16, 764 ms | 5, 63.2 s |
+| inotify watches used / limit | 200,000 / 655,360 (1 instance) | n/a |
+| daemon peak threads, RSS | 134, 1,168 MB | 146, 631 MB |
+| 200 releases, total | 9.7 s | 86.0 s |
+
+- **A `large` create on the Linux runner is now 41 ms**, against the baseline's 1,097 ms, which was nearly all inotify adding 8,336 watches. The attaches run after the creates return, one at a time, about 0.9 s each, so the twenty were all up 17.4 s after the last create returned. The 200 `medium` attaches took the same 17.4 s, at about 90 ms each.
+- **The Linux scan queue reached 16 once**, in the minute that held each attached workspace's one full scan ([ADR 0028](adr/0028-watch-attachment-off-the-create-path.md)): 200 of them, one at a time through the inotify turn, the longest wait 764 ms. The steady state's slowest write (3.2 s) was one of its first, made among those scans, as were 14 of its 22 writes over a second; the queue stayed at one from the next minute on, where the other eight (1.0 to 1.5 s) fell.
+- **macOS is unchanged in kind.** Watches still attach inside the create there. Its 63.2 s scan wait came while the twenty `large` workspaces were released, not in the steady state: their final snapshots are full scans of 100,000 files, eight releases in flight on three permits, and the releases took 88 to 208 s each, 6.7 minutes in all. The report's queue figures stop before the final teardown, where the 200 releases queued 65 scans with a 4.7 s wait.
+
 The macOS runs' twenty `large` creates before the change were also slower than in the `medium` run (1,652 ms mean against 982), with only the warm workspace before them. The volume was 97% full at the time; whether that is why was not established. After the change, with more room on the volume, they averaged 988 ms.
 
 ## Findings

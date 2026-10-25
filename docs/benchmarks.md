@@ -319,8 +319,14 @@ The first `large` run on the CI runners (`bench.yml`, main at `4c966c7`, run [40
 | `create_api/large/overlayfs/20`, before (R1.29) | Docker VM (root) | 430 | 405 | | PASS |
 | `create_api/large/overlayfs/1`, after | Docker VM (root) | **26.0** | 0 | 430 ms | |
 | `create_api/large/overlayfs/20`, after | Docker VM (root) | **29.4** | 0 | 7.6 s | **PASS** |
+| `create_api/large/overlayfs/1`, after | runner (root) | **21.0** | 0 | 1.1 s | |
+| `create_api/large/overlayfs/20`, after | runner (root) | **19.5** | 0 | 21.7 s | **PASS** |
+| `create_api/large/fuse-overlayfs/1`, after | runner | **25.1** | 0 | 3.3 s | |
+| `create_api/large/fuse-overlayfs/20`, after | runner | **22.3** | 0 | 80.1 s | **PASS** |
 
-The Docker VM is the one in [Linux](#linux) above: Docker Desktop on the M2 Max, as root, with `REEF_BENCH_WATCHER=notify`. Without it, `auto` picks Watchman for `large` where Watchman is installed. A create there is now the daemon's other steps (`jj` 5 to 7 ms, `seed` 1 to 2 ms) and the RPC. The drain is the twenty attaches in a row, from the last create's return. The runner's rows after this change follow from this branch's `bench.yml` run.
+The Docker VM is the one in [Linux](#linux) above: Docker Desktop on the M2 Max, as root, with `REEF_BENCH_WATCHER=notify`. Without it, `auto` picks Watchman for `large` where Watchman is installed. A create there is now the daemon's other steps (`jj` 5 to 7 ms, `seed` 1 to 2 ms) and the RPC. The drain is the twenty attaches in a row, from the last create's return. The runner rows after the change are `bench.yml` with `large`, run [40170090452](https://github.com/reef-vcs/reef/actions/runs/40170090452) on this ticket's branch at `e8d94a6`, `ubuntu-24.04` (no Watchman, so `notify`): the creation criterion passes on kernel overlayfs at 19.5 ms per create, against 1,006 ms before. The `create` rows' `proportional` MISS lines and `copy/1`'s target MISS are the same as before the change.
+
+- **Through FUSE the attaches drain slowly.** Twenty in a row took 80 s, about 4 s each, against 21.7 s (about 1.1 s each) on kernel overlayfs; before the change a FUSE attach was 2.4 s inside the create. The bench does not break the drain down, so why an attach takes longer behind the queue is not established. Until its watch is up, a workspace is snapshotted only by the 60 s fallback, with a full scan. A create no longer waits for it.
 
 - **macOS is unchanged.** On the M2 Max with nothing else running, `REEF_BENCH_WATCHER=notify`: `create_api/large/apfs/1` 940 ms and `create_api/large/apfs/20` **969 ms** (PASS), against R1.29's 970 and 962 ms. `watch` is 12 ms, and the attach drain 0 to 3 ms (one `List` call): watches still attach inside the create there.
 - **Queueing must not wait for an attach.** The first version kept the queue under the debouncer's lock, which the attach thread holds across an attach, so each create of a run of twenty waited for the previous workspace's attach: `watch` 456 ms of a 479 ms create at `n = 20`, against 0 at `n = 1`. The queue has its own lock now.
