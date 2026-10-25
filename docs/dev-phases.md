@@ -1,6 +1,6 @@
 # Reef development phases
 
-*Companion to [design.md](design.md). Last updated 2026-10-24.*
+*Companion to [design.md](design.md). Last updated 2026-10-25.*
 
 This document breaks the design into phases and the phases into tickets. Each ticket row is meant to become one issue. Phases map to GitHub milestones, and a phase's exit criteria are the milestone's acceptance test.
 
@@ -124,18 +124,20 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk.
 - A daemon in a VM is reachable from another machine over TLS with a token, serving the same API and web UI.
 
+Briefs for every row are in [`dev-tickets/phase-2/`](dev-tickets/phase-2/README.md), whose README fixes the decisions shared across the phase.
+
 ### Workstream: API
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.01 | Core protobuf schema | Messages and services for status, snapshot, diff, log, changes, undo, and workspaces. Versioned. Reviewed as an API, not generated from code. | M | R1.05 |
-| R2.02 | Status, log, and change services | Implement the read side of the schema over jj-lib. Structured, paginated responses. | M | R2.01 |
-| R2.03 | Snapshot, describe, and undo services | The write side: snapshot now, set change description, undo an operation, with each response returning the op log entry created. | M | R2.01 |
+| R2.01 | Core protobuf schema | Messages and services for status, snapshot, diff, log, changes, undo, operations, trees, events, presence, symbols, queries, remote tokens and workspaces, as package `reef.daemon.v1` in a new `reef-api` crate (protos, generated code, client, JSON types, error kinds; no jj-lib) that the SDKs, the MCP server and the web UI build from. Reviewed as an API, not generated from code; later tickets add to it and never restructure. `v0` is deleted and every client moves in the same PR. ADR. | L | R1.05 |
+| R2.02 | Status, log, and change services | Implement the read side of the schema over jj-lib: workspace status, change log with revsets, change details, diffs as structured hunks, the operation log. Structured, paginated responses. Reads run off the repository thread on a snapshot of its head (ADR). | M | R2.01 |
+| R2.03 | Snapshot, describe, and undo services | The write side: snapshot now, set change description, undo an operation, and the divergence resolution ADR 0018 deferred here, abandon and squash, with each response returning the op log entry created. | M | R2.01 |
 | R2.04 | Virtual workspace API | Read a file at a snapshot, apply an edit, receive a new snapshot hash, without materializing a directory. | M | R2.03 |
-| R2.05 | CLI as thin client | Rewrite all CLI commands over the gRPC API. Remove jj-lib from the binary crate. | M | R2.02, R2.03 |
+| R2.05 | CLI as thin client | Rewrite all CLI commands over the gRPC API through `reef-api`, adding `status`, `log`, `diff`, `ops`, `describe`, `undo`, `abandon`, `squash` and `tree`. jj-lib leaves the binary's dependency graph except behind a default-on `embedded-daemon` feature that keeps `reef daemon run`'s in-process daemon (R1.22's autostart fallback) and the offline `reef restore` (ADR 0020); CI checks the feature-off build. | M | R2.02, R2.03 |
 | R2.06 | Python SDK | Generated from the schema, published to PyPI as `reef-vcs`, with a thin idiomatic wrapper. | S | R2.01 |
 | R2.07 | TypeScript SDK | Generated from the schema, published to npm, with a thin wrapper. | S | R2.01 |
-| R2.08 | Remote daemon access | A second listener for the same gRPC services and the web UI over TCP with TLS and a bearer token, off by default and enabled by configuration or `reef daemon --remote`. Token issuance and rotation through the CLI. The Unix socket stays the local path and the remote listener never serves it without authentication. This is how a phone or another laptop reaches a daemon running in a cloud VM before a store exists. Threat model reviewed under RX.01. | M | R2.01, R1.04 |
+| R2.08 | Remote daemon access | A second listener for the same gRPC services and the web UI over TCP with TLS and a bearer token, off by default and enabled by configuration or `reef daemon --remote`, and the same listener bound to loopback by default so a browser can reach the web UI with a token (a loopback port is reachable by every local user and by any web page the user visits, so it gets the same checks). Token issuance and rotation through the CLI, over the socket only, with per-token scopes. The Unix socket stays the local path and the remote listener never serves it without authentication. This is how a phone or another laptop reaches a daemon running in a cloud VM before a store exists. Built against the threat model's "Requirements for a remote listener" (RX.01). | M | R2.01, R1.04, RX.01 |
 
 ### Workstream: live state
 
@@ -143,27 +145,28 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | --- | --- | --- | --- | --- |
 | R2.09 | Operation log subscription | Server-streaming RPC filtered by repository, change, workspace, or agent. Resume from a given operation. Server-side batching into frames. | M | R2.02 |
 | R2.10 | Presence channel | Ephemeral presence over the same connection: agent activity, workspace being edited, lease heartbeats, long-running operation progress. Never persisted. | M | R2.09 |
-| R2.11 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically. A presence API for agents that want to report finer activity. | S | R2.10 |
+| R2.11 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically. A presence API for agents that want to report finer activity. | S | R2.10, R2.06, R2.07 |
 | R2.12 | Replay | Reconstruct any live view at a past point from the operation log. Drives the scrubber in the UI. | M | R2.09 |
 
 ### Workstream: agent surface
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.13 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`, zero-argument over stdio. Tool descriptions and error hints reuse R1.26's guide and `hint`/`next` fields; `reef init` (R1.27) gains the `.mcp.json` renderer; the server is listed on the MCP registry. | M | R2.05, R1.26, R1.27 |
+| R2.13 | MCP server | `rmcp` server exposing the API as tools, including workspace lifecycle, status, diff, snapshot, and subscriptions as a wait tool. Ships in the `reef` binary as `reef mcp`, zero-argument over stdio. Tool descriptions and error hints reuse R1.26's guide and `hint`/`next` fields; `reef init` (R1.27) gains the `.mcp.json` renderer; the server is listed on the MCP registry. | M | R2.05, R2.09, R1.26, R1.27 |
 | R2.14 | Symbol index ingestion | Accept SCIP indexes and tree-sitter tag output per snapshot. Store symbol locations keyed by snapshot. | L | R2.02 |
 | R2.15 | Symbol-level diff | `diff --symbols`: which symbols changed, added, or removed, and which call sites are affected. Line-level on expand. | M | R2.14 |
 | R2.16 | Query layer | SQL-backed queries over changes, operations, and symbols: changes touching a symbol in a window, by agent, by outcome. Exposed through the API. | M | R2.14 |
-| R2.17 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results, on RX.07's harness and results page. | S | R2.15, RX.07 |
+| R2.17 | Token-efficiency benchmark | Measure tokens an agent needs to answer standard questions (state, what changed, who touched this) via Reef versus git porcelain. Publish results, on RX.07's harness and results page. | S | R2.15, R2.05, RX.07 |
 | R2.24 | `reef schema` | The CLI's command tree and the API's services and messages as JSON Schema and a protobuf descriptor set, from one command, so a harness can generate tool definitions without a human writing them. | S | R2.01, R2.05 |
 | R2.25 | Harness packages | A Claude Code plugin (skill, MCP server entry, hooks) and the equivalents for Codex and opencode, built from R1.27's renderers and published by R1.28's release workflow, so one install line configures a harness for Reef. | S | R1.27, R1.28, R2.13 |
 | R2.26 | Workspace provider contract | A small documented interface (create, attach, release, with JSON in and out) and a reference adapter so a harness that creates git worktrees for isolation can ask Reef for a workspace instead; the upstream conversation with the first harness. | M | R2.13, R1.21 |
+| R2.27 | Client-side store builds | RX.01's follow-up ([#61](https://github.com/reef-vcs/reef/issues/61)): the daemon stops running repository-declared build commands by default. `reef store build` and the MCP tool run the build in the client's own process, inside whatever sandbox the client is in, in a scratch workspace the daemon prepares (`Stores.Prepare`) and seals afterwards (`Stores.Seal`); the daemon-side `Stores.Build` stays behind `[store] allow_builds`, whose default becomes `false`. Amends ADR 0022. | M | R2.05, R2.13, R1.20, RX.01 |
 
 ### Workstream: web UI v0
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.18 | Web UI scaffold | React and TypeScript app, served by the daemon, gRPC-web or WebSocket bridge for streams, state-color system from the design doc. | M | R2.09 |
+| R2.18 | Web UI scaffold | React and TypeScript app, served by the daemon from R2.08's web and remote listeners, gRPC-web for streams over R2.07's generated code, state-color system from the design doc. | M | R2.09, R2.08, R2.07 |
 | R2.19 | Smartlog view | Stacks and changes as a live graph. | M | R2.18 |
 | R2.20 | Workspaces and fleet panel | Workspaces with owner, lease, disk, and presence. Agents and their current change. | M | R2.18, R2.10 |
 | R2.21 | Activity feed with scrubber | Coalesced operation feed, counts always correct, replay via the scrubber. | M | R2.12, R2.18 |
@@ -355,7 +358,7 @@ These do not belong to a phase and should be scheduled alongside the phase where
 | --- | --- | --- | --- | --- |
 | RX.01 | Security review of workspace isolation | The Phase 1 threat model (`docs/threat-model.md`, ADR 0027): one uid is one trust domain, so the boundaries are other local users, repository content, and the installer, not a same-uid agent. Fixed before 0.1.0: state-directory ownership and modes, registration refusing repositories owned by another user, store builds announced and switchable off, a root daemon warning, release provenance, and, found by its hostile-content tests, commits with tree entries that panic jj-lib refused before jj reads them and no snapshot through a workspace root replaced by a symlink; documented as limitations: lease ids as the only credential, `chmod`-sealed stores, build network access. Requirements for R2.08's remote listener; no external review until RX.02. Brief in `dev-tickets/phase-1/`. | M | Phase 1 release |
 | RX.02 | Security review of evidence and identity | Forged evidence, key handling, executor sandbox escape. External review if possible. | L | Phase 3 |
-| RX.03 | Opt-in telemetry | Anonymous usage and performance metrics with a clear opt-in. Needed to measure fallback rates and token savings in the wild. | M | Phase 2 |
+| RX.03 | Opt-in telemetry | Anonymous usage and performance metrics with a clear opt-in. Needed to measure fallback rates and token savings in the wild. Ships collection, `reef telemetry on|off|status|show` and a local report; the upload endpoint is configuration, empty until a collector exists. After R2.05 and R2.17, whose counters it reports. Brief in `dev-tickets/phase-2/`. | M | Phase 2 |
 | RX.04 | Documentation site | Hosted docs from the `docs/` directory, versioned with releases, with `llms.txt` and `llms-full.txt` at the root and the agent guide (R1.26) at a stable URL, so an agent with web access finds the answer in one fetch. | M | Phase 1 release |
 | RX.05 | Windows support decision | Whether and how to support Windows workspaces. No copy-on-write primitive comparable to APFS or overlayfs; options are ReFS block cloning, a VFS, or Linux-only via WSL. ADR. | S | Phase 1 |
 | RX.06 | Performance regression gate | Benchmarks from R0.06 and R1.12 run in CI with a threshold that fails the build. | S | Phase 1 |
