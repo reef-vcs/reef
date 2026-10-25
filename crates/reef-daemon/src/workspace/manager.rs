@@ -16,7 +16,7 @@ use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
-use crate::db::{Db, DbError, META_REMATERIALIZE_PENDING};
+use crate::db::{Db, DbError, META_REMATERIALIZE_PENDING, WorkspaceFilter};
 use crate::lease::LeaseManager;
 use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
@@ -432,6 +432,24 @@ impl Manager {
             .workspaces(repo, states)?
             .into_iter()
             .filter(|record| owner.is_none_or(|owner| record.owner == owner))
+            .map(|record| {
+                let lease = self.lease_of(&record)?;
+                Ok((record, lease))
+            })
+            .collect()
+    }
+
+    /// One page of workspaces with their leases, newest first, after
+    /// `after` (see [`crate::db::Db::workspaces_page`]).
+    pub fn list_page(
+        &self,
+        filter: &WorkspaceFilter<'_>,
+        after: Option<(Timestamp, WorkspaceId)>,
+        limit: usize,
+    ) -> Result<Vec<(WorkspaceRecord, Option<LeaseRecord>)>, ManagerError> {
+        self.db
+            .workspaces_page(filter, after, limit)?
+            .into_iter()
             .map(|record| {
                 let lease = self.lease_of(&record)?;
                 Ok((record, lease))

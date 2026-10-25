@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+use super::convert::proto_duration;
 use crate::backend::{Availability, probe};
 use crate::daemon::AppState;
 use crate::db::SCHEMA_VERSION;
@@ -72,6 +73,11 @@ impl Daemon for DaemonService {
             repositories: saturate(repositories),
             backends,
             active_workspaces: saturate(active_workspaces),
+            api_version: "v1".to_owned(),
+            schema_hash: reef_api::SCHEMA_HASH.clone(),
+            lease_max: Some(proto_duration(state.config.file.lease.max)),
+            // Filled by the tickets that add them: event sequences (R2.09),
+            // listeners (R2.08), presence (R2.10, R2.11), the UI (R2.18).
             ..DaemonStatusResponse::default()
         }))
     }

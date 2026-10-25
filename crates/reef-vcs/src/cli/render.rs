@@ -294,6 +294,8 @@ impl TextRender for Status {
                 ("socket", self.socket.clone()),
                 ("state_dir", self.state_dir.clone()),
                 ("schema_version", self.schema_version.to_string()),
+                ("api_version", self.api_version.clone()),
+                ("schema_hash", self.schema_hash.clone()),
                 ("repositories", self.repositories.to_string()),
                 ("active_workspaces", self.active_workspaces.to_string()),
                 ("backends", backends),

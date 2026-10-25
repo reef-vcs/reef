@@ -15,6 +15,18 @@ use crate::model::{
 
 const WHAT: &str = "workspace";
 
+/// Which workspaces [`Db::workspaces_page`] lists. Empty fields match
+/// everything.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WorkspaceFilter<'a> {
+    /// Only this repository's.
+    pub repo: Option<RepoId>,
+    /// Only those in one of these states.
+    pub states: &'a [WorkspaceState],
+    /// Only this owner's.
+    pub owner: Option<&'a str>,
+}
+
 const COLUMNS: &str = "id, repo_id, owner, purpose, change_id, commit_id, base_tree_id, backend, \
      path, state_dir, lease_id, state, divergent, attention, created_at, last_snapshot_at, \
      last_snapshot_op, watcher";
@@ -255,6 +267,56 @@ impl Db {
             let repo = repo.map(|id| Value::from(id.as_hex()));
             let args = std::iter::once(repo.unwrap_or(Value::Null)).chain(states.iter().cloned());
             stmt.query_map(rusqlite::params_from_iter(args), from_row)?
+                .collect()
+        })
+    }
+
+    /// One page of workspaces, newest first: by `created_at`, then id, both
+    /// descending, starting after `after` (the last row of the previous
+    /// page) and at most `limit` rows. Filters as [`Db::workspaces`], plus
+    /// `owner`.
+    pub fn workspaces_page(
+        &self,
+        filter: &WorkspaceFilter<'_>,
+        after: Option<(Timestamp, WorkspaceId)>,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceRecord>, DbError> {
+        let mut args: Vec<Value> = vec![
+            filter
+                .repo
+                .map_or(Value::Null, |id| Value::from(id.as_hex())),
+            filter
+                .owner
+                .map_or(Value::Null, |owner| Value::from(owner.to_owned())),
+            after.map_or(Value::Null, |(at, _)| Value::from(at.0)),
+            after.map_or(Value::Null, |(_, id)| Value::from(id.as_hex())),
+            Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
+        ];
+        args.extend(
+            filter
+                .states
+                .iter()
+                .map(|state| Value::from(state.as_str().to_owned())),
+        );
+        self.with(|conn| {
+            let state_filter = if filter.states.is_empty() {
+                String::new()
+            } else {
+                let placeholders = (0..filter.states.len())
+                    .map(|i| format!("?{}", i + 6))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("AND state IN ({placeholders})")
+            };
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM workspaces
+                 WHERE (?1 IS NULL OR repo_id = ?1) AND (?2 IS NULL OR owner = ?2)
+                   AND (?3 IS NULL OR created_at < ?3 OR (created_at = ?3 AND id < ?4))
+                   {state_filter}
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?5"
+            ))?;
+            stmt.query_map(rusqlite::params_from_iter(args.iter()), from_row)?
                 .collect()
         })
     }

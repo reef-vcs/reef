@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +23,8 @@ use reef_api::client::ClientError;
 use reef_api::error::detail_of;
 use reef_api::proto::v1::register_request::IfNotJj;
 use reef_api::proto::v1::{
-    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
+    CreateRequest, ListWorkspacesRequest, MoveRequest, Page, Workspace, create_request,
+    move_request,
 };
 use reef_daemon::model::{ReclaimReason, WorkspaceState};
 use reef_lib::error::{Classify as _, ErrorKind};
@@ -1510,5 +1512,130 @@ async fn create_reports_timings() {
         ] {
             assert!(line.contains(&format!(" {field}=")), "{field} in {line}");
         }
+    }
+}
+
+// R2.01 7
+#[tokio::test(flavor = "multi_thread")]
+async fn workspaces_list_pages() {
+    let (daemon, repo) = fixture().await;
+    for _ in 0..7 {
+        create(&daemon, &repo).await;
+    }
+    let page_of = |size: u32, token: &str, owner: &str| ListWorkspacesRequest {
+        repo: repo.id.clone(),
+        owner: owner.to_owned(),
+        page: Some(Page {
+            page_size: size,
+            page_token: token.to_owned(),
+        }),
+        ..ListWorkspacesRequest::default()
+    };
+    let mut seen = Vec::new();
+    let mut sizes = Vec::new();
+    let mut token = String::new();
+    loop {
+        let response = daemon
+            .client
+            .list_workspaces_page(page_of(3, &token, OWNER))
+            .await
+            .unwrap();
+        let page = response.page.unwrap();
+        assert_eq!(page.page_size, 3);
+        sizes.push(response.workspaces.len());
+        seen.extend(response.workspaces);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        if token.is_empty() {
+            // The first page's token, sent with another owner filter.
+            let error = daemon
+                .client
+                .list_workspaces_page(page_of(3, &page.next_page_token, "someone-else"))
+                .await
+                .unwrap_err();
+            assert_eq!(kind_of(&error), ErrorKind::InvalidArgument);
+        }
+        token = page.next_page_token;
+    }
+    assert_eq!(sizes, [3, 3, 1]);
+    let created: Vec<i64> = seen
+        .iter()
+        .map(|ws| millis(ws.created_at.as_ref().unwrap()))
+        .collect();
+    assert!(
+        created.is_sorted_by(|a, b| a >= b),
+        "newest first: {created:?}"
+    );
+    let ids: BTreeSet<&str> = seen.iter().map(|ws| ws.id.as_str()).collect();
+    assert_eq!(ids.len(), 7, "every workspace once");
+
+    let all = daemon
+        .client
+        .list_workspaces_page(page_of(0, "", OWNER))
+        .await
+        .unwrap();
+    assert_eq!(all.workspaces.len(), 7);
+    assert_eq!(all.page.unwrap().next_page_token, "");
+    let followed = daemon
+        .client
+        .list_workspaces(page_of(2, "", OWNER))
+        .await
+        .unwrap();
+    assert_eq!(followed.len(), 7, "the client follows the tokens");
+    let garbage = daemon
+        .client
+        .list_workspaces_page(page_of(3, "not a token", OWNER))
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&garbage), ErrorKind::InvalidArgument);
+}
+
+// R2.01 9: one daemon error per kind, encoded by the daemon and decoded
+// through reef_api::error, as a client does.
+#[test]
+fn error_kinds_round_trip() {
+    use reef_daemon::backend::{BackendError, BackendKind};
+    use reef_daemon::db::DbError;
+    use reef_daemon::error::status;
+    use reef_daemon::repo::RepoThreadError;
+
+    let io = |kind| BackendError::Io {
+        op: "walk",
+        path: "/ws".into(),
+        source: std::io::Error::from(kind),
+    };
+    let cases = [
+        status(DbError::NotFound {
+            what: "workspace",
+            id: "abcd".into(),
+        }),
+        status(BackendError::RootExists("/ws".into())),
+        status(DbError::InvalidPrefix {
+            what: "repository",
+            prefix: "xy".into(),
+        }),
+        status(DbError::Conflict {
+            what: "repository",
+            id: "abcd".into(),
+            reason: "has active workspaces",
+        }),
+        status(BackendError::Unavailable {
+            kind: BackendKind::Overlayfs,
+            reason: "overlayfs is Linux only".into(),
+        }),
+        status(io(std::io::ErrorKind::PermissionDenied)),
+        status(io(std::io::ErrorKind::Other)),
+        status(RepoThreadError::Panicked {
+            id: "00000000000000aa".parse().unwrap(),
+        }),
+    ];
+    assert_eq!(cases.len(), reef_api::error::KINDS.len());
+    for (status, kind) in cases.iter().zip(reef_api::error::KINDS) {
+        assert_eq!(reef_api::error::kind_from_status(status), kind);
+        assert_eq!(status.code(), reef_api::error::code_of(kind));
+        let detail = detail_of(status).unwrap();
+        assert_eq!(detail.kind, reef_api::error::kind_name(kind));
+        assert_eq!(detail.chain.join(": "), status.message());
     }
 }

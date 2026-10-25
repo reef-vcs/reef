@@ -64,6 +64,10 @@ tonic = "0.14"
 tonic-prost = "0.14"
 prost-types = "0.14"
 tonic-prost-build = "0.14"
+# The error envelope (`google.rpc.Status` with `ErrorDetail` as an `Any`) and server reflection on
+# the socket (R2.01, ADR 0029).
+tonic-types = "0.14"
+tonic-reflection = "0.14"
 protox = "0.10"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"                 # CancellationToken for shutdown

@@ -10,6 +10,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -579,4 +580,72 @@ async fn daemon_settings_carry_the_operation_identity() {
         format!("reef@{}", host.to_lowercase())
     );
     daemon.stop().await;
+}
+
+// R2.01 4
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_hash_is_stable_and_reported() {
+    let daemon = TestDaemon::start().await;
+    let status = daemon.client.status().await.unwrap();
+    assert_eq!(status.api_version, "v1");
+    assert_eq!(status.schema_hash, *reef_api::SCHEMA_HASH);
+    assert_eq!(status.schema_hash.len(), 64);
+    assert!(
+        status
+            .schema_hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    assert_eq!(
+        status.lease_max,
+        Some(prost_types::Duration {
+            seconds: 86_400,
+            nanos: 0
+        })
+    );
+}
+
+// R2.01 8
+#[tokio::test(flavor = "multi_thread")]
+async fn reflection_lists_v1_services() {
+    use tonic_reflection::pb::v1::ServerReflectionRequest;
+    use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
+    use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
+    use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
+
+    let daemon = TestDaemon::start().await;
+    let mut reflection = ServerReflectionClient::new(daemon.client.channel());
+    let request = ServerReflectionRequest {
+        host: String::new(),
+        message_request: Some(MessageRequest::ListServices(String::new())),
+    };
+    let mut responses = reflection
+        .server_reflection_info(tokio_stream::once(request))
+        .await
+        .unwrap()
+        .into_inner();
+    let response = responses.message().await.unwrap().unwrap();
+    let Some(MessageResponse::ListServicesResponse(list)) = response.message_response else {
+        panic!("{response:?}");
+    };
+    let services: BTreeSet<String> = list.service.into_iter().map(|s| s.name).collect();
+    let expected: BTreeSet<String> = [
+        "Daemon",
+        "Repositories",
+        "Workspaces",
+        "Changes",
+        "Operations",
+        "Trees",
+        "Presence",
+        "Symbols",
+        "Queries",
+        "Remote",
+        "Maintenance",
+        "Stores",
+    ]
+    .iter()
+    .map(|name| format!("reef.daemon.v1.{name}"))
+    .chain(["grpc.reflection.v1.ServerReflection".to_owned()])
+    .collect();
+    assert_eq!(services, expected);
 }

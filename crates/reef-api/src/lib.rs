@@ -16,6 +16,7 @@ pub mod advice;
 pub mod client;
 pub mod error;
 pub mod json;
+pub mod page;
 pub mod proto;
 
 /// The `FileDescriptorSet` of every `reef/daemon/v1` file, as `protox`

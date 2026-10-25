@@ -148,6 +148,12 @@ impl Client {
         &self.socket
     }
 
+    /// The connection, for a generated client this one has no method for
+    /// (server reflection, say). Cloning it shares the connection.
+    pub fn channel(&self) -> Channel {
+        self.channel.clone()
+    }
+
     /// `Daemon.Status`.
     pub async fn status(&self) -> Result<DaemonStatusResponse, ClientError> {
         let mut client = DaemonClient::new(self.channel.clone());

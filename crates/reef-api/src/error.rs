@@ -184,13 +184,39 @@ pub fn kind_from_status(status: &Status) -> ErrorKind {
         .unwrap_or_else(|| kind_of_code(status.code()))
 }
 
-/// The `ErrorDetail` in a status's details, if it carries one.
+/// The type URL `ErrorDetail` is packed under in a status's
+/// `google.rpc.Status` details.
+pub const ERROR_DETAIL_TYPE_URL: &str = "type.googleapis.com/reef.daemon.v1.ErrorDetail";
+
+/// A status with `code` and `message` whose details are a
+/// `google.rpc.Status` holding `detail` as its one `Any` (ADR 0029): the
+/// standard rich-error model, which `grpcio-status`, connect-es, and
+/// `tonic-types` decode.
+pub fn status_with_detail(code: Code, message: String, detail: &ErrorDetail) -> Status {
+    let envelope = tonic_types::Status {
+        code: code.into(),
+        message: message.clone(),
+        details: vec![prost_types::Any {
+            type_url: ERROR_DETAIL_TYPE_URL.to_owned(),
+            value: detail.encode_to_vec(),
+        }],
+    };
+    Status::with_details(code, message, envelope.encode_to_vec().into())
+}
+
+/// The `ErrorDetail` in a status's details, if it carries one: the first
+/// `Any` of [`ERROR_DETAIL_TYPE_URL`] in its `google.rpc.Status`.
 pub fn detail_of(status: &Status) -> Option<ErrorDetail> {
     let details = status.details();
     if details.is_empty() {
         return None;
     }
-    ErrorDetail::decode(details).ok()
+    let envelope = tonic_types::Status::decode(details).ok()?;
+    envelope
+        .details
+        .iter()
+        .find(|any| any.type_url == ERROR_DETAIL_TYPE_URL)
+        .and_then(|any| ErrorDetail::decode(any.value.as_slice()).ok())
 }
 
 fn kind_of_code(code: Code) -> ErrorKind {
@@ -271,6 +297,39 @@ mod tests {
         let garbage = Status::with_details(Code::NotFound, "x", vec![0xff, 0xff].into());
         assert_eq!(kind_from_status(&garbage), ErrorKind::NotFound);
         assert_eq!(parse_kind("Nope"), None);
+    }
+
+    #[test]
+    fn the_detail_travels_in_a_google_rpc_status() {
+        let detail = ErrorDetail {
+            kind: "NotFound".into(),
+            chain: vec!["no such workspace".into()],
+            hint: "List them.".into(),
+            next: vec!["reef".into(), "ws".into(), "list".into()],
+        };
+        let status = status_with_detail(Code::NotFound, "no such workspace".into(), &detail);
+        let envelope = tonic_types::Status::decode(status.details()).unwrap();
+        assert_eq!(envelope.code, i32::from(Code::NotFound));
+        assert_eq!(envelope.message, "no such workspace");
+        assert_eq!(envelope.details.len(), 1);
+        assert_eq!(
+            envelope.details[0].type_url,
+            "type.googleapis.com/reef.daemon.v1.ErrorDetail"
+        );
+        assert_eq!(detail_of(&status), Some(detail));
+        assert_eq!(kind_from_status(&status), ErrorKind::NotFound);
+        // A bare ErrorDetail, v0's envelope, is not read as one.
+        let bare = Status::with_details(
+            Code::NotFound,
+            "x",
+            ErrorDetail {
+                kind: "Conflict".into(),
+                ..ErrorDetail::default()
+            }
+            .encode_to_vec()
+            .into(),
+        );
+        assert_eq!(kind_from_status(&bare), ErrorKind::NotFound);
     }
 
     #[test]

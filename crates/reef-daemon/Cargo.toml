@@ -60,6 +60,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
+tonic-reflection.workspace = true   # grpc.reflection.v1 on the socket (R2.01)
 prost.workspace = true
 prost-types.workspace = true     # google.protobuf.Timestamp in the API
 clap.workspace = true

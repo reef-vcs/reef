@@ -524,6 +524,10 @@ pub struct Status {
     pub active_workspaces: u32,
     /// Each backend's probe.
     pub backends: Vec<BackendProbe>,
+    /// The API's major version, `v1` (R2.01).
+    pub api_version: String,
+    /// BLAKE3 of the schema the daemon was built with, hex (R2.01).
+    pub schema_hash: String,
 }
 
 impl From<&v1::DaemonStatusResponse> for Status {
@@ -538,6 +542,8 @@ impl From<&v1::DaemonStatusResponse> for Status {
             repositories: status.repositories,
             active_workspaces: status.active_workspaces,
             backends: status.backends.iter().map(BackendProbe::from).collect(),
+            api_version: status.api_version.clone(),
+            schema_hash: status.schema_hash.clone(),
         }
     }
 }

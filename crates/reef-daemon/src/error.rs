@@ -1,8 +1,9 @@
 //! Errors at the API edge (ADR 0017, ADR 0029): every handler's error
 //! becomes a [`tonic::Status`] whose code comes from the error's
 //! [`ErrorKind`], whose message is its [`ErrorChain`], and whose details
-//! carry a `reef.daemon.v1.ErrorDetail { kind, chain, hint, next }` so
-//! clients get the kind back without parsing messages. [`kind_from_status`]
+//! carry a `reef.daemon.v1.ErrorDetail { kind, chain, hint, next }`,
+//! packed in a `google.rpc.Status`, so clients get the kind back without
+//! parsing messages. [`kind_from_status`]
 //! is the client's inverse; it and the rest of the client's half live in
 //! `reef_api::error` and are re-exported here.
 //!
@@ -13,12 +14,13 @@
 
 use std::error::Error;
 
-use prost::Message as _;
 pub use reef_api::advice::{Advice, Advise};
-pub use reef_api::error::{KINDS, code_of, detail_of, kind_from_status, kind_name, parse_kind};
+pub use reef_api::error::{
+    KINDS, code_of, detail_of, kind_from_status, kind_name, parse_kind, status_with_detail,
+};
 use reef_api::proto::v1::ErrorDetail;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
-use tonic::{Code, Status};
+use tonic::Status;
 
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
@@ -92,12 +94,6 @@ pub fn status_from(error: &(dyn Error + 'static), kind: ErrorKind) -> Status {
     status_with_detail(code_of(kind), message, &detail)
 }
 
-/// A status with `code` and `message` whose details carry `detail`: the
-/// one place the daemon encodes an `ErrorDetail`.
-pub fn status_with_detail(code: Code, message: String, detail: &ErrorDetail) -> Status {
-    Status::with_details(code, message, detail.encode_to_vec().into())
-}
-
 /// [`status_from`] with the error's own kind. Handlers end in
 /// `.map_err(status)`.
 #[expect(
@@ -127,6 +123,8 @@ fn chain(error: &(dyn Error + 'static)) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::io;
+
+    use tonic::Code;
 
     use super::*;
     use crate::backend::{BackendError, BackendKind};

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reef_api::page::{self, PageError};
 use reef_lib::error::{Classify, ErrorKind};
 use tonic::{Request, Response, Status};
 
@@ -12,15 +13,19 @@ use super::convert::{WorkspaceView, lease, proto_duration, timestamp};
 use super::stubs::stub;
 use crate::backend::BackendChoice;
 use crate::daemon::AppState;
+use crate::db::WorkspaceFilter;
 use crate::error::status;
-use crate::model::{LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceState};
+use crate::model::{
+    LeaseId, LeaseRecord, ReclaimReason, RepoId, Timestamp, WorkspaceId, WorkspaceRecord,
+    WorkspaceState,
+};
 use crate::snapshot::{SnapshotKind, index};
 use crate::workspace::{CreateSpec, MissingStores, ReleaseSpec, Start};
 use reef_api::proto::v1::workspaces_server::Workspaces;
 use reef_api::proto::v1::{
     self, CreateRequest, CreateResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest,
     InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveRequest, MoveResponse,
-    ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace,
+    PageInfo, ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace,
     WorkspaceStatusRequest, WorkspaceStatusResponse, create_request, move_request,
 };
 
@@ -65,6 +70,31 @@ fn non_empty(text: String) -> Option<String> {
 
 fn optional_millis(ms: u64) -> Option<Duration> {
     (ms != 0).then(|| Duration::from_millis(ms))
+}
+
+/// The hash binding a `Workspaces.List` page token to its filters.
+fn list_filter_hash(repo: Option<RepoId>, states: &[WorkspaceState], owner: Option<&str>) -> u64 {
+    let mut states: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
+    states.sort_unstable();
+    states.dedup();
+    let repo = repo.map(|id| id.as_hex()).unwrap_or_default();
+    page::filter_hash(
+        ["workspaces", &repo, owner.unwrap_or_default()]
+            .into_iter()
+            .chain(states),
+    )
+}
+
+/// A `Workspaces.List` cursor: the last row's `<created_at>:<id>`.
+fn cursor_of(record: &WorkspaceRecord) -> String {
+    format!("{}:{}", record.created_at.0, record.id.as_hex())
+}
+
+fn parse_cursor(cursor: &str) -> Result<(Timestamp, WorkspaceId), PageError> {
+    let (at, id) = cursor.split_once(':').ok_or(PageError::Malformed)?;
+    let at = at.parse().map_err(|_| PageError::Malformed)?;
+    let id = id.parse().map_err(|_| PageError::Malformed)?;
+    Ok((Timestamp(at), id))
 }
 
 fn missing_stores(value: create_request::MissingStores) -> MissingStores {
@@ -152,11 +182,32 @@ impl Workspaces for WorkspacesService {
             .collect::<Result<Vec<_>, _>>()
             .map_err(status)?;
         let owner = non_empty(request.owner);
+        let page = request.page.unwrap_or_default();
+        let limit = page::clamp_page_size(page.page_size);
+        let hash = list_filter_hash(repo, &states, owner.as_deref());
+        let after = page::decode_token(&page.page_token, hash)
+            .and_then(|cursor| cursor.as_deref().map(parse_cursor).transpose())
+            .map_err(status)?;
+        let filter = WorkspaceFilter {
+            repo,
+            states: &states,
+            owner: owner.as_deref(),
+        };
+        // One more than a page, to know whether another follows.
+        let mut rows = manager
+            .list_page(&filter, after, limit.saturating_add(1))
+            .map_err(status)?;
+        let next_page_token = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last()
+                .map(|(last, _)| page::encode_token(&cursor_of(last), hash))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let now = Timestamp::now();
         let local_counts = index::local_counts(&self.state.db, repo).map_err(status)?;
-        let workspaces = manager
-            .list(repo, &states, owner.as_deref())
-            .map_err(status)?
+        let workspaces = rows
             .iter()
             .map(|(record, lease)| {
                 let stores = manager
@@ -175,7 +226,11 @@ impl Workspaces for WorkspacesService {
             .collect();
         Ok(Response::new(ListWorkspacesResponse {
             workspaces,
-            page: None,
+            page: Some(PageInfo {
+                next_page_token,
+                page_size: u32::try_from(limit).unwrap_or(u32::MAX),
+                restarted: false,
+            }),
         }))
     }
 
@@ -206,7 +261,7 @@ impl Workspaces for WorkspacesService {
             other_workspaces_on_change: inspected
                 .other_workspaces_on_change
                 .iter()
-                .map(crate::model::WorkspaceId::as_hex)
+                .map(WorkspaceId::as_hex)
                 .collect(),
             op_id: inspected.op_id.unwrap_or_default(),
             snapshot_count: inspected.snapshot_count,

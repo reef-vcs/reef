@@ -244,8 +244,7 @@ fn newest(
     mut listed: Vec<reef_api::proto::v1::Workspace>,
     limit: usize,
 ) -> Vec<reef_api::proto::v1::Workspace> {
-    // The daemon lists oldest first.
-    listed.reverse();
+    // The daemon lists newest first (R2.01).
     if limit > 0 {
         listed.truncate(limit);
     }

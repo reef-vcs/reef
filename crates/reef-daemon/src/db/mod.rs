@@ -32,6 +32,7 @@ mod stores;
 mod workspaces;
 
 pub use leases::Renewal;
+pub use workspaces::WorkspaceFilter;
 
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
