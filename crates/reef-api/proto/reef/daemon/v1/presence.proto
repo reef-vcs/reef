@@ -1,0 +1,58 @@
+// Presence: what each agent says it is doing, live (R2.10, R2.11).
+// Entries live in the daemon's memory only and expire unless renewed;
+// nothing here is stored in the operation log or SQLite.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "reef/daemon/v1/events.proto";
+import "reef/daemon/v1/types.proto";
+
+// Live agent presence.
+service Presence {
+  // Every live entry as a first frame (`Event.presence` with kind SET),
+  // then each change as it happens, framed as `Operations.Subscribe` frames
+  // events.
+  rpc Subscribe(SubscribePresenceRequest) returns (stream Frame); // R2.10
+  // Reports one agent's presence, one update per message, for as long as
+  // the stream stays open; its entries are cleared when it closes, unless
+  // `oneshot`, and when they expire.
+  rpc Report(stream PresenceUpdate) returns (ReportPresenceResponse); // R2.10
+}
+
+// Whose presence to stream.
+message SubscribePresenceRequest {
+  // The repository; empty for every repository.
+  string repo = 1;
+  // Which entries, by `changes`, `workspaces`, and `owners` (matching the
+  // agent); `kinds` is ignored. Unset for all.
+  EventFilter filter = 2;
+}
+
+// One presence report.
+message PresenceUpdate {
+  // Who reports. Required on the first message, and every later message on
+  // the stream repeats it.
+  string agent = 1;
+  // The workspace id it reports for, or a path inside it; empty for an
+  // agent with no workspace.
+  string workspace = 2;
+  // The change id it works on, in hex; empty for the workspace's.
+  string change = 3;
+  // What it is doing.
+  PresenceEntry.Activity activity = 4;
+  // Free text, such as the command running; a CUSTOM activity's name.
+  string detail = 5;
+  // How far along it is; unset when it cannot say.
+  Progress progress = 6;
+  // Only renew the entry's expiry; leave its activity as it is (R2.11).
+  bool keepalive = 7;
+  // Keep the entry until its TTL even after this stream ends (R2.11).
+  bool oneshot = 8;
+}
+
+// What the report stream did.
+message ReportPresenceResponse {
+  // Updates received.
+  uint64 updates = 1;
+}

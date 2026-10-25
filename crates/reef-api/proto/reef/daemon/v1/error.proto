@@ -1,13 +1,18 @@
-// The detail every daemon error carries in its status details (R1.05,
-// ADR 0017).
+// The detail every daemon error carries (R1.05, ADR 0017, ADR 0029): the
+// status details are a `google.rpc.Status` whose `details` hold one
+// `ErrorDetail` as a `google.protobuf.Any`
+// (`type.googleapis.com/reef.daemon.v1.ErrorDetail`), the standard
+// rich-error model, so any gRPC client library can decode it.
 syntax = "proto3";
 
 package reef.daemon.v1;
 
+// What went wrong, in terms a client can act on.
 message ErrorDetail {
-  // The error's `reef_lib::error::ErrorKind`, by variant name: NotFound,
-  // AlreadyExists, InvalidArgument, Conflict, Unavailable,
-  // PermissionDenied, Io, or Internal.
+  // The error's `ErrorKind`, by variant name: NotFound, AlreadyExists,
+  // InvalidArgument, Conflict, Unavailable, PermissionDenied, Io, or
+  // Internal. Exit codes and retries key on this, not on the gRPC code (Io
+  // and Internal share INTERNAL).
   string kind = 1;
   // The error's message, then each source's, outermost first.
   repeated string chain = 2;

@@ -4,6 +4,15 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Changed
+
+- The daemon API is `reef.daemon.v1`, the whole Phase 2 schema, reviewed once ([docs/api.md](docs/api.md), ADR 0029). v0 clients no longer connect. RPCs whose ticket has not landed answer `UNIMPLEMENTED` with a hint naming it. Error details are now a standard `google.rpc.Status` carrying `ErrorDetail`, and `Workspaces.List` pages.
+- The schema, the Rust client, and the error kinds live in a new crate, `reef-api`, which links neither jj-lib nor SQLite.
+
+### Added
+
+- `reef daemon status` shows the API version and the schema's hash, and the socket serves gRPC reflection, so `grpcurl -unix` works against a daemon.
+
 ## [0.1.0] - 2026-10-25
 
 Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quickstart.md).

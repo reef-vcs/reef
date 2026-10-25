@@ -668,8 +668,8 @@ mod tests {
 
     use reef_api::proto::v1::register_request::IfNotJj;
     use reef_api::proto::v1::{
-        CreateResponse, ForgetResponse, InspectResponse, ListWorkspacesRequest, RegisterResponse,
-        ReleaseResponse, Repository, SnapshotResponse, StatusResponse,
+        CreateResponse, DaemonStatusResponse, ForgetResponse, InspectResponse,
+        ListWorkspacesRequest, RegisterResponse, ReleaseResponse, Repository, SnapshotResponse,
     };
 
     use super::*;
@@ -687,7 +687,7 @@ mod tests {
 
     #[tonic::async_trait]
     impl WorkspacesApi for Fake {
-        async fn status(&self) -> Result<StatusResponse, ClientError> {
+        async fn status(&self) -> Result<DaemonStatusResponse, ClientError> {
             not_here()
         }
         async fn register_repository(

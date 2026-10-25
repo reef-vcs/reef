@@ -1,6 +1,6 @@
 //! The daemon client the CLI, the benchmarks, and the tests use. It wraps
-//! the generated clients, one method per RPC, so nothing else depends on
-//! their shape.
+//! the generated clients, one method per v1 RPC (those whose ticket has not
+//! landed answer `UNIMPLEMENTED`), so nothing else depends on their shape.
 //! [`WorkspacesApi`] is the same surface, less maintenance, as a trait, for
 //! code that wants to run against a fake daemon (R1.21's heartbeater);
 //! [`crate::json`] is the stable JSON form of the responses that `reef -o json`
@@ -15,20 +15,40 @@ use tonic::transport::{Channel, Endpoint, Uri};
 
 use crate::advice::Advice;
 use crate::error::{Classify, ErrorKind, detail_of, kind_from_status};
+use crate::proto::v1::changes_client::ChangesClient;
 use crate::proto::v1::daemon_client::DaemonClient;
 use crate::proto::v1::maintenance_client::MaintenanceClient;
+use crate::proto::v1::operations_client::OperationsClient;
+use crate::proto::v1::presence_client::PresenceClient;
+use crate::proto::v1::queries_client::QueriesClient;
 use crate::proto::v1::register_request::IfNotJj;
+use crate::proto::v1::remote_client::RemoteClient;
 use crate::proto::v1::repositories_client::RepositoriesClient;
 use crate::proto::v1::stores_client::StoresClient;
+use crate::proto::v1::symbols_client::SymbolsClient;
+use crate::proto::v1::trees_client::TreesClient;
 use crate::proto::v1::workspaces_client::WorkspacesClient;
 use crate::proto::v1::{
-    BackupProgress, BackupRequest, BuildEvent, BuildStoreRequest, CreateRequest, CreateResponse,
-    ForgetRequest, ForgetResponse, GcRequest, GcResponse, HeartbeatRequest, HeartbeatResponse,
-    InspectRequest, InspectResponse, ListRepositoriesRequest, ListStoresRequest,
-    ListWorkspacesRequest, MoveRequest, MoveResponse, QuiesceRequest, QuiesceResponse,
-    RegisterRequest, RegisterResponse, ReleaseRequest, ReleaseResponse, Repository, ResumeRequest,
-    ResumeResponse, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, StoreInfo,
-    Workspace,
+    AbandonChangeRequest, AbandonChangeResponse, AbortStoreBuildRequest, AbortStoreBuildResponse,
+    ApplyEditsChunk, ApplyEditsResponse, BackupProgress, BackupRequest, BuildEvent, BuildResult,
+    BuildStoreRequest, CreateRequest, CreateResponse, DaemonStatusRequest, DaemonStatusResponse,
+    DescribeChangeRequest, DescribeChangeResponse, DiffRequest, DiffResponse, FileChunk,
+    ForgetRequest, ForgetResponse, Frame, GcRequest, GcResponse, GetChangeRequest,
+    GetChangeResponse, GetOperationRequest, GetOperationResponse, HeartbeatRequest,
+    HeartbeatResponse, IndexSymbolsRequest, IndexSymbolsResponse, IngestSymbolsChunk,
+    IngestSymbolsResponse, InspectRequest, InspectResponse, IssueTokenRequest, IssueTokenResponse,
+    ListQueriesRequest, ListQueriesResponse, ListRepositoriesRequest, ListStoresRequest,
+    ListTokensRequest, ListTokensResponse, ListTreeRequest, ListTreeResponse,
+    ListWorkspacesRequest, ListWorkspacesResponse, LogChangesRequest, LogChangesResponse,
+    LogOperationsRequest, LogOperationsResponse, LookupSymbolsRequest, LookupSymbolsResponse,
+    MoveRequest, MoveResponse, Page, PrepareStoreBuildRequest, PrepareStoreBuildResponse,
+    PresenceUpdate, QuiesceRequest, QuiesceResponse, ReadFileRequest, RegisterRequest,
+    RegisterResponse, ReleaseRequest, ReleaseResponse, ReplayRequest, ReplayState,
+    ReportPresenceResponse, Repository, ResumeRequest, ResumeResponse, RevokeTokenRequest,
+    RevokeTokenResponse, RunQueryRequest, RunQueryResponse, SealStoreBuildRequest, SnapshotRequest,
+    SnapshotResponse, SquashChangeRequest, SquashChangeResponse, StoreInfo,
+    SubscribePresenceRequest, SubscribeRequest, UndoRequest, UndoResponse, Workspace,
+    WorkspaceStatusRequest, WorkspaceStatusResponse,
 };
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
@@ -129,9 +149,9 @@ impl Client {
     }
 
     /// `Daemon.Status`.
-    pub async fn status(&self) -> Result<StatusResponse, ClientError> {
+    pub async fn status(&self) -> Result<DaemonStatusResponse, ClientError> {
         let mut client = DaemonClient::new(self.channel.clone());
-        Ok(client.status(StatusRequest {}).await?.into_inner())
+        Ok(client.status(DaemonStatusRequest {}).await?.into_inner())
     }
 
     fn repositories(&self) -> RepositoriesClient<Channel> {
@@ -184,17 +204,30 @@ impl Client {
         Ok(self.workspaces().create(request).await?.into_inner())
     }
 
-    /// `Workspaces.List`.
+    /// `Workspaces.List`, every page: follows `next_page_token` from
+    /// `request.page` (the first page when unset) to the last page.
     pub async fn list_workspaces(
         &self,
-        request: ListWorkspacesRequest,
+        mut request: ListWorkspacesRequest,
     ) -> Result<Vec<Workspace>, ClientError> {
-        Ok(self
-            .workspaces()
-            .list(request)
-            .await?
-            .into_inner()
-            .workspaces)
+        let mut all = Vec::new();
+        loop {
+            let response = self.list_workspaces_page(request.clone()).await?;
+            all.extend(response.workspaces);
+            let next = response.page.map(|page| page.next_page_token);
+            match next.filter(|token| !token.is_empty()) {
+                Some(token) => request.page.get_or_insert_with(Page::default).page_token = token,
+                None => return Ok(all),
+            }
+        }
+    }
+
+    /// `Workspaces.List`, one page.
+    pub async fn list_workspaces_page(
+        &self,
+        request: ListWorkspacesRequest,
+    ) -> Result<ListWorkspacesResponse, ClientError> {
+        Ok(self.workspaces().list(request).await?.into_inner())
     }
 
     /// `Workspaces.Inspect`. `repo` may be empty to look the workspace up
@@ -269,7 +302,7 @@ impl Client {
     ) -> Result<HeartbeatResponse, ClientError> {
         let request = HeartbeatRequest {
             repo: repo.to_owned(),
-            workspace_id: workspace.to_owned(),
+            workspace: workspace.to_owned(),
             lease_id: lease_id.to_owned(),
         };
         Ok(self.workspaces().heartbeat(request).await?.into_inner())
@@ -364,6 +397,247 @@ impl Client {
         let mut client = StoresClient::new(self.channel.clone());
         Ok(client.list(request).await?.into_inner().stores)
     }
+
+    /// `Stores.Prepare` (R2.27).
+    pub async fn prepare_store_build(
+        &self,
+        request: PrepareStoreBuildRequest,
+    ) -> Result<PrepareStoreBuildResponse, ClientError> {
+        let mut client = StoresClient::new(self.channel.clone());
+        Ok(client.prepare(request).await?.into_inner())
+    }
+
+    /// `Stores.Seal` (R2.27).
+    pub async fn seal_store_build(
+        &self,
+        request: SealStoreBuildRequest,
+    ) -> Result<BuildResult, ClientError> {
+        let mut client = StoresClient::new(self.channel.clone());
+        Ok(client.seal(request).await?.into_inner())
+    }
+
+    /// `Stores.Abort` (R2.27).
+    pub async fn abort_store_build(
+        &self,
+        request: AbortStoreBuildRequest,
+    ) -> Result<AbortStoreBuildResponse, ClientError> {
+        let mut client = StoresClient::new(self.channel.clone());
+        Ok(client.abort(request).await?.into_inner())
+    }
+
+    /// `Workspaces.Status` (R2.02).
+    pub async fn workspace_status(
+        &self,
+        request: WorkspaceStatusRequest,
+    ) -> Result<WorkspaceStatusResponse, ClientError> {
+        Ok(self.workspaces().status(request).await?.into_inner())
+    }
+
+    fn changes(&self) -> ChangesClient<Channel> {
+        ChangesClient::new(self.channel.clone())
+    }
+
+    /// `Changes.Log` (R2.02), one page.
+    pub async fn log_changes(
+        &self,
+        request: LogChangesRequest,
+    ) -> Result<LogChangesResponse, ClientError> {
+        Ok(self.changes().log(request).await?.into_inner())
+    }
+
+    /// `Changes.Get` (R2.02).
+    pub async fn get_change(
+        &self,
+        request: GetChangeRequest,
+    ) -> Result<GetChangeResponse, ClientError> {
+        Ok(self.changes().get(request).await?.into_inner())
+    }
+
+    /// `Changes.Diff` (R2.02; level SYMBOLS R2.15).
+    pub async fn diff(&self, request: DiffRequest) -> Result<DiffResponse, ClientError> {
+        Ok(self.changes().diff(request).await?.into_inner())
+    }
+
+    /// `Changes.Describe` (R2.03).
+    pub async fn describe_change(
+        &self,
+        request: DescribeChangeRequest,
+    ) -> Result<DescribeChangeResponse, ClientError> {
+        Ok(self.changes().describe(request).await?.into_inner())
+    }
+
+    /// `Changes.Abandon` (R2.03).
+    pub async fn abandon_change(
+        &self,
+        request: AbandonChangeRequest,
+    ) -> Result<AbandonChangeResponse, ClientError> {
+        Ok(self.changes().abandon(request).await?.into_inner())
+    }
+
+    /// `Changes.Squash` (R2.03).
+    pub async fn squash_change(
+        &self,
+        request: SquashChangeRequest,
+    ) -> Result<SquashChangeResponse, ClientError> {
+        Ok(self.changes().squash(request).await?.into_inner())
+    }
+
+    fn operations(&self) -> OperationsClient<Channel> {
+        OperationsClient::new(self.channel.clone())
+    }
+
+    /// `Operations.Log` (R2.02), one page.
+    pub async fn log_operations(
+        &self,
+        request: LogOperationsRequest,
+    ) -> Result<LogOperationsResponse, ClientError> {
+        Ok(self.operations().log(request).await?.into_inner())
+    }
+
+    /// `Operations.Get` (R2.02).
+    pub async fn get_operation(
+        &self,
+        request: GetOperationRequest,
+    ) -> Result<GetOperationResponse, ClientError> {
+        Ok(self.operations().get(request).await?.into_inner())
+    }
+
+    /// `Operations.Undo` (R2.03).
+    pub async fn undo(&self, request: UndoRequest) -> Result<UndoResponse, ClientError> {
+        Ok(self.operations().undo(request).await?.into_inner())
+    }
+
+    /// `Operations.Subscribe` (R2.09): frames until the caller drops the
+    /// stream; an error ends it.
+    pub async fn subscribe(
+        &self,
+        request: SubscribeRequest,
+    ) -> Result<tonic::Streaming<Frame>, ClientError> {
+        Ok(self.operations().subscribe(request).await?.into_inner())
+    }
+
+    /// `Operations.Replay` (R2.12).
+    pub async fn replay(&self, request: ReplayRequest) -> Result<ReplayState, ClientError> {
+        Ok(self.operations().replay(request).await?.into_inner())
+    }
+
+    fn trees(&self) -> TreesClient<Channel> {
+        TreesClient::new(self.channel.clone())
+    }
+
+    /// `Trees.List` (R2.04), one page.
+    pub async fn list_tree(
+        &self,
+        request: ListTreeRequest,
+    ) -> Result<ListTreeResponse, ClientError> {
+        Ok(self.trees().list(request).await?.into_inner())
+    }
+
+    /// `Trees.Read` (R2.04): the file's chunks, metadata on the first.
+    pub async fn read_file(
+        &self,
+        request: ReadFileRequest,
+    ) -> Result<tonic::Streaming<FileChunk>, ClientError> {
+        Ok(self.trees().read(request).await?.into_inner())
+    }
+
+    /// `Trees.Apply` (R2.04): `chunks` is the header, then the edits.
+    pub async fn apply_edits(
+        &self,
+        chunks: impl tokio_stream::Stream<Item = ApplyEditsChunk> + Send + 'static,
+    ) -> Result<ApplyEditsResponse, ClientError> {
+        Ok(self.trees().apply(chunks).await?.into_inner())
+    }
+
+    /// `Presence.Subscribe` (R2.10): the live table, then changes.
+    pub async fn subscribe_presence(
+        &self,
+        request: SubscribePresenceRequest,
+    ) -> Result<tonic::Streaming<Frame>, ClientError> {
+        let mut client = PresenceClient::new(self.channel.clone());
+        Ok(client.subscribe(request).await?.into_inner())
+    }
+
+    /// `Presence.Report` (R2.10): reports each update `updates` yields
+    /// until it ends.
+    pub async fn report_presence(
+        &self,
+        updates: impl tokio_stream::Stream<Item = PresenceUpdate> + Send + 'static,
+    ) -> Result<ReportPresenceResponse, ClientError> {
+        let mut client = PresenceClient::new(self.channel.clone());
+        Ok(client.report(updates).await?.into_inner())
+    }
+
+    fn symbols(&self) -> SymbolsClient<Channel> {
+        SymbolsClient::new(self.channel.clone())
+    }
+
+    /// `Symbols.Index` (R2.14).
+    pub async fn index_symbols(
+        &self,
+        request: IndexSymbolsRequest,
+    ) -> Result<IndexSymbolsResponse, ClientError> {
+        Ok(self.symbols().index(request).await?.into_inner())
+    }
+
+    /// `Symbols.Ingest` (R2.14): `chunks` is the index, the first chunk
+    /// naming the repository, the revision, and the source.
+    pub async fn ingest_symbols(
+        &self,
+        chunks: impl tokio_stream::Stream<Item = IngestSymbolsChunk> + Send + 'static,
+    ) -> Result<IngestSymbolsResponse, ClientError> {
+        Ok(self.symbols().ingest(chunks).await?.into_inner())
+    }
+
+    /// `Symbols.Lookup` (R2.14), one page.
+    pub async fn lookup_symbols(
+        &self,
+        request: LookupSymbolsRequest,
+    ) -> Result<LookupSymbolsResponse, ClientError> {
+        Ok(self.symbols().lookup(request).await?.into_inner())
+    }
+
+    /// `Queries.List` (R2.16).
+    pub async fn list_queries(&self) -> Result<ListQueriesResponse, ClientError> {
+        let mut client = QueriesClient::new(self.channel.clone());
+        Ok(client.list(ListQueriesRequest {}).await?.into_inner())
+    }
+
+    /// `Queries.Run` (R2.16), one page.
+    pub async fn run_query(
+        &self,
+        request: RunQueryRequest,
+    ) -> Result<RunQueryResponse, ClientError> {
+        let mut client = QueriesClient::new(self.channel.clone());
+        Ok(client.run(request).await?.into_inner())
+    }
+
+    fn remote(&self) -> RemoteClient<Channel> {
+        RemoteClient::new(self.channel.clone())
+    }
+
+    /// `Remote.IssueToken` (R2.08).
+    pub async fn issue_token(
+        &self,
+        request: IssueTokenRequest,
+    ) -> Result<IssueTokenResponse, ClientError> {
+        Ok(self.remote().issue_token(request).await?.into_inner())
+    }
+
+    /// `Remote.ListTokens` (R2.08).
+    pub async fn list_tokens(&self) -> Result<ListTokensResponse, ClientError> {
+        let request = ListTokensRequest {};
+        Ok(self.remote().list_tokens(request).await?.into_inner())
+    }
+
+    /// `Remote.RevokeToken` (R2.08). `token` is a name, an id, or a unique
+    /// id prefix.
+    pub async fn revoke_token(&self, token: &str) -> Result<RevokeTokenResponse, ClientError> {
+        let request = RevokeTokenRequest {
+            token: token.to_owned(),
+        };
+        Ok(self.remote().revoke_token(request).await?.into_inner())
+    }
 }
 
 /// The workspace side of the client's surface as a trait: one method per
@@ -374,7 +648,7 @@ impl Client {
 #[tonic::async_trait]
 pub trait WorkspacesApi: Send + Sync {
     /// `Daemon.Status`.
-    async fn status(&self) -> Result<StatusResponse, ClientError>;
+    async fn status(&self) -> Result<DaemonStatusResponse, ClientError>;
     /// `Repositories.Register`.
     async fn register_repository(
         &self,
@@ -426,7 +700,7 @@ pub trait WorkspacesApi: Send + Sync {
 
 #[tonic::async_trait]
 impl WorkspacesApi for Client {
-    async fn status(&self) -> Result<StatusResponse, ClientError> {
+    async fn status(&self) -> Result<DaemonStatusResponse, ClientError> {
         Client::status(self).await
     }
 

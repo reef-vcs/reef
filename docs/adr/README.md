@@ -18,7 +18,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0004](0004-grpc-over-unix-socket.md) | gRPC with tonic over a Unix socket for the daemon API | accepted |
 | [0005](0005-tauri-desktop-shell.md) | Tauri 2 for the desktop shell | accepted |
 | [0006](0006-cel-for-policy.md) | CEL for repository policy | accepted |
-| [0007](0007-crate-layout.md) | Crate layout | accepted |
+| [0007](0007-crate-layout.md) | Crate layout | accepted, amended by [0029](0029-daemon-api-v1-and-the-reef-api-crate.md) |
 | [0008](0008-jj-lib-embedding-findings.md) | jj-lib embedding findings | accepted |
 | [0009](0009-error-and-logging-conventions.md) | Error and logging conventions | accepted |
 | [0010](0010-dco-instead-of-cla.md) | DCO instead of CLA | accepted |
@@ -28,7 +28,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0014](0014-workspace-model-on-jj.md) | Workspace model on jj | accepted |
 | [0015](0015-materialization-backends-and-base-cache.md) | Materialization backends and the base cache | accepted |
 | [0016](0016-overlayfs-privilege-tiers.md) | overlayfs on Linux: privilege tiers | accepted |
-| [0017](0017-daemon-api-v0-and-error-mapping.md) | Daemon API v0 and error mapping | accepted |
+| [0017](0017-daemon-api-v0-and-error-mapping.md) | Daemon API v0 and error mapping | superseded by [0029](0029-daemon-api-v1-and-the-reef-api-crate.md) |
 | [0018](0018-snapshot-staleness-and-divergence.md) | Snapshot staleness and divergence | accepted |
 | [0019](0019-leases-and-reclaim.md) | Leases and reclaim | accepted |
 | [0020](0020-local-backup-format.md) | Local backup format | accepted |
@@ -40,3 +40,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0026](0026-narrowed-notify-snapshots.md) | Narrowed notify snapshots | accepted |
 | [0027](0027-trust-boundaries-in-phase-1.md) | Trust boundaries in Phase 1 | accepted |
 | [0028](0028-watch-attachment-off-the-create-path.md) | Watch attachment off the create path | accepted |
+| [0029](0029-daemon-api-v1-and-the-reef-api-crate.md) | Daemon API v1 and the `reef-api` crate | accepted |

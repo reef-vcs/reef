@@ -10,7 +10,7 @@ use crate::db::SCHEMA_VERSION;
 use crate::error::status;
 use crate::model::WorkspaceState;
 use reef_api::proto::v1::daemon_server::Daemon;
-use reef_api::proto::v1::{BackendProbe, StatusRequest, StatusResponse};
+use reef_api::proto::v1::{BackendProbe, DaemonStatusRequest, DaemonStatusResponse};
 
 /// Serves `Daemon`.
 #[derive(Debug)]
@@ -29,8 +29,8 @@ impl DaemonService {
 impl Daemon for DaemonService {
     async fn status(
         &self,
-        _request: Request<StatusRequest>,
-    ) -> Result<Response<StatusResponse>, Status> {
+        _request: Request<DaemonStatusRequest>,
+    ) -> Result<Response<DaemonStatusResponse>, Status> {
         let state = &self.state;
         let paths = &state.config.paths;
         let repositories = state.db.repositories().map_err(status)?.len();
@@ -62,7 +62,7 @@ impl Daemon for DaemonService {
                 }
             })
             .collect();
-        Ok(Response::new(StatusResponse {
+        Ok(Response::new(DaemonStatusResponse {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             pid: std::process::id(),
             uptime_ms: u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -72,6 +72,7 @@ impl Daemon for DaemonService {
             repositories: saturate(repositories),
             backends,
             active_workspaces: saturate(active_workspaces),
+            ..DaemonStatusResponse::default()
         }))
     }
 }

@@ -315,7 +315,7 @@ pub async fn run(
     dest: &Path,
     repo: Option<RepoId>,
     progress: mpsc::Sender<BackupProgress>,
-) -> Result<Manifest, BackupError> {
+) -> Result<Finished, BackupError> {
     let begun = Instant::now();
     prepare_dest(state, dest)?;
     let report = |step: &str, repo: Option<RepoId>, files: u64, bytes: u64| {
@@ -326,6 +326,7 @@ pub async fn run(
             bytes,
             done: false,
             manifest_path: String::new(),
+            summary: None,
         };
         // Progress is best effort: a client that stopped reading does not
         // stop the backup.
@@ -393,7 +394,23 @@ pub async fn run(
         elapsed_ms = elapsed_ms(begun),
         "backup finished"
     );
-    Ok(manifest)
+    Ok(Finished {
+        manifest,
+        started,
+        completed: finished,
+    })
+}
+
+/// A finished backup: its manifest, as written, and when it began and
+/// ended.
+#[derive(Clone, Debug)]
+pub struct Finished {
+    /// `manifest.json`.
+    pub manifest: Manifest,
+    /// When it began: the manifest's `created_at`.
+    pub started: Timestamp,
+    /// When the last repository's heads were written.
+    pub completed: Timestamp,
 }
 
 /// `<dest>/repos/<id>`.

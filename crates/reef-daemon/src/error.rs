@@ -18,7 +18,7 @@ pub use reef_api::advice::{Advice, Advise};
 pub use reef_api::error::{KINDS, code_of, detail_of, kind_from_status, kind_name, parse_kind};
 use reef_api::proto::v1::ErrorDetail;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
-use tonic::Status;
+use tonic::{Code, Status};
 
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
@@ -89,7 +89,13 @@ pub fn status_from(error: &(dyn Error + 'static), kind: ErrorKind) -> Status {
         hint: advice.hint,
         next: advice.next,
     };
-    Status::with_details(code_of(kind), message, detail.encode_to_vec().into())
+    status_with_detail(code_of(kind), message, &detail)
+}
+
+/// A status with `code` and `message` whose details carry `detail`: the
+/// one place the daemon encodes an `ErrorDetail`.
+pub fn status_with_detail(code: Code, message: String, detail: &ErrorDetail) -> Status {
+    Status::with_details(code, message, detail.encode_to_vec().into())
 }
 
 /// [`status_from`] with the error's own kind. Handlers end in
@@ -121,8 +127,6 @@ fn chain(error: &(dyn Error + 'static)) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::io;
-
-    use tonic::Code;
 
     use super::*;
     use crate::backend::{BackendError, BackendKind};

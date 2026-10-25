@@ -1,18 +1,24 @@
 // The Reef daemon API, version 1 (R2.01, ADR 0029). Rust clients use
 // `reef_api::client::Client`; other languages generate from these files.
+// Within v1 every change is additive: fields and RPCs are added, never
+// renumbered, renamed, or removed (docs/api.md).
 syntax = "proto3";
 
 package reef.daemon.v1;
 
+import "google/protobuf/duration.proto";
+
 // The daemon itself.
 service Daemon {
-  // What the daemon is and what it serves.
-  rpc Status(StatusRequest) returns (StatusResponse);
+  // What the daemon is, which schema it serves, and what it can do.
+  rpc Status(DaemonStatusRequest) returns (DaemonStatusResponse);
 }
 
-message StatusRequest {}
+// No parameters.
+message DaemonStatusRequest {}
 
-message StatusResponse {
+// The daemon's identity, state, and capabilities.
+message DaemonStatusResponse {
   // The daemon's version (`CARGO_PKG_VERSION`).
   string version = 1;
   // The daemon's process id.
@@ -32,11 +38,55 @@ message StatusResponse {
   repeated BackendProbe backends = 8;
   // Workspaces in the `active` state.
   uint32 active_workspaces = 9;
+  // The API's major version: "v1".
+  string api_version = 10;
+  // BLAKE3 of the descriptor set the daemon was built with, 64 hex
+  // characters (`reef_api::SCHEMA_HASH`): two builds with the same hash
+  // serve the same schema.
+  string schema_hash = 11;
+  // Each registered repository's event state (R2.09); empty until then.
+  repeated RepoSeq seqs = 12;
+  // The loopback web listener's URL (R2.08); empty until then.
+  string web_url = 13;
+  // The remote listener's address (R2.08); empty when it is off.
+  string remote_listen = 14;
+  // The newest event sequence the daemon has assigned, over every
+  // repository (R2.09); 0 until then. A subscriber starting now resumes
+  // after it.
+  uint64 seq = 15;
+  // Events a subscriber may fall behind by before it is `lagged`: the
+  // broker's `[events] buffer` (R2.09); 0 until then.
+  uint32 events_buffer = 16;
+  // Live presence entries (R2.10); 0 until then.
+  uint32 presence_entries = 17;
+  // How long a presence entry lives without an update: `[presence] ttl`
+  // (R2.11); unset until then.
+  google.protobuf.Duration presence_ttl = 18;
+  // The longest lease a create may ask for: `lease.max` (R2.26).
+  google.protobuf.Duration lease_max = 19;
+  // Whether the web UI's files are built into this daemon (R2.18).
+  bool ui_built_in = 20;
 }
 
+// One repository's event state (R2.09).
+message RepoSeq {
+  // The repository.
+  string repo_id = 1;
+  // The newest event sequence of this repository's events: where a
+  // subscription to it alone stands. 0 before its first.
+  uint64 seq = 2;
+  // Whether the daemon watches its operation heads, so operations written
+  // outside it (jj by hand) are noticed at once (R2.09).
+  bool op_heads_watch = 3;
+  // The head operation the daemon's reads answer from (R2.02).
+  string head_op_id = 4;
+}
+
+// One materialization backend's probe.
 message BackendProbe {
   // The backend's name, as stored in `workspaces.backend`.
   string kind = 1;
+  // Whether it can serve workspace roots under the state directory.
   bool available = 2;
   // Why it is unavailable; empty when available.
   string reason = 3;

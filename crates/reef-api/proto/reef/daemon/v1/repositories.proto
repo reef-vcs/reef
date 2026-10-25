@@ -5,6 +5,7 @@ package reef.daemon.v1;
 
 import "reef/daemon/v1/types.proto";
 
+// The repositories the daemon serves.
 service Repositories {
   // Registers the jj repository containing `path`, by its root. Registering
   // a registered repository again succeeds with `already_registered`. With
@@ -18,6 +19,7 @@ service Repositories {
   rpc Forget(ForgetRequest) returns (ForgetResponse);
 }
 
+// Which repository to register.
 message RegisterRequest {
   // What to do when no jj repository contains `path` (R1.25).
   enum IfNotJj {
@@ -32,28 +34,37 @@ message RegisterRequest {
 
   // An absolute path inside the repository's root.
   string path = 1;
+  // What to do with a git checkout that has no jj repository.
   IfNotJj if_not_jj = 2;
 }
 
+// The registered repository.
 message RegisterResponse {
+  // The repository, as registered now or before.
   Repository repository = 1;
+  // It was registered before this call.
   bool already_registered = 2;
   // Whether this call created `.jj` in the checkout (R1.25).
   bool initialized_jj = 3;
 }
 
+// No parameters.
 message ListRepositoriesRequest {}
 
+// Every registered repository.
 message ListRepositoriesResponse {
+  // Oldest first.
   repeated Repository repositories = 1;
 }
 
+// Which repository to forget.
 message ForgetRequest {
   // A repo id, a unique id prefix (4 or more hex characters), or an
   // absolute path inside a registered root.
   string repo = 1;
 }
 
+// The repository forgotten.
 message ForgetResponse {
   // The repository forgotten (R1.22).
   Repository repository = 1;

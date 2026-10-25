@@ -115,6 +115,9 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
                 .map(PendingWatch::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            // R2.10 fills both from the presence table.
+            presence: Vec::new(),
+            heartbeat_at: None,
         }
     }
 }

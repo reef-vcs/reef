@@ -1,13 +1,14 @@
 //! `reef backup` (R1.18, ADR 0020): a consistent copy of the daemon's state
 //! into a new or empty directory, taken while agents keep writing. Progress
-//! goes to stderr; the result is the backup's manifest.
+//! goes to stderr; the result is the backup's manifest, as the daemon's last
+//! progress message carries it.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use reef_api::client::ClientError;
-use reef_daemon::maintenance::backup::Manifest;
+use reef_api::json::BackupManifest;
 
 use super::render::size;
 use super::repo::missing;
@@ -40,7 +41,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             let mut steps = ctx.client.backup(dest, &repo).await?;
             while let Some(step) = steps.message().await.map_err(ClientError::from)? {
                 if step.done {
-                    return Ok(Some(step.manifest_path));
+                    return Ok(step.summary.as_ref().map(BackupManifest::from));
                 }
                 let what = if step.repo_id.is_empty() {
                     "database".to_owned()
@@ -57,21 +58,16 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             Ok(None)
         }
     };
-    let manifest_path = match &args.repo {
+    let manifest = match &args.repo {
         Some(repo) => {
             ctx.call_with_repo_within(deadline, &RepoArg::parse(repo)?, streamed)
                 .await?
         }
         None => ctx.call_within(deadline, streamed(String::new())).await?,
     };
-    let Some(manifest_path) = manifest_path else {
+    let Some(manifest) = manifest else {
         return Err(missing("backup result"));
     };
-    let manifest = Manifest::read(&dest).map_err(|error| CliError::Io {
-        op: "read",
-        path: PathBuf::from(&manifest_path),
-        source: std::io::Error::other(reef_lib::error::ErrorChain(&error).to_string()),
-    })?;
     let files: u64 = manifest.repos.iter().map(|repo| repo.files).sum();
     let bytes: u64 =
         manifest.repos.iter().map(|repo| repo.bytes).sum::<u64>() + manifest.sqlite.bytes;

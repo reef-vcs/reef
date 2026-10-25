@@ -517,6 +517,7 @@ async fn release_tears_down_and_keeps_row() {
             repo: repo.id.clone(),
             states: vec!["released".into()],
             owner: OWNER.into(),
+            page: None,
         })
         .await
         .unwrap();

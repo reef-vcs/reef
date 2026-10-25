@@ -1,0 +1,116 @@
+// Events: what `Operations.Subscribe` and `Presence.Subscribe` stream
+// (R2.09, R2.10). Indexed events get the daemon-wide sequence `seq`, from 1,
+// without gaps; a client resumes after the last sequence it saw.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/daemon/v1/types.proto";
+
+// Which events a subscriber wants. Within a field, values are alternatives;
+// across fields, all must match. Empty fields match everything.
+message EventFilter {
+  // Change ids, full hex: operations that moved them.
+  repeated string changes = 1;
+  // Workspace ids: events about them.
+  repeated string workspaces = 2;
+  // Workspace owners, or for presence the reporting agent.
+  repeated string owners = 3;
+  // `operation:<kind>` (an `Operation.kind`), `workspace:<kind>` (a
+  // `WorkspaceEvent.Kind` in lower case), `lease`, or `presence`; an
+  // unknown one is INVALID_ARGUMENT. Ignored by `Presence.Subscribe`.
+  repeated string kinds = 4;
+}
+
+// One event.
+message Event {
+  // The daemon-wide event sequence; 0 for events that are not indexed
+  // (lease heartbeats, presence).
+  uint64 seq = 1;
+  // The repository.
+  string repo_id = 2;
+  // When the daemon recorded it.
+  google.protobuf.Timestamp at = 3;
+  // What happened; exactly one is set.
+  oneof payload {
+    // A jj operation was recorded, by the daemon or not.
+    Operation operation = 4;
+    // A workspace's state changed.
+    WorkspaceEvent workspace = 5;
+    // A lease was issued, renewed, or expired.
+    LeaseEvent lease = 6;
+    // A presence entry was set or cleared (R2.10).
+    PresenceEntry presence = 7;
+  }
+}
+
+// A workspace's state changed.
+message WorkspaceEvent {
+  // What changed.
+  enum Kind {
+    // It was created.
+    CREATED = 0;
+    // A snapshot recorded an operation.
+    SNAPSHOTTED = 1;
+    // It was released.
+    RELEASED = 2;
+    // Its lease expired and it was reclaimed.
+    RECLAIMED = 3;
+    // It moved to another change.
+    MOVED = 4;
+    // Its `attention` or `divergent` changed.
+    ATTENTION = 5;
+  }
+  // What changed.
+  Kind kind = 1;
+  // The workspace afterwards.
+  Workspace workspace = 2;
+  // The operation that recorded it; empty when none did.
+  string op_id = 3;
+  // What the index recorded with it: the reclaim's final operation and
+  // reason for RELEASED and RECLAIMED, `<attention>|<divergent>` for
+  // ATTENTION; empty otherwise.
+  string detail = 4;
+  // The lease involved, when there is one.
+  string lease_id = 5;
+  // For RELEASED and RECLAIMED: bytes the workspace had allocated.
+  uint64 freed_bytes = 6;
+}
+
+// A lease changed. The index records issues and expiries; heartbeats are
+// live only, with `Event.seq` 0.
+message LeaseEvent {
+  // What changed.
+  enum Kind {
+    // It was issued: with a create, or by a restore.
+    ISSUED = 0;
+    // A heartbeat renewed it.
+    HEARTBEAT = 1;
+    // It passed its grace and its workspace is being reclaimed.
+    EXPIRED = 2;
+  }
+  // What changed.
+  Kind kind = 1;
+  // The workspace it is for.
+  string workspace = 2;
+  // The lease afterwards.
+  Lease lease = 3;
+}
+
+// A batch of events, in sequence order.
+message Frame {
+  // The events, oldest first.
+  repeated Event events = 1;
+  // The first sequence the frame covers.
+  uint64 from_seq = 2;
+  // The last sequence the frame covers.
+  uint64 to_seq = 3;
+  // Events between `from_seq` and `to_seq` the filter excluded, so a
+  // client that counts sees every sequence once.
+  uint32 coalesced = 4;
+  // The subscriber fell behind: the daemon caught it up from the index
+  // (`Operations.Subscribe`), or this frame resends every live entry
+  // (`Presence.Subscribe`). Nothing indexed is lost.
+  bool lagged = 5;
+}

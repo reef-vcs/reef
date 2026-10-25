@@ -59,7 +59,42 @@ impl From<&GcReport> for v1::GcReport {
             store_bytes_freed: report.store_bytes_freed,
             elapsed_ms: report.elapsed_ms,
             dry_run: report.dry_run,
+            // R2.14 adds the symbol tables' step.
+            symbol_rows_removed: 0,
         }
+    }
+}
+
+/// A finished backup's manifest as the last progress message carries it.
+fn summary(finished: &backup::Finished) -> v1::BackupSummary {
+    let manifest = &finished.manifest;
+    v1::BackupSummary {
+        version: manifest.version,
+        started_at: Some(timestamp(finished.started)),
+        daemon_instance_id: manifest.daemon_instance_id.clone(),
+        reef_version: manifest.reef_version.clone(),
+        jj_lib_version: manifest.jj_lib_version.clone(),
+        state_dir: manifest.state_dir.display().to_string(),
+        repos: manifest
+            .repos
+            .iter()
+            .map(|repo| v1::BackupRepo {
+                id: repo.id.clone(),
+                root: repo.root.display().to_string(),
+                jj_repo_path: repo.jj_repo_path.display().to_string(),
+                colocated: repo.colocated,
+                op_heads: repo.op_heads.clone(),
+                files: repo.files,
+                bytes: repo.bytes,
+                pause_ms: repo.pause_ms,
+            })
+            .collect(),
+        database: Some(v1::BackupDatabase {
+            pages: manifest.sqlite.pages,
+            bytes: manifest.sqlite.bytes,
+        }),
+        complete: manifest.complete,
+        completed_at: Some(timestamp(finished.completed)),
     }
 }
 
@@ -144,15 +179,19 @@ impl Maintenance for MaintenanceService {
                 let _ = events.try_send(Ok(step));
             }
             let last = match job.await {
-                Ok(Ok(manifest)) => Ok(BackupProgress {
-                    repo_id: String::new(),
-                    step: "done".to_owned(),
-                    files: manifest.repos.iter().map(|repo| repo.files).sum(),
-                    bytes: manifest.repos.iter().map(|repo| repo.bytes).sum::<u64>()
-                        + manifest.sqlite.bytes,
-                    done: true,
-                    manifest_path,
-                }),
+                Ok(Ok(finished)) => {
+                    let manifest = &finished.manifest;
+                    Ok(BackupProgress {
+                        repo_id: String::new(),
+                        step: "done".to_owned(),
+                        files: manifest.repos.iter().map(|repo| repo.files).sum(),
+                        bytes: manifest.repos.iter().map(|repo| repo.bytes).sum::<u64>()
+                            + manifest.sqlite.bytes,
+                        done: true,
+                        manifest_path,
+                        summary: Some(summary(&finished)),
+                    })
+                }
                 Ok(Err(error)) => {
                     backup::log_failure(&error);
                     Err(status(error))

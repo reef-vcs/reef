@@ -8,7 +8,9 @@ package reef.daemon.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/daemon/v1/types.proto";
 
+// Shared dependency stores: built once, sealed, mounted everywhere.
 service Stores {
   // Runs the store's `build` command in a scratch workspace and seals what
   // it wrote: the command's output lines as they come, then the result. A
@@ -19,10 +21,22 @@ service Stores {
   // INTERNAL (timed out; the process group was killed), UNAVAILABLE (the
   // daemon is shutting down).
   rpc Build(BuildStoreRequest) returns (stream BuildEvent);
+  // Starts a build the client runs itself (R2.27): leases a scratch
+  // workspace on `rev` with the other stores mounted, and returns where to
+  // run the store's command and where its output goes. Seal or Abort ends
+  // it; an expired lease aborts it.
+  rpc Prepare(PrepareStoreBuildRequest) returns (PrepareStoreBuildResponse); // R2.27
+  // Seals what a prepared build wrote, given the command's exit code
+  // (R2.27): a zero exit seals the store read-only; any other keeps it for
+  // inspection until GC, like a failed Build.
+  rpc Seal(SealStoreBuildRequest) returns (BuildResult); // R2.27
+  // Abandons a prepared build and releases its scratch workspace (R2.27).
+  rpc Abort(AbortStoreBuildRequest) returns (AbortStoreBuildResponse); // R2.27
   // Sealed stores.
   rpc List(ListStoresRequest) returns (ListStoresResponse);
 }
 
+// Which store to build, and how.
 message BuildStoreRequest {
   // A repo id, a unique id prefix, or an absolute path inside a registered
   // root.
@@ -39,9 +53,13 @@ message BuildStoreRequest {
   bool force = 5;
 }
 
+// One event of a build's stream.
 message BuildEvent {
+  // Exactly one is set.
   oneof event {
+    // A line the command wrote.
     OutputLine line = 1;
+    // The build's result: the stream's last message.
     BuildResult done = 2;
     // Sent once, before the first line, when the command is about to run
     // (RX.01): what the daemon runs, for the client to show.
@@ -63,15 +81,22 @@ message BuildStarted {
 // One line of the build command's output, without its line ending, lossily
 // decoded as UTF-8.
 message OutputLine {
+  // Which of the command's streams it came from.
   enum Stream {
+    // Standard output.
     STDOUT = 0;
+    // Standard error.
     STDERR = 1;
   }
+  // The line.
   string text = 1;
+  // Where it came from.
   Stream stream = 2;
 }
 
+// How a build ended.
 message BuildResult {
+  // The store's name.
   string name = 1;
   // blake3 of the lockfile's bytes, 64 hex characters.
   string lockfile_hash = 2;
@@ -80,6 +105,7 @@ message BuildResult {
   string path = 3;
   // Bytes the sealed store allocates.
   uint64 bytes = 4;
+  // Whether the store is sealed; false for a failed build.
   bool sealed = 5;
   // The command's exit code; -1 if a signal ended it.
   int32 exit_code = 6;
@@ -90,21 +116,31 @@ message BuildResult {
   uint64 dropped_lines = 8;
   // A sealed store already existed; nothing was built.
   bool already_built = 9;
+  // The event sequence of the scratch workspace's release (R2.09); 0
+  // until then, and when nothing was built.
+  uint64 seq = 10;
 }
 
+// Which stores to list.
 message ListStoresRequest {
   // Empty for every store; otherwise the stores this repository built
   // first or one of its workspaces mounts.
   string repo = 1;
 }
 
+// A built store.
 message StoreInfo {
+  // The `[[store]] name`.
   string name = 1;
+  // blake3 of its lockfile, 64 hex characters.
   string lockfile_hash = 2;
+  // Its directory.
   string path = 3;
   // Allocated bytes, measured when listed.
   uint64 bytes = 4;
+  // When its build was sealed.
   google.protobuf.Timestamp built_at = 5;
+  // Whether it is sealed.
   bool sealed = 6;
   // Loaded workspaces that mount it, a running build's scratch workspace
   // (which mounts the other stores it can) included.
@@ -113,6 +149,88 @@ message StoreInfo {
   string repo_id = 8;
 }
 
+// The stores.
 message ListStoresResponse {
+  // One per store and lockfile hash.
   repeated StoreInfo stores = 1;
+}
+
+// A build to prepare (R2.27).
+message PrepareStoreBuildRequest {
+  // A repo id, a unique id prefix, or an absolute path inside a registered
+  // root.
+  string repo = 1;
+  // The `[[store]] name`.
+  string name = 2;
+  // The revision whose `reef.toml` and lockfile to build from; empty for
+  // CreateRequest's default start.
+  string rev = 3;
+  // The scratch workspace's lease length; 0 = the daemon default.
+  uint64 lease_ms = 4;
+  // Prepare even if a sealed store exists for the lockfile's hash.
+  bool force = 5;
+  // Who builds: the scratch workspace's owner; Seal and Abort must name
+  // the same.
+  string owner = 6;
+}
+
+// Where and what to build (R2.27). Run `argv` in `scratch_root` with the
+// client's environment plus `env` and `REEF_STORE_DIR = store_dir`,
+// heartbeat `lease`, then Seal with the exit code.
+message PrepareStoreBuildResponse {
+  // Names the build in Seal and Abort.
+  string build_id = 1;
+  // The scratch workspace's directory: the command's working directory.
+  string scratch_root = 2;
+  // Where the command writes the store's contents.
+  string store_dir = 3;
+  // The `[[store]] build` argv.
+  repeated string argv = 4;
+  // `[store.env]`, as `KEY=VALUE`, sorted by key.
+  repeated string env = 5;
+  // The commit the build runs on, full hex.
+  string rev = 6;
+  // blake3 of the lockfile's bytes, 64 hex characters.
+  string lockfile_hash = 7;
+  // The scratch workspace's lease; the build aborts when it expires.
+  Lease lease = 8;
+  // A sealed store already exists and `force` was not set: nothing was
+  // prepared, and `result` describes the store.
+  bool already_built = 9;
+  // The existing store, when `already_built`.
+  BuildResult result = 10;
+  // The scratch workspace.
+  Workspace workspace = 11;
+  // Where the store is mounted, repository-root relative.
+  string mount = 12;
+}
+
+// A prepared build to seal (R2.27).
+message SealStoreBuildRequest {
+  // From PrepareStoreBuildResponse.
+  string build_id = 1;
+  // The command's exit code; -1 if a signal ended it.
+  int32 exit_code = 2;
+  // The owner Prepare named; another is PERMISSION_DENIED.
+  string owner = 3;
+}
+
+// A prepared build to abandon (R2.27).
+message AbortStoreBuildRequest {
+  // From PrepareStoreBuildResponse.
+  string build_id = 1;
+  // Why, for the log; free text.
+  string reason = 2;
+  // The owner Prepare named; another is PERMISSION_DENIED.
+  string owner = 3;
+}
+
+// What the abort did (R2.27).
+message AbortStoreBuildResponse {
+  // The operation that released the scratch workspace.
+  string op_id = 1;
+  // Bytes the discarded build had allocated.
+  uint64 freed_bytes = 2;
+  // The release's event sequence (R2.09); 0 until then.
+  uint64 seq = 3;
 }

@@ -1,6 +1,5 @@
-// Workspaces: create, list, inspect, release, snapshot (R1.05). R1.06 adds
-// Move and R1.15 Heartbeat, R1.20 shared stores; field numbers are stable
-// from here.
+// Workspaces: create, list, inspect, release, snapshot (R1.05), move
+// (R1.06), heartbeat (R1.15), status (R2.02).
 //
 // `repo` accepts a repo id, a unique id prefix (4 or more hex characters),
 // or an absolute path inside a registered root. Where a workspace is named
@@ -17,10 +16,12 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "reef/daemon/v1/types.proto";
 
+// Leased, isolated working copies of a repository.
 service Workspaces {
   // Materializes a new workspace on a change and leases it.
   rpc Create(CreateRequest) returns (CreateResponse);
-  // Workspaces, from the metadata database only.
+  // Workspaces, from the metadata database only, newest first, a page at a
+  // time.
   rpc List(ListWorkspacesRequest) returns (ListWorkspacesResponse);
   // One workspace, with its disk usage and the other workspaces on its
   // change.
@@ -43,9 +44,24 @@ service Workspaces {
   // whose working directory is inside it keeps the old tree until it
   // changes directory into the path again.
   rpc Move(MoveRequest) returns (MoveResponse);
+  // What changed in a workspace: its change's diff against its parents,
+  // plus files written since the last snapshot (R2.02; from the status
+  // index without a scan, R2.23).
+  rpc Status(WorkspaceStatusRequest) returns (WorkspaceStatusResponse); // R2.02
 }
 
+// A workspace to create.
 message CreateRequest {
+  // What to do about a shared store `reef.toml` declares that has no
+  // sealed build for the lockfile's hash (R1.20).
+  enum MissingStores {
+    // Fail with UNAVAILABLE, naming the `reef store build` to run.
+    FAIL = 0;
+    // Create the workspace without it, with `attention = store-missing`.
+    SKIP = 1;
+  }
+
+  // The repository to create it in.
   string repo = 1;
   // Where the working-copy commit starts. Revisions resolve as a change id
   // prefix (hex or jj's reverse hex), a commit id prefix, or a local
@@ -60,7 +76,8 @@ message CreateRequest {
     // A new empty change on top of this revision.
     string new_on = 3;
   }
-  // Who holds the workspace. Required; clients fill in a default.
+  // Who holds the workspace. Required; clients fill in a default
+  // (`<user>@<host>`).
   string owner = 4;
   // Free text.
   string purpose = 5;
@@ -73,18 +90,13 @@ message CreateRequest {
   // The lease length; 0 = the daemon default. Grace is never per request
   // (R1.15).
   uint64 lease_ms = 8;
-  // What to do about a shared store `reef.toml` declares that has no
-  // sealed build for the lockfile's hash (R1.20).
-  enum MissingStores {
-    // Fail with UNAVAILABLE, naming the `reef store build` to run.
-    FAIL = 0;
-    // Create the workspace without it, with `attention = store-missing`.
-    SKIP = 1;
-  }
+  // What to do about a store with no sealed build.
   MissingStores missing_stores = 9;
 }
 
+// The workspace created.
 message CreateResponse {
+  // The new workspace.
   Workspace workspace = 1;
   // The operation that created the jj workspace.
   string op_id = 2;
@@ -103,6 +115,8 @@ message CreateResponse {
   // bookmark (`main`, `master@origin`), or `root checkout` when none
   // exists. Empty when the request named a start (R1.31).
   string start = 7;
+  // The event sequence of the create (R2.09); 0 until then.
+  uint64 seq = 8;
 }
 
 // The steps of a create, in milliseconds; the daemon's
@@ -132,6 +146,7 @@ message CreateTimings {
   uint64 total_ms = 9;
 }
 
+// Which workspaces to list.
 message ListWorkspacesRequest {
   // Empty for every repository.
   string repo = 1;
@@ -139,13 +154,21 @@ message ListWorkspacesRequest {
   repeated string states = 2;
   // Empty for any owner.
   string owner = 3;
+  // Which page; workspaces come newest first (by `created_at`, then id).
+  Page page = 4;
 }
 
+// One page of workspaces.
 message ListWorkspacesResponse {
+  // Newest first.
   repeated Workspace workspaces = 1;
+  // Where the page ended.
+  PageInfo page = 2;
 }
 
+// Which workspace to inspect.
 message InspectRequest {
+  // The repository; may be empty.
   string repo = 1;
   // A workspace id or unique prefix, or an absolute path inside an active
   // workspace's directory (R1.26).
@@ -158,18 +181,20 @@ message InspectRequest {
   bool skip_disk_usage = 4;
 }
 
+// One workspace in detail.
 message InspectResponse {
+  // The workspace, after the snapshot if one was taken.
   Workspace workspace = 1;
-  // Unset for a workspace whose directory is gone.
+  // Unset for a workspace whose directory is gone, or when skipped.
   DiskUsage disk_usage = 2;
   // Ids of the other active workspaces on the same change.
   repeated string other_workspaces_on_change = 3;
   // The operation `snapshot_first` recorded, if it recorded one.
   string op_id = 4;
-  // Snapshot operations the daemon indexed for this workspace (R1.16), and
-  // how many of them are local: not yet published. `local_snapshot_count`
-  // equals `workspace.local_snapshot_count`, which List carries too.
+  // Snapshot operations the daemon indexed for this workspace (R1.16).
   uint64 snapshot_count = 5;
+  // How many of them are local: not yet published. Equals
+  // `workspace.local_snapshot_count`, which List carries too.
   uint64 local_snapshot_count = 6;
   // The newest 10 of them, newest first.
   repeated SnapshotEntry recent_snapshots = 7;
@@ -177,6 +202,7 @@ message InspectResponse {
 
 // One snapshot operation in the daemon's index (R1.16).
 message SnapshotEntry {
+  // The operation.
   string op_id = 1;
   // The working-copy commit it wrote.
   string commit_id = 2;
@@ -190,8 +216,11 @@ message SnapshotEntry {
   google.protobuf.Timestamp taken_at = 5;
 }
 
+// Which workspace to release.
 message ReleaseRequest {
+  // The repository; may be empty.
   string repo = 1;
+  // A workspace id or unique prefix, or a path inside it.
   string workspace = 2;
   // Release even if the final snapshot or forgetting the jj workspace
   // fails.
@@ -202,6 +231,7 @@ message ReleaseRequest {
   bool skip_final_snapshot = 4;
 }
 
+// What the release did.
 message ReleaseResponse {
   // The operation holding the final snapshot, empty if it found nothing to
   // record or was skipped.
@@ -212,37 +242,51 @@ message ReleaseResponse {
   uint64 freed_bytes = 3;
   // The workspace's full id, since the request may name a prefix (R1.22).
   string workspace_id = 4;
+  // The event sequence of the release (R2.09); 0 until then.
+  uint64 seq = 5;
 }
 
+// Which workspace to snapshot.
 message SnapshotRequest {
+  // The repository; may be empty.
   string repo = 1;
+  // A workspace id or unique prefix, or a path inside it.
   string workspace = 2;
   // The operation's description; empty for
   // `reef: snapshot workspace <id>`.
   string description = 3;
 }
 
+// What the snapshot recorded.
 message SnapshotResponse {
   // The snapshot's operation; empty when nothing changed.
   string op_id = 1;
+  // Whether the working copy differed from its commit.
   bool changed = 2;
   // The working-copy commit afterwards.
   string commit_id = 3;
   // How long jj's scan of the working copy took, in milliseconds (R1.14).
   uint64 scan_ms = 4;
+  // The event sequence of the snapshot (R2.09); 0 when nothing changed,
+  // and until then.
+  uint64 seq = 5;
 }
 
+// Which lease to renew.
 message HeartbeatRequest {
+  // The repository; may be empty.
   string repo = 1;
   // A workspace id or unique prefix, or a path inside it.
-  string workspace_id = 2;
+  string workspace = 2;
   // The lease being renewed: the capability. A lease that is not the
   // workspace's current one is `FAILED_PRECONDITION` (Conflict), as is a
   // workspace that was released or reclaimed, or a lease past its grace.
   string lease_id = 3;
 }
 
+// The renewed lease.
 message HeartbeatResponse {
+  // The lease renewed.
   string lease_id = 1;
   // Now plus the lease's length.
   google.protobuf.Timestamp expires_at = 2;
@@ -250,7 +294,9 @@ message HeartbeatResponse {
   google.protobuf.Duration heartbeat_every = 3;
 }
 
+// Which workspace to move, and where.
 message MoveRequest {
+  // The repository; may be empty.
   string repo = 1;
   // A workspace id or unique prefix, or a path inside it.
   string workspace = 2;
@@ -269,6 +315,7 @@ message MoveRequest {
   CreateRequest.MissingStores missing_stores = 5;
 }
 
+// What the move did.
 message MoveResponse {
   // The workspace afterwards.
   Workspace workspace = 1;
@@ -278,12 +325,114 @@ message MoveResponse {
   // The final snapshot of the change it left; empty when there was nothing
   // to record.
   string final_op_id = 3;
-  // Files the check-out wrote (clone and copy backends; zero when
+  // Files the check-out rewrote (clone and copy backends; zero when
   // `tree_replaced`).
   uint32 files_updated = 4;
+  // Files the check-out added.
   uint32 files_added = 5;
+  // Files the check-out removed.
   uint32 files_removed = 6;
   // The backend replaced the whole tree (overlay backends: new lower
   // layer, empty upper).
   bool tree_replaced = 7;
+  // The event sequence of the move (R2.09); 0 until then.
+  uint64 seq = 8;
+}
+
+// Which workspace's status to report (R2.02).
+message WorkspaceStatusRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // A workspace id or unique prefix, or a path inside it.
+  string workspace = 2;
+  // Snapshot first, so `files` includes everything on disk and `dirty` is
+  // empty. Off by default in the API.
+  bool snapshot_first = 3;
+}
+
+// What changed in a workspace (R2.02, R2.23).
+message WorkspaceStatusResponse {
+  // The workspace, after the snapshot if one was taken.
+  Workspace workspace = 1;
+  // Its change, at its working-copy commit; its `parents` are what `files`
+  // is against.
+  Change change = 2;
+  // The change's files against its parents.
+  repeated FileStatus files = 3;
+  // Paths written since the last snapshot, as the watcher reported them.
+  repeated DirtyPath dirty = 4;
+  // Paths whose content in the change has unresolved conflicts.
+  repeated string conflicted_paths = 5;
+  // Answered from the status index (R2.23), not a scan.
+  bool from_index = 6;
+  // The snapshot `snapshot_first` took, if it recorded one.
+  string op_id = 7;
+  // Why the index was not used (R2.23): overflow, watch-down, ...; empty
+  // when it was.
+  string stale_reason = 8;
+  // The index's last reconciliation with a snapshot (R2.23).
+  google.protobuf.Timestamp index_reconciled_at = 9;
+  // The change's other visible commits, when it is divergent.
+  repeated string divergent_commits = 10;
+  // The head operation the answer was read from (R2.02).
+  string at_op = 11;
+  // How to resolve a divergent workspace, in one sentence (R2.03); empty
+  // otherwise.
+  string hint = 12;
+  // The command that resolves it, as an argv (R2.03): a `reef squash` of
+  // the other commit into this one. Empty when there is none.
+  repeated string next = 13;
+}
+
+// A path written since the last snapshot.
+message DirtyPath {
+  // What happened to it, as the watcher saw it.
+  enum Kind {
+    // It did not exist at the last snapshot.
+    ADDED = 0;
+    // Its content changed.
+    MODIFIED = 1;
+    // It was removed.
+    DELETED = 2;
+    // It changed between file, symlink, and directory.
+    TYPE_CHANGED = 3;
+  }
+  // Repository-root relative.
+  string path = 1;
+  // What happened to it.
+  Kind kind = 2;
+  // The first event since the last snapshot.
+  google.protobuf.Timestamp since = 3;
+}
+
+// A file of a change, against the change's parents.
+message FileStatus {
+  // How the file differs.
+  enum State {
+    // New in the change.
+    ADDED = 0;
+    // Its content changed.
+    MODIFIED = 1;
+    // Removed by the change.
+    REMOVED = 2;
+    // Moved from `old_path`, possibly modified too. Reserved: Phase 2
+    // reports a rename as REMOVED and ADDED (R2.02).
+    RENAMED = 3;
+    // Only its kind changed (executable bit, file to symlink).
+    MODE_CHANGED = 4;
+  }
+  // Repository-root relative.
+  string path = 1;
+  // How it differs.
+  State state = 2;
+  // Where it was before, for RENAMED; empty otherwise.
+  string old_path = 3;
+  // What it is in the change (what it was, for REMOVED).
+  FileEntry.Kind kind = 4;
+  // Its content in the change has unresolved conflicts.
+  bool conflicted = 5;
+  // Bytes in the parents; 0 for ADDED.
+  uint64 old_size = 6;
+  // Bytes in the change; 0 for REMOVED.
+  uint64 new_size = 7;
 }

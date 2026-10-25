@@ -1,12 +1,37 @@
-// Records shared by the Repositories and Workspaces services (R1.05).
-// Timestamps are google.protobuf.Timestamp; ids are lowercase hex strings
-// (ADR 0017).
+// Records shared by every service (R1.05, R2.01). Timestamps are
+// google.protobuf.Timestamp, durations google.protobuf.Duration; ids are
+// lowercase hex strings (ADR 0017, ADR 0029).
 syntax = "proto3";
 
 package reef.daemon.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+
+// Which page of a list to return. Every request whose list can grow takes
+// one; its response carries `next_page_token`.
+message Page {
+  // At most this many entries; 0 means 100, and more than 1,000 is 1,000.
+  uint32 page_size = 1;
+  // Empty for the first page; otherwise the previous response's
+  // `next_page_token`, unchanged. A token is opaque and only valid with the
+  // filters of the request that returned it: another request's token is
+  // INVALID_ARGUMENT.
+  string page_token = 2;
+}
+
+// Where a list response's page ended. Every response to a paged request
+// carries one.
+message PageInfo {
+  // The next page's token; empty on the last page.
+  string next_page_token = 1;
+  // The page size the daemon used, after the default and the cap.
+  uint32 page_size = 2;
+  // The cursor the request's token named is gone (its commit was hidden,
+  // say), so this page starts over from the first: a client redraws
+  // instead of appending.
+  bool restarted = 3;
+}
 
 // A registered repository.
 message Repository {
@@ -16,10 +41,11 @@ message Repository {
   string root = 2;
   // Whether jj and git share the working copy (`<root>/.git`).
   bool colocated = 3;
+  // When it was registered.
   google.protobuf.Timestamp registered_at = 4;
 }
 
-// A workspace's lease. R1.15 adds fields 8 to 10.
+// A workspace's lease (R1.15).
 message Lease {
   // Computed when the response is built, from `expires_at`, `grace_ms`,
   // whether the lease has ended, and the daemon's clock.
@@ -32,18 +58,26 @@ message Lease {
     EXPIRED = 2;
     // Released, expired and reclaimed, or replaced by a restore.
     ENDED = 3;
+    // Not known: a lease as `Operations.Replay` reconstructs it, whose
+    // past expiries were never recorded (R2.12).
+    UNKNOWN = 4;
   }
 
+  // 16 hex characters. Heartbeats name it: it is the capability to renew.
   string id = 1;
+  // Who holds it: the workspace's owner when it was issued.
   string owner = 2;
+  // When it was issued.
   google.protobuf.Timestamp issued_at = 3;
   // When it lapses unless renewed.
   google.protobuf.Timestamp expires_at = 4;
+  // The last heartbeat; `issued_at` until the first.
   google.protobuf.Timestamp last_heartbeat_at = 5;
   // How far each heartbeat extends it.
   uint64 length_ms = 6;
   // How long after `expires_at` a heartbeat still revives it.
   uint64 grace_ms = 7;
+  // Its state as of the response.
   State state = 8;
   // released, expired, or restored; empty until it ends.
   string end_reason = 9;
@@ -52,12 +86,105 @@ message Lease {
   google.protobuf.Duration heartbeat_every = 10;
 }
 
+// A shared dependency store mounted in a workspace (R1.20).
+message MountedStore {
+  // How the store appears at its mount point.
+  enum Mode {
+    // A symlink to the store directory.
+    SYMLINK = 0;
+    // A read-only bind mount (Linux, with CAP_SYS_ADMIN).
+    BIND = 1;
+  }
+  // The `[[store]] name` in `reef.toml`.
+  string name = 1;
+  // blake3 of the lockfile the store was built from, 64 hex characters.
+  string lockfile_hash = 2;
+  // Where it is mounted, repository-root relative.
+  string mount = 3;
+  // How it is mounted.
+  Mode mode = 4;
+  // The workspace's lockfile still matches the store as of its last
+  // snapshot; false sets `attention = store-hash-mismatch`.
+  bool verified = 5;
+}
+
+// One live presence entry, keyed by agent and workspace (R2.10), or its
+// clearing. In types.proto, not presence.proto, because Workspace and Event
+// carry them.
+message PresenceEntry {
+  // Whether the entry was set or cleared.
+  enum Kind {
+    // Added or updated.
+    SET = 0;
+    // Removed: its stream ended or it expired. Only `agent` and
+    // `workspace` are meaningful.
+    CLEARED = 1;
+  }
+  // Who reported it.
+  enum Source {
+    // A client's `Presence.Report` stream.
+    CLIENT = 0;
+    // The daemon itself (`agent = "reef-daemon"`): a snapshot, store build,
+    // backup, GC, or reclaim in flight.
+    DAEMON = 1;
+  }
+  // What the agent says it is doing.
+  enum Activity {
+    // Nothing in particular; the default.
+    IDLE = 0;
+    // Editing files.
+    EDITING = 1;
+    // Running a command.
+    RUNNING = 2;
+    // Running tests.
+    TESTING = 3;
+    // Waiting on something outside the workspace (a human, a build).
+    WAITING = 4;
+    // Something else, described in `detail`.
+    CUSTOM = 5;
+  }
+  // Who reports it: an agent name, the workspace's owner, or
+  // `reef-daemon`.
+  string agent = 1;
+  // The workspace id it reports for; empty for an agent with no workspace.
+  string workspace = 2;
+  // The change id the agent is working on, in hex; empty if none.
+  string change = 3;
+  // What it is doing.
+  Activity activity = 4;
+  // Free text, such as the command running or the file being edited.
+  string detail = 5;
+  // How far along it is, when it can say; unset otherwise.
+  Progress progress = 6;
+  // When the daemon last received an update for it.
+  google.protobuf.Timestamp reported_at = 7;
+  // When the daemon drops it unless another report arrives.
+  google.protobuf.Timestamp expires_at = 8;
+  // Set or cleared.
+  Kind kind = 9;
+  // The first report of its current activity.
+  google.protobuf.Timestamp since = 10;
+  // Who reported it.
+  Source source = 11;
+}
+
+// Progress through a known amount of work.
+message Progress {
+  // Units done.
+  uint64 done = 1;
+  // Units in all; 0 when unknown.
+  uint64 total = 2;
+}
+
 // A Reef workspace: a leased directory backed by its own jj workspace.
 message Workspace {
   // 16 hex characters; the jj workspace is `reef-<id>`.
   string id = 1;
+  // Its repository's id.
   string repo_id = 2;
+  // Who holds it.
   string owner = 3;
+  // Free text the creator gave; empty if none.
   string purpose = 4;
   // The jj change it is on, in hex.
   string change_id = 5;
@@ -70,13 +197,16 @@ message Workspace {
   string path = 8;
   // active, releasing, released, or reclaimed.
   string state = 9;
+  // Whether its change is divergent (more than one visible commit).
   bool divergent = 10;
   // Why it needs attention, such as `final-snapshot-failed`; empty if it
   // does not.
   string attention = 11;
+  // When it was created.
   google.protobuf.Timestamp created_at = 12;
   // Unset until a snapshot recorded an operation.
   google.protobuf.Timestamp last_snapshot_at = 13;
+  // The operation that snapshot recorded; empty until then.
   string last_snapshot_op = 14;
   // Its lease: the unended one while active, the one it ended with once
   // released or reclaimed (R1.15).
@@ -96,28 +226,174 @@ message Workspace {
   // background (Linux, R1.32); empty once it is up. A full scan follows the
   // watch coming up, so nothing written meanwhile is lost.
   string watch_state = 19;
-}
-
-// A shared dependency store mounted in a workspace (R1.20).
-message MountedStore {
-  enum Mode {
-    // A symlink to the store directory.
-    SYMLINK = 0;
-    // A read-only bind mount (Linux, with CAP_SYS_ADMIN).
-    BIND = 1;
-  }
-  string name = 1;
-  string lockfile_hash = 2;
-  // Repository-root relative.
-  string mount = 3;
-  Mode mode = 4;
-  // The workspace's lockfile still matches the store as of its last
-  // snapshot; false sets `attention = store-hash-mismatch`.
-  bool verified = 5;
+  // Every live presence entry for it, the daemon's included, newest
+  // `reported_at` first (R2.10); empty until then.
+  repeated PresenceEntry presence = 20;
+  // Its lease's last heartbeat since the daemon started (R2.10); unset if
+  // none.
+  google.protobuf.Timestamp heartbeat_at = 21;
 }
 
 // How much disk a workspace uses beyond its base. An estimate.
 message DiskUsage {
+  // Allocated bytes of the files that differ from the base.
   uint64 allocated_bytes = 1;
+  // How many files differ from the base.
   uint64 files_changed = 2;
+}
+
+// Who made a commit, and when (jj's `Signature`).
+message Signature {
+  // The name, as configured.
+  string name = 1;
+  // The email, as configured.
+  string email = 2;
+  // When, as an instant.
+  google.protobuf.Timestamp at = 3;
+  // The offset from UTC of the signer's clock, in minutes, so a client can
+  // show local time.
+  int32 tz_offset_minutes = 4;
+}
+
+// A change and the commit it is at.
+message ChangeRef {
+  // The change id, full hex.
+  string change_id = 1;
+  // The commit id, full hex.
+  string commit_id = 2;
+}
+
+// A jj change at one commit (R2.02).
+message Change {
+  // The change id, full hex. Clients show jj's reverse hex to humans.
+  string change_id = 1;
+  // The commit id, full hex.
+  string commit_id = 2;
+  // The full description; empty if none.
+  string description = 3;
+  // Who authored it.
+  Signature author = 4;
+  // Who last rewrote it.
+  Signature committer = 5;
+  // Its parents, first parent first.
+  repeated ChangeRef parents = 6;
+  // Local bookmarks pointing at this commit.
+  repeated string bookmarks = 7;
+  // Whether another visible commit has the same change id.
+  bool divergent = 8;
+  // Whether its tree has unresolved conflicts.
+  bool conflicted = 9;
+  // Whether its tree equals its parents' (merged) tree.
+  bool empty = 10;
+  // Reef workspace ids whose working-copy commit this is; `default` for the
+  // user's own checkout.
+  repeated string workspaces = 11;
+  // Whether it is some workspace's working-copy commit.
+  bool is_working_copy = 12;
+  // Its tree's id, full hex; for a conflicted tree, its first side's.
+  string tree_id = 13;
+  // jj's graph edges, set only when `LogChangesRequest.with_graph`; empty
+  // otherwise, and clients fall back to `parents` (R2.02, R2.19).
+  repeated GraphEdge edges = 14;
+}
+
+// An edge of the change graph, as jj's log draws it.
+message GraphEdge {
+  // `jj_core::graph::GraphEdgeType` (jj-core 0.46.0, `graph.rs:81-85`).
+  // Nested like `DiffLine.Kind`, so the names stay message-scoped.
+  enum Kind {
+    // A parent that is in the listed set.
+    DIRECT = 0;
+    // An ancestor the revset elided: commits sit between.
+    INDIRECT = 1;
+    // A parent outside the listed set.
+    MISSING = 2;
+  }
+  // The commit the edge points to.
+  ChangeRef target = 1;
+  // What kind of edge it is.
+  Kind kind = 2;
+}
+
+// One jj operation (R2.02, R2.09).
+message Operation {
+  // The operation id, full hex.
+  string op_id = 1;
+  // Its parent operation ids; more than one for a merge of concurrent
+  // operations.
+  repeated string parents = 2;
+  // jj's description of it, such as `reef: snapshot workspace <id>`.
+  string description = 3;
+  // What it did: snapshot, create, release, move, undo, describe, abandon,
+  // squash, apply, gc, import, or external (an operation the daemon did not
+  // write).
+  string kind = 4;
+  // The Reef workspace it was for, if any.
+  string workspace_id = 5;
+  // jj's `operation.username`.
+  string username = 6;
+  // jj's `operation.hostname`.
+  string hostname = 7;
+  // Whether jj marked it a working-copy snapshot.
+  bool is_snapshot = 8;
+  // Whether the daemon did not write it (jj run by hand, say).
+  bool external = 9;
+  // When it started.
+  google.protobuf.Timestamp start_at = 10;
+  // When it ended.
+  google.protobuf.Timestamp end_at = 11;
+  // Its event sequence once indexed (R2.09); 0 until then. The sequence
+  // is daemon-wide and increasing, shared by every repository's events.
+  uint64 seq = 12;
+  // The changes whose head or working-copy commit it moved, at most 50
+  // (R2.02).
+  repeated ChangeRef changes = 13;
+  // jj's operation attributes, `reef.client` among them (R2.08).
+  map<string, string> attributes = 14;
+  // `changes` was cut at 50.
+  bool changes_truncated = 15;
+  // GC removed the operation from the log and no rewrite matched it
+  // (R2.09); it cannot be replayed.
+  bool gc_rewritten = 16;
+}
+
+// One entry of a tree: a file, a directory, or something else at a path.
+message FileEntry {
+  // What the entry is.
+  enum Kind {
+    // A regular file.
+    FILE = 0;
+    // A regular file with the executable bit.
+    EXECUTABLE = 1;
+    // A symbolic link; `symlink_target` holds its target.
+    SYMLINK = 2;
+    // A directory.
+    DIRECTORY = 3;
+    // A git submodule.
+    SUBMODULE = 4;
+    // A path whose sides disagree; read it to see the conflict.
+    CONFLICT = 5;
+  }
+  // Repository-root relative, `/`-separated.
+  string path = 1;
+  // What it is.
+  Kind kind = 2;
+  // Bytes of a file's content; unset for anything else, and when the
+  // listing left sizes out (`Trees.List`'s `sizes_omitted`).
+  optional uint64 size = 3;
+  // The content's blob id, full hex; empty for a directory or a conflict.
+  string blob_id = 4;
+  // A symlink's target; empty otherwise.
+  string symlink_target = 5;
+  // The path's sides disagree (kind CONFLICT, or a file in a conflicted
+  // tree).
+  bool conflicted = 6;
+}
+
+// A local bookmark and the change it points at.
+message Bookmark {
+  // The bookmark's name.
+  string name = 1;
+  // Where it points.
+  ChangeRef change = 2;
 }

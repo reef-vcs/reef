@@ -1,5 +1,5 @@
 //! `reef.daemon.v1.Stores`: build and list shared dependency stores
-//! (R1.20).
+//! (R1.20); prepare, seal, and abort are R2.27's.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -14,6 +14,7 @@ use tonic::{Request, Response, Status};
 use tracing::Instrument as _;
 
 use super::convert::timestamp;
+use super::stubs::stub;
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::model::WorkspaceState;
@@ -23,8 +24,9 @@ use crate::store::build::{
 use crate::store::{StoreError, StoreKey};
 use reef_api::proto::v1::stores_server::Stores;
 use reef_api::proto::v1::{
-    self, BuildEvent, BuildStoreRequest, ListStoresRequest, ListStoresResponse, StoreInfo,
-    build_event, output_line,
+    self, AbortStoreBuildRequest, AbortStoreBuildResponse, BuildEvent, BuildStoreRequest,
+    ListStoresRequest, ListStoresResponse, PrepareStoreBuildRequest, PrepareStoreBuildResponse,
+    SealStoreBuildRequest, StoreInfo, build_event, output_line,
 };
 
 /// How many events a build may queue for a slow client before its output
@@ -103,6 +105,8 @@ impl From<&BuildResult> for v1::BuildResult {
             op_id: result.op_id.clone().unwrap_or_default(),
             dropped_lines: result.dropped_lines,
             already_built: result.already_built,
+            // R2.09 assigns event sequences.
+            seq: 0,
         }
     }
 }
@@ -260,6 +264,27 @@ impl Stores for StoresService {
             })
             .collect();
         Ok(Response::new(ListStoresResponse { stores }))
+    }
+
+    async fn prepare(
+        &self,
+        _: Request<PrepareStoreBuildRequest>,
+    ) -> Result<Response<PrepareStoreBuildResponse>, Status> {
+        Err(stub("reef.daemon.v1.Stores/Prepare"))
+    }
+
+    async fn seal(
+        &self,
+        _: Request<SealStoreBuildRequest>,
+    ) -> Result<Response<v1::BuildResult>, Status> {
+        Err(stub("reef.daemon.v1.Stores/Seal"))
+    }
+
+    async fn abort(
+        &self,
+        _: Request<AbortStoreBuildRequest>,
+    ) -> Result<Response<AbortStoreBuildResponse>, Status> {
+        Err(stub("reef.daemon.v1.Stores/Abort"))
     }
 }
 

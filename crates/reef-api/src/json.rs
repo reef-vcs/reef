@@ -106,7 +106,8 @@ pub struct Lease {
     pub length_ms: u64,
     /// How long after `expires_at` a heartbeat still revives it.
     pub grace_ms: u64,
-    /// `active`, `in_grace`, `expired`, or `ended`, as of the response.
+    /// `active`, `in_grace`, `expired`, or `ended`, as of the response;
+    /// `unknown` for a replayed lease (R2.12).
     pub state: String,
     /// `released`, `expired`, or `restored` once it has ended.
     pub end_reason: Option<String>,
@@ -121,6 +122,7 @@ fn lease_state(state: v1::lease::State) -> &'static str {
         v1::lease::State::InGrace => "in_grace",
         v1::lease::State::Expired => "expired",
         v1::lease::State::Ended => "ended",
+        v1::lease::State::Unknown => "unknown",
     }
 }
 
@@ -524,8 +526,8 @@ pub struct Status {
     pub backends: Vec<BackendProbe>,
 }
 
-impl From<&v1::StatusResponse> for Status {
-    fn from(status: &v1::StatusResponse) -> Self {
+impl From<&v1::DaemonStatusResponse> for Status {
+    fn from(status: &v1::DaemonStatusResponse) -> Self {
         Self {
             version: status.version.clone(),
             pid: status.pid,
@@ -665,6 +667,97 @@ impl From<&v1::GcReport> for GcReport {
             store_bytes_freed: report.store_bytes_freed,
             elapsed_ms: report.elapsed_ms,
             dry_run: report.dry_run,
+        }
+    }
+}
+
+/// A finished backup, from `Maintenance.Backup`'s last message (R1.18):
+/// field for field what `<dest>/manifest.json` holds, so `reef backup -o
+/// json` prints the same object it did when it read the file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BackupManifest {
+    /// The manifest format's version.
+    pub version: u32,
+    /// When the backup began, RFC 3339.
+    pub created_at: String,
+    /// The database's `meta.daemon_instance_id`.
+    pub daemon_instance_id: String,
+    /// The daemon's version.
+    pub reef_version: String,
+    /// The jj-lib version the daemon was built with.
+    pub jj_lib_version: String,
+    /// The state directory backed up.
+    pub state_dir: String,
+    /// The repositories, in registration order.
+    pub repos: Vec<BackupRepo>,
+    /// The database copy.
+    pub sqlite: BackupDatabase,
+    /// Every repository's heads were written.
+    pub complete: bool,
+}
+
+/// One repository in a backup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BackupRepo {
+    /// The repository's id.
+    pub id: String,
+    /// Its registered root.
+    pub root: String,
+    /// Its `.jj/repo` when backed up.
+    pub jj_repo_path: String,
+    /// Whether jj and git share the working copy.
+    pub colocated: bool,
+    /// The operation heads copied.
+    pub op_heads: Vec<String>,
+    /// Files copied.
+    pub files: u64,
+    /// Bytes copied.
+    pub bytes: u64,
+    /// How long the repository thread was paused.
+    pub pause_ms: u64,
+}
+
+/// The database copy in a backup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct BackupDatabase {
+    /// Pages copied.
+    pub pages: u64,
+    /// The copy's size.
+    pub bytes: u64,
+}
+
+impl From<&v1::BackupSummary> for BackupManifest {
+    fn from(summary: &v1::BackupSummary) -> Self {
+        Self {
+            version: summary.version,
+            created_at: time(summary.started_at.as_ref()).unwrap_or_default(),
+            daemon_instance_id: summary.daemon_instance_id.clone(),
+            reef_version: summary.reef_version.clone(),
+            jj_lib_version: summary.jj_lib_version.clone(),
+            state_dir: summary.state_dir.clone(),
+            repos: summary
+                .repos
+                .iter()
+                .map(|repo| BackupRepo {
+                    id: repo.id.clone(),
+                    root: repo.root.clone(),
+                    jj_repo_path: repo.jj_repo_path.clone(),
+                    colocated: repo.colocated,
+                    op_heads: repo.op_heads.clone(),
+                    files: repo.files,
+                    bytes: repo.bytes,
+                    pause_ms: repo.pause_ms,
+                })
+                .collect(),
+            sqlite: summary
+                .database
+                .as_ref()
+                .map(|db| BackupDatabase {
+                    pages: db.pages,
+                    bytes: db.bytes,
+                })
+                .unwrap_or_default(),
+            complete: summary.complete,
         }
     }
 }

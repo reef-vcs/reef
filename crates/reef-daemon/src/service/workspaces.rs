@@ -1,5 +1,5 @@
 //! `reef.daemon.v1.Workspaces`: create, list, inspect, release, snapshot,
-//! heartbeat, move.
+//! heartbeat, move; status is R2.02's.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use reef_lib::error::{Classify, ErrorKind};
 use tonic::{Request, Response, Status};
 
 use super::convert::{WorkspaceView, lease, proto_duration, timestamp};
+use super::stubs::stub;
 use crate::backend::BackendChoice;
 use crate::daemon::AppState;
 use crate::error::status;
@@ -19,8 +20,8 @@ use reef_api::proto::v1::workspaces_server::Workspaces;
 use reef_api::proto::v1::{
     self, CreateRequest, CreateResponse, HeartbeatRequest, HeartbeatResponse, InspectRequest,
     InspectResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveRequest, MoveResponse,
-    ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace, create_request,
-    move_request,
+    ReleaseRequest, ReleaseResponse, SnapshotRequest, SnapshotResponse, Workspace,
+    WorkspaceStatusRequest, WorkspaceStatusResponse, create_request, move_request,
 };
 
 /// A request field that does not parse.
@@ -125,6 +126,8 @@ impl Workspaces for WorkspacesService {
             base_was_cached: created.base_was_cached,
             timings: Some(v1::CreateTimings::from(&created.timings)),
             start: created.default_start.unwrap_or_default(),
+            // R2.09 assigns event sequences.
+            seq: 0,
         }))
     }
 
@@ -170,7 +173,10 @@ impl Workspaces for WorkspacesService {
                 })
             })
             .collect();
-        Ok(Response::new(ListWorkspacesResponse { workspaces }))
+        Ok(Response::new(ListWorkspacesResponse {
+            workspaces,
+            page: None,
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -242,6 +248,7 @@ impl Workspaces for WorkspacesService {
             snapshot_taken: released.snapshot_taken,
             freed_bytes: released.freed_bytes.unwrap_or(0),
             workspace_id: record.id.as_hex(),
+            seq: 0,
         }))
     }
 
@@ -269,6 +276,7 @@ impl Workspaces for WorkspacesService {
             changed: snapshot.changed,
             commit_id: snapshot.commit_id.to_string(),
             scan_ms: snapshot.scan_ms,
+            seq: 0,
         }))
     }
 
@@ -280,7 +288,7 @@ impl Workspaces for WorkspacesService {
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
-            .resolve_workspace(&request.repo, &request.workspace_id)
+            .resolve_workspace(&request.repo, &request.workspace)
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
         let lease_id: LeaseId = request.lease_id.trim().parse().map_err(status)?;
@@ -332,6 +340,14 @@ impl Workspaces for WorkspacesService {
             files_added: moved.checkout.added,
             files_removed: moved.checkout.removed,
             tree_replaced: moved.tree_replaced,
+            seq: 0,
         }))
+    }
+
+    async fn status(
+        &self,
+        _: Request<WorkspaceStatusRequest>,
+    ) -> Result<Response<WorkspaceStatusResponse>, Status> {
+        Err(stub("reef.daemon.v1.Workspaces/Status"))
     }
 }

@@ -1,0 +1,74 @@
+// Queries: named, parameterized queries over the daemon's index (R2.16).
+// No raw SQL crosses the API.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "google/protobuf/struct.proto";
+import "reef/daemon/v1/types.proto";
+
+// The daemon's named queries.
+service Queries {
+  // Every query, with its parameters and columns.
+  rpc List(ListQueriesRequest) returns (ListQueriesResponse); // R2.16
+  // Runs one query, a page of rows at a time.
+  rpc Run(RunQueryRequest) returns (RunQueryResponse); // R2.16
+}
+
+// No parameters.
+message ListQueriesRequest {}
+
+// The queries.
+message ListQueriesResponse {
+  // By name.
+  repeated QueryInfo queries = 1;
+}
+
+// A named query.
+message QueryInfo {
+  // What `RunQueryRequest.name` takes, such as `changes_touching_path`.
+  string name = 1;
+  // What it answers, in one sentence.
+  string description = 2;
+  // Its parameters.
+  repeated ParamInfo params = 3;
+  // The columns its rows have, in order.
+  repeated string columns = 4;
+}
+
+// One parameter of a query.
+message ParamInfo {
+  // What `RunQueryRequest.params` keys it by.
+  string name = 1;
+  // How its string value is read, such as `timestamp` (RFC 3339 or
+  // `1d ago`), `change` (a revision), `string`, or `integer`.
+  string kind = 2;
+  // A run without it is INVALID_ARGUMENT.
+  bool required = 3;
+  // What it does, in one sentence.
+  string description = 4;
+}
+
+// A query to run.
+message RunQueryRequest {
+  // The repository.
+  string repo = 1;
+  // The query's name.
+  string name = 2;
+  // Its parameters, as strings; an unknown key is INVALID_ARGUMENT.
+  map<string, string> params = 3;
+  // Which page of rows.
+  Page page = 4;
+}
+
+// One page of a query's rows.
+message RunQueryResponse {
+  // The columns' names, in row order.
+  repeated string columns = 1;
+  // One value per column each: strings for ids, paths, and kinds, numbers
+  // for counts and sequences, RFC 3339 strings for `*_at` columns, null
+  // for NULL.
+  repeated google.protobuf.ListValue rows = 2;
+  // Where the page ended.
+  PageInfo page = 3;
+}

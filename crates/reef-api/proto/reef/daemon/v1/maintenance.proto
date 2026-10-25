@@ -7,6 +7,7 @@ package reef.daemon.v1;
 
 import "google/protobuf/timestamp.proto";
 
+// Keeping the daemon's state small and safe.
 service Maintenance {
   // Garbage collection: jj's operations and git objects older than the undo
   // window, base cache entries no active workspace uses, ended workspace
@@ -32,6 +33,7 @@ service Maintenance {
   rpc Resume(ResumeRequest) returns (ResumeResponse);
 }
 
+// What to collect.
 message GcRequest {
   // A repo id, a unique id prefix, or an absolute path inside a registered
   // root; empty for every registered repository.
@@ -42,6 +44,7 @@ message GcRequest {
 
 // What GC did to one repository. Byte counts are allocated blocks.
 message GcReport {
+  // The repository.
   string repo_id = 1;
   // Nothing newer than this was deleted: now minus the undo window, or
   // minus the backup retention while the last backup is within it.
@@ -50,28 +53,40 @@ message GcReport {
   // same in a dry run). jj's index, which the step empties and rebuilds, is
   // not counted.
   uint64 jj_bytes_before = 3;
+  // The same, after.
   uint64 jj_bytes_after = 4;
   // Rebuilding jj's index from the surviving operations.
   uint64 reindex_ms = 5;
   // Why the jj step stopped short (such as `git` missing); empty if it did
   // not. The other steps still ran.
   string jj_error = 6;
+  // Base cache entries removed.
   uint32 base_entries_removed = 7;
+  // What they had allocated.
   uint64 base_bytes_freed = 8;
+  // Ended workspace rows deleted.
   uint32 workspace_rows_removed = 9;
   // The `wc/<id>` state directories of the removed rows.
   uint64 wc_bytes_freed = 10;
+  // Unused stores removed.
   uint32 stores_removed = 11;
+  // What they had allocated.
   uint64 store_bytes_freed = 12;
+  // The run for this repository.
   uint64 elapsed_ms = 13;
+  // Nothing was deleted; the counts are what would have gone.
   bool dry_run = 14;
+  // Symbol index rows removed, over its four tables (R2.14); 0 until then.
+  uint64 symbol_rows_removed = 15;
 }
 
+// What GC did.
 message GcResponse {
   // One per repository, in registration order.
   repeated GcReport reports = 1;
 }
 
+// Where to back up to.
 message BackupRequest {
   // An absolute directory, new or empty, outside the state directory.
   string dest = 1;
@@ -80,21 +95,81 @@ message BackupRequest {
   string repo = 2;
 }
 
+// One step of a backup, or its end.
 message BackupProgress {
   // Empty for the database step.
   string repo_id = 1;
   // `sqlite`, `operations` (under the pause), `objects`, `heads`, or
   // `done`.
   string step = 2;
-  // What the step copied.
+  // Files the step copied.
   uint64 files = 3;
+  // Bytes the step copied.
   uint64 bytes = 4;
   // The last message: the backup is complete.
   bool done = 5;
   // On the last message: `<dest>/manifest.json`.
   string manifest_path = 6;
+  // On the last message: what the manifest records, so a client needs not
+  // read it from disk (R2.01).
+  BackupSummary summary = 7;
 }
 
+// A finished backup: the content of its `manifest.json`.
+message BackupSummary {
+  // The manifest format's version.
+  uint32 version = 1;
+  // When the backup began.
+  google.protobuf.Timestamp started_at = 2;
+  // The database's `meta.daemon_instance_id`.
+  string daemon_instance_id = 3;
+  // The daemon's version.
+  string reef_version = 4;
+  // The jj-lib version the daemon was built with.
+  string jj_lib_version = 5;
+  // The state directory backed up.
+  string state_dir = 6;
+  // The repositories, in registration order.
+  repeated BackupRepo repos = 7;
+  // The database copy.
+  BackupDatabase database = 8;
+  // Every repository's operation heads were written; restore refuses a
+  // backup without it.
+  bool complete = 9;
+  // When the last repository's heads were written.
+  google.protobuf.Timestamp completed_at = 10;
+}
+
+// One repository in a backup.
+message BackupRepo {
+  // The repository's id.
+  string id = 1;
+  // Its registered root.
+  string root = 2;
+  // Its `.jj/repo` when backed up.
+  string jj_repo_path = 3;
+  // Whether jj and git share the working copy.
+  bool colocated = 4;
+  // The operation heads copied.
+  repeated string op_heads = 5;
+  // Files copied.
+  uint64 files = 6;
+  // Bytes copied.
+  uint64 bytes = 7;
+  // How long the repository thread was paused while its operation files
+  // were copied.
+  uint64 pause_ms = 8;
+}
+
+// The database copy in a backup.
+message BackupDatabase {
+  // Pages copied.
+  uint64 pages = 1;
+  // The copy's size in bytes.
+  uint64 bytes = 2;
+}
+
+// What to quiesce.
 message QuiesceRequest {
   // As GcRequest.repo: only this repository's thread is paused (snapshots,
   // reclaims, and GC are held off for every repository either way); empty
@@ -105,16 +180,23 @@ message QuiesceRequest {
   uint64 max_ms = 2;
 }
 
+// The quiesce in effect.
 message QuiesceResponse {
+  // Resume names it; it is the only way to end the quiesce early.
   string token = 1;
+  // When the daemon was held still.
   google.protobuf.Timestamp quiesced_at = 2;
+  // When it resumes by itself.
   google.protobuf.Timestamp auto_resume_at = 3;
 }
 
+// Which quiesce to end.
 message ResumeRequest {
+  // The token Quiesce returned.
   string token = 1;
 }
 
+// How long the quiesce lasted.
 message ResumeResponse {
   // How long the quiesce lasted.
   uint64 paused_ms = 1;

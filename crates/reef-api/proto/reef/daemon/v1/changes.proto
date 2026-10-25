@@ -1,0 +1,424 @@
+// Changes: the read side (log, get, diff; R2.02, symbols R2.15) and the
+// write side (describe, abandon, squash; R2.03) of a repository's history.
+//
+// `rev` resolves as a change id prefix (hex or jj's reverse hex), a commit
+// id prefix, or a local bookmark, in that order, plus `@` (the `default`
+// workspace's working-copy commit), `<workspace-id>@` (a Reef workspace's),
+// and `<rev>-` (the first parent). Only `LogChangesRequest.revset` takes
+// jj's revset language. Reads answer from the daemon's current head and say
+// which in `at_op`. Writes snapshot every workspace they would move first,
+// then check the new commits out in them: `snapshots` lists the snapshot
+// operations, `workspaces_updated` the workspaces checked out, and
+// `workspaces_failed` those whose check-out failed (they get
+// `attention = checkout-failed`; the write itself stands).
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "reef/daemon/v1/types.proto";
+import "reef/daemon/v1/workspaces.proto";
+
+// A repository's changes.
+service Changes {
+  // Changes matching a revset, a page at a time.
+  rpc Log(LogChangesRequest) returns (LogChangesResponse); // R2.02
+  // One change, with its diff stat.
+  rpc Get(GetChangeRequest) returns (GetChangeResponse); // R2.02
+  // What a change, or a range between two revisions, changed: per-file
+  // stats, structured line hunks, or symbols (level SYMBOLS: R2.15).
+  rpc Diff(DiffRequest) returns (DiffResponse); // R2.02
+  // Sets a change's description.
+  rpc Describe(DescribeChangeRequest) returns (DescribeChangeResponse); // R2.03
+  // Abandons changes, rebasing their descendants onto their parents.
+  rpc Abandon(AbandonChangeRequest) returns (AbandonChangeResponse); // R2.03
+  // Moves a change's content into another change, by default its first
+  // parent.
+  rpc Squash(SquashChangeRequest) returns (SquashChangeResponse); // R2.03
+}
+
+// Which changes to list.
+message LogChangesRequest {
+  // The repository.
+  string repo = 1;
+  // jj's revset language, parsed by jj-lib; `<workspace-id>@` names a Reef
+  // workspace's working-copy commit. Empty: `reef_log()`, every visible
+  // head and its ancestors down to the nearest bookmark or 200 commits,
+  // whichever is first.
+  string revset = 2;
+  // Which page. Pages are disjoint only without `with_graph`.
+  Page page = 3;
+  // Fill `Change.edges` and order rows topo-grouped, the working-copy
+  // branch first, as `jj log` draws them (R2.19).
+  bool with_graph = 4;
+}
+
+// One page of changes.
+message LogChangesResponse {
+  // In the revset's order, or graph order when `with_graph`.
+  repeated Change changes = 1;
+  // Where the page ended; `restarted` when the cursor's commit was hidden.
+  PageInfo page = 2;
+  // The revset evaluated, the default spelled out when the request's was
+  // empty.
+  string revset = 3;
+  // The head operation the answer was read from.
+  string at_op = 4;
+  // Bookmarks the log treats as trunk (the default start's), so a client
+  // can mark changes that landed.
+  repeated string trunk_bookmarks = 5;
+}
+
+// Which change to get.
+message GetChangeRequest {
+  // The repository.
+  string repo = 1;
+  // The revision.
+  string rev = 2;
+}
+
+// The change.
+message GetChangeResponse {
+  // The change, at the commit `rev` resolved to.
+  Change change = 1;
+  // Files that differ from its parents.
+  uint32 files_changed = 2;
+  // Lines added against its parents, over text files.
+  uint64 insertions = 3;
+  // Lines removed against its parents, over text files.
+  uint64 deletions = 4;
+  // The change's other visible commits, when it is divergent.
+  repeated ChangeRef other_commits = 5;
+  // The head operation the answer was read from.
+  string at_op = 6;
+}
+
+// What to diff, and how much detail to return.
+message DiffRequest {
+  // How much detail.
+  enum Level {
+    // `DiffResponse.stat` and per-file counts, without hunks.
+    STAT = 0;
+    // The changed paths and their kinds only.
+    FILES = 1;
+    // Files with their line hunks.
+    LINES = 2;
+    // `DiffResponse.symbols` (R2.15); UNIMPLEMENTED until then.
+    SYMBOLS = 3;
+  }
+  // The repository.
+  string repo = 1;
+  // What to diff.
+  oneof target {
+    // A change's commit against its parents' merged tree, as a revision.
+    string change = 2;
+    // Two revisions.
+    DiffRange range = 3;
+  }
+  // How much detail.
+  Level level = 4;
+  // Only paths under these prefixes, repository-root relative; empty for
+  // every path.
+  repeated string paths = 5;
+  // Unchanged lines around each hunk for LINES; 0 means 3.
+  uint32 context_lines = 6;
+  // For SYMBOLS: call sites of added symbols too, not only of changed and
+  // removed ones (R2.15).
+  bool callers_of_added = 7;
+  // For SYMBOLS: top-level symbols only (R2.15).
+  bool summary = 8;
+}
+
+// A diff between two revisions.
+message DiffRange {
+  // The old side.
+  string from = 1;
+  // The new side.
+  string to = 2;
+}
+
+// The diff. Bounded by `[api] max_diff_bytes`: past it, `truncated` is set
+// and the client narrows with `paths`.
+message DiffResponse {
+  // The old side; for a change, its first parent.
+  ChangeRef from = 1;
+  // The new side.
+  ChangeRef to = 2;
+  // Totals over the files returned.
+  DiffStat stat = 3;
+  // One per changed file, by path; per-file counts for STAT, kinds for
+  // FILES, hunks for LINES; empty for SYMBOLS.
+  repeated FileDiff files = 4;
+  // The response hit the size bound and stops before `truncated_at`.
+  bool truncated = 5;
+  // The first path left out; empty unless `truncated`.
+  string truncated_at = 6;
+  // The head operation the answer was read from.
+  string at_op = 7;
+  // The symbol diff, for SYMBOLS (R2.15); unset otherwise.
+  SymbolDiff symbols = 8;
+  // The level answered.
+  DiffRequest.Level level = 9;
+}
+
+// Totals of a diff.
+message DiffStat {
+  // Files that differ.
+  uint32 files_changed = 1;
+  // Lines added, over text files.
+  uint64 insertions = 2;
+  // Lines removed, over text files.
+  uint64 deletions = 3;
+}
+
+// How one file differs.
+message FileDiff {
+  // Repository-root relative, on the new side.
+  string path = 1;
+  // Where it was on the old side, when renamed; empty otherwise.
+  string old_path = 2;
+  // How it differs.
+  FileStatus.State state = 3;
+  // What it was on the old side.
+  FileEntry.Kind old_kind = 4;
+  // What it is on the new side.
+  FileEntry.Kind new_kind = 5;
+  // Either side has a NUL byte in its first 8 KiB or is over
+  // `[api] max_diff_file_size`: only sizes are reported, never hunks.
+  bool binary = 6;
+  // Bytes on the old side.
+  uint64 old_size = 7;
+  // Bytes on the new side.
+  uint64 new_size = 8;
+  // Its line hunks, for LINES.
+  repeated DiffHunk hunks = 9;
+  // Lines added; 0 for a binary file.
+  uint32 insertions = 10;
+  // Lines removed; 0 for a binary file.
+  uint32 deletions = 11;
+  // A side is conflicted; that side's text is jj's materialized conflict,
+  // markers included (the only place markers appear in the API).
+  bool conflicted = 12;
+}
+
+// A run of changed lines and their context.
+message DiffHunk {
+  // The first old line, 1-based.
+  uint32 old_start = 1;
+  // Old lines the hunk spans.
+  uint32 old_lines = 2;
+  // The first new line, 1-based.
+  uint32 new_start = 3;
+  // New lines the hunk spans.
+  uint32 new_lines = 4;
+  // The lines, in order.
+  repeated DiffLine lines = 5;
+}
+
+// One line of a hunk.
+message DiffLine {
+  // Which side it belongs to.
+  enum Kind {
+    // On both sides.
+    CONTEXT = 0;
+    // On the new side only.
+    ADDED = 1;
+    // On the old side only.
+    REMOVED = 2;
+  }
+  // Which side.
+  Kind kind = 1;
+  // The line's bytes without its line ending: content need not be UTF-8.
+  bytes text = 2;
+}
+
+// A diff by symbol (R2.15).
+message SymbolDiff {
+  // One per changed file in an indexed language, by path.
+  repeated FileSymbolDiff files = 1;
+  // Files of the `to` tree in an enabled language whose blob is not
+  // indexed: how much of the call-site answer is missing.
+  uint32 unindexed_files = 2;
+  // Changed files in no indexed language, or binary.
+  uint32 other_files = 3;
+  // The old side's commit, full hex.
+  string from_commit = 4;
+  // The new side's commit, full hex.
+  string to_commit = 5;
+}
+
+// One file's symbol changes (R2.15).
+message FileSymbolDiff {
+  // Repository-root relative.
+  string path = 1;
+  // added, modified, or removed.
+  string status = 2;
+  // Both sides' blobs are indexed.
+  bool indexed = 3;
+  // The language it was parsed as.
+  string lang = 4;
+  // Where the symbols came from: tags, scip, or mixed.
+  string source = 5;
+  // Its changed symbols, in position order.
+  repeated SymbolChange symbols = 6;
+}
+
+// One symbol's change (R2.15).
+message SymbolChange {
+  // added, removed, changed (its body differs), or moved (the same body
+  // at other lines).
+  string status = 1;
+  // Its name.
+  string name = 2;
+  // function, method, struct, class, ...: the language's kind.
+  string kind = 3;
+  // The enclosing symbol's name; empty at file scope.
+  string parent = 4;
+  // Its signature line, as written.
+  string signature = 5;
+  // Its lines on the old side; unset when added.
+  LineRange before = 6;
+  // Its lines on the new side; unset when removed.
+  LineRange after = 7;
+  // Where the new side calls or references it, for a changed or removed
+  // symbol (an added one with `callers_of_added`).
+  repeated CallSite call_sites = 8;
+  // `call_sites` was cut at the daemon's limit.
+  bool call_sites_truncated = 9;
+}
+
+// A range of lines, 0-based and inclusive, as the index stores them.
+message LineRange {
+  // The first line.
+  uint32 start = 1;
+  // The last line.
+  uint32 end = 2;
+}
+
+// A use of a symbol (R2.15).
+message CallSite {
+  // Repository-root relative.
+  string path = 1;
+  // 0-based, as `LineRange`.
+  uint32 line = 2;
+  // call or reference.
+  string kind = 3;
+  // The symbol the use is in; empty at file scope.
+  string enclosing_symbol = 4;
+}
+
+// A change to describe (R2.03).
+message DescribeChangeRequest {
+  // The repository.
+  string repo = 1;
+  // The revision.
+  string rev = 2;
+  // The new description, whole.
+  string description = 3;
+  // The workspace the client acts for, recorded in the operation; empty
+  // for none.
+  string workspace = 4;
+}
+
+// The described change (R2.03).
+message DescribeChangeResponse {
+  // The change, rewritten.
+  Change change = 1;
+  // The operation it recorded.
+  Operation operation = 2;
+  // That operation's id.
+  string op_id = 3;
+  // The snapshots taken first.
+  repeated string snapshots = 4;
+  // Reef workspaces checked out on a new commit.
+  repeated string workspaces_updated = 5;
+  // Reef workspaces whose check-out failed.
+  repeated string workspaces_failed = 6;
+  // The operation's event sequence (R2.09); 0 until then.
+  uint64 seq = 7;
+}
+
+// Changes to abandon (R2.03).
+message AbandonChangeRequest {
+  // The repository.
+  string repo = 1;
+  // The revisions; abandoned in one operation.
+  repeated string revs = 2;
+  // The workspace the client acts for, recorded in the operation; empty
+  // for none.
+  string workspace = 3;
+  // Abandon a commit a bookmark points at too (FAILED_PRECONDITION
+  // otherwise).
+  bool force = 4;
+}
+
+// A workspace that moved to another change.
+message WorkspaceChange {
+  // The workspace's id.
+  string workspace = 1;
+  // The change it is on now.
+  ChangeRef change = 2;
+}
+
+// What the abandon did (R2.03).
+message AbandonChangeResponse {
+  // The operation it recorded.
+  Operation operation = 1;
+  // That operation's id.
+  string op_id = 2;
+  // Descendants rebased onto the abandoned changes' parents, at their new
+  // commits.
+  repeated ChangeRef rebased = 3;
+  // Reef workspaces checked out on a new commit.
+  repeated string workspaces_updated = 4;
+  // The changes abandoned, at the commits they had.
+  repeated ChangeRef abandoned = 5;
+  // The snapshots taken first.
+  repeated string snapshots = 6;
+  // Workspaces that were on an abandoned change and are now on a new empty
+  // change on its parents, as jj moves them.
+  repeated WorkspaceChange new_changes = 7;
+  // Reef workspaces whose check-out failed.
+  repeated string workspaces_failed = 8;
+  // The operation's event sequence (R2.09); 0 until then.
+  uint64 seq = 9;
+}
+
+// A change to squash (R2.03).
+message SquashChangeRequest {
+  // The repository.
+  string repo = 1;
+  // The change to squash, as a revision.
+  string rev = 2;
+  // The revision to squash into; empty for the change's first parent.
+  string into = 3;
+  // The result's description: empty keeps `into`'s; a leading `+` appends
+  // the rest to it.
+  string description = 4;
+  // The workspace the client acts for, recorded in the operation; empty
+  // for none.
+  string workspace = 5;
+  // Keep the emptied change instead of abandoning it.
+  bool keep_emptied = 6;
+}
+
+// What the squash did (R2.03).
+message SquashChangeResponse {
+  // The change squashed into, rewritten.
+  Change result = 1;
+  // The operation it recorded.
+  Operation operation = 2;
+  // That operation's id.
+  string op_id = 3;
+  // Reef workspaces checked out on a new commit.
+  repeated string workspaces_updated = 4;
+  // The result has conflicts the squash introduced.
+  bool result_conflicted = 5;
+  // The emptied change, when it was abandoned.
+  repeated ChangeRef abandoned = 6;
+  // The snapshots taken first.
+  repeated string snapshots = 7;
+  // Reef workspaces whose check-out failed.
+  repeated string workspaces_failed = 8;
+  // The operation's event sequence (R2.09); 0 until then.
+  uint64 seq = 9;
+}

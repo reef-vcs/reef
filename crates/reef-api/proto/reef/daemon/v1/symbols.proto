@@ -1,0 +1,132 @@
+// Symbols: an index of definitions and references keyed by blob (R2.14),
+// built by the daemon with tree-sitter tags or ingested from a SCIP index.
+// A blob's SCIP rows are preferred over its tags rows when both exist.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "reef/daemon/v1/types.proto";
+
+// A repository's symbol index.
+service Symbols {
+  // Indexes a revision's files with the daemon's own parsers, and waits.
+  rpc Index(IndexSymbolsRequest) returns (IndexSymbolsResponse); // R2.14
+  // Ingests a SCIP index a client built, streamed in chunks.
+  rpc Ingest(stream IngestSymbolsChunk) returns (IngestSymbolsResponse); // R2.14
+  // Symbols defined at a revision, by name and kind, a page at a time.
+  rpc Lookup(LookupSymbolsRequest) returns (LookupSymbolsResponse); // R2.14
+}
+
+// What to index.
+message IndexSymbolsRequest {
+  // Which files.
+  enum Scope {
+    // The files the revision changed against its parents.
+    CHANGED = 0;
+    // Every file of the revision's tree.
+    TREE = 1;
+  }
+  // The repository.
+  string repo = 1;
+  // The revision.
+  string rev = 2;
+  // Which files.
+  Scope scope = 3;
+}
+
+// What indexing did.
+message IndexSymbolsResponse {
+  // The commit indexed, full hex.
+  string commit_id = 1;
+  // Files in scope.
+  uint64 files_seen = 2;
+  // Files parsed now (a blob already indexed is not parsed again).
+  uint64 files_indexed = 3;
+  // Files over the size limit, skipped.
+  uint64 files_skipped_size = 4;
+  // Files the parser failed on.
+  uint64 files_with_errors = 5;
+  // Definitions recorded.
+  uint64 symbols = 6;
+  // References recorded.
+  uint64 refs = 7;
+  // How long it took.
+  uint64 elapsed_ms = 8;
+}
+
+// One chunk of an index to ingest.
+message IngestSymbolsChunk {
+  // The repository; first chunk only.
+  string repo = 1;
+  // The revision whose tree the index describes; first chunk only.
+  string rev = 2;
+  // The index's format, `scip`; first chunk only.
+  string source = 3;
+  // The next bytes of the index; at most 256 MiB in all.
+  bytes data = 4;
+}
+
+// What ingesting did.
+message IngestSymbolsResponse {
+  // The commit the index was matched against, full hex.
+  string commit_id = 1;
+  // Documents ingested.
+  uint32 documents = 2;
+  // Documents whose path is not a regular file in the tree.
+  uint32 skipped_documents = 3;
+  // Definitions recorded.
+  uint64 symbols = 4;
+  // References recorded.
+  uint64 refs = 5;
+}
+
+// Which symbols to look up.
+message LookupSymbolsRequest {
+  // The repository.
+  string repo = 1;
+  // The revision; empty for `@`.
+  string rev = 2;
+  // The name, or its prefix unless `exact`.
+  string name = 3;
+  // Only this kind; empty for any.
+  string kind = 4;
+  // Match `name` exactly instead of as a prefix.
+  bool exact = 5;
+  // Which page.
+  Page page = 6;
+}
+
+// One page of symbols.
+message LookupSymbolsResponse {
+  // By path, then line.
+  repeated Symbol symbols = 1;
+  // Where the page ended.
+  PageInfo page = 2;
+}
+
+// A symbol definition. Lines and columns are 0-based, as the index stores
+// them.
+message Symbol {
+  // Its file at the revision.
+  string path = 1;
+  // The file's blob id, full hex.
+  string blob_id = 2;
+  // Its name.
+  string name = 3;
+  // function, method, struct, class, ...: the language's kind.
+  string kind = 4;
+  // The enclosing symbol's name; empty at file scope.
+  string parent = 5;
+  // Its signature line, as written.
+  string signature = 6;
+  // Where it starts: line.
+  uint32 start_line = 7;
+  // Where it starts: column, in bytes.
+  uint32 start_col = 8;
+  // Where it ends: line.
+  uint32 end_line = 9;
+  // Where it ends: column, in bytes.
+  uint32 end_col = 10;
+  // Where the row came from: tags or scip.
+  string source = 11;
+}

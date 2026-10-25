@@ -1,0 +1,177 @@
+// Trees: the virtual workspace (R2.04). Read any revision's files and
+// write a change's without a workspace on disk. Paths are
+// repository-root relative and `/`-separated; `..`, empty components, and
+// `.jj` or `.git` components are INVALID_ARGUMENT.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "reef/daemon/v1/types.proto";
+
+// A revision's files, read and written through the API.
+service Trees {
+  // The entries under a path at a revision, a page at a time (page size
+  // default 1,000, cap 10,000).
+  rpc List(ListTreeRequest) returns (ListTreeResponse); // R2.04
+  // A file's content at a revision, or a range of it, in chunks of at most
+  // 64 KiB; the first chunk carries the metadata.
+  rpc Read(ReadFileRequest) returns (stream FileChunk); // R2.04
+  // Rewrites a change's commit with whole-file edits as one operation: a
+  // header, then edits, until the client half-closes. Conflicted paths are
+  // refused, not resolved.
+  rpc Apply(stream ApplyEditsChunk) returns (ApplyEditsResponse); // R2.04
+}
+
+// Which entries to list.
+message ListTreeRequest {
+  // The repository.
+  string repo = 1;
+  // The revision.
+  string rev = 2;
+  // A directory; empty for the root.
+  string path = 3;
+  // Every entry below `path`, not only its children.
+  bool recursive = 4;
+  // Which page.
+  Page page = 5;
+  // Fill `FileEntry.size` (a blob read per file; only for listings of at
+  // most 1,000 entries).
+  bool with_sizes = 6;
+}
+
+// One page of entries.
+message ListTreeResponse {
+  // By path.
+  repeated FileEntry entries = 1;
+  // Where the page ended.
+  PageInfo page = 2;
+  // The commit listed.
+  ChangeRef at_commit = 3;
+  // The head operation the answer was read from.
+  string at_op = 4;
+  // `with_sizes` was asked but the listing was too long: sizes are unset.
+  bool sizes_omitted = 5;
+}
+
+// Which file to read.
+message ReadFileRequest {
+  // The repository.
+  string repo = 1;
+  // The revision.
+  string rev = 2;
+  // The file.
+  string path = 3;
+  // The first byte to return.
+  uint64 offset = 4;
+  // At most this many bytes; 0 for all.
+  uint64 limit = 5;
+  // For a conflicted file, stream jj's materialized conflict, markers
+  // included, instead of refusing with FAILED_PRECONDITION.
+  bool materialize_conflicts = 6;
+}
+
+// One chunk of a file.
+message FileChunk {
+  // The next bytes; a symlink's target for SYMLINK.
+  bytes data = 1;
+  // Where `data` starts in the file.
+  uint64 offset = 2;
+  // This is the last chunk.
+  bool eof = 3;
+  // The whole file's size; first chunk only.
+  uint64 total_size = 4;
+  // What the entry is; first chunk only.
+  FileEntry.Kind kind = 5;
+  // The content's blob id, full hex; first chunk only.
+  string blob_id = 6;
+  // The content is a materialized conflict; first chunk only.
+  bool conflicted = 7;
+}
+
+// One message of an Apply stream: the header first, then edits.
+message ApplyEditsChunk {
+  // Exactly one is set.
+  oneof part {
+    // The first message.
+    ApplyHeader header = 1;
+    // Every later message.
+    Edit edit = 2;
+  }
+}
+
+// What an Apply rewrites.
+message ApplyHeader {
+  // The repository.
+  string repo = 1;
+  // The change to rewrite, as a revision: the edit rewrites the commit it
+  // resolves to, keeping the change id.
+  string change = 2;
+  // The change's new description; empty to keep it.
+  string description = 3;
+  // The commit id the client read the change at; another is
+  // FAILED_PRECONDITION. Empty to skip the check.
+  string expected_commit = 4;
+  // Allow a divergent change when `change` named a commit id directly.
+  bool allow_divergence = 5;
+  // The workspace the client acts for, recorded in the operation; empty
+  // for none.
+  string workspace = 6;
+}
+
+// One file edit.
+message Edit {
+  // The file.
+  string path = 1;
+  // What to do; exactly one is set.
+  oneof op {
+    // Write content. Consecutive edits of the same path with `write`
+    // append, so a large file is sent in chunks.
+    WriteFile write = 2;
+    // Delete the file, or everything under a directory; a missing path is
+    // a no-op.
+    bool delete = 3;
+    // Make it a symlink to this target.
+    string symlink = 4;
+    // Set it to another revision's file, by blob id (no bytes move).
+    CopyFrom copy_from = 5;
+  }
+}
+
+// File content to write.
+message WriteFile {
+  // The bytes (or the next of them).
+  bytes data = 1;
+  // The executable bit; unset keeps an existing file's, false for a new
+  // one.
+  optional bool executable = 2;
+}
+
+// Where to copy a file from.
+message CopyFrom {
+  // The revision.
+  string rev = 1;
+  // The file there.
+  string path = 2;
+}
+
+// What the apply did.
+message ApplyEditsResponse {
+  // The change at its new commit.
+  ChangeRef result = 1;
+  // The operation it recorded.
+  Operation operation = 2;
+  // That operation's id.
+  string op_id = 3;
+  // Paths written or deleted.
+  uint32 files_written = 4;
+  // Bytes written.
+  uint64 bytes_written = 5;
+  // The snapshots taken first, of workspaces on the change.
+  repeated string snapshots = 6;
+  // Reef workspaces checked out on the new commit.
+  repeated string workspaces_updated = 7;
+  // Reef workspaces whose check-out failed.
+  repeated string workspaces_failed = 8;
+  // The operation's event sequence (R2.09); 0 until then.
+  uint64 seq = 9;
+}

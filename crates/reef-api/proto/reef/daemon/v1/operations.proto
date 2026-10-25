@@ -1,0 +1,195 @@
+// Operations: a repository's jj operation log (R2.02), undo (R2.03), the
+// event stream (R2.09), and the repository at any past point (R2.12).
+//
+// Event sequences (`seq`) are daemon-wide and increasing: every event of
+// every repository gets the next number, and a repository's events are the
+// subsequence with its id.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/daemon/v1/events.proto";
+import "reef/daemon/v1/types.proto";
+
+// A repository's operation log.
+service Operations {
+  // Operations, newest first unless asked otherwise, a page at a time.
+  rpc Log(LogOperationsRequest) returns (LogOperationsResponse); // R2.02
+  // One operation, with a summary of its view.
+  rpc Get(GetOperationRequest) returns (GetOperationResponse); // R2.02
+  // Restores the repository's view to before an operation, recording a new
+  // operation.
+  rpc Undo(UndoRequest) returns (UndoResponse); // R2.03
+  // Events as they happen, after any the client missed.
+  rpc Subscribe(SubscribeRequest) returns (stream Frame); // R2.09
+  // The repository's changes and workspaces as of a past sequence,
+  // operation, or time.
+  rpc Replay(ReplayRequest) returns (ReplayState); // R2.12
+}
+
+// Which operations to list.
+message LogOperationsRequest {
+  // The repository.
+  string repo = 1;
+  // Only these `Operation.kind` values; empty for every kind.
+  repeated string kinds = 2;
+  // Only operations for this workspace; empty for any.
+  string workspace = 3;
+  // Only operations whose jj username is this; empty for any.
+  string owner = 4;
+  // Which page.
+  Page page = 5;
+  // Greater than 0: only operations indexed after this sequence, oldest
+  // first, so a client can poll by sequence (R2.09).
+  uint64 after_seq = 6;
+  // Only operations that ended at or after this time; unset for no bound.
+  google.protobuf.Timestamp since = 7;
+  // Only operations that ended before this time; unset for no bound.
+  google.protobuf.Timestamp until = 8;
+  // Only operations that moved one of these change ids; empty for any.
+  repeated string changes = 9;
+  // Greater than 0: only operations indexed before this sequence (R2.09).
+  uint64 before_seq = 10;
+  // Oldest first instead of newest first.
+  bool oldest_first = 11;
+}
+
+// One page of operations.
+message LogOperationsResponse {
+  // Newest first, or oldest first with `after_seq` or `oldest_first`.
+  repeated Operation operations = 1;
+  // Where the page ended.
+  PageInfo page = 2;
+  // The head operation the answer was read from.
+  string at_op = 3;
+}
+
+// Which operation to get.
+message GetOperationRequest {
+  // The repository.
+  string repo = 1;
+  // An operation id or unique prefix; `@` for the head operation.
+  string op = 2;
+}
+
+// The operation.
+message GetOperationResponse {
+  // The operation.
+  Operation operation = 1;
+  // What its view held.
+  ViewSummary view_summary = 2;
+  // The head operation the answer was read from.
+  string at_op = 3;
+}
+
+// An operation's view, summarized (R2.02).
+message ViewSummary {
+  // The visible heads.
+  repeated ChangeRef heads = 1;
+  // Each jj workspace's working-copy commit, by jj workspace name
+  // (`default`, `reef-<id>`).
+  map<string, ChangeRef> workspaces = 2;
+  // Each local bookmark's commit id, full hex, by name.
+  map<string, string> bookmarks = 3;
+}
+
+// Which operation to undo (R2.03).
+message UndoRequest {
+  // The repository.
+  string repo = 1;
+  // An operation id or unique prefix; empty for the head operation.
+  string op = 2;
+  // The workspace the client acts for, recorded in the operation; empty
+  // for none.
+  string workspace = 3;
+}
+
+// What the undo did (R2.03).
+message UndoResponse {
+  // The operation it recorded.
+  Operation operation = 1;
+  // That operation's id.
+  string op_id = 2;
+  // The operation undone.
+  Operation undone = 3;
+  // The operation whose view the repository has now.
+  string restored_to = 4;
+  // Reef workspaces checked out on a new commit.
+  repeated string workspaces_updated = 5;
+  // The snapshots taken first.
+  repeated string snapshots = 6;
+  // Reef workspaces whose check-out failed.
+  repeated string workspaces_failed = 7;
+  // The operation's event sequence (R2.09); 0 until then.
+  uint64 seq = 8;
+}
+
+// Which events to stream (R2.09).
+message SubscribeRequest {
+  // The repository; empty for every repository.
+  string repo = 1;
+  // 0: from now. Greater: first the events after this sequence from the
+  // index, then live ones. A sequence older than the index holds is
+  // INVALID_ARGUMENT naming the oldest.
+  uint64 resume_after_seq = 2;
+  // Which events; unset for all.
+  EventFilter filter = 3;
+}
+
+// Which point in the past (R2.12).
+message ReplayRequest {
+  // What to reconstruct.
+  enum Only {
+    // Changes and workspaces.
+    ALL = 0;
+    // Changes only.
+    CHANGES = 1;
+    // Workspaces only.
+    WORKSPACES = 2;
+  }
+  // The repository.
+  string repo = 1;
+  // The point; exactly one is set.
+  oneof at {
+    // The repository's newest operation with this sequence or less.
+    uint64 seq = 2;
+    // This operation (an id or unique prefix).
+    string op = 3;
+    // The newest operation that ended at or before this time.
+    google.protobuf.Timestamp time = 4;
+  }
+  // The changes to list, in jj's revset language, evaluated at that
+  // operation; empty for `reef_log()`.
+  string revset = 5;
+  // Which half to reconstruct.
+  Only only = 6;
+}
+
+// The repository as it was (R2.12).
+message ReplayState {
+  // The operation the point resolved to.
+  string op_id = 1;
+  // Its event sequence.
+  uint64 seq = 2;
+  // When it ended.
+  google.protobuf.Timestamp at = 3;
+  // The revset's changes at that operation, with graph edges, as
+  // `Changes.Log` with `with_graph` returns them.
+  repeated Change changes = 4;
+  // The repository's workspaces as they were then.
+  repeated ReplayedWorkspace workspaces = 5;
+  // The local bookmarks at that operation.
+  repeated Bookmark bookmarks = 6;
+  // Some workspace could not be reconstructed exactly.
+  bool partial = 7;
+}
+
+// A workspace as it was at a past operation (R2.12).
+message ReplayedWorkspace {
+  // The workspace then; its lease's state is UNKNOWN and `presence` empty.
+  Workspace workspace = 1;
+  // Its fields come from history; false when the operation's view lacked
+  // it and its current ids are shown.
+  bool reconstructed = 2;
+}

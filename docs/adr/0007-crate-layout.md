@@ -1,6 +1,6 @@
 # 0007. Crate layout
 
-- Status: accepted
+- Status: accepted; amended by [0029](0029-daemon-api-v1-and-the-reef-api-crate.md) (a fifth crate, `reef-api`, below `reef-lib`)
 - Date: 2026-10-15
 - Ticket: R0.01
 

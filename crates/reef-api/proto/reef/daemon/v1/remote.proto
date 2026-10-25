@@ -1,0 +1,76 @@
+// Remote: the tokens remote and web clients authenticate with (R2.08).
+// Served on the Unix socket only: whoever can reach the socket manages
+// tokens, and no token can.
+syntax = "proto3";
+
+package reef.daemon.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// Access tokens for the remote and web listeners.
+service Remote {
+  // Issues a token; its secret is in the response and nowhere else.
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse); // R2.08
+  // Every token, revoked and expired ones included, without secrets.
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse); // R2.08
+  // Revokes a token at once.
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse); // R2.08
+}
+
+// An access token, without its secret.
+message Token {
+  // 16 hex characters.
+  string id = 1;
+  // Its name, unique among tokens.
+  string name = 2;
+  // What it may call: read, presence, workspaces, admin.
+  repeated string scopes = 3;
+  // When it was issued.
+  google.protobuf.Timestamp created_at = 4;
+  // When it stops working; unset for never.
+  google.protobuf.Timestamp expires_at = 5;
+  // When a request last authenticated with it; unset if never.
+  google.protobuf.Timestamp last_used_at = 6;
+  // When it was revoked; unset if it was not.
+  google.protobuf.Timestamp revoked_at = 7;
+}
+
+// A token to issue.
+message IssueTokenRequest {
+  // Its name.
+  string name = 1;
+  // Its scopes; empty for `read`.
+  repeated string scopes = 2;
+  // How long it works; unset for never.
+  google.protobuf.Duration expires_in = 3;
+}
+
+// The token issued.
+message IssueTokenResponse {
+  // The token.
+  Token token = 1;
+  // The bearer secret, shown once: the daemon keeps only its hash.
+  string secret = 2;
+}
+
+// No parameters.
+message ListTokensRequest {}
+
+// The tokens.
+message ListTokensResponse {
+  // Oldest first.
+  repeated Token tokens = 1;
+}
+
+// Which token to revoke.
+message RevokeTokenRequest {
+  // The token's name, or its id or a unique id prefix.
+  string token = 1;
+}
+
+// The revoked token.
+message RevokeTokenResponse {
+  // The token, with `revoked_at` set.
+  Token token = 1;
+}

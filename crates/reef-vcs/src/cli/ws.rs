@@ -187,6 +187,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                     repo,
                     states: states.clone(),
                     owner: String::new(),
+                    page: None,
                 })
             };
             let listed = match repo {
