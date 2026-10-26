@@ -10,6 +10,7 @@ use std::sync::{Arc, PoisonError};
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::CommitIdHex;
+use reef_lib::jj::revset::{self, RevsetScope};
 use reef_lib::spec::StoreSpec;
 
 use super::{CreateSpec, Manager, ManagerError, MissingStores, WorkspaceEntry};
@@ -428,7 +429,7 @@ impl Manager {
                     // The default start's bookmarks may have moved on the
                     // root since the thread last reloaded.
                     super::create::refresh_for_resolve(head).await?;
-                    let commit = super::create::default_start(&head.repo).await?.commit;
+                    let commit = super::create::default_start(&head.repo)?.commit;
                     head.repo
                         .check_tree_names(&commit, &mut head.checked_trees)
                         .await?;
@@ -463,8 +464,17 @@ impl Manager {
                 async move {
                     super::create::refresh_for_resolve(head).await?;
                     let commit = match rev {
-                        Some(text) => head.repo.resolve_revision(&text).await?.commit_id,
-                        None => super::create::default_start(&head.repo).await?.commit,
+                        Some(text) => {
+                            let scope = RevsetScope {
+                                workspace: None,
+                                user_email: head.settings.user_email(),
+                                root: &head.root,
+                            };
+                            revset::resolve_revision(head.repo.head(), &text, &scope)
+                                .await?
+                                .commit_id
+                        }
+                        None => super::create::default_start(&head.repo)?.commit,
                     };
                     head.repo
                         .check_tree_names(&commit, &mut head.checked_trees)

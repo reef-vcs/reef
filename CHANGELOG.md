@@ -4,11 +4,18 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Added
+
+- The read side of the API ([ADR 0030](docs/adr/0030-reads-over-jj-state.md)): `GetStatus` (the repository's trunk, active workspaces, mutable heads, conflicted and divergent changes, and a workspace's changed and conflicted files), `ListChanges` (the log, with graph edges, over jj's revset language), `GetChange`, `GetDiff` (summary, line counts, or unified hunks, with renames and copies), `ListOperations` and `GetOperation`. Revisions are jj revsets with Reef's `trunk()`, `immutable_heads()`, `immutable()` and `mutable()`; reads can be made at any operation, and reads of a workspace's `@` snapshot it first. The CLI's commands for them come with R2.05.
+- Every operation a response reports carries its effects: changes created, rewritten, hidden or abandoned, bookmarks moved, working copies moved. Operations Reef did not just write are classified by kind.
+- API revision 2: `OperationEffects.change_count` and `bookmark_count`, `CHANGE_EFFECT_KIND_HIDDEN`, `BookmarkEffect.conflicted`, `WorkspaceStatus.conflicted_path_count`, and `FileDiff`'s `old_no_final_newline`, `new_no_final_newline`, `too_large` and `invalid_utf8`.
+
 ### Changed
 
 - The daemon's API is `reef.api.v1`, in the new `reef-api` crate: typed enums instead of strings, every list paginated, every write returning the jj operation it recorded, errors as `google.rpc.Status` with a `reef.api.v1.ErrorDetail` that stock gRPC tooling decodes, and every RPC Phase 2 implements declared up front ([ADR 0029](docs/adr/0029-daemon-api-v1.md)). `reef.daemon.v0` is gone except `Daemon/Status`, which a 0.1 `reef daemon status` and `stop` still use.
 - A daemon that cannot serve a request as asked says so: exit code 9, kind `unsupported`. The CLI's JSON error object carries the daemon's `reason` when there is one, such as `API_VERSION_MISMATCH`.
 - `reef ws list` asks the daemon for workspaces newest first, a page at a time.
+- `ws create --change`/`--new-on`, `ws move`, and `store build --rev` take a jj revset naming one commit, resolved in jj's order: tags, bookmarks, commit id prefixes, then change id prefixes. A bookmark whose name is also an id prefix (`cafe`) now names the bookmark, and hex text that prefixes both a commit id and a change id names the commit. A divergent change id or a conflicted bookmark is now `invalid_argument` (exit 2, reason `AMBIGUOUS_REVISION`, with the commits in the hint) instead of `conflict` (exit 5).
 
 ### Upgrading from 0.1
 

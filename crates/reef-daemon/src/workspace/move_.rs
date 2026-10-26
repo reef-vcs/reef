@@ -128,7 +128,7 @@ impl Manager {
         let final_op_id = self.move_snapshot(&entry, described.clone()).await?;
 
         // 2 and 3.
-        let resolved = resolve_start(&handle, start).await?;
+        let resolved = resolve_start(&handle, start, Some(id.jj_workspace_name())).await?;
         let (base, _) = self
             .ensure_base(&handle, &resolved, &*entry.backend)
             .await?;

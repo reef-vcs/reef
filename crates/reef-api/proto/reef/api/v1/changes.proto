@@ -3,12 +3,29 @@
 // `revision` is a jj revset expression that must resolve to exactly one
 // commit: none is NOT_FOUND, several are INVALID_ARGUMENT (a divergent
 // change id names two commits; use a commit id). `@` is the request's
-// `workspace`'s working-copy commit and is invalid without one. `trunk()` is
-// the repository's default start bookmark and `immutable_heads()` is
-// `trunk() | tags()`. `at_operation` is an operation id or unique prefix: the
+// `workspace`'s working-copy commit and is invalid without one. Symbols
+// resolve in jj's order: tags, local bookmarks, commit id prefixes in hex,
+// change id prefixes in reverse hex, then change id prefixes in hex; jj's
+// `change_id()` takes reverse hex only. Reef defines four aliases and reads
+// no user configuration: `trunk()` is the commit of the repository's
+// default start bookmark (the first of `main`, origin's HEAD, `master` and
+// `trunk`, locally then on `origin`), or `root()` when there is none;
+// `immutable_heads()` is `trunk() | tags()`; `immutable()` is
+// `::(immutable_heads() | root())`; and `mutable()` is `~immutable()`.
+// `at_operation` is an operation id or unique prefix of lowercase hex: the
 // read answers from that operation's view; empty means the current head.
 // Reads whose revision or revset involves `@` snapshot the workspace first
 // unless `skip_snapshot`; a read `at_operation` never snapshots.
+//
+// Errors of every revision read: INVALID_ARGUMENT with reason
+// WORKSPACE_REQUIRED (`@` without `workspace`), INVALID_REVSET (jj's parse
+// error as the message), AMBIGUOUS_ID_PREFIX (metadata `prefix`),
+// AMBIGUOUS_REVISION (several commits; metadata `revision`, `commit_ids`),
+// INVALID_OPERATION_ID, AMBIGUOUS_OPERATION_ID (metadata `operation_id`) or
+// INVALID_PAGE_TOKEN; NOT_FOUND with reason REVISION_NOT_FOUND (metadata
+// `revision`), WORKING_COPY_NOT_FOUND (metadata `workspace_id`,
+// `at_operation`) or OPERATION_NOT_FOUND (metadata `operation_id`); and a
+// failed snapshot's own error.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -19,13 +36,16 @@ import "reef/api/v1/options.proto";
 
 // The log, and reading and rewriting changes.
 service ChangeService {
-  // The log: changes in topological order, children first, with graph
-  // edges. Declared; R2.02 implements it.
+  // The log: changes in topological order, children first, branches kept
+  // together as `jj log` prints them, with graph edges. A page stops before
+  // its response passes 3 MiB, so it may hold fewer than `page_size`
+  // entries.
   rpc ListChanges(ListChangesRequest) returns (ListChangesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
-  // One change. Declared; R2.02 implements it.
+  // One change. Errors: also INVALID_ARGUMENT with reason
+  // REVISION_REQUIRED for an empty `revision`.
   rpc GetChange(GetChangeRequest) returns (GetChangeResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -94,7 +114,7 @@ message Change {
 enum GraphEdgeKind {
   // Not set.
   GRAPH_EDGE_KIND_UNSPECIFIED = 0;
-  // The parent is the next entry's commit, a direct parent.
+  // A direct parent, itself in the log.
   GRAPH_EDGE_KIND_DIRECT = 1;
   // The parent is reached through commits the log leaves out.
   GRAPH_EDGE_KIND_INDIRECT = 2;
@@ -124,18 +144,18 @@ message ListChangesRequest {
   string repo = 1;
   // The workspace `@` refers to; empty for none.
   string workspace = 2;
-  // A jj revset expression; empty for Reef's default log set: every active
-  // workspace's working-copy commit and its ancestors back to `trunk()`,
-  // `trunk()` itself, and every visible mutable head. A server that does
-  // not speak jj's revset language may refuse a non-empty one with
-  // UNSUPPORTED.
+  // A jj revset expression; empty for Reef's default log set,
+  // `trunk() | working_copies() | mutable()`: every working copy, every
+  // visible mutable commit (each mutable head and its ancestors back to
+  // `trunk()`), and `trunk()` itself. A server that does not speak jj's
+  // revset language may refuse a non-empty one with UNSUPPORTED.
   string revset = 3;
   // Read at this operation; empty for the head.
   string at_operation = 4;
   // Answer from the last recorded snapshot instead of snapshotting first.
   bool skip_snapshot = 5;
   // Entries per page: 0 means 100, more than 1,000 means 1,000, and a
-  // negative value is INVALID_ARGUMENT.
+  // negative value is INVALID_ARGUMENT. A page may hold fewer.
   int32 page_size = 6;
   // The previous page's `next_page_token`; empty for the first page. A
   // token sent with different fields is INVALID_ARGUMENT, reason

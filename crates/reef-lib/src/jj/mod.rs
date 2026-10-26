@@ -14,13 +14,17 @@
 /// `Cargo.lock`.
 pub const JJ_LIB_VERSION: &str = "0.46.0";
 
+pub mod diff;
+pub mod effects;
 pub mod gc;
 pub mod git;
 pub mod ignore;
+pub mod log;
 pub mod materialize;
 pub mod oplog;
 pub mod repo;
 pub mod restore;
+pub mod revset;
 pub mod settings;
 pub mod snapshot;
 pub mod spec;
@@ -52,6 +56,7 @@ pub use watchman_client;
 // jj-lib types the daemon names without depending on jj-lib: the repository
 // thread's state (R1.03) and the cross-thread `Send + Sync` assertion on them.
 pub use jj_lib::merged_tree::MergedTree;
+pub use jj_lib::operation::Operation;
 pub use jj_lib::repo::ReadonlyRepo;
 // A store's lockfile path, for `Repo::file_id_at` (R1.20).
 pub use jj_lib::repo_path::RepoPath;
@@ -59,7 +64,7 @@ pub use jj_lib::settings::UserSettings;
 pub use jj_lib::working_copy::WorkingCopyStateError;
 pub use workspace::{
     CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
-    MovePointerError, PointerMove, ResolveError, Resolved, ResolvedVia, StartPoint,
+    MovePointerError, PointerMove, ResolveError, Resolved, StartPoint,
 };
 
 #[cfg(test)]

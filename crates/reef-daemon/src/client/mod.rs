@@ -21,9 +21,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use hyper_util::rt::TokioIo;
 use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
+use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
+use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
+use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
+use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::store_service_client::StoreServiceClient;
 use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
 use reef_api::v1::{
@@ -37,6 +41,11 @@ use reef_api::v1::{
     RegisterRepositoryRequest, RegisterRepositoryResponse, ReleaseWorkspaceRequest,
     ReleaseWorkspaceResponse, RenewLeaseRequest, RenewLeaseResponse, Repository, ResumeRequest,
     ResumeResponse, SnapshotWorkspaceRequest, SnapshotWorkspaceResponse, StoreInfo, Workspace,
+};
+use reef_api::v1::{
+    GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
+    GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
+    ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry,
 };
 use reef_lib::error::{Classify, ErrorKind};
 use tokio::net::UnixStream;
@@ -643,6 +652,109 @@ impl Client {
             }
             request.page_token = response.next_page_token;
         }
+    }
+
+    /// `StatusService.GetStatus`.
+    pub async fn get_status(
+        &self,
+        request: GetStatusRequest,
+    ) -> Result<GetStatusResponse, ClientError> {
+        let mut client = StatusServiceClient::new(self.channel.clone());
+        self.call("GetStatus", client.get_status(request)).await
+    }
+
+    /// `ChangeService.ListChanges`: one page of the log.
+    pub async fn list_changes_page(
+        &self,
+        request: ListChangesRequest,
+    ) -> Result<ListChangesResponse, ClientError> {
+        let mut client = ChangeServiceClient::new(self.channel.clone());
+        self.call("ListChanges", client.list_changes(request)).await
+    }
+
+    /// The whole log `request` asks for, over as many pages as it takes,
+    /// all read at the first page's operation; `request`'s page fields are
+    /// ignored.
+    pub async fn list_changes(
+        &self,
+        request: ListChangesRequest,
+    ) -> Result<Vec<LogEntry>, ClientError> {
+        let mut entries = Vec::new();
+        let mut request = ListChangesRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        loop {
+            let response = self.list_changes_page(request.clone()).await?;
+            entries.extend(response.entries);
+            if response.next_page_token.is_empty() {
+                return Ok(entries);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// `ChangeService.GetChange`.
+    pub async fn get_change(
+        &self,
+        request: GetChangeRequest,
+    ) -> Result<GetChangeResponse, ClientError> {
+        let mut client = ChangeServiceClient::new(self.channel.clone());
+        self.call("GetChange", client.get_change(request)).await
+    }
+
+    /// `DiffService.GetDiff`: one page of files.
+    pub async fn get_diff_page(
+        &self,
+        request: GetDiffRequest,
+    ) -> Result<GetDiffResponse, ClientError> {
+        let mut client = DiffServiceClient::new(self.channel.clone());
+        self.call("GetDiff", client.get_diff(request)).await
+    }
+
+    /// The whole diff `request` asks for: every page's files, with the
+    /// first page's other fields; `request`'s page fields are ignored.
+    pub async fn get_diff(&self, request: GetDiffRequest) -> Result<GetDiffResponse, ClientError> {
+        let mut request = GetDiffRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        let mut whole = self.get_diff_page(request.clone()).await?;
+        while !whole.next_page_token.is_empty() {
+            request.page_token = std::mem::take(&mut whole.next_page_token);
+            let next = self.get_diff_page(request.clone()).await?;
+            whole.files.extend(next.files);
+            whole.next_page_token = next.next_page_token;
+        }
+        Ok(whole)
+    }
+
+    /// `OperationService.ListOperations`: one page, newest first.
+    pub async fn list_operations_page(
+        &self,
+        request: ListOperationsRequest,
+    ) -> Result<ListOperationsResponse, ClientError> {
+        let mut client = OperationServiceClient::new(self.channel.clone());
+        self.call("ListOperations", client.list_operations(request))
+            .await
+    }
+
+    /// `OperationService.GetOperation`, with its effects. `operation_id` is
+    /// an id or unique prefix.
+    pub async fn get_operation(
+        &self,
+        repo: &str,
+        operation_id: &str,
+    ) -> Result<GetOperationResponse, ClientError> {
+        let mut client = OperationServiceClient::new(self.channel.clone());
+        let request = GetOperationRequest {
+            repo: repo.to_owned(),
+            operation_id: operation_id.to_owned(),
+        };
+        self.call("GetOperation", client.get_operation(request))
+            .await
     }
 }
 

@@ -6,7 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorKind};
-use reef_lib::jj::oplog::OpEntry;
+use reef_lib::jj::CommitIdHex;
+use reef_lib::jj::diff::{ChangeKind, EntryKind, FileDiffInfo};
+use reef_lib::jj::effects::{ChangeEffectKind, OpEffects};
+use reef_lib::jj::log::{ChangeInfo, EdgeKind, LogNode, SignatureInfo};
+use reef_lib::jj::oplog::{ATTR_AGENT, ATTR_SNAPSHOT_KIND, OpClass, OpEntry, OpKind};
 
 use crate::backend::{BackendChoice, BackendKind, DiskUsage};
 use crate::lease::{LeaseManager, LeaseState};
@@ -30,7 +34,7 @@ pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
 }
 
 /// A [`SystemTime`] as a `google.protobuf.Timestamp`, to the millisecond.
-fn system_timestamp(time: SystemTime) -> prost_types::Timestamp {
+pub(super) fn system_timestamp(time: SystemTime) -> prost_types::Timestamp {
     let millis = match time.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
         Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
@@ -385,6 +389,284 @@ pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> 
         workspace_id: written.workspace.unwrap_or_default().to_owned(),
         agent: written.agent.to_owned(),
         ..v1::Operation::default()
+    }
+}
+
+/// A change as a message: Reef workspaces' working copies by id, others by
+/// jj name.
+pub(super) fn change(info: &ChangeInfo) -> v1::Change {
+    let (workspace_ids, jj_workspaces) = split_workspaces(&info.workspaces);
+    v1::Change {
+        change_id: info.change_id.to_string(),
+        commit_id: info.commit_id.to_string(),
+        parent_commit_ids: info
+            .parent_commit_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        parent_change_ids: info
+            .parent_change_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        description: info.description.clone(),
+        author: Some(signature(&info.author)),
+        committer: Some(signature(&info.committer)),
+        tree_id: info.tree_id.clone().unwrap_or_default(),
+        empty: info.empty,
+        conflict: info.conflict,
+        divergent: info.divergent,
+        immutable: info.immutable,
+        hidden: info.hidden,
+        bookmarks: info.bookmarks.clone(),
+        tags: info.tags.clone(),
+        workspace_ids,
+        jj_workspaces,
+    }
+}
+
+fn signature(signature: &SignatureInfo) -> v1::Signature {
+    v1::Signature {
+        name: signature.name.clone(),
+        email: signature.email.clone(),
+        at: Some(system_timestamp(signature.at)),
+    }
+}
+
+/// The Reef workspace id in a jj workspace name `reef-<id>`.
+fn reef_workspace(name: &str) -> Option<&str> {
+    name.strip_prefix(REEF_WORKSPACE)
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// jj workspace names as (Reef workspace ids, other jj names).
+fn split_workspaces(names: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut reef = Vec::new();
+    let mut other = Vec::new();
+    for name in names {
+        match reef_workspace(name) {
+            Some(id) => reef.push(id.to_owned()),
+            None => other.push(name.clone()),
+        }
+    }
+    (reef, other)
+}
+
+/// A log entry as a message.
+pub(super) fn log_entry(info: &ChangeInfo, node: &LogNode) -> v1::LogEntry {
+    v1::LogEntry {
+        change: Some(change(info)),
+        edges: node
+            .edges
+            .iter()
+            .map(|(commit, kind)| v1::GraphEdge {
+                commit_id: commit.to_string(),
+                kind: match kind {
+                    EdgeKind::Direct => v1::GraphEdgeKind::Direct,
+                    EdgeKind::Indirect => v1::GraphEdgeKind::Indirect,
+                    EdgeKind::Missing => v1::GraphEdgeKind::Missing,
+                }
+                .into(),
+            })
+            .collect(),
+    }
+}
+
+fn entry_type(kind: Option<EntryKind>) -> v1::EntryType {
+    match kind {
+        None => v1::EntryType::Unspecified,
+        Some(EntryKind::File) => v1::EntryType::File,
+        Some(EntryKind::Executable) => v1::EntryType::Executable,
+        Some(EntryKind::Symlink) => v1::EntryType::Symlink,
+        Some(EntryKind::Directory) => v1::EntryType::Directory,
+        Some(EntryKind::Conflict) => v1::EntryType::Conflict,
+        Some(EntryKind::Submodule) => v1::EntryType::Submodule,
+    }
+}
+
+/// A file's path and how it differs, as a message.
+pub(super) fn file_change(diff: &FileDiffInfo) -> v1::FileChange {
+    let kind = match diff.kind {
+        None => v1::FileChangeKind::Unspecified,
+        Some(ChangeKind::Added) => v1::FileChangeKind::Added,
+        Some(ChangeKind::Modified) => v1::FileChangeKind::Modified,
+        Some(ChangeKind::Deleted) => v1::FileChangeKind::Deleted,
+        Some(ChangeKind::Renamed) => v1::FileChangeKind::Renamed,
+        Some(ChangeKind::Copied) => v1::FileChangeKind::Copied,
+    };
+    v1::FileChange {
+        path: diff.path.clone(),
+        kind: kind.into(),
+        old_path: diff.old_path.clone().unwrap_or_default(),
+        old_type: entry_type(diff.old_type).into(),
+        new_type: entry_type(diff.new_type).into(),
+    }
+}
+
+/// A file's diff as a message.
+pub(super) fn file_diff(diff: &FileDiffInfo) -> v1::FileDiff {
+    v1::FileDiff {
+        change: Some(file_change(diff)),
+        binary: diff.binary,
+        conflict: diff.conflict,
+        lines_added: diff.lines_added,
+        lines_removed: diff.lines_removed,
+        hunks: diff
+            .hunks
+            .iter()
+            .map(|hunk| v1::Hunk {
+                old_start: hunk.old_start,
+                old_lines: hunk.old_lines,
+                new_start: hunk.new_start,
+                new_lines: hunk.new_lines,
+                lines: hunk.lines.clone(),
+            })
+            .collect(),
+        truncated: diff.truncated,
+        old_no_final_newline: diff.old_no_final_newline,
+        new_no_final_newline: diff.new_no_final_newline,
+        too_large: diff.too_large,
+        invalid_utf8: diff.invalid_utf8,
+    }
+}
+
+fn hex_or_empty(id: Option<&CommitIdHex>) -> String {
+    id.map(ToString::to_string).unwrap_or_default()
+}
+
+fn to_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// An operation's effects as a message.
+pub(super) fn effects(effects: &OpEffects) -> v1::OperationEffects {
+    v1::OperationEffects {
+        changes: effects
+            .changes
+            .iter()
+            .map(|change| v1::ChangeEffect {
+                change_id: change.change_id.to_string(),
+                kind: match change.kind {
+                    ChangeEffectKind::Created => v1::ChangeEffectKind::Created,
+                    ChangeEffectKind::Rewritten => v1::ChangeEffectKind::Rewritten,
+                    ChangeEffectKind::Abandoned => v1::ChangeEffectKind::Abandoned,
+                    ChangeEffectKind::Hidden => v1::ChangeEffectKind::Hidden,
+                }
+                .into(),
+                commit_id: hex_or_empty(change.commit_id.as_ref()),
+                previous_commit_id: hex_or_empty(change.previous_commit_id.as_ref()),
+            })
+            .collect(),
+        bookmarks: effects
+            .bookmarks
+            .iter()
+            .map(|bookmark| v1::BookmarkEffect {
+                name: bookmark.name.clone(),
+                remote: bookmark.remote.clone().unwrap_or_default(),
+                commit_id: hex_or_empty(bookmark.commit_id.as_ref()),
+                previous_commit_id: hex_or_empty(bookmark.previous_commit_id.as_ref()),
+                conflicted: bookmark.conflicted,
+            })
+            .collect(),
+        working_copies: effects
+            .working_copies
+            .iter()
+            .map(|moved| {
+                let (workspace_id, jj_workspace) = match reef_workspace(&moved.workspace) {
+                    Some(id) => (id.to_owned(), String::new()),
+                    None => (String::new(), moved.workspace.clone()),
+                };
+                v1::WorkingCopyEffect {
+                    workspace_id,
+                    jj_workspace,
+                    commit_id: hex_or_empty(moved.commit_id.as_ref()),
+                    previous_commit_id: hex_or_empty(moved.previous_commit_id.as_ref()),
+                }
+            })
+            .collect(),
+        change_count: to_u32(effects.change_count),
+        bookmark_count: to_u32(effects.bookmark_count),
+    }
+}
+
+/// A classification as the v1 kind.
+pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
+    match kind {
+        None => v1::OperationKind::Unspecified,
+        Some(OpKind::Snapshot) => v1::OperationKind::Snapshot,
+        Some(OpKind::CreateWorkspace) => v1::OperationKind::CreateWorkspace,
+        Some(OpKind::ReleaseWorkspace) => v1::OperationKind::ReleaseWorkspace,
+        Some(OpKind::MoveWorkspace) => v1::OperationKind::MoveWorkspace,
+        Some(OpKind::Describe) => v1::OperationKind::Describe,
+        Some(OpKind::Abandon) => v1::OperationKind::Abandon,
+        Some(OpKind::Undo) => v1::OperationKind::Undo,
+        Some(OpKind::Edit) => v1::OperationKind::Edit,
+        Some(OpKind::ImportRefs) => v1::OperationKind::ImportRefs,
+        Some(OpKind::External) => v1::OperationKind::External,
+        Some(OpKind::Other) => v1::OperationKind::Other,
+    }
+}
+
+/// What the daemon's records add to an operation it did not just write.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Recorded<'a> {
+    /// The snapshot index's kind for it, when it has a row.
+    pub(super) indexed: Option<SnapshotKind>,
+    /// The owner of the workspace it was for, in any state.
+    pub(super) owner: Option<&'a str>,
+}
+
+/// An operation the daemon did not just write, classified (R2.02): its
+/// kind from `reef.kind` or Reef's descriptions, its snapshot kind from
+/// `reef.snapshot-kind`, else the snapshot index, else the description.
+pub(super) fn listed_operation(
+    entry: &OpEntry,
+    repo: RepoId,
+    class: &OpClass,
+    recorded: Recorded<'_>,
+) -> v1::Operation {
+    let jj_workspace = entry
+        .workspace
+        .as_deref()
+        .filter(|name| reef_workspace(name).is_none())
+        .unwrap_or_default()
+        .to_owned();
+    let snapshot = if class.kind == Some(OpKind::Snapshot) {
+        let attribute = entry
+            .attributes
+            .get(ATTR_SNAPSHOT_KIND)
+            .and_then(|kind| kind.parse::<SnapshotKind>().ok());
+        let described = class
+            .snapshot_kind
+            .as_deref()
+            .and_then(|kind| kind.parse::<SnapshotKind>().ok());
+        attribute.or(recorded.indexed).or(described)
+    } else {
+        None
+    };
+    let agent = entry
+        .attributes
+        .get(ATTR_AGENT)
+        .map_or(recorded.owner.unwrap_or_default(), String::as_str);
+    v1::Operation {
+        id: entry.id.to_string(),
+        repo_id: repo.as_hex(),
+        parent_ids: entry.parents.iter().map(ToString::to_string).collect(),
+        description: entry.description.clone(),
+        started_at: Some(system_timestamp(entry.start)),
+        ended_at: Some(system_timestamp(entry.end)),
+        hostname: entry.hostname.clone(),
+        username: entry.username.clone(),
+        is_snapshot: entry.is_snapshot,
+        kind: operation_kind(class.kind).into(),
+        snapshot_kind: snapshot
+            .map_or(v1::SnapshotKind::Unspecified, snapshot_kind)
+            .into(),
+        workspace_id: class.workspace_id.clone().unwrap_or_default(),
+        jj_workspace,
+        agent: agent.to_owned(),
+        attributes: entry.attributes.clone(),
+        effects: None,
     }
 }
 

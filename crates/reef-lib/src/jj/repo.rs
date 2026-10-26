@@ -98,11 +98,25 @@ impl OperationIdHex {
     pub(crate) fn of(id: &jj_lib::op_store::OperationId) -> Self {
         Self(id.hex())
     }
+
+    /// The id as jj-lib's type. The text is valid hex by construction, so
+    /// the empty fallback is never taken.
+    pub(crate) fn to_id(&self) -> jj_lib::op_store::OperationId {
+        jj_lib::op_store::OperationId::try_from_hex(&self.0)
+            .unwrap_or_else(|| jj_lib::op_store::OperationId::new(Vec::new()))
+    }
 }
 
 impl CommitIdHex {
     pub(crate) fn of(id: &jj_lib::backend::CommitId) -> Self {
         Self(id.hex())
+    }
+
+    /// The id as jj-lib's type. The text is valid hex by construction, so
+    /// the empty fallback is never taken.
+    pub(crate) fn to_id(&self) -> jj_lib::backend::CommitId {
+        jj_lib::backend::CommitId::try_from_hex(&self.0)
+            .unwrap_or_else(|| jj_lib::backend::CommitId::new(Vec::new()))
     }
 }
 

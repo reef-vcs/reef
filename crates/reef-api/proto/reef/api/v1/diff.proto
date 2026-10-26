@@ -11,7 +11,14 @@ import "reef/api/v1/options.proto";
 // Diffs.
 service DiffService {
   // The files that differ between two revisions, in path order, with
-  // hunks or line counts on request. Declared; R2.02 implements it.
+  // hunks or line counts on request. Renames and copies are detected when
+  // at most 1,000 files differ, as git's default `diff.renameLimit`; past
+  // that, files are added and deleted. A page stops before its response
+  // passes 3 MiB, so it may hold fewer than `page_size` files.
+  //
+  // Errors: as in changes.proto, and INVALID_ARGUMENT with reason
+  // INVALID_PATH (metadata `path`) for a `paths` value that is not a
+  // repository-relative `/`-separated path.
   rpc GetDiff(GetDiffRequest) returns (GetDiffResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -41,21 +48,22 @@ message GetDiffRequest {
   string from_revision = 3;
   // The new side; empty for `@`, which requires `workspace`.
   string to_revision = 4;
-  // Path prefixes to diff; empty for every path.
+  // Path prefixes to diff, matched by whole components (`src` matches
+  // `src/a.rs`, not `srcx`); empty for every path.
   repeated string paths = 5;
   // How much to return.
   DiffFormat format = 6;
   // Lines of context around each hunk; unset for 3.
   optional uint32 context_lines = 7;
   // Hunk lines per file at most: 0 means 1,000. A longer file's hunks are
-  // cut and `FileDiff.truncated` set.
+  // cut and `FileDiff.truncated` set; hunks also stop at 1 MiB per file.
   uint32 max_lines_per_file = 8;
   // Read at this operation; empty for the head.
   string at_operation = 9;
   // Answer from the last recorded snapshot instead of snapshotting first.
   bool skip_snapshot = 10;
   // Files per page: 0 means 100, more than 1,000 means 1,000, and a
-  // negative value is INVALID_ARGUMENT.
+  // negative value is INVALID_ARGUMENT. A page may hold fewer.
   int32 page_size = 11;
   // The previous page's `next_page_token`; empty for the first page. A
   // token sent with different fields is INVALID_ARGUMENT, reason
@@ -93,8 +101,19 @@ message FileDiff {
   uint32 lines_removed = 5;
   // The hunks, with DIFF_FORMAT_HUNKS.
   repeated Hunk hunks = 6;
-  // `hunks` was cut at `max_lines_per_file`.
+  // `hunks` was cut at `max_lines_per_file` or at 1 MiB.
   bool truncated = 7;
+  // The old side does not end with a newline: its last line in `hunks` had
+  // one added. With DIFF_FORMAT_HUNKS.
+  bool old_no_final_newline = 8;
+  // The new side does not end with a newline, as for the old side.
+  bool new_no_final_newline = 9;
+  // A side is larger than 16 MiB: no line counts and no hunks. With
+  // DIFF_FORMAT_STAT and DIFF_FORMAT_HUNKS.
+  bool too_large = 10;
+  // A side is not valid UTF-8: `hunks` show U+FFFD for the bytes that are
+  // not; the line counts are exact.
+  bool invalid_utf8 = 11;
 }
 
 // One hunk of a unified diff.

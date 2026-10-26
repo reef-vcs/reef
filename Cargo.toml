@@ -36,6 +36,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "net", "signal", "process"] }
 pollster = "1"
+# Revset date patterns (R2.02): jj-lib's `DatePatternContext` is built from a chrono time. The
+# version and features jj-lib already uses, so the lockfile gains nothing.
+chrono = { version = "0.4.44", default-features = false, features = ["std", "clock"] }
+# Unified diff hunks (R2.02): jj-lib's `unified_diff_hunks` takes `BStr` sides. The version
+# jj-lib already uses.
+bstr = "1"
 futures = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.10"

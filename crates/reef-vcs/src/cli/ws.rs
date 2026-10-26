@@ -96,7 +96,8 @@ pub(crate) struct CreateTarget {
     /// the current directory.
     #[arg(long, value_name = "REPO")]
     pub(crate) repo: Option<String>,
-    /// Edit this change (a change id prefix, commit id prefix, or bookmark).
+    /// Edit this revision: a jj revset naming one commit, such as a change or
+    /// commit id prefix, a bookmark, or `trunk()`.
     #[arg(long, value_name = "REV", conflicts_with = "new_on")]
     pub(crate) change: Option<String>,
     /// Start a new change on this revision [default: the first bookmark of

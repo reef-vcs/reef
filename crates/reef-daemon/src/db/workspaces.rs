@@ -1,5 +1,6 @@
 //! Queries on `workspaces`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rusqlite::types::Value;
@@ -164,6 +165,24 @@ impl Db {
             .optional()
         })?
         .ok_or_else(|| not_found(id))
+    }
+
+    /// The owners of the workspaces among `ids` that have a row, in any
+    /// state (R2.02's operation lists name an operation's agent by them).
+    pub fn owners(&self, ids: &[WorkspaceId]) -> Result<HashMap<WorkspaceId, String>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare("SELECT owner FROM workspaces WHERE id = ?1")?;
+            let mut owners = HashMap::new();
+            for id in ids {
+                if let Some(owner) = stmt
+                    .query_row([*id], |row| row.get::<_, String>(0))
+                    .optional()?
+                {
+                    owners.insert(*id, owner);
+                }
+            }
+            Ok(owners)
+        })
     }
 
     /// The one workspace whose id starts with `prefix` (at least four hex

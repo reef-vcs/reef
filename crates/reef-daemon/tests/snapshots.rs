@@ -27,8 +27,9 @@ use reef_api::v1::{Backend, WatchState};
 use reef_daemon::model::WorkspaceId;
 use reef_daemon::snapshot::PauseGuard;
 use reef_daemon::workspace::SnapshotSpec;
+use reef_lib::jj::Repo;
 use reef_lib::jj::oplog::OpEntry;
-use reef_lib::jj::{Repo, ResolveError};
+use reef_lib::jj::revset::RevisionError;
 use reef_testing::synth::Preset;
 
 const OWNER: &str = "tester@host";
@@ -413,7 +414,11 @@ async fn stale_diverges_when_dirty() {
         .resolve_revision(&a.change_id)
         .await
         .unwrap_err();
-    let ResolveError::DivergentChange { commits, .. } = error else {
+    let RevisionError::Ambiguous {
+        commit_ids: commits,
+        ..
+    } = error
+    else {
         panic!("expected a divergent change, got {error:?}");
     };
     let commits: BTreeSet<String> = commits.iter().map(ToString::to_string).collect();

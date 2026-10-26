@@ -2,15 +2,18 @@
 //! writes (R1.16).
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use jj_lib::backend::{BackendError, Timestamp};
+use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::{OpStoreError, OperationId};
 use jj_lib::op_walk::walk_ancestors;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
-use jj_lib::repo::Repo as _;
+use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
 
 use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
@@ -149,6 +152,9 @@ pub enum OpLogError {
     /// An operation id is not one of this store's.
     #[error("{0} is not an operation id of this repository")]
     InvalidOperationId(OperationIdHex),
+    /// The repository could not be loaded at an operation.
+    #[error("failed to load the repository at an operation")]
+    Load(#[from] RepoLoaderError),
 }
 
 impl Classify for OpLogError {
@@ -157,6 +163,7 @@ impl Classify for OpLogError {
             Self::OpStore(error) => classify_by_source(error),
             Self::Commit(error) => classify_by_source(error),
             Self::InvalidOperationId(_) => ErrorKind::InvalidArgument,
+            Self::Load(error) => classify_by_source(error),
         }
     }
 }
@@ -264,6 +271,344 @@ impl Repo {
             ChangeIdHex::of(commit.change_id()),
         )))
     }
+}
+
+/// The operation attribute naming what Reef wrote an operation for, one of
+/// [`OpKind::as_str`]'s values. R2.03 writes it; R2.02 reads it.
+pub const ATTR_KIND: &str = "reef.kind";
+/// The attribute naming a snapshot's kind: `watcher`, `explicit`, `final`,
+/// `move` or `shutdown`.
+pub const ATTR_SNAPSHOT_KIND: &str = "reef.snapshot-kind";
+/// The attribute naming the Reef workspace an operation was recorded for.
+pub const ATTR_WORKSPACE: &str = "reef.workspace";
+/// The attribute naming the agent that caused an operation.
+pub const ATTR_AGENT: &str = "reef.agent";
+
+/// What an operation did, as Reef classifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    /// A snapshot of a workspace's files.
+    Snapshot,
+    /// A workspace was created.
+    CreateWorkspace,
+    /// A workspace was released or reclaimed.
+    ReleaseWorkspace,
+    /// A workspace was moved to another change.
+    MoveWorkspace,
+    /// A change's description was set.
+    Describe,
+    /// A change was abandoned.
+    Abandon,
+    /// An operation was undone.
+    Undo,
+    /// Files were edited without a directory.
+    Edit,
+    /// Git refs were imported.
+    ImportRefs,
+    /// Written by another jj client.
+    External,
+    /// Written by Reef, and none of the above.
+    Other,
+}
+
+impl OpKind {
+    /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
+    pub const WRITTEN: [OpKind; 10] = [
+        OpKind::Snapshot,
+        OpKind::CreateWorkspace,
+        OpKind::ReleaseWorkspace,
+        OpKind::MoveWorkspace,
+        OpKind::Describe,
+        OpKind::Abandon,
+        OpKind::Undo,
+        OpKind::Edit,
+        OpKind::ImportRefs,
+        OpKind::Other,
+    ];
+
+    /// The [`ATTR_KIND`] value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpKind::Snapshot => "snapshot",
+            OpKind::CreateWorkspace => "create-workspace",
+            OpKind::ReleaseWorkspace => "release-workspace",
+            OpKind::MoveWorkspace => "move-workspace",
+            OpKind::Describe => "describe",
+            OpKind::Abandon => "abandon",
+            OpKind::Undo => "undo",
+            OpKind::Edit => "edit",
+            OpKind::ImportRefs => "import-refs",
+            OpKind::External => "external",
+            OpKind::Other => "other",
+        }
+    }
+
+    fn from_attribute(value: &str) -> OpKind {
+        OpKind::WRITTEN
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .unwrap_or(OpKind::Other)
+    }
+}
+
+/// How Reef reads an operation it did not just write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpClass {
+    /// What it did; `None` for the root operation, which is not classified.
+    pub kind: Option<OpKind>,
+    /// For a snapshot, its kind as [`ATTR_SNAPSHOT_KIND`] spells it, when
+    /// the attribute or the description says (`final`, `shutdown`, `move`);
+    /// `None` when not known (watcher and explicit snapshots share a
+    /// description).
+    pub snapshot_kind: Option<String>,
+    /// The Reef workspace it was for: [`ATTR_WORKSPACE`], else jj's
+    /// workspace `reef-<id>`, else the id in one of Reef's descriptions.
+    pub workspace_id: Option<String>,
+}
+
+/// Descriptions Reef writes that are not snapshots, with the kind each
+/// means; each is followed by a workspace id (and, for some, more text).
+const DESCRIBED: [(&str, OpKind); 4] = [
+    ("reef: create workspace ", OpKind::CreateWorkspace),
+    ("reef: release workspace ", OpKind::ReleaseWorkspace),
+    (MOVE_PREFIX, OpKind::MoveWorkspace),
+    ("reef: rematerialize workspace ", OpKind::Other),
+];
+/// The description of a ref import before a create.
+const IMPORT_REFS: &str = "reef: import git refs";
+/// The prefix of `reef_lib::jj::undo`'s description.
+const UNDO_PREFIX: &str = "undo: restore to operation ";
+/// Every description Reef writes starts so, except jj's own texts.
+const REEF_PREFIX: &str = "reef: ";
+
+/// The workspace id at the start of `rest`, up to a space or the end.
+fn leading_id(rest: &str) -> Option<String> {
+    let id = rest.split(' ').next()?;
+    is_hex(id).then(|| id.to_owned())
+}
+
+/// Classifies `entry`: by [`ATTR_KIND`], else by the descriptions Reef
+/// writes, else [`OpKind::External`]; the root operation is unclassified.
+pub fn classify(entry: &OpEntry) -> OpClass {
+    let workspace_id = entry
+        .attributes
+        .get(ATTR_WORKSPACE)
+        .filter(|id| is_hex(id))
+        .cloned()
+        .or_else(|| {
+            let id = entry.workspace.as_deref()?.strip_prefix(WORKSPACE_PREFIX)?;
+            is_hex(id).then(|| id.to_owned())
+        });
+    if let Some(kind) = entry.attributes.get(ATTR_KIND) {
+        let kind = OpKind::from_attribute(kind);
+        return OpClass {
+            kind: Some(kind),
+            snapshot_kind: (kind == OpKind::Snapshot)
+                .then(|| entry.attributes.get(ATTR_SNAPSHOT_KIND).cloned())
+                .flatten(),
+            workspace_id,
+        };
+    }
+    if let Some(mark) = is_reef_snapshot(entry) {
+        let snapshot_kind = match mark.kind {
+            SnapshotMarkKind::Snapshot => None,
+            SnapshotMarkKind::Final if entry.description.ends_with(" (shutdown)") => {
+                Some("shutdown".to_owned())
+            }
+            SnapshotMarkKind::Final => Some("final".to_owned()),
+            SnapshotMarkKind::Move => Some("move".to_owned()),
+        };
+        return OpClass {
+            kind: Some(OpKind::Snapshot),
+            snapshot_kind,
+            workspace_id: workspace_id.or(Some(mark.workspace_id)),
+        };
+    }
+    let class = |kind, id: Option<String>| OpClass {
+        kind: Some(kind),
+        snapshot_kind: None,
+        workspace_id: workspace_id.clone().or(id),
+    };
+    let description = entry.description.as_str();
+    for (prefix, kind) in DESCRIBED {
+        if let Some(rest) = description.strip_prefix(prefix)
+            && let Some(id) = leading_id(rest)
+        {
+            return class(kind, Some(id));
+        }
+    }
+    if description == IMPORT_REFS {
+        return class(OpKind::ImportRefs, None);
+    }
+    if description.starts_with(UNDO_PREFIX) {
+        return class(OpKind::Undo, None);
+    }
+    if description.starts_with(REEF_PREFIX) {
+        return class(OpKind::Other, None);
+    }
+    if entry.parents.is_empty() {
+        return OpClass {
+            kind: None,
+            snapshot_kind: None,
+            workspace_id,
+        };
+    }
+    class(OpKind::External, None)
+}
+
+/// Failure to find an operation a request names.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OpLookupError {
+    /// Not lowercase hex, or empty.
+    #[error("{0:?} is not an operation id: give a full id or a prefix in lowercase hex")]
+    Invalid(String),
+    /// No operation has this id or prefix.
+    #[error("no operation {0} in this repository")]
+    NotFound(String),
+    /// Several operations share this prefix.
+    #[error("operation id prefix {0} is ambiguous")]
+    Ambiguous(String),
+    /// The operation could not be read.
+    #[error(transparent)]
+    OpLog(#[from] OpLogError),
+}
+
+impl Classify for OpLookupError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Invalid(_) | Self::Ambiguous(_) => ErrorKind::InvalidArgument,
+            Self::NotFound(_) => ErrorKind::NotFound,
+            Self::OpLog(error) => error.kind(),
+        }
+    }
+}
+
+impl From<OpStoreError> for OpLookupError {
+    fn from(error: OpStoreError) -> Self {
+        OpLookupError::OpLog(error.into())
+    }
+}
+
+/// What [`walk_from`] walked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedWalk {
+    /// Operations taken from the walk, the skipped ones included.
+    pub examined: usize,
+    /// The last operation skipped, to check a page token against.
+    pub last_skipped: Option<OperationIdHex>,
+    /// The walk reached the root operation.
+    pub ended: bool,
+}
+
+/// The operation `text` names in `repo`'s store: a full id, or a unique
+/// prefix of lowercase hex. Any operation qualifies, not only ancestors of
+/// the head.
+pub async fn resolve_operation(
+    repo: &ReadonlyRepo,
+    text: &str,
+) -> Result<Operation, OpLookupError> {
+    let text = text.trim();
+    let valid = !text.is_empty() && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !valid {
+        return Err(OpLookupError::Invalid(text.to_owned()));
+    }
+    let full = 2 * repo.op_store().root_operation_id().as_bytes().len();
+    let id = match text.len().cmp(&full) {
+        std::cmp::Ordering::Equal => OperationId::try_from_hex(text)
+            .ok_or_else(|| OpLookupError::Invalid(text.to_owned()))?,
+        std::cmp::Ordering::Greater => return Err(OpLookupError::NotFound(text.to_owned())),
+        std::cmp::Ordering::Less => {
+            let prefix = HexPrefix::try_from_hex(text)
+                .ok_or_else(|| OpLookupError::Invalid(text.to_owned()))?;
+            match repo.op_store().resolve_operation_id_prefix(&prefix).await? {
+                PrefixResolution::NoMatch => return Err(OpLookupError::NotFound(text.to_owned())),
+                PrefixResolution::AmbiguousMatch => {
+                    return Err(OpLookupError::Ambiguous(text.to_owned()));
+                }
+                PrefixResolution::SingleMatch(id) => id,
+            }
+        }
+    };
+    match repo.loader().load_operation(&id).await {
+        Ok(operation) => Ok(operation),
+        Err(OpStoreError::ObjectNotFound { .. }) => Err(OpLookupError::NotFound(text.to_owned())),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// [`resolve_operation`] as an [`OpEntry`].
+pub async fn lookup(repo: &ReadonlyRepo, text: &str) -> Result<OpEntry, OpLookupError> {
+    Ok(entry_of(&resolve_operation(repo, text).await?))
+}
+
+/// The current operation heads in `repo`'s store, sorted, read without
+/// loading or merging them: more than one while concurrent operations
+/// are unmerged.
+pub async fn op_heads(repo: &ReadonlyRepo) -> Result<Vec<OperationIdHex>, OpLogError> {
+    let heads = repo
+        .op_heads_store()
+        .get_op_heads()
+        .await
+        .map_err(|error| OpLogError::Load(error.into()))?;
+    let mut heads: Vec<OperationIdHex> = heads.iter().map(OperationIdHex::of).collect();
+    heads.sort();
+    Ok(heads)
+}
+
+/// Walks the operation log from `heads` as `jj op log` does (newest end
+/// time first among operations whose children were all listed), skipping
+/// `skip` operations, then calling `visit` with each until it breaks.
+/// Never loads a repository and never writes.
+pub async fn walk_from(
+    repo: &ReadonlyRepo,
+    heads: &[OperationIdHex],
+    skip: usize,
+    mut visit: impl AsyncFnMut(&Operation) -> ControlFlow<()>,
+) -> Result<PinnedWalk, OpLookupError> {
+    let mut ops = Vec::with_capacity(heads.len());
+    for head in heads {
+        match repo.loader().load_operation(&head.to_id()).await {
+            Ok(op) => ops.push(op),
+            Err(OpStoreError::ObjectNotFound { .. }) => {
+                return Err(OpLookupError::NotFound(head.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut stream = std::pin::pin!(walk_ancestors(&ops));
+    let mut walk = PinnedWalk {
+        examined: 0,
+        last_skipped: None,
+        ended: true,
+    };
+    while let Some(op) = stream.next().await {
+        let op = op?;
+        walk.examined += 1;
+        if walk.examined <= skip {
+            walk.last_skipped = Some(OperationIdHex::of(op.id()));
+            continue;
+        }
+        if visit(&op).await.is_break() {
+            walk.ended = false;
+            break;
+        }
+    }
+    Ok(walk)
+}
+
+/// `repo`'s store loaded at `operation`, with that operation's view and an
+/// index covering it.
+pub async fn load_at(
+    repo: &ReadonlyRepo,
+    operation: &Operation,
+) -> Result<Arc<ReadonlyRepo>, OpLogError> {
+    Ok(repo.loader().load_at(operation).await?)
+}
+
+/// `operation` as an [`OpEntry`].
+pub fn entry(operation: &Operation) -> OpEntry {
+    entry_of(operation)
 }
 
 fn entry_of(op: &Operation) -> OpEntry {

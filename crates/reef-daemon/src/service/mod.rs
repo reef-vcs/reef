@@ -4,9 +4,10 @@
 //! daemon's own types (in `convert`) and end in
 //! `.map_err(crate::error::status)`.
 //!
-//! The modules of declared RPCs that later tickets implement (`status`,
-//! `changes`, `diff`, `operations`, `files`, `presence`) answer every RPC
-//! with [`crate::error::not_implemented`] for now.
+//! The read RPCs (`status`, `changes`, `diff`, `operations`) run on
+//! [`crate::read::Reads`] (R2.02, ADR 0030). The RPCs later tickets
+//! implement (`files`, `presence`, and the write side of `changes` and
+//! `operations`) answer [`crate::error::not_implemented`] for now.
 
 pub mod changes;
 pub mod compat;
@@ -23,6 +24,7 @@ pub mod stores;
 pub mod workspaces;
 
 mod convert;
+mod reading;
 
 use reef_api::v1;
 use reef_lib::error::ErrorChain;
@@ -34,7 +36,8 @@ use crate::error::status;
 use crate::model::RepoId;
 
 /// The operation `op_id` of `repo` that a handler just caused, read back in
-/// full; `None` when it recorded none (`op_id` empty or absent).
+/// full with its effects (R2.02); `None` when it recorded none (`op_id`
+/// empty or absent). Effects that cannot be computed are left unset.
 ///
 /// The write has happened by then, so a read-back that fails never fails
 /// the RPC: it is logged, and the operation is reported with what the
@@ -51,7 +54,13 @@ pub(in crate::service) async fn written_operation(
     };
     let id: OperationIdHex = op_id.parse().map_err(status)?;
     match state.manager.operation(repo, id).await {
-        Ok(entry) => Ok(Some(convert::operation(&entry, repo, written))),
+        Ok(entry) => {
+            let mut operation = convert::operation(&entry, repo, written);
+            if let Ok(handle) = state.manager.handle(repo) {
+                operation.effects = reading::effects_of(state, &handle, None, op_id).await;
+            }
+            Ok(Some(operation))
+        }
         Err(error) => {
             tracing::warn!(
                 op_id,

@@ -1863,3 +1863,79 @@ fn quickstart_commands_exist() {
         page.display()
     );
 }
+
+/// R2.02: `--new-on` and `--change` take a jj revset naming one commit; a
+/// divergent change names two, which is `invalid_argument` (exit 2) with
+/// reason `AMBIGUOUS_REVISION`.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_create_takes_a_revset() {
+    let (daemon, repo) = with_repo().await;
+    let first = create(&daemon, &repo).await;
+    let change = first["change_id"].as_str().unwrap();
+    let get = async |revision: String| {
+        daemon
+            .client
+            .get_change(reef_api::v1::GetChangeRequest {
+                repo: repo.id.clone(),
+                revision,
+                ..reef_api::v1::GetChangeRequest::default()
+            })
+            .await
+            .unwrap()
+            .change
+            .unwrap()
+    };
+    let root_checkout = get("default@".to_owned()).await.commit_id;
+
+    // The parent of the first workspace's change.
+    let parent = format!("{change}-");
+    let value = json(
+        &run(
+            reef(&daemon),
+            &[
+                "ws", "create", "--repo", &repo.id, "--new-on", &parent, "-o", "json",
+            ],
+        )
+        .await,
+    );
+    let below = get(format!("{}-", value["commit_id"].as_str().unwrap())).await;
+    assert_eq!(below.commit_id, root_checkout);
+
+    // Two workspaces on one change, both edited: the change is divergent.
+    let second = json(
+        &run(
+            reef(&daemon),
+            &[
+                "ws", "create", "--repo", &repo.id, "--change", change, "-o", "json",
+            ],
+        )
+        .await,
+    );
+    for (ws, file) in [(&first, "a.txt"), (&second, "b.txt")] {
+        let path = Path::new(ws["path"].as_str().unwrap());
+        std::fs::write(path.join(file), "edit\n").unwrap();
+        daemon
+            .client
+            .snapshot_workspace("", ws["id"].as_str().unwrap(), "")
+            .await
+            .unwrap();
+    }
+    let output = run(
+        reef(&daemon),
+        &[
+            "ws", "create", "--repo", &repo.id, "--change", change, "-o", "json",
+        ],
+    )
+    .await;
+    failed(&output, 2, "invalid_argument");
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["error"]["reason"], "AMBIGUOUS_REVISION", "{value}");
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("commit id"),
+        "{value}"
+    );
+    daemon.stop().await;
+}

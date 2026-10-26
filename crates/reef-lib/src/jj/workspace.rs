@@ -18,9 +18,8 @@ use std::path::{Path, PathBuf};
 use jj_lib::backend::{BackendError, CommitId};
 use jj_lib::commit::Commit;
 use jj_lib::file_util::PathError;
-use jj_lib::index::IndexError;
 use jj_lib::local_working_copy::LocalWorkingCopy;
-use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::{RefName, RemoteName, WorkspaceNameBuf};
 use jj_lib::repo::{CheckOutCommitError, EditCommitError, Repo as _, RepoLoaderError};
@@ -50,54 +49,23 @@ pub enum StartPoint {
     NewOn(CommitIdHex),
 }
 
-/// What [`Repo::resolve_revision`] found.
+/// A revision resolved to one commit ([`super::revset::resolve_one`],
+/// [`Repo::resolve_bookmark`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
     /// The commit.
     pub commit_id: CommitIdHex,
     /// Its change.
     pub change_id: ChangeIdHex,
-    /// Which kind of reference matched.
-    pub via: ResolvedVia,
 }
 
-/// Which kind of reference [`Repo::resolve_revision`] matched.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResolvedVia {
-    /// A change id prefix, in hex or in jj's reverse hex.
-    ChangeId,
-    /// A commit id prefix.
-    CommitId,
-    /// A bookmark name: local, or remote-tracking from
-    /// [`Repo::resolve_bookmark`].
-    Bookmark,
-}
-
-/// Failure to resolve a revision.
+/// Failure to resolve a bookmark ([`Repo::resolve_bookmark`]).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ResolveError {
-    /// Nothing matched: no change or commit id prefix and no local bookmark.
-    #[error("no change, commit, or bookmark matches {0:?}")]
-    NoMatch(String),
-    /// The text is a prefix of more than one change id, or of more than one
-    /// commit id.
-    #[error("id prefix {0:?} is ambiguous")]
-    AmbiguousPrefix(String),
-    /// The change has more than one visible commit.
-    #[error("change {change_id} is divergent: it has {} visible commits", commits.len())]
-    DivergentChange {
-        /// The change.
-        change_id: ChangeIdHex,
-        /// Every visible commit of the change.
-        commits: Vec<CommitIdHex>,
-    },
     /// The bookmark points at more than one commit.
     #[error("bookmark {0:?} is conflicted")]
     ConflictedBookmark(String),
-    /// The index could not be searched.
-    #[error("failed to search the index")]
-    Index(#[from] IndexError),
     /// A matched commit could not be read.
     #[error("failed to read a commit")]
     Backend(#[from] BackendError),
@@ -106,10 +74,7 @@ pub enum ResolveError {
 impl Classify for ResolveError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::NoMatch(_) => ErrorKind::NotFound,
-            Self::AmbiguousPrefix(_) => ErrorKind::InvalidArgument,
-            Self::DivergentChange { .. } | Self::ConflictedBookmark(_) => ErrorKind::Conflict,
-            Self::Index(error) => classify_by_source(error),
+            Self::ConflictedBookmark(_) => ErrorKind::Conflict,
             Self::Backend(error) => classify_by_source(error),
         }
     }
@@ -391,68 +356,11 @@ impl Classify for CheckoutTreeError {
 }
 
 impl Repo {
-    /// Resolves `text` as a change id prefix, then a commit id prefix, then a
-    /// local bookmark name, as the daemon's `change` and `new_on` fields do.
-    /// There is no revset language.
-    ///
-    /// A change id prefix may be hex or jj's reverse hex (`k` to `z`, as
-    /// `jj log` prints). Text that is a prefix of both a change id and a
-    /// commit id resolves as the change, as jj prefers it. A prefix of more
-    /// than one change, or of none but more than one commit, is
-    /// [`ResolveError::AmbiguousPrefix`] and is not tried as a bookmark. A
-    /// change with several visible commits is
-    /// [`ResolveError::DivergentChange`]; a change with only hidden commits
-    /// does not match. Commit id prefixes match hidden commits too.
-    ///
-    /// # Warning
-    ///
-    /// A bookmark whose name is all hex digits (`cafe`), or all letters `k`
-    /// to `z` (`works`), is tried as an id prefix first, so it resolves to
-    /// the matching change or commit if there is one, and an ambiguous
-    /// prefix is an error without falling back to the bookmark. The brief
-    /// (R1.01) fixes this order; such a bookmark is reachable only while no
-    /// id starts with its name.
-    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
-    pub async fn resolve_revision(&self, text: &str) -> Result<Resolved, ResolveError> {
-        self.resolve_revision_unlogged(text)
-            .await
-            .inspect_err(|error| crate::log_failure!(error))
-    }
-
-    async fn resolve_revision_unlogged(&self, text: &str) -> Result<Resolved, ResolveError> {
-        if !text.is_empty() {
-            // The two alphabets are disjoint, so at most one of these parses.
-            let hex = HexPrefix::try_from_hex(text);
-            let reverse_hex = HexPrefix::try_from_reverse_hex(text);
-            if let Some(prefix) = hex.as_ref().or(reverse_hex.as_ref())
-                && let Some(resolved) = self.resolve_change_prefix(text, prefix).await?
-            {
-                return Ok(resolved);
-            }
-            if let Some(prefix) = &hex {
-                match self.repo.index().resolve_commit_id_prefix(prefix).await? {
-                    PrefixResolution::SingleMatch(id) => {
-                        let commit = self.repo.store().get_commit_async(&id).await?;
-                        return Ok(resolved(&commit, ResolvedVia::CommitId));
-                    }
-                    PrefixResolution::AmbiguousMatch => {
-                        return Err(ResolveError::AmbiguousPrefix(text.to_owned()));
-                    }
-                    PrefixResolution::NoMatch => {}
-                }
-            }
-        }
-        self.resolve_bookmark(text, None)
-            .await?
-            .ok_or_else(|| ResolveError::NoMatch(text.to_owned()))
-    }
-
     /// The commit the bookmark `name` points at: the local bookmark, or with
     /// `remote` the remote-tracking bookmark `name@remote`, tracked or not.
     /// `None` if there is no such bookmark;
     /// [`ResolveError::ConflictedBookmark`] if it points at more than one
-    /// commit. Unlike [`Repo::resolve_revision`], `name` is never tried as an
-    /// id prefix, so `trunk` (all reverse-hex letters) is a bookmark here.
+    /// commit. `name` is never tried as an id prefix or a revset.
     pub async fn resolve_bookmark(
         &self,
         name: &str,
@@ -479,34 +387,10 @@ impl Repo {
             })
         })?;
         let commit = self.repo.store().get_commit_async(id).await?;
-        Ok(Some(resolved(&commit, ResolvedVia::Bookmark)))
-    }
-
-    /// The visible commit of the one change matching `prefix`, or `None` if
-    /// no change, or only hidden commits, match.
-    async fn resolve_change_prefix(
-        &self,
-        text: &str,
-        prefix: &HexPrefix,
-    ) -> Result<Option<Resolved>, ResolveError> {
-        let targets = match self.repo.resolve_change_id_prefix(prefix).await? {
-            PrefixResolution::NoMatch => return Ok(None),
-            PrefixResolution::AmbiguousMatch => {
-                return Err(ResolveError::AmbiguousPrefix(text.to_owned()));
-            }
-            PrefixResolution::SingleMatch(targets) => targets,
-        };
-        let Some(visible) = targets.into_visible() else {
-            return Ok(None);
-        };
-        let commit = self.repo.store().get_commit_async(&visible[0]).await?;
-        if visible.len() > 1 {
-            return Err(ResolveError::DivergentChange {
-                change_id: ChangeIdHex::of(commit.change_id()),
-                commits: visible.iter().map(CommitIdHex::of).collect(),
-            });
-        }
-        Ok(Some(resolved(&commit, ResolvedVia::ChangeId)))
+        Ok(Some(Resolved {
+            commit_id: CommitIdHex::of(commit.id()),
+            change_id: ChangeIdHex::of(commit.change_id()),
+        }))
     }
 
     /// Creates a jj workspace named `name` whose tree is at `root` (which must
@@ -1036,14 +920,6 @@ fn summary(commit: &Commit) -> ChangeSummary {
         commit_id: CommitIdHex::of(commit.id()),
         description: commit.description().to_owned(),
         is_wc: true,
-    }
-}
-
-fn resolved(commit: &Commit, via: ResolvedVia) -> Resolved {
-    Resolved {
-        commit_id: CommitIdHex::of(commit.id()),
-        change_id: ChangeIdHex::of(commit.change_id()),
-        via,
     }
 }
 

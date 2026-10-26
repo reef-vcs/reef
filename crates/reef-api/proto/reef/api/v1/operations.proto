@@ -12,14 +12,26 @@ import "reef/api/v1/options.proto";
 
 // Reading, undoing, and following the operation log.
 service OperationService {
-  // Operations newest first from the head, filtered. Declared; R2.02
-  // implements it, and until then it fails UNIMPLEMENTED with reason
-  // NOT_IMPLEMENTED.
+  // Operations newest first from the operation heads, as `jj op log` lists
+  // them, filtered. Never writes: concurrent operation heads are walked,
+  // not merged. A page examines at most 10,000 operations and stops before
+  // its response passes 3 MiB, so it may hold fewer than `page_size`
+  // operations, or none, with a `next_page_token`.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_PAGE_TOKEN, or
+  // INVALID_CHANGE_ID (metadata `change`) for a `filter.changes` value that
+  // is not a hex or reverse-hex prefix; NOT_FOUND for an unknown
+  // `filter.workspaces` value, or with reason OPERATION_NOT_FOUND
+  // (metadata `operation_id`) when a page token's operation is gone.
   rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-  // One operation, with its effects. Declared; R2.02 implements it.
+  // One operation, with its effects.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_OPERATION_ID (not lowercase
+  // hex, or empty) or AMBIGUOUS_OPERATION_ID (metadata `operation_id`);
+  // NOT_FOUND with reason OPERATION_NOT_FOUND (metadata `operation_id`).
   rpc GetOperation(GetOperationRequest) returns (GetOperationResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -128,12 +140,19 @@ message Operation {
 // What an operation changed, from the difference between its view and its
 // parents'.
 message OperationEffects {
-  // Changes created, rewritten, or abandoned.
+  // Changes created, rewritten, hidden, or abandoned, one entry per commit,
+  // sorted by change id then commit id; at most 1,000.
   repeated ChangeEffect changes = 1;
-  // Bookmarks set, moved, or deleted.
+  // Bookmarks set, moved, or deleted, local before remote, sorted by name;
+  // at most 1,000. The `git` remote is left out.
   repeated BookmarkEffect bookmarks = 2;
-  // Working-copy commits that moved.
+  // Working-copy commits that moved, sorted by jj workspace name.
   repeated WorkingCopyEffect working_copies = 3;
+  // Change entries in all; more than `changes` holds when it was capped.
+  uint32 change_count = 4;
+  // Bookmark entries in all; more than `bookmarks` holds when it was
+  // capped.
+  uint32 bookmark_count = 5;
 }
 
 // How an operation changed a change.
@@ -146,6 +165,9 @@ enum ChangeEffectKind {
   CHANGE_EFFECT_KIND_REWRITTEN = 2;
   // The change is no longer visible.
   CHANGE_EFFECT_KIND_ABANDONED = 3;
+  // One of the change's commits is no longer visible, and the change still
+  // is, through another: a divergent change resolved.
+  CHANGE_EFFECT_KIND_HIDDEN = 4;
 }
 
 // One change an operation touched.
@@ -170,6 +192,9 @@ message BookmarkEffect {
   string commit_id = 3;
   // Where it pointed before; empty when created.
   string previous_commit_id = 4;
+  // The bookmark is conflicted afterwards; `commit_id` is the first of its
+  // targets.
+  bool conflicted = 5;
 }
 
 // One working-copy commit an operation moved.
@@ -205,14 +230,17 @@ message ListOperationsRequest {
   string repo = 1;
   // Which operations; unset for all.
   OperationFilter filter = 2;
-  // Only operations that ended after this; unset for no bound.
+  // Only operations that ended after this; unset for no bound. The walk
+  // stops at the first operation that ended at or before it, so with
+  // clocks skewed across hosts sharing a repository, older-looking
+  // operations past that point are left out.
   google.protobuf.Timestamp ended_after = 3;
   // Only operations that ended before this; unset for no bound.
   google.protobuf.Timestamp ended_before = 4;
   // Compute each operation's effects.
   bool include_effects = 5;
   // Operations per page: 0 means 100, more than 1,000 means 1,000, and a
-  // negative value is INVALID_ARGUMENT.
+  // negative value is INVALID_ARGUMENT. A page may hold fewer.
   int32 page_size = 6;
   // The previous page's `next_page_token`; empty for the first page. A
   // token sent with different filters is INVALID_ARGUMENT, reason
