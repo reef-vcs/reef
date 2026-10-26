@@ -254,12 +254,17 @@ impl Client {
     /// every call (R2.03): the operations those calls record name it as
     /// their agent instead of the workspace's owner. Trimmed; it must be
     /// visible ASCII of at most [`reef_api::AGENT_MAX_BYTES`] bytes, as the
-    /// daemon requires.
+    /// daemon requires. Empty sends none, as the daemon reads an empty
+    /// value.
     pub fn with_agent(mut self, agent: impl Into<String>) -> Result<Client, ClientError> {
         let agent = agent.into();
         let text = agent.trim();
+        if text.is_empty() {
+            self.agent = AgentInterceptor::default();
+            return Ok(self);
+        }
         let visible = text.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
-        if text.is_empty() || text.len() > reef_api::AGENT_MAX_BYTES || !visible {
+        if text.len() > reef_api::AGENT_MAX_BYTES || !visible {
             return Err(ClientError::InvalidAgent(agent));
         }
         let value = text

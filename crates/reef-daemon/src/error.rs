@@ -395,6 +395,9 @@ fn rewrite_advice(error: &RewriteError) -> Option<Advice> {
         RewriteError::Mismatch { actual, .. } => Some(Advice::hint(format!(
             "The revision now names {actual}; read it again and retry with that id."
         ))),
+        RewriteError::Hidden(_) => Some(Advice::hint(
+            "The commit was rewritten since it was read (a snapshot, or another write); read the change again and retry with its current commit id.",
+        )),
         RewriteError::Immutable(_) => Some(Advice::hint(
             "Trunk, tags and untracked remote bookmarks are immutable; rewrite a change on top of them instead.",
         )),

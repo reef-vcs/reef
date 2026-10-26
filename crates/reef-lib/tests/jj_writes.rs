@@ -216,6 +216,30 @@ async fn same_change(
         .unwrap()
 }
 
+/// A commit of `change` on `parent` whose committer time is `millis`.
+async fn at_time(
+    tx: &mut Transaction,
+    change: &ChangeId,
+    parent: &Commit,
+    contents: &str,
+    millis: i64,
+) -> Commit {
+    let tree = tree(tx, &[("f", contents)]).await;
+    let mut committer = tx.repo().store().root_commit().committer().clone();
+    committer.timestamp = jj_lib::backend::Timestamp {
+        timestamp: jj_lib::backend::MillisSinceEpoch(millis),
+        tz_offset: 0,
+    };
+    tx.repo_mut()
+        .new_commit(vec![parent.id().clone()], tree)
+        .set_change_id(change.clone())
+        .set_committer(committer)
+        .set_description("w")
+        .write()
+        .await
+        .unwrap()
+}
+
 fn bookmark(tx: &mut Transaction, name: &str, commit: &Commit) {
     tx.repo_mut()
         .set_local_bookmark_target(RefName::new(name), RefTarget::normal(commit.id().clone()));
@@ -542,27 +566,44 @@ async fn abandon_commit_resolves_divergence() {
         .unwrap();
     assert_eq!(rebased.parent_ids(), [ours.id().clone()]);
 
-    // Three visible commits: the newest is the successor; one that descends
-    // from the abandoned commit is skipped.
+    // Several candidates: the newest by committer time takes over, a tie
+    // goes to the higher commit id, and one that descends from the
+    // abandoned commit is skipped however new it is.
     let mut fx = Fixture::new().await;
     let mut tx = fx.tx();
     let base = new_commit(&mut tx, &[], &[("f", "base")], "base").await;
-    let first = new_commit(&mut tx, &[&base], &[("f", "1")], "w").await;
-    let change = first.change_id().clone();
-    let second = same_change(&mut tx, &change, &base, &[("f", "2")], "w").await;
-    let descendant = same_change(&mut tx, &change, &first, &[("f", "3")], "w").await;
+    let lost = new_commit(&mut tx, &[&base], &[("f", "0")], "w").await;
+    let change = lost.change_id().clone();
+    let older = at_time(&mut tx, &change, &base, "1", 1_000).await;
+    let newer = at_time(&mut tx, &change, &base, "2", 3_000).await;
+    let middle = at_time(&mut tx, &change, &base, "3", 2_000).await;
+    let descendant = at_time(&mut tx, &change, &lost, "4", 9_000).await;
     fx.commit(tx, "setup").await;
-    let abandoned = fx.abandon(&first).await;
+    assert_eq!(newer.committer().timestamp.timestamp.0, 3_000, "times set");
+    let abandoned = fx.abandon(&lost).await;
     assert_eq!(
         abandoned.successor,
-        Some(hex(&second)),
-        "{descendant:?} is skipped"
+        Some(hex(&newer)),
+        "not {older:?}, {middle:?} or the descendant {descendant:?}"
     );
+    let mut fx = Fixture::new().await;
     let mut tx = fx.tx();
-    let third = same_change(&mut tx, &change, &base, &[("f", "4")], "w").await;
-    fx.commit(tx, "a newer commit of the change").await;
-    let abandoned = fx.abandon(&second).await;
-    assert_eq!(abandoned.successor, Some(hex(&third)), "the newest");
+    let base = new_commit(&mut tx, &[], &[("f", "base")], "base").await;
+    let lost = new_commit(&mut tx, &[&base], &[("f", "0")], "w").await;
+    let change = lost.change_id().clone();
+    let one = at_time(&mut tx, &change, &base, "1", 5_000).await;
+    let two = at_time(&mut tx, &change, &base, "2", 5_000).await;
+    fx.commit(tx, "setup").await;
+    let higher = if one.id().hex() > two.id().hex() {
+        &one
+    } else {
+        &two
+    };
+    assert_eq!(
+        fx.abandon(&lost).await.successor,
+        Some(hex(higher)),
+        "a tie"
+    );
 
     // Only a descendant left: a plain abandon.
     let mut fx = Fixture::new().await;

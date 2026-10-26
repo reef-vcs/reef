@@ -63,6 +63,18 @@ fn write(workspace: &v1::Workspace, path: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// `path` in `commit`'s tree, read from the repository at `root`.
+async fn file_at(root: &Path, commit: &str, path: &str) -> Option<String> {
+    let repo = reef_lib::jj::Repo::open(root, &reef_daemon::testing::test_settings())
+        .await
+        .unwrap();
+    let path = reef_lib::jj::RepoPath::from_internal_string(path).unwrap();
+    repo.read_file_at(&commit.parse().unwrap(), path)
+        .await
+        .unwrap()
+        .map(|bytes| String::from_utf8(bytes).unwrap())
+}
+
 fn read(workspace: &v1::Workspace, path: &str) -> Option<String> {
     std::fs::read_to_string(Path::new(&workspace.path).join(path)).ok()
 }
@@ -317,7 +329,10 @@ async fn describe_holds_snapshots_off() {
     assert!(!row.divergent);
     let at = change(client, &ws, "@").await;
     assert_eq!(at.description, "describe 39\n");
-    assert_eq!(read(&ws, "racing.txt").unwrap(), format!("{last}\n"));
+    assert_eq!(
+        file_at(&repo.root, &at.commit_id, "racing.txt").await,
+        Some(format!("{last}\n"))
+    );
     daemon.stop().await;
 }
 
@@ -383,6 +398,18 @@ async fn abandon_change() {
     assert_eq!(read(&w, "late.txt"), None);
     let w_after = get(client, &repo, &w).await;
     assert_ne!(w_after.change_id, w.change_id);
+    // V's snapshot before the write records V's owner, not W's.
+    let v_snapshot = &operations(
+        client,
+        &repo,
+        OperationFilter {
+            workspaces: vec![v.id.clone()],
+            kinds: vec![OperationKind::Snapshot.into()],
+            ..OperationFilter::default()
+        },
+    )
+    .await[0];
+    assert_eq!(v_snapshot.agent, "v@test");
     // V was snapshotted, then rebased: it loses the abandoned diff and
     // keeps its own edits.
     assert_eq!(read(&v, "base.txt"), None);
@@ -432,6 +459,23 @@ async fn abandon_resolves_divergence() {
     let listed = metadata(&ambiguous)["commit_ids"].clone();
     assert!(listed.contains(&row_a.commit_id) && listed.contains(&row_b.commit_id));
 
+    // An edit in B: the write snapshots B first, which rewrites the commit
+    // the caller named, so the expected id no longer holds; the error names
+    // B's new commit, and a retry with it succeeds.
+    write(&b, "late-b.txt", "late\n");
+    let moved_on = client
+        .abandon_change(abandon(&a, &row_b.commit_id, &row_b.commit_id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&moved_on),
+        (
+            Code::FailedPrecondition,
+            "EXPECTED_COMMIT_MISMATCH".to_owned()
+        )
+    );
+    let row_b = get(client, &repo, &b).await;
+    assert_eq!(metadata(&moved_on)["commit_id"], row_b.commit_id);
     let response = client
         .abandon_change(abandon(&a, &row_b.commit_id, &row_b.commit_id))
         .await
@@ -492,13 +536,21 @@ async fn undo_operation() {
     assert_eq!(undo_op.kind(), OperationKind::Undo);
     assert_eq!(change(client, &w, "@").await.description, "");
     assert_eq!(get(client, &repo, &w).await.commit_id, w.commit_id);
-    // Undoing the undo describes it again; undoing it once more writes
-    // nothing new.
+    // Undoing the undo describes it again. Undoing the first undo once
+    // more is superseded: what it brought back has been rewritten since.
     client
         .undo_operation(undo(&repo, Some(&w), &undo_op.id))
         .await
         .unwrap();
     assert_eq!(change(client, &w, "@").await.description, "named\n");
+    let again = client
+        .undo_operation(undo(&repo, Some(&w), &undo_op.id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&again),
+        (Code::FailedPrecondition, "OPERATION_SUPERSEDED".to_owned())
+    );
 
     // A plain abandon, undone from the workspace that abandoned.
     write(&w, "kept.txt", "kept\n");
@@ -627,20 +679,16 @@ async fn undo_refusals() {
         reason(&superseded),
         (Code::FailedPrecondition, "OPERATION_SUPERSEDED".to_owned())
     );
-    assert_eq!(read(&w, "edit.txt").as_deref(), Some("edit\n"));
     let at = change(client, &w, "@").await;
     assert_eq!(at.description, "named\n");
-    let snaps = operations(
-        client,
-        &repo,
-        OperationFilter {
-            workspaces: vec![w.id.clone()],
-            kinds: vec![OperationKind::Snapshot.into()],
-            ..OperationFilter::default()
-        },
-    )
-    .await;
-    assert!(!snaps.is_empty(), "the edit was snapshotted");
+    assert_eq!(
+        file_at(&repo.root, &at.commit_id, "edit.txt")
+            .await
+            .as_deref(),
+        Some("edit\n"),
+        "the edit was snapshotted into W's commit"
+    );
+    assert_eq!(read(&w, "edit.txt").as_deref(), Some("edit\n"));
 
     // A released workspace cannot be named.
     let gone = client
@@ -781,11 +829,13 @@ async fn every_operation_is_tagged() {
         })
         .await
         .unwrap();
+    write(&ws, "e.txt", "e\n");
     let released = client
-        .release_workspace(&repo.id, &ws.id, false, false)
+        .release_workspace(&repo.id, &ws.id, true, false)
         .await
         .unwrap();
     let written = [
+        (released.final_snapshot.unwrap(), "snapshot", Some("final")),
         (inspected, "snapshot", Some("explicit")),
         (moved.final_snapshot.unwrap(), "snapshot", Some("move")),
         (moved.operation.unwrap(), "move-workspace", None),
