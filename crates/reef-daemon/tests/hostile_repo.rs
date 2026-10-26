@@ -722,3 +722,72 @@ async fn registering_a_checkout_whose_head_jj_cannot_read_fails_cleanly() {
     assert!(!exclude.lines().any(|line| line == "/.jj/"), "{exclude}");
     daemon.client.status().await.unwrap();
 }
+
+// R2.04
+#[tokio::test(flavor = "multi_thread")]
+async fn edit_files_never_writes_through_a_symlink() {
+    use reef_api::v1::{EditFilesRequest, FileEdit, edit_files_request, file_edit};
+    let f = fixture().await;
+    let canary = canary_dir(&f);
+    let target = canary.to_str().unwrap().to_owned();
+    let link = blob(&f.root, target.as_bytes());
+    f.hostile("editlinks", &[(LINK, b"link", &link)]);
+    let before = (
+        snapshot_dir(&canary),
+        snapshot_dir(&f.root.join(".git").join("hooks")),
+    );
+    let ws = f
+        .create_on("editlinks", Backend::Unspecified)
+        .await
+        .unwrap();
+    let request = |edits: Vec<FileEdit>| EditFilesRequest {
+        workspace: ws.id.clone(),
+        target: Some(edit_files_request::Target::Revision("@".to_owned())),
+        edits,
+        ..EditFilesRequest::default()
+    };
+    let content = |path: &str| FileEdit {
+        path: path.to_owned(),
+        action: Some(file_edit::Action::Content(CANARY.as_bytes().to_vec())),
+        executable: None,
+    };
+    let reason = |error: ClientError| match error {
+        ClientError::Rpc {
+            reason, metadata, ..
+        } => (reason, metadata.get("path").cloned()),
+        other => panic!("{other:?}"),
+    };
+    let client = &f.daemon.client;
+    let through = client
+        .edit_files(request(vec![content("link/x")]))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(through),
+        ("NOT_A_DIRECTORY".to_owned(), Some("link".to_owned()))
+    );
+    for reserved in [".git/hooks/pre-commit", ".jj/repo/x", "a/.GIT/config"] {
+        let error = client
+            .edit_files(request(vec![content(reserved)]))
+            .await
+            .unwrap_err();
+        assert_eq!(reason(error).0, "INVALID_PATH", "{reserved}");
+    }
+    // A link may be copied; it stays a link, never followed.
+    let copy = FileEdit {
+        path: "inner/link2".to_owned(),
+        action: Some(file_edit::Action::CopyFrom("link".to_owned())),
+        executable: None,
+    };
+    client.edit_files(request(vec![copy])).await.unwrap();
+    let copied = Path::new(&ws.path).join("inner").join("link2");
+    assert!(std::fs::symlink_metadata(&copied).unwrap().is_symlink());
+    assert_eq!(std::fs::read_link(&copied).unwrap(), canary);
+    let after = (
+        snapshot_dir(&canary),
+        snapshot_dir(&f.root.join(".git").join("hooks")),
+    );
+    assert_eq!(before, after);
+    f.assert_alive().await;
+    f.daemon.stop().await;
+}

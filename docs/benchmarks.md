@@ -385,3 +385,33 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 Nothing here walks a tree: `medium` and `large` agree. An operation that writes no commit (`abandon_leaf`, `revert_snapshot`) costs 16 to 17 ms, which is jj-lib committing and publishing an operation (operation, view, index segment, op heads) on APFS; each commit written adds about 9 ms (`describe_wc` writes two, the working-copy commit and its rebased descendant; `abandon_divergent` one). The brief's targets (under 10 to 15 ms) were set before measuring and assumed a cheaper operation commit; the cost is in jj-lib's store writes, not Reef's code, and is paid once per write RPC.
 
 End to end through the daemon, `DescribeChange` of a workspace's `@` (test `describe_change`, 20 calls) has a median of 30.4 ms in the test (debug) build, writing one commit: the transaction above, the follows' row updates, and `written_operation`. `AbandonChange` and `UndoOperation` add a scan of each workspace they move before the write and one after (a scan plus a check-out of the files that differ); see "Baseline" for scan costs.
+
+## Files (R2.04)
+
+`crates/reef-lib/benches/files.rs` measures `reef_lib::jj::files` on the same fixture, as `files/<preset>/<name>`: `cargo bench -p reef-lib --bench files` (or `just bench -- files/`). Setup writes a 16 MiB file and a leaf to edit, each as a new change on the working-copy commit, which never moves; the fixture's operation log grows with every run.
+
+| Benchmark | Timed |
+| --- | --- |
+| `read_small` | read a small text file at the working-copy commit |
+| `read_paged_16mib` | read a 16 MiB file in 1 MiB pages, all 16 and the empty one past the end |
+| `list_root` | list the root directory, not recursive |
+| `list_recursive_first` | the first page of 100 of a recursive listing of the root |
+| `list_recursive_last` | the last page of 100 of the same listing, by cursor |
+| `edit_one` | rewrite a leaf commit with one text replacement: overlay, blob, tree, commit and publish |
+| `new_on_hundred` | a new change on the working-copy commit writing 100 small files |
+
+Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
+
+| Benchmark | `medium` (10,014 files) | `large` (100,014 files) | Brief's target |
+| --- | ---: | ---: | ---: |
+| `read_small` | 21.6 µs | 21.2 µs | < 1 ms |
+| `read_paged_16mib` | 75.5 ms | 73.0 ms | < 400 ms |
+| `list_root` | 2.6 µs | 4.4 µs | < 2 ms |
+| `list_recursive_first` | 23.3 µs | 27.3 µs | < 5 ms |
+| `list_recursive_last` | 34.4 µs | 38.0 µs | < 10 to 15 ms |
+| `edit_one` | 30.9 ms | 31.4 ms | < 35 ms |
+| `new_on_hundred` | 30.1 ms | 31.4 ms | < 60 ms |
+
+`list_recursive_last` close to `list_recursive_first` on `large` is what the cursor matcher buys: the last page skips every subtree before its cursor instead of walking 100,000 entries. `read_paged_16mib` is the known quadratic case (each page reads the whole blob), about 4.6 ms a page here. The edits cost what R2.03's writes do: one commit written plus committing the operation; 100 small blobs add little.
+
+End to end through the daemon (test build), `EditFiles` with no workspace (test `edit_files_without_a_workspace`, 20 calls) has a median of about 30 ms; with one workspace on the edited commit and one on its child, which are snapshotted first and follow afterwards (test `edit_files_moves_workspaces`), one call takes about 230 ms, mostly the scans and the check-out.

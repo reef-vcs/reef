@@ -43,3 +43,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0029](0029-daemon-api-v1.md) | Daemon API v1 | accepted |
 | [0030](0030-reads-over-jj-state.md) | Reads over jj state | accepted |
 | [0031](0031-writes-over-jj-state.md) | Writes over jj state | accepted |
+| [0032](0032-files-without-a-workspace.md) | Files without a workspace | accepted |

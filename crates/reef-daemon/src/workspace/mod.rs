@@ -47,7 +47,7 @@ pub use create::ROOT_CHECKOUT;
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
-pub use rewrite::{Rewritten, Write, WriteRequest};
+pub use rewrite::{EditTarget, Rewritten, Write, WriteRequest};
 pub use snapshot::{REEFIGNORE, ReadSnapshot};
 pub(crate) use stores::StoreTarget;
 
@@ -553,6 +553,9 @@ pub enum ManagerError {
     /// An undo was refused or failed (R2.03).
     #[error("undo the operation")]
     Undo(#[from] reef_lib::jj::undo::UndoError),
+    /// An edit of files was refused or failed (R2.04).
+    #[error("edit the files")]
+    Edit(#[from] reef_lib::jj::files::EditError),
     /// An operation id did not resolve (R2.03).
     #[error("resolve the operation")]
     OpLookup(#[from] reef_lib::jj::oplog::OpLookupError),
@@ -612,6 +615,7 @@ impl Classify for ManagerError {
             Self::OpLog(error) => error.kind(),
             Self::Rewrite(error) => error.kind(),
             Self::Undo(error) => error.kind(),
+            Self::Edit(error) => error.kind(),
             Self::OpLookup(error) => error.kind(),
             Self::RewriteSnapshot { .. } => ErrorKind::Conflict,
         }

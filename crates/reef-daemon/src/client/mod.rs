@@ -24,6 +24,7 @@ use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
+use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
@@ -32,7 +33,8 @@ use reef_api::v1::store_service_client::StoreServiceClient;
 use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
 use reef_api::v1::{
     AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest, DescribeChangeResponse,
-    UndoOperationRequest, UndoOperationResponse,
+    EditFilesRequest, EditFilesResponse, ListFilesRequest, ListFilesResponse, ReadFileRequest,
+    ReadFileResponse, UndoOperationRequest, UndoOperationResponse,
 };
 use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
@@ -58,6 +60,10 @@ use tonic::transport::{Channel, Endpoint, Uri};
 pub use reef_lib::jj::settings::parse_byte_size;
 
 use crate::error::{Advice, detail_of, kind_from_status};
+
+/// The largest request a daemon decodes: tonic's default limit, which the
+/// server keeps (R2.04).
+pub const MAX_REQUEST_BYTES: usize = 4 << 20;
 
 /// This build's version, which the client compares with the daemon's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -143,6 +149,15 @@ pub enum ClientError {
         /// The status as received.
         status: tonic::Status,
     },
+    /// A request larger than the daemon decodes (gRPC's 4 MiB), refused
+    /// before it is sent (R2.04).
+    #[error("the request is {bytes} bytes; the daemon accepts at most {max}")]
+    TooLarge {
+        /// The encoded request.
+        bytes: usize,
+        /// The limit.
+        max: usize,
+    },
     /// [`Client::with_agent`] was given a value the daemon would refuse.
     #[error("an agent must be visible ASCII of at most {max} bytes: {0:?}", max = reef_api::AGENT_MAX_BYTES)]
     InvalidAgent(String),
@@ -187,6 +202,9 @@ impl ClientError {
     pub fn advice(&self) -> Option<Advice> {
         match self {
             Self::Connect { .. } | Self::Incompatible { .. } | Self::InvalidAgent(_) => None,
+            Self::TooLarge { .. } => Some(Advice::hint(
+                "Edit large files in a workspace, or split the edits across requests.",
+            )),
             Self::Rpc { status, .. } => detail_of(status).and_then(|d| Advice::from_detail(&d)),
         }
     }
@@ -195,7 +213,7 @@ impl ClientError {
     /// `API_VERSION_MISMATCH`.
     pub fn reason(&self) -> &str {
         match self {
-            Self::Connect { .. } => "",
+            Self::Connect { .. } | Self::TooLarge { .. } => "",
             Self::InvalidAgent(_) => reef_api::error::INVALID_AGENT,
             Self::Rpc { reason, .. } => reason,
             Self::Incompatible { .. } => reef_api::error::API_VERSION_MISMATCH,
@@ -207,7 +225,7 @@ impl Classify for ClientError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::Connect { .. } => ErrorKind::Unavailable,
-            Self::InvalidAgent(_) => ErrorKind::InvalidArgument,
+            Self::InvalidAgent(_) | Self::TooLarge { .. } => ErrorKind::InvalidArgument,
             Self::Rpc { kind, .. } => *kind,
             Self::Incompatible { .. } => ErrorKind::Unsupported,
         }
@@ -852,6 +870,101 @@ impl Client {
             OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("UndoOperation", client.undo_operation(request))
             .await
+    }
+
+    /// `FileService.ReadFile` (R2.04): at most 1 MiB of the file.
+    pub async fn read_file(
+        &self,
+        request: ReadFileRequest,
+    ) -> Result<ReadFileResponse, ClientError> {
+        let mut client =
+            FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ReadFile", client.read_file(request)).await
+    }
+
+    /// The file `request` names from its `offset` to the end, over as many
+    /// reads as it takes; `request`'s `limit` is ignored. Reads after the
+    /// first name the commit the first one read, so a write in between
+    /// cannot mix two versions.
+    pub async fn read_file_to_end(
+        &self,
+        request: ReadFileRequest,
+    ) -> Result<ReadFileResponse, ClientError> {
+        let start = request.offset;
+        let mut whole = self
+            .read_file(ReadFileRequest {
+                limit: 0,
+                ..request.clone()
+            })
+            .await?;
+        let mut next = ReadFileRequest {
+            revision: whole.commit_id.clone(),
+            skip_snapshot: true,
+            limit: 0,
+            ..request
+        };
+        loop {
+            let read = u64::try_from(whole.content.len()).unwrap_or(u64::MAX);
+            next.offset = start.saturating_add(read);
+            if next.offset >= whole.size {
+                return Ok(whole);
+            }
+            let page = self.read_file(next.clone()).await?;
+            if page.content.is_empty() {
+                return Ok(whole);
+            }
+            whole.content.extend(page.content);
+        }
+    }
+
+    /// `FileService.ListFiles` (R2.04): one page.
+    pub async fn list_files_page(
+        &self,
+        request: ListFilesRequest,
+    ) -> Result<ListFilesResponse, ClientError> {
+        let mut client =
+            FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ListFiles", client.list_files(request)).await
+    }
+
+    /// The whole listing `request` asks for: every page's entries, with the
+    /// first page's other fields, all read at the first page's operation;
+    /// `request`'s page fields are ignored.
+    pub async fn list_files(
+        &self,
+        request: ListFilesRequest,
+    ) -> Result<ListFilesResponse, ClientError> {
+        let mut request = ListFilesRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        let mut whole = self.list_files_page(request.clone()).await?;
+        while !whole.next_page_token.is_empty() {
+            request.page_token = std::mem::take(&mut whole.next_page_token);
+            let next = self.list_files_page(request.clone()).await?;
+            whole.entries.extend(next.entries);
+            whole.next_page_token = next.next_page_token;
+        }
+        Ok(whole)
+    }
+
+    /// `FileService.EditFiles` (R2.04). A request the daemon would not
+    /// decode (over gRPC's 4 MiB) is [`ClientError::TooLarge`], not sent.
+    pub async fn edit_files(
+        &self,
+        request: EditFilesRequest,
+    ) -> Result<EditFilesResponse, ClientError> {
+        let bytes = prost::Message::encoded_len(&request);
+        if bytes > MAX_REQUEST_BYTES {
+            return Err(ClientError::TooLarge {
+                bytes,
+                max: MAX_REQUEST_BYTES,
+            });
+        }
+        let mut client =
+            FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("EditFiles", client.edit_files(request)).await
     }
 }
 

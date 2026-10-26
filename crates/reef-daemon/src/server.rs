@@ -86,7 +86,9 @@ pub fn router(state: Arc<AppState>) -> ApiRouter {
             Arc::clone(&state),
         )))
         .add_service(DiffServiceServer::new(DiffHandler::new(Arc::clone(&state))))
-        .add_service(FileServiceServer::new(FilesHandler))
+        .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(
+            &state,
+        ))))
         .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
             Arc::clone(&state),
         )))

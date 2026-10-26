@@ -21,7 +21,8 @@ use std::error::Error;
 use prost::Message as _;
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
-use reef_lib::jj::diff::PathError;
+use reef_lib::jj::diff::{EntryKind, PathError};
+use reef_lib::jj::files::{EditError, EditProblem, FileError};
 use reef_lib::jj::oplog::OpLookupError;
 use reef_lib::jj::revset::RevisionError;
 use reef_lib::jj::rewrite::RewriteError;
@@ -137,6 +138,10 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             rewrite_advice(error)
         } else if let Some(error) = error.downcast_ref::<UndoError>() {
             undo_advice(error)
+        } else if let Some(error) = error.downcast_ref::<FileError>() {
+            file_advice(error)
+        } else if let Some(error) = error.downcast_ref::<EditError>() {
+            edit_advice(error)
         } else {
             None
         };
@@ -346,6 +351,88 @@ fn undo_reason(error: &UndoError) -> Option<(&'static str, BTreeMap<String, Stri
     })
 }
 
+/// An entry type as the `type` metadata names it: the `EntryType` value.
+fn type_name(kind: EntryKind) -> String {
+    crate::service::entry_type_name(kind).to_owned()
+}
+
+fn file_reason(error: &FileError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        FileError::NotFound { path, commit } => (
+            reason::PATH_NOT_FOUND,
+            meta(&[("path", path.clone()), ("commit_id", commit.to_string())]),
+        ),
+        FileError::NotAFile { path, kind, commit } => (
+            reason::NOT_A_FILE,
+            meta(&[
+                ("path", path.clone()),
+                ("type", type_name(*kind)),
+                ("commit_id", commit.to_string()),
+            ]),
+        ),
+        FileError::NotADirectory { path, kind, commit } => (
+            reason::NOT_A_DIRECTORY,
+            meta(&[
+                ("path", path.clone()),
+                ("type", type_name(*kind)),
+                ("commit_id", commit.to_string()),
+            ]),
+        ),
+        // Transparent: its source skips the path error.
+        FileError::Path(error) => (reason::INVALID_PATH, meta(&[("path", error.path.clone())])),
+        _ => return None,
+    })
+}
+
+fn edit_reason(error: &EditError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let (index, edit_path, problem) = match error {
+        EditError::Edit {
+            index,
+            path,
+            problem,
+        } => (index, path, problem),
+        EditError::TooMany(_) => return Some((reason::INVALID_EDIT, BTreeMap::new())),
+        _ => return None,
+    };
+    let mut metadata = meta(&[
+        ("edit_index", index.to_string()),
+        ("path", problem.path().unwrap_or(edit_path).to_owned()),
+    ]);
+    let mut add = |key: &str, value: String| {
+        metadata.insert(key.to_owned(), value);
+    };
+    let reason = match problem {
+        EditProblem::InvalidPath(_) => reason::INVALID_PATH,
+        EditProblem::Invalid(_) => reason::INVALID_EDIT,
+        EditProblem::PathNotFound(_) => reason::PATH_NOT_FOUND,
+        EditProblem::NotAFile { kind, .. } => {
+            add("type", type_name(*kind));
+            reason::NOT_A_FILE
+        }
+        EditProblem::NotADirectory { kind, .. } => {
+            add("type", type_name(*kind));
+            reason::NOT_A_DIRECTORY
+        }
+        EditProblem::TextNotFound(_) => reason::TEXT_NOT_FOUND,
+        EditProblem::TextNotUnique { occurrences, .. } => {
+            add("occurrences", occurrences.to_string());
+            reason::TEXT_NOT_UNIQUE
+        }
+        EditProblem::FileTooLarge { size, .. } => {
+            add("size", size.to_string());
+            reason::FILE_TOO_LARGE
+        }
+        EditProblem::StoreMountPath { mount, .. } => {
+            add("mount", mount.clone());
+            reason::STORE_MOUNT_PATH
+        }
+        _ => return None,
+    };
+    Some((reason, metadata))
+}
+
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -373,6 +460,10 @@ fn reason_and_metadata(
             rewrite_reason(error)
         } else if let Some(error) = error.downcast_ref::<UndoError>() {
             undo_reason(error)
+        } else if let Some(error) = error.downcast_ref::<FileError>() {
+            file_reason(error)
+        } else if let Some(error) = error.downcast_ref::<EditError>() {
+            edit_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (
@@ -400,6 +491,50 @@ fn rewrite_advice(error: &RewriteError) -> Option<Advice> {
         )),
         RewriteError::Immutable(_) => Some(Advice::hint(
             "Trunk, tags and untracked remote bookmarks are immutable; rewrite a change on top of them instead.",
+        )),
+        _ => None,
+    }
+}
+
+/// How to fix a refused read or listing (R2.04).
+fn file_advice(error: &FileError) -> Option<Advice> {
+    match error {
+        FileError::NotAFile { .. } => Some(Advice::hint(
+            "ListFiles lists a directory; ReadFile reads the files in it.",
+        )),
+        FileError::NotADirectory { .. } => Some(Advice::hint(
+            "It is not a directory; ReadFile reads it, and ListFiles of its parent lists it.",
+        )),
+        _ => None,
+    }
+}
+
+/// How to fix a refused edit (R2.04).
+fn edit_advice(error: &EditError) -> Option<Advice> {
+    let EditError::Edit { problem, .. } = error else {
+        return None;
+    };
+    match problem {
+        EditProblem::NotAFile {
+            kind: EntryKind::Directory,
+            ..
+        } => Some(Advice::hint(
+            "Directories are not edited as one; edit or delete the files in it one by one.",
+        )),
+        EditProblem::NotAFile { .. } | EditProblem::NotADirectory { .. } => Some(Advice::hint(
+            "Delete it first, in an earlier edit of the same request.",
+        )),
+        EditProblem::TextNotUnique { .. } => Some(Advice::hint(
+            "Include more surrounding text in old_text, or set all.",
+        )),
+        EditProblem::TextNotFound(_) => Some(Advice::hint(
+            "Read the file at the target again, and pass its commit_id as expected_commit_id.",
+        )),
+        EditProblem::FileTooLarge { .. } => Some(Advice::hint(
+            "Send the whole file as content, or edit it in a workspace.",
+        )),
+        EditProblem::StoreMountPath { .. } => Some(Advice::hint(
+            "That path is the mount of a shared store declared in reef.toml; only the store's build writes it.",
         )),
         _ => None,
     }
@@ -976,6 +1111,127 @@ mod tests {
         assert_eq!(
             detail_of(&required).unwrap().reason,
             reef_api::error::REVISION_REQUIRED
+        );
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one case per reason")]
+    fn file_reasons_carry_their_metadata() {
+        use reef_lib::jj::files::{EditError, EditProblem, FileError};
+        // (status, code, reason, metadata beyond `edit_index` and `path`)
+        type Case = (
+            Status,
+            Code,
+            &'static str,
+            Vec<(&'static str, &'static str)>,
+        );
+        let commit: reef_lib::jj::CommitIdHex = "ab".repeat(20).parse().unwrap();
+        let edit = |problem| {
+            status(ManagerError::Edit(EditError::Edit {
+                index: 3,
+                path: "a/b".into(),
+                problem,
+            }))
+        };
+        let cases: Vec<Case> = vec![
+            (
+                edit(EditProblem::InvalidPath("a/b".into())),
+                Code::InvalidArgument,
+                reef_api::error::INVALID_PATH,
+                vec![],
+            ),
+            (
+                edit(EditProblem::Invalid("why")),
+                Code::InvalidArgument,
+                reef_api::error::INVALID_EDIT,
+                vec![],
+            ),
+            (
+                edit(EditProblem::PathNotFound("a/b".into())),
+                Code::NotFound,
+                reef_api::error::PATH_NOT_FOUND,
+                vec![],
+            ),
+            (
+                edit(EditProblem::NotAFile {
+                    path: "a/b".into(),
+                    kind: EntryKind::Symlink,
+                }),
+                Code::FailedPrecondition,
+                reef_api::error::NOT_A_FILE,
+                vec![("type", "ENTRY_TYPE_SYMLINK")],
+            ),
+            (
+                edit(EditProblem::TextNotUnique {
+                    path: "a/b".into(),
+                    occurrences: 2,
+                }),
+                Code::FailedPrecondition,
+                reef_api::error::TEXT_NOT_UNIQUE,
+                vec![("occurrences", "2")],
+            ),
+            (
+                edit(EditProblem::FileTooLarge {
+                    path: "a/b".into(),
+                    size: 99,
+                }),
+                Code::FailedPrecondition,
+                reef_api::error::FILE_TOO_LARGE,
+                vec![("size", "99")],
+            ),
+            (
+                edit(EditProblem::StoreMountPath {
+                    path: "a/b".into(),
+                    mount: "a".into(),
+                }),
+                Code::FailedPrecondition,
+                reef_api::error::STORE_MOUNT_PATH,
+                vec![("mount", "a")],
+            ),
+        ];
+        for (status, code, reason, extra) in cases {
+            assert_eq!(status.code(), code, "{reason}");
+            let detail = detail_of(&status).unwrap();
+            assert_eq!(detail.reason, reason);
+            let expected: BTreeMap<String, String> = [("edit_index", "3"), ("path", "a/b")]
+                .into_iter()
+                .chain(extra)
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect();
+            assert_eq!(detail.metadata, expected, "{reason}");
+        }
+        // The ancestor, not the edit's own path, for NOT_A_DIRECTORY.
+        let ancestor = edit(EditProblem::NotADirectory {
+            path: "a".into(),
+            kind: EntryKind::File,
+        });
+        let detail = detail_of(&ancestor).unwrap();
+        assert_eq!(detail.reason, reef_api::error::NOT_A_DIRECTORY);
+        assert_eq!(detail.metadata["path"], "a");
+        assert_ne!(detail.hint, "");
+        let many = status(ManagerError::Edit(EditError::TooMany(1001)));
+        let detail = detail_of(&many).unwrap();
+        assert_eq!(
+            (detail.reason.as_str(), detail.metadata.len()),
+            (reef_api::error::INVALID_EDIT, 0)
+        );
+        // Reads name the commit.
+        let read = status(FileError::NotAFile {
+            path: "d".into(),
+            kind: EntryKind::Directory,
+            commit: commit.clone(),
+        });
+        let detail = detail_of(&read).unwrap();
+        assert_eq!(read.code(), Code::FailedPrecondition);
+        assert_eq!(detail.reason, reef_api::error::NOT_A_FILE);
+        assert_eq!(detail.metadata["type"], "ENTRY_TYPE_DIRECTORY");
+        assert_eq!(detail.metadata["commit_id"], commit.to_string());
+        let path = status(FileError::Path(PathError {
+            path: "../x".into(),
+        }));
+        assert_eq!(
+            detail_of(&path).unwrap().reason,
+            reef_api::error::INVALID_PATH
         );
     }
 

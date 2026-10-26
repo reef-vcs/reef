@@ -11,21 +11,65 @@ import "reef/api/v1/options.proto";
 
 // The virtual workspace API.
 service FileService {
-  // A file's content at a revision, at most 1 MiB per call. Declared;
-  // R2.04 implements it.
+  // A file's content at a revision, at most 1 MiB per call. `revision` is
+  // required; when it uses `@`, the workspace is snapshotted first unless
+  // `skip_snapshot` or `at_operation` is set. A file returns its bytes as
+  // stored, a symlink its target, and a conflict jj's materialization with
+  // markers (one that is not between files, its sides described). An
+  // `offset` at or past the end returns empty `content` and the `size`. A
+  // path is read through the tree, never through a symlink.
+  //
+  // Errors: INVALID_ARGUMENT with reason REVISION_REQUIRED, INVALID_PATH
+  // (metadata `path`), or a revision reason; NOT_FOUND with reason
+  // PATH_NOT_FOUND (metadata `path`, `commit_id`); FAILED_PRECONDITION with
+  // reason NOT_A_FILE (metadata `path`, `type`, `commit_id`) for a
+  // directory or submodule.
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
-  // The entries of a directory at a revision, in path order. Declared;
-  // R2.04 implements it.
+  // The entries of a directory at a revision, in jj's path order (by
+  // component, so `a/b` is before `a.rs`), paged; the snapshot rule is
+  // ReadFile's. Not recursive: the directory's own entries, directories
+  // among them. Recursive: every entry below it that is not a directory;
+  // symlinks are listed, never followed. In a conflicted tree, a name whose
+  // every present side is a directory is a DIRECTORY, and one whose sides
+  // disagree otherwise is a CONFLICT.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_PATH, INVALID_PAGE_TOKEN,
+  // or a revision reason; NOT_FOUND with reason PATH_NOT_FOUND;
+  // FAILED_PRECONDITION with reason NOT_A_DIRECTORY (metadata `path`,
+  // `type`, `commit_id`).
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
   // Applies edits to a revision, or to a new change on one, and records the
-  // result as a new commit: all edits or none. Declared; R2.04 implements
-  // it.
+  // result as a new commit: all edits or none, in one operation of kind
+  // EDIT, undoable with UndoOperation. `revision` rewrites the commit and
+  // keeps its change id; it must be mutable and visible. `new_on` creates a
+  // change on the commit, which may be immutable. Edits apply in order, each
+  // seeing what the earlier ones left; none writes through a symlink, under
+  // a file, into a path with a `.git` or `.jj` component, or under a shared
+  // store's mount in reef.toml. The request is checked against the current
+  // tree before anything is recorded. Workspaces on the edited commit or
+  // its descendants (on the parent, for `new_on`) are snapshotted first, in
+  // operations of their own; afterwards those on a rewritten commit take
+  // the new tree. When nothing changes, nothing is recorded and `operation`
+  // is unset. The author stays; the committer, and a new change's author,
+  // are the daemon's identity. A request is at most 4 MiB (larger is
+  // OUT_OF_RANGE, from gRPC) and 1,000 edits.
+  //
+  // Errors: INVALID_ARGUMENT with reason REVISION_REQUIRED,
+  // INVALID_COMMIT_ID, INVALID_DESCRIPTION, INVALID_EDIT (metadata
+  // `edit_index`), INVALID_PATH (metadata `path`, `edit_index`), or a
+  // revision reason; NOT_FOUND with reason PATH_NOT_FOUND (metadata `path`,
+  // `edit_index`); FAILED_PRECONDITION with reason EXPECTED_COMMIT_MISMATCH,
+  // IMMUTABLE_REVISION (`revision` only), HIDDEN_REVISION, NOT_A_FILE,
+  // NOT_A_DIRECTORY, TEXT_NOT_FOUND, TEXT_NOT_UNIQUE (metadata
+  // `occurrences`), FILE_TOO_LARGE (metadata `size`) or STORE_MOUNT_PATH
+  // (metadata `mount`), each about one edit with metadata `edit_index` and
+  // `path`.
   rpc EditFiles(EditFilesRequest) returns (EditFilesResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -98,7 +142,7 @@ message ReadFileRequest {
   string workspace = 2;
   // The revision.
   string revision = 3;
-  // The file.
+  // The file. Required.
   string path = 4;
   // Read at this operation; empty for the head.
   string at_operation = 5;
@@ -167,7 +211,8 @@ message ListFilesResponse {
 message EditFilesRequest {
   // The repository; may be empty when `workspace` is named.
   string repo = 1;
-  // The workspace `@` refers to; empty for none.
+  // The workspace `@` refers to, recorded as the operation's workspace; it
+  // is never moved. It must be active. Empty for none.
   string workspace = 2;
   // What to edit. Required.
   oneof target {
@@ -181,8 +226,8 @@ message EditFilesRequest {
   string expected_commit_id = 5;
   // The edits, applied in order.
   repeated FileEdit edits = 6;
-  // The new commit's description; unset to keep the target's (or empty for
-  // a new change).
+  // The new commit's description, with a trailing newline added; unset to
+  // keep the target's (or empty for a new change).
   optional string description = 7;
 }
 
@@ -196,9 +241,11 @@ message EditFilesResponse {
 
 // One edit of one path.
 message FileEdit {
-  // The path.
+  // The path: repository-relative, `/`-separated, with no empty, `.` or
+  // `..` component, and no `.git` or `.jj` component in any case.
   string path = 1;
-  // What to do to it. Required.
+  // What to do to it. Required, unless `executable` is set: an edit with no
+  // action and `executable` set changes only the bit of an existing file.
   oneof action {
     // Replace the whole content, creating the file if needed.
     bytes content = 2;
@@ -206,21 +253,33 @@ message FileEdit {
     TextReplace replace = 3;
     // Delete it.
     FileDelete delete = 4;
+    // Take the file or symlink at this path, as the earlier edits of this
+    // request left it, without sending its content: its bytes or target,
+    // and a file's executable bit unless `executable` is set. With a later
+    // delete of that path, a rename. A directory, conflict or submodule is
+    // FAILED_PRECONDITION, reason NOT_A_FILE.
+    string copy_from = 6;
   }
-  // Set the executable bit; unset to keep it (false for a new file).
+  // Set the executable bit; unset to keep it (false for a new file, and
+  // for a conflict the bit its file sides agree on, else false). Not with
+  // a delete, or a copy of a symlink.
   optional bool executable = 5;
 }
 
-// A text replacement inside a file.
+// A text replacement inside a file of at most 16 MiB, matched byte for
+// byte, with no line-ending or encoding normalization.
 message TextReplace {
-  // The text to find.
+  // The text to find; not empty.
   string old_text = 1;
   // What to put in its place.
   string new_text = 2;
-  // Replace every occurrence; false requires `old_text` to occur exactly
-  // once, else FAILED_PRECONDITION.
+  // Replace every non-overlapping occurrence, left to right; false requires
+  // `old_text` to occur exactly once, counting overlapping occurrences. No
+  // occurrence is FAILED_PRECONDITION, reason TEXT_NOT_FOUND, either way;
+  // more than one without `all` is reason TEXT_NOT_UNIQUE.
   bool all = 3;
 }
 
-// Delete a file.
+// Delete a file, symlink, conflict or submodule; nothing there is NOT_FOUND,
+// reason PATH_NOT_FOUND, and a directory is deleted file by file.
 message FileDelete {}

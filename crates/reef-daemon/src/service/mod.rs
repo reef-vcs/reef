@@ -4,10 +4,12 @@
 //! daemon's own types (in `convert`) and end in
 //! `.map_err(crate::error::status)`.
 //!
-//! The read RPCs (`status`, `changes`, `diff`, `operations`) run on
-//! [`crate::read::Reads`] (R2.02, ADR 0030). The RPCs later tickets
-//! implement (`files`, `presence`, and the write side of `changes` and
-//! `operations`) answer [`crate::error::not_implemented`] for now.
+//! The read RPCs (`status`, `changes`, `diff`, `operations`, and the file
+//! reads) run on [`crate::read::Reads`] (R2.02, ADR 0030); the writes
+//! (`changes`, undo in `operations`, and `EditFiles`) run through
+//! [`crate::workspace::Manager::rewrite`] (R2.03, R2.04). The RPCs later
+//! tickets implement (`presence`, and the operation subscription) answer
+//! [`crate::error::not_implemented`] for now.
 
 pub mod changes;
 pub mod compat;
@@ -25,6 +27,12 @@ pub mod workspaces;
 
 mod convert;
 mod reading;
+
+/// An entry kind as `reef.api.v1.EntryType` names it, for error metadata
+/// (R2.04).
+pub(crate) fn entry_type_name(kind: reef_lib::jj::diff::EntryKind) -> &'static str {
+    convert::entry_type(Some(kind)).as_str_name()
+}
 
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
