@@ -25,15 +25,15 @@ use std::time::{Duration, Instant};
 use common::spawned::{
     KillOnDrop, SpawnedDaemon, file_at, files_at, pid, reef, workspace_dirs, ws_run,
 };
-use common::{SyntheticRepo, test_settings};
+use common::{SyntheticRepo, op_id, proto_millis, test_settings};
 use nix::sys::signal::{Signal, kill};
+use reef_api::v1::{
+    Attention, CreateWorkspaceRequest, ListWorkspacesRequest, MoveWorkspaceRequest, Workspace,
+    WorkspaceState, build_store_response, create_workspace_request, move_workspace_request,
+};
 use reef_daemon::client::Client;
 use reef_daemon::config::FileConfig;
 use reef_daemon::model::{ReclaimReason, ReclaimRecord, WorkspaceId};
-use reef_daemon::proto::v0::{
-    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, build_event, create_request,
-    move_request,
-};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
@@ -73,16 +73,16 @@ async fn fixture() -> (SpawnedDaemon, SyntheticRepo) {
 async fn create_with(
     client: &Client,
     repo: &SyntheticRepo,
-    start: Option<create_request::Start>,
+    start: Option<create_workspace_request::Start>,
     lease_ms: u64,
 ) -> Workspace {
     client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            lease_ms,
+            lease_length: Some(proto_millis(lease_ms)),
             start,
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -108,9 +108,14 @@ async fn inspect(client: &Client, id: &str) -> Workspace {
 async fn all_workspaces(client: &Client) -> Vec<Workspace> {
     client
         .list_workspaces(ListWorkspacesRequest {
-            states: ["active", "releasing", "released", "reclaimed"]
-                .map(str::to_owned)
-                .to_vec(),
+            states: [
+                WorkspaceState::Active,
+                WorkspaceState::Releasing,
+                WorkspaceState::Released,
+                WorkspaceState::Reclaimed,
+            ]
+            .map(i32::from)
+            .to_vec(),
             ..ListWorkspacesRequest::default()
         })
         .await
@@ -153,11 +158,11 @@ where
     }
 }
 
-async fn wait_for_state(client: &Client, id: &str, state: &str) {
+async fn wait_for_state(client: &Client, id: &str, state: WorkspaceState) {
     wait_for(
         RECLAIM_BOUND,
-        &format!("workspace {id} {state}"),
-        || async { inspect(client, id).await.state == state },
+        &format!("workspace {id} {state:?}"),
+        || async { inspect(client, id).await.state() == state },
     )
     .await;
 }
@@ -259,7 +264,7 @@ async fn agent_killed_mid_edit_leaves_snapshot_and_no_directory() {
     let written = std::fs::read(&log).unwrap();
     let killed = Instant::now();
 
-    wait_for_state(&daemon.client, &id, "reclaimed").await;
+    wait_for_state(&daemon.client, &id, WorkspaceState::Reclaimed).await;
     assert!(
         killed.elapsed() < Duration::from_secs(10),
         "{:?}",
@@ -308,7 +313,7 @@ async fn agent_killed_with_unsnapshotted_write() {
     );
     let id = read_line_of(&id_file, &mut agent).await;
     let path = PathBuf::from(inspect(&daemon.client, &id).await.path);
-    wait_for_state(&daemon.client, &id, "reclaimed").await;
+    wait_for_state(&daemon.client, &id, WorkspaceState::Reclaimed).await;
     assert!(!path.exists());
     let reclaims = reclaims_of(&daemon, &id);
     assert_eq!(reclaims.len(), 1, "{reclaims:?}");
@@ -330,7 +335,7 @@ async fn lease_expiry_without_heartbeat() {
     let short = create(&daemon.client, &repo).await;
     let long = create_with(&daemon.client, &repo, None, 10_000).await;
     let expires = millis(short.lease.as_ref().unwrap().expires_at.as_ref());
-    wait_for_state(&daemon.client, &short.id, "reclaimed").await;
+    wait_for_state(&daemon.client, &short.id, WorkspaceState::Reclaimed).await;
     let reclaims = reclaims_of(&daemon, &short.id);
     assert_eq!(reclaims.len(), 1, "{reclaims:?}");
     assert_eq!(reclaims[0].reason, ReclaimReason::Expired);
@@ -342,7 +347,7 @@ async fn lease_expiry_without_heartbeat() {
     );
     assert!(!Path::new(&short.path).exists());
     let long = inspect(&daemon.client, &long.id).await;
-    assert_eq!(long.state, "active");
+    assert_eq!(long.state(), WorkspaceState::Active);
     assert!(Path::new(&long.path).is_dir());
 }
 
@@ -358,19 +363,19 @@ async fn heartbeat_in_grace_revives() {
     tokio::time::sleep(Duration::from_millis(wait)).await;
     let beat = daemon
         .client
-        .heartbeat_workspace("", &ws.id, &lease.id)
+        .renew_lease("", &ws.id, &lease.id)
         .await
         .unwrap();
-    assert!(millis(beat.expires_at.as_ref()) > expires);
+    assert!(millis(beat.lease.unwrap().expires_at.as_ref()) > expires);
     let revived = inspect(&daemon.client, &ws.id).await;
-    assert_eq!(revived.state, "active");
+    assert_eq!(revived.state(), WorkspaceState::Active);
     assert_eq!(reclaims_of(&daemon, &ws.id), []);
 
     // Then left to lapse: past the grace a heartbeat is refused.
-    wait_for_state(&daemon.client, &ws.id, "reclaimed").await;
+    wait_for_state(&daemon.client, &ws.id, WorkspaceState::Reclaimed).await;
     let error = daemon
         .client
-        .heartbeat_workspace("", &ws.id, &lease.id)
+        .renew_lease("", &ws.id, &lease.id)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
@@ -392,7 +397,7 @@ async fn two_workspaces_on_one_change() {
     // `change_id` is hex; `--change` takes jj's reverse hex, as the CLI
     // prints it.
     let rev = reef_daemon::client::json::reverse_hex(&change);
-    let on_change = || Some(create_request::Start::Change(rev.clone()));
+    let on_change = || Some(create_workspace_request::Start::Change(rev.clone()));
     let a = create_with(client, &repo, on_change(), 60_000).await;
     let b = create_with(client, &repo, on_change(), 60_000).await;
 
@@ -405,7 +410,7 @@ async fn two_workspaces_on_one_change() {
     write_and_snapshot(&b, "b.txt").await;
     let (a_now, b_now) = (inspect(client, &a.id).await, inspect(client, &b.id).await);
     for ws in [&a_now, &b_now] {
-        assert_eq!(ws.state, "active");
+        assert_eq!(ws.state(), WorkspaceState::Active);
         assert_eq!(ws.change_id, change);
     }
     let has = |ws: &Workspace, path: &'static str| {
@@ -423,7 +428,7 @@ async fn two_workspaces_on_one_change() {
     assert!(
         [&a_now, &b_now]
             .iter()
-            .any(|ws| ws.divergent && ws.attention == "divergent"),
+            .any(|ws| ws.divergent && ws.attention() == Attention::Divergent),
         "{a_now:?}\n{b_now:?}"
     );
 
@@ -480,24 +485,18 @@ async fn daemon_killed_mid_snapshot_recovers() {
 
         client.status().await.unwrap();
         let after = inspect(client, &ws.id).await;
-        assert_eq!(after.state, "active", "round {round}");
+        assert_eq!(after.state(), WorkspaceState::Active, "round {round}");
         let restart_grace = i64::try_from(RESTART_GRACE.as_millis()).unwrap();
         let expires = millis(after.lease.as_ref().unwrap().expires_at.as_ref());
         assert!(
             expires >= restarted + restart_grace,
             "round {round}: expires {expires} before restart {restarted} + grace"
         );
-        client
-            .heartbeat_workspace("", &ws.id, &lease)
-            .await
-            .unwrap();
+        client.renew_lease("", &ws.id, &lease).await.unwrap();
         // Nothing reclaimed on the first ticks.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(reclaims_of(&daemon, &ws.id), [], "round {round}");
-        client
-            .heartbeat_workspace("", &ws.id, &lease)
-            .await
-            .unwrap();
+        client.renew_lease("", &ws.id, &lease).await.unwrap();
 
         let snapshot = client.snapshot_workspace("", &ws.id, "").await.unwrap();
         let saved = files_at(&repo.root, &snapshot.commit_id, &files).await;
@@ -563,7 +562,7 @@ async fn ws_run_write_before_the_watch_attaches_is_snapshotted() {
     let id = read_line_of(&id_file, &mut agent).await;
     let waited = wait_for(Duration::from_secs(10), "a watcher snapshot", || async {
         let ws = inspect(&daemon.client, &id).await;
-        !ws.last_snapshot_op.is_empty()
+        !ws.last_snapshot_operation_id.is_empty()
             && file_at(&repo.root, &ws.commit_id, "early.txt")
                 .await
                 .as_deref()
@@ -617,11 +616,11 @@ async fn daemon_killed_during_create() {
         let id = repo.id.clone();
         let create = tokio::spawn(async move {
             client
-                .create_workspace(CreateRequest {
+                .create_workspace(CreateWorkspaceRequest {
                     repo: id,
                     owner: OWNER.to_owned(),
-                    lease_ms: 60_000,
-                    ..CreateRequest::default()
+                    lease_length: Some(proto_millis(60_000)),
+                    ..CreateWorkspaceRequest::default()
                 })
                 .await
         });
@@ -654,7 +653,10 @@ async fn daemon_killed_during_create() {
     // The daemon still creates, and the warm workspace is untouched.
     let ws = create(&daemon.client, &repo).await;
     assert!(Path::new(&ws.path).is_dir());
-    assert_eq!(inspect(&daemon.client, &warm.id).await.state, "active");
+    assert_eq!(
+        inspect(&daemon.client, &warm.id).await.state(),
+        WorkspaceState::Active
+    );
 }
 
 /// Every workspace directory has an active row and every active row a
@@ -667,7 +669,7 @@ async fn check_rows_match_directories(
     let rows = all_workspaces(&daemon.client).await;
     let active: BTreeSet<String> = rows
         .iter()
-        .filter(|ws| ws.state == "active")
+        .filter(|ws| ws.state() == WorkspaceState::Active)
         .map(|ws| ws.id.clone())
         .collect();
     let dirs = workspace_dirs(ws_root);
@@ -714,7 +716,7 @@ async fn with_store(daemon: &SpawnedDaemon, repo: &SyntheticRepo) {
         .unwrap();
     let mut done = None;
     while let Some(event) = stream.message().await.unwrap() {
-        if let Some(build_event::Event::Done(result)) = event.event {
+        if let Some(build_store_response::Event::Result(result)) = event.event {
             done = Some(result);
         }
     }
@@ -733,8 +735,8 @@ async fn restart_reestablishes_mounts_and_watchers() {
 
     let daemon = daemon.respawn().await;
     let after = inspect(&daemon.client, &ws.id).await;
-    assert_eq!(after.state, "active");
-    assert_eq!(after.attention, "", "{after:?}");
+    assert_eq!(after.state(), WorkspaceState::Active);
+    assert_eq!(after.attention(), Attention::Unspecified, "{after:?}");
     assert_eq!(after.stores.len(), 1, "{after:?}");
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "v1\n");
 
@@ -836,21 +838,21 @@ async fn move_keeps_lease_and_directory() {
         .unwrap();
     let ws = create_with(client, &repo, None, 60_000).await;
     let moved = client
-        .move_workspace(MoveRequest {
+        .move_workspace(MoveWorkspaceRequest {
             workspace: ws.id.clone(),
-            target: Some(move_request::Target::Change(
+            target: Some(move_workspace_request::Target::Change(
                 reef_daemon::client::json::reverse_hex(&other.change_id),
             )),
-            ..MoveRequest::default()
+            ..MoveWorkspaceRequest::default()
         })
         .await
         .unwrap();
-    assert_ne!(moved.op_id, "");
+    assert_ne!(op_id(moved.operation.as_ref()), "");
     let moved = moved.workspace.unwrap();
     assert_eq!(moved.change_id, other.change_id);
-    assert_eq!(moved.lease.unwrap().id, ws.lease.unwrap().id);
+    assert_eq!(moved.lease.as_ref().unwrap().id, ws.lease.unwrap().id);
     assert_eq!(moved.path, ws.path);
-    assert_eq!(moved.state, "active");
+    assert_eq!(moved.state(), WorkspaceState::Active);
     assert_eq!(
         std::fs::read_to_string(Path::new(&ws.path).join("other.txt")).unwrap(),
         "other"
@@ -1053,7 +1055,7 @@ async fn register_refuses_a_root_owned_by_another_user() {
 #[cfg(feature = "privileged-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn register_walks_up_only_to_an_owned_root() {
-    use reef_daemon::proto::v0::register_request::IfNotJj;
+    use reef_api::v1::IfNotJj;
     if !is_root() {
         eprintln!("skipped: needs root to chown");
         return;
@@ -1109,8 +1111,8 @@ async fn register_walks_up_only_to_an_owned_root() {
 fn register_accepts_the_sudo_users_repository() {
     use std::os::unix::fs::MetadataExt as _;
 
+    use reef_api::v1::IfNotJj;
     use reef_daemon::db::Db;
-    use reef_daemon::proto::v0::register_request::IfNotJj;
     use reef_daemon::repo::{OwnerPolicy, RegisterError, RepoRegistry};
     if !is_root() {
         eprintln!("skipped: needs root to chown");
@@ -1153,7 +1155,7 @@ fn register_accepts_the_sudo_users_repository() {
 #[cfg(feature = "privileged-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn register_accepts_the_sudo_users_repository_through_the_daemon() {
-    use reef_daemon::proto::v0::register_request::IfNotJj;
+    use reef_api::v1::IfNotJj;
     let sudo_uid = std::env::var("SUDO_UID")
         .ok()
         .and_then(|uid| uid.parse::<u32>().ok());

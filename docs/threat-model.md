@@ -105,7 +105,7 @@ Status is *fixed in RX.01* with the tests, *verified* (the test shows Reef alrea
 R2.08 adds a listener that is not the socket. Every RPC today is authorized by the socket's mode, so before it serves any of them, it must satisfy all of these, and its brief reviews its implementation against this list and adds its rows to the findings table:
 
 1. **TLS**, with a pinned or CA-issued certificate. No plaintext mode.
-2. **A per-client token with scopes.** A phone that approves proposals is not a client that can `Create` a workspace at an arbitrary path, run a store build, back up to a path, quiesce the daemon, or release another client's workspace. Each scope names the RPCs it allows; the default scope allows none of those.
+2. **A per-client token with scopes.** A phone that approves proposals is not a client that can `Create` a workspace at an arbitrary path, run a store build, back up to a path, quiesce the daemon, or release another client's workspace. Each scope names the RPCs it allows; the default scope allows none of those. The schema classifies every RPC for this: `(reef.api.v1.access)` is `READ`, `WRITE` or `ADMIN` on each method ([ADR 0029](adr/0029-daemon-api-v1.md)), and scopes are sets of those levels plus field rules.
 3. **The local socket's full API is never exposed remotely by default.** What a remote client can call is an explicit list.
 4. **Rate limits on the unauthenticated surface**: the handshake and token checks.
 5. **Audit**: every remote mutation is recorded with the client's identity, in the operation log's description.

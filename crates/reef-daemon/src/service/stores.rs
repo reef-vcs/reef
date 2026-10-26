@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Stores`: build and list shared dependency stores
+//! `reef.api.v1.StoreService`: build and list shared dependency stores
 //! (R1.20).
 
 use std::collections::{HashMap, HashSet};
@@ -7,21 +7,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
+use reef_api::v1::store_service_server::StoreService;
+use reef_api::v1::{
+    self, BuildStoreRequest, BuildStoreResponse, ListStoresRequest, ListStoresResponse,
+    OperationKind, StoreInfo, build_store_response, output_line,
+};
 use reef_lib::error::{Classify, ErrorKind};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::Instrument as _;
 
-use super::convert::timestamp;
+use super::convert::{Written, timestamp};
+use super::page::PageRequest;
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::model::WorkspaceState;
-use crate::proto::v0::stores_server::Stores;
-use crate::proto::v0::{
-    self, BuildEvent, BuildStoreRequest, ListStoresRequest, ListStoresResponse, StoreInfo,
-    build_event, output_line,
-};
+use crate::model::{RepoId, WorkspaceState};
 use crate::store::build::{
     self, BuildOutput, BuildRequest, BuildResult, BuildStarted, OutputLine, OutputStream,
 };
@@ -42,7 +43,7 @@ impl Classify for InvalidTimeout {
     }
 }
 
-/// Serves `Stores`.
+/// Serves `StoreService`.
 #[derive(Debug)]
 pub struct StoresService {
     state: Arc<AppState>,
@@ -55,7 +56,7 @@ impl StoresService {
     }
 }
 
-impl From<&OutputLine> for v0::OutputLine {
+impl From<&OutputLine> for v1::OutputLine {
     fn from(line: &OutputLine) -> Self {
         let stream = match line.stream {
             OutputStream::Stdout => output_line::Stream::Stdout,
@@ -68,7 +69,7 @@ impl From<&OutputLine> for v0::OutputLine {
     }
 }
 
-impl From<&BuildStarted> for v0::BuildStarted {
+impl From<&BuildStarted> for v1::BuildStarted {
     fn from(started: &BuildStarted) -> Self {
         Self {
             argv: started.argv.clone(),
@@ -77,34 +78,49 @@ impl From<&BuildStarted> for v0::BuildStarted {
                 .iter()
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect(),
-            rev: started.rev.clone(),
+            commit_id: started.rev.clone(),
         }
     }
 }
 
-impl From<&BuildOutput> for build_event::Event {
+impl From<&BuildOutput> for build_store_response::Event {
     fn from(output: &BuildOutput) -> Self {
         match output {
-            BuildOutput::Started(started) => Self::Started(v0::BuildStarted::from(started)),
-            BuildOutput::Line(line) => Self::Line(v0::OutputLine::from(line)),
+            BuildOutput::Started(started) => Self::Started(v1::BuildStarted::from(started)),
+            BuildOutput::Line(line) => Self::Line(v1::OutputLine::from(line)),
         }
     }
 }
 
-impl From<&BuildResult> for v0::BuildResult {
-    fn from(result: &BuildResult) -> Self {
-        Self {
-            name: result.key.name.clone(),
-            lockfile_hash: result.key.lockfile_hash.clone(),
-            path: result.path.display().to_string(),
-            bytes: result.bytes,
-            sealed: result.sealed,
-            exit_code: result.exit_code,
-            op_id: result.op_id.clone().unwrap_or_default(),
-            dropped_lines: result.dropped_lines,
-            already_built: result.already_built,
-        }
-    }
+/// A build's result as a message, with its release operation read back.
+async fn build_result(
+    state: &AppState,
+    repo: RepoId,
+    result: &BuildResult,
+) -> Result<v1::BuildResult, Status> {
+    let release_operation = super::written_operation(
+        state,
+        repo,
+        result.op_id.as_deref(),
+        Written {
+            kind: OperationKind::ReleaseWorkspace,
+            snapshot: None,
+            workspace: None,
+            agent: build::BUILD_OWNER,
+        },
+    )
+    .await?;
+    Ok(v1::BuildResult {
+        name: result.key.name.clone(),
+        lockfile_hash: result.key.lockfile_hash.clone(),
+        path: result.path.display().to_string(),
+        bytes: result.bytes,
+        sealed: result.sealed,
+        exit_code: result.exit_code,
+        release_operation,
+        dropped_lines: result.dropped_lines,
+        already_built: result.already_built,
+    })
 }
 
 /// The request's timeout, or [`build::DEFAULT_TIMEOUT`].
@@ -121,17 +137,17 @@ fn timeout(request: Option<&prost_types::Duration>) -> Result<Duration, InvalidT
     Ok(timeout)
 }
 
-type BuildStream = Pin<Box<dyn Stream<Item = Result<BuildEvent, Status>> + Send>>;
+type BuildStream = Pin<Box<dyn Stream<Item = Result<BuildStoreResponse, Status>> + Send>>;
 
 #[tonic::async_trait]
-impl Stores for StoresService {
-    type BuildStream = BuildStream;
+impl StoreService for StoresService {
+    type BuildStoreStream = BuildStream;
 
     #[tracing::instrument(skip_all, fields(repo = %request.get_ref().repo, store = %request.get_ref().name))]
-    async fn build(
+    async fn build_store(
         &self,
         request: Request<BuildStoreRequest>,
-    ) -> Result<Response<Self::BuildStream>, Status> {
+    ) -> Result<Response<Self::BuildStoreStream>, Status> {
         let request = request.into_inner();
         if !self.state.config.file.store.allow_builds {
             return Err(status(StoreError::BuildsOff));
@@ -141,13 +157,15 @@ impl Stores for StoresService {
         let build = BuildRequest {
             repo: repo.id,
             name: request.name,
-            rev: Some(request.rev).filter(|rev| !rev.trim().is_empty()),
+            rev: Some(request.revision).filter(|rev| !rev.trim().is_empty()),
             timeout: timeout(request.timeout.as_ref()).map_err(status)?,
             force: request.force,
         };
         let (events, stream) = mpsc::channel(EVENT_BUFFER);
         let (lines, mut output) = mpsc::channel(EVENT_BUFFER);
         let shutdown = self.state.shutdown.clone();
+        let state = Arc::clone(&self.state);
+        let repo_id = repo.id;
         // Its own task, so a client that disconnects does not cut the build
         // between its command and its seal or release.
         let job = tokio::spawn(
@@ -160,8 +178,8 @@ impl Stores for StoresService {
             // the build goes on.
             let mut dropped = 0u64;
             while let Some(item) = output.recv().await {
-                let event = BuildEvent {
-                    event: Some(build_event::Event::from(&item)),
+                let event = BuildStoreResponse {
+                    event: Some(build_store_response::Event::from(&item)),
                 };
                 match events.try_send(Ok(event)) {
                     Ok(()) => {}
@@ -175,9 +193,11 @@ impl Stores for StoresService {
             let last = match job.await {
                 Ok(Ok(mut result)) => {
                     result.dropped_lines = dropped;
-                    Ok(BuildEvent {
-                        event: Some(build_event::Event::Done(v0::BuildResult::from(&result))),
-                    })
+                    build_result(&state, repo_id, &result)
+                        .await
+                        .map(|result| BuildStoreResponse {
+                            event: Some(build_store_response::Event::Result(result)),
+                        })
                 }
                 Ok(Err(error)) => Err(status(error)),
                 Err(error) => Err(Status::internal(format!(
@@ -190,11 +210,21 @@ impl Stores for StoresService {
     }
 
     #[tracing::instrument(skip_all, fields(repo = %request.get_ref().repo))]
-    async fn list(
+    async fn list_stores(
         &self,
         request: Request<ListStoresRequest>,
     ) -> Result<Response<ListStoresResponse>, Status> {
         let request = request.into_inner();
+        let page = PageRequest::new(
+            request.page_size,
+            &request.page_token,
+            &ListStoresRequest {
+                page_size: 0,
+                page_token: String::new(),
+                ..request.clone()
+            },
+        )
+        .map_err(status)?;
         let manager = &self.state.manager;
         let in_use = manager.stores_in_use();
         let rows = self.state.db.stores().map_err(status)?;
@@ -226,6 +256,9 @@ impl Stores for StoresService {
                     .is_none_or(|keys| keys.contains(&key_of(&row.name, &row.lockfile_hash)))
             })
             .collect();
+        // By name, then hash; a NUL cannot occur in either.
+        let (rows, next_page_token) =
+            page.page(rows, |row| format!("{}\0{}", row.name, row.lockfile_hash));
         let sizes: HashMap<StoreKey, u64> = {
             let paths: Vec<_> = rows
                 .iter()
@@ -259,7 +292,10 @@ impl Stores for StoresService {
                 }
             })
             .collect();
-        Ok(Response::new(ListStoresResponse { stores }))
+        Ok(Response::new(ListStoresResponse {
+            stores,
+            next_page_token,
+        }))
     }
 }
 

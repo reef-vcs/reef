@@ -18,16 +18,19 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, proto_millis, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::v1::{
+    self, Attention, CreateWorkspaceRequest, LeaseEndReason, LeaseState, Workspace,
+};
 use reef_daemon::backend::{BackendChoice, BackendKind};
+use reef_daemon::client::json::duration_millis;
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::daemon::Daemon;
 use reef_daemon::error::detail_of;
 use reef_daemon::model::{LeaseEnd, ReclaimReason, ReclaimRecord, WorkspaceId, WorkspaceState};
-use reef_daemon::proto::v0::{CreateRequest, Workspace, lease};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::{CommitIdHex, Repo};
@@ -87,11 +90,11 @@ async fn fixture_with(
 async fn create_with(daemon: &TestDaemon, repo: &SyntheticRepo, lease_ms: u64) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            lease_ms,
-            ..CreateRequest::default()
+            lease_length: Some(proto_millis(lease_ms)),
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -136,7 +139,7 @@ fn kind_of(error: &ClientError) -> ErrorKind {
         panic!("not an RPC error: {error:?}");
     };
     let detail = detail_of(status).expect("an ErrorDetail in the status");
-    assert_eq!(detail.kind, reef_daemon::error::kind_name(*kind));
+    assert_eq!(detail.kind(), reef_daemon::error::proto_kind(*kind));
     if *kind == ErrorKind::Conflict {
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     }
@@ -160,9 +163,9 @@ where
     }
 }
 
-async fn wait_for_state(client: &Client, ws: &Workspace, state: &str) {
-    wait_for(RECLAIM_BOUND, &format!("workspace {state}"), || async {
-        inspect(client, ws).await.state == state
+async fn wait_for_state(client: &Client, ws: &Workspace, state: v1::WorkspaceState) {
+    wait_for(RECLAIM_BOUND, &format!("workspace {state:?}"), || async {
+        inspect(client, ws).await.state() == state
     })
     .await;
 }
@@ -239,7 +242,7 @@ async fn heartbeat_extends() {
     // heartbeat, and expiry is not what this test checks.
     let ws = create_with(&daemon, &repo, 10_000).await;
     let issued = ws.lease.clone().unwrap();
-    assert_eq!(issued.state(), lease::State::Active);
+    assert_eq!(issued.state(), LeaseState::Active);
     assert_eq!(
         issued.heartbeat_every,
         Some(prost_types::Duration {
@@ -257,10 +260,11 @@ async fn heartbeat_extends() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     let renewed = daemon
         .client
-        .heartbeat_workspace("", &ws.id[..8], &issued.id)
+        .renew_lease("", &ws.id[..8], &issued.id)
         .await
         .unwrap();
-    assert_eq!(renewed.lease_id, issued.id);
+    let renewed = renewed.lease.unwrap();
+    assert_eq!(renewed.id, issued.id);
     assert_eq!(renewed.heartbeat_every, issued.heartbeat_every);
 
     let lease = inspect(&daemon.client, &ws).await.lease.unwrap();
@@ -289,13 +293,13 @@ async fn expired_lease_is_reclaimed() {
     let state_dir = state_dir_of(&daemon, &repo, &ws);
     std::fs::write(Path::new(&ws.path).join("last-words.txt"), "unsaved\n").unwrap();
 
-    wait_for_state(&daemon.client, &ws, "reclaimed").await;
+    wait_for_state(&daemon.client, &ws, v1::WorkspaceState::Reclaimed).await;
     assert!(!Path::new(&ws.path).exists(), "directory gone");
     assert!(!state_dir.exists(), "wc/<id> gone");
     let inspected = inspect(&daemon.client, &ws).await;
     let lease = inspected.lease.unwrap();
-    assert_eq!(lease.state(), lease::State::Ended);
-    assert_eq!(lease.end_reason, "expired");
+    assert_eq!(lease.state(), LeaseState::Ended);
+    assert_eq!(lease.end_reason(), LeaseEndReason::Expired);
 
     let reclaims = reclaims_of(&daemon, &ws);
     assert_eq!(reclaims.len(), 1);
@@ -352,18 +356,18 @@ async fn grace_revives() {
     tokio::time::sleep(Duration::from_millis(wait)).await;
     assert_eq!(
         inspect(&daemon.client, &ws).await.lease.unwrap().state(),
-        lease::State::InGrace
+        LeaseState::InGrace
     );
     daemon
         .client
-        .heartbeat_workspace("", &ws.id, &lease_id(&ws))
+        .renew_lease("", &ws.id, &lease_id(&ws))
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_secs(4).saturating_sub(begun.elapsed())).await;
     let inspected = inspect(&daemon.client, &ws).await;
-    assert_eq!(inspected.state, "active");
-    assert_eq!(inspected.lease.unwrap().state(), lease::State::Active);
+    assert_eq!(inspected.state(), v1::WorkspaceState::Active);
+    assert_eq!(inspected.lease.unwrap().state(), LeaseState::Active);
     assert!(Path::new(&ws.path).is_dir());
     assert_eq!(reclaims_of(&daemon, &ws), Vec::<ReclaimRecord>::new());
 }
@@ -373,10 +377,10 @@ async fn grace_revives() {
 async fn heartbeat_after_reclaim_is_conflict() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo).await;
-    wait_for_state(&daemon.client, &ws, "reclaimed").await;
+    wait_for_state(&daemon.client, &ws, v1::WorkspaceState::Reclaimed).await;
     let error = daemon
         .client
-        .heartbeat_workspace(&repo.id, &ws.id, &lease_id(&ws))
+        .renew_lease(&repo.id, &ws.id, &lease_id(&ws))
         .await
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::Conflict);
@@ -391,7 +395,7 @@ async fn superseded_lease_is_conflict() {
     let random = reef_daemon::model::LeaseId::generate().as_hex();
     let error = daemon
         .client
-        .heartbeat_workspace(&repo.id, &ws.id, &random)
+        .renew_lease(&repo.id, &ws.id, &random)
         .await
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::Conflict);
@@ -399,13 +403,13 @@ async fn superseded_lease_is_conflict() {
 
     let malformed = daemon
         .client
-        .heartbeat_workspace(&repo.id, &ws.id, "not-a-lease")
+        .renew_lease(&repo.id, &ws.id, "not-a-lease")
         .await
         .unwrap_err();
     assert_eq!(kind_of(&malformed), ErrorKind::InvalidArgument);
     let unknown = daemon
         .client
-        .heartbeat_workspace(&repo.id, "ffffffffffffffff", &lease_id(&ws))
+        .renew_lease(&repo.id, "ffffffffffffffff", &lease_id(&ws))
         .await
         .unwrap_err();
     assert_eq!(kind_of(&unknown), ErrorKind::NotFound);
@@ -417,19 +421,19 @@ async fn too_long_is_invalid() {
     let (daemon, repo) = fixture().await;
     let error = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            lease_ms: 11_000,
-            ..CreateRequest::default()
+            lease_length: Some(proto_millis(11_000)),
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap_err();
     assert_eq!(kind_of(&error), ErrorKind::InvalidArgument);
     let ws = create_with(&daemon, &repo, 10_000).await;
     assert_eq!(
-        ws.lease.unwrap().length_ms,
-        10_000,
+        ws.lease.unwrap().length.as_ref().map(duration_millis),
+        Some(10_000),
         "the maximum is allowed"
     );
 }
@@ -471,7 +475,7 @@ async fn restart_applies_grace() {
         .unwrap();
     assert!(reclaimed.is_empty(), "the first tick reclaims nothing");
     let inspected = inspect(&daemon.client, &ws).await;
-    assert_eq!(inspected.state, "active");
+    assert_eq!(inspected.state(), v1::WorkspaceState::Active);
     let expires_at = millis(inspected.lease.unwrap().expires_at.as_ref());
     assert!(
         expires_at >= started + 3_000,
@@ -479,7 +483,7 @@ async fn restart_applies_grace() {
     );
 
     let elapsed = wait_for(RECLAIM_BOUND, "reclaimed after the grace", || async {
-        inspect(&daemon.client, &ws).await.state == "reclaimed"
+        inspect(&daemon.client, &ws).await.state() == v1::WorkspaceState::Reclaimed
     })
     .await;
     assert!(
@@ -502,7 +506,7 @@ async fn final_snapshot_failure_keeps_directory() {
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     wait_for(RECLAIM_BOUND, "final-snapshot-failed", || async {
-        inspect(&daemon.client, &ws).await.attention == "final-snapshot-failed"
+        inspect(&daemon.client, &ws).await.attention() == Attention::FinalSnapshotFailed
     })
     .await;
     // Two more ticks, each retrying and failing. Each attempt holds the
@@ -511,26 +515,30 @@ async fn final_snapshot_failure_keeps_directory() {
     tokio::time::sleep(TICK * 2 + Duration::from_millis(100)).await;
     let mut inspected = inspect(&daemon.client, &ws).await;
     let begun = Instant::now();
-    while inspected.state == "releasing" && begun.elapsed() < RECLAIM_BOUND {
+    while inspected.state() == v1::WorkspaceState::Releasing && begun.elapsed() < RECLAIM_BOUND {
         tokio::time::sleep(Duration::from_millis(20)).await;
         inspected = inspect(&daemon.client, &ws).await;
     }
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(inspected.state, "active");
-    assert_eq!(inspected.attention, "final-snapshot-failed");
-    assert!(inspected.lease.unwrap().end_reason.is_empty(), "lease open");
+    assert_eq!(inspected.state(), v1::WorkspaceState::Active);
+    assert_eq!(inspected.attention(), Attention::FinalSnapshotFailed);
+    assert_eq!(
+        inspected.lease.unwrap().end_reason(),
+        LeaseEndReason::Unspecified,
+        "lease open"
+    );
     assert!(root.is_dir(), "never torn down");
     assert!(root.join("last-words.txt").is_file());
     assert_eq!(reclaims_of(&daemon, &ws), Vec::<ReclaimRecord>::new());
 
-    wait_for_state(&daemon.client, &ws, "reclaimed").await;
+    wait_for_state(&daemon.client, &ws, v1::WorkspaceState::Reclaimed).await;
     let reclaims = reclaims_of(&daemon, &ws);
     assert_eq!(reclaims.len(), 1);
     assert!(reclaims[0].snapshot_taken);
     assert!(reclaims[0].final_op_id.is_some(), "the file was saved");
     assert_eq!(
-        inspect(&daemon.client, &ws).await.attention,
-        "",
+        inspect(&daemon.client, &ws).await.attention(),
+        Attention::Unspecified,
         "cleared once reclaimed"
     );
 }
@@ -542,7 +550,7 @@ async fn missing_root_is_reclaimed_without_snapshot() {
     let ws = create(&daemon, &repo).await;
     std::fs::remove_dir_all(&ws.path).unwrap();
 
-    wait_for_state(&daemon.client, &ws, "reclaimed").await;
+    wait_for_state(&daemon.client, &ws, v1::WorkspaceState::Reclaimed).await;
     let reclaims = reclaims_of(&daemon, &ws);
     assert_eq!(reclaims.len(), 1);
     assert_eq!(reclaims[0].reason, ReclaimReason::Expired);
@@ -587,7 +595,10 @@ async fn release_uses_the_pipeline() {
         format!("reef: release workspace {}", ws.id)
     );
     let inspected = inspect(&daemon.client, &ws).await;
-    assert_eq!(inspected.lease.unwrap().end_reason, "released");
+    assert_eq!(
+        inspected.lease.unwrap().end_reason(),
+        LeaseEndReason::Released
+    );
 }
 
 // 11

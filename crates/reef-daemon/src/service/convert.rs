@@ -1,16 +1,24 @@
 //! Conversions between the daemon's records and the generated messages,
-//! one per type, so the manager never sees the generated code.
+//! one per type, so the manager never sees the generated code. Model enums
+//! become v1 enums here and nowhere else.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::backend::DiskUsage;
+use reef_api::v1;
+use reef_lib::error::{Classify, ErrorKind};
+use reef_lib::jj::oplog::OpEntry;
+
+use crate::backend::{BackendChoice, BackendKind, DiskUsage};
 use crate::lease::{LeaseManager, LeaseState};
-use crate::model::{LeaseRecord, RepositoryRecord, Timestamp, WorkspaceRecord};
-use crate::proto::v0;
+use crate::model::{
+    Attention, LeaseEnd, LeaseRecord, RepoId, RepositoryRecord, Timestamp, WatcherKind,
+    WorkspaceRecord, WorkspaceState,
+};
+use crate::snapshot::SnapshotKind;
 use crate::snapshot::index::SnapshotEntry;
 use crate::store::{MountMode, MountedStore};
 use crate::watcher::PendingWatch;
-use crate::workspace::CreateTimings;
+use crate::workspace::{CreateTimings, MissingStores};
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
 pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
@@ -21,8 +29,13 @@ pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
     }
 }
 
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+/// A [`SystemTime`] as a `google.protobuf.Timestamp`, to the millisecond.
+fn system_timestamp(time: SystemTime) -> prost_types::Timestamp {
+    let millis = match time.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
+        Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
+    };
+    timestamp(Timestamp(millis))
 }
 
 /// A duration as a `google.protobuf.Duration`.
@@ -34,7 +47,16 @@ pub(super) fn proto_duration(duration: Duration) -> prost_types::Duration {
     }
 }
 
-impl From<&RepositoryRecord> for v0::Repository {
+/// A `google.protobuf.Duration` from a request: `None` when unset or zero,
+/// or when negative.
+pub(super) fn request_duration(duration: Option<&prost_types::Duration>) -> Option<Duration> {
+    let duration = duration?;
+    let secs = u64::try_from(duration.seconds).ok()?;
+    let nanos = u32::try_from(duration.nanos).ok()?;
+    Some(Duration::new(secs, nanos)).filter(|duration| !duration.is_zero())
+}
+
+impl From<&RepositoryRecord> for v1::Repository {
     fn from(record: &RepositoryRecord) -> Self {
         Self {
             id: record.id.as_hex(),
@@ -45,33 +67,145 @@ impl From<&RepositoryRecord> for v0::Repository {
     }
 }
 
-impl From<LeaseState> for v0::lease::State {
-    fn from(state: LeaseState) -> Self {
-        match state {
-            LeaseState::Active => Self::Active,
-            LeaseState::InGrace => Self::InGrace,
-            LeaseState::Expired => Self::Expired,
-            LeaseState::Ended => Self::Ended,
-        }
+fn lease_state(state: LeaseState) -> v1::LeaseState {
+    match state {
+        LeaseState::Active => v1::LeaseState::Active,
+        LeaseState::InGrace => v1::LeaseState::InGrace,
+        LeaseState::Expired => v1::LeaseState::Expired,
+        LeaseState::Ended => v1::LeaseState::Ended,
+    }
+}
+
+fn lease_end(end: Option<LeaseEnd>) -> v1::LeaseEndReason {
+    match end {
+        None => v1::LeaseEndReason::Unspecified,
+        Some(LeaseEnd::Released) => v1::LeaseEndReason::Released,
+        Some(LeaseEnd::Expired) => v1::LeaseEndReason::Expired,
+        Some(LeaseEnd::Restored) => v1::LeaseEndReason::Restored,
     }
 }
 
 /// A lease as a message, its state computed at `now`.
-pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v0::Lease {
-    v0::Lease {
+pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v1::Lease {
+    v1::Lease {
         id: lease.id.as_hex(),
         owner: lease.owner.clone(),
         issued_at: Some(timestamp(lease.issued_at)),
         expires_at: Some(timestamp(lease.expires_at)),
         last_heartbeat_at: Some(timestamp(lease.last_heartbeat_at)),
-        length_ms: millis(lease.length),
-        grace_ms: millis(lease.grace),
-        state: v0::lease::State::from(LeaseState::of(lease, now)).into(),
-        end_reason: lease
-            .end_reason
-            .map(|reason| reason.as_str().to_owned())
-            .unwrap_or_default(),
+        length: Some(proto_duration(lease.length)),
+        grace: Some(proto_duration(lease.grace)),
+        state: lease_state(LeaseState::of(lease, now)).into(),
+        end_reason: lease_end(lease.end_reason).into(),
         heartbeat_every: Some(proto_duration(leases.heartbeat_every(lease.length))),
+    }
+}
+
+/// A backend as a message.
+pub(super) fn backend(kind: BackendKind) -> v1::Backend {
+    match kind {
+        BackendKind::Copy => v1::Backend::Copy,
+        BackendKind::ApfsClone => v1::Backend::Apfs,
+        BackendKind::Reflink => v1::Backend::Reflink,
+        BackendKind::Overlayfs => v1::Backend::Overlayfs,
+        BackendKind::FuseOverlayfs => v1::Backend::FuseOverlayfs,
+    }
+}
+
+/// A request's enum field holding a value this daemon does not know.
+#[derive(Debug, thiserror::Error)]
+#[error("{field} {value} is not a value this daemon knows")]
+pub(super) struct UnknownValue {
+    /// The request field.
+    pub(super) field: &'static str,
+    /// What it held.
+    pub(super) value: i32,
+}
+
+impl Classify for UnknownValue {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::InvalidArgument
+    }
+}
+
+/// A request's enum field, refused when it holds a value this daemon does
+/// not know (a newer client's), rather than read as unspecified.
+pub(super) fn known<E: TryFrom<i32>>(field: &'static str, value: i32) -> Result<E, UnknownValue> {
+    E::try_from(value).map_err(|_| UnknownValue { field, value })
+}
+
+/// A request's backend: `None` for the daemon's default.
+pub(super) fn backend_choice(backend: v1::Backend) -> Option<BackendChoice> {
+    let kind = match backend {
+        v1::Backend::Unspecified => return None,
+        v1::Backend::Auto => return Some(BackendChoice::Auto),
+        v1::Backend::Copy => BackendKind::Copy,
+        v1::Backend::Apfs => BackendKind::ApfsClone,
+        v1::Backend::Reflink => BackendKind::Reflink,
+        v1::Backend::Overlayfs => BackendKind::Overlayfs,
+        v1::Backend::FuseOverlayfs => BackendKind::FuseOverlayfs,
+    };
+    Some(BackendChoice::Named(kind))
+}
+
+/// A request's missing-stores policy; unspecified is `Fail`.
+pub(super) fn missing_stores(value: v1::MissingStores) -> MissingStores {
+    match value {
+        v1::MissingStores::Skip => MissingStores::Skip,
+        v1::MissingStores::Fail | v1::MissingStores::Unspecified => MissingStores::Fail,
+    }
+}
+
+/// A workspace state as a message.
+fn workspace_state(state: WorkspaceState) -> v1::WorkspaceState {
+    match state {
+        WorkspaceState::Active => v1::WorkspaceState::Active,
+        WorkspaceState::Releasing => v1::WorkspaceState::Releasing,
+        WorkspaceState::Released => v1::WorkspaceState::Released,
+        WorkspaceState::Reclaimed => v1::WorkspaceState::Reclaimed,
+    }
+}
+
+/// A requested state; `None` for unspecified.
+pub(super) fn state_of(state: v1::WorkspaceState) -> Option<WorkspaceState> {
+    match state {
+        v1::WorkspaceState::Unspecified => None,
+        v1::WorkspaceState::Active => Some(WorkspaceState::Active),
+        v1::WorkspaceState::Releasing => Some(WorkspaceState::Releasing),
+        v1::WorkspaceState::Released => Some(WorkspaceState::Released),
+        v1::WorkspaceState::Reclaimed => Some(WorkspaceState::Reclaimed),
+    }
+}
+
+fn attention(attention: Option<Attention>) -> v1::Attention {
+    match attention {
+        None => v1::Attention::Unspecified,
+        Some(Attention::Divergent) => v1::Attention::Divergent,
+        Some(Attention::StaleRecovered) => v1::Attention::StaleRecovered,
+        Some(Attention::FinalSnapshotFailed) => v1::Attention::FinalSnapshotFailed,
+        Some(Attention::StoreHashMismatch) => v1::Attention::StoreHashMismatch,
+        Some(Attention::StoreMissing) => v1::Attention::StoreMissing,
+        Some(Attention::WatchFailed) => v1::Attention::WatchFailed,
+        Some(Attention::UpperMissing) => v1::Attention::UpperMissing,
+        Some(Attention::MountFailed) => v1::Attention::MountFailed,
+    }
+}
+
+fn watcher(kind: WatcherKind) -> v1::WatcherKind {
+    match kind {
+        WatcherKind::Notify => v1::WatcherKind::Notify,
+        WatcherKind::Watchman => v1::WatcherKind::Watchman,
+    }
+}
+
+/// A snapshot kind as a message.
+pub(super) fn snapshot_kind(kind: SnapshotKind) -> v1::SnapshotKind {
+    match kind {
+        SnapshotKind::Watcher => v1::SnapshotKind::Watcher,
+        SnapshotKind::Explicit => v1::SnapshotKind::Explicit,
+        SnapshotKind::Final => v1::SnapshotKind::Final,
+        SnapshotKind::Move => v1::SnapshotKind::Move,
+        SnapshotKind::Shutdown => v1::SnapshotKind::Shutdown,
     }
 }
 
@@ -79,15 +213,26 @@ pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) 
 /// stores, and why its watch is not up yet, as one message.
 pub(super) struct WorkspaceView<'a> {
     pub(super) record: &'a WorkspaceRecord,
-    pub(super) lease: Option<v0::Lease>,
+    pub(super) lease: Option<v1::Lease>,
     pub(super) local_snapshot_count: u64,
     pub(super) stores: &'a [MountedStore],
     pub(super) watch_pending: Option<PendingWatch>,
+    /// Whether the workspace is loaded: an active, loaded workspace with no
+    /// pending watch reports its watch as attached.
+    pub(super) loaded: bool,
 }
 
-impl From<WorkspaceView<'_>> for v0::Workspace {
+impl From<WorkspaceView<'_>> for v1::Workspace {
     fn from(view: WorkspaceView<'_>) -> Self {
         let record = view.record;
+        let watch_state = match view.watch_pending {
+            Some(PendingWatch::Waiting) => v1::WatchState::Waiting,
+            Some(PendingWatch::Attaching) => v1::WatchState::Attaching,
+            None if view.loaded && record.state == WorkspaceState::Active => {
+                v1::WatchState::Attached
+            }
+            None => v1::WatchState::Unspecified,
+        };
         Self {
             id: record.id.as_hex(),
             repo_id: record.repo_id.as_hex(),
@@ -95,35 +240,32 @@ impl From<WorkspaceView<'_>> for v0::Workspace {
             purpose: record.purpose.clone(),
             change_id: record.change_id.clone(),
             commit_id: record.commit_id.clone(),
-            backend: record.backend.clone(),
+            backend: record
+                .backend
+                .parse::<BackendKind>()
+                .map_or(v1::Backend::Unspecified, backend)
+                .into(),
             path: record.path.display().to_string(),
-            state: record.state.as_str().to_owned(),
+            state: workspace_state(record.state).into(),
             divergent: record.divergent,
-            attention: record
-                .attention
-                .map(|attention| attention.as_str().to_owned())
-                .unwrap_or_default(),
+            attention: attention(record.attention).into(),
             created_at: Some(timestamp(record.created_at)),
             last_snapshot_at: record.last_snapshot_at.map(timestamp),
-            last_snapshot_op: record.last_snapshot_op.clone().unwrap_or_default(),
+            last_snapshot_operation_id: record.last_snapshot_op.clone().unwrap_or_default(),
             lease: view.lease,
-            watcher: record.watcher.as_str().to_owned(),
+            watcher: watcher(record.watcher).into(),
             local_snapshot_count: view.local_snapshot_count,
-            stores: view.stores.iter().map(v0::MountedStore::from).collect(),
-            watch_state: view
-                .watch_pending
-                .map(PendingWatch::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+            stores: view.stores.iter().map(v1::MountedStore::from).collect(),
+            watch_state: watch_state.into(),
         }
     }
 }
 
-impl From<&MountedStore> for v0::MountedStore {
+impl From<&MountedStore> for v1::MountedStore {
     fn from(store: &MountedStore) -> Self {
         let mode = match store.mode {
-            MountMode::Symlink => v0::mounted_store::Mode::Symlink,
-            MountMode::Bind => v0::mounted_store::Mode::Bind,
+            MountMode::Symlink => v1::StoreMountMode::Symlink,
+            MountMode::Bind => v1::StoreMountMode::Bind,
         };
         Self {
             name: store.key.name.clone(),
@@ -135,19 +277,19 @@ impl From<&MountedStore> for v0::MountedStore {
     }
 }
 
-impl From<&SnapshotEntry> for v0::SnapshotEntry {
+impl From<&SnapshotEntry> for v1::SnapshotEntry {
     fn from(entry: &SnapshotEntry) -> Self {
         Self {
-            op_id: entry.op_id.to_string(),
+            operation_id: entry.op_id.to_string(),
             commit_id: entry.commit_id.to_string(),
-            kind: entry.kind.as_str().to_owned(),
+            kind: snapshot_kind(entry.kind).into(),
             local: entry.local,
             taken_at: Some(timestamp(entry.taken_at)),
         }
     }
 }
 
-impl From<&DiskUsage> for v0::DiskUsage {
+impl From<&DiskUsage> for v1::DiskUsage {
     fn from(usage: &DiskUsage) -> Self {
         Self {
             allocated_bytes: usage.allocated_bytes,
@@ -156,7 +298,7 @@ impl From<&DiskUsage> for v0::DiskUsage {
     }
 }
 
-impl From<&CreateTimings> for v0::CreateTimings {
+impl From<&CreateTimings> for v1::CreateTimings {
     fn from(timings: &CreateTimings) -> Self {
         Self {
             resolve_ms: timings.resolve_ms,
@@ -172,8 +314,66 @@ impl From<&CreateTimings> for v0::CreateTimings {
     }
 }
 
+/// Prefix of the jj workspace names of Reef workspaces.
+const REEF_WORKSPACE: &str = "reef-";
+
+/// What R2.01 knows about an operation it just wrote: the RPC that wrote it
+/// says what kind it is and which workspace it was for, and the
+/// workspace's owner is its agent.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Written<'a> {
+    pub(super) kind: v1::OperationKind,
+    pub(super) snapshot: Option<SnapshotKind>,
+    /// The Reef workspace it was for, when the RPC names one: a create,
+    /// move, or release runs in jj's `default` workspace.
+    pub(super) workspace: Option<&'a str>,
+    pub(super) agent: &'a str,
+}
+
+/// An operation the daemon just wrote, as a message. Effects are left unset
+/// (R2.02 computes them).
+pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> v1::Operation {
+    let (named, jj_workspace) = match entry.workspace.as_deref() {
+        Some(name) => match name.strip_prefix(REEF_WORKSPACE) {
+            Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                (id.to_owned(), String::new())
+            }
+            _ => (String::new(), name.to_owned()),
+        },
+        None => (String::new(), String::new()),
+    };
+    let workspace_id = written.workspace.map_or(named, str::to_owned);
+    let agent = entry
+        .attributes
+        .get("reef.agent")
+        .map_or(written.agent, String::as_str);
+    v1::Operation {
+        id: entry.id.to_string(),
+        repo_id: repo.as_hex(),
+        parent_ids: entry.parents.iter().map(ToString::to_string).collect(),
+        description: entry.description.clone(),
+        started_at: Some(system_timestamp(entry.start)),
+        ended_at: Some(system_timestamp(entry.end)),
+        hostname: entry.hostname.clone(),
+        username: entry.username.clone(),
+        is_snapshot: entry.is_snapshot,
+        kind: written.kind.into(),
+        snapshot_kind: written
+            .snapshot
+            .map_or(v1::SnapshotKind::Unspecified, snapshot_kind)
+            .into(),
+        workspace_id,
+        jj_workspace,
+        agent: agent.to_owned(),
+        attributes: entry.attributes.clone(),
+        effects: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -185,6 +385,19 @@ mod tests {
                 nanos: 250_000_000
             }
         );
+        assert_eq!(
+            request_duration(Some(&proto_duration(Duration::from_millis(60_250)))),
+            Some(Duration::from_millis(60_250))
+        );
+        assert_eq!(
+            request_duration(Some(&prost_types::Duration::default())),
+            None
+        );
+        let negative = prost_types::Duration {
+            seconds: -1,
+            nanos: 0,
+        };
+        assert_eq!(request_duration(Some(&negative)), None);
     }
 
     #[test]
@@ -203,6 +416,69 @@ mod tests {
                 seconds: -1,
                 nanos: 999_000_000
             }
+        );
+    }
+
+    #[test]
+    fn every_backend_round_trips() {
+        for kind in BackendKind::AUTO_ORDER {
+            assert_eq!(
+                backend_choice(backend(kind)),
+                Some(BackendChoice::Named(kind))
+            );
+        }
+        assert_eq!(backend_choice(v1::Backend::Unspecified), None);
+        assert_eq!(backend_choice(v1::Backend::Auto), Some(BackendChoice::Auto));
+    }
+
+    #[test]
+    fn operations_name_their_workspace() {
+        let entry = |workspace: &str, attributes: BTreeMap<String, String>| OpEntry {
+            id: "00ff".parse().unwrap(),
+            parents: vec!["00aa".parse().unwrap()],
+            description: "reef: create workspace 0123456789abcdef".into(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH + Duration::from_millis(1500),
+            hostname: "host".into(),
+            username: "user".into(),
+            is_snapshot: false,
+            workspace: Some(workspace.to_owned()),
+            attributes,
+        };
+        let repo: RepoId = "aaaa000000000001".parse().unwrap();
+        let written = Written {
+            kind: v1::OperationKind::CreateWorkspace,
+            snapshot: None,
+            workspace: None,
+            agent: "owner@host",
+        };
+        let op = operation(
+            &entry("reef-0123456789abcdef", BTreeMap::new()),
+            repo,
+            written,
+        );
+        assert_eq!(op.workspace_id, "0123456789abcdef");
+        assert_eq!(op.jj_workspace, "");
+        assert_eq!(op.agent, "owner@host");
+        assert_eq!(op.parent_ids, ["00aa"]);
+        assert_eq!(op.kind(), v1::OperationKind::CreateWorkspace);
+        assert_eq!(op.ended_at.unwrap().nanos, 500_000_000);
+        let tagged = [("reef.agent".to_owned(), "agent-7".to_owned())].into();
+        let op = operation(&entry("default", tagged), repo, written);
+        assert_eq!(
+            (op.workspace_id.as_str(), op.jj_workspace.as_str()),
+            ("", "default")
+        );
+        assert_eq!(op.agent, "agent-7");
+        // A create runs in `default`; the RPC knows its workspace.
+        let written = Written {
+            workspace: Some("0123456789abcdef"),
+            ..written
+        };
+        let op = operation(&entry("default", BTreeMap::new()), repo, written);
+        assert_eq!(
+            (op.workspace_id.as_str(), op.jj_workspace.as_str()),
+            ("0123456789abcdef", "default")
         );
     }
 }

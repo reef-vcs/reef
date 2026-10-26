@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use reef_api::v1::IfNotJj;
 use reef_daemon::client::Client;
 use reef_daemon::config::FileConfig;
 use reef_daemon::db::Db;
-use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_testing::synth::Preset;
 use serde_json::Value;
 use tempfile::TempDir;

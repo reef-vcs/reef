@@ -1,5 +1,6 @@
-// The detail every daemon error carries in its status details (R1.05,
-// ADR 0017).
+// The detail a 0.1 daemon's errors carry in their status details, raw: frozen
+// at 0.1.0; used only to tell a 0.1 client that it must upgrade (R2.01, ADR
+// 0029). Never edited.
 syntax = "proto3";
 
 package reef.daemon.v0;

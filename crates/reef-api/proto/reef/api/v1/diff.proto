@@ -1,0 +1,111 @@
+// Diffs between revisions. `revision`, `at_operation` and `skip_snapshot`
+// are as in changes.proto. R2.15 adds symbol-level fields at the next free
+// numbers.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/files.proto";
+import "reef/api/v1/options.proto";
+
+// Diffs.
+service DiffService {
+  // The files that differ between two revisions, in path order, with
+  // hunks or line counts on request. Declared; R2.02 implements it.
+  rpc GetDiff(GetDiffRequest) returns (GetDiffResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// How much of each file's diff to return.
+enum DiffFormat {
+  // DIFF_FORMAT_SUMMARY.
+  DIFF_FORMAT_UNSPECIFIED = 0;
+  // Paths and kinds only.
+  DIFF_FORMAT_SUMMARY = 1;
+  // Paths, kinds, and lines added and removed.
+  DIFF_FORMAT_STAT = 2;
+  // Everything in DIFF_FORMAT_STAT, and the hunks.
+  DIFF_FORMAT_HUNKS = 3;
+}
+
+// A diff.
+message GetDiffRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The old side; empty for `to_revision`'s parents, merged as `jj diff -r`
+  // does.
+  string from_revision = 3;
+  // The new side; empty for `@`, which requires `workspace`.
+  string to_revision = 4;
+  // Path prefixes to diff; empty for every path.
+  repeated string paths = 5;
+  // How much to return.
+  DiffFormat format = 6;
+  // Lines of context around each hunk; unset for 3.
+  optional uint32 context_lines = 7;
+  // Hunk lines per file at most: 0 means 1,000. A longer file's hunks are
+  // cut and `FileDiff.truncated` set.
+  uint32 max_lines_per_file = 8;
+  // Read at this operation; empty for the head.
+  string at_operation = 9;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 10;
+  // Files per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 11;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 12;
+}
+
+// A page of a diff.
+message GetDiffResponse {
+  // The files, in path order.
+  repeated FileDiff files = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+  // The old side's commits: more than one when it is a merge of parents.
+  repeated string from_commit_ids = 3;
+  // The new side's commit.
+  string to_commit_id = 4;
+  // The operation it was read at.
+  string at_operation = 5;
+  // Files that differ, over every page.
+  uint32 total_files = 6;
+}
+
+// One file's diff.
+message FileDiff {
+  // The path and how it differs.
+  FileChange change = 1;
+  // Either side is binary; there are no hunks.
+  bool binary = 2;
+  // Either side is conflicted.
+  bool conflict = 3;
+  // Lines added, with DIFF_FORMAT_STAT and DIFF_FORMAT_HUNKS.
+  uint32 lines_added = 4;
+  // Lines removed, with DIFF_FORMAT_STAT and DIFF_FORMAT_HUNKS.
+  uint32 lines_removed = 5;
+  // The hunks, with DIFF_FORMAT_HUNKS.
+  repeated Hunk hunks = 6;
+  // `hunks` was cut at `max_lines_per_file`.
+  bool truncated = 7;
+}
+
+// One hunk of a unified diff.
+message Hunk {
+  // The first old line, counting from 1.
+  uint32 old_start = 1;
+  // How many old lines.
+  uint32 old_lines = 2;
+  // The first new line, counting from 1.
+  uint32 new_start = 3;
+  // How many new lines.
+  uint32 new_lines = 4;
+  // The unified-diff body: each line prefixed with ' ', '-' or '+', and
+  // newline-terminated.
+  string lines = 5;
+}

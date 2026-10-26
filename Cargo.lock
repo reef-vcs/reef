@@ -2906,10 +2906,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-api"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "protox",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tonic-types",
+]
+
+[[package]]
 name = "reef-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "blake3",
  "clap",
  "criterion",
@@ -2926,9 +2942,9 @@ dependencies = [
  "pollster",
  "prost",
  "prost-types",
- "protox",
  "rand",
  "rayon",
+ "reef-api",
  "reef-daemon",
  "reef-lib",
  "reef-testing",
@@ -2946,7 +2962,6 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "tower",
  "tracing",
  "tracing-appender",
@@ -3004,6 +3019,8 @@ dependencies = [
  "jj-lib",
  "nix",
  "pollster",
+ "prost-types",
+ "reef-api",
  "reef-daemon",
  "reef-lib",
  "reef-testing",
@@ -3012,6 +3029,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "toml",
  "tonic",
  "tracing",
@@ -3675,6 +3693,17 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "tonic-build",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
 ]
 
 [[package]]

@@ -1,0 +1,545 @@
+// Workspaces: leased directories, each backed by its own jj workspace.
+//
+// `repo` accepts a repo id, a unique id prefix of four or more hex
+// characters, or an absolute path inside a registered root. `workspace`
+// accepts a workspace id, a unique prefix, or an absolute path inside an
+// active workspace's directory; where a request names a workspace, `repo`
+// may be empty and the workspace is looked up in every repository.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+
+// Creating, inspecting, snapshotting, moving, and releasing workspaces.
+service WorkspaceService {
+  // Materializes a new workspace on a change and leases it.
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Workspaces newest first, from the metadata database only.
+  rpc ListWorkspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // One workspace, with its disk usage, its recent snapshots, and the other
+  // workspaces on its change.
+  rpc GetWorkspace(GetWorkspaceRequest) returns (GetWorkspaceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Takes a final snapshot, forgets the jj workspace, and removes the
+  // directory. The record stays, as WORKSPACE_STATE_RELEASED. The same
+  // pipeline reclaims a workspace whose lease expired.
+  rpc ReleaseWorkspace(ReleaseWorkspaceRequest) returns (ReleaseWorkspaceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Snapshots the workspace's files into its working-copy commit now.
+  rpc SnapshotWorkspace(SnapshotWorkspaceRequest) returns (SnapshotWorkspaceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Renews a workspace's lease. Never snapshots. A lease that is not the
+  // workspace's current one is FAILED_PRECONDITION, as is a workspace that
+  // was released or reclaimed, or a lease past its grace; during a quiesce
+  // it is UNAVAILABLE.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Moves a workspace to another change: a final snapshot of the change it
+  // is on, then the new change's tree in the same directory. Id, path,
+  // lease (expiry included; a move is not a renewal), and backend stay. The
+  // target's shared stores are mounted, so a move to the same change
+  // remounts a rebuilt store. A final snapshot that fails refuses the move
+  // with FAILED_PRECONDITION and changes nothing. An overlay workspace is
+  // unmounted (lazily if busy) and mounted again: a process whose working
+  // directory is inside it keeps the old tree until it changes directory
+  // into the path again.
+  rpc MoveWorkspace(MoveWorkspaceRequest) returns (MoveWorkspaceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+}
+
+// How a workspace's directory is materialized.
+enum Backend {
+  // In a request, the daemon's `workspace.backend`; in a record, not set.
+  BACKEND_UNSPECIFIED = 0;
+  // In a request only: the best backend available for the path.
+  BACKEND_AUTO = 1;
+  // A plain copy.
+  BACKEND_COPY = 2;
+  // An APFS clone (macOS).
+  BACKEND_APFS = 3;
+  // Per-file reflink clones (Linux, on filesystems that support them).
+  BACKEND_REFLINK = 4;
+  // A kernel overlayfs mount (Linux, with CAP_SYS_ADMIN).
+  BACKEND_OVERLAYFS = 5;
+  // A fuse-overlayfs mount (Linux).
+  BACKEND_FUSE_OVERLAYFS = 6;
+}
+
+// Where a workspace is in its life.
+enum WorkspaceState {
+  // Not set.
+  WORKSPACE_STATE_UNSPECIFIED = 0;
+  // Leased and materialized.
+  WORKSPACE_STATE_ACTIVE = 1;
+  // Being released or reclaimed.
+  WORKSPACE_STATE_RELEASING = 2;
+  // Released by its holder.
+  WORKSPACE_STATE_RELEASED = 3;
+  // Reclaimed after its lease expired.
+  WORKSPACE_STATE_RECLAIMED = 4;
+}
+
+// Why a workspace needs attention.
+enum Attention {
+  // It needs none.
+  ATTENTION_UNSPECIFIED = 0;
+  // Its change has more than one visible commit.
+  ATTENTION_DIVERGENT = 1;
+  // Its working copy was stale and was recovered.
+  ATTENTION_STALE_RECOVERED = 2;
+  // The final snapshot before a release failed; the workspace was kept.
+  ATTENTION_FINAL_SNAPSHOT_FAILED = 3;
+  // Its lockfile no longer matches a mounted shared store.
+  ATTENTION_STORE_HASH_MISMATCH = 4;
+  // A shared store it declares had no sealed build and was left out.
+  ATTENTION_STORE_MISSING = 5;
+  // Its file watch could not be attached.
+  ATTENTION_WATCH_FAILED = 6;
+  // An overlay workspace's upper directory is gone.
+  ATTENTION_UPPER_MISSING = 7;
+  // An overlay workspace could not be mounted.
+  ATTENTION_MOUNT_FAILED = 8;
+}
+
+// What triggers a workspace's snapshots.
+enum WatcherKind {
+  // Not set.
+  WATCHER_KIND_UNSPECIFIED = 0;
+  // The daemon's own filesystem notifications.
+  WATCHER_KIND_NOTIFY = 1;
+  // Watchman (R1.14).
+  WATCHER_KIND_WATCHMAN = 2;
+}
+
+// Why a workspace's watch is not up yet. A full scan follows the watch
+// coming up, so nothing written meanwhile is lost.
+enum WatchState {
+  // Not reported: the workspace is not active or not loaded.
+  WATCH_STATE_UNSPECIFIED = 0;
+  // The watch is up.
+  WATCH_STATE_ATTACHED = 1;
+  // Its Watchman subscription is deferred until a burst of workspace
+  // creates ends (R1.29).
+  WATCH_STATE_WAITING = 2;
+  // Its notify watch is queued or being attached in the background (Linux,
+  // R1.32).
+  WATCH_STATE_ATTACHING = 3;
+}
+
+// A lease's state, computed when the response is built from `expires_at`,
+// `grace`, whether the lease has ended, and the daemon's clock.
+enum LeaseState {
+  // Not set.
+  LEASE_STATE_UNSPECIFIED = 0;
+  // Before `expires_at`.
+  LEASE_STATE_ACTIVE = 1;
+  // Past `expires_at` but within `grace`: a renewal still revives it.
+  LEASE_STATE_IN_GRACE = 2;
+  // Past its grace; the next expiry tick reclaims the workspace.
+  LEASE_STATE_EXPIRED = 3;
+  // Released, expired and reclaimed, or replaced by a restore.
+  LEASE_STATE_ENDED = 4;
+}
+
+// Why a lease ended.
+enum LeaseEndReason {
+  // It has not ended.
+  LEASE_END_REASON_UNSPECIFIED = 0;
+  // Its workspace was released.
+  LEASE_END_REASON_RELEASED = 1;
+  // It expired and its workspace was reclaimed.
+  LEASE_END_REASON_EXPIRED = 2;
+  // A restore replaced it.
+  LEASE_END_REASON_RESTORED = 3;
+}
+
+// What to do about a shared store `reef.toml` declares that has no sealed
+// build for the lockfile's hash (R1.20).
+enum MissingStores {
+  // MISSING_STORES_FAIL.
+  MISSING_STORES_UNSPECIFIED = 0;
+  // Fail with UNAVAILABLE, naming the `reef store build` to run.
+  MISSING_STORES_FAIL = 1;
+  // Go on without it, with ATTENTION_STORE_MISSING.
+  MISSING_STORES_SKIP = 2;
+}
+
+// How a shared store is mounted in a workspace.
+enum StoreMountMode {
+  // Not set.
+  STORE_MOUNT_MODE_UNSPECIFIED = 0;
+  // A symlink to the store directory.
+  STORE_MOUNT_MODE_SYMLINK = 1;
+  // A read-only bind mount (Linux, with CAP_SYS_ADMIN).
+  STORE_MOUNT_MODE_BIND = 2;
+}
+
+// A workspace's lease.
+message Lease {
+  // 16 hex characters.
+  string id = 1;
+  // Who holds it.
+  string owner = 2;
+  // When it was issued.
+  google.protobuf.Timestamp issued_at = 3;
+  // When it lapses unless renewed.
+  google.protobuf.Timestamp expires_at = 4;
+  // The last renewal, or the issue.
+  google.protobuf.Timestamp last_heartbeat_at = 5;
+  // How far each renewal extends it.
+  google.protobuf.Duration length = 6;
+  // How long after `expires_at` a renewal still revives it.
+  google.protobuf.Duration grace = 7;
+  // Its state as of the response.
+  LeaseState state = 8;
+  // Why it ended; unspecified until it does.
+  LeaseEndReason end_reason = 9;
+  // How often the holder should renew it: the daemon's `lease.heartbeat`,
+  // at most a third of `length`.
+  google.protobuf.Duration heartbeat_every = 10;
+}
+
+// A Reef workspace.
+message Workspace {
+  // 16 hex characters; the jj workspace is `reef-<id>`.
+  string id = 1;
+  // Its repository.
+  string repo_id = 2;
+  // Who holds it.
+  string owner = 3;
+  // Free text; empty if not given.
+  string purpose = 4;
+  // The jj change it is on, in hex.
+  string change_id = 5;
+  // Its working-copy commit as of the last snapshot or check-out.
+  string commit_id = 6;
+  // How its directory is materialized.
+  Backend backend = 7;
+  // Its directory.
+  string path = 8;
+  // Where it is in its life.
+  WorkspaceState state = 9;
+  // Its change has more than one visible commit.
+  bool divergent = 10;
+  // Why it needs attention; unspecified when it needs none.
+  Attention attention = 11;
+  // When it was created.
+  google.protobuf.Timestamp created_at = 12;
+  // When a snapshot last recorded an operation; unset until one did.
+  google.protobuf.Timestamp last_snapshot_at = 13;
+  // That operation; empty until one did.
+  string last_snapshot_operation_id = 14;
+  // Its lease: the unended one while active, the one it ended with once
+  // released or reclaimed.
+  Lease lease = 15;
+  // What triggers its snapshots. Fixed at create.
+  WatcherKind watcher = 16;
+  // How many of its snapshots have not been published (R1.16): every one,
+  // until publishing exists. Filled in by ListWorkspaces, GetWorkspace and
+  // MoveWorkspace; 0 in CreateWorkspace.
+  uint64 local_snapshot_count = 17;
+  // The shared stores mounted in it (R1.20). Empty for a workspace that is
+  // not active or not loaded.
+  repeated MountedStore stores = 18;
+  // Why its watch is not up yet; WATCH_STATE_ATTACHED once it is.
+  WatchState watch_state = 19;
+}
+
+// A shared dependency store mounted in a workspace (R1.20).
+message MountedStore {
+  // The `[[store]] name`.
+  string name = 1;
+  // blake3 of its lockfile, 64 hex characters.
+  string lockfile_hash = 2;
+  // Where, repository-root relative.
+  string mount = 3;
+  // How.
+  StoreMountMode mode = 4;
+  // The workspace's lockfile still matches the store as of its last
+  // snapshot; false sets ATTENTION_STORE_HASH_MISMATCH.
+  bool verified = 5;
+}
+
+// How much disk a workspace uses beyond its base. An estimate.
+message DiskUsage {
+  // Allocated bytes of the files that differ from the base.
+  uint64 allocated_bytes = 1;
+  // How many files differ from the base.
+  uint64 files_changed = 2;
+}
+
+// One snapshot operation in the daemon's index (R1.16).
+message SnapshotEntry {
+  // The operation.
+  string operation_id = 1;
+  // The working-copy commit it wrote.
+  string commit_id = 2;
+  // Why it ran. An index rebuilt from the operation log reads explicit
+  // snapshots as watcher ones and shutdown ones as final.
+  SnapshotKind kind = 3;
+  // Not yet published. Always true until publishing exists.
+  bool local = 4;
+  // When the operation ended.
+  google.protobuf.Timestamp taken_at = 5;
+}
+
+// The steps of a create, in milliseconds. Step 1 (validation, paths, the
+// backend probe) counts only in `total_ms`.
+message CreateTimings {
+  // Step 2: resolving the start revision, reading `reef.toml`, looking the
+  // stores up.
+  uint64 resolve_ms = 1;
+  // Step 3: ensuring the base (zero-cost when cached).
+  uint64 base_ms = 2;
+  // Step 4: the backend's materialization from the base, alone.
+  uint64 materialize_ms = 3;
+  // Step 4: mounting the shared stores.
+  uint64 mount_ms = 4;
+  // Step 5: creating the jj workspace.
+  uint64 jj_ms = 5;
+  // Step 6: seeding the working copy's tree state.
+  uint64 seed_ms = 6;
+  // Step 7: writing the record and issuing the lease.
+  uint64 insert_ms = 7;
+  // Loading the workspace and attaching its file watcher, or only queueing
+  // the attach when the watch is pending (WATCH_STATE_ATTACHING).
+  uint64 watch_ms = 8;
+  // The whole create, from the request to the response.
+  uint64 total_ms = 9;
+}
+
+// Create a workspace.
+message CreateWorkspaceRequest {
+  // The repository.
+  string repo = 1;
+  // Where the working-copy commit starts. Until R2.02 resolves revisions as
+  // revsets, a revision resolves as a change id prefix (hex or jj's reverse
+  // hex), a commit id prefix, or a local bookmark, in that order. Neither:
+  // a new change on the default start, the first bookmark that exists of
+  // `main`; the branch `origin/HEAD` names, local then `<name>@origin`;
+  // `master`; `trunk`; `main@origin`, `master@origin`, `trunk@origin`; else
+  // the `default` workspace's working-copy commit. `start` in the response
+  // says which.
+  oneof start {
+    // Edit this change: the workspace's working-copy commit is its commit.
+    string change = 2;
+    // A new empty change on top of this revision.
+    string new_on = 3;
+  }
+  // Who holds the workspace. Required; clients fill in a default.
+  string owner = 4;
+  // Free text.
+  string purpose = 5;
+  // How to materialize it; unspecified for the daemon's
+  // `workspace.backend`.
+  Backend backend = 6;
+  // An absolute directory to create the workspace at, which must not exist;
+  // empty for the daemon's workspace root.
+  string path = 7;
+  // The lease length; unset for the daemon's `lease.default`. Grace is
+  // never per request.
+  google.protobuf.Duration lease_length = 8;
+  // What to do about a declared shared store with no sealed build.
+  MissingStores missing_stores = 9;
+}
+
+// A created workspace.
+message CreateWorkspaceResponse {
+  // The new workspace.
+  Workspace workspace = 1;
+  // The operation that created its jj workspace.
+  Operation operation = 2;
+  // Another Reef workspace's working-copy commit was already the edited
+  // commit (allowed; the divergence rule of R1.13 applies).
+  bool shared_change = 3;
+  // Whether the base cache already held the tree.
+  bool base_was_cached = 4;
+  // How long each step took.
+  CreateTimings timings = 5;
+  // What the default start chose when the request named no start: the
+  // bookmark (`main`, `master@origin`), or `root checkout` when none
+  // exists. Empty when the request named a start.
+  string start = 6;
+}
+
+// A page of workspaces.
+message ListWorkspacesRequest {
+  // The repository; empty for every repository.
+  string repo = 1;
+  // States to include; empty for any state.
+  repeated WorkspaceState states = 2;
+  // The owner; empty for any owner.
+  string owner = 3;
+  // Workspaces per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 4;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different filters is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 5;
+}
+
+// A page of workspaces, newest first.
+message ListWorkspacesResponse {
+  // The workspaces.
+  repeated Workspace workspaces = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+}
+
+// One workspace.
+message GetWorkspaceRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace.
+  string workspace = 2;
+  // Snapshot first, so the answer reflects the files on disk. Off by
+  // default, so a read of the record has no side effects.
+  bool snapshot_first = 3;
+  // Leave `disk_usage` unset instead of walking the directory to measure
+  // it, for a caller that must be cheap (`reef here`).
+  bool skip_disk_usage = 4;
+}
+
+// One workspace.
+message GetWorkspaceResponse {
+  // The workspace, after the snapshot if one was taken.
+  Workspace workspace = 1;
+  // Unset for a workspace whose directory is gone, or with
+  // `skip_disk_usage`.
+  DiskUsage disk_usage = 2;
+  // Ids of the other active workspaces on the same change.
+  repeated string other_workspaces_on_change = 3;
+  // The operation `snapshot_first` recorded, if it recorded one.
+  Operation snapshot = 4;
+  // Snapshot operations the daemon indexed for this workspace (R1.16).
+  uint64 snapshot_count = 5;
+  // The newest 10 of them, newest first.
+  repeated SnapshotEntry recent_snapshots = 6;
+}
+
+// Release a workspace.
+message ReleaseWorkspaceRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace.
+  string workspace = 2;
+  // Release even if the final snapshot or forgetting the jj workspace
+  // fails.
+  bool force = 3;
+  // Skip the final snapshot. The default, false, snapshots first.
+  bool skip_final_snapshot = 4;
+}
+
+// What a release did.
+message ReleaseWorkspaceResponse {
+  // The workspace's full id, since the request may name a prefix.
+  string workspace_id = 1;
+  // The operation that forgot the jj workspace; unset if there was none to
+  // forget.
+  Operation operation = 2;
+  // The operation holding the final snapshot; unset if it found nothing to
+  // record or was skipped.
+  Operation final_snapshot = 3;
+  // Whether a final snapshot ran (it may have found no changes).
+  bool snapshot_taken = 4;
+  // Bytes the workspace had allocated, as estimated before tear-down.
+  uint64 freed_bytes = 5;
+}
+
+// Snapshot a workspace.
+message SnapshotWorkspaceRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace.
+  string workspace = 2;
+  // The operation's description; empty for `reef: snapshot workspace <id>`.
+  string description = 3;
+}
+
+// What a snapshot recorded.
+message SnapshotWorkspaceResponse {
+  // The snapshot's operation; unset when nothing changed.
+  Operation operation = 1;
+  // Whether anything changed.
+  bool changed = 2;
+  // The working-copy commit afterwards.
+  string commit_id = 3;
+  // How long jj's scan of the working copy took, in milliseconds.
+  uint64 scan_ms = 4;
+}
+
+// Renew a lease.
+message RenewLeaseRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace.
+  string workspace = 2;
+  // The lease being renewed: the capability.
+  string lease_id = 3;
+}
+
+// A renewed lease.
+message RenewLeaseResponse {
+  // The lease afterwards: `expires_at` is now plus its length.
+  Lease lease = 1;
+}
+
+// Move a workspace.
+message MoveWorkspaceRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace.
+  string workspace = 2;
+  // Resolved as CreateWorkspaceRequest's `start`, after the final
+  // snapshot. Neither: a new change on the default start.
+  oneof target {
+    // Edit this change. The workspace's own change remounts its stores.
+    string change = 3;
+    // A new empty change on top of this revision.
+    string new_on = 4;
+  }
+  // As for a create: a store the target declares with no sealed build fails
+  // the move before anything changes, or is left out with
+  // ATTENTION_STORE_MISSING.
+  MissingStores missing_stores = 5;
+}
+
+// What a move did.
+message MoveWorkspaceResponse {
+  // The workspace afterwards.
+  Workspace workspace = 1;
+  // The operation that moved the working-copy pointer; unset when the
+  // target was the workspace's working-copy commit already.
+  Operation operation = 2;
+  // The final snapshot of the change it left; unset when there was nothing
+  // to record.
+  Operation final_snapshot = 3;
+  // Files the check-out rewrote (clone and copy backends; zero when
+  // `tree_replaced`).
+  uint32 files_updated = 4;
+  // Files the check-out wrote.
+  uint32 files_added = 5;
+  // Files the check-out removed.
+  uint32 files_removed = 6;
+  // The backend replaced the whole tree (overlay backends: new lower layer,
+  // empty upper).
+  bool tree_replaced = 7;
+}

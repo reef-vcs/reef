@@ -29,6 +29,37 @@ pub mod spawned;
 /// How long the binary gets to bind its socket, and to exit after SIGTERM.
 pub const BINARY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `ms` milliseconds as a request's `google.protobuf.Duration`, for the
+/// fields the v0 API took as milliseconds (zero still asks for the
+/// default).
+pub fn proto_millis(ms: u64) -> prost_types::Duration {
+    prost_types::Duration::try_from(Duration::from_millis(ms)).unwrap()
+}
+
+/// The id of the operation a response names, empty for none: the v0 API's
+/// `op_id` fields.
+pub fn op_id(operation: Option<&reef_api::v1::Operation>) -> &str {
+    operation.map_or("", |operation| operation.id.as_str())
+}
+
+/// A watcher's name, as the v0 API reported it: `notify` or `watchman`.
+pub fn watcher_name(watcher: reef_api::v1::WatcherKind) -> &'static str {
+    match watcher {
+        reef_api::v1::WatcherKind::Notify => "notify",
+        reef_api::v1::WatcherKind::Watchman => "watchman",
+        reef_api::v1::WatcherKind::Unspecified => "unknown",
+    }
+}
+
+/// Whether `ws`'s watch is up or not reported: the v0 API's empty
+/// `watch_state`, neither `waiting` nor `attaching`.
+pub fn is_watched(ws: &reef_api::v1::Workspace) -> bool {
+    matches!(
+        ws.watch_state(),
+        reef_api::v1::WatchState::Attached | reef_api::v1::WatchState::Unspecified
+    )
+}
+
 /// A short temporary directory for a state directory.
 pub fn short_tempdir() -> TempDir {
     tempfile::Builder::new()

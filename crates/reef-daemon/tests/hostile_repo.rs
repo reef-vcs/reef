@@ -23,12 +23,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::TestDaemon;
+use common::{TestDaemon, proto_millis};
+use reef_api::v1::{Backend, CreateWorkspaceRequest, IfNotJj, Workspace, create_workspace_request};
 use reef_daemon::backend::fs_util::TRASH_INFIX;
 use reef_daemon::client::ClientError;
 use reef_daemon::config::Config;
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, Workspace, create_request};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_testing::git::{blob, commit_tree, init_repo, raw_tree};
 
@@ -95,16 +94,16 @@ impl Fixture {
         raw_tree(&self.root, &[(FILE, CANARY.as_bytes(), &canary)])
     }
 
-    async fn create_on(&self, bookmark: &str, backend: &str) -> Result<Workspace, ClientError> {
+    async fn create_on(&self, bookmark: &str, backend: Backend) -> Result<Workspace, ClientError> {
         let response = self
             .daemon
             .client
-            .create_workspace(CreateRequest {
+            .create_workspace(CreateWorkspaceRequest {
                 repo: self.repo.clone(),
-                start: Some(create_request::Start::NewOn(bookmark.to_owned())),
+                start: Some(create_workspace_request::Start::NewOn(bookmark.to_owned())),
                 owner: OWNER.to_owned(),
-                backend: backend.to_owned(),
-                ..CreateRequest::default()
+                backend: backend.into(),
+                ..CreateWorkspaceRequest::default()
             })
             .await?;
         Ok(response.workspace.unwrap())
@@ -194,7 +193,10 @@ async fn tree_entry_named_dotdot_fails_the_create_cleanly() {
     let f = fixture().await;
     let canary = f.canary_tree();
     f.hostile("hostile", &[(DIR, b"..", &canary)]);
-    let error = f.create_on("hostile", "").await.unwrap_err();
+    let error = f
+        .create_on("hostile", Backend::Unspecified)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("\"..\""), "{error}");
     assert!(f.workspace_dirs().is_empty(), "{:?}", f.workspace_dirs());
     f.assert_no_canary();
@@ -210,10 +212,16 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
     f.hostile("hostile", &[(FILE, name.as_bytes(), &canary)]);
     // jj-lib 0.46 panics reading this tree, poisoning its git backend for
     // every workspace of the repository; Reef refuses the commit first.
-    let error = f.create_on("hostile", "").await.unwrap_err();
+    let error = f
+        .create_on("hostile", Backend::Unspecified)
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidArgument, "{error}");
     assert!(error.to_string().contains("jj cannot read"), "{error}");
-    let error = f.create_on("hostile", "").await.unwrap_err();
+    let error = f
+        .create_on("hostile", Backend::Unspecified)
+        .await
+        .unwrap_err();
     assert_eq!(
         error.kind(),
         ErrorKind::InvalidArgument,
@@ -221,7 +229,7 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
     );
     f.assert_no_canary();
     f.assert_alive().await;
-    let ws = f.create_on("main", "").await.unwrap();
+    let ws = f.create_on("main", Backend::Unspecified).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(Path::new(&ws.path).join("README")).unwrap(),
         "main\n"
@@ -241,7 +249,7 @@ async fn a_panicked_job_reopens_the_repository() {
     use reef_lib::jj::CommitIdHex;
 
     let f = fixture().await;
-    let before = f.create_on("main", "").await.unwrap();
+    let before = f.create_on("main", Backend::Unspecified).await.unwrap();
     let canary = blob(&f.root, b"escaped\n");
     let name = format!("a/{CANARY}");
     let hostile: CommitIdHex = f
@@ -274,7 +282,7 @@ async fn a_panicked_job_reopens_the_repository() {
         .await
         .unwrap()
         .unwrap();
-    f.create_on("main", "").await.unwrap();
+    f.create_on("main", Backend::Unspecified).await.unwrap();
     std::fs::write(Path::new(&before.path).join("after-panic"), "kept\n").unwrap();
     let snapshot = f
         .daemon
@@ -285,7 +293,13 @@ async fn a_panicked_job_reopens_the_repository() {
     assert!(snapshot.changed, "{snapshot:?}");
 
     panic().await;
-    let reports = f.daemon.client.gc(&f.repo, false).await.unwrap().reports;
+    let reports = f
+        .daemon
+        .client
+        .collect_garbage(&f.repo, false)
+        .await
+        .unwrap()
+        .reports;
     assert_eq!(reports.len(), 1);
     assert!(reports[0].jj_error.is_empty(), "{}", reports[0].jj_error);
 }
@@ -304,7 +318,7 @@ async fn reserved_names_in_a_tree_are_refused() {
         ("jj-dir", vec![(DIR, b".jj".as_slice(), canary.as_str())]),
     ] {
         f.hostile(name, &entries);
-        match f.create_on(name, "").await {
+        match f.create_on(name, Backend::Unspecified).await {
             Err(error) => eprintln!("{name}: refused: {error}"),
             Ok(ws) => panic!("{name}: created {}", ws.path),
         }
@@ -335,7 +349,7 @@ async fn reserved_names_in_a_tree_are_refused() {
 }
 
 /// The available backends, from the daemon's probe.
-async fn backends(f: &Fixture) -> Vec<String> {
+async fn backends(f: &Fixture) -> Vec<Backend> {
     f.daemon
         .client
         .status()
@@ -344,7 +358,7 @@ async fn backends(f: &Fixture) -> Vec<String> {
         .backends
         .into_iter()
         .filter(|probe| probe.available)
-        .map(|probe| probe.kind)
+        .map(|probe| probe.backend())
         .collect()
 }
 
@@ -384,19 +398,19 @@ async fn symlink_to_outside_is_recreated_and_never_followed() {
     );
 
     for backend in backends(&f).await {
-        let ws = f.create_on("links", &backend).await.unwrap();
+        let ws = f.create_on("links", backend).await.unwrap();
         let root = Path::new(&ws.path);
         for (name, target) in links {
             let path = root.join(std::str::from_utf8(name).unwrap());
             assert!(
                 std::fs::symlink_metadata(&path).unwrap().is_symlink(),
-                "{backend}: {}",
+                "{backend:?}: {}",
                 path.display()
             );
             assert_eq!(
                 std::fs::read_link(&path).unwrap(),
                 Path::new(target),
-                "{backend}"
+                "{backend:?}"
             );
         }
         // Disk usage, a snapshot after a write, and the release all walk
@@ -408,10 +422,10 @@ async fn symlink_to_outside_is_recreated_and_never_followed() {
             .inspect_workspace(&f.repo, &ws.id, false)
             .await
             .unwrap();
-        assert!(inspected.disk_usage.is_some(), "{backend}");
+        assert!(inspected.disk_usage.is_some(), "{backend:?}");
         assert!(
             begun.elapsed() < Duration::from_secs(30),
-            "{backend}: followed a link"
+            "{backend:?}: followed a link"
         );
         std::fs::write(root.join("new.txt"), "agent\n").unwrap();
         f.daemon
@@ -424,12 +438,12 @@ async fn symlink_to_outside_is_recreated_and_never_followed() {
             .release_workspace(&f.repo, &ws.id, true, false)
             .await
             .unwrap();
-        assert!(!root.exists(), "{backend}");
+        assert!(!root.exists(), "{backend:?}");
         let after = (
             snapshot_dir(&canary),
             std::fs::read(f.root.join("canary.txt")).unwrap(),
         );
-        assert_eq!(before, after, "{backend}");
+        assert_eq!(before, after, "{backend:?}");
     }
     // The trash sweep at start.
     let stopped = f.daemon.stop_keeping().await;
@@ -469,14 +483,17 @@ async fn store_mount_under_a_symlinked_ancestor_is_refused_end_to_end() {
         .unwrap();
     let mut sealed = false;
     while let Some(event) = events.message().await.unwrap() {
-        if let Some(reef_daemon::proto::v0::build_event::Event::Done(done)) = event.event {
+        if let Some(reef_api::v1::build_store_response::Event::Result(done)) = event.event {
             sealed = done.sealed;
         }
     }
     assert!(sealed, "the store is built");
     let link = blob(&f.root, canary.to_str().unwrap().as_bytes());
     with_store(&f, "hostile-store", &[(LINK, b"vendor", &link)]);
-    let error = f.create_on("hostile-store", "").await.unwrap_err();
+    let error = f
+        .create_on("hostile-store", Backend::Unspecified)
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict, "{error}");
     assert_eq!(snapshot_dir(&canary), before);
     assert!(f.workspace_dirs().is_empty(), "{:?}", f.workspace_dirs());
@@ -495,15 +512,15 @@ async fn reclaim_of_a_root_replaced_by_a_symlink_removes_only_the_link() {
     let ws = f
         .daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: f.repo.clone(),
-            start: Some(create_request::Start::NewOn("main".into())),
+            start: Some(create_workspace_request::Start::NewOn("main".into())),
             owner: OWNER.to_owned(),
             // Not an overlay: its root is a mount point, which no rename
             // replaces.
-            backend: "copy".into(),
-            lease_ms: 1000,
-            ..CreateRequest::default()
+            backend: Backend::Copy.into(),
+            lease_length: Some(proto_millis(1000)),
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -537,7 +554,7 @@ async fn reclaim_of_a_root_replaced_by_a_symlink_removes_only_the_link() {
     let listed = f
         .daemon
         .client
-        .list_workspaces(reef_daemon::proto::v0::ListWorkspacesRequest {
+        .list_workspaces(reef_api::v1::ListWorkspacesRequest {
             repo: f.repo.clone(),
             ..Default::default()
         })
@@ -566,7 +583,7 @@ async fn snapshot_of_a_root_replaced_by_a_symlink_is_refused() {
     let canary = canary_dir(&f);
     let before = snapshot_dir(&canary);
     // Not an overlay, as in 16.
-    let ws = f.create_on("main", "copy").await.unwrap();
+    let ws = f.create_on("main", Backend::Copy).await.unwrap();
     let root = PathBuf::from(&ws.path);
     std::fs::rename(&root, root.with_extension("aside")).unwrap();
     std::os::unix::fs::symlink(&canary, &root).unwrap();
@@ -609,7 +626,7 @@ async fn reefignore_and_excludes_are_patterns_only() {
         "patterns",
         &[(FILE, b".reefignore", &ignore), (FILE, b"reef.toml", &spec)],
     );
-    let ws = f.create_on("patterns", "").await.unwrap();
+    let ws = f.create_on("patterns", Backend::Unspecified).await.unwrap();
     let root = Path::new(&ws.path);
     std::fs::write(root.join("x"), "x\n").unwrap();
     std::fs::write(root.join("passwd"), "not that one\n").unwrap();

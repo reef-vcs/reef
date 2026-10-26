@@ -1,0 +1,35 @@
+[package]
+name = "reef-api"
+description = "Reef API: the reef.api.v1 protobuf schema and its generated Rust messages, clients, and servers. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "grpc"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+tonic-types.workspace = true     # google.rpc.Status, the envelope of every error's detail
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+prost-reflect.workspace = true   # reads each method's `(reef.api.v1.access)` option
+blake3.workspace = true          # the schema digest `API_DIGEST` is checked against
+
+[dev-dependencies]
+prost-reflect.workspace = true   # the schema's shape tests walk the descriptor set

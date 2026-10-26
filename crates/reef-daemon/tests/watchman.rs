@@ -17,15 +17,17 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, is_watched, test_settings, watcher_name};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::v1::{
+    Attention, CreateWorkspaceRequest, IfNotJj, ListWorkspacesRequest, WatchState, WatcherKind,
+    Workspace,
+};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, WatcherBackend};
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace};
 use reef_daemon::watcher::watchman::WatchmanWatcher;
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::error::ErrorKind;
@@ -109,10 +111,10 @@ async fn fixture(
 async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -193,7 +195,8 @@ async fn snapshotted(
 ) -> Duration {
     wait_for(bound, &format!("a snapshot with {path}"), || async {
         let row = inspect(daemon, repo, ws).await;
-        !row.last_snapshot_op.is_empty() && tree_has(&repo.root, &row.commit_id, path).await
+        !row.last_snapshot_operation_id.is_empty()
+            && tree_has(&repo.root, &row.commit_id, path).await
     })
     .await
 }
@@ -205,8 +208,11 @@ async fn watchman_triggers_snapshot() {
     let _serial = SERIAL.lock().await;
     let (daemon, repo) = fixture(Preset::Small, |_| {}).await;
     let ws = create(&daemon, &repo).await;
-    assert_eq!(ws.watcher, "watchman");
-    assert_eq!(inspect(&daemon, &repo, &ws).await.watcher, "watchman");
+    assert_eq!(ws.watcher(), WatcherKind::Watchman);
+    assert_eq!(
+        inspect(&daemon, &repo, &ws).await.watcher(),
+        WatcherKind::Watchman
+    );
     let listed = daemon
         .client
         .list_workspaces(ListWorkspacesRequest {
@@ -215,9 +221,12 @@ async fn watchman_triggers_snapshot() {
         })
         .await
         .unwrap();
-    assert_eq!(listed[0].watcher, "watchman");
+    assert_eq!(listed[0].watcher(), WatcherKind::Watchman);
     subscribed(&ws, 1).await;
-    assert_eq!(inspect(&daemon, &repo, &ws).await.attention, "");
+    assert_eq!(
+        inspect(&daemon, &repo, &ws).await.attention(),
+        Attention::Unspecified
+    );
 
     write(&ws, "agent-wrote-this.txt", "hello\n");
     let waited = snapshotted(
@@ -297,16 +306,16 @@ async fn scan_ms_after_one_change(preset: Preset, backend: WatcherBackend) -> Ve
         .repository
         .unwrap();
     let ws = client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
         .workspace
         .unwrap();
-    assert_eq!(ws.watcher, backend.as_str());
+    assert_eq!(watcher_name(ws.watcher()), backend.as_str());
     // The first Watchman query has no clock yet and scans everything.
     for _ in 0..2 {
         client
@@ -428,7 +437,7 @@ async fn survives_watchman_restart() {
     )
     .await;
     wait_for(Duration::from_secs(3), "watch-failed to clear", || async {
-        inspect(&daemon, &repo, &ws).await.attention.is_empty()
+        inspect(&daemon, &repo, &ws).await.attention() == Attention::Unspecified
     })
     .await;
     write(&ws, "after-restart.txt", "y\n");
@@ -448,16 +457,19 @@ async fn survives_watchman_restart() {
 async fn auto_selects_by_threshold() {
     require_watchman!();
     let _serial = SERIAL.lock().await;
-    for (threshold, expected) in [(100, "watchman"), (1_000_000, "notify")] {
+    for (threshold, expected) in [
+        (100, WatcherKind::Watchman),
+        (1_000_000, WatcherKind::Notify),
+    ] {
         let (daemon, repo) = fixture(Preset::Small, |config| {
             config.file.watcher.backend = WatcherBackend::Auto;
             config.file.watcher.watchman_threshold_files = threshold;
         })
         .await;
         let ws = create(&daemon, &repo).await;
-        assert_eq!(ws.watcher, expected, "threshold {threshold}");
+        assert_eq!(ws.watcher(), expected, "threshold {threshold}");
         assert_eq!(
-            inspect(&daemon, &repo, &ws).await.watcher,
+            inspect(&daemon, &repo, &ws).await.watcher(),
             expected,
             "threshold {threshold}"
         );
@@ -506,10 +518,10 @@ async fn missing_binary_is_unavailable() {
         .unwrap();
     let repo = registered.repository.unwrap();
     let created = client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id,
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await;
     drop(client);
@@ -550,7 +562,7 @@ async fn write_right_after_create_is_snapshotted() {
         + Duration::from_secs(2);
     let ws = create(&daemon, &repo).await;
     write(&ws, "right-after-create.txt", "hello\n");
-    assert_eq!(ws.watcher, "watchman");
+    assert_eq!(ws.watcher(), WatcherKind::Watchman);
     let waited = snapshotted(&daemon, &repo, &ws, "right-after-create.txt", bound).await;
     eprintln!("a write right after create reached the operation log in {waited:.2?}");
 }
@@ -580,7 +592,7 @@ async fn watchman_waits_for_a_quiet_window() {
 
     // A, then B 500 ms later: A waits for B's create to be 1 s old.
     let a = create(&daemon, &repo).await;
-    assert_eq!(a.watch_state, "waiting");
+    assert_eq!(a.watch_state(), WatchState::Waiting);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let b_started = Instant::now();
     let b = create(&daemon, &repo).await;
@@ -588,13 +600,17 @@ async fn watchman_waits_for_a_quiet_window() {
     tokio::time::sleep_until((b_started + Duration::from_millis(900)).into()).await;
     assert_eq!(established(&a), 0, "A subscribed within 1 s of B's create");
     let inspected = inspect(&daemon, &repo, &a).await;
-    assert_eq!(inspected.watch_state, "waiting");
-    assert_eq!(inspected.attention, "", "waiting is not watch-failed");
+    assert_eq!(inspected.watch_state(), WatchState::Waiting);
+    assert_eq!(
+        inspected.attention(),
+        Attention::Unspecified,
+        "waiting is not watch-failed"
+    );
     subscribed(&a, 1).await;
     let subscribed_after = b_started.elapsed();
     eprintln!("A subscribed {subscribed_after:.2?} after B's create started");
     assert!(subscribed_after >= quiet);
-    assert_eq!(inspect(&daemon, &repo, &a).await.watch_state, "");
+    assert!(is_watched(&inspect(&daemon, &repo, &a).await));
     // No fallback timer (10 minutes): the subscription's first result took
     // the snapshot. That one is a full scan, after jj's own first Watchman
     // query of the workspace, while B's subscription comes up beside it:
@@ -616,7 +632,7 @@ async fn watchman_waits_for_a_quiet_window() {
     let c = create(&daemon, &repo).await;
     let before = established(&c);
     let daemon = daemon.restart().await;
-    assert_eq!(inspect(&daemon, &repo, &c).await.watch_state, "");
+    assert!(is_watched(&inspect(&daemon, &repo, &c).await));
     subscribed(&c, before + 1).await;
 
     // Creates every 500 ms never leave a quiet second; D subscribes by the

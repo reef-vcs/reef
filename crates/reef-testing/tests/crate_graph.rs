@@ -1,6 +1,8 @@
 //! Enforces the workspace's crate dependency direction:
 //! `reef-vcs` → `reef-daemon` → `reef-lib`, with `reef-testing` standing
-//! apart so any crate can dev-depend on it. See ADR 0007.
+//! apart so any crate can dev-depend on it (ADR 0007), and `reef-api`, the
+//! API schema, depending on no Reef crate while `reef-daemon` and
+//! `reef-vcs` depend on it (ADR 0029).
 
 #![allow(
     clippy::expect_used,
@@ -12,7 +14,13 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 4] = ["reef-daemon", "reef-lib", "reef-testing", "reef-vcs"];
+const MEMBERS: [&str; 5] = [
+    "reef-api",
+    "reef-daemon",
+    "reef-lib",
+    "reef-testing",
+    "reef-vcs",
+];
 
 fn metadata() -> Value {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
@@ -72,7 +80,7 @@ fn assert_no_dependency(metadata: &Value, from: &str, to: &str) {
 }
 
 #[test]
-fn workspace_members_are_the_four_crates() {
+fn workspace_members_are_the_five_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -89,6 +97,33 @@ fn reef_lib_depends_on_no_higher_crate() {
     let metadata = metadata();
     assert_no_dependency(&metadata, "reef-lib", "reef-daemon");
     assert_no_dependency(&metadata, "reef-lib", "reef-vcs");
+}
+
+#[test]
+fn reef_api_depends_on_no_reef_crate() {
+    let metadata = metadata();
+    let reef_deps: Vec<_> = dependencies(&metadata, "reef-api")
+        .into_iter()
+        .filter(|(dep, _)| dep.starts_with("reef-"))
+        .collect();
+    assert!(
+        reef_deps.is_empty(),
+        "reef-api must not depend on other reef crates, found {reef_deps:?}"
+    );
+    assert_no_dependency(&metadata, "reef-lib", "reef-api");
+}
+
+#[test]
+fn the_daemon_and_the_cli_depend_on_reef_api() {
+    let metadata = metadata();
+    for crate_name in ["reef-daemon", "reef-vcs"] {
+        assert!(
+            dependencies(&metadata, crate_name)
+                .iter()
+                .any(|(dep, kind)| dep == "reef-api" && kind == "normal"),
+            "{crate_name} must depend on reef-api"
+        );
+    }
 }
 
 #[test]

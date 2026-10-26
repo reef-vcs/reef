@@ -1,19 +1,22 @@
-//! `reef.daemon.v0.Repositories`: register, list, forget.
+//! `reef.api.v1.RepositoryService`: register, get, list, forget.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use reef_api::v1::repository_service_server::RepositoryService;
+use reef_api::v1::{
+    ForgetRepositoryRequest, ForgetRepositoryResponse, GetRepositoryRequest, GetRepositoryResponse,
+    ListRepositoriesRequest, ListRepositoriesResponse, RegisterRepositoryRequest,
+    RegisterRepositoryResponse, Repository,
+};
 use tonic::{Request, Response, Status};
 
+use super::convert::known;
+use super::page::{PageRequest, oldest_first};
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::proto::v0::repositories_server::Repositories;
-use crate::proto::v0::{
-    ForgetRequest, ForgetResponse, ListRepositoriesRequest, ListRepositoriesResponse,
-    RegisterRequest, RegisterResponse, Repository,
-};
 
-/// Serves `Repositories`.
+/// Serves `RepositoryService`.
 #[derive(Debug)]
 pub struct RepositoriesService {
     state: Arc<AppState>,
@@ -27,14 +30,14 @@ impl RepositoriesService {
 }
 
 #[tonic::async_trait]
-impl Repositories for RepositoriesService {
+impl RepositoryService for RepositoriesService {
     #[tracing::instrument(skip_all, fields(path = %request.get_ref().path, repo))]
-    async fn register(
+    async fn register_repository(
         &self,
-        request: Request<RegisterRequest>,
-    ) -> Result<Response<RegisterResponse>, Status> {
+        request: Request<RegisterRepositoryRequest>,
+    ) -> Result<Response<RegisterRepositoryResponse>, Status> {
         let request = request.into_inner();
-        let if_not_jj = request.if_not_jj();
+        let if_not_jj = known("if_not_jj", request.if_not_jj).map_err(status)?;
         let registered = self
             .state
             .manager
@@ -43,41 +46,63 @@ impl Repositories for RepositoriesService {
             .map_err(status)?;
         let record = &registered.record;
         tracing::Span::current().record("repo", tracing::field::display(record.id));
-        Ok(Response::new(RegisterResponse {
+        Ok(Response::new(RegisterRepositoryResponse {
             repository: Some(Repository::from(record)),
             already_registered: registered.already_registered,
             initialized_jj: registered.initialized_jj,
         }))
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn list(
+    #[tracing::instrument(skip_all, fields(repo))]
+    async fn get_repository(
         &self,
-        _request: Request<ListRepositoriesRequest>,
-    ) -> Result<Response<ListRepositoriesResponse>, Status> {
-        let repositories = self
+        request: Request<GetRepositoryRequest>,
+    ) -> Result<Response<GetRepositoryResponse>, Status> {
+        let record = self
             .state
-            .db
-            .repositories()
-            .map_err(status)?
-            .iter()
-            .map(Repository::from)
-            .collect();
-        Ok(Response::new(ListRepositoriesResponse { repositories }))
+            .manager
+            .resolve_repo(&request.into_inner().repo)
+            .map_err(status)?;
+        tracing::Span::current().record("repo", tracing::field::display(record.id));
+        Ok(Response::new(GetRepositoryResponse {
+            repository: Some(Repository::from(&record)),
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn list_repositories(
+        &self,
+        request: Request<ListRepositoriesRequest>,
+    ) -> Result<Response<ListRepositoriesResponse>, Status> {
+        let request = request.into_inner();
+        let page = PageRequest::new(
+            request.page_size,
+            &request.page_token,
+            &ListRepositoriesRequest::default(),
+        )
+        .map_err(status)?;
+        let (records, next_page_token) = page
+            .page(self.state.db.repositories().map_err(status)?, |record| {
+                oldest_first(record.registered_at.0, &record.id.as_hex())
+            });
+        Ok(Response::new(ListRepositoriesResponse {
+            repositories: records.iter().map(Repository::from).collect(),
+            next_page_token,
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(repo))]
-    async fn forget(
+    async fn forget_repository(
         &self,
-        request: Request<ForgetRequest>,
-    ) -> Result<Response<ForgetResponse>, Status> {
+        request: Request<ForgetRepositoryRequest>,
+    ) -> Result<Response<ForgetRepositoryResponse>, Status> {
         let manager = &self.state.manager;
         let record = manager
             .resolve_repo(&request.into_inner().repo)
             .map_err(status)?;
         tracing::Span::current().record("repo", tracing::field::display(record.id));
         let forgotten = manager.forget_repository(record.id).await.map_err(status)?;
-        Ok(Response::new(ForgetResponse {
+        Ok(Response::new(ForgetRepositoryResponse {
             repository: Some(Repository::from(&forgotten)),
         }))
     }

@@ -1,9 +1,8 @@
 //! The environment `reef ws run` gives its command (README, CLI): which
 //! workspace it is in and how to reach the daemon that holds it.
 
+use reef_api::v1::Workspace;
 use std::path::Path;
-
-use reef_daemon::proto::v0::Workspace;
 
 /// `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`, `REEF_REPO`, and `REEF_SOCKET`
 /// for a command running in `ws`, whose daemon listens on `socket`.

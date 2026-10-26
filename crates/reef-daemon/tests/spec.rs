@@ -14,10 +14,11 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, proto_millis, test_settings};
+use reef_api::v1::{CreateWorkspaceRequest, ListWorkspacesRequest, MissingStores, Workspace};
 use reef_daemon::client::ClientError;
+use reef_daemon::client::json::duration_millis;
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, Workspace, create_request};
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
@@ -73,20 +74,22 @@ async fn create(
 ) -> Result<Workspace, ClientError> {
     let response = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            lease_ms,
+            lease_length: Some(proto_millis(lease_ms)),
             // The spec's store is never built here; R1.20's tests build it.
-            missing_stores: create_request::MissingStores::Skip.into(),
-            ..CreateRequest::default()
+            missing_stores: MissingStores::Skip.into(),
+            ..CreateWorkspaceRequest::default()
         })
         .await?;
     Ok(response.workspace.unwrap())
 }
 
 fn length(ws: &Workspace) -> Duration {
-    Duration::from_millis(ws.lease.as_ref().unwrap().length_ms)
+    Duration::from_millis(duration_millis(
+        ws.lease.as_ref().unwrap().length.as_ref().unwrap(),
+    ))
 }
 
 fn snapshot_spec(daemon: &TestDaemon, ws: &Workspace) -> SnapshotSpec {

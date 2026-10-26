@@ -4,12 +4,13 @@ set positional-arguments
 default:
     @just --list
 
-# One-time contributor setup: hooks, nextest.
+# One-time contributor setup: hooks, nextest, and a note if buf is missing.
 setup:
     git config core.hooksPath .githooks
     cargo install cargo-nextest --locked || true
     cargo install cargo-deny --locked || true
     cargo install just --locked || true
+    command -v buf >/dev/null || echo "Install buf for 'just api' (ADR 0029): brew install bufbuild/buf/buf, or a release binary from https://github.com/bufbuild/buf/releases"
 
 build:
     cargo build --workspace --all-targets
@@ -38,6 +39,16 @@ doc:
 
 deny:
     cargo deny check licenses bans sources
+
+# The API schema's lint and formatting (ADR 0029). Building never needs buf; this does.
+api:
+    buf lint
+    buf format --diff --exit-code
+
+# The API schema against another revision: v1 only grows (ADR 0029). From a Reef workspace,
+# which has no .git, pass the registered root: just api-breaking /path/to/root/.git#branch=main
+api-breaking against=".git#branch=main":
+    buf breaking --against "{{against}}"
 
 deny-advisories:
     cargo deny check advisories
@@ -106,7 +117,7 @@ doc-links:
     scripts/doc-links.sh
 
 # Everything CI runs, in CI order.
-ci: fmt-check doc-links lint build agent-files installer test doc deny
+ci: fmt-check api doc-links lint build agent-files installer test doc deny
 
 clean:
     cargo clean

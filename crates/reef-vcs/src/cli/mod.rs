@@ -34,11 +34,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{ArgAction, CommandFactory as _, Parser as _};
+use reef_api::v1::IfNotJj;
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, PathOverrides};
 use reef_daemon::error::Advice;
 use reef_daemon::logging::{self, LogOptions};
-use reef_daemon::proto::v0::register_request::IfNotJj;
 use reef_lib::error::ErrorKind;
 
 pub(crate) use error::CliError;
@@ -150,6 +150,15 @@ impl Global {
             }
         }
         argv.extend(["daemon".to_owned(), "start".to_owned()]);
+        argv
+    }
+
+    /// `reef daemon stop` with the flags that choose which daemon this
+    /// command line talks to.
+    pub(crate) fn daemon_stop(&self) -> Vec<String> {
+        let mut argv = self.daemon_start();
+        argv.pop();
+        argv.push("stop".to_owned());
         argv
     }
 }
@@ -375,12 +384,53 @@ pub(crate) fn main() -> ExitCode {
             return ExitCode::from(error.exit_code());
         }
     };
-    match runtime.block_on(run(global, command, &out)) {
+    let rerunnable = !matches!(command, Command::Daemon(_));
+    let result = match runtime.block_on(run(global.clone(), command, &out)) {
+        Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) if rerunnable => {
+            runtime.block_on(rerun(&global, &out, error, &args))
+        }
+        result => result,
+    };
+    match result {
         Ok(code) => code,
         Err(error) => {
             out.error(&error);
             ExitCode::from(error.exit_code())
         }
+    }
+}
+
+/// The running daemon could not serve the command (`incompatible`, a
+/// [`ClientError::Incompatible`]): restart it if it is idle and run the
+/// command once more, from the same arguments (R2.01). The failed call
+/// changed nothing on the old daemon, so the rerun is safe.
+async fn rerun(
+    global: &Global,
+    out: &Out,
+    incompatible: ClientError,
+    args: &[OsString],
+) -> Result<ExitCode, CliError> {
+    daemon::restart(global, out, incompatible).await?;
+    let Cli { global, command } =
+        Cli::try_parse_from(args).map_err(|error| CliError::Usage(error.to_string()))?;
+    let Some(command) = command else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    match run(global.clone(), command, out).await {
+        Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) => {
+            let ClientError::Incompatible {
+                active_workspaces, ..
+            } = &error
+            else {
+                unreachable!("matched above");
+            };
+            Err(CliError::OldDaemon {
+                stop: global.daemon_stop(),
+                active_workspaces: *active_workspaces,
+                error: Box::new(error),
+            })
+        }
+        result => result,
     }
 }
 

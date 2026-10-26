@@ -42,6 +42,7 @@ privileged-tests = []
 
 [dependencies]
 reef-lib.workspace = true
+reef-api.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -62,6 +63,7 @@ tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true     # google.protobuf.Timestamp in the API
+base64.workspace = true          # page tokens (R2.01)
 hyper-util.workspace = true
 tower.workspace = true
 clap.workspace = true
@@ -82,11 +84,6 @@ reflink-copy.workspace = true    # per-file clones (R1.08's fallback, R1.10)
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true, features = ["mount", "fs"] }   # overlay mounts (R1.09), store bind mounts (R1.20)
-
-[build-dependencies]
-tonic-prost-build.workspace = true
-protox.workspace = true
-prost-types.workspace = true
 
 [[test]]
 name = "watchman"

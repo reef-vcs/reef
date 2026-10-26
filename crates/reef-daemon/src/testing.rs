@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use reef_api::v1::IfNotJj;
 use reef_lib::jj::Repo;
 use reef_lib::jj::settings::{Identity, user_settings_with_max_new_file_size};
 use reef_testing::synth::{self, Preset, Spec};
@@ -16,7 +17,6 @@ use tempfile::TempDir;
 use crate::client::Client;
 use crate::config::{Config, Paths};
 use crate::daemon::{Daemon, DaemonHandle};
-use crate::proto::v0::register_request::IfNotJj;
 
 /// Above the generator's largest files, so a synthetic tree is tracked in
 /// full.
