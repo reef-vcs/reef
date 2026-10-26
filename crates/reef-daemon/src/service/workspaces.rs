@@ -124,6 +124,7 @@ impl WorkspaceService for WorkspacesService {
     ) -> Result<Response<ListWorkspacesResponse>, Status> {
         let request = request.into_inner();
         let page = PageRequest::new(
+            "/reef.api.v1.WorkspaceService/ListWorkspaces",
             request.page_size,
             &request.page_token,
             &ListWorkspacesRequest {

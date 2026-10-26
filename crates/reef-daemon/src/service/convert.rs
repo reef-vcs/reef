@@ -370,6 +370,24 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
     }
 }
 
+/// An operation the daemon just wrote but could not read back, as a
+/// message: what the RPC that wrote it knows. Effects are unset.
+pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> v1::Operation {
+    v1::Operation {
+        id: id.to_owned(),
+        repo_id: repo.as_hex(),
+        kind: written.kind.into(),
+        snapshot_kind: written
+            .snapshot
+            .map_or(v1::SnapshotKind::Unspecified, snapshot_kind)
+            .into(),
+        is_snapshot: written.kind == v1::OperationKind::Snapshot,
+        workspace_id: written.workspace.unwrap_or_default().to_owned(),
+        agent: written.agent.to_owned(),
+        ..v1::Operation::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

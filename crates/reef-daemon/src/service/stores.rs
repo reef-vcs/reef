@@ -216,6 +216,7 @@ impl StoreService for StoresService {
     ) -> Result<Response<ListStoresResponse>, Status> {
         let request = request.into_inner();
         let page = PageRequest::new(
+            "/reef.api.v1.StoreService/ListStores",
             request.page_size,
             &request.page_token,
             &ListStoresRequest {

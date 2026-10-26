@@ -118,22 +118,33 @@ async fn status_of(client: &Client, global: &Global) -> Result<Status, CliError>
     }
 }
 
-/// Whether a daemon reporting `status` cannot serve this reef: another API,
-/// or another version.
-fn mismatched(status: &Status) -> bool {
-    status.api != "v1" || status.version != client::VERSION
+/// Whether a daemon reporting `status` is this reef's own: API v1 and the
+/// same version.
+fn current(status: &Status) -> bool {
+    status.api == "v1" && status.version == client::VERSION
 }
 
-/// Idempotent: a running daemon is reported, not restarted, unless it is
-/// another version (R2.01): an idle one is restarted, and a busy one is
-/// reported as an error.
+/// Idempotent: a running daemon is reported, not restarted, unless it
+/// speaks another API (a 0.1 daemon, R2.01): an idle one is restarted, and
+/// a busy one is reported as an error. A v1 daemon of another version is
+/// reported with its version; a later call it cannot serve restarts it then.
 async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
     let config = global.load_config()?;
     let status = match Client::connect(&config.paths.socket).await {
         Ok(client) => {
             let status = status_of(&client, global).await?;
             drop(client);
-            if mismatched(&status) {
+            if status.api == "v1" {
+                if status.version == client::VERSION {
+                    out.note(&format!("already running (pid {})", status.pid));
+                } else {
+                    out.note(&format!(
+                        "already running (pid {}, reef {})",
+                        status.pid, status.version
+                    ));
+                }
+                status
+            } else {
                 let incompatible = ClientError::Incompatible {
                     socket: config.paths.socket.clone(),
                     method: "daemon start".to_owned(),
@@ -143,9 +154,6 @@ async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
                 };
                 let (client, _) = restart(global, out, incompatible).await?;
                 status_of(&client, global).await?
-            } else {
-                out.note(&format!("already running (pid {})", status.pid));
-                status
             }
         }
         Err(ClientError::Connect { .. }) => {
@@ -163,7 +171,7 @@ async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
 
 /// Stops the daemon and prints that it did.
 async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
-    let pid = stop_daemon(global, force).await?;
+    let pid = stop_daemon(global, force, None).await?;
     out.done(
         &serde_json::json!({ "stopped": true, "pid": pid }),
         &format!("stopped daemon (pid {pid})"),
@@ -176,6 +184,11 @@ async fn stop(global: &Global, out: &Out, force: bool) -> Result<(), CliError> {
 /// saying so on stderr. A daemon with active workspaces is never signalled;
 /// it is reported as [`CliError::OldDaemon`], and so is any daemon under
 /// `--no-autostart`.
+///
+/// Another CLI may be restarting it at the same time, so what the daemon is
+/// and whether it is idle are read again just before the stop, and only
+/// the pid read then is signalled: a daemon that is already this reef's is
+/// used as it is, and one that went away is simply started.
 pub(crate) async fn restart(
     global: &Global,
     out: &Out,
@@ -190,15 +203,33 @@ pub(crate) async fn restart(
     else {
         return Err(CliError::Daemon(incompatible));
     };
+    let old_daemon = |active_workspaces: u32, error: ClientError| CliError::OldDaemon {
+        stop: global.daemon_stop(),
+        active_workspaces,
+        error: Box::new(error),
+    };
     if global.no_autostart || *active_workspaces > 0 {
-        return Err(CliError::OldDaemon {
-            stop: global.daemon_stop(),
-            active_workspaces: *active_workspaces,
-            error: Box::new(incompatible),
-        });
+        return Err(old_daemon(*active_workspaces, incompatible));
     }
     let config = global.load_config()?;
-    stop_daemon(global, false).await?;
+    let socket = &config.paths.socket;
+    match Client::connect(socket).await {
+        Ok(client) => {
+            let status = status_of(&client, global).await?;
+            if current(&status) {
+                // Another CLI restarted it meanwhile.
+                return Ok((client, status.pid));
+            }
+            drop(client);
+            if status.active_workspaces > 0 {
+                return Err(old_daemon(status.active_workspaces, incompatible));
+            }
+            stop_daemon(global, false, Some(status.pid)).await?;
+        }
+        // Gone meanwhile: another CLI stopped it.
+        Err(ClientError::Connect { .. }) => {}
+        Err(error) => return Err(CliError::Daemon(error)),
+    }
     let (client, pid) = autostart::start(global, &config).await?;
     out.note(&format!(
         "reef: restarted the daemon (reef {daemon_version}, API {daemon_api}, was running)"
@@ -208,8 +239,9 @@ pub(crate) async fn restart(
 
 /// Signals only a pid that both the pid file names and the daemon on the
 /// socket reports as its own, so a stale pid file never gets an unrelated
-/// process killed. The pid stopped.
-async fn stop_daemon(global: &Global, force: bool) -> Result<u32, CliError> {
+/// process killed, and, when `only` is given, only that pid: a restart
+/// never signals a daemon other than the one it checked. The pid stopped.
+async fn stop_daemon(global: &Global, force: bool, only: Option<u32>) -> Result<u32, CliError> {
     let config = global.load_config()?;
     let socket = &config.paths.socket;
     let pid_file = &config.paths.pid;
@@ -229,6 +261,17 @@ async fn stop_daemon(global: &Global, force: bool) -> Result<u32, CliError> {
     };
     let status = status_of(&client, global).await?;
     drop(client);
+    if let Some(only) = only.filter(|only| *only != status.pid) {
+        return Err(CliError::Refused {
+            kind: ErrorKind::Conflict,
+            message: format!(
+                "the daemon at {} changed while restarting it (pid {only}, now {}); not signalling",
+                socket.display(),
+                status.pid
+            ),
+            advice: None,
+        });
+    }
     // The CLI's pid file, or, when `--socket` names a daemon on another
     // state directory, the one in the state directory it reports.
     let theirs = Path::new(&status.state_dir).join(PID_FILE);

@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hyper_util::rt::TokioIo;
 use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
@@ -47,6 +48,22 @@ use crate::error::{Advice, detail_of, kind_from_status};
 
 /// This build's version, which the client compares with the daemon's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Set once any call through any [`Client`] in this process has been
+/// answered with success.
+/// The page size the `*_all` helpers ask for: the largest a daemon serves,
+/// so walking a long list takes as few calls as it can.
+const ALL_PAGE_SIZE: i32 = 1000;
+
+static ANSWERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether any call through a [`Client`] in this process has succeeded. The
+/// CLI reruns a command against a restarted daemon only while this is false
+/// (R2.01): a call that succeeded may have changed something, and a rerun
+/// would repeat it.
+pub fn any_call_answered() -> bool {
+    ANSWERED.load(Ordering::SeqCst)
+}
 
 /// A connection to a daemon's socket. Cheap to clone; requests on clones
 /// share the connection.
@@ -205,7 +222,10 @@ impl Client {
         // Boxed, as the probe below is: a tonic call's future is large, and
         // a CLI command's future holds several.
         match Box::pin(call).await {
-            Ok(response) => Ok(response.into_inner()),
+            Ok(response) => {
+                ANSWERED.store(true, Ordering::SeqCst);
+                Ok(response.into_inner())
+            }
             // Boxed: the probe's two calls would otherwise be inlined into
             // every call's future.
             Err(status) if is_unserved(&status) => {
@@ -345,7 +365,7 @@ impl Client {
         loop {
             let response = self
                 .list_repositories_page(ListRepositoriesRequest {
-                    page_size: 0,
+                    page_size: ALL_PAGE_SIZE,
                     page_token,
                 })
                 .await?;
@@ -402,7 +422,7 @@ impl Client {
     ) -> Result<Vec<Workspace>, ClientError> {
         let mut workspaces = Vec::new();
         let mut request = ListWorkspacesRequest {
-            page_size: 0,
+            page_size: ALL_PAGE_SIZE,
             page_token: String::new(),
             ..request
         };
@@ -612,7 +632,7 @@ impl Client {
         let mut stores = Vec::new();
         let mut request = ListStoresRequest {
             repo: repo.to_owned(),
-            page_size: 0,
+            page_size: ALL_PAGE_SIZE,
             page_token: String::new(),
         };
         loop {

@@ -48,9 +48,15 @@ pub use reef::daemon::v0;
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
 pub const API_REVISION: u32 = 1;
 
-/// blake3 of the v1 descriptors without comments, as of [`API_REVISION`].
-/// A test fails when the schema changes without both being updated.
-pub const API_DIGEST: &str = "9732b939adbf6da1b0212749e8ab4c7dbe9cb4127db82167b14b6d56008c751d";
+/// blake3 of the v1 descriptors without comments, one per revision, oldest
+/// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
+/// and bumps [`API_REVISION`]; a test fails until both are done.
+pub const API_DIGESTS: &[&str] =
+    &["9732b939adbf6da1b0212749e8ab4c7dbe9cb4127db82167b14b6d56008c751d"];
+
+/// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
+/// the last of [`API_DIGESTS`].
+pub const API_DIGEST: &str = API_DIGESTS[API_DIGESTS.len() - 1];
 
 /// The v1 files and their imports, with comments, as an encoded
 /// `google.protobuf.FileDescriptorSet`, for SDK generators and reflection.
@@ -151,10 +157,18 @@ mod tests {
 
     #[test]
     fn api_digest_matches_revision() {
+        let revisions = API_DIGESTS.len();
         assert_eq!(
-            API_DIGEST, BUILT_DIGEST,
-            "the v1 schema changed: bump API_REVISION (now {API_REVISION}) by one and set \
-             API_DIGEST to {BUILT_DIGEST:?} (ADR 0029's checklist, items 1 and 2)"
+            API_DIGEST,
+            BUILT_DIGEST,
+            "the v1 schema changed: append {BUILT_DIGEST:?} to API_DIGESTS and bump API_REVISION \
+             to {} (ADR 0029's checklist, items 1 and 2)",
+            revisions + 1
+        );
+        assert_eq!(
+            usize::try_from(API_REVISION).unwrap(),
+            revisions,
+            "API_DIGESTS has {revisions} entries: API_REVISION must be {revisions}"
         );
     }
 

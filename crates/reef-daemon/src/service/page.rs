@@ -77,9 +77,10 @@ pub struct PageRequest {
 
 impl PageRequest {
     /// The page `page_size` and `page_token` ask for. `filters` is the
-    /// request with its page fields cleared: a token is only good with the
-    /// filters it was issued for.
+    /// request with its page fields cleared: a token is only good for the
+    /// RPC (`method`) and the filters it was issued for.
     pub fn new<M: prost::Message>(
+        method: &str,
         page_size: i32,
         page_token: &str,
         filters: &M,
@@ -89,8 +90,12 @@ impl PageRequest {
             Ok(0) => DEFAULT_PAGE_SIZE,
             Ok(size) => size.min(MAX_PAGE_SIZE),
         };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(method.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&filters.encode_to_vec());
         let mut digest = [0; 8];
-        digest.copy_from_slice(&blake3::hash(&filters.encode_to_vec()).as_bytes()[..8]);
+        digest.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
         let after = if page_token.is_empty() {
             None
         } else {
@@ -163,8 +168,18 @@ pub fn oldest_first(millis: i64, id: &str) -> String {
     format!("{:019}:{id}", millis.max(0))
 }
 
-/// A sort key in descending order of `millis`, then ascending `id`.
+/// A sort key in descending order of `millis`, then descending `id` (a hex
+/// id, each digit complemented), so ties come out as Phase 1 listed them.
 pub fn newest_first(millis: i64, id: &str) -> String {
+    let id: String = id
+        .chars()
+        .map(|digit| {
+            digit
+                .to_digit(16)
+                .and_then(|value| char::from_digit(15 - value, 16))
+                .unwrap_or(digit)
+        })
+        .collect();
     format!("{:019}:{id}", i64::MAX - millis.max(0))
 }
 
@@ -189,7 +204,7 @@ mod tests {
         let mut token = String::new();
         let mut seen = Vec::new();
         loop {
-            let request = PageRequest::new(2, &token, &filters("a")).unwrap();
+            let request = PageRequest::new("/test/List", 2, &token, &filters("a")).unwrap();
             let (page, next) = request.page(items.clone(), key);
             assert!(page.len() <= 2);
             seen.extend(page);
@@ -203,26 +218,34 @@ mod tests {
 
     #[test]
     fn sizes_default_clamp_and_refuse_negatives() {
-        let request = PageRequest::new(0, "", &filters("a")).unwrap();
+        let request = PageRequest::new("/test/List", 0, "", &filters("a")).unwrap();
         assert_eq!(request.size, DEFAULT_PAGE_SIZE);
-        let request = PageRequest::new(5000, "", &filters("a")).unwrap();
+        let request = PageRequest::new("/test/List", 5000, "", &filters("a")).unwrap();
         assert_eq!(request.size, MAX_PAGE_SIZE);
         assert!(matches!(
-            PageRequest::new(-1, "", &filters("a")),
+            PageRequest::new("/test/List", -1, "", &filters("a")),
             Err(PageError::Size(_))
         ));
     }
 
     #[test]
+    fn tokens_are_bound_to_the_method() {
+        let request = PageRequest::new("/a/ListThings", 1, "", &filters("")).unwrap();
+        let (_, next) = request.page(vec![1, 2], u32::to_string);
+        let error = PageRequest::new("/a/ListOthers", 1, &next, &filters("")).unwrap_err();
+        assert!(matches!(error, PageError::Token(PageTokenError::Mismatch)));
+    }
+
+    #[test]
     fn tokens_are_bound_to_the_filters() {
-        let request = PageRequest::new(1, "", &filters("a")).unwrap();
+        let request = PageRequest::new("/test/List", 1, "", &filters("a")).unwrap();
         let (_, next) = request.page(vec![1, 2], u32::to_string);
         assert_ne!(next, "");
-        let error = PageRequest::new(1, &next, &filters("b")).unwrap_err();
+        let error = PageRequest::new("/test/List", 1, &next, &filters("b")).unwrap_err();
         assert!(matches!(error, PageError::Token(PageTokenError::Mismatch)));
         let detail = detail_of(&status(error)).unwrap();
         assert_eq!(detail.reason, reef_api::error::INVALID_PAGE_TOKEN);
-        let garbage = PageRequest::new(1, "!!", &filters("a")).unwrap_err();
+        let garbage = PageRequest::new("/test/List", 1, "!!", &filters("a")).unwrap_err();
         assert!(matches!(
             garbage,
             PageError::Token(PageTokenError::Malformed)
@@ -232,7 +255,7 @@ mod tests {
     #[test]
     fn newest_first_sorts_descending() {
         assert!(newest_first(2_000, "a") < newest_first(1_000, "a"));
-        assert!(newest_first(1_000, "a") < newest_first(1_000, "b"));
+        assert!(newest_first(1_000, "b") < newest_first(1_000, "a"));
         assert!(oldest_first(1_000, "z") < oldest_first(2_000, "a"));
     }
 }

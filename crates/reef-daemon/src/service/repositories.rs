@@ -76,6 +76,7 @@ impl RepositoryService for RepositoriesService {
     ) -> Result<Response<ListRepositoriesResponse>, Status> {
         let request = request.into_inner();
         let page = PageRequest::new(
+            "/reef.api.v1.RepositoryService/ListRepositories",
             request.page_size,
             &request.page_token,
             &ListRepositoriesRequest::default(),

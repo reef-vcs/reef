@@ -315,3 +315,34 @@ fn old_idle_daemon_is_restarted() {
     assert_eq!(error["next"], serde_json::json!(["reef", "daemon", "stop"]));
     assert!(!fake.exited());
 }
+
+/// `reef daemon start` against a 0.1 daemon applies the same rule: an idle
+/// one is restarted, a busy one is named.
+#[test]
+fn old_daemon_start_restarts_an_idle_one_and_names_a_busy_one() {
+    let setup = Setup::new();
+    let fake = FakeDaemon::spawn(&setup.state(), &setup.socket(), 0);
+    let output = setup.reef(&["daemon", "start"]);
+    let status = json(&output);
+    assert_eq!(status["api"], "v1", "{status}");
+    assert!(
+        stderr(&output).contains("reef: restarted the daemon (reef 0.1.0, API v0, was running)"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(fake.exits(), "the old daemon is still running");
+    json(&setup.reef(&["daemon", "stop"]));
+
+    let setup = Setup::new();
+    let fake = FakeDaemon::spawn(&setup.state(), &setup.socket(), 1);
+    let error = unsupported(&setup.reef(&["daemon", "start"]));
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("1 active workspace;"),
+        "{error}"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!fake.exited(), "a busy daemon must not be stopped");
+}

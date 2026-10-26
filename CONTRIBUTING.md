@@ -85,7 +85,7 @@ The schema in `crates/reef-api/proto/reef/api/v1` is the API of record ([ADR 002
 
 1. Edit the protos: add, never remove, renumber, rename, or move. A field that should go is marked `[deprecated = true]`.
 2. `buf format -w`, then `just api` (lint and format) and `just api-breaking` (against `main`; from a Reef workspace, pass the registered root's `.git`).
-3. Bump `API_REVISION` in `crates/reef-api/src/lib.rs` by one, and set `API_DIGEST` to the value `cargo nextest run -p reef-api` prints.
+3. Bump `API_REVISION` in `crates/reef-api/src/lib.rs` by one, and append the digest `cargo nextest run -p reef-api` prints to `API_DIGESTS`.
 4. Review the change against ADR 0029's API review checklist, and list the addition in the CHANGELOG.
 
 ## ADRs

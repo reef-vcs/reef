@@ -379,6 +379,38 @@ async fn lists_page() {
         .await
         .unwrap();
     assert_eq!(next.repositories[0].id, registered.repository.unwrap().id);
+    // A repositories token is no workspaces token, and sizes are checked.
+    let repos_token = client
+        .list_repositories_page(ListRepositoriesRequest {
+            page_size: 1,
+            page_token: String::new(),
+        })
+        .await
+        .unwrap()
+        .next_page_token;
+    let error = client
+        .list_workspaces_page(ListWorkspacesRequest {
+            page_size: 1,
+            page_token: repos_token,
+            ..ListWorkspacesRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (
+            Code::InvalidArgument,
+            reef_api::error::INVALID_PAGE_TOKEN.to_owned()
+        )
+    );
+    let error = client
+        .list_repositories_page(ListRepositoriesRequest {
+            page_size: -1,
+            page_token: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).0, Code::InvalidArgument);
     assert_eq!(next.next_page_token, "");
 
     // No store is built: one empty page.
@@ -457,6 +489,8 @@ async fn writes_carry_their_operation() {
     );
     assert_eq!(id, head_op(&repo.root).await);
 
+    // An edit the move's final snapshot records.
+    std::fs::write(Path::new(&ws.path).join("before-move.txt"), "move\n").unwrap();
     let moved = client
         .move_workspace(MoveWorkspaceRequest {
             workspace: ws.id.clone(),
@@ -466,17 +500,34 @@ async fn writes_carry_their_operation() {
         .await
         .unwrap();
     assert_written(
+        moved.final_snapshot.as_ref(),
+        OperationKind::Snapshot,
+        SnapshotKind::Move,
+        &ws.id,
+        owner,
+    );
+    let id = assert_written(
         moved.operation.as_ref(),
         OperationKind::MoveWorkspace,
         SnapshotKind::Unspecified,
         &ws.id,
         owner,
     );
+    assert_eq!(id, head_op(&repo.root).await);
 
+    // An edit the release's final snapshot records.
+    std::fs::write(Path::new(&ws.path).join("before-release.txt"), "release\n").unwrap();
     let released = client
         .release_workspace("", &ws.id, true, false)
         .await
         .unwrap();
+    assert_written(
+        released.final_snapshot.as_ref(),
+        OperationKind::Snapshot,
+        SnapshotKind::Final,
+        &ws.id,
+        owner,
+    );
     let id = assert_written(
         released.operation.as_ref(),
         OperationKind::ReleaseWorkspace,

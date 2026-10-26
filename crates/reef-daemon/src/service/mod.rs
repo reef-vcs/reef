@@ -25,6 +25,7 @@ pub mod workspaces;
 mod convert;
 
 use reef_api::v1;
+use reef_lib::error::ErrorChain;
 use reef_lib::jj::OperationIdHex;
 use tonic::Status;
 
@@ -34,6 +35,11 @@ use crate::model::RepoId;
 
 /// The operation `op_id` of `repo` that a handler just caused, read back in
 /// full; `None` when it recorded none (`op_id` empty or absent).
+///
+/// The write has happened by then, so a read-back that fails never fails
+/// the RPC: it is logged, and the operation is reported with what the
+/// handler knows (its id, kind, workspace and agent) instead of jj's
+/// record.
 pub(in crate::service) async fn written_operation(
     state: &AppState,
     repo: RepoId,
@@ -44,6 +50,15 @@ pub(in crate::service) async fn written_operation(
         return Ok(None);
     };
     let id: OperationIdHex = op_id.parse().map_err(status)?;
-    let entry = state.manager.operation(repo, id).await.map_err(status)?;
-    Ok(Some(convert::operation(&entry, repo, written)))
+    match state.manager.operation(repo, id).await {
+        Ok(entry) => Ok(Some(convert::operation(&entry, repo, written))),
+        Err(error) => {
+            tracing::warn!(
+                op_id,
+                error = %ErrorChain(&error),
+                "cannot read back the operation just written; reporting it by id"
+            );
+            Ok(Some(convert::unread_operation(op_id, repo, written)))
+        }
+    }
 }

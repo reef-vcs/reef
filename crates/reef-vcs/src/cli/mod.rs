@@ -386,8 +386,15 @@ pub(crate) fn main() -> ExitCode {
     };
     let rerunnable = !matches!(command, Command::Daemon(_));
     let result = match runtime.block_on(run(global.clone(), command, &out)) {
-        Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) if rerunnable => {
+        // Only while no call has succeeded: one that did may have changed
+        // something, which the rerun would repeat.
+        Err(CliError::Daemon(error @ ClientError::Incompatible { .. }))
+            if rerunnable && !reef_daemon::client::any_call_answered() =>
+        {
             runtime.block_on(rerun(&global, &out, error, &args))
+        }
+        Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) => {
+            Err(old_daemon(&global, error))
         }
         result => result,
     };
@@ -402,8 +409,9 @@ pub(crate) fn main() -> ExitCode {
 
 /// The running daemon could not serve the command (`incompatible`, a
 /// [`ClientError::Incompatible`]): restart it if it is idle and run the
-/// command once more, from the same arguments (R2.01). The failed call
-/// changed nothing on the old daemon, so the rerun is safe.
+/// command once more, from the same arguments (R2.01). Called only when no
+/// call of the command had succeeded, so the failed one, which changed
+/// nothing, was its first and the rerun repeats nothing.
 async fn rerun(
     global: &Global,
     out: &Out,
@@ -418,19 +426,25 @@ async fn rerun(
     };
     match run(global.clone(), command, out).await {
         Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) => {
-            let ClientError::Incompatible {
-                active_workspaces, ..
-            } = &error
-            else {
-                unreachable!("matched above");
-            };
-            Err(CliError::OldDaemon {
-                stop: global.daemon_stop(),
-                active_workspaces: *active_workspaces,
-                error: Box::new(error),
-            })
+            Err(old_daemon(&global, error))
         }
         result => result,
+    }
+}
+
+/// A daemon that cannot serve this reef and is not restarted, with the
+/// `reef daemon stop` that lets the next command start the matching one.
+fn old_daemon(global: &Global, error: ClientError) -> CliError {
+    let active_workspaces = match &error {
+        ClientError::Incompatible {
+            active_workspaces, ..
+        } => *active_workspaces,
+        _ => 0,
+    };
+    CliError::OldDaemon {
+        stop: global.daemon_stop(),
+        active_workspaces,
+        error: Box::new(error),
     }
 }
 
