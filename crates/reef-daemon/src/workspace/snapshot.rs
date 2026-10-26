@@ -298,10 +298,6 @@ impl Manager {
         mut trigger: Trigger,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let begun = Instant::now();
-        *entry
-            .scan_started
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(begun);
         let started = trigger.first_event.unwrap_or(begun);
         let record = entry.record();
         let id = record.id;
@@ -404,6 +400,14 @@ impl Manager {
         );
         self.verify_stores(entry, &outcome, &record.commit_id).await;
         self.scheduler.run_hooks(&outcome);
+        // Only a full scan that succeeded saw every write made before it
+        // began; a narrowed one saw the paths reported by then (R2.02).
+        if full {
+            *entry
+                .scan_started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(begun);
+        }
         Ok(outcome)
     }
 }

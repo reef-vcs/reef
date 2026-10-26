@@ -15,7 +15,7 @@ use tonic::{Request, Response, Status};
 
 use super::convert::{self, known};
 use super::page::{MAX_PAGE_BYTES, PageRequest};
-use super::reading::{op_id, repo_at, snapshot_first, target, uses_working_copy};
+use super::reading::{bad_token, op_id, repo_at, snapshot_first, target, uses_working_copy};
 use crate::daemon::AppState;
 use crate::error::status;
 
@@ -93,7 +93,12 @@ impl DiffService for DiffHandler {
             max_hunk_bytes: MAX_HUNK_BYTES,
             max_file_bytes: MAX_FILE_BYTES,
             paths: diff::check_paths(&request.paths).map_err(status)?,
-            after: page.cursor().map(str::to_owned),
+            after: page
+                .cursor()
+                .map(|cursor| diff::check_paths(&[cursor.to_owned()]))
+                .transpose()
+                .map_err(|_| bad_token())?
+                .and_then(|mut paths| paths.pop()),
             limit: page.size(),
         };
         if page.pinned().is_none() && request.at_operation.is_empty() && !request.skip_snapshot {

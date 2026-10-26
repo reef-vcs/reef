@@ -90,7 +90,9 @@ fn read_benches(c: &mut Criterion) {
                 let describer = Describer::new(&head, &scope).expect("describer");
                 describer.describe(&wc).await.expect("describe @");
                 let heads = revset::parse(&head, "heads(mutable())", &scope).expect("parse");
-                log::commits(&head, &heads, PAGE).await.expect("heads");
+                log::commits(&head, &heads, PAGE, &|| false)
+                    .await
+                    .expect("heads");
                 let page = diff::diff_page(
                     &head,
                     &DiffBase::Commit(before.clone()),

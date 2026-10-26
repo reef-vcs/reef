@@ -81,8 +81,9 @@ pub struct WorkspaceEntry {
     pub repo: RepoHandle,
     /// Serializes snapshots and release of this workspace.
     pub scan_lock: tokio::sync::Mutex<()>,
-    /// When its last snapshot began, set with `scan_lock` held: a read
-    /// that arrived before it is covered by that scan (R2.02).
+    /// When its last full snapshot that succeeded began, set with
+    /// `scan_lock` held: a read that arrived before it is covered by that
+    /// scan (R2.02). Narrowed scans do not set it.
     pub scan_started: Mutex<Option<std::time::Instant>>,
     /// What its snapshots exclude beyond git's ignore rules.
     pub spec: Mutex<SnapshotSpec>,

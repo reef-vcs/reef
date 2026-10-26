@@ -345,6 +345,7 @@ fn parse_as(
     text: &str,
     aliases: &RevsetAliasesMap,
     scope: &RevsetScope<'_>,
+    now: &chrono::DateTime<chrono::Local>,
     workspace: &str,
 ) -> Result<Arc<UserRevsetExpression>, RevsetParseError> {
     let converter = RepoPathUiConverter::Fs {
@@ -356,7 +357,7 @@ fn parse_as(
         aliases_map: aliases,
         local_variables: HashMap::new(),
         user_email: scope.user_email,
-        date_pattern_context: chrono::Local::now().into(),
+        date_pattern_context: (*now).into(),
         default_ignored_remote: Some(RemoteName::new("git")),
         fileset_aliases_map: &fileset_aliases,
         extensions: &EXTENSIONS,
@@ -386,12 +387,15 @@ pub fn parse(
     scope: &RevsetScope<'_>,
 ) -> Result<ParsedRevset, RevisionError> {
     let aliases = aliases(repo);
+    // One instant for every parse: a relative date (`after:"1 hour ago"`)
+    // must resolve alike in the probes, or they would differ without `@`.
+    let now = chrono::Local::now();
     let invalid = |error: RevsetParseError| RevisionError::Parse {
         revision: text.to_owned(),
         message: error.to_string(),
     };
-    let probe = parse_as(text, &aliases, scope, PROBE_A).map_err(invalid)?;
-    let other = parse_as(text, &aliases, scope, PROBE_B).map_err(invalid)?;
+    let probe = parse_as(text, &aliases, scope, &now, PROBE_A).map_err(invalid)?;
+    let other = parse_as(text, &aliases, scope, &now, PROBE_B).map_err(invalid)?;
     let uses_working_copy = format!("{probe:?}") != format!("{other:?}");
     let expression = if uses_working_copy {
         let Some(workspace) = scope.workspace else {
@@ -399,7 +403,7 @@ pub fn parse(
                 revision: text.to_owned(),
             });
         };
-        parse_as(text, &aliases, scope, workspace).map_err(invalid)?
+        parse_as(text, &aliases, scope, &now, workspace).map_err(invalid)?
     } else {
         other
     };

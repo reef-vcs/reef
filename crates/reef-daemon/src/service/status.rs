@@ -114,6 +114,7 @@ impl StatusService for StatusHandler {
         };
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
+        let (stop, _guard) = state.reads.stop();
         let read_target = target.clone();
         let read = state
             .reads
@@ -130,9 +131,10 @@ impl StatusService for StatusHandler {
                     None => None,
                 };
                 let parsed = revset::parse(repo, "heads(mutable())", &scope).map_err(status)?;
-                let (ids, head_count) = log::commits(repo, &parsed, usize::MAX)
-                    .await
-                    .map_err(status)?;
+                let (ids, head_count) =
+                    log::commits(repo, &parsed, usize::MAX, &|| stop.requested())
+                        .await
+                        .map_err(status)?;
                 let mut heads = Vec::with_capacity(ids.len());
                 for id in &ids {
                     heads.push(describer.describe(id).await.map_err(status)?);

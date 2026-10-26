@@ -191,12 +191,10 @@ impl Walk {
 
     fn touches(&self, effects: Option<&OpEffects>) -> bool {
         effects.is_some_and(|effects| {
-            effects.changes.iter().any(|change| {
-                self.filter
-                    .changes
-                    .iter()
-                    .any(|prefix| change.change_id.as_str().starts_with(prefix.as_str()))
-            })
+            self.filter
+                .changes
+                .iter()
+                .any(|prefix| effects.touches(prefix))
         })
     }
 

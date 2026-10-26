@@ -469,6 +469,13 @@ async fn at_sign_needs_a_workspace() {
         let parsed = revset::parse(&head, text, &fx.scope()).unwrap();
         assert!(!parsed.uses_working_copy(), "{text}");
     }
+    // A relative date resolves once per parse (from the review: two
+    // instants made the probes differ about one time in twenty).
+    for _ in 0..2000 {
+        let text = "committer_date(after:\"1 hour ago\")";
+        let parsed = revset::parse(&head, text, &fx.scope()).unwrap();
+        assert!(!parsed.uses_working_copy());
+    }
 
     let wc = fx.repo.wc_commit().unwrap();
     let at = revset::resolve_revision(&head, "@", &fx.in_workspace("default"))
@@ -906,7 +913,9 @@ async fn diff_summary_and_copies() {
     let page = diff_of(&fx, &DiffBase::Parents, &second, &paged).await;
     assert_eq!(page.files.len(), 4);
     assert!(page.more);
-    paged.after = Some(page.files[3].path.clone());
+    paged.after = diff::check_paths(&[page.files[3].path.clone()])
+        .unwrap()
+        .pop();
     let page = diff_of(&fx, &DiffBase::Parents, &second, &paged).await;
     assert_eq!(page.files[0].path, "link");
     assert_eq!(page.total, 10);
@@ -1369,6 +1378,10 @@ async fn effects() {
     fx.commit(tx, "bulk").await;
     let found = effects_of_head(&fx, 1000).await;
     assert_eq!((found.changes.len(), found.change_count), (1000, 1005));
+    // A filter by change still matches past the cap (from the review).
+    let last = found.capped_change_ids.last().expect("five past the cap");
+    assert!(found.touches(last.as_str()));
+    assert!(!found.changes.iter().any(|c| &c.change_id == last));
 }
 
 fn op_entry(description: &str, is_snapshot: bool, workspace: &str) -> oplog::OpEntry {
@@ -1778,4 +1791,115 @@ async fn renames_stop_at_the_limit() {
     };
     assert_eq!(kind("new"), Some(ChangeKind::Added));
     assert_eq!(kind("old"), Some(ChangeKind::Deleted));
+}
+
+/// Every path of the diff, paged `limit` at a time.
+async fn paged_paths(fx: &Fixture, to: &Commit, limit: usize) -> Vec<String> {
+    let mut options = options(diff::DiffFormat::Summary);
+    options.limit = limit;
+    let mut paths = Vec::new();
+    loop {
+        let page = diff_of(fx, &diff::DiffBase::Parents, to, &options).await;
+        paths.extend(page.files.iter().map(|f| f.path.clone()));
+        if !page.more {
+            return paths;
+        }
+        options.after = diff::check_paths(&[paths.last().unwrap().clone()])
+            .unwrap()
+            .pop();
+    }
+}
+
+// 8a (from the review): pages follow jj's path order, by component, so a
+// directory and a file named like it neither skip nor repeat a path.
+#[tokio::test]
+async fn diff_pages_follow_path_order() {
+    let mut fx = Fixture::new().await;
+    let head = fx.head();
+    let root = head.store().root_commit();
+    let tree = tree_with(
+        &head,
+        &root.tree(),
+        &[
+            ("src/foo.rs", Entry::File(b"a\n")),
+            ("src/foo/bar.rs", Entry::File(b"b\n")),
+            ("src/foo-x.rs", Entry::File(b"c\n")),
+            ("src/zed.rs", Entry::File(b"d\n")),
+        ],
+    )
+    .await;
+    let mut tx = fx.tx();
+    let commit = commit_tree(&mut tx, &[&root], tree, "files").await;
+    fx.commit(tx, "setup").await;
+    let all = paged_paths(&fx, &commit, 100).await;
+    assert_eq!(all.len(), 4);
+    for limit in 1..4 {
+        assert_eq!(paged_paths(&fx, &commit, limit).await, all, "limit {limit}");
+    }
+}
+
+// 9b (from the review): a hunk cut to its old side starts its emptied new
+// side at the line before, as git writes it.
+#[tokio::test]
+async fn cut_hunks_start_empty_sides_before() {
+    use diff::{DiffBase, DiffFormat};
+    let mut fx = Fixture::new().await;
+    let head = fx.head();
+    let root = head.store().root_commit();
+    let old = tree_with(&head, &root.tree(), &[("f", Entry::File(b"a\nx\nb\n"))]).await;
+    let new = tree_with(&head, &old, &[("f", Entry::File(b"a\ny\nb\n"))]).await;
+    let mut tx = fx.tx();
+    let first = commit_tree(&mut tx, &[&root], old, "old").await;
+    let second = commit_tree(&mut tx, &[&first], new, "new").await;
+    fx.commit(tx, "setup").await;
+    let mut cut = options(DiffFormat::Hunks);
+    cut.context = 0;
+    cut.max_lines = 1;
+    let page = diff_of(&fx, &DiffBase::Parents, &second, &cut).await;
+    let hunk = &page.files[0].hunks[0];
+    assert_eq!(hunk.lines, "-x\n");
+    assert_eq!(
+        (
+            hunk.old_start,
+            hunk.old_lines,
+            hunk.new_start,
+            hunk.new_lines
+        ),
+        (2, 1, 1, 0)
+    );
+    assert!(page.files[0].truncated);
+}
+
+// 10a (from the review): a commit rewritten twice in one transaction is one
+// rewrite of the commit visible before, through the intermediate one.
+#[tokio::test]
+async fn effects_follow_rewrites_within_an_operation() {
+    use effects::ChangeEffectKind::Rewritten;
+    let mut fx = Fixture::new().await;
+    let wc = fx.repo.wc_commit().unwrap();
+    let mut tx = fx.tx();
+    let once = tx
+        .repo_mut()
+        .rewrite_commit(&wc)
+        .set_description("once")
+        .write()
+        .await
+        .unwrap();
+    let twice = tx
+        .repo_mut()
+        .rewrite_commit(&once)
+        .set_description("twice")
+        .write()
+        .await
+        .unwrap();
+    fx.commit(tx, "rewrite twice").await;
+    assert_eq!(
+        change_effects(&effects_of_head(&fx, 1000).await),
+        [(
+            change_hex(&wc),
+            Rewritten,
+            Some(twice.id().hex()),
+            Some(wc.id().hex())
+        )]
+    );
 }

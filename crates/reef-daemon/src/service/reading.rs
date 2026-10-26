@@ -171,8 +171,9 @@ impl Records {
 }
 
 /// The effects of the operation `id` of `target`'s repository, computed
-/// on the blocking pool over the repository as its thread last loaded it;
-/// `None`, logged, when they cannot be.
+/// on the blocking pool over the repository as its thread last loaded it,
+/// without waiting for a read permit (a write reports them); `None`,
+/// logged, when they cannot be.
 pub(super) async fn effects_of(
     state: &AppState,
     handle: &RepoHandle,
@@ -188,7 +189,7 @@ pub(super) async fn effects_of(
     let id = id.to_owned();
     let found = state
         .reads
-        .run(handle, move || async move {
+        .run_for_write(handle, move || async move {
             let operation = match oplog::resolve_operation(&head, &id).await {
                 Ok(operation) => operation,
                 Err(error) => {

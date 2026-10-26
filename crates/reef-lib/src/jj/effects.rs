@@ -9,7 +9,7 @@
 //! or new changes; what is left of `R` was hidden (its change still
 //! visible) or abandoned.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use futures::StreamExt as _;
@@ -99,6 +99,21 @@ pub struct OpEffects {
     pub bookmark_count: usize,
     /// By jj workspace name.
     pub working_copies: Vec<WorkingCopyEffectInfo>,
+    /// The changes of the entries the cap left out of `changes`, sorted and
+    /// without repeats: what a filter by change matches beyond the cap.
+    pub capped_change_ids: Vec<ChangeIdHex>,
+}
+
+impl OpEffects {
+    /// Whether the operation touched a change whose hex id starts with
+    /// `prefix`, counting entries past the cap.
+    pub fn touches(&self, prefix: &str) -> bool {
+        self.changes
+            .iter()
+            .map(|change| &change.change_id)
+            .chain(&self.capped_change_ids)
+            .any(|change| change.as_str().starts_with(prefix))
+    }
 }
 
 fn first_added(target: &RefTarget) -> Option<CommitIdHex> {
@@ -213,7 +228,11 @@ pub async fn operation_effects(
         .collect();
     let mut changes = change_effects(&repo, operation, &before_heads, &after_heads).await?;
     let change_count = changes.len();
-    changes.truncate(cap);
+    let mut capped_change_ids: Vec<ChangeIdHex> = changes
+        .drain(cap.min(changes.len())..)
+        .map(|change| change.change_id)
+        .collect();
+    capped_change_ids.dedup();
 
     let mut bookmarks = bookmark_effects(after, &befores);
     let bookmark_count = bookmarks.len();
@@ -224,7 +243,38 @@ pub async fn operation_effects(
         bookmarks,
         bookmark_count,
         working_copies: working_copy_effects(after, &befores),
+        capped_change_ids,
     })
+}
+
+/// The commit of `change` in `removed` that `commit` rewrote, following
+/// the predecessors this operation recorded through commits it rewrote
+/// again in the same transaction (jj records those intermediate commits
+/// too), nearest first.
+fn predecessor_in<'a>(
+    operation: &'a Operation,
+    commit: &CommitId,
+    change: &ChangeId,
+    removed: &HashMap<CommitId, ChangeId>,
+) -> Option<&'a CommitId> {
+    let mut queue: VecDeque<&CommitId> = operation
+        .predecessors_for_commit(commit)
+        .unwrap_or_default()
+        .iter()
+        .collect();
+    let mut seen = HashSet::new();
+    while let Some(candidate) = queue.pop_front() {
+        if !seen.insert(candidate) {
+            continue;
+        }
+        if removed.get(candidate) == Some(change) {
+            return Some(candidate);
+        }
+        if let Some(earlier) = operation.predecessors_for_commit(candidate) {
+            queue.extend(earlier);
+        }
+    }
+    None
 }
 
 /// One entry per commit that became or stopped being visible between
@@ -272,15 +322,15 @@ async fn change_effects(
     }
     let mut unpaired = Vec::new();
     for (commit, change) in &added {
-        let predecessor = operation
-            .predecessors_for_commit(commit)
-            .unwrap_or_default()
-            .iter()
-            .find(|predecessor| {
-                removed_changes
-                    .get(*predecessor)
-                    .or_else(|| outside.get(*predecessor))
-                    == Some(change)
+        let predecessor =
+            predecessor_in(operation, commit, change, &removed_changes).or_else(|| {
+                // A predecessor that was not visible before either: a rewrite
+                // of a commit another workspace already rewrote.
+                operation
+                    .predecessors_for_commit(commit)
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|predecessor| outside.get(*predecessor) == Some(change))
             });
         match predecessor {
             Some(predecessor) => {

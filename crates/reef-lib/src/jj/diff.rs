@@ -154,8 +154,9 @@ pub struct DiffOptions {
     pub max_file_bytes: usize,
     /// Path prefixes; empty for every path.
     pub paths: Vec<RepoPathBuf>,
-    /// Files whose path is this or before it are skipped.
-    pub after: Option<String>,
+    /// Files whose path is this or before it, in jj's path order (by
+    /// component, so `a/b` is before `a.rs`), are skipped.
+    pub after: Option<RepoPathBuf>,
     /// Files per page at most.
     pub limit: usize,
 }
@@ -411,6 +412,14 @@ fn compare(diff: &mut FileDiffInfo, old: &[u8], new: &[u8], options: &DiffOption
             }
         }
         if !kept.lines.is_empty() {
+            // A side the cut emptied starts at the line before, as git
+            // writes an empty side.
+            if kept.old_lines == 0 {
+                kept.old_start = to_u32(hunk.left_line_range.start);
+            }
+            if kept.new_lines == 0 {
+                kept.new_start = to_u32(hunk.right_line_range.start);
+            }
             diff.hunks.push(kept);
         }
     }
@@ -505,8 +514,13 @@ pub async fn diff_page(
     // would pay it again; past git's own default `diff.renameLimit` it is
     // skipped, as git skips it, and files are added and deleted.
     let mut copies = CopyRecords::default();
-    let differ = from_tree.diff_stream(&to_tree, &*matcher).count().await;
-    if differ <= RENAME_LIMIT {
+    let mut differ = 0;
+    let mut counting = from_tree.diff_stream(&to_tree, &*matcher);
+    while differ <= RENAME_LIMIT && counting.next().await.is_some() {
+        differ += 1;
+    }
+    drop(counting);
+    if differ <= RENAME_LIMIT && !should_stop() {
         for commit in &from_commits {
             copy_records(repo, commit.id(), to_commit.id(), &mut copies).await?;
         }
@@ -532,22 +546,27 @@ pub async fn diff_page(
     };
     let mut stream = from_tree.diff_stream_with_copies(&to_tree, &*matcher, &copies);
     while let Some(entry) = stream.next().await {
+        if should_stop() {
+            // The RPC is gone: `total` no longer matters.
+            page.more = true;
+            break;
+        }
         page.total += 1;
-        let path = entry.path.target().as_internal_file_string().to_owned();
         if options
             .after
             .as_ref()
-            .is_some_and(|after| path.as_str() <= after.as_str())
+            .is_some_and(|after| entry.path.target() <= after.as_ref())
         {
             continue;
         }
         if page.more {
             continue;
         }
-        if page.files.len() == options.limit || should_stop() {
+        if page.files.len() == options.limit {
             page.more = true;
             continue;
         }
+        let path = entry.path.target().as_internal_file_string().to_owned();
         let sides = Sides {
             from: &from_tree,
             to: &to_tree,

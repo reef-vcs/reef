@@ -299,17 +299,22 @@ pub async fn log_page(
 }
 
 /// Up to `limit` commits of `parsed` in the revset's order (children
-/// first), and how many it has in all.
+/// first), and how many it has in all. `should_stop` is checked between
+/// commits; when it returns true the count ends there.
 pub async fn commits(
     repo: &ReadonlyRepo,
     parsed: &ParsedRevset,
     limit: usize,
+    should_stop: &dyn Fn() -> bool,
 ) -> Result<(Vec<CommitIdHex>, usize), RevisionError> {
     let revset = revset::evaluate(repo, parsed)?;
     let mut stream = revset.stream();
     let mut ids = Vec::new();
     let mut total = 0;
     while let Some(id) = stream.next().await {
+        if should_stop() {
+            break;
+        }
         let id = id.map_err(RevisionError::Evaluation)?;
         if ids.len() < limit {
             ids.push(CommitIdHex::of(&id));

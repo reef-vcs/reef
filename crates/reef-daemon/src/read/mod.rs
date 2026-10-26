@@ -222,20 +222,53 @@ impl Reads {
     }
 
     /// Runs `read` on the blocking pool with a permit, driving its future
-    /// there. A panic fails with [`ReadError::Panicked`] and has `handle`'s
-    /// thread reopen the repository.
+    /// there. The permit is held by the blocking task, so a read whose RPC
+    /// was dropped keeps its slot until it stops. A panic fails with
+    /// [`ReadError::Panicked`], forgets the repository's cached entries,
+    /// and has `handle`'s thread reopen the repository.
     pub async fn run<T, F, Fut>(&self, handle: &RepoHandle, read: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = T>,
     {
-        let _permit = Arc::clone(&self.permits)
+        let permit = Arc::clone(&self.permits)
             .acquire_owned()
             .await
             .map_err(|_| ReadError::Cancelled)?;
+        self.blocking(handle, Some(permit), read).await
+    }
+
+    /// [`Reads::run`] without a permit, for the effects a write's response
+    /// reports: writes are bounded by the repository's thread already, and
+    /// must not queue behind slow reads.
+    pub async fn run_for_write<T, F, Fut>(
+        &self,
+        handle: &RepoHandle,
+        read: F,
+    ) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+    {
+        self.blocking(handle, None, read).await
+    }
+
+    async fn blocking<T, F, Fut>(
+        &self,
+        handle: &RepoHandle,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        read: F,
+    ) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+    {
         let span = tracing::Span::current();
         let joined = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let _entered = span.enter();
             pollster::block_on(read())
         })
@@ -244,6 +277,9 @@ impl Reads {
             Ok(value) => Ok(value),
             Err(error) if error.is_panic() => {
                 tracing::error!(repo = %handle.id(), "read panicked; reopening the repository");
+                // Repositories loaded from the store the panic may have
+                // poisoned are not reused.
+                self.clear(handle.id());
                 handle.reopen_after_panic();
                 Err(ReadError::Panicked { repo: handle.id() })
             }
