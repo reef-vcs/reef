@@ -197,8 +197,9 @@ pub mod error {
     /// A replacement's `old_text` occurs more than once and `all` is not
     /// set. Metadata: `path`, `edit_index`, `occurrences`.
     pub const TEXT_NOT_UNIQUE: &str = "TEXT_NOT_UNIQUE";
-    /// A file larger than a text replacement reads (16 MiB). Metadata:
-    /// `path`, `edit_index`, `size`.
+    /// A file larger than a text replacement reads or writes (16 MiB), or
+    /// edits holding more than 64 MiB of content in all. Metadata: `path`,
+    /// `edit_index`, `size`.
     pub const FILE_TOO_LARGE: &str = "FILE_TOO_LARGE";
     /// An edit at or under a shared store's mount in `reef.toml`. Metadata:
     /// `path`, `mount`, `edit_index`.

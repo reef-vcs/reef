@@ -21,9 +21,10 @@ use jj_lib::backend::{
 use jj_lib::commit::Commit;
 use jj_lib::conflicts::{
     MaterializedTreeValue, materialize_merge_result_to_bytes, materialize_tree_value,
+    resolve_file_executable,
 };
 use jj_lib::matchers::{Matcher, PrefixMatcher, Visit, VisitDirs, VisitFiles};
-use jj_lib::merge::{Merge, SameChange};
+use jj_lib::merge::Merge;
 use jj_lib::merged_tree::{MergedTree, all_merged_tree_entries};
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId as _;
@@ -44,6 +45,9 @@ pub const MAX_READ_BYTES: usize = 1 << 20;
 pub const MAX_REPLACE_BYTES: u64 = 16 << 20;
 /// The most edits in one request.
 pub const MAX_EDITS: usize = 1000;
+/// The most content bytes one request's edits may hold in memory: what it
+/// sent, and what its replacements read and produced.
+pub const MAX_HELD_BYTES: usize = 64 << 20;
 
 /// Path components an edit may not write, compared ignoring ASCII case: a
 /// tree holding them cannot be checked out (jj-lib refuses `.git` and
@@ -517,6 +521,9 @@ pub enum EditProblem {
         /// Its size, or the first size known to be over.
         size: u64,
     },
+    /// The request's edits hold more content than [`MAX_HELD_BYTES`].
+    #[error("the edits hold {0} bytes of content; one request holds at most {MAX_HELD_BYTES}")]
+    TooMuchContent(usize),
     /// A path at or under a shared store's mount.
     #[error("{path} is under {mount}, the mount of a shared store in reef.toml")]
     StoreMountPath {
@@ -531,7 +538,7 @@ impl EditProblem {
     /// The path the problem is about.
     pub fn path(&self) -> Option<&str> {
         match self {
-            Self::Invalid(_) => None,
+            Self::Invalid(_) | Self::TooMuchContent(_) => None,
             Self::InvalidPath(path)
             | Self::PathNotFound(path)
             | Self::TextNotFound(path)
@@ -554,6 +561,7 @@ impl Classify for EditProblem {
             | Self::TextNotFound(_)
             | Self::TextNotUnique { .. }
             | Self::FileTooLarge { .. }
+            | Self::TooMuchContent(_)
             | Self::StoreMountPath { .. } => ErrorKind::Conflict,
         }
     }
@@ -684,6 +692,8 @@ impl Current {
 struct Overlay<'a> {
     base: &'a MergedTree,
     entries: BTreeMap<RepoPathBuf, Pending>,
+    /// The content bytes the entries hold, counted as they are added.
+    held: usize,
 }
 
 impl Overlay<'_> {
@@ -691,6 +701,8 @@ impl Overlay<'_> {
     async fn get(&self, path: &RepoPath) -> Result<Current, BackendError> {
         if let Some(pending) = self.entries.get(path) {
             return Ok(match pending {
+                // Deleted, then written below: a directory now.
+                Pending::Absent if self.has_below(path).await? => Current::Directory,
                 Pending::Absent => Current::Absent,
                 pending => Current::Pending(pending.clone()),
             });
@@ -862,9 +874,20 @@ fn replace(
     path: &RepoPath,
 ) -> Result<Vec<u8>, EditProblem> {
     let text = || path.as_internal_file_string().to_owned();
+    // The result is bounded like the input, before it is built: `all` with
+    // a long `new` multiplies the file.
+    let too_large = |count: usize| {
+        let size = bytes.len() - count * old.len() + count.saturating_mul(new.len());
+        let size = u64::try_from(size).unwrap_or(u64::MAX);
+        (size > MAX_REPLACE_BYTES).then(|| EditProblem::FileTooLarge { path: text(), size })
+    };
     if all {
-        if bytes.find(old).is_none() {
+        let count = bytes.find_iter(old).count();
+        if count == 0 {
             return Err(EditProblem::TextNotFound(text()));
+        }
+        if let Some(problem) = too_large(count) {
+            return Err(problem);
         }
         return Ok(bytes.replace(old, new));
     }
@@ -877,6 +900,9 @@ fn replace(
             path: text(),
             occurrences,
         });
+    }
+    if let Some(problem) = too_large(1) {
+        return Err(problem);
     }
     let mut out = Vec::with_capacity(bytes.len() - old.len() + new.len());
     out.extend_from_slice(&bytes[..start]);
@@ -900,7 +926,8 @@ fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
 }
 
 /// The bit a file written over `current` gets when the edit leaves it
-/// unset: the file's own, a conflict's when its file sides agree, else
+/// unset: the file's own, a conflict's as jj resolves it when it snapshots a
+/// resolved conflict (its sides', else its base's when unambiguous), else
 /// false.
 fn kept_bit(current: &Current) -> bool {
     match current {
@@ -909,7 +936,7 @@ fn kept_bit(current: &Current) -> bool {
         ) => *executable,
         Current::Base(value) => value
             .to_executable_merge()
-            .and_then(|bits| bits.resolve_trivial(SameChange::Accept).copied().flatten())
+            .and_then(|bits| resolve_file_executable(&bits))
             .unwrap_or(false),
         _ => false,
     }
@@ -999,6 +1026,12 @@ async fn apply_one(overlay: &mut Overlay<'_>, edit: &Edit) -> Result<(), Failure
             copied
         }
     };
+    if let Pending::Bytes { bytes, .. } = &next {
+        overlay.held = overlay.held.saturating_add(bytes.len());
+        if overlay.held > MAX_HELD_BYTES {
+            return Err(EditProblem::TooMuchContent(overlay.held).into());
+        }
+    }
     overlay.entries.insert(path, next);
     Ok(())
 }
@@ -1067,22 +1100,32 @@ fn mounts_in(bytes: &[u8]) -> Vec<String> {
 async fn mounts(overlay: &Overlay<'_>) -> Result<Vec<String>, BackendError> {
     #[expect(clippy::expect_used, reason = "a constant, valid repository path")]
     let spec = RepoPath::from_internal_string(SPEC_FILE).expect("reef.toml is a valid path");
+    // A `reef.toml` too large to read declares nothing a workspace uses: a
+    // create fails on it too.
+    let read = async |id: &FileId| match read_blob(overlay.base, spec, id).await {
+        Ok(bytes) => Ok(mounts_in(&bytes)),
+        Err(Failure::Backend(error)) => Err(error),
+        Err(Failure::Problem(_)) => Ok(Vec::new()),
+    };
     let mut mounts = Vec::new();
-    if let Some(TreeValue::File { id, .. }) = overlay.base.path_value(spec).await?.as_normal()
-        && let Ok(bytes) = read_blob(overlay.base, spec, id).await
-    {
-        mounts.extend(mounts_in(&bytes));
+    if let Some(TreeValue::File { id, .. }) = overlay.base.path_value(spec).await?.as_normal() {
+        mounts.extend(read(id).await?);
     }
     match overlay.entries.get(spec) {
         Some(Pending::Bytes { bytes, .. }) => mounts.extend(mounts_in(bytes)),
-        Some(Pending::Value(TreeValue::File { id, .. })) => {
-            if let Ok(bytes) = read_blob(overlay.base, spec, id).await {
-                mounts.extend(mounts_in(&bytes));
-            }
-        }
+        Some(Pending::Value(TreeValue::File { id, .. })) => mounts.extend(read(id).await?),
         _ => {}
     }
     Ok(mounts)
+}
+
+/// Whether `path` is `mount` or below it, ignoring ASCII case: on a
+/// case-insensitive filesystem `Node_Modules/x` lands in `node_modules`.
+fn under_mount(path: &str, mount: &str) -> bool {
+    let (path, mount) = (path.as_bytes(), mount.as_bytes());
+    path.len() >= mount.len()
+        && path[..mount.len()].eq_ignore_ascii_case(mount)
+        && (path.len() == mount.len() || path[mount.len()] == b'/')
 }
 
 /// Applies `edits` in order over `base`, all or none, each seeing what the
@@ -1098,6 +1141,7 @@ pub async fn apply(
     let mut overlay = Overlay {
         base,
         entries: BTreeMap::new(),
+        held: 0,
     };
     for (index, edit) in edits.iter().enumerate() {
         apply_one(&mut overlay, edit)
@@ -1107,12 +1151,7 @@ pub async fn apply(
     let mounts = mounts(&overlay).await?;
     for (index, edit) in edits.iter().enumerate() {
         let path = &edit.path;
-        if let Some(mount) = mounts.iter().find(|mount| {
-            path == *mount
-                || path
-                    .strip_prefix(mount.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        }) {
+        if let Some(mount) = mounts.iter().find(|mount| under_mount(path, mount)) {
             return Err(at(
                 index,
                 edit,
@@ -1287,6 +1326,22 @@ mod tests {
         assert!(matches!(
             replace(b"abc", b"x", b"y", true, &p),
             Err(EditProblem::TextNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn mounts_match_ignoring_case() {
+        assert!(under_mount("node_modules", "node_modules"));
+        assert!(under_mount("node_modules/x", "node_modules"));
+        assert!(under_mount("Node_Modules/x", "node_modules"));
+        assert!(!under_mount("node_modules_x", "node_modules"));
+        assert!(!under_mount("node", "node_modules"));
+        let p = path("f");
+        let big = vec![b'a'; 1 << 20];
+        let new = "b".repeat(2 << 20);
+        assert!(matches!(
+            replace(&big, b"a", new.as_bytes(), true, &p),
+            Err(EditProblem::FileTooLarge { .. })
         ));
     }
 

@@ -650,6 +650,10 @@ async fn edit_files_without_a_workspace() {
 
 // 12
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "two workspaces through one edit, then a new change"
+)]
 async fn edit_files_moves_workspaces() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
@@ -716,6 +720,20 @@ async fn edit_files_moves_workspaces() {
     )
     .await[0];
     assert_eq!(v_snapshot.agent, "v@test");
+    // Both were snapshotted before the edit, descendants first.
+    let all = operations(client, &repo, OperationFilter::default()).await;
+    let at = all.iter().position(|op| op.id == operation.id).unwrap();
+    let before: Vec<(&str, OperationKind)> = all[at + 1..at + 3]
+        .iter()
+        .map(|op| (op.workspace_id.as_str(), op.kind()))
+        .collect();
+    assert_eq!(
+        before,
+        [
+            (w.id.as_str(), OperationKind::Snapshot),
+            (v.id.as_str(), OperationKind::Snapshot)
+        ]
+    );
 
     // W's directory took the edit through a checkout.
     assert_eq!(read(&w, "b.txt").as_deref(), Some("b\n"));

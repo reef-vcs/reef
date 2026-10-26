@@ -681,6 +681,27 @@ async fn edits_apply_in_order() {
         value(&tree, "only").await,
         Some(TreeValue::File { .. })
     ));
+    // A file deleted, then written below, is a directory for later edits.
+    for last in [
+        content("f", "lost?"),
+        delete("f"),
+        replace("f", "one", "1", false),
+    ] {
+        let (index, error) = applied(&base, &[delete("f"), content("f/b", "b"), last])
+            .await
+            .unwrap_err();
+        assert_eq!(index, 2);
+        assert!(
+            matches!(
+                error,
+                EditProblem::NotAFile {
+                    kind: EntryKind::Directory,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 
     // copy_from keeps the id and bit, copies a symlink, and with a delete
     // is a rename.
@@ -773,6 +794,28 @@ async fn edits_apply_in_order() {
         .await
         .unwrap();
     assert!(dry.is_none());
+    let op = fx.head().op_id().clone();
+    let failed = fx
+        .repo
+        .edit_commit(
+            &hex(&base),
+            &[content("ok", "1"), delete("absent")],
+            None,
+            &meta(),
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(*fx.head().op_id(), op, "no operation");
+    // Content held in memory is bounded, replacements' results included.
+    let grow = vec![
+        content("g", &"a".repeat(1 << 20)),
+        replace("g", "a", &"b".repeat(2 << 20), true),
+    ];
+    let (_, error) = applied(&base, &grow).await.unwrap_err();
+    assert!(
+        matches!(error, EditProblem::FileTooLarge { .. }),
+        "{error:?}"
+    );
 }
 
 // 5
@@ -878,6 +921,42 @@ async fn edit_commit() {
             .as_resolved()
             .is_none()
     );
+}
+
+// 5, the executable bit of a conflict
+#[tokio::test]
+async fn content_over_a_conflict_keeps_jjs_bit() {
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("x", Entry::Exec(b"base\n"))]).await;
+    let modified = new_commit(&mut tx, &[&base], &[("x", Entry::Exec(b"modified\n"))]).await;
+    let deleted = new_commit(&mut tx, &[&base], &[]).await;
+    let deleted = {
+        let tree = files::apply(&deleted.tree(), &[delete("x")], true)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.repo_mut()
+            .rewrite_commit(&deleted)
+            .set_tree(tree)
+            .write()
+            .await
+            .unwrap()
+    };
+    let merged = new_commit(&mut tx, &[&modified, &deleted], &[]).await;
+    fx.commit(tx).await;
+    assert!(merged.tree().has_conflict());
+    // Modified on one side, deleted on the other: jj keeps the base's bit.
+    let tree = applied(&merged, &[content("x", "resolved\n")])
+        .await
+        .unwrap();
+    assert!(matches!(
+        value(&tree, "x").await,
+        Some(TreeValue::File {
+            executable: true,
+            ..
+        })
+    ));
 }
 
 // 6

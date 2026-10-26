@@ -242,7 +242,7 @@ message EditFilesResponse {
 // One edit of one path.
 message FileEdit {
   // The path: repository-relative, `/`-separated, with no empty, `.` or
-  // `..` component, and no `.git` or `.jj` component in any case.
+  // `..` component, and no `.git`, `.jj` or `git~1` component in any case.
   string path = 1;
   // What to do to it. Required, unless `executable` is set: an edit with no
   // action and `executable` set changes only the bit of an existing file.

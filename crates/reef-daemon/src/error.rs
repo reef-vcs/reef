@@ -424,6 +424,10 @@ fn edit_reason(error: &EditError) -> Option<(&'static str, BTreeMap<String, Stri
             add("size", size.to_string());
             reason::FILE_TOO_LARGE
         }
+        EditProblem::TooMuchContent(size) => {
+            add("size", size.to_string());
+            reason::FILE_TOO_LARGE
+        }
         EditProblem::StoreMountPath { mount, .. } => {
             add("mount", mount.clone());
             reason::STORE_MOUNT_PATH
@@ -521,6 +525,12 @@ fn edit_advice(error: &EditError) -> Option<Advice> {
         } => Some(Advice::hint(
             "Directories are not edited as one; edit or delete the files in it one by one.",
         )),
+        EditProblem::NotAFile {
+            kind: EntryKind::Conflict,
+            ..
+        } => Some(Advice::hint(
+            "A conflict is resolved by writing the whole file with content.",
+        )),
         EditProblem::NotAFile { .. } | EditProblem::NotADirectory { .. } => Some(Advice::hint(
             "Delete it first, in an earlier edit of the same request.",
         )),
@@ -530,7 +540,7 @@ fn edit_advice(error: &EditError) -> Option<Advice> {
         EditProblem::TextNotFound(_) => Some(Advice::hint(
             "Read the file at the target again, and pass its commit_id as expected_commit_id.",
         )),
-        EditProblem::FileTooLarge { .. } => Some(Advice::hint(
+        EditProblem::FileTooLarge { .. } | EditProblem::TooMuchContent(_) => Some(Advice::hint(
             "Send the whole file as content, or edit it in a workspace.",
         )),
         EditProblem::StoreMountPath { .. } => Some(Advice::hint(
