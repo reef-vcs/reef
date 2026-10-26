@@ -26,16 +26,16 @@ use std::time::{Duration, Instant, SystemTime};
 use common::{SyntheticRepo, TestDaemon, logs, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
+use reef_api::v1::{
+    BackupResponse, BackupStep, CreateWorkspaceRequest, IfNotJj, ListWorkspacesRequest, Workspace,
+    WorkspaceState, create_workspace_request,
+};
 use reef_daemon::client::json::millis_of;
 use reef_daemon::config::Config;
 use reef_daemon::db::META_REMATERIALIZE_PENDING;
 use reef_daemon::maintenance::backup::{HEADS_FILE, MANIFEST_FILE, Manifest, read_op_heads};
 use reef_daemon::maintenance::restore::{RestoreError, RestoreOptions, RestoreReport, restore};
 use reef_daemon::model::{RepoId, Timestamp};
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
-    BackupProgress, CreateRequest, ListWorkspacesRequest, Workspace, create_request,
-};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{CommitIdHex, Repo, RepoPath};
 use reef_testing::synth::Preset;
@@ -70,15 +70,15 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
 async fn create(
     daemon: &TestDaemon,
     repo: &str,
-    start: Option<create_request::Start>,
+    start: Option<create_workspace_request::Start>,
 ) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.to_owned(),
             start,
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -97,7 +97,8 @@ async fn snapshot(daemon: &TestDaemon, repo: &str, ws: &Workspace) -> (String, S
         .snapshot_workspace(repo, &ws.id, "")
         .await
         .unwrap();
-    (response.commit_id, response.op_id)
+    let operation = response.operation.map(|op| op.id).unwrap_or_default();
+    (response.commit_id, operation)
 }
 
 async fn workspaces(daemon: &TestDaemon, repo: &str) -> Vec<Workspace> {
@@ -113,14 +114,14 @@ async fn workspaces(daemon: &TestDaemon, repo: &str) -> Vec<Workspace> {
 
 /// A backup of `repo` (empty for every repository) into `dest`: its
 /// progress messages and its manifest.
-async fn backup(daemon: &TestDaemon, dest: &Path, repo: &str) -> (Vec<BackupProgress>, Manifest) {
+async fn backup(daemon: &TestDaemon, dest: &Path, repo: &str) -> (Vec<BackupResponse>, Manifest) {
     let mut stream = daemon.client.backup(dest, repo).await.unwrap();
     let mut steps = Vec::new();
     while let Some(step) = stream.message().await.unwrap() {
         steps.push(step);
     }
     let last = steps.last().expect("a last message");
-    assert!(last.done, "{steps:?}");
+    assert_eq!(last.step(), BackupStep::Done, "{steps:?}");
     assert_eq!(Path::new(&last.manifest_path), dest.join(MANIFEST_FILE));
     (steps, Manifest::read(dest).unwrap())
 }
@@ -310,7 +311,7 @@ async fn round_trip_under_load() {
     while workspaces(&daemon, &repo.id)
         .await
         .iter()
-        .any(|ws| ws.last_snapshot_op.is_empty())
+        .any(|ws| ws.last_snapshot_operation_id.is_empty())
     {
         assert!(Instant::now() < deadline, "every workspace snapshots");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,14 +322,16 @@ async fn round_trip_under_load() {
     let before: Vec<String> = workspaces(&daemon, &repo.id)
         .await
         .into_iter()
-        .map(|ws| ws.last_snapshot_op)
+        .map(|ws| ws.last_snapshot_operation_id)
         .collect();
     let dest = daemon.tmp.path().join("backup");
     let (steps, manifest) = backup(&daemon, &dest, "").await;
     assert!(manifest.complete);
     assert_eq!(manifest.repos.len(), 1);
     assert!(
-        steps.iter().any(|step| step.step == "operations"),
+        steps
+            .iter()
+            .any(|step| step.step() == BackupStep::Operations),
         "{steps:?}"
     );
     let pause_ms = manifest.repos[0].pause_ms;
@@ -400,7 +403,7 @@ async fn round_trip_under_load() {
 /// its lease past the restart grace, on its commit in the restored view,
 /// holding some of what its writer wrote, in order, on disk too.
 async fn check_restored(root: &Path, ws: &Workspace, written: usize, started: Timestamp) {
-    assert_eq!(ws.state, "active", "{ws:?}");
+    assert_eq!(ws.state(), WorkspaceState::Active, "{ws:?}");
     let expires = millis_of(ws.lease.as_ref().unwrap().expires_at.as_ref().unwrap());
     assert!(
         expires >= started.0 + 5_000,
@@ -561,7 +564,7 @@ async fn newer_live_repo_is_refused() {
     daemon.handle.state().manager.scheduler().pause_watcher();
     let restored = workspaces(&daemon, &repo.id).await;
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].state, "active");
+    assert_eq!(restored[0].state(), WorkspaceState::Active);
     let (commit, _) = snapshot(&daemon, &repo.id, &restored[0]).await;
     assert_eq!(
         file_at(&repo.root, &commit, "later.txt").await.as_deref(),
@@ -597,7 +600,7 @@ async fn quiesce_blocks_writes_and_auto_resumes() {
     );
     let error = daemon
         .client
-        .heartbeat_workspace(&repo.id, &ws.id, &lease.id)
+        .renew_lease(&repo.id, &ws.id, &lease.id)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error:?}");
@@ -624,7 +627,7 @@ async fn quiesce_blocks_writes_and_auto_resumes() {
     );
     daemon
         .client
-        .heartbeat_workspace(&repo.id, &ws.id, &lease.id)
+        .renew_lease(&repo.id, &ws.id, &lease.id)
         .await
         .unwrap();
 }
@@ -770,7 +773,7 @@ async fn colocated_repo_round_trips() {
     let daemon = stopped.start().await;
     let restored = workspaces(&daemon, &repo).await;
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].state, "active");
+    assert_eq!(restored[0].state(), WorkspaceState::Active);
     assert_eq!(restored[0].commit_id, commit);
     assert_eq!(
         std::fs::read_to_string(Path::new(&restored[0].path).join("b.txt")).unwrap(),
@@ -800,7 +803,7 @@ async fn gc_respects_retention() {
 
         let report = daemon
             .client
-            .gc(&repo.id, false)
+            .collect_garbage(&repo.id, false)
             .await
             .unwrap()
             .reports
@@ -825,7 +828,7 @@ async fn rematerialize_on_demand() {
     let b = create(
         &daemon,
         &repo.id,
-        Some(create_request::Start::NewOn(a.change_id.clone())),
+        Some(create_workspace_request::Start::NewOn(a.change_id.clone())),
     )
     .await;
     // On the default start again: a's first tree, shared.
@@ -851,7 +854,11 @@ async fn rematerialize_on_demand() {
     let restored = workspaces(&daemon, &repo.id).await;
     assert_eq!(restored.len(), 3);
     for ws in &restored {
-        assert_eq!(ws.state, "active", "none is reclaimed: {ws:?}");
+        assert_eq!(
+            ws.state(),
+            WorkspaceState::Active,
+            "none is reclaimed: {ws:?}"
+        );
         assert!(Path::new(&ws.path).is_dir());
         assert!(
             logs().has_line(&[

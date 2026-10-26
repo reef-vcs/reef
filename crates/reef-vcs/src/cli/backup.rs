@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use reef_api::v1::BackupStep;
 use reef_daemon::client::ClientError;
 use reef_daemon::maintenance::backup::Manifest;
 
@@ -30,6 +31,18 @@ pub(crate) struct Args {
     repo: Option<String>,
 }
 
+/// A backup step as the daemon's log names it.
+fn step_name(step: BackupStep) -> &'static str {
+    match step {
+        BackupStep::Sqlite => "sqlite",
+        BackupStep::Operations => "operations",
+        BackupStep::Objects => "objects",
+        BackupStep::Heads => "heads",
+        BackupStep::Done => "done",
+        BackupStep::Unspecified => "unknown",
+    }
+}
+
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     let begun = Instant::now();
     let dest = absolute(&args.dir)?;
@@ -39,7 +52,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         async move {
             let mut steps = ctx.client.backup(dest, &repo).await?;
             while let Some(step) = steps.message().await.map_err(ClientError::from)? {
-                if step.done {
+                if step.step() == BackupStep::Done {
                     return Ok(Some(step.manifest_path));
                 }
                 let what = if step.repo_id.is_empty() {
@@ -49,7 +62,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                 };
                 ctx.out.note(&format!(
                     "reef: {what}: {} ({} files, {})",
-                    step.step,
+                    step_name(step.step()),
                     step.files,
                     size(step.bytes)
                 ));

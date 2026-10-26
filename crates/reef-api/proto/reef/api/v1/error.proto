@@ -1,0 +1,59 @@
+// The detail every Reef API error carries (ADR 0029).
+//
+// An error's gRPC code comes from its kind. `grpc-status-details-bin` holds
+// a `google.rpc.Status` whose `details` has one `Any` of this message, type
+// URL `type.googleapis.com/reef.api.v1.ErrorDetail`.
+syntax = "proto3";
+
+package reef.api.v1;
+
+// What went wrong, as a class: the gRPC code follows from it, and a client
+// decides from it whether the caller can fix the error.
+enum ErrorKind {
+  // Not set; read as ERROR_KIND_INTERNAL.
+  ERROR_KIND_UNSPECIFIED = 0;
+  // Something named does not exist. NOT_FOUND.
+  ERROR_KIND_NOT_FOUND = 1;
+  // Something to be created already exists. ALREADY_EXISTS.
+  ERROR_KIND_ALREADY_EXISTS = 2;
+  // The request is malformed or names something ambiguously.
+  // INVALID_ARGUMENT.
+  ERROR_KIND_INVALID_ARGUMENT = 3;
+  // The request conflicts with the current state, such as a workspace
+  // that is not active. FAILED_PRECONDITION.
+  ERROR_KIND_CONFLICT = 4;
+  // The daemon cannot serve it now, such as during a quiesce; retrying
+  // later may succeed. UNAVAILABLE.
+  ERROR_KIND_UNAVAILABLE = 5;
+  // The filesystem or the operating system refused. PERMISSION_DENIED.
+  ERROR_KIND_PERMISSION_DENIED = 6;
+  // A filesystem error that is not a permission error. INTERNAL.
+  ERROR_KIND_IO = 7;
+  // A bug or an unexpected state in the daemon. INTERNAL.
+  ERROR_KIND_INTERNAL = 8;
+  // The daemon cannot serve the request as asked: an RPC it declares but
+  // does not implement, a method it does not know, or a client and daemon
+  // whose API versions differ. UNIMPLEMENTED.
+  ERROR_KIND_UNSUPPORTED = 9;
+}
+
+// The structured part of an error.
+message ErrorDetail {
+  // The error's kind.
+  ErrorKind kind = 1;
+  // The specific condition, as an UPPER_SNAKE constant documented on the
+  // RPCs that return it (`NOT_IMPLEMENTED`, `INVALID_PAGE_TOKEN`); empty
+  // when there is none.
+  string reason = 2;
+  // The error's message, then each source's, outermost first. Joined with
+  // ": ", it is the status message.
+  repeated string chain = 3;
+  // How to fix it, in one sentence; empty when the daemon does not know.
+  string hint = 4;
+  // A command line that fixes it or shows what to do next, as an argv
+  // starting "reef" that an agent can run verbatim; never a placeholder.
+  // Empty when there is none.
+  repeated string next = 5;
+  // Values that go with `reason`, documented with it, such as `method`.
+  map<string, string> metadata = 6;
+}

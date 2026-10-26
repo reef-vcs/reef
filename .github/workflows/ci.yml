@@ -38,6 +38,33 @@ jobs:
       - run: just fmt-check
       - run: just doc-links
 
+  # The API schema (R2.01, ADR 0029): lint, formatting, and, on a pull request, no breaking change
+  # against the base. The breaking check needs v1 on the base, which R2.01's own PR does not have.
+  api:
+    name: API schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+          version: "1.74.0"
+      - run: buf lint
+      - run: buf format --diff --exit-code
+      - if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          if [[ -z "$(git ls-tree -d "origin/$BASE" crates/reef-api/proto/reef/api/v1)" ]]; then
+            echo "origin/$BASE has no reef.api.v1 yet; nothing to compare"
+            exit 0
+          fi
+          buf breaking --against ".git#ref=origin/$BASE"
+
   deny:
     name: cargo deny
     runs-on: ubuntu-24.04
@@ -228,7 +255,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, deny, check, overlayfs, synth-determinism, cli-shape]
+    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -237,6 +264,7 @@ jobs:
       - env:
           NEEDS: ${{ toJSON(needs) }}
           FMT: ${{ needs.fmt.result }}
+          API: ${{ needs.api.result }}
           DENY: ${{ needs.deny.result }}
           CHECK: ${{ needs.check.result }}
           OVERLAYFS: ${{ needs.overlayfs.result }}
@@ -244,4 +272,4 @@ jobs:
           CLI_SHAPE: ${{ needs.cli-shape.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" ]]
+          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" ]]

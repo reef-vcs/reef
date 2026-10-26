@@ -180,7 +180,12 @@ impl Out {
             }
         }
         if self.mode == Output::Json {
-            self.error_object(kind_text(error.kind()), &message, advice.as_ref());
+            self.error_object(
+                kind_text(error.kind()),
+                error.reason(),
+                &message,
+                advice.as_ref(),
+            );
         }
     }
 
@@ -203,15 +208,18 @@ impl Out {
         }
         if self.mode == Output::Json {
             let advice = fix.cloned().or_else(|| usage.map(Advice::hint));
-            self.error_object("invalid_argument", message, advice.as_ref());
+            self.error_object("invalid_argument", "", message, advice.as_ref());
         }
     }
 
-    fn error_object(&self, kind: &str, message: &str, advice: Option<&Advice>) {
+    fn error_object(&self, kind: &str, reason: &str, message: &str, advice: Option<&Advice>) {
         /// The fields in the order a reader wants them.
         #[derive(Serialize)]
         struct ErrorObject<'a> {
             kind: &'a str,
+            /// The daemon's `ErrorDetail.reason` (R2.01), when it has one.
+            #[serde(skip_serializing_if = "str::is_empty")]
+            reason: &'a str,
             message: &'a str,
             #[serde(skip_serializing_if = "str::is_empty")]
             hint: &'a str,
@@ -224,6 +232,7 @@ impl Out {
         }
         let error = ErrorObject {
             kind,
+            reason,
             message,
             hint: advice.map_or("", |advice| advice.hint.as_str()),
             next: advice.map_or(&[], |advice| advice.next.as_slice()),

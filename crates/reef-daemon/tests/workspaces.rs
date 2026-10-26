@@ -17,14 +17,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, is_watched, op_id, proto_millis, test_settings};
+use reef_api::v1::{
+    self, Backend, CreateWorkspaceRequest, IfNotJj, LeaseEndReason, ListWorkspacesRequest,
+    MoveWorkspaceRequest, SnapshotKind, WatchState, Workspace, create_workspace_request,
+    move_workspace_request,
+};
 use reef_daemon::client::ClientError;
 use reef_daemon::error::detail_of;
 use reef_daemon::model::{ReclaimReason, WorkspaceState};
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
-    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
-};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo, RepoPath};
 use reef_testing::synth::{self, Preset};
@@ -35,13 +36,23 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo(Preset::Small).await
 }
 
-fn request(repo: &SyntheticRepo, start: Option<create_request::Start>) -> CreateRequest {
-    CreateRequest {
+fn request(
+    repo: &SyntheticRepo,
+    start: Option<create_workspace_request::Start>,
+) -> CreateWorkspaceRequest {
+    CreateWorkspaceRequest {
         repo: repo.id.clone(),
         start,
         owner: OWNER.to_owned(),
-        ..CreateRequest::default()
+        ..CreateWorkspaceRequest::default()
     }
+}
+
+/// v0's `materialize_ms`: the base cache lookup and the backend's
+/// materialization.
+fn materialize_ms(response: &v1::CreateWorkspaceResponse) -> u64 {
+    let timings = response.timings.unwrap_or_default();
+    timings.base_ms + timings.materialize_ms
 }
 
 async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
@@ -76,7 +87,7 @@ fn kind_of(error: &ClientError) -> ErrorKind {
         panic!("not an RPC error: {error:?}");
     };
     let detail = detail_of(status).expect("an ErrorDetail in the status");
-    assert_eq!(detail.kind, reef_daemon::error::kind_name(*kind));
+    assert_eq!(detail.kind(), reef_daemon::error::proto_kind(*kind));
     assert_eq!(error.kind(), *kind);
     *kind
 }
@@ -128,8 +139,8 @@ async fn register_then_create_default() {
         .unwrap();
     let cold_wall = begun.elapsed();
     assert!(!cold.base_was_cached);
-    assert_ne!(cold.op_id, "");
-    let ws = cold.workspace.unwrap();
+    assert_ne!(op_id(cold.operation.as_ref()), "");
+    let ws = cold.workspace.clone().unwrap();
     let path = PathBuf::from(&ws.path);
     assert!(path.is_dir());
     assert!(
@@ -145,7 +156,7 @@ async fn register_then_create_default() {
         ws.change_id,
         default_wc(&repo.root).await.change_id.as_str()
     );
-    assert_eq!(ws.state, "active");
+    assert_eq!(ws.state(), v1::WorkspaceState::Active);
     // The first available in auto's order: apfs on macOS; on Linux an
     // overlay as root or with `fuse-overlayfs` installed, else the copy.
     let status = daemon.client.status().await.unwrap();
@@ -155,9 +166,13 @@ async fn register_then_create_default() {
         .find(|backend| backend.available)
         .unwrap();
     if cfg!(target_os = "macos") {
-        assert_eq!(expected.kind, "apfs");
+        assert_eq!(expected.backend(), Backend::Apfs);
     }
-    assert_eq!(ws.backend, expected.kind, "auto picks the platform's clone");
+    assert_eq!(
+        ws.backend(),
+        expected.backend(),
+        "auto picks the platform's clone"
+    );
     let lease = ws.lease.unwrap();
     assert_eq!(
         millis(lease.expires_at.as_ref().unwrap()) - millis(lease.issued_at.as_ref().unwrap()),
@@ -178,7 +193,8 @@ async fn register_then_create_default() {
     eprintln!(
         "create on the small preset: cold {cold_wall:.2?} (materialize {} ms), \
          base cached {warm_wall:.2?} (materialize {} ms)",
-        cold.materialize_ms, warm.materialize_ms
+        materialize_ms(&cold),
+        materialize_ms(&warm)
     );
 }
 
@@ -187,7 +203,7 @@ async fn register_then_create_default() {
 async fn create_on_change_edits_it() {
     let (daemon, repo) = fixture().await;
     let wc = default_wc(&repo.root).await;
-    let prefix = create_request::Start::Change(wc.change_id.as_str()[..12].to_owned());
+    let prefix = create_workspace_request::Start::Change(wc.change_id.as_str()[..12].to_owned());
     let first = daemon
         .client
         .create_workspace(request(&repo, Some(prefix.clone())))
@@ -223,7 +239,10 @@ async fn create_on_change_edits_it() {
         inspect_two.other_workspaces_on_change,
         std::slice::from_ref(&one.id)
     );
-    assert!(inspect_two.op_id.is_empty(), "no snapshot was asked for");
+    assert!(
+        op_id(inspect_two.snapshot.as_ref()).is_empty(),
+        "no snapshot was asked for"
+    );
     let usage = inspect_two.disk_usage.unwrap();
     assert_eq!(usage.files_changed, 0, "{usage:?}");
 }
@@ -269,7 +288,7 @@ async fn create_new_on_bookmark() {
         .unwrap();
 
     for start in [
-        Some(create_request::Start::NewOn("main".into())),
+        Some(create_workspace_request::Start::NewOn("main".into())),
         None, // the default is the `main` bookmark when it exists (R1.31)
     ] {
         let ws = daemon
@@ -292,7 +311,9 @@ async fn create_new_on_bookmark() {
         .client
         .create_workspace(request(
             &repo,
-            Some(create_request::Start::NewOn("no-such-bookmark".into())),
+            Some(create_workspace_request::Start::NewOn(
+                "no-such-bookmark".into(),
+            )),
         ))
         .await
         .unwrap_err();
@@ -320,7 +341,7 @@ async fn first_snapshot_is_noop() {
         .unwrap();
     let elapsed = begun.elapsed();
     assert!(!snapshot.changed);
-    assert_eq!(snapshot.op_id, "");
+    assert_eq!(op_id(snapshot.operation.as_ref()), "");
     assert_eq!(snapshot.commit_id, ws.commit_id);
 
     // For comparison, a cold scan: the same tree with every file's state
@@ -420,7 +441,9 @@ async fn second_tree(damage_first_base: bool) {
         .client
         .create_workspace(request(
             &repo,
-            Some(create_request::Start::Change(first.change_id.clone())),
+            Some(create_workspace_request::Start::Change(
+                first.change_id.clone(),
+            )),
         ))
         .await
         .unwrap();
@@ -461,13 +484,13 @@ async fn edit_then_snapshot_records_op() {
         .await
         .unwrap();
     assert!(snapshot.changed);
-    assert_ne!(snapshot.op_id, "");
+    assert_ne!(op_id(snapshot.operation.as_ref()), "");
     assert_ne!(snapshot.commit_id, ws.commit_id);
 
     let log = open(&repo.root).await.op_log(20).await.unwrap();
     let op = log
         .iter()
-        .find(|op| op.id.as_str() == snapshot.op_id)
+        .find(|op| op.id.as_str() == op_id(snapshot.operation.as_ref()))
         .expect("the snapshot's operation is in the log");
     assert_eq!(
         op.workspace.as_deref(),
@@ -488,7 +511,10 @@ async fn edit_then_snapshot_records_op() {
         .await
         .unwrap();
     assert_eq!(listed[0].commit_id, snapshot.commit_id);
-    assert_eq!(listed[0].last_snapshot_op, snapshot.op_id);
+    assert_eq!(
+        listed[0].last_snapshot_operation_id,
+        op_id(snapshot.operation.as_ref())
+    );
     assert!(listed[0].last_snapshot_at.is_some());
 }
 
@@ -506,7 +532,10 @@ async fn release_tears_down_and_keeps_row() {
         .await
         .unwrap();
     assert!(released.snapshot_taken);
-    assert!(released.final_op_id.is_empty(), "nothing had changed");
+    assert!(
+        op_id(released.final_snapshot.as_ref()).is_empty(),
+        "nothing had changed"
+    );
     assert_eq!(released.workspace_id, ws.id);
     assert!(!Path::new(&ws.path).exists());
     assert!(!state_dir.exists());
@@ -515,21 +544,22 @@ async fn release_tears_down_and_keeps_row() {
         .client
         .list_workspaces(ListWorkspacesRequest {
             repo: repo.id.clone(),
-            states: vec!["released".into()],
+            states: vec![v1::WorkspaceState::Released.into()],
             owner: OWNER.into(),
+            ..ListWorkspacesRequest::default()
         })
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, ws.id);
-    assert_eq!(listed[0].state, "released");
+    assert_eq!(listed[0].state(), v1::WorkspaceState::Released);
     let lease = listed[0].lease.as_ref().expect("the lease it ended with");
-    assert_eq!(lease.state(), reef_daemon::proto::v0::lease::State::Ended);
-    assert_eq!(lease.end_reason, "released");
+    assert_eq!(lease.state(), v1::LeaseState::Ended);
+    assert_eq!(lease.end_reason(), LeaseEndReason::Released);
     let active = daemon
         .client
         .list_workspaces(ListWorkspacesRequest {
-            states: vec!["active".into()],
+            states: vec![v1::WorkspaceState::Active.into()],
             ..ListWorkspacesRequest::default()
         })
         .await
@@ -567,8 +597,11 @@ async fn release_tears_down_and_keeps_row() {
         .inspect_workspace(&repo.id, &ws.id, true)
         .await
         .unwrap();
-    assert_eq!(inspected.workspace.unwrap().state, "released");
-    assert_eq!(inspected.op_id, "");
+    assert_eq!(
+        inspected.workspace.unwrap().state(),
+        v1::WorkspaceState::Released
+    );
+    assert_eq!(op_id(inspected.snapshot.as_ref()), "");
     assert!(inspected.disk_usage.is_none());
 }
 
@@ -584,7 +617,7 @@ async fn release_with_unsnapshotted_edit_snapshots_first() {
         .await
         .unwrap();
     assert!(released.snapshot_taken);
-    assert_ne!(released.final_op_id, "");
+    assert_ne!(op_id(released.final_snapshot.as_ref()), "");
 
     let record = daemon
         .handle
@@ -617,7 +650,7 @@ async fn path_collision_is_already_exists() {
     std::fs::create_dir(&taken).unwrap();
     let error = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             path: taken.display().to_string(),
             ..request(&repo, None)
         })
@@ -627,7 +660,7 @@ async fn path_collision_is_already_exists() {
 
     let relative = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             path: "relative/ws".into(),
             ..request(&repo, None)
         })
@@ -636,7 +669,7 @@ async fn path_collision_is_already_exists() {
     assert_eq!(kind_of(&relative), ErrorKind::InvalidArgument);
     let no_owner = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             owner: String::new(),
             ..request(&repo, None)
         })
@@ -645,8 +678,8 @@ async fn path_collision_is_already_exists() {
     assert_eq!(kind_of(&no_owner), ErrorKind::InvalidArgument);
     let too_long = daemon
         .client
-        .create_workspace(CreateRequest {
-            lease_ms: 25 * 60 * 60 * 1000,
+        .create_workspace(CreateWorkspaceRequest {
+            lease_length: Some(proto_millis(25 * 60 * 60 * 1000)),
             ..request(&repo, None)
         })
         .await
@@ -657,7 +690,7 @@ async fn path_collision_is_already_exists() {
     let chosen = daemon.tmp.path().join("chosen/ws");
     let ws = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             path: chosen.display().to_string(),
             ..request(&repo, None)
         })
@@ -680,7 +713,7 @@ async fn path_collision_is_already_exists() {
     assert!(!chosen.exists());
     let reused = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             path: chosen.display().to_string(),
             ..request(&repo, None)
         })
@@ -750,7 +783,10 @@ async fn restart_reloads_active_workspaces() {
             .inspect_workspace(&repo.id, &ws.id, false)
             .await
             .unwrap();
-        assert_eq!(inspected.workspace.unwrap().state, "active");
+        assert_eq!(
+            inspected.workspace.unwrap().state(),
+            v1::WorkspaceState::Active
+        );
         std::fs::write(Path::new(&ws.path).join("after-restart.txt"), "y\n").unwrap();
         let snapshot = daemon
             .client
@@ -775,7 +811,7 @@ async fn unavailable_backend_is_named() {
     let overlay = status
         .backends
         .iter()
-        .find(|probe| probe.kind == "overlayfs")
+        .find(|probe| probe.backend() == Backend::Overlayfs)
         .unwrap();
     if overlay.available {
         eprintln!("overlayfs is available here; nothing to check");
@@ -784,8 +820,8 @@ async fn unavailable_backend_is_named() {
     assert!(cfg!(target_os = "linux") || !overlay.reason.is_empty());
     let error = daemon
         .client
-        .create_workspace(CreateRequest {
-            backend: "overlayfs".into(),
+        .create_workspace(CreateWorkspaceRequest {
+            backend: Backend::Overlayfs.into(),
             ..request(&repo, None)
         })
         .await
@@ -797,8 +833,11 @@ async fn unavailable_backend_is_named() {
 
     let unknown = daemon
         .client
-        .create_workspace(CreateRequest {
-            backend: "zfs".into(),
+        .create_workspace(CreateWorkspaceRequest {
+            // A backend this daemon does not know (v0 named one "zfs"): a
+            // value outside `Backend`, refused, not taken as the default.
+            backend: 99,
+
             ..request(&repo, None)
         })
         .await
@@ -858,11 +897,11 @@ async fn colocated_repo_imports_refs() {
     let begun = Instant::now();
     let ws = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repository.id.clone(),
-            start: Some(create_request::Start::NewOn("feat".into())),
+            start: Some(create_workspace_request::Start::NewOn("feat".into())),
             owner: OWNER.into(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -924,8 +963,8 @@ async fn failed_create_leaves_nothing() {
     let target = parent.join("ws");
     let error = daemon
         .client
-        .create_workspace(CreateRequest {
-            backend: "copy".into(),
+        .create_workspace(CreateWorkspaceRequest {
+            backend: Backend::Copy.into(),
             path: target.display().to_string(),
             ..request(&repo, None)
         })
@@ -1024,10 +1063,10 @@ async fn register_initializes_jj_alongside_git() {
     // git's `main` is the default base once the create imports refs.
     let ws = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repository.id.clone(),
             owner: OWNER.into(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -1069,12 +1108,16 @@ async fn register_initializes_jj_alongside_git() {
 // R1.06: moving a workspace between changes, numbered as its brief numbers
 // them.
 
-fn move_request(repo: &SyntheticRepo, ws: &Workspace, target: move_request::Target) -> MoveRequest {
-    MoveRequest {
+fn move_request(
+    repo: &SyntheticRepo,
+    ws: &Workspace,
+    target: move_workspace_request::Target,
+) -> MoveWorkspaceRequest {
+    MoveWorkspaceRequest {
         repo: repo.id.clone(),
         workspace: ws.id.clone(),
         target: Some(target),
-        ..MoveRequest::default()
+        ..MoveWorkspaceRequest::default()
     }
 }
 
@@ -1118,7 +1161,7 @@ async fn move_keeps_lease_and_path() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::NewOn(base.commit_id.to_string()),
+            move_workspace_request::Target::NewOn(base.commit_id.to_string()),
         ))
         .await
         .unwrap();
@@ -1126,7 +1169,7 @@ async fn move_keeps_lease_and_path() {
     assert_eq!(after.id, ws.id);
     assert_eq!(after.path, ws.path);
     assert_eq!(after.backend, ws.backend);
-    assert_eq!(after.state, "active");
+    assert_eq!(after.state(), v1::WorkspaceState::Active);
     let (lease, lease_after) = (ws.lease.unwrap(), after.lease.unwrap());
     assert_eq!(lease_after.id, lease.id);
     assert_eq!(
@@ -1159,21 +1202,22 @@ async fn move_keeps_lease_and_path() {
         "the final snapshot holds the edit"
     );
 
-    assert_ne!(moved.final_op_id, "");
-    assert_ne!(moved.op_id, "");
-    assert_ne!(moved.final_op_id, moved.op_id);
+    let (final_op_id, move_op_id) = (
+        op_id(moved.final_snapshot.as_ref()),
+        op_id(moved.operation.as_ref()),
+    );
+    assert_ne!(final_op_id, "");
+    assert_ne!(move_op_id, "");
+    assert_ne!(final_op_id, move_op_id);
     let log = open(&repo.root).await.op_log(20).await.unwrap();
     let description = format!(
         "reef: move workspace {} to a new change on {}",
         ws.id, base.commit_id
     );
-    let final_op = log
-        .iter()
-        .find(|op| op.id.as_str() == moved.final_op_id)
-        .unwrap();
+    let final_op = log.iter().find(|op| op.id.as_str() == final_op_id).unwrap();
     assert!(final_op.is_snapshot);
     assert_eq!(final_op.description, description);
-    let pointer_op = log.iter().find(|op| op.id.as_str() == moved.op_id).unwrap();
+    let pointer_op = log.iter().find(|op| op.id.as_str() == move_op_id).unwrap();
     assert!(!pointer_op.is_snapshot);
     assert_eq!(pointer_op.description, description);
     let inspected = daemon
@@ -1181,8 +1225,8 @@ async fn move_keeps_lease_and_path() {
         .inspect_workspace(&repo.id, &ws.id, false)
         .await
         .unwrap();
-    assert_eq!(inspected.recent_snapshots[0].op_id, moved.final_op_id);
-    assert_eq!(inspected.recent_snapshots[0].kind, "move");
+    assert_eq!(inspected.recent_snapshots[0].operation_id, final_op_id);
+    assert_eq!(inspected.recent_snapshots[0].kind(), SnapshotKind::Move);
     assert_eq!(inspected.workspace.unwrap().change_id, after.change_id);
     assert_eq!(all_workspaces(&daemon).await.len(), 1, "no new row");
 }
@@ -1205,14 +1249,18 @@ async fn move_to_existing_change_edits_it() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::Change(target_change.as_str()[..12].to_owned()),
+            move_workspace_request::Target::Change(target_change.as_str()[..12].to_owned()),
         ))
         .await
         .unwrap();
     let after = moved.workspace.unwrap();
     assert_eq!(after.commit_id, target);
     assert_eq!(after.change_id, target_change.as_str());
-    assert_eq!(moved.final_op_id, "", "nothing to snapshot");
+    assert_eq!(
+        op_id(moved.final_snapshot.as_ref()),
+        "",
+        "nothing to snapshot"
+    );
     assert!(Path::new(&ws.path).join("c.txt").is_file());
     let error = open(&repo.root)
         .await
@@ -1273,7 +1321,7 @@ async fn move_with_failing_snapshot_is_conflict() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::NewOn(base.commit_id.to_string()),
+            move_workspace_request::Target::NewOn(base.commit_id.to_string()),
         ))
         .await
         .unwrap_err();
@@ -1321,13 +1369,13 @@ async fn move_is_cheap_on_shared_tree() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::NewOn(target),
+            move_workspace_request::Target::NewOn(target),
         ))
         .await
         .unwrap();
     eprintln!(
         "backend {}: tree_replaced {}, files {} updated, {} added, {} removed",
-        ws.backend,
+        reef_daemon::client::json::backend_name(ws.backend),
         moved.tree_replaced,
         moved.files_updated,
         moved.files_added,
@@ -1362,7 +1410,7 @@ async fn move_then_first_snapshot_is_noop() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::NewOn(target.clone()),
+            move_workspace_request::Target::NewOn(target.clone()),
         ))
         .await
         .unwrap();
@@ -1383,12 +1431,12 @@ async fn move_then_first_snapshot_is_noop() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::Change(after.change_id.clone()),
+            move_workspace_request::Target::Change(after.change_id.clone()),
         ))
         .await
         .unwrap();
-    assert_eq!(again.op_id, "");
-    assert_eq!(again.final_op_id, "");
+    assert_eq!(op_id(again.operation.as_ref()), "");
+    assert_eq!(op_id(again.final_snapshot.as_ref()), "");
     assert_eq!(again.workspace.unwrap().commit_id, after.commit_id);
 }
 
@@ -1407,7 +1455,7 @@ async fn move_of_released_workspace_is_conflict() {
         .move_workspace(move_request(
             &repo,
             &ws,
-            move_request::Target::NewOn("main".into()),
+            move_workspace_request::Target::NewOn("main".into()),
         ))
         .await
         .unwrap_err();
@@ -1470,17 +1518,19 @@ async fn create_reports_timings() {
         assert!(timings.total_ms > 0, "{timings:?}");
         // R1.32: on Linux the attach is queued, not waited for (unless
         // it is done by the time the response is built).
-        let watch_state = created.workspace.as_ref().unwrap().watch_state.as_str();
+        let ws = created.workspace.as_ref().unwrap();
+        let watch_state = ws.watch_state();
         if cfg!(target_os = "linux") {
             assert!(timings.watch_ms < 100, "{timings:?}");
-            assert!(matches!(watch_state, "" | "attaching"), "{watch_state:?}");
+            assert!(
+                is_watched(ws) || watch_state == WatchState::Attaching,
+                "{watch_state:?}"
+            );
         } else {
-            assert_eq!(watch_state, "");
+            assert!(is_watched(ws), "{watch_state:?}");
         }
-        assert_eq!(
-            created.materialize_ms,
-            timings.base_ms + timings.materialize_ms
-        );
+        // v0's `materialize_ms`, `base_ms + materialize_ms`, is gone from
+        // the response; the steps above are what it summed.
         eprintln!(
             "create timings (base cached: {}): {timings:?}",
             created.base_was_cached

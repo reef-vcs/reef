@@ -19,6 +19,7 @@ use common::{
     terminate, test_settings, wait_for_socket,
 };
 use futures::FutureExt as _;
+use reef_api::v1::Backend;
 use reef_daemon::client::Client;
 use reef_daemon::config::{Config, ConfigError, PathOverrides, Paths, SOCKET_PATH_MAX};
 use reef_daemon::db::{Db, SCHEMA_VERSION};
@@ -46,13 +47,13 @@ async fn status_answers_over_socket() {
         daemon.handle.socket_path().display().to_string()
     );
     assert_eq!(first.schema_version, SCHEMA_VERSION);
-    assert_eq!(first.repositories, 0);
-    assert_eq!(first.active_workspaces, 0);
+    assert_eq!(first.repository_count, 0);
+    assert_eq!(first.active_workspace_count, 0);
     assert!(
         first
             .backends
             .iter()
-            .any(|b| b.kind == "copy" && b.available),
+            .any(|b| b.backend() == Backend::Copy && b.available),
         "{:?}",
         first.backends
     );

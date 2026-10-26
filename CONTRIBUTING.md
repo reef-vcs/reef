@@ -18,6 +18,8 @@ just setup   # installs the git hooks and the cargo tools CI uses (nextest, deny
 just ci      # everything CI runs, in CI order
 ```
 
+`just ci` checks the API schema with [buf](https://buf.build/docs/installation) (`brew install bufbuild/buf/buf`, or a release binary on Linux). Building never needs it, nor `protoc`.
+
 `just` with no arguments lists every recipe; read the [justfile](justfile) for what each one does. The pre-commit hook runs rustfmt and clippy; skip it with `git commit --no-verify` or `REEF_SKIP_HOOKS=1` when you need to.
 
 `just ci` also lints the installer with [ShellCheck](https://www.shellcheck.net) (`brew install shellcheck` or `apt-get install shellcheck`).
@@ -31,7 +33,7 @@ just ci      # everything CI runs, in CI order
 - PR titles lead with the ticket ID and its name, for example `R0.04 jj-lib embedding spike`.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - PRs are squash merged, so each ticket lands as one commit on `main` with the PR description as its body. Push fixes as new commits on the branch; there is no need to rewrite history during review.
-- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `cargo deny`, `ubuntu-24.04`, `macos-15`, and `synth determinism` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
+- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, and `synth determinism` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
 - If a ticket brief and `docs/dev-phases.md` disagree on scope, the brief wins for the implementation; fix `dev-phases.md` in the same PR.
 
 ## Commit messages
@@ -75,7 +77,16 @@ Signed-off-by: Ada Contributor <ada@example.com>
 - **Visibility** is `pub(crate)` by default. Make an item `pub` only when another crate needs it; the `unreachable_pub` lint catches the rest.
 - **Docs** on every public item. `missing_docs` is on, and `just doc` builds with `-D warnings` and private items.
 - **Tests**: unit tests sit next to the code in a `#[cfg(test)] mod tests`; integration tests go in the crate's `tests/` directory; benchmarks go in `benches/` (see [docs/benchmarks.md](docs/benchmarks.md)).
-- **Crate boundaries** follow [ADR 0007](docs/adr/0007-crate-layout.md): `reef-vcs` → `reef-daemon` → `reef-lib`, and `reef-testing` depends on none of them.
+- **Crate boundaries** follow [ADR 0007](docs/adr/0007-crate-layout.md): `reef-vcs` → `reef-daemon` → `reef-lib`, and `reef-testing` depends on none of them. `reef-api` depends on no Reef crate; `reef-daemon` and `reef-vcs` depend on it, and `reef-lib` never does ([ADR 0029](docs/adr/0029-daemon-api-v1.md)).
+
+## Changing the API
+
+The schema in `crates/reef-api/proto/reef/api/v1` is the API of record ([ADR 0029](docs/adr/0029-daemon-api-v1.md)); v1 only grows.
+
+1. Edit the protos: add, never remove, renumber, rename, or move. A field that should go is marked `[deprecated = true]`.
+2. `buf format -w`, then `just api` (lint and format) and `just api-breaking` (against `main`; from a Reef workspace, pass the registered root's `.git`).
+3. Bump `API_REVISION` in `crates/reef-api/src/lib.rs` by one, and append the digest `cargo nextest run -p reef-api` prints to `API_DIGESTS`.
+4. Review the change against ADR 0029's API review checklist, and list the addition in the CHANGELOG.
 
 ## ADRs
 

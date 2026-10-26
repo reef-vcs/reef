@@ -1,6 +1,6 @@
 # 0017. Daemon API v0 and error mapping
 
-- Status: accepted
+- Status: superseded by [0029](0029-daemon-api-v1.md)
 - Date: 2026-10-17
 - Ticket: R1.05
 

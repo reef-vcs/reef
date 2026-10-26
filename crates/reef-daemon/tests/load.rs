@@ -35,14 +35,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use common::SyntheticRepo;
 use common::spawned::{SpawnedDaemon, free_bytes, workspace_dirs};
+use common::{SyntheticRepo, watcher_name};
 use futures::StreamExt as _;
-use reef_daemon::client::Client;
-use reef_daemon::config::{FileConfig, WatcherBackend};
-use reef_daemon::proto::v0::{
-    CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
+use reef_api::v1::{
+    CreateTimings, CreateWorkspaceRequest, CreateWorkspaceResponse, ListWorkspacesRequest,
+    WatchState, Workspace, WorkspaceState,
 };
+use reef_daemon::client::Client;
+use reef_daemon::client::json::backend_name;
+use reef_daemon::config::{FileConfig, WatcherBackend};
 use reef_testing::synth::Preset;
 use serde_json::{Value, json};
 
@@ -217,8 +219,8 @@ async fn load_profile() {
     }
     let free_after = free_bytes(daemon.root());
     let large_drain_ms = wait_attached(client, &large_ids).await;
-    let backend = workspace(client, &large_ids[0]).await.backend;
-    let cow = matches!(backend.as_str(), "apfs" | "overlayfs");
+    let backend = backend_name(workspace(client, &large_ids[0]).await.backend);
+    let cow = matches!(backend, "apfs" | "overlayfs");
     report["large_creates"] = json!({
         "backend": backend,
         "copy_on_write": cow,
@@ -239,7 +241,7 @@ async fn load_profile() {
     release_all(client, std::slice::from_ref(&warm.id)).await;
     let free_before = free_bytes(daemon.root());
     let begun = Instant::now();
-    let created: Vec<(CreateResponse, u64)> = futures::stream::iter(0..params.workspaces)
+    let created: Vec<(CreateWorkspaceResponse, u64)> = futures::stream::iter(0..params.workspaces)
         .map(|_| {
             let client = client.clone();
             let repo = repo.id.clone();
@@ -263,13 +265,13 @@ async fn load_profile() {
         .collect();
     let mut watchers = HashMap::<&str, usize>::new();
     for ws in &workspaces {
-        *watchers.entry(ws.watcher.as_str()).or_default() += 1;
+        *watchers.entry(watcher_name(ws.watcher())).or_default() += 1;
     }
     // The criterion is at steady state with every watch up (R1.32).
     let ids: Vec<String> = workspaces.iter().map(|ws| ws.id.clone()).collect();
     let drain_ms = wait_attached(client, &ids).await;
     report["creates"] = json!({
-        "backend": workspaces[0].backend,
+        "backend": backend_name(workspaces[0].backend),
         "watchers": watchers,
         "base_build_ms": preset_base_ms,
         "total_ms": all_ms,
@@ -373,12 +375,12 @@ async fn create(client: &Client, repo: &str) -> Workspace {
     create_response(client, repo).await.workspace.unwrap()
 }
 
-async fn create_response(client: &Client, repo: &str) -> CreateResponse {
+async fn create_response(client: &Client, repo: &str) -> CreateWorkspaceResponse {
     client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.to_owned(),
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -420,7 +422,7 @@ async fn wait_attached(client: &Client, ids: &[String]) -> u64 {
             .unwrap();
         let attaching: Vec<&str> = listed
             .iter()
-            .filter(|ws| ws.watch_state == "attaching" && ids.contains(&ws.id))
+            .filter(|ws| ws.watch_state() == WatchState::Attaching && ids.contains(&ws.id))
             .map(|ws| ws.id.as_str())
             .collect();
         if attaching.is_empty() {
@@ -643,7 +645,7 @@ impl Load {
                 }
                 for (id, lease) in &leases {
                     client
-                        .heartbeat_workspace("", id, lease)
+                        .renew_lease("", id, lease)
                         .await
                         .unwrap_or_else(|error| panic!("heartbeat {id}: {error:?}"));
                     sent += 1;
@@ -675,7 +677,7 @@ impl Load {
                 let listed = client
                     .list_workspaces(ListWorkspacesRequest {
                         repo: repo.clone(),
-                        states: vec!["active".to_owned()],
+                        states: vec![WorkspaceState::Active.into()],
                         ..ListWorkspacesRequest::default()
                     })
                     .await

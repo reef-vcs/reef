@@ -30,9 +30,9 @@ renewed until it exits.
 ## Output
 
 `-o json` or `REEF_OUTPUT=json` forces JSON: one object or array, or
-`{"error": {"kind", "message", "hint", "next"}}`. Exit 0 ok, 2 usage,
-3 not found, 4 exists, 5 conflict, 6 unavailable, 7 denied, 8 I/O,
-1 other; `ws run` exits with its command's code.
+`{"error": {"kind", "reason", "message", "hint", "next"}}`. Exit 0 ok,
+2 usage, 3 not found, 4 exists, 5 conflict, 6 unavailable, 7 denied,
+8 I/O, 9 unsupported, 1 other; `ws run` exits with its command's code.
 
 ## Not yet
 

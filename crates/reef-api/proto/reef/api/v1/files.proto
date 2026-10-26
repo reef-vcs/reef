@@ -1,0 +1,226 @@
+// Files at a revision, read and edited without materializing a directory
+// (R2.04). `revision`, `at_operation` and `skip_snapshot` are as in
+// changes.proto. Paths are repository-relative and `/`-separated.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+
+// The virtual workspace API.
+service FileService {
+  // A file's content at a revision, at most 1 MiB per call. Declared;
+  // R2.04 implements it.
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // The entries of a directory at a revision, in path order. Declared;
+  // R2.04 implements it.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Applies edits to a revision, or to a new change on one, and records the
+  // result as a new commit: all edits or none. Declared; R2.04 implements
+  // it.
+  rpc EditFiles(EditFilesRequest) returns (EditFilesResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+}
+
+// What a tree entry is.
+enum EntryType {
+  // Absent.
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  // A regular file.
+  ENTRY_TYPE_FILE = 1;
+  // An executable file.
+  ENTRY_TYPE_EXECUTABLE = 2;
+  // A symbolic link.
+  ENTRY_TYPE_SYMLINK = 3;
+  // A directory.
+  ENTRY_TYPE_DIRECTORY = 4;
+  // A conflicted entry.
+  ENTRY_TYPE_CONFLICT = 5;
+  // A git submodule.
+  ENTRY_TYPE_SUBMODULE = 6;
+}
+
+// How a path differs between two trees.
+enum FileChangeKind {
+  // Not set.
+  FILE_CHANGE_KIND_UNSPECIFIED = 0;
+  // Only in the new tree.
+  FILE_CHANGE_KIND_ADDED = 1;
+  // In both, with different content or type.
+  FILE_CHANGE_KIND_MODIFIED = 2;
+  // Only in the old tree.
+  FILE_CHANGE_KIND_DELETED = 3;
+  // Moved from `old_path`.
+  FILE_CHANGE_KIND_RENAMED = 4;
+  // Copied from `old_path`.
+  FILE_CHANGE_KIND_COPIED = 5;
+}
+
+// One entry of a tree.
+message FileEntry {
+  // Repository-relative, `/`-separated.
+  string path = 1;
+  // What it is.
+  EntryType type = 2;
+  // The content's id in the store, in hex; empty for a directory or a
+  // conflict.
+  string file_id = 3;
+}
+
+// One path that differs between two trees.
+message FileChange {
+  // The path in the new tree (the old one for a deletion).
+  string path = 1;
+  // How it differs.
+  FileChangeKind kind = 2;
+  // Where it came from, for a rename or copy; empty otherwise.
+  string old_path = 3;
+  // Its type in the old tree; unspecified when added.
+  EntryType old_type = 4;
+  // Its type in the new tree; unspecified when deleted.
+  EntryType new_type = 5;
+}
+
+// Read a file.
+message ReadFileRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision.
+  string revision = 3;
+  // The file.
+  string path = 4;
+  // Read at this operation; empty for the head.
+  string at_operation = 5;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 6;
+  // The first byte to return.
+  uint64 offset = 7;
+  // How many bytes at most: 0, or more than 1 MiB, means 1 MiB.
+  uint64 limit = 8;
+}
+
+// A file's content.
+message ReadFileResponse {
+  // The entry.
+  FileEntry entry = 1;
+  // The bytes from `offset`: a symlink's target, and a conflict as jj
+  // materializes it, with markers.
+  bytes content = 2;
+  // The whole file's length, for reading on from `offset` plus the length
+  // of `content`.
+  uint64 size = 3;
+  // The commit read.
+  string commit_id = 4;
+  // The operation it was read at.
+  string at_operation = 5;
+}
+
+// List a directory.
+message ListFilesRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision.
+  string revision = 3;
+  // A directory; empty for the root.
+  string path = 4;
+  // Include everything below it, not only its own entries.
+  bool recursive = 5;
+  // Read at this operation; empty for the head.
+  string at_operation = 6;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 7;
+  // Entries per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 8;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 9;
+}
+
+// A page of a directory listing.
+message ListFilesResponse {
+  // The entries, in path order.
+  repeated FileEntry entries = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+  // The commit read.
+  string commit_id = 3;
+  // The operation it was read at.
+  string at_operation = 4;
+}
+
+// Edit files.
+message EditFilesRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // What to edit. Required.
+  oneof target {
+    // Rewrite this commit, keeping its change id.
+    string revision = 3;
+    // A new change on top of this revision.
+    string new_on = 4;
+  }
+  // When non-empty, FAILED_PRECONDITION unless the target still resolves to
+  // this commit.
+  string expected_commit_id = 5;
+  // The edits, applied in order.
+  repeated FileEdit edits = 6;
+  // The new commit's description; unset to keep the target's (or empty for
+  // a new change).
+  optional string description = 7;
+}
+
+// What an edit recorded.
+message EditFilesResponse {
+  // The change afterwards; `change.commit_id` is the new snapshot.
+  Change change = 1;
+  // The operation that recorded it.
+  Operation operation = 2;
+}
+
+// One edit of one path.
+message FileEdit {
+  // The path.
+  string path = 1;
+  // What to do to it. Required.
+  oneof action {
+    // Replace the whole content, creating the file if needed.
+    bytes content = 2;
+    // Replace text inside it.
+    TextReplace replace = 3;
+    // Delete it.
+    FileDelete delete = 4;
+  }
+  // Set the executable bit; unset to keep it (false for a new file).
+  optional bool executable = 5;
+}
+
+// A text replacement inside a file.
+message TextReplace {
+  // The text to find.
+  string old_text = 1;
+  // What to put in its place.
+  string new_text = 2;
+  // Replace every occurrence; false requires `old_text` to occur exactly
+  // once, else FAILED_PRECONDITION.
+  bool all = 3;
+}
+
+// Delete a file.
+message FileDelete {}

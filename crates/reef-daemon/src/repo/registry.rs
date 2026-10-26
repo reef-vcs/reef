@@ -8,6 +8,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
+use reef_api::v1::IfNotJj;
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::{InitError, OpenError, Repo, UserSettings};
 
@@ -16,7 +17,6 @@ use super::{RegistryError, RepoRegistry};
 use crate::db::{Db, DbError};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
-use crate::proto::v0::register_request::IfNotJj;
 
 /// Failure to register a repository.
 #[derive(Debug, thiserror::Error)]

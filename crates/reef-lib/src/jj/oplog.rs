@@ -1,6 +1,7 @@
 //! Reading the operation log, and recognizing the snapshot operations Reef
 //! writes (R1.16).
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
@@ -39,6 +40,8 @@ pub struct OpEntry {
     pub is_snapshot: bool,
     /// The workspace the operation ran in, if recorded.
     pub workspace: Option<String>,
+    /// jj's operation attributes (`jj op log -T attributes`), verbatim.
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// What [`Repo::walk_op_log`] walked.
@@ -214,6 +217,22 @@ impl Repo {
         })
     }
 
+    /// The operation `id` (full hex), which need not be an ancestor of the
+    /// loaded head.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), op_id = %id))]
+    pub async fn operation(&self, id: &OperationIdHex) -> Result<OpEntry, OpLogError> {
+        self.operation_unlogged(id)
+            .await
+            .inspect_err(|error| crate::log_failure!(error))
+    }
+
+    async fn operation_unlogged(&self, id: &OperationIdHex) -> Result<OpEntry, OpLogError> {
+        let op_id = OperationId::try_from_hex(id.as_str())
+            .ok_or_else(|| OpLogError::InvalidOperationId(id.clone()))?;
+        let operation = self.repo.loader().load_operation(&op_id).await?;
+        Ok(entry_of(&operation))
+    }
+
     /// The working-copy commit of the jj workspace `workspace` in operation
     /// `op`'s view, and its change; `None` if the view has none for it.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), op_id = %op))]
@@ -262,6 +281,7 @@ fn entry_of(op: &Operation) -> OpEntry {
             .workspace_name
             .as_ref()
             .map(|name| name.as_str().to_owned()),
+        attributes: metadata.attributes.clone(),
     }
 }
 
@@ -297,6 +317,7 @@ mod tests {
             username: String::new(),
             is_snapshot,
             workspace: Some(workspace.to_owned()),
+            attributes: BTreeMap::new(),
         }
     }
 

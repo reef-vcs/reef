@@ -1,6 +1,7 @@
-// The Reef daemon API, version 0 (R1.03). Phase 1's working schema; R2.01
-// replaces it with the reviewed v1. Clients use `reef_daemon::client::Client`,
-// never the generated stubs directly.
+// The Reef daemon API, version 0: frozen at 0.1.0; served only for version
+// detection. A daemon that serves `reef.api.v1` answers `Daemon/Status` here
+// so a 0.1 CLI can still run `reef daemon status` and `reef daemon stop`
+// (R2.01, ADR 0029). Never edited.
 syntax = "proto3";
 
 package reef.daemon.v0;

@@ -1,4 +1,4 @@
-//! `reef.daemon.v0.Maintenance`: garbage collection (R1.17), backup and
+//! `reef.api.v1.MaintenanceService`: garbage collection (R1.17), backup and
 //! quiesce (R1.18).
 
 use std::path::PathBuf;
@@ -7,42 +7,42 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
+use reef_api::v1::maintenance_service_server::MaintenanceService;
+use reef_api::v1::{
+    self, BackupRequest, BackupResponse, BackupStep, CollectGarbageRequest, CollectGarbageResponse,
+    QuiesceRequest, QuiesceResponse, ResumeRequest, ResumeResponse,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::Instrument as _;
 
-use super::convert::timestamp;
+use super::convert::{request_duration, timestamp};
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::maintenance::gc::{self, GcReport};
 use crate::maintenance::{Busy, backup, quiesce};
 use crate::model::RepoId;
-use crate::proto::v0::maintenance_server::Maintenance;
-use crate::proto::v0::{
-    self, BackupProgress, BackupRequest, GcRequest, GcResponse, QuiesceRequest, QuiesceResponse,
-    ResumeRequest, ResumeResponse,
-};
 
 /// Progress messages buffered for a slow client; more are dropped.
 const PROGRESS_BUFFER: usize = 64;
 
-type BackupStream = Pin<Box<dyn Stream<Item = Result<BackupProgress, Status>> + Send>>;
+type BackupStream = Pin<Box<dyn Stream<Item = Result<BackupResponse, Status>> + Send>>;
 
-/// Serves `Maintenance`.
+/// Serves `MaintenanceService`.
 #[derive(Debug)]
-pub struct MaintenanceService {
+pub struct MaintenanceHandler {
     state: Arc<AppState>,
 }
 
-impl MaintenanceService {
+impl MaintenanceHandler {
     /// A service over `state`.
-    pub fn new(state: Arc<AppState>) -> MaintenanceService {
-        MaintenanceService { state }
+    pub fn new(state: Arc<AppState>) -> MaintenanceHandler {
+        MaintenanceHandler { state }
     }
 }
 
-impl From<&GcReport> for v0::GcReport {
+impl From<&GcReport> for v1::GcReport {
     fn from(report: &GcReport) -> Self {
         Self {
             repo_id: report.repo_id.as_hex(),
@@ -63,7 +63,7 @@ impl From<&GcReport> for v0::GcReport {
     }
 }
 
-impl MaintenanceService {
+impl MaintenanceHandler {
     /// A request's `repo`: `None` when empty, else resolved.
     fn repo(&self, text: &str) -> Result<Option<RepoId>, Status> {
         if text.trim().is_empty() {
@@ -76,11 +76,14 @@ impl MaintenanceService {
 }
 
 #[tonic::async_trait]
-impl Maintenance for MaintenanceService {
+impl MaintenanceService for MaintenanceHandler {
     type BackupStream = BackupStream;
 
     #[tracing::instrument(skip_all, fields(repo = %request.get_ref().repo, dry_run = request.get_ref().dry_run))]
-    async fn gc(&self, request: Request<GcRequest>) -> Result<Response<GcResponse>, Status> {
+    async fn collect_garbage(
+        &self,
+        request: Request<CollectGarbageRequest>,
+    ) -> Result<Response<CollectGarbageResponse>, Status> {
         let request = request.into_inner();
         let state = Arc::clone(&self.state);
         // Its own task: a client that stops waiting must not cut GC between
@@ -106,8 +109,8 @@ impl Maintenance for MaintenanceService {
         let reports = tokio::spawn(task.instrument(tracing::Span::current()))
             .await
             .map_err(|error| Status::internal(format!("the GC task failed: {error}")))??;
-        Ok(Response::new(GcResponse {
-            reports: reports.iter().map(v0::GcReport::from).collect(),
+        Ok(Response::new(CollectGarbageResponse {
+            reports: reports.iter().map(v1::GcReport::from).collect(),
         }))
     }
 
@@ -144,13 +147,12 @@ impl Maintenance for MaintenanceService {
                 let _ = events.try_send(Ok(step));
             }
             let last = match job.await {
-                Ok(Ok(manifest)) => Ok(BackupProgress {
+                Ok(Ok(manifest)) => Ok(BackupResponse {
                     repo_id: String::new(),
-                    step: "done".to_owned(),
+                    step: BackupStep::Done.into(),
                     files: manifest.repos.iter().map(|repo| repo.files).sum(),
                     bytes: manifest.repos.iter().map(|repo| repo.bytes).sum::<u64>()
                         + manifest.sqlite.bytes,
-                    done: true,
                     manifest_path,
                 }),
                 Ok(Err(error)) => {
@@ -172,7 +174,7 @@ impl Maintenance for MaintenanceService {
         let request = request.into_inner();
         let repo = self.repo(&request.repo)?;
         let state = Arc::clone(&self.state);
-        let max = Duration::from_millis(request.max_ms);
+        let max = request_duration(request.max.as_ref()).unwrap_or(Duration::ZERO);
         // Its own task: a client that stops waiting must not leave the
         // threads paused without a token anyone knows; the auto-resume
         // still ends it.

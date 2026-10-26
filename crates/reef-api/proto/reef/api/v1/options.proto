@@ -1,0 +1,28 @@
+// Options every RPC in the Reef API sets (ADR 0029).
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// What an RPC may do, for access control (R2.08) and tool hints (R2.13).
+// Every method in `reef.api.v1` sets `(reef.api.v1.access)`; the build of
+// `reef-api` fails if one does not.
+enum Access {
+  // Never valid on a method.
+  ACCESS_UNSPECIFIED = 0;
+  // Reads state. May snapshot a workspace it reads: a snapshot records what
+  // is already on disk.
+  ACCESS_READ = 1;
+  // Records operations on the changes, workspaces, leases, or presence the
+  // request names.
+  ACCESS_WRITE = 2;
+  // Has daemon-wide or host-level effects: registration, garbage
+  // collection, backup, quiesce, store builds.
+  ACCESS_ADMIN = 3;
+}
+
+extend google.protobuf.MethodOptions {
+  // The method's access level. Required on every method of this package.
+  Access access = 50701;
+}

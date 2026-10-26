@@ -13,7 +13,7 @@
 mod common;
 
 use common::TestDaemon;
-use reef_daemon::proto::v0::CreateRequest;
+use reef_api::v1::CreateWorkspaceRequest;
 use reef_testing::synth::Preset;
 
 /// Open file descriptors of this process that are inotify instances.
@@ -31,10 +31,10 @@ async fn one_inotify_instance_for_twenty_workspaces() {
     for _ in 0..20 {
         daemon
             .client
-            .create_workspace(CreateRequest {
+            .create_workspace(CreateWorkspaceRequest {
                 repo: repo.id.clone(),
                 owner: "tester@host".to_owned(),
-                ..CreateRequest::default()
+                ..CreateWorkspaceRequest::default()
             })
             .await
             .unwrap();

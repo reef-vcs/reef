@@ -22,8 +22,10 @@ use std::time::{Duration, SystemTime};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use reef_daemon::client::{ClientError, WorkspacesApi, default_owner};
-use reef_daemon::proto::v0::{CreateRequest, HeartbeatResponse, Lease, Workspace, lease};
+use reef_api::v1::{
+    CreateWorkspaceRequest, Lease, LeaseState, RenewLeaseResponse, Workspace, WorkspaceState,
+};
+use reef_daemon::client::{ClientError, WorkspacesApi, default_owner, json};
 use reef_lib::error::{Classify as _, ErrorChain, ErrorKind};
 use serde::Serialize;
 use tokio::process::{Child, Command};
@@ -33,7 +35,7 @@ use tokio::time::Instant;
 use super::env::reef_env;
 use super::error::kind_text;
 use super::repo::missing;
-use super::ws::{CreateTarget, lease_millis, note_default_start};
+use super::ws::{CreateTarget, lease_length, note_default_start};
 use super::{CliError, Ctx, Out};
 
 /// Each heartbeat's deadline.
@@ -244,10 +246,10 @@ fn prepare(ctx: &Ctx, ws: &Workspace) -> Result<(Heartbeater, Signals), CliError
     Ok((heartbeater, Signals::install()?))
 }
 
-/// `Workspaces.Create` with `ws run`'s defaults: the workspace, and what
+/// `WorkspaceService.CreateWorkspace` with `ws run`'s defaults: the workspace, and what
 /// the default start chose, if the flags named no start.
 async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), CliError> {
-    let request = CreateRequest {
+    let request = CreateWorkspaceRequest {
         owner: args
             .owner
             .clone()
@@ -256,12 +258,12 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), C
             .purpose
             .clone()
             .unwrap_or_else(|| purpose_of(&args.command)),
-        lease_ms: lease_millis(args.lease)?,
+        lease_length: lease_length(args.lease)?,
         ..args.target.request()?
     };
     let response = ctx
         .call_with_repo(&args.target.repo()?, |repo| {
-            ctx.client.create_workspace(CreateRequest {
+            ctx.client.create_workspace(CreateWorkspaceRequest {
                 repo,
                 ..request.clone()
             })
@@ -287,14 +289,16 @@ async fn attach(ctx: &Ctx, workspace: &str, owner: Option<&str>) -> Result<Works
         .call(ctx.client.inspect_workspace("", workspace, false))
         .await?;
     let mut ws = response.workspace.ok_or_else(|| missing("workspace"))?;
-    let live = ws.state == "active"
-        && ws.lease.as_ref().is_some_and(|lease| {
-            matches!(lease.state(), lease::State::Active | lease::State::InGrace)
-        });
+    let live = ws.state() == WorkspaceState::Active
+        && ws
+            .lease
+            .as_ref()
+            .is_some_and(|lease| matches!(lease.state(), LeaseState::Active | LeaseState::InGrace));
     if !live {
         return Err(conflict(format!(
             "workspace {} is {} and its lease has ended; only an active workspace can be attached",
-            ws.id, ws.state
+            ws.id,
+            json::state_name(ws.state)
         )));
     }
     if !may_attach(&ws.owner, owner, &default_owner()) {
@@ -305,10 +309,11 @@ async fn attach(ctx: &Ctx, workspace: &str, owner: Option<&str>) -> Result<Works
     }
     let lease = ws.lease.as_mut().ok_or_else(|| missing("lease"))?;
     let renewed = ctx
-        .call(ctx.client.heartbeat_workspace("", &ws.id, &lease.id))
+        .call(ctx.client.renew_lease("", &ws.id, &lease.id))
         .await?;
-    lease.expires_at = renewed.expires_at.or(lease.expires_at);
-    lease.heartbeat_every = renewed.heartbeat_every.or(lease.heartbeat_every);
+    if let Some(renewed) = renewed.lease {
+        *lease = renewed;
+    }
     Ok(ws)
 }
 
@@ -442,7 +447,7 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
             Ok(response) => Outcome {
                 kept: true,
                 snapshot_taken: true,
-                final_op_id: non_empty(&response.op_id),
+                final_op_id: response.operation.map(|operation| operation.id),
                 ..Outcome::default()
             },
             Err(error) => Outcome {
@@ -468,7 +473,7 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
         Ok(response) => Outcome {
             released: true,
             snapshot_taken: response.snapshot_taken,
-            final_op_id: non_empty(&response.final_op_id),
+            final_op_id: response.final_snapshot.map(|operation| operation.id),
             ..Outcome::default()
         },
         Err(error) => Outcome {
@@ -476,11 +481,6 @@ async fn finish(ctx: &Ctx, ws: &Workspace, keep: bool) -> Outcome {
             ..Outcome::default()
         },
     }
-}
-
-/// `value`, or `None` if it is empty, as the API spells "unset".
-fn non_empty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// Renews the lease every `heartbeat_every` until aborted, or until the
@@ -558,7 +558,7 @@ impl Heartbeater {
             .and_then(|every| Duration::try_from(every).ok())
             .filter(|every| !every.is_zero())
             .ok_or_else(|| missing("lease.heartbeat_every"))?;
-        let grace = Duration::from_millis(lease.grace_ms);
+        let grace = Duration::from_millis(lease.grace.as_ref().map_or(0, json::duration_millis));
         Ok(Self {
             api,
             workspace: ws.id.clone(),
@@ -585,10 +585,8 @@ impl Heartbeater {
     /// lease being gone; an error when it is: `Conflict` (ended, replaced,
     /// or past its grace) or `NotFound`. A request cut off by a daemon
     /// restart fails as `Internal`, which must not stop the heartbeats.
-    async fn tick(&mut self) -> Result<Option<HeartbeatResponse>, ClientError> {
-        let call = self
-            .api
-            .heartbeat_workspace("", &self.workspace, &self.lease);
+    async fn tick(&mut self) -> Result<Option<RenewLeaseResponse>, ClientError> {
+        let call = self.api.renew_lease("", &self.workspace, &self.lease);
         let reason = match tokio::time::timeout(HEARTBEAT_DEADLINE, call).await {
             Ok(Ok(response)) => {
                 self.renewed(&response);
@@ -605,20 +603,23 @@ impl Heartbeater {
         Ok(None)
     }
 
-    fn renewed(&mut self, response: &HeartbeatResponse) {
+    fn renewed(&mut self, response: &RenewLeaseResponse) {
+        let Some(lease) = response.lease.as_ref() else {
+            return;
+        };
         if self.state == LinkState::Lost {
             self.notify("reef: daemon reachable again; lease renewed");
         }
         self.state = LinkState::Up;
         self.backoff.reset();
-        if let Some(every) = response
+        if let Some(every) = lease
             .heartbeat_every
             .and_then(|every| Duration::try_from(every).ok())
             .filter(|every| !every.is_zero())
         {
             self.every = every;
         }
-        self.lapses_at = lapse(response.expires_at, self.grace).or(self.lapses_at);
+        self.lapses_at = lapse(lease.expires_at, self.grace).or(self.lapses_at);
         self.warned_lapsed = false;
     }
 
@@ -666,10 +667,11 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    use reef_daemon::proto::v0::register_request::IfNotJj;
-    use reef_daemon::proto::v0::{
-        CreateResponse, ForgetResponse, InspectResponse, ListWorkspacesRequest, RegisterResponse,
-        ReleaseResponse, Repository, SnapshotResponse, StatusResponse,
+    use reef_api::v1::IfNotJj;
+    use reef_api::v1::{
+        CreateWorkspaceResponse, ForgetRepositoryResponse, GetDaemonStatusResponse,
+        GetWorkspaceResponse, ListWorkspacesRequest, RegisterRepositoryResponse,
+        ReleaseWorkspaceResponse, Repository, SnapshotWorkspaceResponse,
     };
 
     use super::*;
@@ -678,7 +680,7 @@ mod tests {
     /// called.
     #[derive(Default)]
     struct Fake {
-        answers: Mutex<VecDeque<Result<HeartbeatResponse, ClientError>>>,
+        answers: Mutex<VecDeque<Result<RenewLeaseResponse, ClientError>>>,
     }
 
     fn not_here<T>() -> Result<T, ClientError> {
@@ -687,23 +689,29 @@ mod tests {
 
     #[tonic::async_trait]
     impl WorkspacesApi for Fake {
-        async fn status(&self) -> Result<StatusResponse, ClientError> {
+        async fn status(&self) -> Result<GetDaemonStatusResponse, ClientError> {
             not_here()
         }
         async fn register_repository(
             &self,
             _: &Path,
             _: IfNotJj,
-        ) -> Result<RegisterResponse, ClientError> {
+        ) -> Result<RegisterRepositoryResponse, ClientError> {
             not_here()
         }
         async fn list_repositories(&self) -> Result<Vec<Repository>, ClientError> {
             not_here()
         }
-        async fn forget_repository(&self, _: &str) -> Result<ForgetResponse, ClientError> {
+        async fn forget_repository(
+            &self,
+            _: &str,
+        ) -> Result<ForgetRepositoryResponse, ClientError> {
             not_here()
         }
-        async fn create_workspace(&self, _: CreateRequest) -> Result<CreateResponse, ClientError> {
+        async fn create_workspace(
+            &self,
+            _: CreateWorkspaceRequest,
+        ) -> Result<CreateWorkspaceResponse, ClientError> {
             not_here()
         }
         async fn list_workspaces(
@@ -717,7 +725,7 @@ mod tests {
             _: &str,
             _: &str,
             _: bool,
-        ) -> Result<InspectResponse, ClientError> {
+        ) -> Result<GetWorkspaceResponse, ClientError> {
             not_here()
         }
         async fn release_workspace(
@@ -726,7 +734,7 @@ mod tests {
             _: &str,
             _: bool,
             _: bool,
-        ) -> Result<ReleaseResponse, ClientError> {
+        ) -> Result<ReleaseWorkspaceResponse, ClientError> {
             not_here()
         }
         async fn snapshot_workspace(
@@ -734,36 +742,39 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-        ) -> Result<SnapshotResponse, ClientError> {
+        ) -> Result<SnapshotWorkspaceResponse, ClientError> {
             not_here()
         }
-        async fn heartbeat_workspace(
+        async fn renew_lease(
             &self,
             _: &str,
             workspace: &str,
             lease_id: &str,
-        ) -> Result<HeartbeatResponse, ClientError> {
+        ) -> Result<RenewLeaseResponse, ClientError> {
             assert_eq!((workspace, lease_id), ("ws", "lease"));
             self.answers.lock().unwrap().pop_front().unwrap()
         }
     }
 
-    fn down() -> Result<HeartbeatResponse, ClientError> {
+    fn down() -> Result<RenewLeaseResponse, ClientError> {
         Err(tonic::Status::unavailable("daemon is down").into())
     }
 
-    fn renewed(every: Duration) -> HeartbeatResponse {
-        HeartbeatResponse {
-            lease_id: "lease".into(),
-            expires_at: Some((SystemTime::now() + Duration::from_secs(90)).into()),
-            heartbeat_every: Some(every.try_into().unwrap()),
+    fn renewed(every: Duration) -> RenewLeaseResponse {
+        RenewLeaseResponse {
+            lease: Some(Lease {
+                id: "lease".into(),
+                expires_at: Some((SystemTime::now() + Duration::from_secs(90)).into()),
+                heartbeat_every: Some(every.try_into().unwrap()),
+                ..Lease::default()
+            }),
         }
     }
 
     /// A heartbeater over `answers` whose lease expires at `expires_at`,
     /// and the notes it makes.
     fn heartbeater(
-        answers: Vec<Result<HeartbeatResponse, ClientError>>,
+        answers: Vec<Result<RenewLeaseResponse, ClientError>>,
         expires_at: SystemTime,
     ) -> (Heartbeater, Arc<Mutex<Vec<String>>>) {
         let fake = Fake {
@@ -776,7 +787,7 @@ mod tests {
         let lease = Lease {
             id: "lease".into(),
             expires_at: Some(expires_at.into()),
-            grace_ms: 1000,
+            grace: Some(Duration::from_secs(1).try_into().unwrap()),
             heartbeat_every: Some(Duration::from_secs(10).try_into().unwrap()),
             ..Lease::default()
         };

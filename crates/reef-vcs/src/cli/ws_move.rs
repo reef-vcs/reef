@@ -1,9 +1,9 @@
 //! `reef ws move` (R1.06): a workspace onto another change, keeping its
 //! directory and lease.
 
+use reef_api::v1::MissingStores;
+use reef_api::v1::{MoveWorkspaceRequest, move_workspace_request};
 use reef_daemon::client::json::Moved;
-use reef_daemon::proto::v0::create_request::MissingStores;
-use reef_daemon::proto::v0::{MoveRequest, move_request};
 
 use super::repo::missing;
 use super::{CliError, Ctx};
@@ -32,8 +32,8 @@ pub(crate) struct Args {
 /// mode, as `ws create` does).
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     let target = match (args.change, args.new_on) {
-        (Some(change), _) => move_request::Target::Change(change),
-        (None, Some(new_on)) => move_request::Target::NewOn(new_on),
+        (Some(change), _) => move_workspace_request::Target::Change(change),
+        (None, Some(new_on)) => move_workspace_request::Target::NewOn(new_on),
         (None, None) => unreachable!("clap requires --change or --new-on"),
     };
     let missing_stores = if args.skip_missing_stores {
@@ -42,7 +42,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         MissingStores::Fail
     };
     let response = ctx
-        .call(ctx.client.move_workspace(MoveRequest {
+        .call(ctx.client.move_workspace(MoveWorkspaceRequest {
             repo: String::new(),
             workspace: args.workspace,
             target: Some(target),

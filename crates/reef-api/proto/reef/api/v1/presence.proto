@@ -1,0 +1,151 @@
+// Presence: ephemeral state about who is doing what, over the same
+// connection as the API. Never persisted (design.md, Subscriptions).
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Reporting and following presence.
+service PresenceService {
+  // Reports or replaces one presence entry, which lapses after its TTL
+  // unless reported again. Declared; R2.11 implements it.
+  rpc ReportPresence(ReportPresenceRequest) returns (ReportPresenceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Ends one presence entry now. Declared; R2.11 implements it.
+  rpc ClearPresence(ClearPresenceRequest) returns (ClearPresenceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // The current presence set, then changes to it as they happen. A frame
+  // with no events is a keepalive, sent at least every 30 seconds.
+  // Declared; R2.10 implements it.
+  rpc SubscribePresence(SubscribePresenceRequest) returns (stream SubscribePresenceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// What a presence entry says.
+enum PresenceKind {
+  // Not set.
+  PRESENCE_KIND_UNSPECIFIED = 0;
+  // What an agent is doing, as free text in `activity`.
+  PRESENCE_KIND_ACTIVITY = 1;
+  // The paths an agent is editing.
+  PRESENCE_KIND_EDITING = 2;
+  // A lease renewal, reported by the daemon.
+  PRESENCE_KIND_LEASE = 3;
+  // A long-running operation's progress, from the daemon or a client.
+  PRESENCE_KIND_PROGRESS = 4;
+}
+
+// How far a long-running operation has got.
+message Progress {
+  // What it is doing now, such as `materialize`.
+  string phase = 1;
+  // Units done.
+  uint64 done = 2;
+  // Units in all; 0 when unknown.
+  uint64 total = 3;
+  // What a unit is, such as `files` or `bytes`.
+  string unit = 4;
+}
+
+// One presence entry.
+message Presence {
+  // The entry's id, assigned by the daemon.
+  string id = 1;
+  // Who reported it.
+  string agent = 2;
+  // The repository it is about; empty for none.
+  string repo_id = 3;
+  // The workspace it is about; empty for none.
+  string workspace_id = 4;
+  // The change it is about, in hex; empty for none.
+  string change_id = 5;
+  // What it says.
+  PresenceKind kind = 6;
+  // Free text, for PRESENCE_KIND_ACTIVITY.
+  string activity = 7;
+  // Repository-relative paths, for PRESENCE_KIND_EDITING.
+  repeated string paths = 8;
+  // Progress, for PRESENCE_KIND_PROGRESS.
+  Progress progress = 9;
+  // When it was last reported.
+  google.protobuf.Timestamp updated_at = 10;
+  // When it lapses unless reported again.
+  google.protobuf.Timestamp expires_at = 11;
+}
+
+// Report presence.
+message ReportPresenceRequest {
+  // The entry to replace; empty for a new entry.
+  string presence_id = 1;
+  // Who is reporting. Required.
+  string agent = 2;
+  // The repository it is about; empty for none.
+  string repo = 3;
+  // The workspace it is about; empty for none.
+  string workspace = 4;
+  // The change it is about; empty for none.
+  string change = 5;
+  // What it says.
+  PresenceKind kind = 6;
+  // Free text, for PRESENCE_KIND_ACTIVITY.
+  string activity = 7;
+  // Repository-relative paths, for PRESENCE_KIND_EDITING.
+  repeated string paths = 8;
+  // Progress, for PRESENCE_KIND_PROGRESS.
+  Progress progress = 9;
+  // How long it lasts unless reported again; unset for 30 seconds, at most
+  // 10 minutes.
+  google.protobuf.Duration ttl = 10;
+}
+
+// A reported entry.
+message ReportPresenceResponse {
+  // The entry as stored.
+  Presence presence = 1;
+}
+
+// Clear presence.
+message ClearPresenceRequest {
+  // The entry to end.
+  string presence_id = 1;
+}
+
+// A cleared entry.
+message ClearPresenceResponse {}
+
+// Follow presence. An empty field is no constraint; values within a field
+// are ORed, and fields are ANDed.
+message SubscribePresenceRequest {
+  // Repositories, as `repo` references.
+  repeated string repos = 1;
+  // Workspaces, as `workspace` references.
+  repeated string workspaces = 2;
+  // Agents.
+  repeated string agents = 3;
+  // Kinds.
+  repeated PresenceKind kinds = 4;
+}
+
+// One frame of presence.
+message SubscribePresenceResponse {
+  // Entries that appeared, changed, or ended. Empty in a keepalive.
+  repeated PresenceEvent events = 1;
+  // True from the frame that completes the current set onward.
+  bool synced = 2;
+}
+
+// A change to one presence entry.
+message PresenceEvent {
+  // The entry; its last state when `ended`.
+  Presence presence = 1;
+  // It was cleared or expired.
+  bool ended = 2;
+}

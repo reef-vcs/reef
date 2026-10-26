@@ -1,0 +1,15 @@
+# The API schema's lint, format and breaking-change rules (R2.01, ADR 0029). Codegen does not
+# use buf: crates/reef-api/build.rs compiles the protos with protox. The frozen v0 files are not
+# linted; they are never edited.
+version: v2
+modules:
+  - path: crates/reef-api/proto
+    excludes:
+      - crates/reef-api/proto/reef/daemon/v0
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+breaking:
+  use:
+    - FILE

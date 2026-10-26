@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, test_settings};
+use reef_api::v1::{CreateWorkspaceRequest, Workspace};
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, Workspace};
 use reef_daemon::snapshot::{SnapshotKind, SnapshotOutcome};
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::jj::{CommitIdHex, Repo, RepoPath};
@@ -63,10 +63,10 @@ async fn fixture_with(
 async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()

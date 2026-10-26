@@ -1,0 +1,221 @@
+// Changes and the log.
+//
+// `revision` is a jj revset expression that must resolve to exactly one
+// commit: none is NOT_FOUND, several are INVALID_ARGUMENT (a divergent
+// change id names two commits; use a commit id). `@` is the request's
+// `workspace`'s working-copy commit and is invalid without one. `trunk()` is
+// the repository's default start bookmark and `immutable_heads()` is
+// `trunk() | tags()`. `at_operation` is an operation id or unique prefix: the
+// read answers from that operation's view; empty means the current head.
+// Reads whose revision or revset involves `@` snapshot the workspace first
+// unless `skip_snapshot`; a read `at_operation` never snapshots.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+
+// The log, and reading and rewriting changes.
+service ChangeService {
+  // The log: changes in topological order, children first, with graph
+  // edges. Declared; R2.02 implements it.
+  rpc ListChanges(ListChangesRequest) returns (ListChangesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // One change. Declared; R2.02 implements it.
+  rpc GetChange(GetChangeRequest) returns (GetChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Sets a change's description. Declared; R2.03 implements it.
+  rpc DescribeChange(DescribeChangeRequest) returns (DescribeChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Abandons a change: how a divergent change is resolved (R1.13).
+  // Declared; R2.03 implements it.
+  rpc AbandonChange(AbandonChangeRequest) returns (AbandonChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+}
+
+// Who made a commit, and when.
+message Signature {
+  // The name.
+  string name = 1;
+  // The email address.
+  string email = 2;
+  // When.
+  google.protobuf.Timestamp at = 3;
+}
+
+// One commit of a change.
+message Change {
+  // The change, in hex.
+  string change_id = 1;
+  // The commit, in hex.
+  string commit_id = 2;
+  // Its parent commits.
+  repeated string parent_commit_ids = 3;
+  // Its parents' changes, in the order of `parent_commit_ids`.
+  repeated string parent_change_ids = 4;
+  // The full description.
+  string description = 5;
+  // The author.
+  Signature author = 6;
+  // The committer.
+  Signature committer = 7;
+  // The tree, in hex; empty when the tree is conflicted.
+  string tree_id = 8;
+  // The commit changes nothing against its parents.
+  bool empty = 9;
+  // The tree has conflicts.
+  bool conflict = 10;
+  // The change has more than one visible commit.
+  bool divergent = 11;
+  // The commit is an ancestor of `immutable_heads()`.
+  bool immutable = 12;
+  // The commit is not visible at the operation read; it was named by
+  // commit id.
+  bool hidden = 13;
+  // Bookmarks pointing at it: local as `name`, remote as `name@remote`.
+  repeated string bookmarks = 14;
+  // Tags pointing at it.
+  repeated string tags = 15;
+  // Reef workspaces whose working-copy commit it is.
+  repeated string workspace_ids = 16;
+  // Other jj workspaces whose working-copy commit it is, such as `default`.
+  repeated string jj_workspaces = 17;
+}
+
+// How a log entry reaches a parent.
+enum GraphEdgeKind {
+  // Not set.
+  GRAPH_EDGE_KIND_UNSPECIFIED = 0;
+  // The parent is the next entry's commit, a direct parent.
+  GRAPH_EDGE_KIND_DIRECT = 1;
+  // The parent is reached through commits the log leaves out.
+  GRAPH_EDGE_KIND_INDIRECT = 2;
+  // The parent is outside the revset entirely.
+  GRAPH_EDGE_KIND_MISSING = 3;
+}
+
+// An edge from a log entry to one of its parents.
+message GraphEdge {
+  // The parent's commit.
+  string commit_id = 1;
+  // How it is reached.
+  GraphEdgeKind kind = 2;
+}
+
+// One entry of the log.
+message LogEntry {
+  // The change.
+  Change change = 1;
+  // Its edges to its parents in the log.
+  repeated GraphEdge edges = 2;
+}
+
+// A page of the log.
+message ListChangesRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // A jj revset expression; empty for Reef's default log set: every active
+  // workspace's working-copy commit and its ancestors back to `trunk()`,
+  // `trunk()` itself, and every visible mutable head. A server that does
+  // not speak jj's revset language may refuse a non-empty one with
+  // UNSUPPORTED.
+  string revset = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+  // Entries per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 6;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 7;
+}
+
+// A page of the log.
+message ListChangesResponse {
+  // The entries, children first.
+  repeated LogEntry entries = 1;
+  // The token for the next page; empty on the last page. Later pages read
+  // the same operation as the first.
+  string next_page_token = 2;
+  // The operation the log was read at.
+  string at_operation = 3;
+}
+
+// One change.
+message GetChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision.
+  string revision = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+}
+
+// One change.
+message GetChangeResponse {
+  // The change.
+  Change change = 1;
+  // The operation it was read at.
+  string at_operation = 2;
+}
+
+// Set a change's description.
+message DescribeChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision to describe.
+  string revision = 3;
+  // The new description, in full.
+  string description = 4;
+  // When non-empty, FAILED_PRECONDITION unless the revision still resolves
+  // to this commit.
+  string expected_commit_id = 5;
+}
+
+// What a describe recorded.
+message DescribeChangeResponse {
+  // The change afterwards.
+  Change change = 1;
+  // The operation that rewrote it.
+  Operation operation = 2;
+}
+
+// Abandon a change.
+message AbandonChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision to abandon.
+  string revision = 3;
+  // When non-empty, FAILED_PRECONDITION unless the revision still resolves
+  // to this commit.
+  string expected_commit_id = 4;
+}
+
+// What an abandon recorded.
+message AbandonChangeResponse {
+  // The commit abandoned.
+  string abandoned_commit_id = 1;
+  // The operation that abandoned it.
+  Operation operation = 2;
+}

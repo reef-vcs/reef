@@ -15,14 +15,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, op_id, test_settings};
+use reef_api::v1::{
+    CreateWorkspaceRequest, ListWorkspacesRequest, MoveWorkspaceRequest, Workspace,
+    create_workspace_request, move_workspace_request,
+};
 use reef_daemon::Daemon;
 use reef_daemon::client::Client;
+use reef_daemon::client::json::snapshot_kind_name;
 use reef_daemon::db::Db;
 use reef_daemon::model::{RepoId, Timestamp, WorkspaceId};
-use reef_daemon::proto::v0::{
-    CreateRequest, ListWorkspacesRequest, MoveRequest, Workspace, create_request, move_request,
-};
 use reef_daemon::snapshot::SnapshotKind;
 use reef_daemon::snapshot::index::{self, ReindexReport, SnapshotEntry};
 use reef_lib::jj::Repo;
@@ -51,15 +53,15 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
 async fn create(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
-    start: Option<create_request::Start>,
+    start: Option<create_workspace_request::Start>,
 ) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             start,
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -82,11 +84,11 @@ fn write(ws: &Workspace, path: &str, contents: &str) {
 /// Writes a file and waits for the watcher to snapshot it; returns the
 /// operation.
 async fn watcher_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) -> String {
-    let before = inspect(daemon, repo, ws).await.last_snapshot_op;
+    let before = inspect(daemon, repo, ws).await.last_snapshot_operation_id;
     write(ws, "watched.txt", "seen by the watcher\n");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let op = inspect(daemon, repo, ws).await.last_snapshot_op;
+        let op = inspect(daemon, repo, ws).await.last_snapshot_operation_id;
         if !op.is_empty() && op != before {
             return op;
         }
@@ -127,7 +129,7 @@ async fn explicit_snapshot(
         .await
         .unwrap();
     assert!(snapshot.changed, "the write is new");
-    snapshot.op_id
+    op_id(snapshot.operation.as_ref()).to_owned()
 }
 
 /// Writes a file and moves the workspace to its own change (R1.06), which
@@ -136,16 +138,19 @@ async fn move_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace
     write(ws, "moved.txt", "written before a move\n");
     let moved = daemon
         .client
-        .move_workspace(MoveRequest {
+        .move_workspace(MoveWorkspaceRequest {
             repo: repo.id.clone(),
             workspace: ws.id.clone(),
-            target: Some(move_request::Target::Change(ws.change_id.clone())),
-            ..MoveRequest::default()
+            target: Some(move_workspace_request::Target::Change(ws.change_id.clone())),
+            ..MoveWorkspaceRequest::default()
         })
         .await
         .unwrap();
-    assert!(!moved.final_op_id.is_empty(), "the move's snapshot wrote");
-    moved.final_op_id
+    assert!(
+        !op_id(moved.final_snapshot.as_ref()).is_empty(),
+        "the move's snapshot wrote"
+    );
+    op_id(moved.final_snapshot.as_ref()).to_owned()
 }
 
 /// Writes a file and releases with a final snapshot; returns the
@@ -157,8 +162,11 @@ async fn final_snapshot(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspac
         .release_workspace(&repo.id, &ws.id, true, false)
         .await
         .unwrap();
-    assert!(!released.final_op_id.is_empty(), "the final snapshot wrote");
-    released.final_op_id
+    assert!(
+        !op_id(released.final_snapshot.as_ref()).is_empty(),
+        "the final snapshot wrote"
+    );
+    op_id(released.final_snapshot.as_ref()).to_owned()
 }
 
 async fn inspect(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) -> Workspace {
@@ -285,12 +293,18 @@ async fn every_kind_is_recorded() {
         .await
         .unwrap();
     assert_eq!(inspected.snapshot_count, 4);
-    assert_eq!(inspected.local_snapshot_count, 4);
+    // The response's own `local_snapshot_count` (v0) is the workspace's now.
     assert_eq!(inspected.workspace.unwrap().local_snapshot_count, 4);
     let recent: Vec<_> = inspected
         .recent_snapshots
         .iter()
-        .map(|entry| (entry.op_id.as_str(), entry.kind.as_str(), entry.local))
+        .map(|entry| {
+            (
+                entry.operation_id.as_str(),
+                snapshot_kind_name(entry.kind),
+                entry.local,
+            )
+        })
         .collect();
     assert_eq!(recent.len(), 4);
     assert_eq!(
@@ -447,7 +461,7 @@ async fn for_change_lists_all_workspaces() {
     let b = create(
         &daemon,
         &repo,
-        Some(create_request::Start::Change(a.change_id.clone())),
+        Some(create_workspace_request::Start::Change(a.change_id.clone())),
     )
     .await;
     quiesce(&daemon, &repo, &[&a, &b]).await;

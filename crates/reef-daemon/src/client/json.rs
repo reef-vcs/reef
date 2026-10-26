@@ -4,12 +4,17 @@
 //! timestamps are RFC 3339 UTC strings, ids are full lowercase hex, and an
 //! absent value (an empty string or unset field in the message) is `null`.
 //!
+//! The v1 enums are printed as the strings Phase 1 printed (`apfs`,
+//! `fuse-overlayfs`, `stale-recovered`), so the JSON did not change with
+//! the API (R2.01); a value this build does not know prints as `unknown`.
+//!
 //! These are output types only; nothing parses them back.
 
+use reef_api::v1;
 use serde::Serialize;
 
-use crate::model::Timestamp;
-use crate::proto::v0;
+use crate::backend::BackendKind;
+use crate::model::{Attention, Timestamp};
 
 /// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision.
 pub fn rfc3339(time: &prost_types::Timestamp) -> String {
@@ -29,6 +34,89 @@ fn time(value: Option<&prost_types::Timestamp>) -> Option<String> {
 
 fn text(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// What an enum value this build does not know prints as.
+pub const UNKNOWN: &str = "unknown";
+
+/// A backend's name, as `workspaces.backend` stores it.
+pub fn backend_name(backend: i32) -> &'static str {
+    let kind = match v1::Backend::try_from(backend) {
+        Ok(v1::Backend::Copy) => BackendKind::Copy,
+        Ok(v1::Backend::Apfs) => BackendKind::ApfsClone,
+        Ok(v1::Backend::Reflink) => BackendKind::Reflink,
+        Ok(v1::Backend::Overlayfs) => BackendKind::Overlayfs,
+        Ok(v1::Backend::FuseOverlayfs) => BackendKind::FuseOverlayfs,
+        Ok(v1::Backend::Auto) => return "auto",
+        Ok(v1::Backend::Unspecified) | Err(_) => return UNKNOWN,
+    };
+    kind.as_str()
+}
+
+/// A workspace state's name: `active`, `releasing`, `released`, or
+/// `reclaimed`.
+pub fn state_name(state: i32) -> &'static str {
+    match v1::WorkspaceState::try_from(state) {
+        Ok(v1::WorkspaceState::Active) => "active",
+        Ok(v1::WorkspaceState::Releasing) => "releasing",
+        Ok(v1::WorkspaceState::Released) => "released",
+        Ok(v1::WorkspaceState::Reclaimed) => "reclaimed",
+        Ok(v1::WorkspaceState::Unspecified) | Err(_) => UNKNOWN,
+    }
+}
+
+/// An attention reason's name, such as `final-snapshot-failed`; `None`
+/// when the workspace needs none.
+pub fn attention_name(attention: i32) -> Option<&'static str> {
+    let reason = match v1::Attention::try_from(attention) {
+        Ok(v1::Attention::Unspecified) => return None,
+        Ok(v1::Attention::Divergent) => Attention::Divergent,
+        Ok(v1::Attention::StaleRecovered) => Attention::StaleRecovered,
+        Ok(v1::Attention::FinalSnapshotFailed) => Attention::FinalSnapshotFailed,
+        Ok(v1::Attention::StoreHashMismatch) => Attention::StoreHashMismatch,
+        Ok(v1::Attention::StoreMissing) => Attention::StoreMissing,
+        Ok(v1::Attention::WatchFailed) => Attention::WatchFailed,
+        Ok(v1::Attention::UpperMissing) => Attention::UpperMissing,
+        Ok(v1::Attention::MountFailed) => Attention::MountFailed,
+        Err(_) => return Some(UNKNOWN),
+    };
+    Some(reason.as_str())
+}
+
+fn watcher_name(watcher: i32) -> &'static str {
+    match v1::WatcherKind::try_from(watcher) {
+        Ok(v1::WatcherKind::Notify) => "notify",
+        Ok(v1::WatcherKind::Watchman) => "watchman",
+        Ok(v1::WatcherKind::Unspecified) | Err(_) => UNKNOWN,
+    }
+}
+
+/// Why a watch is not up yet: `waiting` or `attaching`; `None` once it is,
+/// or when not reported.
+fn watch_state_name(state: i32) -> Option<&'static str> {
+    match v1::WatchState::try_from(state) {
+        Ok(v1::WatchState::Waiting) => Some("waiting"),
+        Ok(v1::WatchState::Attaching) => Some("attaching"),
+        Ok(v1::WatchState::Attached | v1::WatchState::Unspecified) => None,
+        Err(_) => Some(UNKNOWN),
+    }
+}
+
+/// A snapshot kind's name: `watcher`, `explicit`, `final`, `move`, or
+/// `shutdown`.
+pub fn snapshot_kind_name(kind: i32) -> &'static str {
+    match v1::SnapshotKind::try_from(kind) {
+        Ok(v1::SnapshotKind::Watcher) => "watcher",
+        Ok(v1::SnapshotKind::Explicit) => "explicit",
+        Ok(v1::SnapshotKind::Final) => "final",
+        Ok(v1::SnapshotKind::Move) => "move",
+        Ok(v1::SnapshotKind::Shutdown) => "shutdown",
+        Ok(v1::SnapshotKind::Unspecified) | Err(_) => UNKNOWN,
+    }
+}
+
+fn operation_id(operation: Option<&v1::Operation>) -> Option<String> {
+    operation.map(|operation| operation.id.clone())
 }
 
 /// A hex change id in jj's "reverse hex", the spelling `jj log` shows: the
@@ -57,8 +145,8 @@ pub struct Repository {
     pub registered_at: Option<String>,
 }
 
-impl From<&v0::Repository> for Repository {
-    fn from(repo: &v0::Repository) -> Self {
+impl From<&v1::Repository> for Repository {
+    fn from(repo: &v1::Repository) -> Self {
         Self {
             id: repo.id.clone(),
             root: repo.root.clone(),
@@ -97,17 +185,30 @@ pub struct Lease {
 }
 
 /// A lease state's JSON name.
-fn lease_state(state: v0::lease::State) -> &'static str {
-    match state {
-        v0::lease::State::Active => "active",
-        v0::lease::State::InGrace => "in_grace",
-        v0::lease::State::Expired => "expired",
-        v0::lease::State::Ended => "ended",
+fn lease_state(state: i32) -> &'static str {
+    match v1::LeaseState::try_from(state) {
+        Ok(v1::LeaseState::Active) => "active",
+        Ok(v1::LeaseState::InGrace) => "in_grace",
+        Ok(v1::LeaseState::Expired) => "expired",
+        Ok(v1::LeaseState::Ended) => "ended",
+        Ok(v1::LeaseState::Unspecified) | Err(_) => UNKNOWN,
+    }
+}
+
+/// Why a lease ended: `released`, `expired`, or `restored`; `None` until it
+/// does.
+fn lease_end_reason(reason: i32) -> Option<&'static str> {
+    match v1::LeaseEndReason::try_from(reason) {
+        Ok(v1::LeaseEndReason::Released) => Some("released"),
+        Ok(v1::LeaseEndReason::Expired) => Some("expired"),
+        Ok(v1::LeaseEndReason::Restored) => Some("restored"),
+        Ok(v1::LeaseEndReason::Unspecified) => None,
+        Err(_) => Some(UNKNOWN),
     }
 }
 
 /// A `google.protobuf.Duration` in whole milliseconds; negative is zero.
-fn duration_millis(duration: &prost_types::Duration) -> u64 {
+pub fn duration_millis(duration: &prost_types::Duration) -> u64 {
     let millis = duration
         .seconds
         .saturating_mul(1000)
@@ -115,8 +216,8 @@ fn duration_millis(duration: &prost_types::Duration) -> u64 {
     u64::try_from(millis).unwrap_or(0)
 }
 
-impl From<&v0::Lease> for Lease {
-    fn from(lease: &v0::Lease) -> Self {
+impl From<&v1::Lease> for Lease {
+    fn from(lease: &v1::Lease) -> Self {
         Self {
             id: lease.id.clone(),
             owner: lease.owner.clone(),
@@ -124,10 +225,10 @@ impl From<&v0::Lease> for Lease {
             expires_at: time(lease.expires_at.as_ref()),
             expires_at_ms: lease.expires_at.as_ref().map(millis_of),
             last_heartbeat_at: time(lease.last_heartbeat_at.as_ref()),
-            length_ms: lease.length_ms,
-            grace_ms: lease.grace_ms,
-            state: lease_state(lease.state()).to_owned(),
-            end_reason: text(&lease.end_reason),
+            length_ms: lease.length.as_ref().map_or(0, duration_millis),
+            grace_ms: lease.grace.as_ref().map_or(0, duration_millis),
+            state: lease_state(lease.state).to_owned(),
+            end_reason: lease_end_reason(lease.end_reason).map(str::to_owned),
             heartbeat_every_ms: lease.heartbeat_every.as_ref().map(duration_millis),
         }
     }
@@ -196,11 +297,12 @@ pub struct MountedStore {
     pub verified: bool,
 }
 
-impl From<&v0::MountedStore> for MountedStore {
-    fn from(store: &v0::MountedStore) -> Self {
-        let mode = match store.mode() {
-            v0::mounted_store::Mode::Symlink => "symlink",
-            v0::mounted_store::Mode::Bind => "bind",
+impl From<&v1::MountedStore> for MountedStore {
+    fn from(store: &v1::MountedStore) -> Self {
+        let mode = match v1::StoreMountMode::try_from(store.mode) {
+            Ok(v1::StoreMountMode::Symlink) => "symlink",
+            Ok(v1::StoreMountMode::Bind) => "bind",
+            Ok(v1::StoreMountMode::Unspecified) | Err(_) => UNKNOWN,
         };
         Self {
             name: store.name.clone(),
@@ -212,8 +314,8 @@ impl From<&v0::MountedStore> for MountedStore {
     }
 }
 
-impl From<&v0::Workspace> for Workspace {
-    fn from(ws: &v0::Workspace) -> Self {
+impl From<&v1::Workspace> for Workspace {
+    fn from(ws: &v1::Workspace) -> Self {
         Self {
             id: ws.id.clone(),
             repo_id: ws.repo_id.clone(),
@@ -222,17 +324,17 @@ impl From<&v0::Workspace> for Workspace {
             change_id: ws.change_id.clone(),
             change_id_reverse_hex: reverse_hex(&ws.change_id),
             commit_id: ws.commit_id.clone(),
-            backend: ws.backend.clone(),
+            backend: backend_name(ws.backend).to_owned(),
             path: ws.path.clone(),
-            state: ws.state.clone(),
+            state: state_name(ws.state).to_owned(),
             divergent: ws.divergent,
-            attention: text(&ws.attention),
+            attention: attention_name(ws.attention).map(str::to_owned),
             created_at: time(ws.created_at.as_ref()),
             last_snapshot_at: time(ws.last_snapshot_at.as_ref()),
-            last_snapshot_op: text(&ws.last_snapshot_op),
+            last_snapshot_op: text(&ws.last_snapshot_operation_id),
             lease: ws.lease.as_ref().map(Lease::from),
-            watcher: ws.watcher.clone(),
-            watch_state: text(&ws.watch_state),
+            watcher: watcher_name(ws.watcher).to_owned(),
+            watch_state: watch_state_name(ws.watch_state).map(str::to_owned),
             local_snapshot_count: ws.local_snapshot_count,
             stores: ws.stores.iter().map(MountedStore::from).collect(),
         }
@@ -254,12 +356,12 @@ pub struct SnapshotEntry {
     pub taken_at: Option<String>,
 }
 
-impl From<&v0::SnapshotEntry> for SnapshotEntry {
-    fn from(entry: &v0::SnapshotEntry) -> Self {
+impl From<&v1::SnapshotEntry> for SnapshotEntry {
+    fn from(entry: &v1::SnapshotEntry) -> Self {
         Self {
-            op_id: entry.op_id.clone(),
+            op_id: entry.operation_id.clone(),
             commit_id: entry.commit_id.clone(),
-            kind: entry.kind.clone(),
+            kind: snapshot_kind_name(entry.kind).to_owned(),
             local: entry.local,
             taken_at: time(entry.taken_at.as_ref()),
         }
@@ -275,8 +377,8 @@ pub struct DiskUsage {
     pub files_changed: u64,
 }
 
-impl From<&v0::DiskUsage> for DiskUsage {
-    fn from(usage: &v0::DiskUsage) -> Self {
+impl From<&v1::DiskUsage> for DiskUsage {
+    fn from(usage: &v1::DiskUsage) -> Self {
         Self {
             allocated_bytes: usage.allocated_bytes,
             files_changed: usage.files_changed,
@@ -284,7 +386,8 @@ impl From<&v0::DiskUsage> for DiskUsage {
     }
 }
 
-/// `Workspaces.Create`'s answer: the workspace's fields, then the create's.
+/// `WorkspaceService.CreateWorkspace`'s answer: the workspace's fields, then
+/// the create's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Created {
     /// The new workspace.
@@ -307,24 +410,21 @@ pub struct Created {
 
 impl Created {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::CreateResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::CreateWorkspaceResponse) -> Option<Self> {
+        let timings = response.timings.unwrap_or_default();
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
-            op_id: text(&response.op_id),
+            op_id: operation_id(response.operation.as_ref()),
             shared_change: response.shared_change,
-            materialize_ms: response.materialize_ms,
+            materialize_ms: timings.base_ms.saturating_add(timings.materialize_ms),
             base_was_cached: response.base_was_cached,
-            timings: response
-                .timings
-                .as_ref()
-                .map(CreateTimings::from)
-                .unwrap_or_default(),
+            timings: CreateTimings::from(&timings),
             start: text(&response.start),
         })
     }
 }
 
-/// A create's steps, in milliseconds; see `v0::CreateTimings`.
+/// A create's steps, in milliseconds; see `v1::CreateTimings`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CreateTimings {
     /// Resolving the start revision.
@@ -347,8 +447,8 @@ pub struct CreateTimings {
     pub total_ms: u64,
 }
 
-impl From<&v0::CreateTimings> for CreateTimings {
-    fn from(timings: &v0::CreateTimings) -> Self {
+impl From<&v1::CreateTimings> for CreateTimings {
+    fn from(timings: &v1::CreateTimings) -> Self {
         Self {
             resolve_ms: timings.resolve_ms,
             base_ms: timings.base_ms,
@@ -363,7 +463,7 @@ impl From<&v0::CreateTimings> for CreateTimings {
     }
 }
 
-/// `Workspaces.Move`'s answer (R1.06): the workspace's fields, then the
+/// `WorkspaceService.MoveWorkspace`'s answer (R1.06): the workspace's fields, then the
 /// move's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Moved {
@@ -386,11 +486,11 @@ pub struct Moved {
 
 impl Moved {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::MoveResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::MoveWorkspaceResponse) -> Option<Self> {
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
-            op_id: text(&response.op_id),
-            final_op_id: text(&response.final_op_id),
+            op_id: operation_id(response.operation.as_ref()),
+            final_op_id: operation_id(response.final_snapshot.as_ref()),
             files_updated: response.files_updated,
             files_added: response.files_added,
             files_removed: response.files_removed,
@@ -399,7 +499,8 @@ impl Moved {
     }
 }
 
-/// `Workspaces.Inspect`'s answer: the workspace's fields, then the rest.
+/// `WorkspaceService.GetWorkspace`'s answer: the workspace's fields, then
+/// the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Inspected {
     /// The workspace, after the snapshot if one was taken.
@@ -419,12 +520,12 @@ pub struct Inspected {
 
 impl Inspected {
     /// From the response; `None` if it carries no workspace.
-    pub fn from_response(response: &v0::InspectResponse) -> Option<Self> {
+    pub fn from_response(response: &v1::GetWorkspaceResponse) -> Option<Self> {
         Some(Self {
             workspace: Workspace::from(response.workspace.as_ref()?),
             disk_usage: response.disk_usage.as_ref().map(DiskUsage::from),
             other_workspaces_on_change: response.other_workspaces_on_change.clone(),
-            op_id: text(&response.op_id),
+            op_id: operation_id(response.snapshot.as_ref()),
             snapshot_count: response.snapshot_count,
             recent_snapshots: response
                 .recent_snapshots
@@ -435,7 +536,7 @@ impl Inspected {
     }
 }
 
-/// `Workspaces.Release`'s answer.
+/// `WorkspaceService.ReleaseWorkspace`'s answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Released {
     /// The workspace released.
@@ -448,11 +549,11 @@ pub struct Released {
     pub freed_bytes: u64,
 }
 
-impl From<&v0::ReleaseResponse> for Released {
-    fn from(response: &v0::ReleaseResponse) -> Self {
+impl From<&v1::ReleaseWorkspaceResponse> for Released {
+    fn from(response: &v1::ReleaseWorkspaceResponse) -> Self {
         Self {
             id: response.workspace_id.clone(),
-            final_op_id: text(&response.final_op_id),
+            final_op_id: operation_id(response.final_snapshot.as_ref()),
             snapshot_taken: response.snapshot_taken,
             freed_bytes: response.freed_bytes,
         }
@@ -472,10 +573,10 @@ pub struct BackendProbe {
     pub filesystem: String,
 }
 
-impl From<&v0::BackendProbe> for BackendProbe {
-    fn from(probe: &v0::BackendProbe) -> Self {
+impl From<&v1::BackendProbe> for BackendProbe {
+    fn from(probe: &v1::BackendProbe) -> Self {
         Self {
-            kind: probe.kind.clone(),
+            kind: backend_name(probe.backend).to_owned(),
             available: probe.available,
             reason: text(&probe.reason),
             filesystem: probe.filesystem.clone(),
@@ -483,11 +584,15 @@ impl From<&v0::BackendProbe> for BackendProbe {
     }
 }
 
-/// `Daemon.Status`'s answer.
+/// `DaemonService.GetDaemonStatus`'s answer, or 0.1's `Daemon/Status`'s.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Status {
     /// The daemon's version.
     pub version: String,
+    /// The API it serves: `v1`, or `v0` for a 0.1 daemon (R2.01).
+    pub api: String,
+    /// The revision of `reef.api.v1` it serves; `null` for a 0.1 daemon.
+    pub api_revision: Option<u32>,
     /// The daemon's process id.
     pub pid: u32,
     /// Milliseconds since the daemon started.
@@ -506,10 +611,30 @@ pub struct Status {
     pub backends: Vec<BackendProbe>,
 }
 
-impl From<&v0::StatusResponse> for Status {
-    fn from(status: &v0::StatusResponse) -> Self {
+impl From<&v1::GetDaemonStatusResponse> for Status {
+    fn from(status: &v1::GetDaemonStatusResponse) -> Self {
         Self {
             version: status.version.clone(),
+            api: "v1".to_owned(),
+            api_revision: Some(status.api_revision),
+            pid: status.pid,
+            uptime_ms: status.uptime_ms,
+            socket: status.socket.clone(),
+            state_dir: status.state_dir.clone(),
+            schema_version: status.schema_version,
+            repositories: status.repository_count,
+            active_workspaces: status.active_workspace_count,
+            backends: status.backends.iter().map(BackendProbe::from).collect(),
+        }
+    }
+}
+
+impl From<&reef_api::v0::StatusResponse> for Status {
+    fn from(status: &reef_api::v0::StatusResponse) -> Self {
+        Self {
+            version: status.version.clone(),
+            api: "v0".to_owned(),
+            api_revision: None,
             pid: status.pid,
             uptime_ms: status.uptime_ms,
             socket: status.socket.clone(),
@@ -517,12 +642,21 @@ impl From<&v0::StatusResponse> for Status {
             schema_version: status.schema_version,
             repositories: status.repositories,
             active_workspaces: status.active_workspaces,
-            backends: status.backends.iter().map(BackendProbe::from).collect(),
+            backends: status
+                .backends
+                .iter()
+                .map(|probe| BackendProbe {
+                    kind: probe.kind.clone(),
+                    available: probe.available,
+                    reason: text(&probe.reason),
+                    filesystem: probe.filesystem.clone(),
+                })
+                .collect(),
         }
     }
 }
 
-/// A built store, from `Stores.List` (R1.20).
+/// A built store, from `StoreService.ListStores` (R1.20).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Store {
     /// The `[[store]] name`.
@@ -543,8 +677,8 @@ pub struct Store {
     pub repo_id: String,
 }
 
-impl From<&v0::StoreInfo> for Store {
-    fn from(store: &v0::StoreInfo) -> Self {
+impl From<&v1::StoreInfo> for Store {
+    fn from(store: &v1::StoreInfo) -> Self {
         Self {
             name: store.name.clone(),
             lockfile_hash: store.lockfile_hash.clone(),
@@ -558,7 +692,7 @@ impl From<&v0::StoreInfo> for Store {
     }
 }
 
-/// How a `Stores.Build` ended (R1.20).
+/// How a `StoreService.BuildStore` ended (R1.20).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BuiltStore {
     /// The store.
@@ -581,8 +715,8 @@ pub struct BuiltStore {
     pub already_built: bool,
 }
 
-impl From<&v0::BuildResult> for BuiltStore {
-    fn from(result: &v0::BuildResult) -> Self {
+impl From<&v1::BuildResult> for BuiltStore {
+    fn from(result: &v1::BuildResult) -> Self {
         Self {
             name: result.name.clone(),
             lockfile_hash: result.lockfile_hash.clone(),
@@ -590,14 +724,15 @@ impl From<&v0::BuildResult> for BuiltStore {
             bytes: result.bytes,
             sealed: result.sealed,
             exit_code: result.exit_code,
-            op_id: text(&result.op_id),
+            op_id: operation_id(result.release_operation.as_ref()),
             dropped_lines: result.dropped_lines,
             already_built: result.already_built,
         }
     }
 }
 
-/// One repository's report from `Maintenance.Gc` (R1.17).
+/// One repository's report from `MaintenanceService.CollectGarbage`
+/// (R1.17).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GcReport {
     /// The repository.
@@ -630,8 +765,8 @@ pub struct GcReport {
     pub dry_run: bool,
 }
 
-impl From<&v0::GcReport> for GcReport {
-    fn from(report: &v0::GcReport) -> Self {
+impl From<&v1::GcReport> for GcReport {
+    fn from(report: &v1::GcReport) -> Self {
         Self {
             repo_id: report.repo_id.clone(),
             keep_newer: time(report.keep_newer.as_ref()),
@@ -665,25 +800,29 @@ mod tests {
 
     #[test]
     fn workspace_json_has_stable_names_and_nulls() {
-        let ws = v0::Workspace {
+        let ws = v1::Workspace {
             id: "00000000000000aa".into(),
             change_id: "01".into(),
-            state: "active".into(),
+            state: v1::WorkspaceState::Active.into(),
             created_at: Some(prost_types::Timestamp {
                 seconds: 1_792_175_477,
                 nanos: 42_000_000,
             }),
-            lease: Some(v0::Lease {
+            lease: Some(v1::Lease {
                 id: "00000000000000bb".into(),
                 expires_at: Some(prost_types::Timestamp {
                     seconds: 1_792_175_478,
                     nanos: 0,
                 }),
-                ..v0::Lease::default()
+                state: v1::LeaseState::Active.into(),
+                ..v1::Lease::default()
             }),
-            ..v0::Workspace::default()
+            ..v1::Workspace::default()
         };
         let value = serde_json::to_value(Workspace::from(&ws)).unwrap();
+        assert_eq!(value["state"], "active");
+        assert_eq!(value["backend"], UNKNOWN);
+        assert_eq!(value["watch_state"], serde_json::Value::Null);
         assert_eq!(value["id"], "00000000000000aa");
         assert_eq!(value["change_id_reverse_hex"], "zy");
         assert_eq!(value["created_at"], "2026-10-16T18:31:17.042Z");
@@ -701,16 +840,42 @@ mod tests {
     }
 
     #[test]
+    fn enums_print_as_phase_1_strings() {
+        assert_eq!(
+            backend_name(v1::Backend::FuseOverlayfs.into()),
+            "fuse-overlayfs"
+        );
+        assert_eq!(backend_name(v1::Backend::Apfs.into()), "apfs");
+        assert_eq!(backend_name(99), UNKNOWN);
+        assert_eq!(
+            attention_name(v1::Attention::StaleRecovered.into()),
+            Some("stale-recovered")
+        );
+        assert_eq!(attention_name(v1::Attention::Unspecified.into()), None);
+        assert_eq!(attention_name(99), Some(UNKNOWN));
+        assert_eq!(snapshot_kind_name(v1::SnapshotKind::Final.into()), "final");
+        assert_eq!(
+            watch_state_name(v1::WatchState::Attaching.into()),
+            Some("attaching")
+        );
+        assert_eq!(watch_state_name(v1::WatchState::Attached.into()), None);
+        assert_eq!(
+            lease_end_reason(v1::LeaseEndReason::Restored.into()),
+            Some("restored")
+        );
+    }
+
+    #[test]
     fn mounted_stores_name_their_mode() {
-        let ws = v0::Workspace {
-            stores: vec![v0::MountedStore {
+        let ws = v1::Workspace {
+            stores: vec![v1::MountedStore {
                 name: "deps".into(),
                 lockfile_hash: "ab".into(),
                 mount: "vendor/deps".into(),
-                mode: v0::mounted_store::Mode::Bind.into(),
+                mode: v1::StoreMountMode::Bind.into(),
                 verified: true,
             }],
-            ..v0::Workspace::default()
+            ..v1::Workspace::default()
         };
         let value = serde_json::to_value(Workspace::from(&ws)).unwrap();
         assert_eq!(
@@ -727,19 +892,28 @@ mod tests {
 
     #[test]
     fn created_flattens_the_workspace() {
-        let response = v0::CreateResponse {
-            workspace: Some(v0::Workspace {
+        let response = v1::CreateWorkspaceResponse {
+            workspace: Some(v1::Workspace {
                 id: "00000000000000aa".into(),
                 path: "/ws".into(),
-                ..v0::Workspace::default()
+                ..v1::Workspace::default()
             }),
-            op_id: "ff".into(),
-            ..v0::CreateResponse::default()
+            operation: Some(v1::Operation {
+                id: "ff".into(),
+                ..v1::Operation::default()
+            }),
+            timings: Some(v1::CreateTimings {
+                base_ms: 2,
+                materialize_ms: 3,
+                ..v1::CreateTimings::default()
+            }),
+            ..v1::CreateWorkspaceResponse::default()
         };
         let value = serde_json::to_value(Created::from_response(&response).unwrap()).unwrap();
         assert_eq!(value["id"], "00000000000000aa");
         assert_eq!(value["path"], "/ws");
         assert_eq!(value["op_id"], "ff");
-        assert!(Created::from_response(&v0::CreateResponse::default()).is_none());
+        assert_eq!(value["materialize_ms"], 5);
+        assert!(Created::from_response(&v1::CreateWorkspaceResponse::default()).is_none());
     }
 }

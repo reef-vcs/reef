@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use reef_api::v1::MissingStores;
+use reef_api::v1::{
+    CreateWorkspaceRequest, ListWorkspacesRequest, WorkspaceState, create_workspace_request,
+};
 use reef_daemon::client::default_owner;
 use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
-use reef_daemon::proto::v0::create_request::MissingStores;
-use reef_daemon::proto::v0::{CreateRequest, ListWorkspacesRequest, create_request};
 use reef_daemon::workspace::ROOT_CHECKOUT;
 use reef_lib::error::ErrorKind;
 
@@ -122,11 +124,11 @@ impl CreateTarget {
     }
 
     /// The request these flags describe, owner and lease unset.
-    pub(crate) fn request(&self) -> Result<CreateRequest, CliError> {
+    pub(crate) fn request(&self) -> Result<CreateWorkspaceRequest, CliError> {
         let repo = self.repo()?.text();
         let start = match (&self.change, &self.new_on) {
-            (Some(change), _) => Some(create_request::Start::Change(change.clone())),
-            (None, Some(new_on)) => Some(create_request::Start::NewOn(new_on.clone())),
+            (Some(change), _) => Some(create_workspace_request::Start::Change(change.clone())),
+            (None, Some(new_on)) => Some(create_workspace_request::Start::NewOn(new_on.clone())),
             (None, None) => None,
         };
         let path = match &self.path {
@@ -138,12 +140,12 @@ impl CreateTarget {
         } else {
             MissingStores::Fail
         };
-        Ok(CreateRequest {
+        Ok(CreateWorkspaceRequest {
             repo,
             start,
             path,
             missing_stores: missing_stores.into(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
     }
 }
@@ -177,16 +179,19 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, args).await,
         WsCommand::List { repo, all, limit } => {
-            let states = if all {
+            let states: Vec<i32> = if all {
                 Vec::new()
             } else {
-                vec!["active".to_owned(), "releasing".to_owned()]
+                vec![
+                    WorkspaceState::Active.into(),
+                    WorkspaceState::Releasing.into(),
+                ]
             };
             let list = |repo| {
                 ctx.client.list_workspaces(ListWorkspacesRequest {
                     repo,
                     states: states.clone(),
-                    owner: String::new(),
+                    ..ListWorkspacesRequest::default()
                 })
             };
             let listed = match repo {
@@ -239,12 +244,8 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
 const LIST_LIMIT: usize = 100;
 
 /// The `limit` newest of `listed` (all when 0), newest first.
-fn newest(
-    mut listed: Vec<reef_daemon::proto::v0::Workspace>,
-    limit: usize,
-) -> Vec<reef_daemon::proto::v0::Workspace> {
-    // The daemon lists oldest first.
-    listed.reverse();
+fn newest(mut listed: Vec<reef_api::v1::Workspace>, limit: usize) -> Vec<reef_api::v1::Workspace> {
+    // The daemon lists newest first (R2.01).
     if limit > 0 {
         listed.truncate(limit);
     }
@@ -260,7 +261,7 @@ const GC_TIMEOUT: Duration = Duration::from_hours(1);
 /// command's one JSON value either way.
 async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, CliError> {
     let deadline = ctx.timeout_flag.unwrap_or(GC_TIMEOUT);
-    let gc = |repo: String| async move { ctx.client.gc(&repo, dry_run).await };
+    let gc = |repo: String| async move { ctx.client.collect_garbage(&repo, dry_run).await };
     let response = match repo {
         Some(repo) => {
             ctx.call_with_repo_within(deadline, &RepoArg::parse(repo)?, gc)
@@ -290,27 +291,33 @@ async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, Cl
     }
 }
 
-/// `--lease` as the request's `lease_ms`: 0 for the daemon's default.
-pub(crate) fn lease_millis(lease: Option<Duration>) -> Result<u64, CliError> {
+/// `--lease` as the request's `lease_length`: unset for the daemon's
+/// default.
+pub(crate) fn lease_length(
+    lease: Option<Duration>,
+) -> Result<Option<prost_types::Duration>, CliError> {
     match lease {
         Some(lease) if lease.is_zero() => {
             Err(CliError::Usage("--lease must be longer than 0s".to_owned()))
         }
-        Some(lease) => Ok(u64::try_from(lease.as_millis()).unwrap_or(u64::MAX)),
-        None => Ok(0),
+        Some(lease) => Ok(Some(prost_types::Duration {
+            seconds: i64::try_from(lease.as_secs()).unwrap_or(i64::MAX),
+            nanos: i32::try_from(lease.subsec_nanos()).unwrap_or(0),
+        })),
+        None => Ok(None),
     }
 }
 
 async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
-    let request = CreateRequest {
+    let request = CreateWorkspaceRequest {
         owner: args.owner.unwrap_or_else(default_owner),
         purpose: args.purpose.unwrap_or_default(),
-        lease_ms: lease_millis(args.lease)?,
+        lease_length: lease_length(args.lease)?,
         ..args.target.request()?
     };
     let response = ctx
         .call_with_repo(&args.target.repo()?, |repo| {
-            ctx.client.create_workspace(CreateRequest {
+            ctx.client.create_workspace(CreateWorkspaceRequest {
                 repo,
                 ..request.clone()
             })

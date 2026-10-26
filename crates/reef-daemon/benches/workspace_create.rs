@@ -51,14 +51,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
+use reef_api::v1::{
+    CreateTimings, CreateWorkspaceRequest, CreateWorkspaceResponse, IfNotJj, ListWorkspacesRequest,
+    WatchState, WatcherKind, Workspace,
+};
 use reef_daemon::backend::fs_util::{allocated_bytes, free_bytes};
 use reef_daemon::backend::{
     Backend, BackendKind, OverlayConfig, WorkspacePaths, backend_for, probe,
 };
-use reef_daemon::proto::v0::register_request::IfNotJj;
-use reef_daemon::proto::v0::{
-    CreateRequest, CreateResponse, CreateTimings, ListWorkspacesRequest, Workspace,
-};
+use reef_daemon::client::json::backend_name;
 use reef_daemon::testing::{TestDaemon, short_tmp};
 use reef_testing::synth::{self, MutateOps, Preset};
 
@@ -238,7 +239,7 @@ fn bench_create_api(c: &mut Criterion, fixture: &Fixture) {
                         created.borrow_mut().push(took);
                         materialized
                             .borrow_mut()
-                            .push(Duration::from_millis(response.materialize_ms));
+                            .push(Duration::from_millis(materialize_ms(&response)));
                         steps
                             .borrow_mut()
                             .push(response.timings.unwrap_or_default());
@@ -354,12 +355,12 @@ impl Api {
         eprintln!(
             "bench base: the daemon's first create took {:.1} s (materialize {} ms, base cached: {}), watcher {}",
             started.elapsed().as_secs_f64(),
-            response.materialize_ms,
+            materialize_ms(&response),
             response.base_was_cached,
-            first.watcher,
+            watcher_name(first.watcher()),
         );
         assert_eq!(
-            first.backend,
+            backend_name(first.backend),
             kind.as_str(),
             "the daemon's auto backend differs from the probe's"
         );
@@ -367,7 +368,7 @@ impl Api {
             .parent()
             .expect("a workspace directory")
             .clone_into(&mut api.ws_dir);
-        api.watcher.clone_from(&first.watcher);
+        watcher_name(first.watcher()).clone_into(&mut api.watcher);
         api.release(&first);
         api.wait_for_trash();
         api
@@ -377,12 +378,12 @@ impl Api {
         self.create_with_response().0
     }
 
-    fn create_with_response(&self) -> (Workspace, CreateResponse) {
-        let request = CreateRequest {
+    fn create_with_response(&self) -> (Workspace, CreateWorkspaceResponse) {
+        let request = CreateWorkspaceRequest {
             repo: self.repo.clone(),
             owner: OWNER.to_owned(),
             purpose: "bench".to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         };
         let mut response = self
             .rt
@@ -421,7 +422,8 @@ impl Api {
                 }))
                 .expect("list workspaces");
             let attaching = listed.iter().any(|listed| {
-                listed.watch_state == "attaching" && workspaces.iter().any(|ws| ws.id == listed.id)
+                listed.watch_state() == WatchState::Attaching
+                    && workspaces.iter().any(|ws| ws.id == listed.id)
             });
             if !attaching {
                 return begun.elapsed();
@@ -441,6 +443,24 @@ impl Api {
 
     fn stop(self) {
         self.rt.block_on(self.daemon.stop());
+    }
+}
+
+/// The daemon's materialization time for a create, as Phase 1's
+/// `materialize_ms` reported it: the base cache lookup and the backend's
+/// materialization, `timings.base_ms + timings.materialize_ms`.
+fn materialize_ms(response: &CreateWorkspaceResponse) -> u64 {
+    response.timings.as_ref().map_or(0, |timings| {
+        timings.base_ms.saturating_add(timings.materialize_ms)
+    })
+}
+
+/// A watcher's name, as Phase 1 reported it: `notify` or `watchman`.
+fn watcher_name(watcher: WatcherKind) -> &'static str {
+    match watcher {
+        WatcherKind::Notify => "notify",
+        WatcherKind::Watchman => "watchman",
+        WatcherKind::Unspecified => "unknown",
     }
 }
 

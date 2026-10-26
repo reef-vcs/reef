@@ -21,11 +21,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::short_tempdir;
 use common::spawned::{SpawnedDaemon, file_at};
+use common::{proto_millis, short_tempdir};
+use reef_api::v1::{Attention, CreateWorkspaceRequest, Workspace, WorkspaceState};
 use reef_daemon::config::FileConfig;
 use reef_daemon::model::{ReclaimReason, WorkspaceId};
-use reef_daemon::proto::v0::{CreateRequest, Workspace};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
 use serde_json::Value;
@@ -175,11 +175,11 @@ fn free(volume: &Path) {
 async fn create(daemon: &SpawnedDaemon, repo: &str, lease_ms: u64) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.to_owned(),
             owner: OWNER.to_owned(),
-            lease_ms,
-            ..CreateRequest::default()
+            lease_length: Some(proto_millis(lease_ms)),
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -275,7 +275,10 @@ async fn enospc_does_not_corrupt_or_crash() {
     .await;
     daemon.client.status().await.unwrap();
     assert!(daemon.is_running());
-    assert_eq!(inspect(&daemon, &ws.id).await.state, "active");
+    assert_eq!(
+        inspect(&daemon, &ws.id).await.state(),
+        WorkspaceState::Active
+    );
 
     free(volume.path());
     wait_for("the edit snapshotted once space is free", || async {
@@ -311,7 +314,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
         let filling = std::sync::Arc::clone(&filling);
         async move {
             while filling.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = client.heartbeat_workspace("", &id, &lease).await;
+                let _ = client.renew_lease("", &id, &lease).await;
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
@@ -334,14 +337,14 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     // on the first failed tick and every tenth) and retries every tick.
     // The reclaim once space is free shows the retry.
     wait_for("the reclaim refused", || async {
-        inspect(&daemon, &ws.id).await.attention == "final-snapshot-failed"
+        inspect(&daemon, &ws.id).await.attention() == Attention::FinalSnapshotFailed
             || !daemon
                 .stderr_lines("cannot reclaim the workspace")
                 .is_empty()
     })
     .await;
     let kept = inspect(&daemon, &ws.id).await;
-    assert_eq!(kept.state, "active");
+    assert_eq!(kept.state(), WorkspaceState::Active);
     assert!(path.is_dir());
     let id: WorkspaceId = ws.id.parse().unwrap();
     let reclaimed = || {
@@ -357,7 +360,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
 
     free(volume.path());
     wait_for("reclaimed once space is free", || async {
-        inspect(&daemon, &ws.id).await.state == "reclaimed"
+        inspect(&daemon, &ws.id).await.state() == WorkspaceState::Reclaimed
     })
     .await;
     let rows = reclaimed();

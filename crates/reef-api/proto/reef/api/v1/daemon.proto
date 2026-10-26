@@ -1,0 +1,64 @@
+// The daemon itself.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/options.proto";
+import "reef/api/v1/workspaces.proto";
+
+// The daemon's own status.
+service DaemonService {
+  // What the daemon is and what it serves. A client checks `api_revision`
+  // before calling an RPC added after revision 1.
+  rpc GetDaemonStatus(GetDaemonStatusRequest) returns (GetDaemonStatusResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Ask for the daemon's status.
+message GetDaemonStatusRequest {
+  // Skip the backend probe, which touches the filesystem; `backends` is
+  // then empty.
+  bool skip_backends = 1;
+}
+
+// The daemon's status.
+message GetDaemonStatusResponse {
+  // The daemon's version, such as `0.2.0`.
+  string version = 1;
+  // The revision of `reef.api.v1` it serves; it increases with every
+  // addition to the schema.
+  uint32 api_revision = 2;
+  // The daemon instance's id, which a backup and restore keep.
+  string instance_id = 3;
+  // The daemon's process id.
+  uint32 pid = 4;
+  // Milliseconds since the daemon started.
+  uint64 uptime_ms = 5;
+  // The state directory.
+  string state_dir = 6;
+  // The socket this answer came over.
+  string socket = 7;
+  // The metadata database's schema version.
+  uint32 schema_version = 8;
+  // Registered repositories.
+  uint32 repository_count = 9;
+  // Workspaces in WORKSPACE_STATE_ACTIVE.
+  uint32 active_workspace_count = 10;
+  // Each materialization backend and whether it can serve workspace roots
+  // under the state directory; empty with `skip_backends`.
+  repeated BackendProbe backends = 11;
+}
+
+// One materialization backend's probe.
+message BackendProbe {
+  // The backend.
+  Backend backend = 1;
+  // Whether it can serve workspace roots under the state directory.
+  bool available = 2;
+  // Why it is unavailable; empty when available.
+  string reason = 3;
+  // The filesystem probed, such as `apfs` or `ext4`.
+  string filesystem = 4;
+}

@@ -1,0 +1,122 @@
+// Registering the repositories workspaces are created in.
+//
+// `repo` accepts a repo id, a unique id prefix of four or more hex
+// characters, or an absolute path inside a registered root.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Registered repositories.
+service RepositoryService {
+  // Registers the jj repository containing `path`, by its root.
+  // Registering a registered repository again succeeds with
+  // `already_registered`. With IF_NOT_JJ_INIT_ALONGSIDE_GIT, a git checkout
+  // without jj gets a colocated `.jj` first (R1.25).
+  rpc RegisterRepository(RegisterRepositoryRequest) returns (RegisterRepositoryResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // One registered repository, resolved from a `repo` reference.
+  rpc GetRepository(GetRepositoryRequest) returns (GetRepositoryResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Registered repositories, oldest first.
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Unregisters a repository. Refused with FAILED_PRECONDITION while any of
+  // its workspaces is active.
+  rpc ForgetRepository(ForgetRepositoryRequest) returns (ForgetRepositoryResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+}
+
+// A registered repository.
+message Repository {
+  // 16 hex characters.
+  string id = 1;
+  // The root of the user's own jj workspace.
+  string root = 2;
+  // Whether jj and git share the working copy (`<root>/.git`).
+  bool colocated = 3;
+  // When it was registered.
+  google.protobuf.Timestamp registered_at = 4;
+}
+
+// What to do when no jj repository contains the path (R1.25).
+enum IfNotJj {
+  // IF_NOT_JJ_FAIL.
+  IF_NOT_JJ_UNSPECIFIED = 0;
+  // Refuse with NOT_FOUND.
+  IF_NOT_JJ_FAIL = 1;
+  // If the nearest ancestor with a `.git` has it as a directory, create
+  // jj's side of a colocated repository there and add `/.jj/` to
+  // `.git/info/exclude`, then register it. A `.git` file (a worktree or
+  // submodule) is INVALID_ARGUMENT; no `.git` at all stays NOT_FOUND.
+  IF_NOT_JJ_INIT_ALONGSIDE_GIT = 2;
+}
+
+// Register a repository.
+message RegisterRepositoryRequest {
+  // An absolute path inside the repository's root.
+  string path = 1;
+  // What to do when no jj repository contains `path`.
+  IfNotJj if_not_jj = 2;
+}
+
+// A registered repository.
+message RegisterRepositoryResponse {
+  // The repository.
+  Repository repository = 1;
+  // It was registered already.
+  bool already_registered = 2;
+  // This call created `.jj` in the checkout.
+  bool initialized_jj = 3;
+}
+
+// Look a repository up.
+message GetRepositoryRequest {
+  // The repository.
+  string repo = 1;
+}
+
+// One repository.
+message GetRepositoryResponse {
+  // The repository.
+  Repository repository = 1;
+}
+
+// A page of repositories.
+message ListRepositoriesRequest {
+  // Repositories per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 1;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 2;
+}
+
+// A page of repositories, oldest first.
+message ListRepositoriesResponse {
+  // The repositories.
+  repeated Repository repositories = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+}
+
+// Unregister a repository.
+message ForgetRepositoryRequest {
+  // The repository.
+  string repo = 1;
+}
+
+// A forgotten repository.
+message ForgetRepositoryResponse {
+  // The repository forgotten.
+  Repository repository = 1;
+}

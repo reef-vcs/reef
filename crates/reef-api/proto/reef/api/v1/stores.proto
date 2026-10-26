@@ -1,15 +1,19 @@
 // Shared dependency stores (R1.20, ADR 0022): built once per store name and
 // lockfile hash by the daemon, sealed read-only, and mounted into every
 // workspace whose lockfile hashes the same. Stores are per daemon; `repo`
-// names the repository whose `reef.toml` declares the store.
+// names the repository whose `reef.toml` declares the store, as a repo id,
+// a unique id prefix, or an absolute path inside a registered root.
 syntax = "proto3";
 
-package reef.daemon.v0;
+package reef.api.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
 
-service Stores {
+// Building and listing shared stores.
+service StoreService {
   // Runs the store's `build` command in a scratch workspace and seals what
   // it wrote: the command's output lines as they come, then the result. A
   // build that exits non-zero ends with a result whose `sealed` is false.
@@ -17,21 +21,26 @@ service Stores {
   // `force`. Errors: NOT_FOUND (no such store at the revision),
   // ALREADY_EXISTS (a build of the same store and hash is running),
   // INTERNAL (timed out; the process group was killed), UNAVAILABLE (the
-  // daemon is shutting down).
-  rpc Build(BuildStoreRequest) returns (stream BuildEvent);
-  // Sealed stores.
-  rpc List(ListStoresRequest) returns (ListStoresResponse);
+  // daemon is shutting down, or builds are off).
+  rpc BuildStore(BuildStoreRequest) returns (stream BuildStoreResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // Sealed stores, by name then lockfile hash.
+  rpc ListStores(ListStoresRequest) returns (ListStoresResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
+// Build a store.
 message BuildStoreRequest {
-  // A repo id, a unique id prefix, or an absolute path inside a registered
-  // root.
+  // The repository.
   string repo = 1;
   // The `[[store]] name`.
   string name = 2;
   // The revision whose `reef.toml` and lockfile to build from; empty for
-  // CreateRequest's default start (`main`, origin's HEAD, `master`, ...).
-  string rev = 3;
+  // the default start (`main`, origin's HEAD, `master`, ...).
+  string revision = 3;
   // How long the command may run; unset for 30 minutes.
   google.protobuf.Duration timeout = 4;
   // Rebuild even if a sealed store exists; the old one is moved aside when
@@ -39,17 +48,20 @@ message BuildStoreRequest {
   bool force = 5;
 }
 
-message BuildEvent {
+// One event of a build.
+message BuildStoreResponse {
+  // The event.
   oneof event {
-    OutputLine line = 1;
-    BuildResult done = 2;
-    // Sent once, before the first line, when the command is about to run
-    // (RX.01): what the daemon runs, for the client to show.
-    BuildStarted started = 3;
+    // Sent once, before the first line, when the command is about to run.
+    BuildStarted started = 1;
+    // One line of the command's output.
+    OutputLine line = 2;
+    // The last event: how the build ended.
+    BuildResult result = 3;
   }
 }
 
-// The command a build runs, as `reef.toml` at `rev` declares it.
+// The command a build runs, as `reef.toml` at the revision declares it.
 message BuildStarted {
   // The `[[store]] build` argv.
   repeated string argv = 1;
@@ -57,21 +69,30 @@ message BuildStarted {
   // client: they are repository content, committed in `reef.toml`.
   repeated string env = 2;
   // The commit the build runs on, full hex.
-  string rev = 3;
+  string commit_id = 3;
 }
 
 // One line of the build command's output, without its line ending, lossily
 // decoded as UTF-8.
 message OutputLine {
+  // Which stream a line came from.
   enum Stream {
-    STDOUT = 0;
-    STDERR = 1;
+    // Not set.
+    STREAM_UNSPECIFIED = 0;
+    // Standard output.
+    STREAM_STDOUT = 1;
+    // Standard error.
+    STREAM_STDERR = 2;
   }
+  // The line.
   string text = 1;
+  // Its stream.
   Stream stream = 2;
 }
 
+// How a build ended.
 message BuildResult {
+  // The store's name.
   string name = 1;
   // blake3 of the lockfile's bytes, 64 hex characters.
   string lockfile_hash = 2;
@@ -80,39 +101,58 @@ message BuildResult {
   string path = 3;
   // Bytes the sealed store allocates.
   uint64 bytes = 4;
+  // Whether the store is sealed.
   bool sealed = 5;
   // The command's exit code; -1 if a signal ended it.
   int32 exit_code = 6;
-  // The operation that released the scratch workspace; empty when nothing
+  // The operation that released the scratch workspace; unset when nothing
   // was built.
-  string op_id = 7;
+  Operation release_operation = 7;
   // Output lines dropped because the client read too slowly.
   uint64 dropped_lines = 8;
   // A sealed store already existed; nothing was built.
   bool already_built = 9;
 }
 
+// A page of stores.
 message ListStoresRequest {
-  // Empty for every store; otherwise the stores this repository built
-  // first or one of its workspaces mounts.
+  // The repository; empty for every store, else the stores this repository
+  // built first or one of its workspaces mounts.
   string repo = 1;
+  // Stores per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 2;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 3;
 }
 
+// A page of stores.
+message ListStoresResponse {
+  // The stores, by name then lockfile hash.
+  repeated StoreInfo stores = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+}
+
+// A sealed store.
 message StoreInfo {
+  // The `[[store]] name`.
   string name = 1;
+  // blake3 of its lockfile.
   string lockfile_hash = 2;
+  // Its directory.
   string path = 3;
   // Allocated bytes, measured when listed.
   uint64 bytes = 4;
+  // When its build was sealed.
   google.protobuf.Timestamp built_at = 5;
+  // Whether it is sealed.
   bool sealed = 6;
   // Loaded workspaces that mount it, a running build's scratch workspace
   // (which mounts the other stores it can) included.
   uint32 in_use_by = 7;
   // The repository that built it first.
   string repo_id = 8;
-}
-
-message ListStoresResponse {
-  repeated StoreInfo stores = 1;
 }

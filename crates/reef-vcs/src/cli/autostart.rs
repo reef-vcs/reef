@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use reef_daemon::client::Client;
+use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
 
 use super::{CliError, Global, absolute};
@@ -64,7 +64,22 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
                 .map_err(|_| CliError::Autostart {
                     reason: format!("{} accepted but did not answer", socket.display()),
                 })?
-                .map_err(CliError::Daemon)?;
+                .map_err(|error| match error {
+                    // The daemon binary it found is another version: say
+                    // which, instead of restarting it in a loop (R2.01).
+                    ClientError::Incompatible {
+                        daemon_version,
+                        daemon_api,
+                        ..
+                    } => CliError::Autostart {
+                        reason: format!(
+                            "{} started reef {daemon_version} (API {daemon_api}), not this reef's {} (API v1); install the matching reef-daemon or remove that one",
+                            program.path.display(),
+                            reef_daemon::client::VERSION
+                        ),
+                    },
+                    error => CliError::Daemon(error),
+                })?;
             return Ok((client, status.pid));
         }
         if exited.is_none() {

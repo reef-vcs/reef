@@ -4,6 +4,16 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Changed
+
+- The daemon's API is `reef.api.v1`, in the new `reef-api` crate: typed enums instead of strings, every list paginated, every write returning the jj operation it recorded, errors as `google.rpc.Status` with a `reef.api.v1.ErrorDetail` that stock gRPC tooling decodes, and every RPC Phase 2 implements declared up front ([ADR 0029](docs/adr/0029-daemon-api-v1.md)). `reef.daemon.v0` is gone except `Daemon/Status`, which a 0.1 `reef daemon status` and `stop` still use.
+- A daemon that cannot serve a request as asked says so: exit code 9, kind `unsupported`. The CLI's JSON error object carries the daemon's `reason` when there is one, such as `API_VERSION_MISMATCH`.
+- `reef ws list` asks the daemon for workspaces newest first, a page at a time.
+
+### Upgrading from 0.1
+
+A 0.1 daemon keeps running after the binaries are replaced. The first `reef` command restarts it when it has no active workspaces. Otherwise the command fails with exit code 9 and `next` set to `reef daemon stop`: stop it once its `ws run` sessions end, and the next command starts the new one. A 0.1 `reef` against the new daemon is told to upgrade (exit 5); its `daemon status` and `daemon stop` keep working.
+
 ## [0.1.0] - 2026-10-25
 
 Phase 1: leased copy-on-write workspaces. Start with the [quickstart](docs/quickstart.md).

@@ -23,10 +23,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::{SyntheticRepo, TestDaemon};
+use reef_api::v1::{
+    Attention, CreateWorkspaceRequest, GetWorkspaceResponse, Workspace, WorkspaceState,
+};
 use reef_daemon::backend::{Availability, BackendChoice, BackendKind, OverlayConfig, probe};
+use reef_daemon::client::json::backend_name;
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::daemon::Daemon;
-use reef_daemon::proto::v0::{CreateRequest, InspectResponse, Workspace};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_testing::synth::Preset;
 
@@ -52,10 +55,10 @@ fn available(kind: BackendKind) -> bool {
 async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: "tester@host".to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -63,7 +66,7 @@ async fn create(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
         .unwrap()
 }
 
-async fn inspect(client: &Client, ws: &Workspace) -> InspectResponse {
+async fn inspect(client: &Client, ws: &Workspace) -> GetWorkspaceResponse {
     client.inspect_workspace("", &ws.id, false).await.unwrap()
 }
 
@@ -127,7 +130,7 @@ async fn survives_restart(kind: BackendKind) {
     .await;
     let [kept, lost] = [create(&daemon, &repo).await, create(&daemon, &repo).await];
     for ws in [&kept, &lost] {
-        assert_eq!(ws.backend, kind.as_str());
+        assert_eq!(backend_name(ws.backend), kind.as_str());
         assert!(is_mounted(Path::new(&ws.path)));
         std::fs::write(Path::new(&ws.path).join("edit.txt"), "kept\n").unwrap();
     }
@@ -160,13 +163,16 @@ async fn survives_restart(kind: BackendKind) {
         "kept\n"
     );
     let inspected = inspect(&client, &kept).await;
-    assert_eq!(inspected.workspace.unwrap().attention, "");
+    assert_eq!(
+        inspected.workspace.unwrap().attention(),
+        Attention::Unspecified
+    );
     client.snapshot_workspace("", &kept.id, "").await.unwrap();
 
     assert!(!is_mounted(Path::new(&lost.path)));
     let inspected = inspect(&client, &lost).await.workspace.unwrap();
-    assert_eq!(inspected.attention, "upper-missing");
-    assert_eq!(inspected.state, "active");
+    assert_eq!(inspected.attention(), Attention::UpperMissing);
+    assert_eq!(inspected.state(), WorkspaceState::Active);
     let error: ClientError = client
         .snapshot_workspace("", &lost.id, "")
         .await

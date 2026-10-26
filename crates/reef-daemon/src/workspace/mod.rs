@@ -516,6 +516,9 @@ pub enum ManagerError {
     /// A move could not check the target's tree out (R1.06).
     #[error(transparent)]
     CheckoutTree(#[from] CheckoutTreeError),
+    /// An operation the daemon wrote could not be read back (R2.01).
+    #[error(transparent)]
+    OpLog(#[from] reef_lib::jj::oplog::OpLogError),
 }
 
 impl Classify for ManagerError {
@@ -558,6 +561,7 @@ impl Classify for ManagerError {
             Self::ReadFile(error) => error.kind(),
             Self::MovePointer(error) => error.kind(),
             Self::CheckoutTree(error) => error.kind(),
+            Self::OpLog(error) => error.kind(),
         }
     }
 }

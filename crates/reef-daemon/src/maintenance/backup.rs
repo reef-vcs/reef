@@ -51,6 +51,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use reef_api::v1::{BackupResponse, BackupStep};
 use reef_lib::error::{Classify, ErrorChain, ErrorKind, classify_by_source};
 use reef_lib::jj::{JJ_LIB_VERSION, OperationIdHex};
 use reef_lib::telemetry::elapsed_ms;
@@ -62,7 +63,6 @@ use crate::daemon::{AppState, PrivateDirError};
 use crate::db::{DbError, META_DAEMON_INSTANCE_ID, META_LAST_BACKUP_AT};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
-use crate::proto::v0::BackupProgress;
 use crate::repo::RepoThreadError;
 
 /// The manifest's `version`.
@@ -314,17 +314,16 @@ pub async fn run(
     state: &AppState,
     dest: &Path,
     repo: Option<RepoId>,
-    progress: mpsc::Sender<BackupProgress>,
+    progress: mpsc::Sender<BackupResponse>,
 ) -> Result<Manifest, BackupError> {
     let begun = Instant::now();
     prepare_dest(state, dest)?;
-    let report = |step: &str, repo: Option<RepoId>, files: u64, bytes: u64| {
-        let message = BackupProgress {
+    let report = |step: BackupStep, repo: Option<RepoId>, files: u64, bytes: u64| {
+        let message = BackupResponse {
             repo_id: repo.map(|id| id.as_hex()).unwrap_or_default(),
-            step: step.to_owned(),
+            step: step.into(),
             files,
             bytes,
-            done: false,
             manifest_path: String::new(),
         };
         // Progress is best effort: a client that stopped reading does not
@@ -361,7 +360,7 @@ pub async fn run(
         let pages = state.config.file.backup.sqlite_pages_per_step;
         tokio::task::spawn_blocking(move || backup_sqlite(&db, &to, pages)).await??
     };
-    report("sqlite", None, 1, sqlite.bytes);
+    report(BackupStep::Sqlite, None, 1, sqlite.bytes);
     manifest.sqlite = sqlite;
 
     // 3. and 4., per repository.
@@ -376,7 +375,7 @@ pub async fn run(
     for (record, repo_heads) in records.iter().zip(heads) {
         let dir = repo_dir(dest, record.id);
         tokio::task::spawn_blocking(move || repo_heads.write(&dir)).await??;
-        report("heads", Some(record.id), 0, 0);
+        report(BackupStep::Heads, Some(record.id), 0, 0);
     }
     manifest.complete = true;
     manifest.write(dest)?;
@@ -528,7 +527,7 @@ async fn backup_repo(
     state: &AppState,
     record: &RepositoryRecord,
     dest: &Path,
-    report: &impl Fn(&str, Option<RepoId>, u64, u64),
+    report: &impl Fn(BackupStep, Option<RepoId>, u64, u64),
 ) -> Result<(RepoManifest, RepoHeads), BackupError> {
     let id = record.id;
     let dir = repo_dir(dest, id);
@@ -564,7 +563,7 @@ async fn backup_repo(
     );
     files += paused_files;
     bytes += paused_bytes;
-    report("operations", Some(id), files, bytes);
+    report(BackupStep::Operations, Some(id), files, bytes);
 
     // 4.
     let git = if record.colocated {
@@ -578,7 +577,7 @@ async fn backup_repo(
             tokio::task::spawn_blocking(move || copy_git(&from, &into)).await??;
         files += git_files;
         bytes += git_bytes;
-        report("objects", Some(id), git_files, git_bytes);
+        report(BackupStep::Objects, Some(id), git_files, git_bytes);
     }
     let entry = RepoManifest {
         id: id.as_hex(),

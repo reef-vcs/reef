@@ -32,6 +32,10 @@ pub enum ErrorKind {
     Io,
     /// A bug, a corrupt repository, or a failure Reef cannot classify.
     Internal,
+    /// The daemon cannot serve the request as asked: an RPC or option it
+    /// does not implement, or a client and daemon whose API versions differ
+    /// (R2.01, ADR 0029).
+    Unsupported,
 }
 
 impl ErrorKind {
@@ -45,12 +49,14 @@ impl ErrorKind {
                 | Self::InvalidArgument
                 | Self::Conflict
                 | Self::PermissionDenied
+                | Self::Unsupported
         )
     }
 
     /// The CLI's exit code for a command that failed with this kind: 2 for
     /// `InvalidArgument`, 3 `NotFound`, 4 `AlreadyExists`, 5 `Conflict`, 6
-    /// `Unavailable`, 7 `PermissionDenied`, 8 `Io`, 1 `Internal`.
+    /// `Unavailable`, 7 `PermissionDenied`, 8 `Io`, 9 `Unsupported`, 1
+    /// `Internal`.
     pub fn exit_code(self) -> u8 {
         match self {
             Self::InvalidArgument => 2,
@@ -60,6 +66,7 @@ impl ErrorKind {
             Self::Unavailable => 6,
             Self::PermissionDenied => 7,
             Self::Io => 8,
+            Self::Unsupported => 9,
             Self::Internal => 1,
         }
     }

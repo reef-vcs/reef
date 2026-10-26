@@ -21,12 +21,12 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, logs, test_settings};
-use reef_daemon::client::ClientError;
-use reef_daemon::proto::v0::{
-    self, CreateRequest, ListWorkspacesRequest, Workspace, build_event, create_request,
-    mounted_store, output_line,
+use common::{SyntheticRepo, TestDaemon, logs, op_id, test_settings};
+use reef_api::v1::{
+    self, Attention, Backend, CreateWorkspaceRequest, ListWorkspacesRequest, MissingStores,
+    StoreMountMode, Workspace, WorkspaceState, build_store_response, output_line,
 };
+use reef_daemon::client::ClientError;
 use reef_daemon::store::hash_lockfile;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{CommitIdHex, Repo, StartPoint};
@@ -87,33 +87,31 @@ fn key_hash() -> String {
 async fn create(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
-    missing: create_request::MissingStores,
+    missing: MissingStores,
 ) -> Result<Workspace, ClientError> {
     let response = daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             owner: OWNER.to_owned(),
             missing_stores: missing.into(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await?;
     Ok(response.workspace.unwrap())
 }
 
 async fn create_ok(daemon: &TestDaemon, repo: &SyntheticRepo) -> Workspace {
-    create(daemon, repo, create_request::MissingStores::Fail)
-        .await
-        .unwrap()
+    create(daemon, repo, MissingStores::Fail).await.unwrap()
 }
 
 /// What a `Stores.Build` stream carried.
 #[derive(Debug, Default)]
 struct Built {
     /// Each `Started` event, with how many lines came before it.
-    started: Vec<(usize, v0::BuildStarted)>,
-    lines: Vec<v0::OutputLine>,
-    done: Option<v0::BuildResult>,
+    started: Vec<(usize, v1::BuildStarted)>,
+    lines: Vec<v1::OutputLine>,
+    done: Option<v1::BuildResult>,
     error: Option<ClientError>,
 }
 
@@ -133,11 +131,11 @@ async fn build_with(daemon: &TestDaemon, repo: &SyntheticRepo, timeout: Duration
     loop {
         match stream.message().await {
             Ok(Some(event)) => match event.event.unwrap() {
-                build_event::Event::Started(started) => {
+                build_store_response::Event::Started(started) => {
                     built.started.push((built.lines.len(), started));
                 }
-                build_event::Event::Line(line) => built.lines.push(line),
-                build_event::Event::Done(done) => built.done = Some(done),
+                build_store_response::Event::Line(line) => built.lines.push(line),
+                build_store_response::Event::Result(done) => built.done = Some(done),
             },
             Ok(None) => return built,
             Err(status) => {
@@ -149,16 +147,18 @@ async fn build_with(daemon: &TestDaemon, repo: &SyntheticRepo, timeout: Duration
 }
 
 /// The first event after the build's `Started` (RX.01), which comes first.
-async fn first_line(events: &mut tonic::Streaming<v0::BuildEvent>) -> v0::BuildEvent {
+async fn first_line(
+    events: &mut tonic::Streaming<v1::BuildStoreResponse>,
+) -> v1::BuildStoreResponse {
     let started = events.message().await.unwrap().unwrap();
     assert!(
-        matches!(started.event, Some(build_event::Event::Started(_))),
+        matches!(started.event, Some(build_store_response::Event::Started(_))),
         "{started:?}"
     );
     events.message().await.unwrap().unwrap()
 }
 
-async fn build(daemon: &TestDaemon, repo: &SyntheticRepo) -> v0::BuildResult {
+async fn build(daemon: &TestDaemon, repo: &SyntheticRepo) -> v1::BuildResult {
     let built = build_with(daemon, repo, Duration::from_mins(5)).await;
     assert!(built.error.is_none(), "{:?}", built.error);
     built.done.expect("a result")
@@ -171,7 +171,7 @@ fn mount_of(ws: &Workspace) -> PathBuf {
 /// Whether this daemon gives workspaces bind mounts: privileged, and not
 /// a FUSE overlay workspace.
 fn expects_bind(daemon: &TestDaemon, ws: &Workspace) -> bool {
-    daemon.handle.state().manager.stores().privileged() && ws.backend != "fuse-overlayfs"
+    daemon.handle.state().manager.stores().privileged() && ws.backend() != Backend::FuseOverlayfs
 }
 
 /// Where the store's contents are: `<hash>/<mount's last component>/`.
@@ -204,12 +204,12 @@ fn assert_mounted(daemon: &TestDaemon, ws: &Workspace) {
     assert!(mounted.verified);
     let meta = std::fs::symlink_metadata(&mount).unwrap();
     if expects_bind(daemon, ws) {
-        assert_eq!(mounted.mode(), mounted_store::Mode::Bind);
+        assert_eq!(mounted.mode(), StoreMountMode::Bind);
         assert!(meta.is_dir());
         let store = std::fs::metadata(store_dir(daemon)).unwrap();
         assert_eq!((meta.dev(), meta.ino()), (store.dev(), store.ino()));
     } else {
-        assert_eq!(mounted.mode(), mounted_store::Mode::Symlink);
+        assert_eq!(mounted.mode(), StoreMountMode::Symlink);
         assert!(meta.file_type().is_symlink());
         assert_eq!(std::fs::read_link(&mount).unwrap(), store_dir(daemon));
     }
@@ -262,7 +262,7 @@ fn is_root() -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn create_without_store_fails_unavailable() {
     let (daemon, repo) = fixture().await;
-    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+    let error = create(&daemon, &repo, MissingStores::Fail)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
@@ -289,10 +289,8 @@ async fn create_without_store_fails_unavailable() {
 #[tokio::test(flavor = "multi_thread")]
 async fn create_with_skip_marks_attention() {
     let (daemon, repo) = fixture().await;
-    let ws = create(&daemon, &repo, create_request::MissingStores::Skip)
-        .await
-        .unwrap();
-    assert_eq!(ws.attention, "store-missing");
+    let ws = create(&daemon, &repo, MissingStores::Skip).await.unwrap();
+    assert_eq!(ws.attention(), Attention::StoreMissing);
     assert!(ws.stores.is_empty(), "nothing mounted: {:?}", ws.stores);
     assert!(std::fs::symlink_metadata(mount_of(&ws)).is_err());
 }
@@ -316,7 +314,10 @@ async fn build_seals_and_lists() {
     assert_eq!(done.exit_code, 0);
     assert_eq!(done.name, "deps");
     assert_eq!(done.lockfile_hash, key_hash());
-    assert!(!done.op_id.is_empty(), "the scratch workspace's release");
+    assert!(
+        !op_id(done.release_operation.as_ref()).is_empty(),
+        "the scratch workspace's release"
+    );
     assert!(!done.already_built);
     let dir = store_dir(&daemon);
     assert_eq!(Path::new(&done.path), dir);
@@ -344,13 +345,17 @@ async fn build_seals_and_lists() {
         .unwrap();
     assert_eq!(all.len(), 1, "{all:?}");
     assert_eq!(all[0].owner, "reef-store-build");
-    assert_eq!(all[0].state, "released");
+    assert_eq!(all[0].state(), WorkspaceState::Released);
     assert!(!Path::new(&all[0].path).exists());
 
     // Built already: answered without a build.
     let again = build(&daemon, &repo).await;
     assert!(again.sealed && again.already_built);
-    assert!(again.op_id.is_empty(), "no build ran: {}", again.op_id);
+    assert!(
+        op_id(again.release_operation.as_ref()).is_empty(),
+        "no build ran: {}",
+        op_id(again.release_operation.as_ref())
+    );
 }
 
 // 4
@@ -359,7 +364,7 @@ async fn create_mounts_sealed_store() {
     let (daemon, repo) = fixture().await;
     build(&daemon, &repo).await;
     let ws = create_ok(&daemon, &repo).await;
-    assert_eq!(ws.attention, "");
+    assert_eq!(ws.attention(), Attention::Unspecified);
     assert_mounted(&daemon, &ws);
     assert_eq!(in_use(&daemon).await, 1);
     // Inspect and List carry it too.
@@ -470,7 +475,7 @@ async fn lockfile_edit_sets_mismatch() {
         .unwrap()
         .workspace
         .unwrap();
-    assert_eq!(inspected.attention, "store-hash-mismatch");
+    assert_eq!(inspected.attention(), Attention::StoreHashMismatch);
     assert!(!inspected.stores[0].verified);
     assert!(mount_of(&ws).join("manifest").is_file(), "the mount stays");
 
@@ -488,7 +493,7 @@ async fn lockfile_edit_sets_mismatch() {
         .unwrap()
         .workspace
         .unwrap();
-    assert_eq!(inspected.attention, "");
+    assert_eq!(inspected.attention(), Attention::Unspecified);
     assert!(inspected.stores[0].verified);
 }
 
@@ -511,7 +516,7 @@ async fn build_failure_keeps_failed_dir() {
         daemon.client.list_stores("").await.unwrap().is_empty(),
         "nothing sealed"
     );
-    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+    let error = create(&daemon, &repo, MissingStores::Fail)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
@@ -555,7 +560,7 @@ async fn build_timeout_kills_process_group() {
     // Timed from the command's start, not the scratch workspace's create.
     let started = first_line(&mut events).await;
     assert!(
-        matches!(started.event, Some(build_event::Event::Line(ref line)) if line.text == "started"),
+        matches!(started.event, Some(build_store_response::Event::Line(ref line)) if line.text == "started"),
         "{started:?}"
     );
     let begun = Instant::now();
@@ -563,7 +568,7 @@ async fn build_timeout_kills_process_group() {
         match events.message().await {
             Ok(Some(event)) => {
                 assert!(
-                    !matches!(event.event, Some(build_event::Event::Done(_))),
+                    !matches!(event.event, Some(build_store_response::Event::Result(_))),
                     "{event:?}"
                 );
             }
@@ -622,7 +627,7 @@ async fn concurrent_build_rejected() {
         .unwrap();
     let started = first_line(&mut first).await;
     assert!(
-        matches!(started.event, Some(build_event::Event::Line(ref line)) if line.text == "started"),
+        matches!(started.event, Some(build_store_response::Event::Line(ref line)) if line.text == "started"),
         "{started:?}"
     );
     let second = build_with(&daemon, &repo, Duration::from_mins(1)).await;
@@ -630,7 +635,7 @@ async fn concurrent_build_rejected() {
     assert_eq!(error.kind(), ErrorKind::AlreadyExists, "{error}");
     let mut done = None;
     while let Some(event) = first.message().await.unwrap() {
-        if let Some(build_event::Event::Done(result)) = event.event {
+        if let Some(build_store_response::Event::Result(result)) = event.event {
             done = Some(result);
         }
     }
@@ -669,11 +674,11 @@ async fn bind_mount_is_read_only() {
     }
     build(&daemon, &repo).await;
     let ws = create_ok(&daemon, &repo).await;
-    if ws.backend == "fuse-overlayfs" {
+    if ws.backend() == Backend::FuseOverlayfs {
         eprintln!("skipped: FUSE overlay workspaces get symlinks");
         return;
     }
-    assert_eq!(ws.stores[0].mode(), mounted_store::Mode::Bind);
+    assert_eq!(ws.stores[0].mode(), StoreMountMode::Bind);
     let mount = mount_of(&ws);
     let error = std::fs::write(mount.join("poison"), "x").unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc_erofs()), "{error}");
@@ -727,9 +732,7 @@ async fn restart_finds_mounts_again() {
         // A workspace created before the store was rebuilt for a new
         // lockfile, without it.
         commit_at_root(&repo.root, &[("deps.lock", "v2\n")]).await;
-        create(&daemon, &repo, create_request::MissingStores::Skip)
-            .await
-            .unwrap()
+        create(&daemon, &repo, MissingStores::Skip).await.unwrap()
     };
     let daemon = daemon.restart().await;
     let reloaded = daemon
@@ -754,7 +757,7 @@ async fn restart_finds_mounts_again() {
         "not mounted: {:?}",
         skipped.stores
     );
-    assert_eq!(skipped.attention, "store-missing");
+    assert_eq!(skipped.attention(), Attention::StoreMissing);
 }
 
 // 14: GC removes a store nothing names or mounts, and keeps the others.
@@ -786,10 +789,14 @@ async fn gc_removes_unused_stores() {
     assert_eq!(mounted.stores[0].lockfile_hash, v2.lockfile_hash);
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let dry = daemon.client.gc(&repo.id, true).await.unwrap();
+    let dry = daemon.client.collect_garbage(&repo.id, true).await.unwrap();
     assert_eq!(dry.reports[0].stores_removed, 2, "{:?}", dry.reports[0]);
     assert!(old.exists(), "a dry run removes nothing");
-    let report = daemon.client.gc(&repo.id, false).await.unwrap();
+    let report = daemon
+        .client
+        .collect_garbage(&repo.id, false)
+        .await
+        .unwrap();
     let report = &report.reports[0];
     assert_eq!(report.stores_removed, 2, "{report:?}");
     assert!(report.store_bytes_freed > 0);
@@ -818,11 +825,11 @@ async fn move_to_own_change_remounts_rebuilt_store() {
         .snapshot_workspace(&repo.id, &ws.id, "")
         .await
         .unwrap();
-    let to_own_change = |change: String| v0::MoveRequest {
+    let to_own_change = |change: String| v1::MoveWorkspaceRequest {
         repo: repo.id.clone(),
         workspace: ws.id.clone(),
-        target: Some(v0::move_request::Target::Change(change)),
-        ..v0::MoveRequest::default()
+        target: Some(v1::move_workspace_request::Target::Change(change)),
+        ..v1::MoveWorkspaceRequest::default()
     };
 
     let error = daemon
@@ -839,7 +846,7 @@ async fn move_to_own_change_remounts_rebuilt_store() {
         .workspace
         .unwrap();
     assert_eq!(row.commit_id, snapshot.commit_id, "nothing moved");
-    assert_eq!(row.attention, "store-hash-mismatch");
+    assert_eq!(row.attention(), Attention::StoreHashMismatch);
     assert_eq!(
         row.stores[0].lockfile_hash,
         key_hash(),
@@ -864,10 +871,14 @@ async fn move_to_own_change_remounts_rebuilt_store() {
         .move_workspace(to_own_change(ws.change_id.clone()))
         .await
         .unwrap();
-    assert_eq!(moved.op_id, "", "the pointer did not move");
+    assert_eq!(
+        op_id(moved.operation.as_ref()),
+        "",
+        "the pointer did not move"
+    );
     let after = moved.workspace.unwrap();
     assert_eq!(after.commit_id, snapshot.commit_id);
-    assert_eq!(after.attention, "");
+    assert_eq!(after.attention(), Attention::Unspecified);
     assert_eq!(after.stores.len(), 1);
     assert_eq!(after.stores[0].lockfile_hash, hash_lockfile(b"v2\n"));
     assert!(after.stores[0].verified);
@@ -954,7 +965,7 @@ async fn store_in_the_old_layout_is_rebuilt() {
         .seal_store("deps", &key_hash(), reef_daemon::model::Timestamp(1), &root)
         .unwrap();
 
-    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+    let error = create(&daemon, &repo, MissingStores::Fail)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
@@ -997,7 +1008,7 @@ async fn store_built_for_another_mount_name_is_rebuilt() {
     build(&daemon, &repo).await;
     let elsewhere = SPEC.replace("mount = \"vendor/deps\"", "mount = \"lib/node_modules\"");
     commit_at_root(&repo.root, &[("reef.toml", &elsewhere)]).await;
-    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+    let error = create(&daemon, &repo, MissingStores::Fail)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
@@ -1103,7 +1114,7 @@ async fn build_is_refused_when_builds_are_off() {
         "nothing under {}",
         stores.display()
     );
-    let error = create(&daemon, &repo, create_request::MissingStores::Fail)
+    let error = create(&daemon, &repo, MissingStores::Fail)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable, "{error}");
@@ -1133,7 +1144,7 @@ async fn build_announces_its_command() {
         started.argv
     );
     assert_eq!(started.env, ["A=1", "NODE_ENV=production"]);
-    assert_eq!(started.rev.len(), 40, "{}", started.rev);
+    assert_eq!(started.commit_id.len(), 40, "{}", started.commit_id);
     assert!(
         logs().has_line(&[
             "INFO",

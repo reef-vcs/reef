@@ -1,8 +1,9 @@
 //! How a command fails. Every variant has an [`ErrorKind`], which is the
 //! exit code (README, CLI: `InvalidArgument` 2, `NotFound` 3,
 //! `AlreadyExists` 4, `Conflict` 5, `Unavailable` 6, `PermissionDenied` 7,
-//! `Io` 8, `Internal` 1) and the `kind` of the JSON error object, and may
-//! have an [`Advice`]: the `hint` and `next` of ADR 0025.
+//! `Io` 8, `Unsupported` 9, `Internal` 1) and the `kind` of the JSON error
+//! object, and may have an [`Advice`]: the `hint` and `next` of ADR 0025.
+//! A daemon error's `reason` (R2.01) is the JSON error object's `reason`.
 
 use std::io;
 use std::path::PathBuf;
@@ -21,6 +22,18 @@ pub(crate) enum CliError {
     /// daemon's message is already its whole chain.
     #[error(transparent)]
     Daemon(ClientError),
+    /// The running daemon is another version and cannot serve this reef,
+    /// and was not restarted: it has active workspaces, or autostart is off
+    /// (R2.01).
+    #[error("{error}")]
+    OldDaemon {
+        /// [`ClientError::Incompatible`], boxed: it holds the status.
+        error: Box<ClientError>,
+        /// `reef daemon stop`, with the global flags that chose the socket.
+        stop: Vec<String>,
+        /// The daemon's active workspaces.
+        active_workspaces: u32,
+    },
     /// Nothing answers on the socket and autostart is off.
     #[error("daemon is not running at {}", socket.display())]
     NotRunning {
@@ -109,6 +122,21 @@ impl CliError {
                 .to_owned(),
                 next: start.clone(),
             }),
+            Self::OldDaemon {
+                stop,
+                active_workspaces,
+                ..
+            } => Some(Advice {
+                hint: if *active_workspaces == 0 {
+                    "This reef is not the running daemon's version; stop the daemon and the next command starts the matching one.".to_owned()
+                } else {
+                    format!(
+                        "This reef is not the running daemon's version, which has {active_workspaces} active workspace{}; stop it when they are done and the next command starts the matching one.",
+                        if *active_workspaces == 1 { "" } else { "s" }
+                    )
+                },
+                next: stop.clone(),
+            }),
             Self::Refused { advice, .. } => advice.clone(),
             Self::Timeout { .. } => Some(Advice::hint(
                 "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create.",
@@ -121,12 +149,22 @@ impl CliError {
     pub(crate) fn exit_code(&self) -> u8 {
         self.kind().exit_code()
     }
+
+    /// The daemon's `ErrorDetail.reason`, empty when there is none.
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Daemon(error) => error.reason(),
+            Self::OldDaemon { error, .. } => error.reason(),
+            _ => "",
+        }
+    }
 }
 
 impl Classify for CliError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::Daemon(error) => error.kind(),
+            Self::OldDaemon { error, .. } => error.kind(),
             Self::NotRunning { .. } | Self::Autostart { .. } | Self::Timeout { .. } => {
                 ErrorKind::Unavailable
             }
@@ -150,6 +188,7 @@ pub(crate) fn kind_text(kind: ErrorKind) -> &'static str {
         ErrorKind::Unavailable => "unavailable",
         ErrorKind::PermissionDenied => "permission_denied",
         ErrorKind::Io => "io",
+        ErrorKind::Unsupported => "unsupported",
         _ => "internal",
     }
 }
@@ -168,6 +207,7 @@ mod tests {
             (ErrorKind::Unavailable, 6, "unavailable"),
             (ErrorKind::PermissionDenied, 7, "permission_denied"),
             (ErrorKind::Io, 8, "io"),
+            (ErrorKind::Unsupported, 9, "unsupported"),
             (ErrorKind::Internal, 1, "internal"),
         ];
         for (kind, code, text) in cases {

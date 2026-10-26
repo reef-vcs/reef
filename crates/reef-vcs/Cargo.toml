@@ -37,6 +37,8 @@ watchman = ["reef-daemon/watchman"]
 # tests/cli.rs checks. R2.05 moves those types into the API crate and drops this dependency.
 reef-lib.workspace = true
 reef-daemon.workspace = true
+reef-api.workspace = true        # the reef.api.v1 messages the CLI builds and prints (R2.01)
+prost-types.workspace = true     # google.protobuf.Duration in those messages
 tracing.workspace = true
 thiserror.workspace = true
 clap.workspace = true
@@ -57,5 +59,6 @@ reef-testing.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true    # tests/old_daemon.rs serves its fake 0.1 daemon on a Unix socket
 toml.workspace = true
 nix = { workspace = true, features = ["signal"] }

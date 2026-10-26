@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use futures::FutureExt as _;
+use reef_api::v1::IfNotJj;
 use reef_lib::error::ErrorChain;
+use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::settings::Fsmonitor;
-use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, ReadonlyRepo, UserSettings};
+use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, OperationIdHex, ReadonlyRepo, UserSettings};
 
 use super::{Inspected, ManagerError, WorkspaceEntry};
 use crate::backend::fs_util::remove_tree_async;
@@ -22,7 +24,6 @@ use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
-use crate::proto::v0::register_request::IfNotJj;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind, TrackReason};
@@ -314,6 +315,20 @@ impl Manager {
             return Err(ManagerError::NotLoaded(id));
         }
         Err(ManagerError::RepoNotOpen(record.repo_id))
+    }
+
+    /// The operation `id` of `repo`, read on the repository's
+    /// thread: a response reports an operation it wrote in full (R2.01).
+    pub async fn operation(
+        &self,
+        repo: RepoId,
+        id: OperationIdHex,
+    ) -> Result<OpEntry, ManagerError> {
+        let entry = self
+            .handle(repo)?
+            .call_async(move |head| async move { head.repo.operation(&id).await }.boxed_local())
+            .await??;
+        Ok(entry)
     }
 
     /// The repository a request's `repo` field names: a repo id, a unique

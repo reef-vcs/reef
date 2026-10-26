@@ -5,9 +5,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use reef_api::v1::{BuildStarted, build_store_response, output_line};
 use reef_daemon::client::ClientError;
 use reef_daemon::client::json::{BuiltStore, Store};
-use reef_daemon::proto::v0::{BuildStarted, build_event, output_line};
 use reef_lib::error::ErrorKind;
 
 use super::out::shell_line;
@@ -111,14 +111,14 @@ async fn build(
                 .await?;
             while let Some(event) = events.message().await.map_err(ClientError::from)? {
                 match event.event {
-                    Some(build_event::Event::Started(started)) => {
+                    Some(build_store_response::Event::Started(started)) => {
                         ctx.out.note(&started_line(name, &started));
                     }
-                    Some(build_event::Event::Line(line)) => {
+                    Some(build_store_response::Event::Line(line)) => {
                         let stderr = line.stream() == output_line::Stream::Stderr;
                         ctx.out.passthrough(&line.text, stderr);
                     }
-                    Some(build_event::Event::Done(result)) => return Ok(Some(result)),
+                    Some(build_store_response::Event::Result(result)) => return Ok(Some(result)),
                     None => {}
                 }
             }
@@ -178,7 +178,7 @@ fn started_line(name: &str, started: &BuildStarted) -> String {
             .collect();
         shell_line(&words)
     };
-    let rev: String = started.rev.chars().take(12).collect();
+    let rev: String = started.commit_id.chars().take(12).collect();
     let mut line = format!("reef: building {name} at {rev}: {}", visible(&started.argv));
     if !started.env.is_empty() {
         line.push_str("\nreef: env: ");
@@ -196,7 +196,7 @@ mod tests {
         let started = BuildStarted {
             argv: vec!["sh".into(), "-c".into(), "npm ci".into()],
             env: vec!["NODE_ENV=production".into()],
-            rev: "0123456789abcdef".into(),
+            commit_id: "0123456789abcdef".into(),
         };
         assert_eq!(
             started_line("deps", &started),

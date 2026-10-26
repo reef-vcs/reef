@@ -20,9 +20,11 @@ use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::v1::{
+    Attention, CreateWorkspaceRequest, GcReport, Workspace, create_workspace_request,
+};
 use reef_daemon::config::Config;
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, GcReport, Workspace, create_request};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::{Repo, ResolveError};
 use reef_testing::synth::Preset;
@@ -54,15 +56,15 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
 async fn create(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
-    start: Option<create_request::Start>,
+    start: Option<create_workspace_request::Start>,
 ) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             start,
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -97,7 +99,12 @@ async fn release(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace) {
 }
 
 async fn gc(daemon: &TestDaemon, repo: &SyntheticRepo, dry_run: bool) -> GcReport {
-    let mut reports = daemon.client.gc(&repo.id, dry_run).await.unwrap().reports;
+    let mut reports = daemon
+        .client
+        .collect_garbage(&repo.id, dry_run)
+        .await
+        .unwrap()
+        .reports;
     assert_eq!(reports.len(), 1);
     reports.remove(0)
 }
@@ -193,7 +200,7 @@ async fn three_trees(daemon: &TestDaemon, repo: &SyntheticRepo) -> [Workspace; 3
     let b = create(
         daemon,
         repo,
-        Some(create_request::Start::NewOn(a.change_id.clone())),
+        Some(create_workspace_request::Start::NewOn(a.change_id.clone())),
     )
     .await;
     write(&b, "from-b.txt", "b\n");
@@ -201,7 +208,7 @@ async fn three_trees(daemon: &TestDaemon, repo: &SyntheticRepo) -> [Workspace; 3
     let c = create(
         daemon,
         repo,
-        Some(create_request::Start::NewOn(b.change_id.clone())),
+        Some(create_workspace_request::Start::NewOn(b.change_id.clone())),
     )
     .await;
     [a, b, c]
@@ -301,7 +308,7 @@ async fn active_base_is_never_evicted() {
     let _b = create(
         &daemon,
         &repo,
-        Some(create_request::Start::NewOn(a.change_id.clone())),
+        Some(create_workspace_request::Start::NewOn(a.change_id.clone())),
     )
     .await;
     let before = base_dirs(&daemon, &repo);
@@ -387,7 +394,7 @@ async fn dry_run_changes_nothing() {
     assert_eq!(
         daemon
             .client
-            .list_workspaces(reef_daemon::proto::v0::ListWorkspacesRequest::default())
+            .list_workspaces(reef_api::v1::ListWorkspacesRequest::default())
             .await
             .unwrap()
             .len(),
@@ -401,7 +408,11 @@ async fn dry_run_changes_nothing() {
 async fn gc_refuses_during_maintenance() {
     let (daemon, repo) = fixture().await;
     let held = daemon.handle.state().maintenance.try_acquire().unwrap();
-    let error = daemon.client.gc(&repo.id, false).await.unwrap_err();
+    let error = daemon
+        .client
+        .collect_garbage(&repo.id, false)
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
     assert!(
         error.to_string().contains("maintenance in progress"),
@@ -441,7 +452,7 @@ async fn two_workspaces_same_change_keep_both_sides() {
     let b = create(
         &daemon,
         &repo,
-        Some(create_request::Start::Change(a.change_id.clone())),
+        Some(create_workspace_request::Start::Change(a.change_id.clone())),
     )
     .await;
     write(&a, "from-a.txt", "a\n");
@@ -516,7 +527,7 @@ async fn active_workspace_snapshots_after_gc() {
         .workspace
         .unwrap();
     assert!(!row.divergent);
-    assert_eq!(row.attention, "");
+    assert_eq!(row.attention(), Attention::Unspecified);
     assert_eq!(op_count(&repo.root).await, 3, "one snapshot on the GC head");
 }
 
@@ -577,7 +588,11 @@ async fn stranded_working_copy_is_repaired_at_start() {
         .workspace
         .unwrap();
     assert!(!row.divergent);
-    assert_eq!(row.attention, "", "not recovered onto a new change");
+    assert_eq!(
+        row.attention(),
+        Attention::Unspecified,
+        "not recovered onto a new change"
+    );
 }
 
 /// The first regular file at least three directories deep in `root`, by

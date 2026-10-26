@@ -1,0 +1,105 @@
+// The state of a repository and of a workspace, in one call.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/files.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/repositories.proto";
+import "reef/api/v1/workspaces.proto";
+
+// Status.
+service StatusService {
+  // What the repository looks like now, and, when a workspace is named,
+  // what that workspace has changed. Snapshots the workspace first unless
+  // `skip_snapshot`. Declared; R2.02 implements it, and R2.23 changes how
+  // it is answered, not its shape.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// Where a workspace's status came from.
+enum StatusSource {
+  // Not set.
+  STATUS_SOURCE_UNSPECIFIED = 0;
+  // A snapshot this request took, or found nothing new to record.
+  STATUS_SOURCE_SNAPSHOT = 1;
+  // The incremental index (R2.23).
+  STATUS_SOURCE_INDEX = 2;
+  // A walk of the tree, the index's fallback (R2.23).
+  STATUS_SOURCE_WALK = 3;
+  // The last recorded snapshot, with `skip_snapshot`: edits since then may
+  // be missing.
+  STATUS_SOURCE_LAST_SNAPSHOT = 4;
+}
+
+// Status of a repository, and optionally of one workspace.
+message GetStatusRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // A workspace; empty for the repository's status only.
+  string workspace = 2;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 3;
+  // How many changed files to return at most: 0 means 100. Caps
+  // `changed_files`, never `changed_file_count`.
+  int32 max_files = 4;
+}
+
+// Status.
+message GetStatusResponse {
+  // The repository.
+  Repository repository = 1;
+  // The operation it was read at.
+  string at_operation = 2;
+  // The repository's state.
+  RepositoryStatus repository_status = 3;
+  // The workspace's state; set when a workspace was named.
+  WorkspaceStatus workspace_status = 4;
+}
+
+// A repository's state.
+message RepositoryStatus {
+  // The default start's commit; unset when no default start exists.
+  Change trunk = 1;
+  // The default start's bookmark; empty when none exists.
+  string trunk_bookmark = 2;
+  // Active workspaces, newest 100.
+  repeated Workspace active_workspaces = 3;
+  // Active workspaces, in all.
+  uint32 active_workspace_count = 4;
+  // Visible mutable heads outside trunk's ancestry, newest 100.
+  repeated Change heads = 5;
+  // Such heads, in all.
+  uint32 head_count = 6;
+  // Mutable changes with conflicts, at most 100.
+  repeated string conflicted_change_ids = 7;
+  // Divergent changes, at most 100.
+  repeated string divergent_change_ids = 8;
+  // The head operation.
+  Operation last_operation = 9;
+}
+
+// A workspace's state.
+message WorkspaceStatus {
+  // The workspace.
+  Workspace workspace = 1;
+  // Its working-copy commit.
+  Change working_copy = 2;
+  // That commit's parents.
+  repeated Change parents = 3;
+  // Paths that differ from the parents, merged; at most `max_files`.
+  repeated FileChange changed_files = 4;
+  // Paths that differ, in all.
+  uint32 changed_file_count = 5;
+  // Conflicted paths in the working-copy commit.
+  repeated string conflicted_paths = 6;
+  // Where the answer came from.
+  StatusSource source = 7;
+  // The snapshot this request recorded, if it recorded one.
+  Operation snapshot = 8;
+}

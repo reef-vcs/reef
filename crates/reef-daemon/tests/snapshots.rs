@@ -15,12 +15,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::{SyntheticRepo, TestDaemon, test_settings};
+use common::{SyntheticRepo, TestDaemon, op_id, test_settings};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use reef_api::v1::{
+    Attention, CreateWorkspaceRequest, WatcherKind, Workspace, create_workspace_request,
+};
+#[cfg(target_os = "linux")]
+use reef_api::v1::{Backend, WatchState};
 use reef_daemon::model::WorkspaceId;
-use reef_daemon::proto::v0::{CreateRequest, Workspace, create_request};
 use reef_daemon::snapshot::PauseGuard;
 use reef_daemon::workspace::SnapshotSpec;
 use reef_lib::jj::oplog::OpEntry;
@@ -57,15 +61,15 @@ async fn fixture_with(
 async fn create(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
-    start: Option<create_request::Start>,
+    start: Option<create_workspace_request::Start>,
 ) -> Workspace {
     daemon
         .client
-        .create_workspace(CreateRequest {
+        .create_workspace(CreateWorkspaceRequest {
             repo: repo.id.clone(),
             start,
             owner: OWNER.to_owned(),
-            ..CreateRequest::default()
+            ..CreateWorkspaceRequest::default()
         })
         .await
         .unwrap()
@@ -158,12 +162,12 @@ where
 async fn write_is_snapshotted_within_debounce() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo, None).await;
-    assert_eq!(ws.last_snapshot_op, "");
+    assert_eq!(ws.last_snapshot_operation_id, "");
     write(&ws, "agent-wrote-this.txt", "hello\n");
     let waited = wait_for(Duration::from_secs(3), "a watcher snapshot", || async {
         !inspect(&daemon, &repo, &ws)
             .await
-            .last_snapshot_op
+            .last_snapshot_operation_id
             .is_empty()
     })
     .await;
@@ -173,7 +177,7 @@ async fn write_is_snapshotted_within_debounce() {
     let log = op_log(&repo.root).await;
     let op = log
         .iter()
-        .find(|op| op.id.as_str() == row.last_snapshot_op)
+        .find(|op| op.id.as_str() == row.last_snapshot_operation_id)
         .expect("the snapshot's operation is in the log");
     assert!(op.is_snapshot);
     assert_eq!(
@@ -293,7 +297,7 @@ async fn fallback_timer_catches_missed_events() {
         || async {
             !inspect(&daemon, &repo, &ws)
                 .await
-                .last_snapshot_op
+                .last_snapshot_operation_id
                 .is_empty()
         },
     )
@@ -310,7 +314,7 @@ async fn two_on_one_change(daemon: &TestDaemon, repo: &SyntheticRepo) -> (Worksp
     let b = create(
         daemon,
         repo,
-        Some(create_request::Start::Change(a.change_id.clone())),
+        Some(create_workspace_request::Start::Change(a.change_id.clone())),
     )
     .await;
     assert_eq!(a.commit_id, b.commit_id);
@@ -372,7 +376,7 @@ async fn stale_adopts_when_clean() {
     );
     let row = inspect(&daemon, &repo, &b).await;
     assert!(!row.divergent);
-    assert_eq!(row.attention, "");
+    assert_eq!(row.attention(), Attention::Unspecified);
     assert_eq!(row.commit_id, snapshot_a.commit_id);
 }
 
@@ -401,7 +405,7 @@ async fn stale_diverges_when_dirty() {
     let row_b = inspect(&daemon, &repo, &b).await;
     assert!(!row_a.divergent);
     assert!(row_b.divergent);
-    assert_eq!(row_b.attention, "divergent");
+    assert_eq!(row_b.attention(), Attention::Divergent);
     assert_eq!(row_a.change_id, row_b.change_id);
 
     let error = open(&repo.root)
@@ -464,7 +468,7 @@ async fn repo_behind_is_retried() {
     let log = op_log(&repo.root).await;
     let op = log
         .iter()
-        .find(|op| op.id.as_str() == snapshot.op_id)
+        .find(|op| op.id.as_str() == op_id(snapshot.operation.as_ref()))
         .unwrap();
     assert_eq!(
         op.parents,
@@ -500,7 +504,7 @@ async fn forgotten_workspace_is_recovered() {
         .unwrap();
     assert!(snapshot.changed);
     let row = inspect(&daemon, &repo, &ws).await;
-    assert_eq!(row.attention, "stale-recovered");
+    assert_eq!(row.attention(), Attention::StaleRecovered);
     assert_ne!(row.change_id, ws.change_id, "a new change");
     assert_eq!(row.commit_id, snapshot.commit_id);
     assert!(tree_has(&repo.root, &snapshot.commit_id, "after-forget.txt").await);
@@ -535,7 +539,7 @@ async fn concurrency_is_bounded() {
         wait_for(left, "every workspace snapshotted", || async {
             !inspect(&daemon, &repo, ws)
                 .await
-                .last_snapshot_op
+                .last_snapshot_operation_id
                 .is_empty()
         })
         .await;
@@ -571,7 +575,10 @@ async fn no_watcher_falls_back_to_the_timer() {
     let (daemon, repo) = fixture().await;
     daemon.handle.state().manager.scheduler().refuse_watches();
     let ws = create(&daemon, &repo, None).await;
-    assert_eq!(inspect(&daemon, &repo, &ws).await.attention, "watch-failed");
+    assert_eq!(
+        inspect(&daemon, &repo, &ws).await.attention(),
+        Attention::WatchFailed
+    );
     write(&ws, "unwatched.txt", "x\n");
     wait_for(
         FALLBACK + Duration::from_secs(1),
@@ -579,7 +586,7 @@ async fn no_watcher_falls_back_to_the_timer() {
         || async {
             !inspect(&daemon, &repo, &ws)
                 .await
-                .last_snapshot_op
+                .last_snapshot_operation_id
                 .is_empty()
         },
     )
@@ -607,10 +614,13 @@ async fn only_unwatched_workspaces_get_the_short_fallback() {
     let watched = create(&daemon, &repo, None).await;
     scheduler.refuse_watches();
     let unwatched = create(&daemon, &repo, None).await;
-    assert_eq!(inspect(&daemon, &repo, &watched).await.attention, "");
     assert_eq!(
-        inspect(&daemon, &repo, &unwatched).await.attention,
-        "watch-failed"
+        inspect(&daemon, &repo, &watched).await.attention(),
+        Attention::Unspecified
+    );
+    assert_eq!(
+        inspect(&daemon, &repo, &unwatched).await.attention(),
+        Attention::WatchFailed
     );
     write(&watched, "watched.txt", "x\n");
     write(&unwatched, "unwatched.txt", "x\n");
@@ -620,14 +630,16 @@ async fn only_unwatched_workspaces_get_the_short_fallback() {
         || async {
             !inspect(&daemon, &repo, &unwatched)
                 .await
-                .last_snapshot_op
+                .last_snapshot_operation_id
                 .is_empty()
         },
     )
     .await;
     tokio::time::sleep(FALLBACK).await;
     assert_eq!(
-        inspect(&daemon, &repo, &watched).await.last_snapshot_op,
+        inspect(&daemon, &repo, &watched)
+            .await
+            .last_snapshot_operation_id,
         "",
         "the watched workspace was not rescanned after {FALLBACK:?} twice over"
     );
@@ -664,10 +676,13 @@ async fn hooks_run_after_snapshots() {
     let (outcome, row_op) = seen.last().expect("the hook ran");
     assert!(outcome.changed);
     assert_eq!(outcome.kind, reef_daemon::snapshot::SnapshotKind::Explicit);
-    assert_eq!(outcome.op_id.to_string(), snapshot.op_id);
+    assert_eq!(
+        outcome.op_id.to_string(),
+        op_id(snapshot.operation.as_ref())
+    );
     assert_eq!(
         row_op.as_deref(),
-        Some(snapshot.op_id.as_str()),
+        Some(op_id(snapshot.operation.as_ref())),
         "the row came first"
     );
 }
@@ -709,7 +724,7 @@ async fn medium_write_latency_with_twenty_workspaces() {
         let waited = wait_for(Duration::from_secs(10), "a watcher snapshot", || async {
             !inspect(&daemon, &repo, ws)
                 .await
-                .last_snapshot_op
+                .last_snapshot_operation_id
                 .is_empty()
         })
         .await;
@@ -718,7 +733,7 @@ async fn medium_write_latency_with_twenty_workspaces() {
 
     let mut before = Vec::new();
     for ws in &workspaces {
-        before.push(inspect(&daemon, &repo, ws).await.last_snapshot_op);
+        before.push(inspect(&daemon, &repo, ws).await.last_snapshot_operation_id);
     }
     let begun = Instant::now();
     for ws in &workspaces {
@@ -729,7 +744,7 @@ async fn medium_write_latency_with_twenty_workspaces() {
         let left = Duration::from_secs(20).saturating_sub(begun.elapsed());
         wait_for(left, "every workspace snapshotted", || async {
             let row = inspect(&daemon, &repo, ws).await;
-            row.last_snapshot_op != *before
+            row.last_snapshot_operation_id != *before
                 && tree_has(&repo.root, &row.commit_id, "together.txt").await
         })
         .await;
@@ -764,10 +779,10 @@ async fn moved_workspace_is_still_watched() {
     let ws = create(&daemon, &repo, None).await;
     let moved = daemon
         .client
-        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+        .move_workspace(reef_api::v1::MoveWorkspaceRequest {
             repo: repo.id.clone(),
             workspace: ws.id.clone(),
-            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            target: Some(reef_api::v1::move_workspace_request::Target::NewOn(target)),
             ..Default::default()
         })
         .await
@@ -805,10 +820,10 @@ async fn write_right_after_create_is_snapshotted() {
     let bound = watcher.min_interval + watcher.debounce + Duration::from_secs(2);
     let ws = create(&daemon, &repo, None).await;
     write(&ws, "right-after-create.txt", "hello\n");
-    assert_eq!(ws.watcher, "notify");
+    assert_eq!(ws.watcher(), WatcherKind::Notify);
     let waited = wait_for(bound, "a watcher snapshot", || async {
         let row = inspect(&daemon, &repo, &ws).await;
-        !row.last_snapshot_op.is_empty()
+        !row.last_snapshot_operation_id.is_empty()
             && tree_has(&repo.root, &row.commit_id, "right-after-create.txt").await
     })
     .await;
@@ -886,15 +901,22 @@ async fn write_before_the_watch_attaches_is_snapshotted() {
     let scheduler = daemon.handle.state().manager.scheduler();
     let hold = scheduler.hold_attaches();
     let ws = create(&daemon, &repo, None).await;
-    assert_eq!(ws.watcher, "notify");
-    assert_eq!(ws.watch_state, "attaching");
-    assert_eq!(ws.attention, "", "attaching is not watch-failed");
+    assert_eq!(ws.watcher(), WatcherKind::Notify);
+    assert_eq!(ws.watch_state(), WatchState::Attaching);
+    assert_eq!(
+        ws.attention(),
+        Attention::Unspecified,
+        "attaching is not watch-failed"
+    );
     write(&ws, "before-the-watch.txt", "early\n");
     tokio::time::sleep(Duration::from_millis(500)).await;
     let row = inspect(&daemon, &repo, &ws).await;
-    assert_eq!(row.watch_state, "attaching");
-    assert_eq!(row.attention, "");
-    assert_eq!(row.last_snapshot_op, "", "nothing snapshots while held");
+    assert_eq!(row.watch_state(), WatchState::Attaching);
+    assert_eq!(row.attention(), Attention::Unspecified);
+    assert_eq!(
+        row.last_snapshot_operation_id, "",
+        "nothing snapshots while held"
+    );
     assert_eq!(scheduler.queued_attaches(), 1);
 
     let watcher = &daemon.config.file.watcher;
@@ -903,7 +925,7 @@ async fn write_before_the_watch_attaches_is_snapshotted() {
     drop(hold);
     wait_for(bound, "the attach's snapshot", || async {
         let row = inspect(&daemon, &repo, &ws).await;
-        !row.last_snapshot_op.is_empty()
+        !row.last_snapshot_operation_id.is_empty()
             && tree_has(&repo.root, &row.commit_id, "before-the-watch.txt").await
     })
     .await;
@@ -916,8 +938,8 @@ async fn write_before_the_watch_attaches_is_snapshotted() {
     assert!(first.changed);
     assert!(!first.narrowed, "the attach's snapshot is a full scan");
     let row = inspect(&daemon, &repo, &ws).await;
-    assert_eq!(row.watch_state, "");
-    assert_eq!(row.attention, "");
+    assert!(common::is_watched(&row), "{:?}", row.watch_state());
+    assert_eq!(row.attention(), Attention::Unspecified);
     assert_eq!(attached_lines(&ws), 1);
 
     // The watch is up and reported: the next write's scan is narrowed.
@@ -951,8 +973,8 @@ async fn release_and_move_during_a_pending_attach() {
     let a = create(&daemon, &repo, None).await;
     let b = create(&daemon, &repo, None).await;
     assert_eq!(
-        (&*a.watch_state, &*b.watch_state),
-        ("attaching", "attaching")
+        (a.watch_state(), b.watch_state()),
+        (WatchState::Attaching, WatchState::Attaching)
     );
 
     let begun = Instant::now();
@@ -967,27 +989,31 @@ async fn release_and_move_during_a_pending_attach() {
 
     let moved = daemon
         .client
-        .move_workspace(reef_daemon::proto::v0::MoveRequest {
+        .move_workspace(reef_api::v1::MoveWorkspaceRequest {
             repo: repo.id.clone(),
             workspace: a.id.clone(),
-            target: Some(reef_daemon::proto::v0::move_request::Target::NewOn(target)),
+            target: Some(reef_api::v1::move_workspace_request::Target::NewOn(target)),
             ..Default::default()
         })
         .await
         .unwrap()
         .workspace
         .unwrap();
-    let rewatched = a.backend.contains("overlayfs");
-    assert_eq!(
-        moved.watch_state,
-        if rewatched { "" } else { "attaching" },
-        "backend {}",
-        a.backend
+    let rewatched = matches!(a.backend(), Backend::Overlayfs | Backend::FuseOverlayfs);
+    assert!(
+        if rewatched {
+            common::is_watched(&moved)
+        } else {
+            moved.watch_state() == WatchState::Attaching
+        },
+        "backend {:?}: {:?}",
+        a.backend(),
+        moved.watch_state()
     );
     let moved_at = Instant::now();
     drop(hold);
     wait_for(Duration::from_secs(10), "A's watch", || async {
-        inspect(&daemon, &repo, &a).await.watch_state.is_empty()
+        common::is_watched(&inspect(&daemon, &repo, &a).await)
     })
     .await;
     eprintln!("A watched {:.2?} after the move", moved_at.elapsed());
@@ -1011,7 +1037,10 @@ async fn release_and_move_during_a_pending_attach() {
     assert_eq!(attached_lines(&b), 0);
     assert_eq!(scheduler.queued_attaches(), 0);
     assert!(!common::logs().has_line(&["cannot stop watching"]));
-    assert_eq!(inspect(&daemon, &repo, &a).await.attention, "");
+    assert_eq!(
+        inspect(&daemon, &repo, &a).await.attention(),
+        Attention::Unspecified
+    );
 }
 
 /// R1.32: `watcher.notify_attach_background = false` attaches inside the
@@ -1031,7 +1060,7 @@ async fn background_attach_off_attaches_in_the_create() {
     let scheduler = daemon.handle.state().manager.scheduler();
     let _hold = scheduler.hold_attaches();
     let ws = create(&daemon, &repo, None).await;
-    assert_eq!(ws.watch_state, "");
+    assert!(common::is_watched(&ws), "{:?}", ws.watch_state());
     assert_eq!(scheduler.queued_attaches(), 0);
     write(&ws, "inline.txt", "x\n");
     let watcher = &daemon.config.file.watcher;
@@ -1056,7 +1085,8 @@ async fn loaded_workspaces_attach_inline() {
     })
     .await;
     let daemon = daemon.restart().await;
-    assert_eq!(inspect(&daemon, &repo, &ws).await.watch_state, "");
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert!(common::is_watched(&row), "{:?}", row.watch_state());
     assert_eq!(
         daemon.handle.state().manager.scheduler().queued_attaches(),
         0

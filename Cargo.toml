@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/reef-lib", "crates/reef-daemon", "crates/reef-vcs"]
+default-members = ["crates/reef-lib", "crates/reef-api", "crates/reef-daemon", "crates/reef-vcs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ rust-version = "1.97.1"
 [workspace.dependencies]
 # Internal
 reef-lib = { path = "crates/reef-lib", version = "0.1.0" }
+reef-api = { path = "crates/reef-api", version = "0.1.0" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.1.0" }
 reef-testing = { path = "crates/reef-testing", version = "0.1.0" }   # unpublished; see reef-daemon's `testing` feature
 
@@ -64,6 +65,12 @@ tonic-prost = "0.14"
 prost-types = "0.14"
 tonic-prost-build = "0.14"
 protox = "0.10"
+# The API schema (R2.01): each method's `(reef.api.v1.access)` option, read in reef-api's build
+# script, and google.rpc.Status for the error envelope. Same versions tonic and protox pull in.
+prost-reflect = "0.16"
+tonic-types = "0.14"
+# Page tokens (R2.01): opaque base64url strings.
+base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"                 # CancellationToken for shutdown
 hyper-util = { version = "0.1", features = ["tokio"] }

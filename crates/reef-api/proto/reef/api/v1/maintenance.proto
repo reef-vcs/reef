@@ -1,0 +1,169 @@
+// Maintenance of the daemon's repositories and state: garbage collection
+// (R1.17), and backup and quiesce (R1.18, ADR 0020). Restore is offline
+// (`reef restore`) and has no RPC.
+//
+// `repo` accepts a repo id, a unique id prefix of four or more hex
+// characters, or an absolute path inside a registered root.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Maintenance.
+service MaintenanceService {
+  // Garbage collection: jj's operations and git objects older than the
+  // undo window, base cache entries no active workspace uses, ended
+  // workspace records, and unused stores. Refused with UNAVAILABLE while
+  // another maintenance task (GC, backup, quiesce) runs.
+  rpc CollectGarbage(CollectGarbageRequest) returns (CollectGarbageResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // A consistent copy of the daemon's state (the whole database and each
+  // repository's jj state) into a new or empty directory, while agents keep
+  // writing; each repository's thread is paused only while its operation
+  // files are copied. Progress as it goes; the last message has
+  // BACKUP_STEP_DONE and the manifest's path. UNAVAILABLE while another
+  // maintenance task runs; ALREADY_EXISTS if `dest` is not empty.
+  rpc Backup(BackupRequest) returns (stream BackupResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // Holds the daemon still for a filesystem snapshot of its state
+  // directory: no jj operation is written, no automatic snapshot or lease
+  // reclaim starts, lease renewals are refused (UNAVAILABLE), and SQLite's
+  // WAL is checkpointed into the database file. Ends on Resume with the
+  // token, or by itself at `auto_resume_at`. UNAVAILABLE while another
+  // quiesce or maintenance task is in effect.
+  rpc Quiesce(QuiesceRequest) returns (QuiesceResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // Ends a quiesce; every active lease then has at least `lease.grace`
+  // left. NOT_FOUND for a token not in effect.
+  rpc Resume(ResumeRequest) returns (ResumeResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+}
+
+// Collect garbage.
+message CollectGarbageRequest {
+  // The repository; empty for every registered repository.
+  string repo = 1;
+  // Report what would be freed without deleting anything.
+  bool dry_run = 2;
+}
+
+// What garbage collection did.
+message CollectGarbageResponse {
+  // One per repository, in registration order.
+  repeated GcReport reports = 1;
+}
+
+// What garbage collection did to one repository. Byte counts are allocated
+// blocks.
+message GcReport {
+  // The repository.
+  string repo_id = 1;
+  // Nothing newer than this was deleted: now minus the undo window, or
+  // minus the backup retention while the last backup is within it.
+  google.protobuf.Timestamp keep_newer = 2;
+  // The operation store and git objects before the jj step. jj's index,
+  // which the step empties and rebuilds, is not counted.
+  uint64 jj_bytes_before = 3;
+  // The same after the jj step (the same as before in a dry run).
+  uint64 jj_bytes_after = 4;
+  // Rebuilding jj's index from the surviving operations.
+  uint64 reindex_ms = 5;
+  // Why the jj step stopped short (such as `git` missing); empty if it did
+  // not. The other steps still ran.
+  string jj_error = 6;
+  // Base cache entries removed.
+  uint32 base_entries_removed = 7;
+  // What they had allocated.
+  uint64 base_bytes_freed = 8;
+  // Ended workspace records deleted.
+  uint32 workspace_rows_removed = 9;
+  // What their `wc/<id>` state directories had allocated.
+  uint64 wc_bytes_freed = 10;
+  // Stores removed.
+  uint32 stores_removed = 11;
+  // What they had allocated.
+  uint64 store_bytes_freed = 12;
+  // The run for this repository.
+  uint64 elapsed_ms = 13;
+  // Nothing was deleted; the counts are what would have gone.
+  bool dry_run = 14;
+}
+
+// A step of a backup.
+enum BackupStep {
+  // Not set.
+  BACKUP_STEP_UNSPECIFIED = 0;
+  // The database.
+  BACKUP_STEP_SQLITE = 1;
+  // A repository's operation files, under the pause.
+  BACKUP_STEP_OPERATIONS = 2;
+  // A repository's objects.
+  BACKUP_STEP_OBJECTS = 3;
+  // A repository's heads.
+  BACKUP_STEP_HEADS = 4;
+  // The backup is complete.
+  BACKUP_STEP_DONE = 5;
+}
+
+// Back up the daemon's state.
+message BackupRequest {
+  // An absolute directory, new or empty, outside the state directory.
+  string dest = 1;
+  // The repository; empty for every registered repository. The database is
+  // copied whole either way.
+  string repo = 2;
+}
+
+// Progress of a backup.
+message BackupResponse {
+  // The repository; empty for the database step and the last message.
+  string repo_id = 1;
+  // The step.
+  BackupStep step = 2;
+  // What the step copied: files.
+  uint64 files = 3;
+  // What the step copied: bytes.
+  uint64 bytes = 4;
+  // On BACKUP_STEP_DONE: `<dest>/manifest.json`.
+  string manifest_path = 5;
+}
+
+// Quiesce the daemon.
+message QuiesceRequest {
+  // Only this repository's thread is paused (snapshots, reclaims, and GC
+  // are held off for every repository either way); empty for every
+  // repository.
+  string repo = 1;
+  // Resume by itself after this long; unset, zero, or more than
+  // `backup.quiesce_max` is `backup.quiesce_max`.
+  google.protobuf.Duration max = 2;
+}
+
+// A quiesce in effect.
+message QuiesceResponse {
+  // Resume with this.
+  string token = 1;
+  // When it took effect.
+  google.protobuf.Timestamp quiesced_at = 2;
+  // When it ends by itself.
+  google.protobuf.Timestamp auto_resume_at = 3;
+}
+
+// End a quiesce.
+message ResumeRequest {
+  // The quiesce's token.
+  string token = 1;
+}
+
+// An ended quiesce.
+message ResumeResponse {
+  // How long the quiesce lasted.
+  uint64 paused_ms = 1;
+}

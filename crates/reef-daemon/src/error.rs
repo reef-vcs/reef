@@ -1,18 +1,24 @@
-//! Errors at the API edge (ADR 0017): every handler's error becomes a
-//! [`tonic::Status`] whose code comes from the error's [`ErrorKind`], whose
-//! message is its [`ErrorChain`], and whose details carry a
-//! `reef.daemon.v0.ErrorDetail { kind, chain, hint, next }` so clients get
-//! the kind back without parsing messages. [`kind_from_status`] is the
-//! client's inverse.
+//! Errors at the API edge (ADR 0017, ADR 0029): every handler's error
+//! becomes a [`tonic::Status`] whose code comes from the error's
+//! [`ErrorKind`], whose message is its [`ErrorChain`], and whose details
+//! carry a `google.rpc.Status` holding one `reef.api.v1.ErrorDetail { kind,
+//! reason, chain, hint, next, metadata }` (see [`reef_api::error`]), so
+//! clients get the kind back without parsing messages. [`kind_from_status`]
+//! is the client's inverse.
 //!
 //! `hint` and `next` (R1.26, ADR 0025) are the error's [`Advice`]: how to
 //! fix it, when the daemon knows. They come from [`Advise::advice`] on the
 //! errors that have a known fix, read here and nowhere else, so no handler
-//! formats a fix into a message.
+//! formats a fix into a message. `reason` comes from [`reason_of`] the same
+//! way.
+//!
+//! [`not_implemented`], [`unknown_method`] and [`v0_client`] are the three
+//! answers to a request this daemon cannot serve as asked (R2.01).
 
 use std::error::Error;
 
 use prost::Message as _;
+use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use tonic::{Code, Status};
 
@@ -23,8 +29,8 @@ use crate::maintenance::backup::{BackupError, ManifestError};
 use crate::maintenance::gc::GcRunError;
 use crate::maintenance::quiesce::QuiesceError;
 use crate::maintenance::restore::RestoreError;
-use crate::proto::v0::ErrorDetail;
 use crate::repo::RegisterError;
+use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::workspace::ManagerError;
@@ -62,7 +68,7 @@ impl Advice {
     }
 
     /// The advice an error status carries, if any.
-    pub fn from_detail(detail: &ErrorDetail) -> Option<Advice> {
+    pub fn from_detail(detail: &v1::ErrorDetail) -> Option<Advice> {
         if detail.hint.is_empty() && detail.next.is_empty() {
             return None;
         }
@@ -125,7 +131,7 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
 }
 
 /// Every kind, in the order the API documents them.
-pub const KINDS: [ErrorKind; 8] = [
+pub const KINDS: [ErrorKind; 9] = [
     ErrorKind::NotFound,
     ErrorKind::AlreadyExists,
     ErrorKind::InvalidArgument,
@@ -134,13 +140,14 @@ pub const KINDS: [ErrorKind; 8] = [
     ErrorKind::PermissionDenied,
     ErrorKind::Io,
     ErrorKind::Internal,
+    ErrorKind::Unsupported,
 ];
 
 /// The gRPC code for an error kind: `NotFound` → `NOT_FOUND`,
 /// `AlreadyExists` → `ALREADY_EXISTS`, `InvalidArgument` →
 /// `INVALID_ARGUMENT`, `Conflict` → `FAILED_PRECONDITION`, `Unavailable` →
 /// `UNAVAILABLE`, `PermissionDenied` → `PERMISSION_DENIED`, `Io` and
-/// `Internal` → `INTERNAL`.
+/// `Internal` → `INTERNAL`, `Unsupported` → `UNIMPLEMENTED`.
 pub fn code_of(kind: ErrorKind) -> Code {
     match kind {
         ErrorKind::NotFound => Code::NotFound,
@@ -149,13 +156,46 @@ pub fn code_of(kind: ErrorKind) -> Code {
         ErrorKind::Conflict => Code::FailedPrecondition,
         ErrorKind::Unavailable => Code::Unavailable,
         ErrorKind::PermissionDenied => Code::PermissionDenied,
+        ErrorKind::Unsupported => Code::Unimplemented,
         // `ErrorKind` is non-exhaustive; a kind added later is internal
         // until it is given a code here.
         _ => Code::Internal,
     }
 }
 
-/// The name `ErrorDetail.kind` carries: the variant's name.
+/// The kind as `ErrorDetail.kind`.
+pub fn proto_kind(kind: ErrorKind) -> v1::ErrorKind {
+    match kind {
+        ErrorKind::NotFound => v1::ErrorKind::NotFound,
+        ErrorKind::AlreadyExists => v1::ErrorKind::AlreadyExists,
+        ErrorKind::InvalidArgument => v1::ErrorKind::InvalidArgument,
+        ErrorKind::Conflict => v1::ErrorKind::Conflict,
+        ErrorKind::Unavailable => v1::ErrorKind::Unavailable,
+        ErrorKind::PermissionDenied => v1::ErrorKind::PermissionDenied,
+        ErrorKind::Io => v1::ErrorKind::Io,
+        ErrorKind::Unsupported => v1::ErrorKind::Unsupported,
+        _ => v1::ErrorKind::Internal,
+    }
+}
+
+/// The kind an `ErrorDetail.kind` names; unspecified, and a value this
+/// build does not know, is `Internal`.
+pub fn kind_of_proto(kind: v1::ErrorKind) -> ErrorKind {
+    match kind {
+        v1::ErrorKind::NotFound => ErrorKind::NotFound,
+        v1::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
+        v1::ErrorKind::InvalidArgument => ErrorKind::InvalidArgument,
+        v1::ErrorKind::Conflict => ErrorKind::Conflict,
+        v1::ErrorKind::Unavailable => ErrorKind::Unavailable,
+        v1::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+        v1::ErrorKind::Io => ErrorKind::Io,
+        v1::ErrorKind::Unsupported => ErrorKind::Unsupported,
+        v1::ErrorKind::Internal | v1::ErrorKind::Unspecified => ErrorKind::Internal,
+    }
+}
+
+/// The name 0.1's `reef.daemon.v0.ErrorDetail.kind` carried: the variant's
+/// name. Only [`v0_client`] still writes one.
 pub fn kind_name(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::NotFound => "NotFound",
@@ -165,13 +205,27 @@ pub fn kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::Unavailable => "Unavailable",
         ErrorKind::PermissionDenied => "PermissionDenied",
         ErrorKind::Io => "Io",
+        ErrorKind::Unsupported => "Unsupported",
         _ => "Internal",
     }
 }
 
-/// The kind named `name` by [`kind_name`], if any.
-pub fn parse_kind(name: &str) -> Option<ErrorKind> {
-    KINDS.into_iter().find(|kind| kind_name(*kind) == name)
+/// The specific condition an error is, as `ErrorDetail.reason`: the first
+/// error in its source chain that names one. Reasons are API, documented on
+/// the RPCs that return them (ADR 0029).
+pub fn reason_of(error: &(dyn Error + 'static)) -> Option<&'static str> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        // `PageError::Token` is transparent: its source skips the token
+        // error it wraps.
+        if error.downcast_ref::<PageTokenError>().is_some()
+            || matches!(error.downcast_ref::<PageError>(), Some(PageError::Token(_)))
+        {
+            return Some(reef_api::error::INVALID_PAGE_TOKEN);
+        }
+        current = error.source();
+    }
+    None
 }
 
 /// A status for `error` classified as `kind`: the kind's code, the error's
@@ -183,13 +237,15 @@ pub fn status_from(error: &(dyn Error + 'static), kind: ErrorKind) -> Status {
         tracing::error!(error = %message, ?kind, "request failed");
     }
     let advice = advice_of(error).unwrap_or_default();
-    let detail = ErrorDetail {
-        kind: kind_name(kind).to_owned(),
+    let detail = v1::ErrorDetail {
+        kind: proto_kind(kind).into(),
+        reason: reason_of(error).unwrap_or_default().to_owned(),
         chain: chain(error),
         hint: advice.hint,
         next: advice.next,
+        metadata: std::collections::BTreeMap::new(),
     };
-    Status::with_details(code_of(kind), message, detail.encode_to_vec().into())
+    reef_api::error::status(code_of(kind), message, &detail)
 }
 
 /// [`status_from`] with the error's own kind. Handlers end in
@@ -207,18 +263,93 @@ pub fn status<E: Classify + Error + 'static>(error: E) -> Status {
 /// one, else the inverse of [`code_of`] (`INTERNAL`, `UNKNOWN`, and every
 /// other code → `Internal`).
 pub fn kind_from_status(status: &Status) -> ErrorKind {
-    detail_of(status)
-        .and_then(|detail| parse_kind(&detail.kind))
-        .unwrap_or_else(|| kind_of_code(status.code()))
+    detail_of(status).map_or_else(
+        || kind_of_code(status.code()),
+        |detail| kind_of_proto(detail.kind()),
+    )
 }
 
 /// The `ErrorDetail` in a status's details, if it carries one.
-pub fn detail_of(status: &Status) -> Option<ErrorDetail> {
-    let details = status.details();
-    if details.is_empty() {
-        return None;
-    }
-    ErrorDetail::decode(details).ok()
+pub fn detail_of(status: &Status) -> Option<v1::ErrorDetail> {
+    reef_api::error::detail(status)
+}
+
+/// The version this daemon reports.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The answer of a declared RPC this daemon does not implement:
+/// `UNIMPLEMENTED`, reason `NOT_IMPLEMENTED`, metadata `method`.
+pub fn not_implemented(method: &'static str) -> Status {
+    let message = format!("{method} is not implemented by this daemon (reef {VERSION})");
+    tracing::warn!(method, "declared RPC called; not implemented");
+    unsupported(
+        message,
+        reef_api::error::NOT_IMPLEMENTED,
+        "A later Reef release implements it.",
+        [("method", method.to_owned())],
+    )
+}
+
+/// The answer to a method this daemon does not serve at all, a client newer
+/// than the daemon: `UNIMPLEMENTED`, reason `UNKNOWN_METHOD`, metadata
+/// `method`, `daemon_version`, `api_revision`.
+pub fn unknown_method(path: &str) -> Status {
+    let message = format!(
+        "this daemon (reef {VERSION}, API v1 revision {}) does not serve {path}",
+        reef_api::API_REVISION
+    );
+    tracing::warn!(method = path, "unknown method called");
+    unsupported(
+        message,
+        reef_api::error::UNKNOWN_METHOD,
+        "The client is newer than the daemon; stop the daemon (`reef daemon stop`) and the next command starts the current one.",
+        [
+            ("method", path.to_owned()),
+            ("daemon_version", VERSION.to_owned()),
+            ("api_revision", reef_api::API_REVISION.to_string()),
+        ],
+    )
+}
+
+fn unsupported<const N: usize>(
+    message: String,
+    reason: &str,
+    hint: &str,
+    metadata: [(&str, String); N],
+) -> Status {
+    let detail = v1::ErrorDetail {
+        kind: v1::ErrorKind::Unsupported.into(),
+        reason: reason.to_owned(),
+        chain: vec![message.clone()],
+        hint: hint.to_owned(),
+        next: Vec::new(),
+        metadata: metadata
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    };
+    reef_api::error::status(Code::Unimplemented, message, &detail)
+}
+
+/// The answer to a 0.1 client's call of anything but `Daemon/Status`:
+/// `FAILED_PRECONDITION` with a raw `reef.daemon.v0.ErrorDetail` of kind
+/// `Conflict`, as 0.1 decodes it, telling it to upgrade. `Conflict` because
+/// 0.1 knows no `Unsupported` and treats `Conflict` as the caller's to fix.
+pub fn v0_client(path: &str) -> Status {
+    let message =
+        format!("this daemon is reef {VERSION} and serves API v1; this client speaks API v0");
+    tracing::warn!(method = path, "API v0 client; told to upgrade");
+    let detail = reef_api::v0::ErrorDetail {
+        kind: kind_name(ErrorKind::Conflict).to_owned(),
+        chain: vec![message.clone()],
+        hint: format!("Upgrade reef to {VERSION} or later; `reef --version` shows this one."),
+        next: Vec::new(),
+    };
+    Status::with_details(
+        Code::FailedPrecondition,
+        message,
+        detail.encode_to_vec().into(),
+    )
 }
 
 fn kind_of_code(code: Code) -> ErrorKind {
@@ -229,6 +360,7 @@ fn kind_of_code(code: Code) -> ErrorKind {
         Code::FailedPrecondition => ErrorKind::Conflict,
         Code::Unavailable => ErrorKind::Unavailable,
         Code::PermissionDenied => ErrorKind::PermissionDenied,
+        Code::Unimplemented => ErrorKind::Unsupported,
         _ => ErrorKind::Internal,
     }
 }
@@ -256,6 +388,17 @@ mod tests {
     use crate::backend::{BackendError, BackendKind};
     use crate::model::{RepoId, WorkspaceId, WorkspaceState};
     use crate::repo::RepoThreadError;
+
+    /// A request this daemon cannot serve as asked.
+    #[derive(Debug, thiserror::Error)]
+    #[error("not served")]
+    struct NotServed;
+
+    impl Classify for NotServed {
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Unsupported
+        }
+    }
 
     /// One real error per kind.
     fn one_error_per_kind() -> Vec<(ErrorKind, Box<dyn Fn() -> Status>)> {
@@ -329,20 +472,21 @@ mod tests {
                     })
                 }),
             ),
+            (ErrorKind::Unsupported, Box::new(|| status(NotServed))),
         ]
     }
 
     #[test]
-    fn every_kind_has_a_code_and_round_trips() {
+    fn error_kinds_round_trip() {
         let cases = one_error_per_kind();
         assert_eq!(cases.len(), KINDS.len());
         for (kind, make) in cases {
             let status = make();
             assert_eq!(status.code(), code_of(kind), "{kind:?}");
             assert_eq!(kind_from_status(&status), kind, "{kind:?}");
-            assert_eq!(parse_kind(kind_name(kind)), Some(kind));
+            assert_eq!(kind_of_proto(proto_kind(kind)), kind);
             let detail = detail_of(&status).unwrap();
-            assert_eq!(detail.kind, kind_name(kind));
+            assert_eq!(detail.kind(), proto_kind(kind));
             assert_eq!(detail.chain.join(": "), status.message());
         }
         // Io and Internal share a code; only the detail tells them apart.
@@ -547,6 +691,9 @@ mod tests {
         assert_eq!(kind_from_status(&Status::unknown("x")), ErrorKind::Internal);
         let garbage = Status::with_details(Code::NotFound, "x", vec![0xff, 0xff].into());
         assert_eq!(kind_from_status(&garbage), ErrorKind::NotFound);
-        assert_eq!(parse_kind("Nope"), None);
+        assert_eq!(
+            kind_from_status(&Status::unimplemented("")),
+            ErrorKind::Unsupported
+        );
     }
 }

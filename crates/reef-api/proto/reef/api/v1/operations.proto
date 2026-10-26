@@ -1,0 +1,293 @@
+// The operation log: every change to a repository is one jj operation.
+//
+// `repo` accepts a repo id, a unique id prefix of four or more hex
+// characters, or an absolute path inside a registered root. Operation ids
+// are full lowercase hex; a request may name one by a unique prefix.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Reading, undoing, and following the operation log.
+service OperationService {
+  // Operations newest first from the head, filtered. Declared; R2.02
+  // implements it, and until then it fails UNIMPLEMENTED with reason
+  // NOT_IMPLEMENTED.
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // One operation, with its effects. Declared; R2.02 implements it.
+  rpc GetOperation(GetOperationRequest) returns (GetOperationResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Undoes exactly one operation, as `jj op revert` does, recording a new
+  // operation. Declared; R2.03 implements it.
+  rpc UndoOperation(UndoOperationRequest) returns (UndoOperationResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // New operations as they are recorded, in frames, optionally replaying
+  // history first. A frame with no operations is a keepalive, sent at least
+  // every 30 seconds. Declared; R2.09 implements it.
+  rpc SubscribeOperations(SubscribeOperationsRequest) returns (stream SubscribeOperationsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// What an operation did, as classified by the daemon.
+enum OperationKind {
+  // Not classified.
+  OPERATION_KIND_UNSPECIFIED = 0;
+  // A snapshot of a workspace's files; see `Operation.snapshot_kind`.
+  OPERATION_KIND_SNAPSHOT = 1;
+  // A workspace was created.
+  OPERATION_KIND_CREATE_WORKSPACE = 2;
+  // A workspace was released or reclaimed and its jj workspace forgotten.
+  OPERATION_KIND_RELEASE_WORKSPACE = 3;
+  // A workspace was moved to another change.
+  OPERATION_KIND_MOVE_WORKSPACE = 4;
+  // A change's description was set.
+  OPERATION_KIND_DESCRIBE = 5;
+  // A change was abandoned.
+  OPERATION_KIND_ABANDON = 6;
+  // An operation was undone.
+  OPERATION_KIND_UNDO = 7;
+  // Files were edited without a materialized directory (R2.04).
+  OPERATION_KIND_EDIT = 8;
+  // A colocated repository's git refs were imported.
+  OPERATION_KIND_IMPORT_REFS = 9;
+  // Written by another jj client, such as `jj` in the registered root.
+  OPERATION_KIND_EXTERNAL = 10;
+  // Written by Reef, and not one of the above, such as repository
+  // initialization.
+  OPERATION_KIND_OTHER = 11;
+}
+
+// Why a snapshot ran.
+enum SnapshotKind {
+  // Not a snapshot, or not known.
+  SNAPSHOT_KIND_UNSPECIFIED = 0;
+  // The file watcher saw edits.
+  SNAPSHOT_KIND_WATCHER = 1;
+  // A client asked for it (`SnapshotWorkspace`, or a read that snapshots
+  // first).
+  SNAPSHOT_KIND_EXPLICIT = 2;
+  // Before a release or reclaim.
+  SNAPSHOT_KIND_FINAL = 3;
+  // Before a move to another change.
+  SNAPSHOT_KIND_MOVE = 4;
+  // Before the daemon shut down.
+  SNAPSHOT_KIND_SHUTDOWN = 5;
+}
+
+// One jj operation.
+message Operation {
+  // Full hex.
+  string id = 1;
+  // The repository it belongs to.
+  string repo_id = 2;
+  // Parent operations; more than one for a merge of concurrent operations.
+  repeated string parent_ids = 3;
+  // jj's description, such as `reef: create workspace <id>`.
+  string description = 4;
+  // When the operation started.
+  google.protobuf.Timestamp started_at = 5;
+  // When the operation ended.
+  google.protobuf.Timestamp ended_at = 6;
+  // The host recorded by the writer.
+  string hostname = 7;
+  // The user recorded by the writer.
+  string username = 8;
+  // Whether the operation only snapshotted a working copy.
+  bool is_snapshot = 9;
+  // What it did.
+  OperationKind kind = 10;
+  // Why it snapshotted, when `kind` is OPERATION_KIND_SNAPSHOT.
+  SnapshotKind snapshot_kind = 11;
+  // The Reef workspace it was recorded for: from jj's workspace name
+  // `reef-<id>`, or the workspace the RPC that wrote it named (a create,
+  // move, or release runs in jj's `default` workspace); empty if none.
+  string workspace_id = 12;
+  // jj's workspace name when it is not a Reef workspace, such as `default`;
+  // empty for a Reef workspace's operations.
+  string jj_workspace = 13;
+  // The agent that caused it: the operation attribute `reef.agent`, else
+  // the workspace's owner; empty if unknown.
+  string agent = 14;
+  // jj's operation attributes, verbatim.
+  map<string, string> attributes = 15;
+  // What it changed in the repository's view; unset when not computed. Each
+  // RPC says whether it computes them.
+  OperationEffects effects = 16;
+}
+
+// What an operation changed, from the difference between its view and its
+// parents'.
+message OperationEffects {
+  // Changes created, rewritten, or abandoned.
+  repeated ChangeEffect changes = 1;
+  // Bookmarks set, moved, or deleted.
+  repeated BookmarkEffect bookmarks = 2;
+  // Working-copy commits that moved.
+  repeated WorkingCopyEffect working_copies = 3;
+}
+
+// How an operation changed a change.
+enum ChangeEffectKind {
+  // Not set.
+  CHANGE_EFFECT_KIND_UNSPECIFIED = 0;
+  // A new change.
+  CHANGE_EFFECT_KIND_CREATED = 1;
+  // A new commit for an existing change.
+  CHANGE_EFFECT_KIND_REWRITTEN = 2;
+  // The change is no longer visible.
+  CHANGE_EFFECT_KIND_ABANDONED = 3;
+}
+
+// One change an operation touched.
+message ChangeEffect {
+  // The change, in hex.
+  string change_id = 1;
+  // How it changed.
+  ChangeEffectKind kind = 2;
+  // Its commit afterwards; empty when abandoned.
+  string commit_id = 3;
+  // Its commit before; empty when created.
+  string previous_commit_id = 4;
+}
+
+// One bookmark an operation touched.
+message BookmarkEffect {
+  // The bookmark's name.
+  string name = 1;
+  // The remote, for a remote-tracking bookmark; empty for a local one.
+  string remote = 2;
+  // Where it points afterwards; empty when deleted.
+  string commit_id = 3;
+  // Where it pointed before; empty when created.
+  string previous_commit_id = 4;
+}
+
+// One working-copy commit an operation moved.
+message WorkingCopyEffect {
+  // The Reef workspace; empty for another jj workspace.
+  string workspace_id = 1;
+  // The jj workspace's name when it is not a Reef workspace.
+  string jj_workspace = 2;
+  // Its working-copy commit afterwards; empty when the workspace was
+  // forgotten.
+  string commit_id = 3;
+  // Its working-copy commit before; empty when the workspace was added.
+  string previous_commit_id = 4;
+}
+
+// Which operations to return. An empty field is no constraint; values
+// within a field are ORed, and fields are ANDed.
+message OperationFilter {
+  // Workspace ids or unique prefixes the operation was recorded for.
+  repeated string workspaces = 1;
+  // Change id prefixes, in hex or jj's reverse hex, matched against the
+  // operation's effects.
+  repeated string changes = 2;
+  // Agents, matched against `Operation.agent`.
+  repeated string agents = 3;
+  // Kinds, matched against `Operation.kind`.
+  repeated OperationKind kinds = 4;
+}
+
+// A page of the operation log.
+message ListOperationsRequest {
+  // The repository.
+  string repo = 1;
+  // Which operations; unset for all.
+  OperationFilter filter = 2;
+  // Only operations that ended after this; unset for no bound.
+  google.protobuf.Timestamp ended_after = 3;
+  // Only operations that ended before this; unset for no bound.
+  google.protobuf.Timestamp ended_before = 4;
+  // Compute each operation's effects.
+  bool include_effects = 5;
+  // Operations per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 6;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different filters is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 7;
+}
+
+// A page of the operation log, newest first.
+message ListOperationsResponse {
+  // The operations.
+  repeated Operation operations = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+}
+
+// One operation.
+message GetOperationRequest {
+  // The repository.
+  string repo = 1;
+  // An operation id or unique prefix.
+  string operation_id = 2;
+}
+
+// One operation.
+message GetOperationResponse {
+  // The operation, with its effects.
+  Operation operation = 1;
+}
+
+// Undo one operation.
+message UndoOperationRequest {
+  // The repository.
+  string repo = 1;
+  // A workspace to check out at the restored state afterwards; other
+  // workspaces follow the staleness rules of R1.13. Empty for none.
+  string workspace = 2;
+  // The operation to undo, as an id or unique prefix. Required.
+  string operation_id = 3;
+}
+
+// What an undo recorded.
+message UndoOperationResponse {
+  // The operation that undid it.
+  Operation operation = 1;
+  // The snapshot of `workspace` taken first, if one was recorded.
+  Operation snapshot = 2;
+  // The operation undone, full hex.
+  string undone_operation_id = 3;
+}
+
+// Follow the operation log.
+message SubscribeOperationsRequest {
+  // Repositories to follow; empty for every repository, including ones
+  // registered later.
+  repeated string repos = 1;
+  // Which operations; unset for all.
+  OperationFilter filter = 2;
+  // Where to start; neither for new operations only.
+  oneof start {
+    // Replay the operations after this one first. Requires exactly one
+    // repository in `repos`.
+    string after_operation = 3;
+    // Resume after a frame, from that frame's `cursor`.
+    string cursor = 4;
+  }
+}
+
+// One frame of the operation log.
+message SubscribeOperationsResponse {
+  // Parents before children within a repository, each with its effects.
+  // Empty in a keepalive.
+  repeated Operation operations = 1;
+  // The point to resume from after this frame.
+  string cursor = 2;
+  // False while replaying history after `after_operation` or `cursor`;
+  // true from the first frame of new operations on.
+  bool live = 3;
+}
