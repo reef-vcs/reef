@@ -232,7 +232,7 @@ impl BaseFixture {
             &paths.root,
             &paths.state_dir,
             StartPoint::NewOn(self.commit.clone()),
-            description,
+            &reef_lib::jj::OpMeta::new(reef_lib::jj::OpKind::CreateWorkspace, description),
         ))
         .unwrap();
         seed_tree_state(&self.base, &paths).unwrap();
@@ -811,7 +811,10 @@ fn case_first_snapshot_is_noop(
         &ws.root,
         &ws.state_dir,
         StartPoint::Edit(fx.commit.clone()),
-        "conformance: first snapshot",
+        &reef_lib::jj::OpMeta::new(
+            reef_lib::jj::OpKind::CreateWorkspace,
+            "conformance: first snapshot",
+        ),
     ))
     .map_err(|error| fail(format!("create the jj workspace: {}", ErrorChain(&error))))?;
     drop(repo);

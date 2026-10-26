@@ -1132,7 +1132,13 @@ fn register_accepts_the_sudo_users_repository() {
     let theirs = git_checkout(&tmp.path().join("theirs"), Some(1));
     let accepting = registry(1);
     accepting
-        .register(&db, &theirs, &test_settings(), IfNotJj::InitAlongsideGit)
+        .register(
+            &db,
+            &theirs,
+            &test_settings(),
+            IfNotJj::InitAlongsideGit,
+            None,
+        )
         .unwrap();
     assert_eq!(std::fs::metadata(theirs.join(".jj")).unwrap().uid(), 0);
     accepting.close_all();
@@ -1140,7 +1146,13 @@ fn register_accepts_the_sudo_users_repository() {
     let other = git_checkout(&tmp.path().join("other"), Some(1));
     let refusing = registry(2);
     let error = refusing
-        .register(&db, &other, &test_settings(), IfNotJj::InitAlongsideGit)
+        .register(
+            &db,
+            &other,
+            &test_settings(),
+            IfNotJj::InitAlongsideGit,
+            None,
+        )
         .unwrap_err();
     assert!(
         matches!(error, RegisterError::ForeignOwner { uid: 1, .. }),

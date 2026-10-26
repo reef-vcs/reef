@@ -15,6 +15,7 @@ use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, WorkspaceInitError, WorkspaceLoadError};
 
+use super::oplog::{OpKind, OpMeta};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
 macro_rules! hex_id {
@@ -321,8 +322,15 @@ impl Repo {
     /// the files, so jj's next snapshot of `root` rehashes them. With an
     /// unborn HEAD the working-copy commit stays on the root commit. If a
     /// step fails, the `.jj` directory it made is removed.
+    ///
+    /// The check-out is one operation, `import git head`, of kind
+    /// [`OpKind::Other`], with `agent` as its `reef.agent` (R2.03).
     #[tracing::instrument(skip_all, fields(path = %root.display()))]
-    pub async fn init_in_git_repo(root: &Path, settings: &UserSettings) -> Result<Self, InitError> {
+    pub async fn init_in_git_repo(
+        root: &Path,
+        settings: &UserSettings,
+        agent: Option<&str>,
+    ) -> Result<Self, InitError> {
         let dot_git = root.join(".git");
         if !dot_git.is_dir() {
             let error = if dot_git.exists() {
@@ -338,7 +346,9 @@ impl Repo {
             .map_err(InitError::from)
             .inspect_err(|error| crate::log_failure!(error))?;
         let mut repo = Self { workspace, repo };
-        if let Err(source) = repo.check_out_git_head().await {
+        let mut meta = OpMeta::new(OpKind::Other, "import git head");
+        meta.agent = agent.map(str::to_owned);
+        if let Err(source) = repo.check_out_git_head(&meta).await {
             drop(repo);
             // jj-lib removes `.jj` when one of its own steps fails; so does this.
             std::fs::remove_dir_all(root.join(".jj")).ok();
@@ -357,7 +367,10 @@ impl Repo {
     /// Moves this workspace's working-copy commit onto a new empty change
     /// on git's HEAD and records HEAD's tree as the working-copy state, as
     /// `jj git init --colocate` does. Nothing is written for an unborn HEAD.
-    async fn check_out_git_head(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn check_out_git_head(
+        &mut self,
+        meta: &OpMeta,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let name = self.workspace.workspace_name().to_owned();
         let mut tx = self.repo.start_transaction();
         jj_lib::git::import_head(tx.repo_mut(), &name, self.workspace.workspace_root()).await?;
@@ -371,7 +384,7 @@ impl Repo {
         // until the state names the new operation.
         let mut locked = self.workspace.start_working_copy_mutation().await?;
         locked.locked_wc().reset(&wc_commit).await?;
-        self.repo = tx.commit("import git head").await?;
+        self.repo = meta.commit(tx).await?;
         locked.finish(self.repo.op_id().clone()).await?;
         Ok(())
     }

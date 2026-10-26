@@ -148,6 +148,7 @@ impl StoreService for StoresService {
         &self,
         request: Request<BuildStoreRequest>,
     ) -> Result<Response<Self::BuildStoreStream>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         if !self.state.config.file.store.allow_builds {
             return Err(status(StoreError::BuildsOff));
@@ -160,6 +161,7 @@ impl StoreService for StoresService {
             rev: Some(request.revision).filter(|rev| !rev.trim().is_empty()),
             timeout: timeout(request.timeout.as_ref()).map_err(status)?,
             force: request.force,
+            agent,
         };
         let (events, stream) = mpsc::channel(EVENT_BUFFER);
         let (lines, mut output) = mpsc::channel(EVENT_BUFFER);

@@ -249,12 +249,14 @@ impl RepoRegistry {
     /// one that initialized it is the one that records it.
     ///
     /// Blocks while the repository loads; call it from a blocking context.
+    /// `agent` is the initializing operation's `reef.agent` (R2.03).
     pub fn register(
         &self,
         db: &Db,
         path: &Path,
         settings: &UserSettings,
         if_not_jj: IfNotJj,
+        agent: Option<&str>,
     ) -> Result<Registered, RegisterError> {
         if !path.is_absolute() {
             return Err(RegisterError::NotAbsolute(path.to_owned()));
@@ -263,7 +265,8 @@ impl RepoRegistry {
             .register_turn
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (repo, initialized_jj) = Self::open_or_init(path, settings, if_not_jj, &self.owners)?;
+        let (repo, initialized_jj) =
+            Self::open_or_init(path, settings, if_not_jj, &self.owners, agent)?;
         let registered = |record, already_registered| Registered {
             record,
             already_registered,
@@ -341,6 +344,7 @@ impl RepoRegistry {
         settings: &UserSettings,
         if_not_jj: IfNotJj,
         owners: &OwnerPolicy,
+        agent: Option<&str>,
     ) -> Result<(Repo, bool), RegisterError> {
         let open = |at: &Path| {
             // jj's own discovery: the nearest ancestor with a `.jj`.
@@ -377,7 +381,7 @@ impl RepoRegistry {
             path: exclude_path(&root),
             source,
         })?;
-        let repo = pollster::block_on(Repo::init_in_git_repo(&root, settings))
+        let repo = pollster::block_on(Repo::init_in_git_repo(&root, settings, agent))
             .map_err(|source| RegisterError::Init { root, source })?;
         Ok((repo, true))
     }

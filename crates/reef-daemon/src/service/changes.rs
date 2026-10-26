@@ -1,6 +1,6 @@
-//! `reef.api.v1.ChangeService`: `ListChanges` and `GetChange` (R2.02).
-//! `DescribeChange` and `AbandonChange` (R2.03) answer `UNIMPLEMENTED`
-//! with reason `NOT_IMPLEMENTED`.
+//! `reef.api.v1.ChangeService`: `ListChanges` and `GetChange` (R2.02),
+//! `DescribeChange` and `AbandonChange` (R2.03, through
+//! [`crate::workspace::Manager::rewrite`]).
 //!
 //! A log page token pins the operation the first page read, and its cursor
 //! is `<entries so far>:<last commit id>`: the next page re-evaluates the
@@ -14,19 +14,22 @@ use prost::Message as _;
 use reef_api::v1::change_service_server::ChangeService;
 use reef_api::v1::{
     AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest, DescribeChangeResponse,
-    GetChangeRequest, GetChangeResponse, ListChangesRequest, ListChangesResponse,
+    GetChangeRequest, GetChangeResponse, ListChangesRequest, ListChangesResponse, OperationKind,
 };
 use reef_lib::jj::log::{self, Describer};
 use reef_lib::jj::revset::{self, RevisionError};
 use tonic::{Request, Response, Status};
 
 use super::convert;
+use super::convert::Written;
 use super::page::{MAX_PAGE_BYTES, PageRequest};
 use super::reading::{
     bad_token, op_id, positional, repo_at, snapshot_first, target, uses_working_copy,
 };
+use super::written_operation;
 use crate::daemon::AppState;
-use crate::error::{not_implemented, status};
+use crate::error::status;
+use crate::workspace::{Write, WriteRequest};
 
 const LIST_CHANGES: &str = "/reef.api.v1.ChangeService/ListChanges";
 
@@ -51,6 +54,7 @@ impl ChangeService for ChangesHandler {
         request: Request<ListChangesRequest>,
     ) -> Result<Response<ListChangesResponse>, Status> {
         let arrived = Instant::now();
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let page = PageRequest::new(
             LIST_CHANGES,
@@ -80,7 +84,7 @@ impl ChangeService for ChangesHandler {
         if page.pinned().is_none() && request.at_operation.is_empty() && !request.skip_snapshot {
             let needed = request.revset.trim().is_empty()
                 || uses_working_copy(state, &target, vec![request.revset.clone()]).await?;
-            snapshot_first(state, &target, needed, arrived).await?;
+            snapshot_first(state, &target, needed, arrived, agent).await?;
         }
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
@@ -161,6 +165,7 @@ impl ChangeService for ChangesHandler {
         request: Request<GetChangeRequest>,
     ) -> Result<Response<GetChangeResponse>, Status> {
         let arrived = Instant::now();
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         if request.revision.trim().is_empty() {
             return Err(status(RevisionError::Required));
@@ -169,7 +174,7 @@ impl ChangeService for ChangesHandler {
         let target = target(state, &request.repo, &request.workspace)?;
         if request.at_operation.is_empty() && !request.skip_snapshot {
             let needed = uses_working_copy(state, &target, vec![request.revision.clone()]).await?;
-            snapshot_first(state, &target, needed, arrived).await?;
+            snapshot_first(state, &target, needed, arrived, agent).await?;
         }
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
@@ -198,17 +203,85 @@ impl ChangeService for ChangesHandler {
         }))
     }
 
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn describe_change(
         &self,
-        _request: Request<DescribeChangeRequest>,
+        request: Request<DescribeChangeRequest>,
     ) -> Result<Response<DescribeChangeResponse>, Status> {
-        Err(not_implemented("/reef.api.v1.ChangeService/DescribeChange"))
+        let agent = super::agent_of(request.metadata())?;
+        let request = request.into_inner();
+        let target = target(&self.state, &request.repo, &request.workspace)?;
+        let write = Write::Describe {
+            revision: request.revision,
+            description: request.description,
+            expected: request.expected_commit_id,
+        };
+        let (rewritten, operation) =
+            write_change(&self.state, &target, agent, write, OperationKind::Describe).await?;
+        Ok(Response::new(DescribeChangeResponse {
+            change: rewritten.change.as_ref().map(convert::change),
+            operation,
+        }))
     }
 
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn abandon_change(
         &self,
-        _request: Request<AbandonChangeRequest>,
+        request: Request<AbandonChangeRequest>,
     ) -> Result<Response<AbandonChangeResponse>, Status> {
-        Err(not_implemented("/reef.api.v1.ChangeService/AbandonChange"))
+        let agent = super::agent_of(request.metadata())?;
+        let request = request.into_inner();
+        let target = target(&self.state, &request.repo, &request.workspace)?;
+        let write = Write::Abandon {
+            revision: request.revision,
+            expected: request.expected_commit_id,
+        };
+        let (rewritten, operation) =
+            write_change(&self.state, &target, agent, write, OperationKind::Abandon).await?;
+        Ok(Response::new(AbandonChangeResponse {
+            abandoned_commit_id: rewritten
+                .abandoned
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            operation,
+        }))
     }
+}
+
+/// Runs `write` for `target` and reads back the operation it recorded.
+pub(super) async fn write_change(
+    state: &AppState,
+    target: &super::reading::Target,
+    agent: Option<String>,
+    write: Write,
+    kind: OperationKind,
+) -> Result<(crate::workspace::Rewritten, Option<reef_api::v1::Operation>), Status> {
+    let rewritten = state
+        .manager
+        .rewrite(WriteRequest {
+            repo: target.repo.id,
+            workspace: target.workspace.as_ref().map(|record| record.id),
+            agent: agent.clone(),
+            write,
+        })
+        .await
+        .map_err(status)?;
+    let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
+    let owner = target
+        .workspace
+        .as_ref()
+        .map(|record| record.owner.as_str());
+    let operation = written_operation(
+        state,
+        target.repo.id,
+        rewritten.op_id.as_deref(),
+        Written {
+            kind,
+            snapshot: None,
+            workspace: workspace_id.as_deref(),
+            agent: agent.as_deref().or(owner).unwrap_or_default(),
+        },
+    )
+    .await?;
+    Ok((rewritten, operation))
 }

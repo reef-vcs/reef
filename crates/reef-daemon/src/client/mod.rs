@@ -31,6 +31,10 @@ use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::store_service_client::StoreServiceClient;
 use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
 use reef_api::v1::{
+    AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest, DescribeChangeResponse,
+    UndoOperationRequest, UndoOperationResponse,
+};
+use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
     CollectGarbageResponse, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ForgetRepositoryRequest, ForgetRepositoryResponse, GetDaemonStatusRequest,
@@ -80,7 +84,31 @@ pub fn any_call_answered() -> bool {
 pub struct Client {
     channel: Channel,
     socket: PathBuf,
+    /// Sent as `reef-agent` on every call.
+    agent: AgentInterceptor,
 }
+
+/// Adds the `reef-agent` request metadata (R2.03) to every call, when the
+/// client has one.
+#[derive(Clone, Debug, Default)]
+struct AgentInterceptor(Option<tonic::metadata::AsciiMetadataValue>);
+
+impl tonic::service::Interceptor for AgentInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(agent) = &self.0 {
+            request
+                .metadata_mut()
+                .insert(reef_api::AGENT_METADATA, agent.clone());
+        }
+        Ok(request)
+    }
+}
+
+/// The transport of every generated client: the channel, with the agent.
+type Svc = tonic::service::interceptor::InterceptedService<Channel, AgentInterceptor>;
 
 /// Failure to reach the daemon or of a request.
 #[derive(Debug, thiserror::Error)]
@@ -115,6 +143,9 @@ pub enum ClientError {
         /// The status as received.
         status: tonic::Status,
     },
+    /// [`Client::with_agent`] was given a value the daemon would refuse.
+    #[error("an agent must be visible ASCII of at most {max} bytes: {0:?}", max = reef_api::AGENT_MAX_BYTES)]
+    InvalidAgent(String),
     /// The daemon is another version and cannot serve the call: a 0.1 daemon
     /// (API v0), or a v1 daemon that does not have the method.
     #[error(
@@ -155,7 +186,7 @@ impl ClientError {
     /// `next`, R1.26), if any.
     pub fn advice(&self) -> Option<Advice> {
         match self {
-            Self::Connect { .. } | Self::Incompatible { .. } => None,
+            Self::Connect { .. } | Self::Incompatible { .. } | Self::InvalidAgent(_) => None,
             Self::Rpc { status, .. } => detail_of(status).and_then(|d| Advice::from_detail(&d)),
         }
     }
@@ -165,6 +196,7 @@ impl ClientError {
     pub fn reason(&self) -> &str {
         match self {
             Self::Connect { .. } => "",
+            Self::InvalidAgent(_) => reef_api::error::INVALID_AGENT,
             Self::Rpc { reason, .. } => reason,
             Self::Incompatible { .. } => reef_api::error::API_VERSION_MISMATCH,
         }
@@ -175,6 +207,7 @@ impl Classify for ClientError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::Connect { .. } => ErrorKind::Unavailable,
+            Self::InvalidAgent(_) => ErrorKind::InvalidArgument,
             Self::Rpc { kind, .. } => *kind,
             Self::Incompatible { .. } => ErrorKind::Unsupported,
         }
@@ -213,7 +246,27 @@ impl Client {
         Ok(Client {
             channel,
             socket: socket.to_owned(),
+            agent: AgentInterceptor::default(),
         })
+    }
+
+    /// This client, sending `agent` as the `reef-agent` request metadata on
+    /// every call (R2.03): the operations those calls record name it as
+    /// their agent instead of the workspace's owner. Trimmed; it must be
+    /// visible ASCII of at most [`reef_api::AGENT_MAX_BYTES`] bytes, as the
+    /// daemon requires.
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Result<Client, ClientError> {
+        let agent = agent.into();
+        let text = agent.trim();
+        let visible = text.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
+        if text.is_empty() || text.len() > reef_api::AGENT_MAX_BYTES || !visible {
+            return Err(ClientError::InvalidAgent(agent));
+        }
+        let value = text
+            .parse()
+            .map_err(|_| ClientError::InvalidAgent(agent.clone()))?;
+        self.agent = AgentInterceptor(Some(value));
+        Ok(self)
     }
 
     /// The socket this client is connected to.
@@ -309,20 +362,20 @@ impl Client {
             .into_inner())
     }
 
-    fn repositories(&self) -> RepositoryServiceClient<Channel> {
-        RepositoryServiceClient::new(self.channel.clone())
+    fn repositories(&self) -> RepositoryServiceClient<Svc> {
+        RepositoryServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
 
-    fn workspaces(&self) -> WorkspaceServiceClient<Channel> {
-        WorkspaceServiceClient::new(self.channel.clone())
+    fn workspaces(&self) -> WorkspaceServiceClient<Svc> {
+        WorkspaceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
 
-    fn maintenance(&self) -> MaintenanceServiceClient<Channel> {
-        MaintenanceServiceClient::new(self.channel.clone())
+    fn maintenance(&self) -> MaintenanceServiceClient<Svc> {
+        MaintenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
 
-    fn stores(&self) -> StoreServiceClient<Channel> {
-        StoreServiceClient::new(self.channel.clone())
+    fn stores(&self) -> StoreServiceClient<Svc> {
+        StoreServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
 
     /// `RepositoryService.RegisterRepository`: registers the jj repository
@@ -659,7 +712,8 @@ impl Client {
         &self,
         request: GetStatusRequest,
     ) -> Result<GetStatusResponse, ClientError> {
-        let mut client = StatusServiceClient::new(self.channel.clone());
+        let mut client =
+            StatusServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("GetStatus", client.get_status(request)).await
     }
 
@@ -668,7 +722,8 @@ impl Client {
         &self,
         request: ListChangesRequest,
     ) -> Result<ListChangesResponse, ClientError> {
-        let mut client = ChangeServiceClient::new(self.channel.clone());
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("ListChanges", client.list_changes(request)).await
     }
 
@@ -700,7 +755,8 @@ impl Client {
         &self,
         request: GetChangeRequest,
     ) -> Result<GetChangeResponse, ClientError> {
-        let mut client = ChangeServiceClient::new(self.channel.clone());
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("GetChange", client.get_change(request)).await
     }
 
@@ -709,7 +765,8 @@ impl Client {
         &self,
         request: GetDiffRequest,
     ) -> Result<GetDiffResponse, ClientError> {
-        let mut client = DiffServiceClient::new(self.channel.clone());
+        let mut client =
+            DiffServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("GetDiff", client.get_diff(request)).await
     }
 
@@ -736,7 +793,8 @@ impl Client {
         &self,
         request: ListOperationsRequest,
     ) -> Result<ListOperationsResponse, ClientError> {
-        let mut client = OperationServiceClient::new(self.channel.clone());
+        let mut client =
+            OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("ListOperations", client.list_operations(request))
             .await
     }
@@ -748,12 +806,46 @@ impl Client {
         repo: &str,
         operation_id: &str,
     ) -> Result<GetOperationResponse, ClientError> {
-        let mut client = OperationServiceClient::new(self.channel.clone());
+        let mut client =
+            OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         let request = GetOperationRequest {
             repo: repo.to_owned(),
             operation_id: operation_id.to_owned(),
         };
         self.call("GetOperation", client.get_operation(request))
+            .await
+    }
+
+    /// `ChangeService.DescribeChange` (R2.03).
+    pub async fn describe_change(
+        &self,
+        request: DescribeChangeRequest,
+    ) -> Result<DescribeChangeResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("DescribeChange", client.describe_change(request))
+            .await
+    }
+
+    /// `ChangeService.AbandonChange` (R2.03).
+    pub async fn abandon_change(
+        &self,
+        request: AbandonChangeRequest,
+    ) -> Result<AbandonChangeResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("AbandonChange", client.abandon_change(request))
+            .await
+    }
+
+    /// `OperationService.UndoOperation` (R2.03).
+    pub async fn undo_operation(
+        &self,
+        request: UndoOperationRequest,
+    ) -> Result<UndoOperationResponse, ClientError> {
+        let mut client =
+            OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("UndoOperation", client.undo_operation(request))
             .await
     }
 }

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use jj_lib::object_id::ObjectId as _;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::{CommitIdHex, IgnoreSources, Repo, RepoPath, commit_snapshot};
+use reef_lib::jj::{OpKind, OpMeta};
 use tempfile::TempDir;
 
 fn write(root: &Path, path: &str, contents: &str) {
@@ -54,9 +55,13 @@ async fn narrowed_snapshot(repo: &mut Repo, paths: &[&str]) -> (bool, bool) {
         pending.finish(&op_id).await.unwrap();
         return (narrowed, false);
     }
-    let committed = commit_snapshot(&head, pending.plan(), "narrowed")
-        .await
-        .unwrap();
+    let committed = commit_snapshot(
+        &head,
+        pending.plan(),
+        &OpMeta::new(OpKind::Snapshot, "narrowed"),
+    )
+    .await
+    .unwrap();
     pending.finish(&committed.op_id).await.unwrap();
     repo.set_head(committed.repo);
     (narrowed, true)

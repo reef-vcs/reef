@@ -58,6 +58,7 @@ impl DiffService for DiffHandler {
         request: Request<GetDiffRequest>,
     ) -> Result<Response<GetDiffResponse>, Status> {
         let arrived = Instant::now();
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let page = PageRequest::new(
             GET_DIFF,
@@ -108,7 +109,7 @@ impl DiffService for DiffHandler {
                 vec![to_text.clone(), request.from_revision.clone()],
             )
             .await?;
-            snapshot_first(state, &target, needed, arrived).await?;
+            snapshot_first(state, &target, needed, arrived, agent).await?;
         }
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);

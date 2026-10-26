@@ -361,3 +361,27 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 | `op_page_100` | 1.6 ms | 1.6 ms |
 
 Everything but `diff_summary_full` scales with what changed, not with the tree. `diff_summary_full` walks every path, and a page of a large diff pays that walk again to count `total_files`. Before R2.02 skipped rename and copy detection past 1,000 differing files (git's default `diff.renameLimit`), the git backend's detection took 764 ms of its 770 ms on `medium` and grew faster than the file count; the tree diff alone is 6 ms there.
+
+## Writes (R2.03)
+
+`crates/reef-lib/benches/writes.rs` measures the jj side of the write RPCs on the same fixture, as `writes/<preset>/<name>`: `cargo bench -p reef-lib --bench writes` (or `just bench -- writes/`). Each iteration's setup commits what it writes on, outside the measurement; the fixture's operation log grows with every run.
+
+| Benchmark | Timed |
+| --- | --- |
+| `describe_wc` | describe the working-copy commit, which has one descendant: rewrite, rebase, commit and publish |
+| `abandon_leaf` | abandon a commit with no descendants |
+| `abandon_divergent` | abandon one commit of a divergent change whose other commit takes over its child |
+| `revert_snapshot` | revert the snapshot just taken, supersession check included |
+
+Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
+
+| Benchmark | `medium` (10,014 files) | `large` (100,014 files) |
+| --- | ---: | ---: |
+| `describe_wc` | 35.3 ms | 35.8 ms |
+| `abandon_leaf` | 16.5 ms | 17.2 ms |
+| `abandon_divergent` | 29.1 ms | 30.9 ms |
+| `revert_snapshot` | 17.0 ms | 19.6 ms |
+
+Nothing here walks a tree: `medium` and `large` agree. An operation that writes no commit (`abandon_leaf`, `revert_snapshot`) costs 16 to 17 ms, which is jj-lib committing and publishing an operation (operation, view, index segment, op heads) on APFS; each commit written adds about 9 ms (`describe_wc` writes two, the working-copy commit and its rebased descendant; `abandon_divergent` one). The brief's targets (under 10 to 15 ms) were set before measuring and assumed a cheaper operation commit; the cost is in jj-lib's store writes, not Reef's code, and is paid once per write RPC.
+
+End to end through the daemon, `DescribeChange` of a workspace's `@` (test `describe_change`, 20 calls) has a median of 30.4 ms in the test (debug) build, writing one commit: the transaction above, the follows' row updates, and `written_operation`. `AbandonChange` and `UndoOperation` add a scan of each workspace they move before the write and one after (a scan plus a check-out of the files that differ); see "Baseline" for scan costs.

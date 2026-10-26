@@ -25,6 +25,7 @@ use reef_lib::jj::snapshot::{
 };
 use reef_lib::jj::undo::{UNDO_OP_DESC_PREFIX, UndoError};
 use reef_lib::jj::{IgnoreSources, InitError, OpenError, Repo, StartPoint, commit_snapshot};
+use reef_lib::jj::{OpKind, OpMeta};
 
 const MIB: usize = 1 << 20;
 
@@ -139,7 +140,7 @@ async fn init_in_git_repo_colocates_on_head() {
     let dir = tempfile::tempdir().unwrap();
     let head = reef_testing::git::init_repo(dir.path(), &[("README", "hello\n")]);
 
-    let mut repo = Repo::init_in_git_repo(dir.path(), &settings())
+    let mut repo = Repo::init_in_git_repo(dir.path(), &settings(), None)
         .await
         .expect("init alongside git");
     assert!(repo.is_colocated());
@@ -150,7 +151,9 @@ async fn init_in_git_repo_colocates_on_head() {
     assert!(!repo.snapshot("snapshot").await.unwrap().changed);
 
     assert!(repo.resolve_revision("main").await.is_err());
-    repo.import_git_refs("import git refs").await.unwrap();
+    repo.import_git_refs(&OpMeta::new(OpKind::ImportRefs, "import git refs"))
+        .await
+        .unwrap();
     let main = repo
         .resolve_revision("main")
         .await
@@ -166,7 +169,7 @@ async fn init_in_git_repo_colocates_on_head() {
 async fn init_in_git_repo_with_unborn_head() {
     let dir = tempfile::tempdir().unwrap();
     gix::init(dir.path()).expect("git init");
-    let repo = Repo::init_in_git_repo(dir.path(), &settings())
+    let repo = Repo::init_in_git_repo(dir.path(), &settings(), None)
         .await
         .expect("init alongside git");
     assert!(repo.is_colocated());
@@ -178,7 +181,7 @@ async fn init_in_git_repo_with_unborn_head() {
 #[tokio::test]
 async fn init_in_git_repo_refuses_non_git_dirs() {
     let dir = tempfile::tempdir().unwrap();
-    let err = Repo::init_in_git_repo(dir.path(), &settings())
+    let err = Repo::init_in_git_repo(dir.path(), &settings(), None)
         .await
         .err()
         .unwrap();
@@ -186,7 +189,7 @@ async fn init_in_git_repo_refuses_non_git_dirs() {
     assert_eq!(err.kind(), ErrorKind::InvalidArgument);
 
     std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere\n").unwrap();
-    let err = Repo::init_in_git_repo(dir.path(), &settings())
+    let err = Repo::init_in_git_repo(dir.path(), &settings(), None)
         .await
         .err()
         .unwrap();
@@ -516,7 +519,7 @@ async fn sibling_operation_is_reported() {
             &ws_root,
             &elsewhere.path().join("wc"),
             StartPoint::NewOn(wc),
-            "sibling",
+            &OpMeta::new(OpKind::CreateWorkspace, "sibling"),
         )
         .await
         .unwrap();
@@ -562,7 +565,9 @@ async fn unsaved_state_after_commit_adopts() {
         .unwrap();
     assert!(pending.changed());
     let plan = pending.plan().clone();
-    let committed = commit_snapshot(&head, &plan, "test").await.unwrap();
+    let committed = commit_snapshot(&head, &plan, &OpMeta::new(OpKind::Snapshot, "test"))
+        .await
+        .unwrap();
     drop(pending); // the working-copy state is not saved
     repo.set_head(Arc::clone(&committed.repo));
 

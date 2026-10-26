@@ -1049,7 +1049,11 @@ async fn store_build_without_rev_uses_master() {
             let master = checkout.wc_change().unwrap().commit_id;
             // `jj new`, then `jj bookmark set master -r @-`.
             let moved = checkout
-                .move_pointer("default", StartPoint::NewOn(master.clone()), "new")
+                .move_pointer(
+                    "default",
+                    StartPoint::NewOn(master.clone()),
+                    &reef_lib::jj::OpMeta::new(reef_lib::jj::OpKind::External, "new"),
+                )
                 .await
                 .unwrap();
             checkout.check_out_tree(&moved.wc.commit_id).await.unwrap();

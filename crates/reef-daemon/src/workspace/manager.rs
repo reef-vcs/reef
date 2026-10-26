@@ -12,9 +12,11 @@ use reef_api::v1::IfNotJj;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::settings::Fsmonitor;
-use reef_lib::jj::{CommitIdHex, ForgetWorkspaceError, OperationIdHex, ReadonlyRepo, UserSettings};
+use reef_lib::jj::{
+    CommitIdHex, ForgetWorkspaceError, OpKind, OperationIdHex, ReadonlyRepo, UserSettings,
+};
 
-use super::{Inspected, ManagerError, WorkspaceEntry};
+use super::{Inspected, ManagerError, WorkspaceEntry, op_meta};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
@@ -395,13 +397,15 @@ impl Manager {
         &self,
         path: PathBuf,
         if_not_jj: IfNotJj,
+        agent: Option<String>,
     ) -> Result<Registered, ManagerError> {
         let repos = Arc::clone(&self.repos);
         let db = Arc::clone(&self.db);
         let settings = self.settings.clone();
-        let registered =
-            tokio::task::spawn_blocking(move || repos.register(&db, &path, &settings, if_not_jj))
-                .await??;
+        let registered = tokio::task::spawn_blocking(move || {
+            repos.register(&db, &path, &settings, if_not_jj, agent.as_deref())
+        })
+        .await??;
         Ok(Registered {
             record: self.prepare_watcher(registered.record).await,
             ..registered
@@ -470,16 +474,18 @@ impl Manager {
     /// `snapshot_first`, takes an explicit snapshot before reading if the
     /// workspace is active (a released one has nothing to snapshot).
     /// Without `measure_disk`, leaves the disk usage out rather than walk
-    /// the directory (`reef here`, R1.26).
+    /// the directory (`reef here`, R1.26). `agent` is the snapshot's, as
+    /// [`Manager::snapshot`]'s.
     pub async fn inspect(
         &self,
         id: WorkspaceId,
         snapshot_first: bool,
         measure_disk: bool,
+        agent: Option<String>,
     ) -> Result<Inspected, ManagerError> {
         let active = self.db.workspace(id)?.state == WorkspaceState::Active;
         let op_id = if snapshot_first && active {
-            let snapshot = self.snapshot(id, SnapshotKind::Explicit, "").await?;
+            let snapshot = self.snapshot(id, SnapshotKind::Explicit, "", agent).await?;
             snapshot.changed.then(|| snapshot.op_id.to_string())
         } else {
             None
@@ -786,6 +792,7 @@ impl Manager {
             handle,
             id,
             "reef: release workspace {id} (directory missing)",
+            &record.owner,
         )
         .await
         {
@@ -813,18 +820,25 @@ impl Manager {
 }
 
 /// Forgets the jj workspace `reef-<id>` on the repository thread with
-/// `description` (`{id}` replaced), tolerating one that is already gone.
-/// Returns the operation that forgot it, `None` if it was gone.
+/// `description` (`{id}` replaced), caused by `agent`, tolerating one that
+/// is already gone. Returns the operation that forgot it, `None` if it was
+/// gone.
 pub(super) async fn forget_jj_workspace(
     handle: &RepoHandle,
     id: WorkspaceId,
     description: &str,
+    agent: &str,
 ) -> Result<Option<String>, ManagerError> {
     let name = id.jj_workspace_name();
-    let description = description.replace("{id}", &id.as_hex());
+    let meta = op_meta(
+        OpKind::ReleaseWorkspace,
+        description.replace("{id}", &id.as_hex()),
+        id,
+        agent,
+    );
     let forgotten = handle
         .call_async(move |head| {
-            async move { head.repo.forget_workspace(&name, &description).await }.boxed_local()
+            async move { head.repo.forget_workspace(&name, &meta).await }.boxed_local()
         })
         .await;
     match forgotten? {

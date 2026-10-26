@@ -552,7 +552,7 @@ impl Scheduler {
             .upgrade()
             .ok_or(ManagerError::NotLoaded(ws))?;
         manager
-            .snapshot_with(ws, kind, description(kind, ws, reason))
+            .snapshot_with(ws, kind, description(kind, ws, reason), None)
             .await
     }
 

@@ -25,6 +25,7 @@ pub mod oplog;
 pub mod repo;
 pub mod restore;
 pub mod revset;
+pub mod rewrite;
 pub mod settings;
 pub mod snapshot;
 pub mod spec;
@@ -36,6 +37,7 @@ pub use gc::{GcError, GcOutcome, WorkingCopyCheckError};
 pub use git::{ImportRefsError, ImportRefsOutcome};
 pub use ignore::IgnoreSources;
 pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeStateReadError};
+pub use oplog::{OpKind, OpMeta};
 pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
     Repo,

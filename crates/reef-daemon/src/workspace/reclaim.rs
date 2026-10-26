@@ -81,6 +81,9 @@ impl Manager {
     /// A failed tear-down does not abort: the jj workspace is already gone,
     /// so the reclaim completes and the reclaim row's detail records the
     /// error.
+    ///
+    /// The final snapshot and the forget carry `spec.agent`, else the
+    /// owner, as `reef.agent` (R2.03).
     #[tracing::instrument(skip_all, fields(workspace_id = %id, reason = reason.as_str(), force = spec.force))]
     pub async fn reclaim(
         &self,
@@ -128,7 +131,7 @@ impl Manager {
         let mut details = Vec::new();
         let root_exists = tokio::fs::symlink_metadata(&entry.paths.root).await.is_ok();
         let (snapshot_taken, final_op_id) = self
-            .final_snapshot(&entry, reason, spec, root_exists, &mut details)
+            .final_snapshot(&entry, reason, &spec, root_exists, &mut details)
             .await?;
 
         // 4.
@@ -139,7 +142,7 @@ impl Manager {
         if freed_bytes.is_none() {
             details.push(DISK_USAGE_UNKNOWN.to_owned());
         }
-        let release_op_id = self.forget(&entry, spec).await?;
+        let release_op_id = self.forget(&entry, &spec).await?;
         // The handle is useless without its jj workspace.
         entry
             .jj
@@ -198,7 +201,7 @@ impl Manager {
         &self,
         entry: &Arc<WorkspaceEntry>,
         reason: ReclaimReason,
-        spec: ReleaseSpec,
+        spec: &ReleaseSpec,
         root_exists: bool,
         details: &mut Vec<String>,
     ) -> Result<(bool, Option<String>), ManagerError> {
@@ -236,7 +239,10 @@ impl Manager {
         }
         let kind = SnapshotKind::Final;
         let description = description(kind, id, Some(final_reason(reason)));
-        match self.snapshot_locked(entry, kind, description).await {
+        match self
+            .snapshot_locked(entry, kind, description, spec.agent.clone())
+            .await
+        {
             Ok(snapshot) => Ok((true, snapshot.changed.then(|| snapshot.op_id.to_string()))),
             Err(error) if spec.force => {
                 tracing::warn!(error = %ErrorChain(&error), "final snapshot failed; releasing anyway");
@@ -259,10 +265,12 @@ impl Manager {
     async fn forget(
         &self,
         entry: &WorkspaceEntry,
-        spec: ReleaseSpec,
+        spec: &ReleaseSpec,
     ) -> Result<Option<String>, ManagerError> {
         let id = entry.paths.id;
-        match forget_jj_workspace(&entry.repo, id, "reef: release workspace {id}").await {
+        let owner = entry.record().owner;
+        let agent = spec.agent.as_deref().unwrap_or(&owner);
+        match forget_jj_workspace(&entry.repo, id, "reef: release workspace {id}", agent).await {
             Ok(op_id) => Ok(op_id),
             Err(error) if !spec.force => {
                 self.back_to_active(entry, None).await;

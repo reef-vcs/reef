@@ -91,6 +91,8 @@ impl Manager {
                 &handle,
                 id,
                 "reef: release workspace {id} (create interrupted)",
+                // No row survived to name an owner.
+                "",
             )
             .await
             {

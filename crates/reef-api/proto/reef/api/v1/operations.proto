@@ -3,6 +3,13 @@
 // `repo` accepts a repo id, a unique id prefix of four or more hex
 // characters, or an absolute path inside a registered root. Operation ids
 // are full lowercase hex; a request may name one by a unique prefix.
+//
+// Every RPC that records an operation reads the `reef-agent` request
+// metadata (visible ASCII, at most 256 bytes, else INVALID_ARGUMENT with
+// reason INVALID_AGENT) and writes it as the operation's `reef.agent`
+// attribute, with `reef.kind`, `reef.workspace` and, for a snapshot,
+// `reef.snapshot-kind` (R2.03). The metadata names who caused a write; it
+// is not authentication.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -37,7 +44,25 @@ service OperationService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   // Undoes exactly one operation, as `jj op revert` does, recording a new
-  // operation. Declared; R2.03 implements it.
+  // operation: what it created is abandoned or rewritten back, what it hid
+  // comes back, and the bookmarks and working copies it moved go back;
+  // later operations stay. Workspaces the undo moves are snapshotted first
+  // and take the result afterwards (ADR 0031). When there is nothing to
+  // revert, `operation` is unset.
+  //
+  // Never undone (INVALID_ARGUMENT, reason OPERATION_NOT_UNDOABLE): the
+  // root operation, a merge of concurrent operations, one that adds or
+  // forgets a workspace (create, release), a workspace move (move it back
+  // instead), and one that changed git refs or git's HEAD. An operation
+  // something later changed again (FAILED_PRECONDITION, reason
+  // OPERATION_SUPERSEDED) is refused rather than merged, so an undo never
+  // leaves a change divergent; undo the later ones first, newest first.
+  //
+  // Errors: as for GetOperation, and FAILED_PRECONDITION with reason
+  // OPERATION_NOT_IN_HISTORY (not an ancestor of the head) or
+  // OPERATION_SUPERSEDED (metadata `operation_id` for these and
+  // OPERATION_NOT_UNDOABLE), for a `workspace` that is not active, or when
+  // a workspace could not be snapshotted first (nothing is written).
   rpc UndoOperation(UndoOperationRequest) returns (UndoOperationResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -127,8 +152,9 @@ message Operation {
   // jj's workspace name when it is not a Reef workspace, such as `default`;
   // empty for a Reef workspace's operations.
   string jj_workspace = 13;
-  // The agent that caused it: the operation attribute `reef.agent`, else
-  // the workspace's owner; empty if unknown.
+  // The agent that caused it: the operation attribute `reef.agent` (the
+  // `reef-agent` request metadata of the RPC that wrote it, else the
+  // workspace's owner), else the workspace's owner; empty if unknown.
   string agent = 14;
   // jj's operation attributes, verbatim.
   map<string, string> attributes = 15;
@@ -274,8 +300,9 @@ message GetOperationResponse {
 message UndoOperationRequest {
   // The repository.
   string repo = 1;
-  // A workspace to check out at the restored state afterwards; other
-  // workspaces follow the staleness rules of R1.13. Empty for none.
+  // A workspace to snapshot first and check out afterwards, reported as
+  // `snapshot`. Other workspaces the undo moves are snapshotted first and
+  // then adopt it, by R1.13's staleness rules. Empty for none.
   string workspace = 2;
   // The operation to undo, as an id or unique prefix. Required.
   string operation_id = 3;

@@ -24,6 +24,8 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::diff::PathError;
 use reef_lib::jj::oplog::OpLookupError;
 use reef_lib::jj::revset::RevisionError;
+use reef_lib::jj::rewrite::RewriteError;
+use reef_lib::jj::undo::UndoError;
 use tonic::{Code, Status};
 
 use crate::backend::BaseCacheError;
@@ -34,6 +36,7 @@ use crate::maintenance::gc::GcRunError;
 use crate::maintenance::quiesce::QuiesceError;
 use crate::maintenance::restore::RestoreError;
 use crate::repo::RegisterError;
+use crate::service::InvalidAgent;
 use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
@@ -130,6 +133,10 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
+        } else if let Some(error) = error.downcast_ref::<RewriteError>() {
+            rewrite_advice(error)
+        } else if let Some(error) = error.downcast_ref::<UndoError>() {
+            undo_advice(error)
         } else {
             None
         };
@@ -244,14 +251,16 @@ fn workspace_of(name: &str) -> String {
         .to_owned()
 }
 
+/// Reason metadata from `(key, value)` pairs.
+fn meta(pairs: &[(&str, String)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect()
+}
+
 fn revision_reason(error: &RevisionError) -> Option<(&'static str, BTreeMap<String, String>)> {
     use reef_api::error as reason;
-    let meta = |pairs: &[(&str, String)]| {
-        pairs
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), value.clone()))
-            .collect::<BTreeMap<_, _>>()
-    };
     Some(match error {
         RevisionError::Required => (reason::REVISION_REQUIRED, BTreeMap::new()),
         RevisionError::WorkspaceRequired { .. } => (reason::WORKSPACE_REQUIRED, BTreeMap::new()),
@@ -307,6 +316,36 @@ fn lookup_reason(error: &OpLookupError) -> Option<(&'static str, BTreeMap<String
     })
 }
 
+fn rewrite_reason(error: &RewriteError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let commit = |id: &dyn std::fmt::Display| meta(&[("commit_id", id.to_string())]);
+    Some(match error {
+        RewriteError::InvalidCommitId(text) => (reason::INVALID_COMMIT_ID, commit(text)),
+        RewriteError::InvalidDescription => (reason::INVALID_DESCRIPTION, BTreeMap::new()),
+        RewriteError::Mismatch { expected, actual } => (
+            reason::EXPECTED_COMMIT_MISMATCH,
+            meta(&[
+                ("expected_commit_id", expected.to_string()),
+                ("commit_id", actual.to_string()),
+            ]),
+        ),
+        RewriteError::Immutable(id) => (reason::IMMUTABLE_REVISION, commit(id)),
+        RewriteError::Hidden(id) => (reason::HIDDEN_REVISION, commit(id)),
+        _ => return None,
+    })
+}
+
+fn undo_reason(error: &UndoError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let operation = |id: &dyn std::fmt::Display| meta(&[("operation_id", id.to_string())]);
+    Some(match error {
+        UndoError::NotUndoable { op, .. } => (reason::OPERATION_NOT_UNDOABLE, operation(op)),
+        UndoError::NotInHistory(op) => (reason::OPERATION_NOT_IN_HISTORY, operation(op)),
+        UndoError::Superseded { op, .. } => (reason::OPERATION_SUPERSEDED, operation(op)),
+        _ => return None,
+    })
+}
+
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -328,6 +367,12 @@ fn reason_and_metadata(
                 reef_api::error::INVALID_PATH,
                 BTreeMap::from([("path".to_owned(), error.path.clone())]),
             ))
+        } else if error.downcast_ref::<InvalidAgent>().is_some() {
+            Some((reef_api::error::INVALID_AGENT, BTreeMap::new()))
+        } else if let Some(error) = error.downcast_ref::<RewriteError>() {
+            rewrite_reason(error)
+        } else if let Some(error) = error.downcast_ref::<UndoError>() {
+            undo_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (
@@ -342,6 +387,29 @@ fn reason_and_metadata(
         current = error.source();
     }
     None
+}
+
+/// How to fix a refused describe or abandon (R2.03).
+fn rewrite_advice(error: &RewriteError) -> Option<Advice> {
+    match error {
+        RewriteError::Mismatch { actual, .. } => Some(Advice::hint(format!(
+            "The revision now names {actual}; read it again and retry with that id."
+        ))),
+        RewriteError::Immutable(_) => Some(Advice::hint(
+            "Trunk, tags and untracked remote bookmarks are immutable; rewrite a change on top of them instead.",
+        )),
+        _ => None,
+    }
+}
+
+/// How to fix a refused undo (R2.03).
+fn undo_advice(error: &UndoError) -> Option<Advice> {
+    match error {
+        UndoError::Superseded { .. } => Some(Advice::hint(
+            "Later operations changed what it did; undo them first, newest first (ListOperations with a change filter lists them).",
+        )),
+        _ => None,
+    }
 }
 
 /// How to fix a revision that did not resolve (R2.02).
@@ -805,6 +873,107 @@ mod tests {
         ] {
             assert_eq!(advice_in(&status).next, list, "{status:?}");
         }
+    }
+
+    #[test]
+    fn write_reasons_carry_their_metadata() {
+        use reef_lib::jj::rewrite::RewriteError;
+        use reef_lib::jj::undo::UndoError;
+        // (status, code, reason, metadata)
+        type Case = (Status, Code, &'static str, Vec<(&'static str, String)>);
+        let commit: reef_lib::jj::CommitIdHex = "ab".repeat(20).parse().unwrap();
+        let other: reef_lib::jj::CommitIdHex = "cd".repeat(20).parse().unwrap();
+        let op: reef_lib::jj::OperationIdHex = "ef".repeat(64).parse().unwrap();
+        let cases: Vec<Case> = vec![
+            (
+                status(ManagerError::Rewrite(RewriteError::InvalidCommitId(
+                    "abc".into(),
+                ))),
+                Code::InvalidArgument,
+                reef_api::error::INVALID_COMMIT_ID,
+                vec![("commit_id", "abc".into())],
+            ),
+            (
+                status(ManagerError::Rewrite(RewriteError::InvalidDescription)),
+                Code::InvalidArgument,
+                reef_api::error::INVALID_DESCRIPTION,
+                vec![],
+            ),
+            (
+                status(ManagerError::Rewrite(RewriteError::Mismatch {
+                    expected: commit.clone(),
+                    actual: other.clone(),
+                })),
+                Code::FailedPrecondition,
+                reef_api::error::EXPECTED_COMMIT_MISMATCH,
+                vec![
+                    ("expected_commit_id", commit.to_string()),
+                    ("commit_id", other.to_string()),
+                ],
+            ),
+            (
+                status(ManagerError::Rewrite(RewriteError::Immutable(
+                    commit.clone(),
+                ))),
+                Code::FailedPrecondition,
+                reef_api::error::IMMUTABLE_REVISION,
+                vec![("commit_id", commit.to_string())],
+            ),
+            (
+                status(ManagerError::Rewrite(RewriteError::Hidden(commit.clone()))),
+                Code::FailedPrecondition,
+                reef_api::error::HIDDEN_REVISION,
+                vec![("commit_id", commit.to_string())],
+            ),
+            (
+                status(ManagerError::Undo(UndoError::NotUndoable {
+                    op: op.clone(),
+                    why: "it is the root operation",
+                })),
+                Code::InvalidArgument,
+                reef_api::error::OPERATION_NOT_UNDOABLE,
+                vec![("operation_id", op.to_string())],
+            ),
+            (
+                status(ManagerError::Undo(UndoError::NotInHistory(op.clone()))),
+                Code::FailedPrecondition,
+                reef_api::error::OPERATION_NOT_IN_HISTORY,
+                vec![("operation_id", op.to_string())],
+            ),
+            (
+                status(ManagerError::Undo(UndoError::Superseded {
+                    op: op.clone(),
+                    what: "bookmark main".into(),
+                })),
+                Code::FailedPrecondition,
+                reef_api::error::OPERATION_SUPERSEDED,
+                vec![("operation_id", op.to_string())],
+            ),
+            (
+                status(InvalidAgent),
+                Code::InvalidArgument,
+                reef_api::error::INVALID_AGENT,
+                vec![],
+            ),
+        ];
+        for (status, code, reason, metadata) in cases {
+            assert_eq!(status.code(), code, "{reason}");
+            let detail = detail_of(&status).unwrap();
+            assert_eq!(detail.reason, reason);
+            let expected: BTreeMap<String, String> = metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
+            assert_eq!(detail.metadata, expected, "{reason}");
+        }
+        // A revision error inside a rewrite keeps R2.02's reason.
+        let required = status(ManagerError::Rewrite(RewriteError::Revision(
+            RevisionError::Required,
+        )));
+        assert_eq!(
+            detail_of(&required).unwrap().reason,
+            reef_api::error::REVISION_REQUIRED
+        );
     }
 
     #[test]

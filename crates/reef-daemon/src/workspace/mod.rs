@@ -24,6 +24,7 @@ mod manager;
 mod move_;
 mod reclaim;
 mod rematerialize;
+mod rewrite;
 mod snapshot;
 mod stores;
 
@@ -38,7 +39,7 @@ use reef_lib::jj::snapshot::SnapshotError;
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
     CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
-    ImportRefsError, MovePointerError, OpenError, Repo, ResolveError,
+    ImportRefsError, MovePointerError, OpKind, OpMeta, OpenError, Repo, ResolveError,
 };
 use reef_lib::spec::SpecError;
 
@@ -46,6 +47,7 @@ pub use create::ROOT_CHECKOUT;
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
+pub use rewrite::{Rewritten, Write, WriteRequest};
 pub use snapshot::{REEFIGNORE, ReadSnapshot};
 pub(crate) use stores::StoreTarget;
 
@@ -59,6 +61,19 @@ use crate::model::{LeaseRecord, RepoId, WorkspaceId, WorkspaceRecord, WorkspaceS
 use crate::repo::{RegisterError, RepoHandle, RepoThreadError};
 use crate::snapshot::index::SnapshotEntry;
 use crate::store::{MountedStore, StoreError};
+
+/// What an operation Reef records for workspace `id` carries (R2.03): its
+/// kind and description, the workspace, and `agent`, who caused it.
+pub(crate) fn op_meta(
+    kind: OpKind,
+    description: impl Into<String>,
+    id: WorkspaceId,
+    agent: &str,
+) -> OpMeta {
+    OpMeta::new(kind, description)
+        .workspace(id.as_hex())
+        .agent(agent)
+}
 
 /// One loaded workspace: what the manager holds for every `active` row.
 pub struct WorkspaceEntry {
@@ -195,6 +210,8 @@ pub struct CreateSpec {
     /// A store left out without counting as missing: the one a store
     /// build's scratch workspace is building (R1.20).
     pub skip_store: Option<String>,
+    /// The operations' `reef.agent`; `None` for `owner` (R2.03).
+    pub agent: Option<String>,
 }
 
 /// What [`Manager::create`] made.
@@ -272,7 +289,7 @@ pub struct Moved {
 
 /// How [`Manager::reclaim`] releases or reclaims. The expiry loop uses the
 /// default; `Release` passes its request's flags.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseSpec {
     /// Release even if the final snapshot or forgetting the jj workspace
     /// fails.
@@ -282,6 +299,9 @@ pub struct ReleaseSpec {
     /// Recorded in the `reclaims` row's detail, such as `store build` for a
     /// store build's scratch workspace (R1.20).
     pub detail: Option<&'static str>,
+    /// The operations' `reef.agent`; `None` for the workspace's owner
+    /// (R2.03).
+    pub agent: Option<String>,
 }
 
 impl Default for ReleaseSpec {
@@ -290,6 +310,7 @@ impl Default for ReleaseSpec {
             force: false,
             final_snapshot: true,
             detail: None,
+            agent: None,
         }
     }
 }
@@ -526,6 +547,25 @@ pub enum ManagerError {
     /// An operation the daemon wrote could not be read back (R2.01).
     #[error(transparent)]
     OpLog(#[from] reef_lib::jj::oplog::OpLogError),
+    /// A describe or abandon was refused or failed (R2.03).
+    #[error("rewrite the commit")]
+    Rewrite(#[from] reef_lib::jj::rewrite::RewriteError),
+    /// An undo was refused or failed (R2.03).
+    #[error("undo the operation")]
+    Undo(#[from] reef_lib::jj::undo::UndoError),
+    /// An operation id did not resolve (R2.03).
+    #[error("resolve the operation")]
+    OpLookup(#[from] reef_lib::jj::oplog::OpLookupError),
+    /// A workspace a describe, abandon or undo moves could not be
+    /// snapshotted first, so nothing was written (R2.03).
+    #[error("workspace {id} could not be snapshotted before the write")]
+    RewriteSnapshot {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Why.
+        #[source]
+        source: Box<ManagerError>,
+    },
 }
 
 impl Classify for ManagerError {
@@ -570,6 +610,10 @@ impl Classify for ManagerError {
             Self::MovePointer(error) => error.kind(),
             Self::CheckoutTree(error) => error.kind(),
             Self::OpLog(error) => error.kind(),
+            Self::Rewrite(error) => error.kind(),
+            Self::Undo(error) => error.kind(),
+            Self::OpLookup(error) => error.kind(),
+            Self::RewriteSnapshot { .. } => ErrorKind::Conflict,
         }
     }
 }
@@ -599,6 +643,12 @@ impl Advise for ManagerError {
             )),
             Self::WriteInFlight { id, .. } => Some(Advice::run(
                 "Nothing moved; the workspace's files could not be snapshotted. Inspect it, then retry the move.",
+                ["reef", "ws", "inspect", &id.as_hex()],
+            )),
+            Self::RewriteSnapshot { id, .. } => Some(Advice::run(
+                format!(
+                    "Nothing was written; workspace {id} could not be snapshotted. Inspect it, then retry."
+                ),
                 ["reef", "ws", "inspect", &id.as_hex()],
             )),
             _ => None,
