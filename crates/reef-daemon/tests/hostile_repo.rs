@@ -236,6 +236,55 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
     );
 }
 
+// 12a: reads take any revision without the guard (R2.02). jj-lib 0.46
+// panics reading the tree; the read fails with `INTERNAL`, its repository
+// is reopened, and the next read and create work (the create writes a
+// commit, which takes the git backend's lock a poisoned store would fail).
+// The `panicked` check fails once a jj-lib bump returns an error instead,
+// which is when S-18 changes too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_of_a_tree_jj_cannot_read_fails_alone() {
+    let f = fixture().await;
+    let canary = blob(&f.root, b"escaped\n");
+    let name = format!("a/{CANARY}");
+    f.hostile("hostile", &[(FILE, name.as_bytes(), &canary)]);
+    // A refused create imports the bookmark, so reads can name it.
+    f.create_on("hostile", Backend::Unspecified)
+        .await
+        .unwrap_err();
+    for _ in 0..2 {
+        let error = f
+            .daemon
+            .client
+            .get_diff(reef_api::v1::GetDiffRequest {
+                repo: f.repo.clone(),
+                from_revision: "main".to_owned(),
+                to_revision: "hostile".to_owned(),
+                ..reef_api::v1::GetDiffRequest::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Internal, "{error}");
+        assert!(error.to_string().contains("panicked"), "{error}");
+    }
+    let main = f
+        .daemon
+        .client
+        .get_change(reef_api::v1::GetChangeRequest {
+            repo: f.repo.clone(),
+            revision: "main".to_owned(),
+            ..reef_api::v1::GetChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    assert_eq!(main.commit_id, f.main);
+    f.assert_no_canary();
+    f.assert_alive().await;
+    f.create_on("main", Backend::Unspecified).await.unwrap();
+}
+
 // 12b: the guard's backstop. A job that panics anyway (here jj-lib, handed
 // the tree directly) leaves no poisoned store behind: the thread reopens
 // the repository, so the next job and the next create work, and a
