@@ -16,11 +16,9 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use prost::Message as _;
 use reef_api::v1::change_service_client::ChangeServiceClient;
-use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
-use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::{
     self, CreateWorkspaceRequest, ErrorKind, GetDaemonStatusRequest, IfNotJj,
     ListRepositoriesRequest, ListStoresRequest, ListWorkspacesRequest, MoveWorkspaceRequest,
@@ -57,7 +55,6 @@ fn assert_not_implemented(status: &tonic::Status, method: &str) {
 
 // 8
 #[tokio::test(flavor = "multi_thread")]
-#[expect(clippy::too_many_lines, reason = "one call per declared RPC")]
 async fn declared_rpcs_say_not_implemented() {
     let daemon = TestDaemon::start().await;
     let channel = channel(daemon.handle.socket_path()).await;
@@ -73,26 +70,7 @@ async fn declared_rpcs_say_not_implemented() {
             seen.insert($path);
         }};
     }
-    let mut status = StatusServiceClient::new(channel.clone());
-    check!(
-        status,
-        get_status,
-        GetStatusRequest,
-        "/reef.api.v1.StatusService/GetStatus"
-    );
     let mut changes = ChangeServiceClient::new(channel.clone());
-    check!(
-        changes,
-        list_changes,
-        ListChangesRequest,
-        "/reef.api.v1.ChangeService/ListChanges"
-    );
-    check!(
-        changes,
-        get_change,
-        GetChangeRequest,
-        "/reef.api.v1.ChangeService/GetChange"
-    );
     check!(
         changes,
         describe_change,
@@ -105,26 +83,7 @@ async fn declared_rpcs_say_not_implemented() {
         AbandonChangeRequest,
         "/reef.api.v1.ChangeService/AbandonChange"
     );
-    let mut diff = DiffServiceClient::new(channel.clone());
-    check!(
-        diff,
-        get_diff,
-        GetDiffRequest,
-        "/reef.api.v1.DiffService/GetDiff"
-    );
     let mut operations = OperationServiceClient::new(channel.clone());
-    check!(
-        operations,
-        list_operations,
-        ListOperationsRequest,
-        "/reef.api.v1.OperationService/ListOperations"
-    );
-    check!(
-        operations,
-        get_operation,
-        GetOperationRequest,
-        "/reef.api.v1.OperationService/GetOperation"
-    );
     check!(
         operations,
         undo_operation,
@@ -175,7 +134,8 @@ async fn declared_rpcs_say_not_implemented() {
         SubscribePresenceRequest,
         "/reef.api.v1.PresenceService/SubscribePresence"
     );
-    assert_eq!(seen.len(), 16);
+    // R2.02 implements the other six.
+    assert_eq!(seen.len(), 10);
     // The client does not take a declared RPC of its own version for a
     // version mismatch.
     let error = daemon
@@ -439,7 +399,8 @@ fn assert_written(
     assert_eq!(operation.workspace_id, workspace, "{kind:?}");
     assert_eq!(operation.agent, owner, "{kind:?}");
     assert!(!operation.parent_ids.is_empty(), "{kind:?}");
-    assert!(operation.effects.is_none(), "{kind:?}");
+    // R2.02 fills effects wherever an operation is reported.
+    assert!(operation.effects.is_some(), "{kind:?}");
     operation.id.clone()
 }
 

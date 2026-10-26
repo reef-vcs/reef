@@ -133,23 +133,29 @@ impl Repo {
     /// no git store, the ref is missing or not symbolic, or reading it fails
     /// (logged at `warn`): a default to try, never an error.
     pub fn git_remote_head(&self, remote: &str) -> Option<String> {
-        let git = jj_lib::git::get_git_repo(self.repo.store()).ok()?;
-        let name = format!("refs/remotes/{remote}/HEAD");
-        let reference = match git.try_find_reference(name.as_str()) {
-            Ok(reference) => reference?,
-            Err(error) => {
-                tracing::warn!(
-                    error = %crate::error::ErrorChain(&error),
-                    "cannot read {name}; not using it as a default"
-                );
-                return None;
-            }
-        };
-        let gix::refs::TargetRef::Symbolic(target) = reference.target() else {
-            return None;
-        };
-        let prefix = format!("refs/remotes/{remote}/");
-        let branch = target.as_bstr().strip_prefix(prefix.as_bytes())?;
-        std::str::from_utf8(branch).ok().map(str::to_owned)
+        remote_head(self.repo.store(), remote)
     }
+}
+
+/// [`Repo::git_remote_head`] over a store, so a read at any operation can
+/// find it (R2.02's `trunk()`).
+pub(crate) fn remote_head(store: &jj_lib::store::Store, remote: &str) -> Option<String> {
+    let git = jj_lib::git::get_git_repo(store).ok()?;
+    let name = format!("refs/remotes/{remote}/HEAD");
+    let reference = match git.try_find_reference(name.as_str()) {
+        Ok(reference) => reference?,
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::ErrorChain(&error),
+                "cannot read {name}; not using it as a default"
+            );
+            return None;
+        }
+    };
+    let gix::refs::TargetRef::Symbolic(target) = reference.target() else {
+        return None;
+    };
+    let prefix = format!("refs/remotes/{remote}/");
+    let branch = target.as_bstr().strip_prefix(prefix.as_bytes())?;
+    std::str::from_utf8(branch).ok().map(str::to_owned)
 }

@@ -15,11 +15,15 @@
 //! [`not_implemented`], [`unknown_method`] and [`v0_client`] are the three
 //! answers to a request this daemon cannot serve as asked (R2.01).
 
+use std::collections::BTreeMap;
 use std::error::Error;
 
 use prost::Message as _;
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
+use reef_lib::jj::diff::PathError;
+use reef_lib::jj::oplog::OpLookupError;
+use reef_lib::jj::revset::RevisionError;
 use tonic::{Code, Status};
 
 use crate::backend::BaseCacheError;
@@ -30,6 +34,7 @@ use crate::maintenance::gc::GcRunError;
 use crate::maintenance::quiesce::QuiesceError;
 use crate::maintenance::restore::RestoreError;
 use crate::repo::RegisterError;
+use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
@@ -119,6 +124,12 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<ManifestError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::read::ReadError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::read::PinnedGone>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<RevisionError>() {
+            revision_advice(error)
         } else {
             None
         };
@@ -214,6 +225,91 @@ pub fn kind_name(kind: ErrorKind) -> &'static str {
 /// error in its source chain that names one. Reasons are API, documented on
 /// the RPCs that return them (ADR 0029).
 pub fn reason_of(error: &(dyn Error + 'static)) -> Option<&'static str> {
+    reason_and_metadata(error).map(|(reason, _)| reason)
+}
+
+/// The metadata of `error`'s reason, as `ErrorDetail.metadata`: the keys
+/// documented with each reason.
+pub fn reason_metadata(error: &(dyn Error + 'static)) -> BTreeMap<String, String> {
+    reason_and_metadata(error)
+        .map(|(_, metadata)| metadata)
+        .unwrap_or_default()
+}
+
+/// A jj workspace name as the API reports it: the Reef workspace id of
+/// `reef-<id>`, else the name.
+fn workspace_of(name: &str) -> String {
+    name.strip_prefix(reef_lib::jj::workspace::REEF_WORKSPACE_PREFIX)
+        .unwrap_or(name)
+        .to_owned()
+}
+
+fn revision_reason(error: &RevisionError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let meta = |pairs: &[(&str, String)]| {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    Some(match error {
+        RevisionError::Required => (reason::REVISION_REQUIRED, BTreeMap::new()),
+        RevisionError::WorkspaceRequired { .. } => (reason::WORKSPACE_REQUIRED, BTreeMap::new()),
+        RevisionError::Parse { .. } => (reason::INVALID_REVSET, BTreeMap::new()),
+        RevisionError::NotFound { revision, .. } | RevisionError::Empty { revision } => (
+            reason::REVISION_NOT_FOUND,
+            meta(&[("revision", revision.clone())]),
+        ),
+        RevisionError::AmbiguousPrefix { prefix, .. } => (
+            reason::AMBIGUOUS_ID_PREFIX,
+            meta(&[("prefix", prefix.clone())]),
+        ),
+        RevisionError::Ambiguous {
+            revision,
+            commit_ids,
+            ..
+        } => (
+            reason::AMBIGUOUS_REVISION,
+            meta(&[
+                ("revision", revision.clone()),
+                (
+                    "commit_ids",
+                    commit_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+            ]),
+        ),
+        RevisionError::WorkingCopyNotFound {
+            workspace,
+            at_operation,
+        } => (
+            reason::WORKING_COPY_NOT_FOUND,
+            meta(&[
+                ("workspace_id", workspace_of(workspace)),
+                ("at_operation", at_operation.clone()),
+            ]),
+        ),
+        _ => return None,
+    })
+}
+
+fn lookup_reason(error: &OpLookupError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let operation = |id: &str| BTreeMap::from([("operation_id".to_owned(), id.to_owned())]);
+    Some(match error {
+        OpLookupError::Invalid(_) => (reason::INVALID_OPERATION_ID, BTreeMap::new()),
+        OpLookupError::NotFound(id) => (reason::OPERATION_NOT_FOUND, operation(id)),
+        OpLookupError::Ambiguous(id) => (reason::AMBIGUOUS_OPERATION_ID, operation(id)),
+        _ => return None,
+    })
+}
+
+fn reason_and_metadata(
+    error: &(dyn Error + 'static),
+) -> Option<(&'static str, BTreeMap<String, String>)> {
     let mut current = Some(error);
     while let Some(error) = current {
         // `PageError::Token` is transparent: its source skips the token
@@ -221,11 +317,52 @@ pub fn reason_of(error: &(dyn Error + 'static)) -> Option<&'static str> {
         if error.downcast_ref::<PageTokenError>().is_some()
             || matches!(error.downcast_ref::<PageError>(), Some(PageError::Token(_)))
         {
-            return Some(reef_api::error::INVALID_PAGE_TOKEN);
+            return Some((reef_api::error::INVALID_PAGE_TOKEN, BTreeMap::new()));
+        }
+        let found = if let Some(error) = error.downcast_ref::<RevisionError>() {
+            revision_reason(error)
+        } else if let Some(error) = error.downcast_ref::<OpLookupError>() {
+            lookup_reason(error)
+        } else if let Some(error) = error.downcast_ref::<PathError>() {
+            Some((
+                reef_api::error::INVALID_PATH,
+                BTreeMap::from([("path".to_owned(), error.path.clone())]),
+            ))
+        } else {
+            error.downcast_ref::<InvalidChangeFilter>().map(|error| {
+                (
+                    reef_api::error::INVALID_CHANGE_ID,
+                    BTreeMap::from([("change".to_owned(), error.change.clone())]),
+                )
+            })
+        };
+        if found.is_some() {
+            return found;
         }
         current = error.source();
     }
     None
+}
+
+/// How to fix a revision that did not resolve (R2.02).
+fn revision_advice(error: &RevisionError) -> Option<Advice> {
+    match error {
+        RevisionError::NotFound { candidates, .. } if !candidates.is_empty() => Some(Advice::hint(
+            format!("Did you mean {}?", candidates.join(", ")),
+        )),
+        RevisionError::Ambiguous { commit_ids, .. } => Some(Advice::hint(format!(
+            "It names several commits; name one by commit id: {}.",
+            commit_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        RevisionError::WorkspaceRequired { .. } => Some(Advice::hint(
+            "`@` is a workspace's working-copy commit; name the workspace in the request.",
+        )),
+        _ => None,
+    }
 }
 
 /// A status for `error` classified as `kind`: the kind's code, the error's
@@ -243,7 +380,7 @@ pub fn status_from(error: &(dyn Error + 'static), kind: ErrorKind) -> Status {
         chain: chain(error),
         hint: advice.hint,
         next: advice.next,
-        metadata: std::collections::BTreeMap::new(),
+        metadata: reason_metadata(error),
     };
     reef_api::error::status(code_of(kind), message, &detail)
 }

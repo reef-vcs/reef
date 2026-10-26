@@ -18,17 +18,17 @@ use jj_lib::default_backend_factories::{
     default_backend_factories, default_working_copy_factories,
 };
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
-use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefName, WorkspaceName};
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
+use reef_lib::jj::revset::RevisionError;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::workspace::CommitLookupError;
 use reef_lib::jj::{
     ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources, OpenError,
-    Repo, ResolveError, ResolvedVia, StartPoint, commit_snapshot,
+    Repo, StartPoint, commit_snapshot,
 };
 use tempfile::TempDir;
 
@@ -441,99 +441,8 @@ async fn forget_refuses_default_from_a_reef_workspace() {
     assert!(fx.wc_names().await.contains("default"));
 }
 
-// 7
-#[tokio::test]
-async fn resolve_revision_orders_change_commit_bookmark() {
-    let (mut fx, commit) = Fixture::with_files().await;
-    let change = fx.change_of(&commit).await;
-
-    let by_change = fx
-        .main
-        .resolve_revision(&change.as_str()[..8])
-        .await
-        .unwrap();
-    assert_eq!(
-        (by_change.via, &by_change.commit_id),
-        (ResolvedVia::ChangeId, &commit)
-    );
-    let by_reverse = fx
-        .main
-        .resolve_revision(&change.reverse_hex()[..8])
-        .await
-        .unwrap();
-    assert_eq!(
-        (by_reverse.via, &by_reverse.commit_id),
-        (ResolvedVia::ChangeId, &commit)
-    );
-    let by_commit = fx
-        .main
-        .resolve_revision(&commit.as_str()[..12])
-        .await
-        .unwrap();
-    assert_eq!(
-        (by_commit.via, &by_commit.change_id),
-        (ResolvedVia::CommitId, &change)
-    );
-
-    // A bookmark named like neither id alphabet, set the way `jj bookmark set` does.
-    let head = fx.jj_head().await;
-    let mut tx = head.start_transaction();
-    let target = CommitId::try_from_hex(commit.as_str()).unwrap();
-    tx.repo_mut()
-        .set_local_bookmark_target(RefName::new("feature"), RefTarget::normal(target));
-    tx.commit("bookmark set feature").await.unwrap();
-    fx.main.reload_at_head().await.unwrap();
-    let by_bookmark = fx.main.resolve_revision("feature").await.unwrap();
-    assert_eq!(
-        (by_bookmark.via, &by_bookmark.commit_id),
-        (ResolvedVia::Bookmark, &commit)
-    );
-
-    let none = fx.main.resolve_revision("nope").await.unwrap_err();
-    assert!(matches!(none, ResolveError::NoMatch(_)), "{none:?}");
-    assert_eq!(none.kind(), ErrorKind::NotFound);
-
-    // Seventeen more changes guarantee two share a first hex digit.
-    let head = fx.jj_head().await;
-    let mut tx = head.start_transaction();
-    let root_commit = head.store().root_commit();
-    for _ in 0..17 {
-        tx.repo_mut()
-            .new_commit(vec![root_commit.id().clone()], root_commit.tree())
-            .write()
-            .await
-            .unwrap();
-    }
-    tx.commit("new commits").await.unwrap();
-    fx.main.reload_at_head().await.unwrap();
-    let mut seen = BTreeSet::new();
-    let shared = fx
-        .main
-        .heads()
-        .unwrap()
-        .into_iter()
-        .map(|head| head.change_id.as_str()[..1].to_owned())
-        .find(|digit| !seen.insert(digit.clone()))
-        .expect("pigeonhole");
-    let ambiguous = fx.main.resolve_revision(&shared).await.unwrap_err();
-    assert!(
-        matches!(ambiguous, ResolveError::AmbiguousPrefix(_)),
-        "{ambiguous:?}"
-    );
-    assert_eq!(ambiguous.kind(), ErrorKind::InvalidArgument);
-
-    let [a, b] = fx.diverge(&commit).await;
-    let divergent = fx.main.resolve_revision(change.as_str()).await.unwrap_err();
-    let ResolveError::DivergentChange { change_id, commits } = &divergent else {
-        panic!("expected a divergent change, got {divergent:?}");
-    };
-    assert_eq!(change_id, &change);
-    assert_eq!(
-        commits.iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([&a, &b])
-    );
-    assert_eq!(divergent.kind(), ErrorKind::Conflict);
-}
+// 7 is `revisions_follow_jj_order` and `revisions_are_exactly_one` in
+// jj_reads.rs: since R2.02 a revision is a revset.
 
 // 8
 #[tokio::test]
@@ -720,10 +629,10 @@ async fn stale_diverges_when_dirty() {
         .resolve_revision(shared.change_id.as_str())
         .await
         .unwrap_err();
-    let ResolveError::DivergentChange { commits, .. } = error else {
+    let RevisionError::Ambiguous { commit_ids, .. } = error else {
         panic!("expected a divergent change, got {error:?}");
     };
-    let commits: BTreeSet<_> = commits.into_iter().collect();
+    let commits: BTreeSet<_> = commit_ids.into_iter().collect();
     assert_eq!(
         commits,
         BTreeSet::from([x_snapshot.wc_commit, committed.commit_id.clone()])
@@ -970,13 +879,13 @@ async fn colocated_repository_imports_git_branches() {
         String::from_utf8_lossy(&output.stderr)
     );
     let missing = repo.resolve_revision("feat").await.unwrap_err();
-    assert!(matches!(missing, ResolveError::NoMatch(_)), "{missing:?}");
+    assert!(
+        matches!(missing, RevisionError::NotFound { .. }),
+        "{missing:?}"
+    );
     let imported = repo.import_git_refs("reef: import git refs").await.unwrap();
     assert_eq!(imported.op_id.as_ref(), Some(&repo.op_id()));
     assert_eq!(imported.failed_refs.len(), 0, "{:?}", imported.failed_refs);
     let resolved = repo.resolve_revision("feat").await.unwrap();
-    assert_eq!(
-        (resolved.via, resolved.commit_id),
-        (ResolvedVia::Bookmark, commit)
-    );
+    assert_eq!(resolved.commit_id, commit);
 }

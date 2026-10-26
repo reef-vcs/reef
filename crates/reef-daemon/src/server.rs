@@ -79,21 +79,27 @@ pub type ApiRouter = Router<Stack<CompatLayer, Identity>>;
 pub fn router(state: Arc<AppState>) -> ApiRouter {
     Server::builder()
         .layer(CompatLayer)
-        .add_service(ChangeServiceServer::new(ChangesHandler))
+        .add_service(ChangeServiceServer::new(ChangesHandler::new(Arc::clone(
+            &state,
+        ))))
         .add_service(DaemonServiceServer::new(DaemonStatusService::new(
             Arc::clone(&state),
         )))
-        .add_service(DiffServiceServer::new(DiffHandler))
+        .add_service(DiffServiceServer::new(DiffHandler::new(Arc::clone(&state))))
         .add_service(FileServiceServer::new(FilesHandler))
         .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
             Arc::clone(&state),
         )))
-        .add_service(OperationServiceServer::new(OperationsHandler))
+        .add_service(OperationServiceServer::new(OperationsHandler::new(
+            Arc::clone(&state),
+        )))
         .add_service(PresenceServiceServer::new(PresenceHandler))
         .add_service(RepositoryServiceServer::new(RepositoriesService::new(
             Arc::clone(&state),
         )))
-        .add_service(StatusServiceServer::new(StatusHandler))
+        .add_service(StatusServiceServer::new(StatusHandler::new(Arc::clone(
+            &state,
+        ))))
         .add_service(StoreServiceServer::new(StoresService::new(Arc::clone(
             &state,
         ))))

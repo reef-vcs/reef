@@ -41,3 +41,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0027](0027-trust-boundaries-in-phase-1.md) | Trust boundaries in Phase 1 | accepted |
 | [0028](0028-watch-attachment-off-the-create-path.md) | Watch attachment off the create path | accepted |
 | [0029](0029-daemon-api-v1.md) | Daemon API v1 | accepted |
+| [0030](0030-reads-over-jj-state.md) | Reads over jj state | accepted |

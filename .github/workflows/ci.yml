@@ -205,9 +205,9 @@ jobs:
       # kernel overlay and bind mounts across a restart, and the full disk on a tmpfs. RX.01: the
       # ownership tests, which chown to uid 1, the root daemon's warning, and hostile repository
       # content on kernel overlay workspaces. R1.32: background watch attaches on kernel overlay
-      # workspaces.
+      # workspaces. R2.02: a status read that snapshots a kernel overlay workspace first.
       - name: Kernel overlayfs and store bind mounts (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/)) | test(/another_user|owned_root|sudo_user|root_daemon/) | binary(hostile_repo) | test(/before_the_watch_attaches|during_a_pending_attach|attach_inline/)'
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/)) | test(/another_user|owned_root|sudo_user|root_daemon/) | binary(hostile_repo) | test(/before_the_watch_attaches|during_a_pending_attach|attach_inline/) | (binary(reads) & test(/status_snapshots_first/))'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target

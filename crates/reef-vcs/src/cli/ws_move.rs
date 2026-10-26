@@ -14,11 +14,13 @@ use super::{CliError, Ctx};
 pub(crate) struct Args {
     /// A workspace id, unique prefix, or path inside it.
     workspace: String,
-    /// Edit this change (a change id prefix, commit id prefix, or bookmark);
-    /// the workspace's own change remounts its shared stores.
+    /// Edit this revision: a jj revset naming one commit, such as a change or
+    /// commit id prefix, a bookmark, `trunk()`, or `@` for the workspace's
+    /// own change, which remounts its shared stores.
     #[arg(long, value_name = "REV")]
     change: Option<String>,
-    /// Start a new change on this revision.
+    /// Start a new change on this revision (`@` is the workspace's change,
+    /// after its final snapshot).
     #[arg(long, value_name = "REV")]
     new_on: Option<String>,
     /// Move even if a shared store the target declares is not built; the

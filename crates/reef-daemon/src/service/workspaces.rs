@@ -22,7 +22,9 @@ use super::page::{PageRequest, newest_first};
 use super::written_operation;
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::model::{LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceState};
+use crate::model::{
+    LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceRecord, WorkspaceState,
+};
 use crate::snapshot::{SnapshotKind, index};
 use crate::workspace::{CreateSpec, ReleaseSpec, Start};
 
@@ -42,6 +44,39 @@ impl WorkspacesService {
     fn lease_message(&self, record: Option<&LeaseRecord>, now: Timestamp) -> Option<v1::Lease> {
         record.map(|record| lease(record, self.state.manager.leases(), now))
     }
+}
+
+/// Workspace rows and their leases as messages, as `ListWorkspaces` lists
+/// them; `repo` scopes the local snapshot counts read.
+pub(super) fn listed(
+    state: &AppState,
+    repo: Option<crate::model::RepoId>,
+    rows: &[(WorkspaceRecord, Option<LeaseRecord>)],
+) -> Result<Vec<Workspace>, Status> {
+    let manager = &state.manager;
+    let now = Timestamp::now();
+    let local_counts = index::local_counts(&state.db, repo).map_err(status)?;
+    Ok(rows
+        .iter()
+        .map(|(record, lease_record)| {
+            let entry = manager.entry(record.id);
+            let stores = entry
+                .as_ref()
+                .filter(|_| record.state == WorkspaceState::Active)
+                .map(|entry| entry.stores())
+                .unwrap_or_default();
+            Workspace::from(WorkspaceView {
+                record,
+                lease: lease_record
+                    .as_ref()
+                    .map(|record| lease(record, manager.leases(), now)),
+                local_snapshot_count: local_counts.get(&record.id).copied().unwrap_or(0),
+                stores: &stores,
+                watch_pending: manager.scheduler().watch_pending(record.id),
+                loaded: entry.is_some(),
+            })
+        })
+        .collect())
 }
 
 fn record_ids(repo: impl std::fmt::Display, workspace: impl std::fmt::Display) {
@@ -158,27 +193,7 @@ impl WorkspaceService for WorkspacesService {
                 .map_err(status)?,
             |(record, _)| newest_first(record.created_at.0, &record.id.as_hex()),
         );
-        let now = Timestamp::now();
-        let local_counts = index::local_counts(&self.state.db, repo).map_err(status)?;
-        let workspaces = rows
-            .iter()
-            .map(|(record, lease)| {
-                let entry = manager.entry(record.id);
-                let stores = entry
-                    .as_ref()
-                    .filter(|_| record.state == WorkspaceState::Active)
-                    .map(|entry| entry.stores())
-                    .unwrap_or_default();
-                Workspace::from(WorkspaceView {
-                    record,
-                    lease: self.lease_message(lease.as_ref(), now),
-                    local_snapshot_count: local_counts.get(&record.id).copied().unwrap_or(0),
-                    stores: &stores,
-                    watch_pending: manager.scheduler().watch_pending(record.id),
-                    loaded: entry.is_some(),
-                })
-            })
-            .collect();
+        let workspaces = listed(&self.state, repo, &rows)?;
         Ok(Response::new(ListWorkspacesResponse {
             workspaces,
             next_page_token,

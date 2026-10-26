@@ -54,9 +54,9 @@ use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
+use reef_lib::jj::revset::{self, RevsetScope};
 use reef_lib::jj::{
-    ChangeSummary, CommitIdHex, CreateWorkspaceError, MaterializeError, Repo, ResolveError,
-    StartPoint,
+    ChangeSummary, CommitIdHex, CreateWorkspaceError, MaterializeError, Repo, StartPoint,
 };
 use reef_lib::spec::SPEC_FILE;
 use reef_lib::telemetry::elapsed_ms;
@@ -119,7 +119,7 @@ impl Manager {
         lap.next();
 
         // 2.
-        let resolved = resolve_start(&handle, spec.start.clone()).await?;
+        let resolved = resolve_start(&handle, spec.start.clone(), None).await?;
         let length = self
             .leases
             .length_with_spec(spec.lease, resolved.spec.lease)?;
@@ -266,6 +266,7 @@ impl Manager {
             jj_generation: AtomicU64::new(generation),
             repo: handle,
             scan_lock: tokio::sync::Mutex::new(()),
+            scan_started: Mutex::new(None),
             spec: Mutex::new(spec),
             stores: Mutex::new(stores),
         };
@@ -521,33 +522,44 @@ async fn materialize(
     }
 }
 
-/// Step 2, on the repository thread; also a move's target (R1.06).
+/// Step 2, on the repository thread; also a move's target (R1.06). The
+/// revision is a revset naming one commit (R2.02); `@` is `workspace`'s
+/// working-copy commit (the jj name of a moving workspace), and invalid
+/// without one.
 pub(super) async fn resolve_start(
     handle: &RepoHandle,
     start: Start,
+    workspace: Option<String>,
 ) -> Result<ResolvedStart, ManagerError> {
     handle
         .call_async(move |head| {
             async move {
                 refresh_for_resolve(head).await?;
                 let mut chosen = None;
+                let scope = RevsetScope {
+                    workspace: workspace.as_deref(),
+                    user_email: head.settings.user_email(),
+                    root: &head.root,
+                };
                 let (start, commit) = match start {
                     Start::Change(text) => {
-                        let resolved = head.repo.resolve_revision(&text).await?;
+                        let resolved =
+                            revset::resolve_revision(head.repo.head(), &text, &scope).await?;
                         (
                             StartPoint::Edit(resolved.commit_id.clone()),
                             resolved.commit_id,
                         )
                     }
                     Start::NewOn(text) => {
-                        let resolved = head.repo.resolve_revision(&text).await?;
+                        let resolved =
+                            revset::resolve_revision(head.repo.head(), &text, &scope).await?;
                         (
                             StartPoint::NewOn(resolved.commit_id.clone()),
                             resolved.commit_id,
                         )
                     }
                     Start::Default => {
-                        let default = default_start(&head.repo).await?;
+                        let default = default_start(&head.repo)?;
                         if default.chosen == ROOT_CHECKOUT {
                             tracing::info!(
                                 commit_id = %default.commit,
@@ -618,10 +630,6 @@ pub(super) async fn refresh_for_resolve(
 /// no bookmark matched.
 pub const ROOT_CHECKOUT: &str = "root checkout";
 
-/// The remote whose default branch and remote-tracking bookmarks
-/// [`default_start`] tries.
-const DEFAULT_REMOTE: &str = "origin";
-
 /// The commit a create without a start revision starts on (R1.31), and
 /// what it is: a bookmark (`master`, `main@origin`) or [`ROOT_CHECKOUT`].
 pub(super) struct DefaultStart {
@@ -629,61 +637,16 @@ pub(super) struct DefaultStart {
     pub chosen: String,
 }
 
-/// The bookmarks [`default_start`] tries, in order, as (name, remote):
-/// `main`; the branch `origin/HEAD` names, local then remote-tracking, so a
-/// stale local `master` beside a remote whose default is now `main` does
-/// not win; `master` and `trunk`; then `main`, `master` and `trunk` on
-/// `origin`.
-fn default_candidates(origin_head: Option<&str>) -> Vec<(String, Option<&'static str>)> {
-    let mut candidates: Vec<(String, Option<&'static str>)> = Vec::new();
-    let mut push = |name: &str, remote| {
-        // origin's HEAD is often `main` or `master`: each is tried once.
-        if !candidates.iter().any(|(n, r)| n == name && *r == remote) {
-            candidates.push((name.to_owned(), remote));
-        }
-    };
-    push("main", None);
-    if let Some(head) = origin_head {
-        push(head, None);
-        push(head, Some(DEFAULT_REMOTE));
-    }
-    for name in ["master", "trunk"] {
-        push(name, None);
-    }
-    for name in ["main", "master", "trunk"] {
-        push(name, Some(DEFAULT_REMOTE));
-    }
-    candidates
-}
-
-/// The start of a create without a start revision: the first of
-/// [`default_candidates`] that exists, else the `default` workspace's
-/// working-copy commit. A conflicted bookmark is skipped with a warning. A
-/// store build without `--rev`, GC's store step, and a move without a
-/// target use the same.
-pub(super) async fn default_start(repo: &Repo) -> Result<DefaultStart, ManagerError> {
-    let origin_head = repo.git_remote_head(DEFAULT_REMOTE);
-    for (name, remote) in default_candidates(origin_head.as_deref()) {
-        let chosen = match remote {
-            None => name.clone(),
-            Some(remote) => format!("{name}@{remote}"),
-        };
-        match repo.resolve_bookmark(&name, remote).await {
-            Ok(Some(resolved)) => {
-                return Ok(DefaultStart {
-                    commit: resolved.commit_id,
-                    chosen,
-                });
-            }
-            Ok(None) => {}
-            Err(error @ ResolveError::ConflictedBookmark(_)) => {
-                tracing::warn!(
-                    error = %ErrorChain(&error),
-                    "skipping {chosen} as the default start"
-                );
-            }
-            Err(error) => return Err(error.into()),
-        }
+/// The start of a create without a start revision: `trunk()`'s bookmark
+/// ([`revset::trunk`], R2.02), else the `default` workspace's working-copy
+/// commit. A store build without `--rev`, GC's store step, and a move
+/// without a target use the same.
+pub(super) fn default_start(repo: &Repo) -> Result<DefaultStart, ManagerError> {
+    if let Some(trunk) = revset::trunk(repo.head()) {
+        return Ok(DefaultStart {
+            commit: trunk.commit_id,
+            chosen: trunk.bookmark,
+        });
     }
     Ok(DefaultStart {
         commit: repo.wc_change()?.commit_id,
@@ -940,7 +903,7 @@ mod tests {
 
     async fn chosen(refs: &[(&str, &str)]) -> String {
         let (_tmp, repo, commit) = repo_with(refs).await;
-        let start = default_start(&repo).await.unwrap();
+        let start = default_start(&repo).unwrap();
         if start.chosen != ROOT_CHECKOUT {
             assert_eq!(start.commit, commit, "{refs:?}");
         }
@@ -998,7 +961,7 @@ mod tests {
         // 5. None: the root checkout's change.
         assert_eq!(chosen(&[DEVELOP]).await, ROOT_CHECKOUT);
         let (_tmp, repo, _) = repo_with(&[]).await;
-        let start = default_start(&repo).await.unwrap();
+        let start = default_start(&repo).unwrap();
         assert_eq!(start.chosen, ROOT_CHECKOUT);
         assert_eq!(start.commit, repo.wc_change().unwrap().commit_id);
     }
@@ -1035,14 +998,14 @@ mod tests {
         tx.commit("conflict main").await.unwrap();
 
         let repo = Repo::open(&root, &settings).await.unwrap();
-        let start = default_start(&repo).await.unwrap();
+        let start = default_start(&repo).unwrap();
         assert_eq!(start.chosen, "master");
         assert_eq!(start.commit, commit);
     }
 
     #[test]
     fn candidates_are_tried_once() {
-        let names: Vec<_> = default_candidates(Some("master"))
+        let names: Vec<_> = revset::default_candidates(Some("master"))
             .into_iter()
             .map(|(name, remote)| format!("{name}@{}", remote.unwrap_or("")))
             .collect();
@@ -1061,7 +1024,7 @@ mod tests {
 
     #[test]
     fn candidates_without_an_origin_head() {
-        let names: Vec<_> = default_candidates(None)
+        let names: Vec<_> = revset::default_candidates(None)
             .into_iter()
             .map(|(name, remote)| (name, remote.unwrap_or("")))
             .collect();

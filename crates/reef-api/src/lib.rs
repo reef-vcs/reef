@@ -46,13 +46,17 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 1;
+pub const API_REVISION: u32 = 2;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
 /// and bumps [`API_REVISION`]; a test fails until both are done.
-pub const API_DIGESTS: &[&str] =
-    &["9732b939adbf6da1b0212749e8ab4c7dbe9cb4127db82167b14b6d56008c751d"];
+pub const API_DIGESTS: &[&str] = &[
+    "9732b939adbf6da1b0212749e8ab4c7dbe9cb4127db82167b14b6d56008c751d",
+    // R2.02: effect counts, hidden commits, conflicted bookmarks, the
+    // conflicted path count, and the diff content flags.
+    "72a37ae68cf29402c100f1b917478aca6241278993a21c401c93b04214c3c8c3",
+];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
 /// the last of [`API_DIGESTS`].
@@ -104,6 +108,37 @@ pub mod error {
     /// A page token that does not decode, or was sent with different
     /// request fields than the page it came from.
     pub const INVALID_PAGE_TOKEN: &str = "INVALID_PAGE_TOKEN";
+    /// A revision uses `@`, or `GetDiff`'s `to_revision` is empty, and the
+    /// request names no workspace.
+    pub const WORKSPACE_REQUIRED: &str = "WORKSPACE_REQUIRED";
+    /// A revision or revset that does not parse; the message is jj's.
+    pub const INVALID_REVSET: &str = "INVALID_REVSET";
+    /// A required revision is empty.
+    pub const REVISION_REQUIRED: &str = "REVISION_REQUIRED";
+    /// A revision that names no commit. Metadata: `revision`.
+    pub const REVISION_NOT_FOUND: &str = "REVISION_NOT_FOUND";
+    /// A commit or change id prefix shared by several. Metadata: `prefix`.
+    pub const AMBIGUOUS_ID_PREFIX: &str = "AMBIGUOUS_ID_PREFIX";
+    /// A revision that names several commits where one is required: a
+    /// divergent change, a conflicted bookmark, or a revset of several.
+    /// Metadata: `revision`, `commit_ids` (up to ten, comma-separated).
+    pub const AMBIGUOUS_REVISION: &str = "AMBIGUOUS_REVISION";
+    /// The workspace `@` names has no working-copy commit in the view read.
+    /// Metadata: `workspace_id`, `at_operation`.
+    pub const WORKING_COPY_NOT_FOUND: &str = "WORKING_COPY_NOT_FOUND";
+    /// An operation id that is not lowercase hex, or is empty.
+    pub const INVALID_OPERATION_ID: &str = "INVALID_OPERATION_ID";
+    /// No operation has this id or prefix, or a page token's operation is
+    /// gone. Metadata: `operation_id`.
+    pub const OPERATION_NOT_FOUND: &str = "OPERATION_NOT_FOUND";
+    /// An operation id prefix shared by several. Metadata: `operation_id`.
+    pub const AMBIGUOUS_OPERATION_ID: &str = "AMBIGUOUS_OPERATION_ID";
+    /// A path that is not repository-relative and `/`-separated. Metadata:
+    /// `path`.
+    pub const INVALID_PATH: &str = "INVALID_PATH";
+    /// A change id filter that is not a hex or reverse-hex prefix.
+    /// Metadata: `change`.
+    pub const INVALID_CHANGE_ID: &str = "INVALID_CHANGE_ID";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

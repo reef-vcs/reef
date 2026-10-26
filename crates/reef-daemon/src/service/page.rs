@@ -21,6 +21,10 @@ pub const DEFAULT_PAGE_SIZE: usize = 100;
 pub const MAX_PAGE_SIZE: usize = 1000;
 /// The token format's version.
 const TOKEN_VERSION: u32 = 1;
+/// A page stops before its encoded response would pass this, under tonic's
+/// 4 MiB message limit (R2.02); it may then hold fewer than `page_size`
+/// items.
+pub const MAX_PAGE_BYTES: usize = 3 << 20;
 
 /// A page token that does not decode, or was sent with different request
 /// fields than the page it came from: reason `INVALID_PAGE_TOKEN`.
@@ -67,11 +71,13 @@ struct Token {
     cursor: String,
 }
 
-/// A request's page: how many items, after which key.
+/// A request's page: how many items, after which key, and for lists over
+/// jj state (R2.02) the state the first page pinned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageRequest {
     size: usize,
     after: Option<String>,
+    pinned: Option<String>,
     digest: [u8; 8],
 }
 
@@ -96,8 +102,8 @@ impl PageRequest {
         hasher.update(&filters.encode_to_vec());
         let mut digest = [0; 8];
         digest.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
-        let after = if page_token.is_empty() {
-            None
+        let (after, pinned) = if page_token.is_empty() {
+            (None, None)
         } else {
             let bytes = URL_SAFE_NO_PAD
                 .decode(page_token)
@@ -109,13 +115,42 @@ impl PageRequest {
             if token.filter_digest != digest {
                 return Err(PageTokenError::Mismatch.into());
             }
-            Some(token.cursor)
+            let pinned = Some(token.at_operation).filter(|pinned| !pinned.is_empty());
+            (Some(token.cursor), pinned)
         };
         Ok(PageRequest {
             size,
             after,
+            pinned,
             digest,
         })
+    }
+
+    /// Items per page.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// The previous page's cursor; `None` on the first page.
+    pub fn cursor(&self) -> Option<&str> {
+        self.after.as_deref()
+    }
+
+    /// The state the first page pinned (an operation id, or operation
+    /// heads); `None` on the first page.
+    pub fn pinned(&self) -> Option<&str> {
+        self.pinned.as_deref()
+    }
+
+    /// The token for the page after `cursor`, read at `pinned`.
+    pub fn token_at(&self, cursor: &str, pinned: &str) -> String {
+        let token = Token {
+            version: TOKEN_VERSION,
+            at_operation: pinned.to_owned(),
+            filter_digest: self.digest.to_vec(),
+            cursor: cursor.to_owned(),
+        };
+        URL_SAFE_NO_PAD.encode(token.encode_to_vec())
     }
 
     /// The page of `items` this request asks for, and the token for the
@@ -136,13 +171,7 @@ impl PageRequest {
     }
 
     fn token(&self, cursor: &str) -> String {
-        let token = Token {
-            version: TOKEN_VERSION,
-            at_operation: String::new(),
-            filter_digest: self.digest.to_vec(),
-            cursor: cursor.to_owned(),
-        };
-        URL_SAFE_NO_PAD.encode(token.encode_to_vec())
+        self.token_at(cursor, "")
     }
 }
 
@@ -250,6 +279,21 @@ mod tests {
             garbage,
             PageError::Token(PageTokenError::Malformed)
         ));
+    }
+
+    #[test]
+    fn tokens_carry_the_pinned_state() {
+        let request = PageRequest::new("/test/List", 2, "", &filters("a")).unwrap();
+        assert_eq!((request.cursor(), request.pinned()), (None, None));
+        let token = request.token_at("10:abcd", "00ff");
+        let next = PageRequest::new("/test/List", 2, &token, &filters("a")).unwrap();
+        assert_eq!(next.cursor(), Some("10:abcd"));
+        assert_eq!(next.pinned(), Some("00ff"));
+        assert_eq!(next.size(), 2);
+        // R2.01's tokens, which pin nothing, still decode.
+        let (_, old) = request.page(vec![1, 2, 3], u32::to_string);
+        let next = PageRequest::new("/test/List", 2, &old, &filters("a")).unwrap();
+        assert_eq!((next.cursor(), next.pinned()), (Some("2"), None));
     }
 
     #[test]

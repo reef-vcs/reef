@@ -251,6 +251,14 @@ impl RepoHandle {
         self.call(move |head| pollster::block_on(f(head)))
     }
 
+    /// Marks the repository for reopening, as a panicked job does: a read
+    /// that panicked off the thread (R2.02) may have poisoned a lock in the
+    /// store it shares. Sent as a job; does not wait.
+    pub fn reopen_after_panic(&self) {
+        // The job runs whether or not anyone waits for its reply.
+        drop(self.call(RepoHead::note_panicked));
+    }
+
     /// Pauses the thread after the jobs already sent, until at most `max`
     /// from now (time spent waiting for those jobs counts against `max`):
     /// the returned future resolves once they have run and the thread is

@@ -193,6 +193,33 @@ pub fn get(db: &Db, op: &OperationIdHex) -> Result<Option<SnapshotEntry>, DbErro
     })
 }
 
+/// The kinds of the indexed operations among `ops` (R2.02's operation
+/// lists), by operation id; one query per 500 ids.
+pub fn kinds_of(
+    db: &Db,
+    ops: &[OperationIdHex],
+) -> Result<HashMap<OperationIdHex, SnapshotKind>, DbError> {
+    let mut kinds = HashMap::new();
+    for chunk in ops.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(", ");
+        db.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM snapshots WHERE op_id IN ({marks})"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().map(OperationIdHex::as_str)),
+                from_row,
+            )?;
+            for row in rows {
+                let entry = row?;
+                kinds.insert(entry.op_id, entry.kind);
+            }
+            Ok::<_, rusqlite::Error>(())
+        })?;
+    }
+    Ok(kinds)
+}
+
 /// Test hook: deletes every row of `repo`, as an older database restored
 /// from a backup would lack them.
 #[cfg(any(test, feature = "testing"))]

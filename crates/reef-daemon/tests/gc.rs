@@ -26,7 +26,8 @@ use reef_api::v1::{
 use reef_daemon::config::Config;
 use reef_daemon::model::WorkspaceId;
 use reef_lib::error::{Classify as _, ErrorKind};
-use reef_lib::jj::{Repo, ResolveError};
+use reef_lib::jj::Repo;
+use reef_lib::jj::revset::RevisionError;
 use reef_testing::synth::Preset;
 
 const OWNER: &str = "tester@host";
@@ -471,7 +472,11 @@ async fn two_workspaces_same_change_keep_both_sides() {
         .resolve_revision(&a.change_id)
         .await
         .unwrap_err();
-    let ResolveError::DivergentChange { commits, .. } = error else {
+    let RevisionError::Ambiguous {
+        commit_ids: commits,
+        ..
+    } = error
+    else {
         panic!("expected a divergent change, got {error:?}");
     };
     let commits: BTreeSet<String> = commits.iter().map(ToString::to_string).collect();

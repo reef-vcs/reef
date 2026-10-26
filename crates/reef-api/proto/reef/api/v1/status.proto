@@ -14,8 +14,11 @@ import "reef/api/v1/workspaces.proto";
 service StatusService {
   // What the repository looks like now, and, when a workspace is named,
   // what that workspace has changed. Snapshots the workspace first unless
-  // `skip_snapshot`. Declared; R2.02 implements it, and R2.23 changes how
-  // it is answered, not its shape.
+  // `skip_snapshot`. R2.23 changes how it is answered, not its shape.
+  //
+  // Errors: FAILED_PRECONDITION for a workspace that is not active;
+  // INVALID_ARGUMENT for a negative `max_files`; and a failed snapshot's
+  // own error.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -45,7 +48,8 @@ message GetStatusRequest {
   string workspace = 2;
   // Answer from the last recorded snapshot instead of snapshotting first.
   bool skip_snapshot = 3;
-  // How many changed files to return at most: 0 means 100. Caps
+  // How many changed files to return at most: 0 means 100, more than
+  // 1,000 means 1,000, and a negative value is INVALID_ARGUMENT. Caps
   // `changed_files`, never `changed_file_count`.
   int32 max_files = 4;
 }
@@ -64,7 +68,8 @@ message GetStatusResponse {
 
 // A repository's state.
 message RepositoryStatus {
-  // The default start's commit; unset when no default start exists.
+  // The default start's commit, `trunk()`; unset when no default start
+  // bookmark exists.
   Change trunk = 1;
   // The default start's bookmark; empty when none exists.
   string trunk_bookmark = 2;
@@ -96,10 +101,13 @@ message WorkspaceStatus {
   repeated FileChange changed_files = 4;
   // Paths that differ, in all.
   uint32 changed_file_count = 5;
-  // Conflicted paths in the working-copy commit.
+  // Conflicted paths in the working-copy commit, in path order; at most
+  // 1,000.
   repeated string conflicted_paths = 6;
   // Where the answer came from.
   StatusSource source = 7;
   // The snapshot this request recorded, if it recorded one.
   Operation snapshot = 8;
+  // Conflicted paths, in all.
+  uint32 conflicted_path_count = 9;
 }

@@ -268,7 +268,7 @@ impl Manager {
     }
 
     /// The repository's thread.
-    pub(super) fn handle(&self, repo: RepoId) -> Result<RepoHandle, ManagerError> {
+    pub(crate) fn handle(&self, repo: RepoId) -> Result<RepoHandle, ManagerError> {
         self.repos.get(repo).ok_or(ManagerError::RepoNotOpen(repo))
     }
 
@@ -647,6 +647,7 @@ impl Manager {
                 jj_generation: AtomicU64::new(generation),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
+                scan_started: Mutex::new(None),
                 spec: Mutex::new(spec),
                 stores: Mutex::new(stores),
             };

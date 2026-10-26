@@ -32,6 +32,9 @@ watchman_client = { workspace = true, optional = true }
 gix.workspace = true
 prost.workspace = true
 futures.workspace = true
+pollster.workspace = true
+chrono.workspace = true
+bstr.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 toml.workspace = true
@@ -51,4 +54,8 @@ criterion.workspace = true
 
 [[bench]]
 name = "snapshot"
+harness = false
+
+[[bench]]
+name = "reads"
 harness = false

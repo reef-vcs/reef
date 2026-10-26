@@ -333,3 +333,31 @@ The Docker VM is the one in [Linux](#linux) above: Docker Desktop on the M2 Max,
 - **The end of a burst, by hand.** A release daemon as root in the same VM, `large` registered, then twenty `reef ws create` in a row. Each took 25 to 39 ms through the CLI and answered `attaching`. Their attaches took 397 ms at the median (483 ms at most, 8.1 s in all). The last one waited 6.8 s in the queue, and the backlog was gone 7.3 s after the last create. Each workspace then got one full scan.
 - **The overflow loop.** Before the fix in ADR 0028 (decision 9), the same burst overflowed the kernel's inotify queue 32 times in 12 s. Each overflow makes every notify workspace `everything`, and the workspaces' full scans overflowed it again: about 30 full scans of each workspace during the drain, and it went on until the workspaces were released. The trigger is not new. On main at `10cba6e`, twenty `large` workspaces, a daemon restart, then one write in each started the same loop: 33 overflows in 45 s. With reads dropped before the debouncer and one inotify turn for attaches and full scans, both cases show no overflow and one scan per workspace. Each change alone left one of the two overflowing (the turn alone: 15 overflows in 45 s in the restart case; reads dropped alone: 23 in the burst).
 
+
+## Reads (R2.02)
+
+`crates/reef-lib/benches/reads.rs` measures the jj side of the read RPCs on the same fixture, as `reads/<preset>/<name>`: `cargo bench -p reef-lib --bench reads` (or `just bench -- reads/`). They use criterion's default sampling; the fixture is mutated only to set up each state.
+
+| Benchmark | Timed |
+| --- | --- |
+| `status_diff` | describe `@`, list `heads(mutable())`, and diff a one-file edit (summary): a workspace status |
+| `log_default` | parse `trunk() \| working_copies() \| mutable()`, the first page of the log, each entry described |
+| `change_describe_100` | 100 `Change`s described |
+| `diff_summary_full` | the whole tree against `root()`, first page of 100 files plus `total_files` (the O(tree) case) |
+| `effects_snapshot` | a snapshot operation's effects, uncached |
+| `diff_hunks_50` | 50 modified files with hunks |
+| `op_page_100` | 100 operations walked from the heads and classified, no effects |
+
+Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
+
+| Benchmark | `medium` (10,014 files) | `large` (100,014 files) |
+| --- | ---: | ---: |
+| `status_diff` | 0.47 ms | 0.50 ms |
+| `log_default` | 0.09 ms | 0.09 ms |
+| `change_describe_100` | 0.39 ms | 0.12 ms |
+| `diff_summary_full` | 7.6 ms | 477 ms |
+| `effects_snapshot` | 0.05 ms | 0.05 ms |
+| `diff_hunks_50` | 9.0 ms | 11.7 ms |
+| `op_page_100` | 1.6 ms | 1.6 ms |
+
+Everything but `diff_summary_full` scales with what changed, not with the tree. `diff_summary_full` walks every path, and a page of a large diff pays that walk again to count `total_files`. Before R2.02 skipped rename and copy detection past 1,000 differing files (git's default `diff.renameLimit`), the git backend's detection took 764 ms of its 770 ms on `medium` and grew faster than the file count; the tree diff alone is 6 ms there.

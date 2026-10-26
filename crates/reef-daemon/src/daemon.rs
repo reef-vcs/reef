@@ -105,6 +105,8 @@ pub struct AppState {
     pub started: Instant,
     /// Cancelled when shutdown begins. Long-running tasks select on it.
     pub shutdown: CancellationToken,
+    /// Reads over jj state (R2.02).
+    pub reads: Arc<crate::read::Reads>,
     /// Work to do after the server stops and before the repository threads
     /// do.
     pub hooks: ShutdownHooks,
@@ -325,6 +327,7 @@ impl Daemon {
             Arc::clone(&repos),
             settings.clone(),
         );
+        let shutdown = CancellationToken::new();
         let state = Arc::new(AppState {
             config,
             db,
@@ -332,7 +335,8 @@ impl Daemon {
             settings,
             manager,
             started: Instant::now(),
-            shutdown: CancellationToken::new(),
+            reads: Arc::new(crate::read::Reads::new(shutdown.clone())),
+            shutdown,
             hooks: ShutdownHooks::default(),
             reindexed: Mutex::new(HashMap::new()),
             maintenance: crate::maintenance::Lock::new(),

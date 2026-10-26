@@ -46,7 +46,7 @@ pub use create::ROOT_CHECKOUT;
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
-pub use snapshot::REEFIGNORE;
+pub use snapshot::{REEFIGNORE, ReadSnapshot};
 pub(crate) use stores::StoreTarget;
 
 use crate::backend::{
@@ -81,6 +81,9 @@ pub struct WorkspaceEntry {
     pub repo: RepoHandle,
     /// Serializes snapshots and release of this workspace.
     pub scan_lock: tokio::sync::Mutex<()>,
+    /// When its last snapshot began, set with `scan_lock` held: a read
+    /// that arrived before it is covered by that scan (R2.02).
+    pub scan_started: Mutex<Option<std::time::Instant>>,
     /// What its snapshots exclude beyond git's ignore rules.
     pub spec: Mutex<SnapshotSpec>,
     /// The shared stores mounted in it (R1.20).
@@ -354,9 +357,12 @@ pub enum ManagerError {
     /// A job on the repository thread failed.
     #[error(transparent)]
     RepoThread(#[from] RepoThreadError),
-    /// The start revision did not resolve.
-    #[error("resolve the start revision")]
+    /// A bookmark did not resolve.
+    #[error("resolve a bookmark")]
     Resolve(#[from] ResolveError),
+    /// A revision did not resolve (R2.02).
+    #[error("resolve the revision")]
+    Revision(#[from] reef_lib::jj::revset::RevisionError),
     /// Importing a colocated repository's git refs failed.
     #[error(transparent)]
     ImportRefs(#[from] ImportRefsError),
@@ -532,6 +538,7 @@ impl Classify for ManagerError {
             Self::Register(error) => error.kind(),
             Self::RepoThread(error) => error.kind(),
             Self::Resolve(error) => error.kind(),
+            Self::Revision(error) => error.kind(),
             Self::ImportRefs(error) => error.kind(),
             Self::Open(error) => error.kind(),
             Self::Forget(error) => error.kind(),

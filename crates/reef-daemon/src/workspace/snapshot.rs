@@ -40,6 +40,15 @@ use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
 
 use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
+
+/// What [`Manager::snapshot_for_read`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadSnapshot {
+    /// It snapshotted; the outcome says whether anything was recorded.
+    Taken(SnapshotOutcome),
+    /// A scan that began after the read arrived covers it.
+    Covered,
+}
 use crate::backend::BackendError;
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
@@ -140,6 +149,48 @@ impl Manager {
             });
         }
         self.snapshot_locked(&entry, kind, description).await
+    }
+
+    /// The snapshot a read of `id` takes first (R2.02): an explicit one
+    /// with the default description, unless a scan that began after the
+    /// read `arrived` already covers every write the client finished
+    /// before sending it. Concurrent reads of one workspace therefore cost
+    /// at most two scans. Runs as its own task, as [`Manager::snapshot`].
+    pub async fn snapshot_for_read(
+        &self,
+        id: WorkspaceId,
+        arrived: Instant,
+    ) -> Result<ReadSnapshot, ManagerError> {
+        let manager = self
+            .scheduler
+            .manager()
+            .ok_or(ManagerError::NotLoaded(id))?;
+        let task = async move {
+            let entry = manager.loaded_entry(id, false)?;
+            let _scan = entry.scan_lock.lock().await;
+            let covered = entry
+                .scan_started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some_and(|started| started > arrived);
+            if covered {
+                return Ok(ReadSnapshot::Covered);
+            }
+            let record = entry.record();
+            if record.state != WorkspaceState::Active {
+                return Err(ManagerError::NotActive {
+                    id,
+                    repo: record.repo_id,
+                    state: record.state,
+                });
+            }
+            let kind = SnapshotKind::Explicit;
+            let outcome = manager
+                .snapshot_locked(&entry, kind, description(kind, id, None))
+                .await?;
+            Ok(ReadSnapshot::Taken(outcome))
+        };
+        tokio::spawn(task.instrument(tracing::Span::current())).await?
     }
 
     /// While the daemon shuts down, after the scheduler and the lease
@@ -247,6 +298,10 @@ impl Manager {
         mut trigger: Trigger,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let begun = Instant::now();
+        *entry
+            .scan_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(begun);
         let started = trigger.first_event.unwrap_or(begun);
         let record = entry.record();
         let id = record.id;
