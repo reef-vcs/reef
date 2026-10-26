@@ -1,6 +1,6 @@
 # Reef development phases
 
-*Companion to [design.md](design.md). Last updated 2026-10-24.*
+*Companion to [design.md](design.md). Last updated 2026-10-25.*
 
 This document breaks the design into phases and the phases into tickets. Each ticket row is meant to become one issue. Phases map to GitHub milestones, and a phase's exit criteria are the milestone's acceptance test.
 
@@ -128,9 +128,9 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.01 | Core protobuf schema | Messages and services for status, snapshot, diff, log, changes, undo, and workspaces. Versioned. Reviewed as an API, not generated from code. | M | R1.05 |
-| R2.02 | Status, log, and change services | Implement the read side of the schema over jj-lib. Structured, paginated responses. | M | R2.01 |
-| R2.03 | Snapshot, describe, and undo services | The write side: snapshot now, set change description, undo an operation, with each response returning the op log entry created. | M | R2.01 |
+| R2.01 | Core protobuf schema | Package `reef.api.v1` in a new `reef-api` crate: messages and services for status, snapshot, diff, log, changes, undo, and workspaces, and the declarations R2.04, R2.09, R2.10, and R2.11 implement, so later tickets only add. Phase 1's services ported to v1, and v0 retired behind a compatibility path that names a version mismatch instead of failing blank. Versioned, with conventions and an API review checklist in an ADR and `buf` lint and breaking-change checks in CI. Reviewed as an API, not generated from code. | L | R1.05 |
+| R2.02 | Status, log, and change services | Implement the read side of the schema over jj-lib: status, the log and changes (revsets, reads at an operation), diff, and the operation log. Structured, paginated responses. | M | R2.01 |
+| R2.03 | Snapshot, describe, and undo services | The write side: snapshot now, set change description, abandon a change (how a divergent change is resolved, R1.13), undo an operation, with each response returning the op log entry created. | M | R2.01 |
 | R2.04 | Virtual workspace API | Read a file at a snapshot, apply an edit, receive a new snapshot hash, without materializing a directory. | M | R2.03 |
 | R2.05 | CLI as thin client | Rewrite all CLI commands over the gRPC API. Remove jj-lib from the binary crate. | M | R2.02, R2.03 |
 | R2.06 | Python SDK | Generated from the schema, published to PyPI as `reef-vcs`, with a thin idiomatic wrapper. | S | R2.01 |
