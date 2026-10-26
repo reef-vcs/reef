@@ -89,12 +89,28 @@ fn run(program: &str, args: &[&str]) {
     );
 }
 
-/// Unmounts `path` the way an administrator (or a reboot) would.
+/// Unmounts `path` the way an administrator (or a reboot) would. A stopped
+/// in-process daemon's blocking threads (a watcher snapshot's scan) may
+/// still hold a directory in it for a moment, so `EBUSY` is retried for
+/// up to 10 s.
 fn unmount(kind: BackendKind, path: &Path) {
     let path = path.to_str().unwrap();
-    match kind {
-        BackendKind::Overlayfs => run("umount", &[path]),
-        _ => run("fusermount3", &["-u", path]),
+    let (program, args): (&str, &[&str]) = match kind {
+        BackendKind::Overlayfs => ("umount", &[path]),
+        _ => ("fusermount3", &["-u", path]),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let output = Command::new(program).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            return;
+        }
+        assert!(
+            stderr.contains("busy") && std::time::Instant::now() < deadline,
+            "{program} {args:?}: {stderr}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
