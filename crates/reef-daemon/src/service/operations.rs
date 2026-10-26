@@ -1,6 +1,7 @@
 //! `reef.api.v1.OperationService`: `ListOperations` and `GetOperation`
-//! (R2.02). `UndoOperation` (R2.03) and `SubscribeOperations` (R2.09)
-//! answer `UNIMPLEMENTED` with reason `NOT_IMPLEMENTED`.
+//! (R2.02), `UndoOperation` (R2.03, through
+//! [`crate::workspace::Manager::rewrite`]). `SubscribeOperations` (R2.09)
+//! answers `UNIMPLEMENTED` with reason `NOT_IMPLEMENTED`.
 //!
 //! Operation reads never reload the repository and never merge concurrent
 //! operation heads: they walk from the heads the op heads store lists. A
@@ -451,13 +452,51 @@ impl OperationService for OperationsHandler {
         }))
     }
 
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn undo_operation(
         &self,
-        _request: Request<UndoOperationRequest>,
+        request: Request<UndoOperationRequest>,
     ) -> Result<Response<UndoOperationResponse>, Status> {
-        Err(not_implemented(
-            "/reef.api.v1.OperationService/UndoOperation",
-        ))
+        let agent = super::agent_of(request.metadata())?;
+        let request = request.into_inner();
+        let state = &self.state;
+        let target = target(state, &request.repo, &request.workspace)?;
+        let write = crate::workspace::Write::Undo {
+            operation: request.operation_id,
+        };
+        let (rewritten, operation) = super::changes::write_change(
+            state,
+            &target,
+            agent.clone(),
+            write,
+            v1::OperationKind::Undo,
+        )
+        .await?;
+        let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
+        let owner = target
+            .workspace
+            .as_ref()
+            .map(|record| record.owner.as_str());
+        let snapshot = super::written_operation(
+            state,
+            target.repo.id,
+            rewritten.snapshot_op_id.as_deref(),
+            convert::Written {
+                kind: v1::OperationKind::Snapshot,
+                snapshot: Some(crate::snapshot::SnapshotKind::Explicit),
+                workspace: workspace_id.as_deref(),
+                agent: agent.as_deref().or(owner).unwrap_or_default(),
+            },
+        )
+        .await?;
+        Ok(Response::new(UndoOperationResponse {
+            operation,
+            snapshot,
+            undone_operation_id: rewritten
+                .undone
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        }))
     }
 
     async fn subscribe_operations(

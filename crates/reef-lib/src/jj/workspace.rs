@@ -29,6 +29,7 @@ use jj_lib::working_copy::{CheckoutError, WorkingCopyStateError};
 use jj_lib::workspace::{Workspace, WorkspaceLoadError};
 use jj_lib::workspace_store::WorkspaceStoreError;
 
+use super::oplog::OpMeta;
 use super::repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, OpenError, OperationIdHex, ReadError, Repo,
 };
@@ -396,7 +397,7 @@ impl Repo {
     /// Creates a jj workspace named `name` whose tree is at `root` (which must
     /// exist; its contents are not touched) and whose working-copy state is
     /// at `state_dir` (created, with any missing parents; it must not
-    /// exist). Records one operation with `description`. Returns a
+    /// exist). Records one operation with `meta`. Returns a
     /// [`Repo`] for the new workspace, sharing this repository's loader, and
     /// the operation's id.
     ///
@@ -417,10 +418,10 @@ impl Repo {
         root: &Path,
         state_dir: &Path,
         start: StartPoint,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
         let settings = self.workspace.settings().clone();
-        self.create_workspace_with(name, root, state_dir, start, description, &settings)
+        self.create_workspace_with(name, root, state_dir, start, meta, &settings)
             .await
     }
 
@@ -439,11 +440,11 @@ impl Repo {
         root: &Path,
         state_dir: &Path,
         start: StartPoint,
-        description: &str,
+        meta: &OpMeta,
         wc_settings: &UserSettings,
     ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
         let (repo, op_id) = self
-            .create_workspace_unlogged(name, root, state_dir, start, description, wc_settings)
+            .create_workspace_unlogged(name, root, state_dir, start, meta, wc_settings)
             .await
             .inspect_err(|error| crate::log_failure!(error))?;
         tracing::info!(op_id = %op_id, "workspace created");
@@ -456,7 +457,7 @@ impl Repo {
         root: &Path,
         state_dir: &Path,
         start: StartPoint,
-        description: &str,
+        meta: &OpMeta,
         wc_settings: &UserSettings,
     ) -> Result<(Repo, OperationIdHex), CreateWorkspaceError> {
         let name = WorkspaceNameBuf::from(name);
@@ -488,7 +489,7 @@ impl Repo {
                 tx.repo_mut().edit(name.clone(), &commit).await?;
             }
             tx.repo_mut().rebase_descendants().await?;
-            Ok::<_, CreateWorkspaceError>(tx.commit(description).await?)
+            Ok::<_, CreateWorkspaceError>(meta.commit(tx).await?)
         }
         .await;
         self.repo = match committed {
@@ -678,7 +679,7 @@ impl Repo {
     /// `jj workspace forget`: removes the workspace's working-copy pointer
     /// (abandoning its working-copy commit if that is empty, undescribed, a
     /// head, and not referenced elsewhere) and its entry in jj's workspace
-    /// store. Records one operation with `description`, which this [`Repo`]
+    /// store. Records one operation with `meta`, which this [`Repo`]
     /// adopts. The workspace's directory and state directory are not
     /// touched. Only names starting with [`REEF_WORKSPACE_PREFIX`] can be
     /// forgotten, whichever workspace's [`Repo`] calls this, so the user's
@@ -687,10 +688,10 @@ impl Repo {
     pub async fn forget_workspace(
         &mut self,
         name: &str,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<OperationIdHex, ForgetWorkspaceError> {
         let op_id = self
-            .forget_workspace_unlogged(name, description)
+            .forget_workspace_unlogged(name, meta)
             .await
             .inspect_err(|error| crate::log_failure!(error))?;
         tracing::info!(op_id = %op_id, "workspace forgotten");
@@ -700,7 +701,7 @@ impl Repo {
     async fn forget_workspace_unlogged(
         &mut self,
         name: &str,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<OperationIdHex, ForgetWorkspaceError> {
         if !name.starts_with(REEF_WORKSPACE_PREFIX) {
             return Err(ForgetWorkspaceError::NotReefWorkspace(name.to_owned()));
@@ -717,7 +718,7 @@ impl Repo {
         let mut tx = self.repo.start_transaction();
         tx.repo_mut().remove_workspace(&name).await?;
         tx.repo_mut().rebase_descendants().await?;
-        self.repo = tx.commit(description).await?;
+        self.repo = meta.commit(tx).await?;
         self.repo.loader().workspace_store().forget(&[&name])?;
         Ok(OperationIdHex::of(self.repo.op_id()))
     }
@@ -746,7 +747,7 @@ impl Repo {
     /// Moves the working-copy pointer of the workspace `name` (R1.06):
     /// `Edit` makes the commit its working-copy commit (`jj edit`), `NewOn`
     /// a new empty commit on it, on a new change (`jj new`). One operation
-    /// with `description`, which this [`Repo`] adopts; none when `Edit`
+    /// with `meta`, which this [`Repo`] adopts; none when `Edit`
     /// names the working-copy commit already. As in jj, the commit the
     /// workspace leaves is abandoned when it is empty, undescribed, a head,
     /// and referenced by nothing else. The workspace's files and working
@@ -761,10 +762,10 @@ impl Repo {
         &mut self,
         name: &str,
         start: StartPoint,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<PointerMove, MovePointerError> {
         let moved = self
-            .move_pointer_unlogged(name, start, description)
+            .move_pointer_unlogged(name, start, meta)
             .await
             .inspect_err(|error| crate::log_failure!(error))?;
         if let Some(op_id) = &moved.op_id {
@@ -777,7 +778,7 @@ impl Repo {
         &mut self,
         name: &str,
         start: StartPoint,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<PointerMove, MovePointerError> {
         let name = WorkspaceNameBuf::from(name);
         let current = self
@@ -808,7 +809,7 @@ impl Repo {
             commit
         };
         tx.repo_mut().rebase_descendants().await?;
-        self.repo = tx.commit(description).await?;
+        self.repo = meta.commit(tx).await?;
         Ok(PointerMove {
             op_id: Some(OperationIdHex::of(self.repo.op_id())),
             from: CommitIdHex::of(&current),
@@ -817,7 +818,7 @@ impl Repo {
     }
 
     /// Moves the pointer of the workspace `name` back to `commit` after a
-    /// failed move (R1.06), in one operation with `description`, which this
+    /// failed move (R1.06), in one operation with `meta`, which this
     /// [`Repo`] adopts: the inverse of [`Repo::move_pointer`]. `commit` is
     /// made visible again if the move abandoned it. The commit the pointer
     /// leaves is abandoned only with `abandon_left` (the empty commit a
@@ -829,9 +830,9 @@ impl Repo {
         name: &str,
         commit: &CommitIdHex,
         abandon_left: bool,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<OperationIdHex, MovePointerError> {
-        self.restore_pointer_unlogged(name, commit, abandon_left, description)
+        self.restore_pointer_unlogged(name, commit, abandon_left, meta)
             .await
             .inspect_err(|error| crate::log_failure!(error))
     }
@@ -841,7 +842,7 @@ impl Repo {
         name: &str,
         commit: &CommitIdHex,
         abandon_left: bool,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<OperationIdHex, MovePointerError> {
         let name = WorkspaceNameBuf::from(name);
         if self.repo.view().get_wc_commit_id(&name).is_none() {
@@ -858,7 +859,7 @@ impl Repo {
                 .map_err(EditCommitError::from)?;
         }
         tx.repo_mut().rebase_descendants().await?;
-        self.repo = tx.commit(description).await?;
+        self.repo = meta.commit(tx).await?;
         Ok(OperationIdHex::of(self.repo.op_id()))
     }
 

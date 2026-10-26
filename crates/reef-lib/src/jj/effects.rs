@@ -143,7 +143,7 @@ async fn change_ids_of(
 
 /// `(commit, change)` of every commit visible from `wanted` and not from
 /// `unwanted`.
-async fn visible_difference(
+pub(crate) async fn visible_difference(
     repo: &ReadonlyRepo,
     wanted: &[CommitId],
     unwanted: &[CommitId],
@@ -402,7 +402,7 @@ async fn change_effects(
 
 /// A ref's target in every view, keyed by (remote, name) with `None` for
 /// local bookmarks.
-fn bookmarks_of(view: &View) -> BTreeMap<(Option<&str>, &str), &RefTarget> {
+pub(crate) fn bookmarks_of(view: &View) -> BTreeMap<(Option<&str>, &str), &RefTarget> {
     let mut refs = BTreeMap::new();
     for (name, target) in &view.local_bookmarks {
         refs.insert((None, name.as_str()), target);

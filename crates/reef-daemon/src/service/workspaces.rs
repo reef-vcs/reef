@@ -96,6 +96,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<CreateWorkspaceRequest>,
     ) -> Result<Response<CreateWorkspaceResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
@@ -118,6 +119,7 @@ impl WorkspaceService for WorkspacesService {
                 lease: request_duration(request.lease_length.as_ref()),
                 missing_stores,
                 skip_store: None,
+                agent: agent.clone(),
             })
             .await
             .map_err(status)?;
@@ -131,7 +133,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::CreateWorkspace,
                 snapshot: None,
                 workspace: Some(&workspace_id),
-                agent: &created.record.owner,
+                agent: agent.as_deref().unwrap_or(&created.record.owner),
             },
         )
         .await?;
@@ -205,6 +207,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<GetWorkspaceRequest>,
     ) -> Result<Response<GetWorkspaceResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -213,7 +216,12 @@ impl WorkspaceService for WorkspacesService {
         record_ids(record.repo_id, record.id);
         let workspace_id = record.id.as_hex();
         let inspected = manager
-            .inspect(record.id, request.snapshot_first, !request.skip_disk_usage)
+            .inspect(
+                record.id,
+                request.snapshot_first,
+                !request.skip_disk_usage,
+                agent.clone(),
+            )
             .await
             .map_err(status)?;
         let snapshot = written_operation(
@@ -224,7 +232,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::Snapshot,
                 snapshot: Some(SnapshotKind::Explicit),
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;
@@ -258,6 +266,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<ReleaseWorkspaceRequest>,
     ) -> Result<Response<ReleaseWorkspaceResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -274,6 +283,7 @@ impl WorkspaceService for WorkspacesService {
                     force: request.force,
                     final_snapshot: !request.skip_final_snapshot,
                     detail: None,
+                    agent: agent.clone(),
                 },
             )
             .await
@@ -286,7 +296,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::ReleaseWorkspace,
                 snapshot: None,
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;
@@ -298,7 +308,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::Snapshot,
                 snapshot: Some(SnapshotKind::Final),
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;
@@ -316,6 +326,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<SnapshotWorkspaceRequest>,
     ) -> Result<Response<SnapshotWorkspaceResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -324,7 +335,12 @@ impl WorkspaceService for WorkspacesService {
         record_ids(record.repo_id, record.id);
         let workspace_id = record.id.as_hex();
         let snapshot = manager
-            .snapshot(record.id, SnapshotKind::Explicit, &request.description)
+            .snapshot(
+                record.id,
+                SnapshotKind::Explicit,
+                &request.description,
+                agent.clone(),
+            )
             .await
             .map_err(status)?;
         let op_id = snapshot.op_id.to_string();
@@ -336,7 +352,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::Snapshot,
                 snapshot: Some(SnapshotKind::Explicit),
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;
@@ -377,6 +393,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<MoveWorkspaceRequest>,
     ) -> Result<Response<MoveWorkspaceResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -392,7 +409,7 @@ impl WorkspaceService for WorkspacesService {
             None => Start::Default,
         };
         let moved = manager
-            .move_to(record.id, start, missing_stores)
+            .move_to(record.id, start, missing_stores, agent.clone())
             .await
             .map_err(status)?;
         let (_, local_snapshot_count) = index::counts(&self.state.db, record.id).map_err(status)?;
@@ -404,7 +421,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::MoveWorkspace,
                 snapshot: None,
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;
@@ -416,7 +433,7 @@ impl WorkspaceService for WorkspacesService {
                 kind: OperationKind::Snapshot,
                 snapshot: Some(SnapshotKind::Move),
                 workspace: Some(&workspace_id),
-                agent: &record.owner,
+                agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
         .await?;

@@ -36,12 +36,13 @@ impl RepositoryService for RepositoriesService {
         &self,
         request: Request<RegisterRepositoryRequest>,
     ) -> Result<Response<RegisterRepositoryResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let if_not_jj = known("if_not_jj", request.if_not_jj).map_err(status)?;
         let registered = self
             .state
             .manager
-            .register_repository(PathBuf::from(request.path), if_not_jj)
+            .register_repository(PathBuf::from(request.path), if_not_jj, agent)
             .await
             .map_err(status)?;
         let record = &registered.record;

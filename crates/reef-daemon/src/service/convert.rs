@@ -321,15 +321,16 @@ impl From<&CreateTimings> for v1::CreateTimings {
 /// Prefix of the jj workspace names of Reef workspaces.
 const REEF_WORKSPACE: &str = "reef-";
 
-/// What R2.01 knows about an operation it just wrote: the RPC that wrote it
-/// says what kind it is and which workspace it was for, and the
-/// workspace's owner is its agent.
+/// What the RPC that just wrote an operation knows about it: its kind, the
+/// workspace it was for, and its agent (the request's `reef-agent`, else
+/// the workspace's owner), which are the attributes it wrote (R2.03).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Written<'a> {
     pub(super) kind: v1::OperationKind,
     pub(super) snapshot: Option<SnapshotKind>,
-    /// The Reef workspace it was for, when the RPC names one: a create,
-    /// move, or release runs in jj's `default` workspace.
+    /// The Reef workspace it was for, when the RPC names one. Only
+    /// snapshots record a jj workspace name; creates, moves, releases and
+    /// the write RPCs record none, and `reef.workspace` names it.
     pub(super) workspace: Option<&'a str>,
     pub(super) agent: &'a str,
 }
@@ -349,7 +350,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
     let workspace_id = written.workspace.map_or(named, str::to_owned);
     let agent = entry
         .attributes
-        .get("reef.agent")
+        .get(ATTR_AGENT)
         .map_or(written.agent, String::as_str);
     v1::Operation {
         id: entry.id.to_string(),

@@ -33,8 +33,8 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
-    ChangeIdHex, CommitIdHex, IgnoreSources, OperationIdHex, ReadonlyRepo, Repo, SnapshotCommit,
-    SnapshotError, commit_snapshot,
+    ChangeIdHex, CommitIdHex, IgnoreSources, OpKind, OpMeta, OperationIdHex, ReadonlyRepo, Repo,
+    SnapshotCommit, SnapshotError, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
@@ -91,20 +91,23 @@ enum Recorded {
 impl Manager {
     /// Snapshots a workspace's files into its working-copy commit, after
     /// any snapshot in flight. `description` names the operation; empty
-    /// for the default of `kind`. See [`crate::snapshot::Scheduler::snapshot_now`].
+    /// for the default of `kind`. `agent` is the operation's `reef.agent`;
+    /// `None` for the workspace's owner (R2.03). See
+    /// [`crate::snapshot::Scheduler::snapshot_now`].
     #[tracing::instrument(skip_all, fields(workspace_id = %id, kind = kind.as_str()))]
     pub async fn snapshot(
         &self,
         id: WorkspaceId,
         kind: SnapshotKind,
         description: &str,
+        agent: Option<String>,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let description = if description.is_empty() {
             self::description(kind, id, None)
         } else {
             description.to_owned()
         };
-        self.snapshot_with(id, kind, description).await
+        self.snapshot_with(id, kind, description, agent).await
     }
 
     /// [`Manager::snapshot`] with the description decided. A `Final` or
@@ -118,12 +121,17 @@ impl Manager {
         id: WorkspaceId,
         kind: SnapshotKind,
         description: String,
+        agent: Option<String>,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let manager = self
             .scheduler
             .manager()
             .ok_or(ManagerError::NotLoaded(id))?;
-        let task = async move { manager.snapshot_detached(id, kind, description).await };
+        let task = async move {
+            manager
+                .snapshot_detached(id, kind, description, agent)
+                .await
+        };
         tokio::spawn(task.instrument(tracing::Span::current())).await?
     }
 
@@ -132,6 +140,7 @@ impl Manager {
         id: WorkspaceId,
         kind: SnapshotKind,
         description: String,
+        agent: Option<String>,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let releasing_ok = matches!(kind, SnapshotKind::Final | SnapshotKind::Shutdown);
         let entry = self.loaded_entry(id, releasing_ok)?;
@@ -148,7 +157,7 @@ impl Manager {
                 state,
             });
         }
-        self.snapshot_locked(&entry, kind, description).await
+        self.snapshot_locked(&entry, kind, description, agent).await
     }
 
     /// The snapshot a read of `id` takes first (R2.02): an explicit one
@@ -160,6 +169,7 @@ impl Manager {
         &self,
         id: WorkspaceId,
         arrived: Instant,
+        agent: Option<String>,
     ) -> Result<ReadSnapshot, ManagerError> {
         let manager = self
             .scheduler
@@ -186,7 +196,7 @@ impl Manager {
             }
             let kind = SnapshotKind::Explicit;
             let outcome = manager
-                .snapshot_locked(&entry, kind, description(kind, id, None))
+                .snapshot_locked(&entry, kind, description(kind, id, None), agent)
                 .await?;
             Ok(ReadSnapshot::Taken(outcome))
         };
@@ -202,7 +212,10 @@ impl Manager {
         let dirty = self.scheduler.dirty();
         let kind = SnapshotKind::Shutdown;
         let snapshots = dirty.iter().map(|&id| async move {
-            match self.snapshot_with(id, kind, description(kind, id, None)).await {
+            match self
+                .snapshot_with(id, kind, description(kind, id, None), None)
+                .await
+            {
                 Ok(_) => true,
                 Err(error) => {
                     tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "shutdown snapshot failed");
@@ -225,16 +238,20 @@ impl Manager {
         taken
     }
 
-    /// A snapshot with the entry's scan lock already held.
+    /// A snapshot with the entry's scan lock already held; `agent` as
+    /// [`Manager::snapshot`]'s.
     pub(super) async fn snapshot_locked(
         &self,
         entry: &Arc<WorkspaceEntry>,
         kind: SnapshotKind,
         description: String,
+        agent: Option<String>,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let id = entry.paths.id;
         let trigger = self.scheduler.take_trigger(id);
-        let outcome = self.run_snapshot(entry, kind, description, trigger).await;
+        let outcome = self
+            .run_snapshot(entry, kind, description, agent, trigger)
+            .await;
         self.scheduler.completed(id);
         outcome
     }
@@ -261,7 +278,7 @@ impl Manager {
         }
         let kind = SnapshotKind::Watcher;
         let ran = self
-            .run_snapshot(&entry, kind, description(kind, id, None), trigger)
+            .run_snapshot(&entry, kind, description(kind, id, None), None, trigger)
             .await;
         match ran {
             Ok(_) => return Scheduled::Taken,
@@ -295,12 +312,17 @@ impl Manager {
         entry: &Arc<WorkspaceEntry>,
         kind: SnapshotKind,
         description: String,
+        agent: Option<String>,
         mut trigger: Trigger,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let begun = Instant::now();
         let started = trigger.first_event.unwrap_or(begun);
         let record = entry.record();
         let id = record.id;
+        let meta = OpMeta::new(OpKind::Snapshot, description)
+            .snapshot_kind(kind.as_str())
+            .workspace(id.as_hex())
+            .agent(agent.unwrap_or_else(|| record.owner.clone()));
         // The head first: a permit is a scan slot, not held while the
         // repository thread is busy.
         let head = self.workspace_head(entry, true).await?;
@@ -334,7 +356,7 @@ impl Manager {
                     expected: expected.as_ref(),
                     reefignore: &reefignore,
                     spec: &spec,
-                    description: &description,
+                    meta: &meta,
                     prefixes: prefixes.as_deref(),
                 };
                 pipeline.run(repo, head, permit)
@@ -417,7 +439,7 @@ impl Manager {
     /// working-copy commit after an unchanged snapshot, if it moved: the
     /// workspace adopted another's rewrite of the shared commit, or the view
     /// moved it (`jj abandon`).
-    fn follow_view(
+    pub(super) fn follow_view(
         &self,
         entry: &WorkspaceEntry,
         wc_commit: &CommitIdHex,
@@ -446,7 +468,7 @@ struct Pipeline<'a> {
     expected: Option<&'a CommitIdHex>,
     reefignore: &'a Path,
     spec: &'a SnapshotSpec,
-    description: &'a str,
+    meta: &'a OpMeta,
     /// What to narrow the scan to; `None` scans everything.
     prefixes: Option<&'a [PathBuf]>,
 }
@@ -576,10 +598,10 @@ impl Pipeline<'_> {
 
         let plan = pending.plan().clone();
         let recovered = plan.recover.is_some();
-        let description = self.description.to_owned();
+        let meta = self.meta.clone();
         let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
-                let committed = commit_snapshot(head.repo.head(), &plan, &description).await;
+                let committed = commit_snapshot(head.repo.head(), &plan, &meta).await;
                 if let Ok(committed) = &committed {
                     // The next job starts from this operation (R1.03). A
                     // reload is not needed: nothing else in the daemon

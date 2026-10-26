@@ -59,6 +59,7 @@ use jj_lib::working_copy::{
 use jj_lib::workspace::LockedWorkspace;
 
 use super::ignore::IgnoreSources;
+use super::oplog::{OpKind, OpMeta};
 use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, ReadError, Repo};
 use super::settings::{SettingsError, max_new_file_size};
 use crate::error::{Classify, ErrorKind, classify_by_source};
@@ -396,13 +397,13 @@ impl std::fmt::Debug for SnapshotCommit {
 }
 
 /// The transaction half of a snapshot: records `plan` on `head` in one
-/// operation marked as a snapshot, with `description`. Runs wherever the
+/// operation marked as a snapshot, with `meta`. Runs wherever the
 /// repository's head lives; `head` may be newer than the operation the scan
 /// started from.
 pub async fn commit_snapshot(
     head: &Arc<ReadonlyRepo>,
     plan: &SnapshotPlan,
-    description: &str,
+    meta: &OpMeta,
 ) -> Result<SnapshotCommit, SnapshotError> {
     let write_start = Instant::now();
     let store = head.store();
@@ -439,7 +440,7 @@ pub async fn commit_snapshot(
     let write = write_start.elapsed();
 
     let commit_start = Instant::now();
-    let repo = tx.commit(description).await?;
+    let repo = meta.commit(tx).await?;
     Ok(SnapshotCommit {
         op_id: OperationIdHex::of(repo.op_id()),
         commit_id: CommitIdHex::of(new_commit.id()),
@@ -601,7 +602,8 @@ impl Repo {
         }
 
         let plan = pending.plan().clone();
-        let committed = commit_snapshot(&head, &plan, description).await?;
+        let meta = OpMeta::new(OpKind::Snapshot, description);
+        let committed = commit_snapshot(&head, &plan, &meta).await?;
         let finish_start = Instant::now();
         let finished = pending.finish(&committed.op_id).await;
         // The operation is published once committed. Adopt it even if saving

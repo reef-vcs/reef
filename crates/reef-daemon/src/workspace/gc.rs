@@ -72,7 +72,7 @@ impl Manager {
             .iter()
             .map(|entry| self.scheduler.pause(entry.paths.id))
             .collect();
-        // In id order, as nothing else takes more than one.
+        // In id order, as describe, abandon and undo take theirs (R2.03).
         let mut scans = Vec::with_capacity(entries.len());
         for entry in &entries {
             scans.push(entry.scan_lock.lock().await);
@@ -175,7 +175,7 @@ impl Manager {
                 let id = entry.paths.id;
                 let kind = SnapshotKind::Explicit;
                 if let Err(error) = self
-                    .snapshot_locked(entry, kind, description(kind, id, None))
+                    .snapshot_locked(entry, kind, description(kind, id, None), None)
                     .await
                 {
                     tracing::warn!(workspace_id = %id, error = %ErrorChain(&error), "snapshot before GC failed");

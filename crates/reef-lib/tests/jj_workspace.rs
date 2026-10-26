@@ -30,6 +30,7 @@ use reef_lib::jj::{
     ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources, OpenError,
     Repo, StartPoint, commit_snapshot,
 };
+use reef_lib::jj::{OpKind, OpMeta};
 use tempfile::TempDir;
 
 fn settings() -> UserSettings {
@@ -96,7 +97,10 @@ impl Fixture {
                 &root,
                 &state,
                 start,
-                &format!("reef: create workspace {name}"),
+                &OpMeta::new(
+                    OpKind::CreateWorkspace,
+                    format!("reef: create workspace {name}"),
+                ),
             )
             .await
             .expect("create workspace");
@@ -256,7 +260,7 @@ async fn create_workspace_refuses_existing_name_and_state_dir() {
             &root,
             &other_state,
             StartPoint::Edit(commit.clone()),
-            "",
+            &OpMeta::new(OpKind::CreateWorkspace, ""),
         )
         .await
         .err()
@@ -275,7 +279,7 @@ async fn create_workspace_refuses_existing_name_and_state_dir() {
             &root,
             &state,
             StartPoint::Edit(commit.clone()),
-            "",
+            &OpMeta::new(OpKind::CreateWorkspace, ""),
         )
         .await
         .err()
@@ -294,7 +298,7 @@ async fn create_workspace_refuses_existing_name_and_state_dir() {
             &root,
             &other_state,
             StartPoint::NewOn(unknown),
-            "",
+            &OpMeta::new(OpKind::CreateWorkspace, ""),
         )
         .await
         .err()
@@ -320,7 +324,7 @@ async fn create_workspace_refuses_existing_name_and_state_dir() {
             &missing_root,
             &other_state,
             StartPoint::Edit(commit),
-            "",
+            &OpMeta::new(OpKind::CreateWorkspace, ""),
         )
         .await
         .err()
@@ -385,7 +389,10 @@ async fn forget_workspace_removes_pointer_and_abandons_empty() {
     assert!(fx.head_ids().contains(&empty_commit));
 
     fx.main
-        .forget_workspace("reef-x", "reef: release workspace x")
+        .forget_workspace(
+            "reef-x",
+            &OpMeta::new(OpKind::ReleaseWorkspace, "reef: release workspace x"),
+        )
         .await
         .unwrap();
     assert!(!fx.wc_names().await.contains("reef-x"));
@@ -396,7 +403,10 @@ async fn forget_workspace_removes_pointer_and_abandons_empty() {
     );
 
     fx.main
-        .forget_workspace("reef-y", "reef: release workspace y")
+        .forget_workspace(
+            "reef-y",
+            &OpMeta::new(OpKind::ReleaseWorkspace, "reef: release workspace y"),
+        )
         .await
         .unwrap();
     assert_eq!(fx.wc_names().await, BTreeSet::from(["default".to_owned()]));
@@ -409,13 +419,21 @@ async fn forget_workspace_removes_pointer_and_abandons_empty() {
         "reef: release workspace y"
     );
 
-    let again = fx.main.forget_workspace("reef-y", "").await.unwrap_err();
+    let again = fx
+        .main
+        .forget_workspace("reef-y", &OpMeta::new(OpKind::ReleaseWorkspace, ""))
+        .await
+        .unwrap_err();
     assert!(
         matches!(again, ForgetWorkspaceError::NoSuchWorkspace(_)),
         "{again:?}"
     );
     assert_eq!(again.kind(), ErrorKind::NotFound);
-    let own = fx.main.forget_workspace("default", "").await.unwrap_err();
+    let own = fx
+        .main
+        .forget_workspace("default", &OpMeta::new(OpKind::ReleaseWorkspace, ""))
+        .await
+        .unwrap_err();
     assert!(
         matches!(own, ForgetWorkspaceError::NotReefWorkspace(_)),
         "{own:?}"
@@ -428,12 +446,18 @@ async fn forget_refuses_default_from_a_reef_workspace() {
     let (mut fx, commit) = Fixture::with_files().await;
     let (mut ws, _, _) = fx.create("reef-x", StartPoint::NewOn(commit)).await;
 
-    let error = ws.forget_workspace("default", "").await.unwrap_err();
+    let error = ws
+        .forget_workspace("default", &OpMeta::new(OpKind::ReleaseWorkspace, ""))
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, ForgetWorkspaceError::NotReefWorkspace(_)),
         "{error:?}"
     );
-    let error = ws.forget_workspace("reef-x", "").await.unwrap_err();
+    let error = ws
+        .forget_workspace("reef-x", &OpMeta::new(OpKind::ReleaseWorkspace, ""))
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, ForgetWorkspaceError::CurrentWorkspace(_)),
         "{error:?}"
@@ -615,9 +639,13 @@ async fn stale_diverges_when_dirty() {
     let plan = pending.plan().clone();
     assert!(plan.divergent);
     assert_eq!(plan.rewrite_of, shared.commit_id);
-    let committed = commit_snapshot(x.head(), &plan, "reef: snapshot workspace y")
-        .await
-        .unwrap();
+    let committed = commit_snapshot(
+        x.head(),
+        &plan,
+        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
+    )
+    .await
+    .unwrap();
     assert!(committed.divergent);
     assert_eq!(committed.change_id, shared.change_id);
     pending.finish(&committed.op_id).await.unwrap();
@@ -653,7 +681,10 @@ async fn forgotten_workspace_is_recovered() {
     let before = x.wc_change().unwrap();
     let parents = fx.main.commit_parents(&before.commit_id).await.unwrap();
     fx.main
-        .forget_workspace("reef-x", "forget reef-x")
+        .forget_workspace(
+            "reef-x",
+            &OpMeta::new(OpKind::ReleaseWorkspace, "forget reef-x"),
+        )
         .await
         .unwrap();
     drop(y.reload_at_head().await);
@@ -668,9 +699,13 @@ async fn forgotten_workspace_is_recovered() {
     assert_eq!(pending.wc_commit(), None);
     let plan = pending.plan().clone();
     assert_eq!(plan.recover.as_deref(), Some(parents.as_slice()));
-    let committed = commit_snapshot(fx.main.head(), &plan, "reef: snapshot workspace x")
-        .await
-        .unwrap();
+    let committed = commit_snapshot(
+        fx.main.head(),
+        &plan,
+        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x"),
+    )
+    .await
+    .unwrap();
     assert!(!committed.divergent);
     assert_ne!(committed.change_id, before.change_id, "a fresh change id");
     pending.finish(&committed.op_id).await.unwrap();
@@ -734,7 +769,7 @@ async fn move_pointer_then_check_out_tree() {
         .move_pointer(
             "reef-x",
             StartPoint::NewOn(commit.clone()),
-            "reef: move workspace x",
+            &OpMeta::new(OpKind::MoveWorkspace, "reef: move workspace x"),
         )
         .await
         .unwrap();
@@ -785,7 +820,11 @@ async fn move_pointer_edits_abandons_and_refuses() {
     // Editing the commit it is on records nothing and abandons nothing.
     let same = fx
         .main
-        .move_pointer("reef-x", StartPoint::Edit(empty.parse().unwrap()), "")
+        .move_pointer(
+            "reef-x",
+            StartPoint::Edit(empty.parse().unwrap()),
+            &OpMeta::new(OpKind::MoveWorkspace, ""),
+        )
         .await
         .unwrap();
     assert_eq!(same.op_id, None);
@@ -796,7 +835,11 @@ async fn move_pointer_edits_abandons_and_refuses() {
     // Leaving an empty commit abandons it, as `jj edit` does.
     let edited = fx
         .main
-        .move_pointer("reef-x", StartPoint::Edit(commit.clone()), "reef: move")
+        .move_pointer(
+            "reef-x",
+            StartPoint::Edit(commit.clone()),
+            &OpMeta::new(OpKind::MoveWorkspace, "reef: move"),
+        )
         .await
         .unwrap();
     assert!(edited.op_id.is_some());
@@ -811,17 +854,30 @@ async fn move_pointer_edits_abandons_and_refuses() {
     drop(other);
     let theirs_id: CommitIdHex = theirs.parse().unwrap();
     fx.main
-        .move_pointer("reef-x", StartPoint::Edit(theirs_id.clone()), "reef: move")
+        .move_pointer(
+            "reef-x",
+            StartPoint::Edit(theirs_id.clone()),
+            &OpMeta::new(OpKind::MoveWorkspace, "reef: move"),
+        )
         .await
         .unwrap();
     fx.main
-        .move_pointer("reef-y", StartPoint::Edit(commit.clone()), "reef: move")
+        .move_pointer(
+            "reef-y",
+            StartPoint::Edit(commit.clone()),
+            &OpMeta::new(OpKind::MoveWorkspace, "reef: move"),
+        )
         .await
         .unwrap();
     assert_eq!(fx.main.workspaces_on_commit(&theirs_id), ["reef-x"]);
     let restored = fx
         .main
-        .restore_pointer("reef-x", &empty.parse().unwrap(), false, "reef: move back")
+        .restore_pointer(
+            "reef-x",
+            &empty.parse().unwrap(),
+            false,
+            &OpMeta::new(OpKind::MoveWorkspace, "reef: move back"),
+        )
         .await
         .unwrap();
     assert_eq!(fx.main.op_id(), restored);
@@ -830,7 +886,11 @@ async fn move_pointer_edits_abandons_and_refuses() {
 
     let error = fx
         .main
-        .move_pointer("reef-nope", StartPoint::Edit(commit), "")
+        .move_pointer(
+            "reef-nope",
+            StartPoint::Edit(commit),
+            &OpMeta::new(OpKind::MoveWorkspace, ""),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -865,7 +925,10 @@ async fn colocated_repository_imports_git_branches() {
     assert!(repo.is_colocated());
     let commit = repo.snapshot("snapshot").await.unwrap().wc_commit;
 
-    let nothing = repo.import_git_refs("reef: import git refs").await.unwrap();
+    let nothing = repo
+        .import_git_refs(&OpMeta::new(OpKind::ImportRefs, "reef: import git refs"))
+        .await
+        .unwrap();
     assert_eq!(nothing.op_id, None, "nothing moved in git");
 
     let output = std::process::Command::new("git")
@@ -883,7 +946,10 @@ async fn colocated_repository_imports_git_branches() {
         matches!(missing, RevisionError::NotFound { .. }),
         "{missing:?}"
     );
-    let imported = repo.import_git_refs("reef: import git refs").await.unwrap();
+    let imported = repo
+        .import_git_refs(&OpMeta::new(OpKind::ImportRefs, "reef: import git refs"))
+        .await
+        .unwrap();
     assert_eq!(imported.op_id.as_ref(), Some(&repo.op_id()));
     assert_eq!(imported.failed_refs.len(), 0, "{:?}", imported.failed_refs);
     let resolved = repo.resolve_revision("feat").await.unwrap();

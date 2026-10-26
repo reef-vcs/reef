@@ -41,13 +41,13 @@ use std::time::Instant;
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::materialize::TREE_STATE_FILE;
-use reef_lib::jj::{CheckoutSummary, CommitIdHex, PointerMove, StartPoint};
+use reef_lib::jj::{CheckoutSummary, CommitIdHex, OpKind, OpMeta, PointerMove, StartPoint};
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
 
-use super::create::resolve_start;
+use super::create::{import_meta, resolve_start};
 use super::stores::{StorePlan, StoreRules, StoreTarget};
-use super::{Manager, ManagerError, MissingStores, Moved, Start, WorkspaceEntry};
+use super::{Manager, ManagerError, MissingStores, Moved, Start, WorkspaceEntry, op_meta};
 use crate::backend::{BaseEntry, SwapOutcome};
 use crate::model::{Attention, WorkspaceId, WorkspaceState};
 use crate::repo::RepoHandle;
@@ -78,7 +78,8 @@ impl SwapFailed {
 impl Manager {
     /// Moves an active workspace to `start` (a change to edit, or a new
     /// change on a revision); see the module docs for the steps.
-    /// `missing_stores` is as for a create.
+    /// `missing_stores` is as for a create. `agent` is the operations'
+    /// `reef.agent`; `None` for the workspace's owner (R2.03).
     ///
     /// Runs as its own task: a caller that stops waiting (an RPC whose
     /// client disconnected) must not cut a move between its pointer move
@@ -89,20 +90,30 @@ impl Manager {
         id: WorkspaceId,
         start: Start,
         missing_stores: MissingStores,
+        agent: Option<String>,
     ) -> Result<Moved, ManagerError> {
         let manager = self
             .scheduler
             .manager()
             .ok_or(ManagerError::NotLoaded(id))?;
-        let task = async move { manager.move_detached(id, start, missing_stores).await };
+        let task = async move {
+            manager
+                .move_detached(id, start, missing_stores, agent)
+                .await
+        };
         tokio::spawn(task.instrument(tracing::Span::current())).await?
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the move's steps in order; R2.03's agent tipped it over"
+    )]
     async fn move_detached(
         &self,
         id: WorkspaceId,
         start: Start,
         missing_stores: MissingStores,
+        agent: Option<String>,
     ) -> Result<Moved, ManagerError> {
         let begun = Instant::now();
         let entry = self.active_entry(id)?;
@@ -123,12 +134,16 @@ impl Manager {
         let handle = self.handle(repo_id)?;
         let label = target_label(&start);
         let described = description(SnapshotKind::Move, id, Some(&label));
+        let agent = agent.unwrap_or_else(|| record.owner.clone());
 
         // 1.
-        let final_op_id = self.move_snapshot(&entry, described.clone()).await?;
+        let final_op_id = self
+            .move_snapshot(&entry, described.clone(), agent.clone())
+            .await?;
 
         // 2 and 3.
-        let resolved = resolve_start(&handle, start, Some(id.jj_workspace_name())).await?;
+        let import = import_meta(Some(id), Some(&agent));
+        let resolved = resolve_start(&handle, start, Some(id.jj_workspace_name()), import).await?;
         let (base, _) = self
             .ensure_base(&handle, &resolved, &*entry.backend)
             .await?;
@@ -141,7 +156,8 @@ impl Manager {
         let plan = self.plan_stores(&resolved.stores, &rules, &resolved.commit)?;
 
         // 4.
-        let pointer = move_pointer(&handle, id, resolved.start.clone(), described).await?;
+        let meta = op_meta(OpKind::MoveWorkspace, described, id, &agent);
+        let pointer = move_pointer(&handle, id, resolved.start.clone(), meta).await?;
 
         // 5.
         let from = match self.base_cache(repo_id).get(&record.base_tree_id) {
@@ -156,7 +172,7 @@ impl Manager {
             Ok(swapped) => swapped,
             Err(failed) => {
                 let abandon_left = matches!(resolved.start, StartPoint::NewOn(_));
-                self.roll_back(&entry, &handle, &pointer, abandon_left, old_stores)
+                self.roll_back(&entry, &handle, &pointer, abandon_left, old_stores, &agent)
                     .await;
                 if failed.checkout_started {
                     restore_tree(&entry, &handle, &pointer).await;
@@ -254,9 +270,10 @@ impl Manager {
         &self,
         entry: &Arc<WorkspaceEntry>,
         description: String,
+        agent: String,
     ) -> Result<Option<String>, ManagerError> {
         match self
-            .snapshot_locked(entry, SnapshotKind::Move, description)
+            .snapshot_locked(entry, SnapshotKind::Move, description, Some(agent))
             .await
         {
             Ok(outcome) => Ok(outcome.changed.then(|| outcome.op_id.to_string())),
@@ -311,12 +328,18 @@ impl Manager {
         pointer: &PointerMove,
         abandon_left: bool,
         old_stores: Vec<MountedStore>,
+        agent: &str,
     ) {
         let id = entry.paths.id;
         if pointer.op_id.is_some() {
             let name = id.jj_workspace_name();
             let from = pointer.from.clone();
-            let back = format!("reef: move workspace {id} to {from} (move failed)");
+            let back = op_meta(
+                OpKind::MoveWorkspace,
+                format!("reef: move workspace {id} to {from} (move failed)"),
+                id,
+                agent,
+            );
             let restored = handle
                 .call_async(move |head| {
                     async move {
@@ -435,14 +458,14 @@ async fn move_pointer(
     handle: &RepoHandle,
     id: WorkspaceId,
     start: StartPoint,
-    description: String,
+    meta: OpMeta,
 ) -> Result<PointerMove, ManagerError> {
     let name = id.jj_workspace_name();
     handle
         .call_async(move |head| {
             async move {
                 head.refresh().await?;
-                Ok::<_, ManagerError>(head.repo.move_pointer(&name, start, &description).await?)
+                Ok::<_, ManagerError>(head.repo.move_pointer(&name, start, &meta).await?)
             }
             .boxed_local()
         })

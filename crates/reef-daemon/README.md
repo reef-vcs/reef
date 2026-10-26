@@ -19,6 +19,23 @@ The read RPCs (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ListOperatio
 | `reef: create workspace <id>` | `CREATE_WORKSPACE` |
 | `reef: release workspace <id>`, with any parenthesized reason | `RELEASE_WORKSPACE` |
 | `reef: import git refs` | `IMPORT_REFS` |
-| `undo: restore to operation <id>` | `UNDO` |
+| `reef: describe commit <commit id>` | `DESCRIBE` |
+| `reef: abandon commit <commit id>` | `ABANDON` |
+| `reef: undo operation <operation id>`, or `undo: restore to operation <id>` | `UNDO` |
 | any other `reef: ` description | `OTHER` |
 | anything else, including jj's own `import git head` | `EXTERNAL` |
+
+Since R2.03 every operation Reef records carries the attributes, so the descriptions matter only for older history ([ADR 0031](../../docs/adr/0031-writes-over-jj-state.md)):
+
+| Operation | `reef.kind` | `reef.snapshot-kind` | `reef.workspace` | `reef.agent` |
+| --- | --- | --- | --- | --- |
+| a snapshot | `snapshot` | `watcher`, `explicit`, `final`, `move`, `shutdown` | the workspace | the request's `reef-agent`, else the owner |
+| a create | `create-workspace` | | the new workspace | the request's `reef-agent`, else the owner |
+| a release, reclaim, failed or interrupted create, missing directory | `release-workspace` | | the workspace | the request's `reef-agent` (release only), else the owner; none for an interrupted create |
+| a move's pointer, and its roll-back | `move-workspace` | | the workspace | the request's `reef-agent`, else the owner |
+| a ref import before resolving a revision | `import-refs` | | the workspace being created, moved or written for | as that request |
+| `import git head` at registration, a rematerialization | `other` | | the workspace (rematerialization) | the request's `reef-agent` (registration), else the owner |
+| describe, abandon, undo | `describe`, `abandon`, `undo` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
+| a store build's scratch create and release | as create and release | | the scratch workspace | the request's `reef-agent`, else `reef-store-build` |
+
+`DescribeChange`, `AbandonChange` and `UndoOperation` run through `Manager::rewrite` (`workspace/rewrite.rs`): plan on the repository thread, then take the repository's create lock shared and each moved workspace's scan lock in id order (as GC does), snapshot those workspaces one at a time, descendants first (abandon and undo), write one operation, and have each moved workspace take its new commit.

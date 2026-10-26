@@ -50,12 +50,42 @@ service ChangeService {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
-  // Sets a change's description. Declared; R2.03 implements it.
+  // Sets one commit's description, rebasing its descendants onto the new
+  // commit with their trees unchanged; bookmarks and working copies follow.
+  // The author stays; the committer becomes the daemon's identity, now. A
+  // description already equal (after the trailing newline is added) records
+  // no operation: `operation` is unset and `change` is the current commit.
+  // Never snapshots, as it changes no tree; workspaces on the commit or its
+  // descendants are held still while it writes (ADR 0031). One commit of a
+  // divergent change, named by commit id, may be described; the change
+  // stays divergent.
+  //
+  // Errors: as for every revision read, and INVALID_ARGUMENT with reason
+  // REVISION_REQUIRED (empty `revision`), INVALID_COMMIT_ID (an
+  // `expected_commit_id` that is not a full commit id; metadata
+  // `commit_id`) or INVALID_DESCRIPTION (a NUL); FAILED_PRECONDITION with
+  // reason EXPECTED_COMMIT_MISMATCH (metadata `expected_commit_id`,
+  // `commit_id`), IMMUTABLE_REVISION or HIDDEN_REVISION (metadata
+  // `commit_id`), or for a `workspace` that is not active.
   rpc DescribeChange(DescribeChangeRequest) returns (DescribeChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
-  // Abandons a change: how a divergent change is resolved (R1.13).
-  // Declared; R2.03 implements it.
+  // Abandons one commit: how a divergent change is resolved (R1.13).
+  // Workspaces on the commit or its descendants are snapshotted first, in
+  // operations of their own, and take the result afterwards (ADR 0031).
+  //
+  // When the commit's change has another visible commit that does not
+  // descend from it (the newest by committer time when there are several),
+  // that commit takes its place: descendants are rebased onto it,
+  // bookmarks move to it, working copies edit it, and the effects report
+  // the abandoned commit HIDDEN. Otherwise, as `jj abandon`: descendants
+  // are rebased onto its parents, local bookmarks on it are deleted
+  // (remote ones stay), and working copies on it share one new empty
+  // commit on its parents. `UndoOperation` brings it back.
+  //
+  // Errors: as for DescribeChange, less INVALID_DESCRIPTION, and
+  // FAILED_PRECONDITION when a workspace could not be snapshotted first
+  // (nothing is written).
   rpc AbandonChange(AbandonChangeRequest) returns (AbandonChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -204,7 +234,8 @@ message DescribeChangeRequest {
   string workspace = 2;
   // The revision to describe.
   string revision = 3;
-  // The new description, in full.
+  // The new description, in full. A trailing newline is added when it is
+  // not empty and lacks one, as jj stores descriptions.
   string description = 4;
   // When non-empty, FAILED_PRECONDITION unless the revision still resolves
   // to this commit.

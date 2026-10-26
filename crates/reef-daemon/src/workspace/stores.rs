@@ -428,7 +428,8 @@ impl Manager {
                 async move {
                     // The default start's bookmarks may have moved on the
                     // root since the thread last reloaded.
-                    super::create::refresh_for_resolve(head).await?;
+                    let import = super::create::import_meta(None, None);
+                    super::create::refresh_for_resolve(head, &import).await?;
                     let commit = super::create::default_start(&head.repo)?.commit;
                     head.repo
                         .check_tree_names(&commit, &mut head.checked_trees)
@@ -451,18 +452,22 @@ impl Manager {
     /// resolves to (default: a workspace's default start, R1.31), the
     /// store's `[[store]]` in that commit's
     /// `reef.toml`, and its lockfile hashed there.
-    /// [`StoreError::NotDeclared`] if the spec has no such store.
+    /// [`StoreError::NotDeclared`] if the spec has no such store. A ref
+    /// import first records `agent`, else the build's owner.
     pub(crate) async fn resolve_store(
         &self,
         repo: RepoId,
         rev: Option<String>,
         name: String,
+        agent: Option<String>,
     ) -> Result<(CommitIdHex, StoreSpec, StoreTarget), ManagerError> {
         let handle = self.handle(repo)?;
+        let agent = agent.unwrap_or_else(|| crate::store::build::BUILD_OWNER.to_owned());
+        let import = super::create::import_meta(None, Some(&agent));
         handle
             .call_async(move |head| {
                 async move {
-                    super::create::refresh_for_resolve(head).await?;
+                    super::create::refresh_for_resolve(head, &import).await?;
                     let commit = match rev {
                         Some(text) => {
                             let scope = RevsetScope {

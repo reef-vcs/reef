@@ -56,7 +56,8 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::revset::{self, RevsetScope};
 use reef_lib::jj::{
-    ChangeSummary, CommitIdHex, CreateWorkspaceError, MaterializeError, Repo, StartPoint,
+    ChangeSummary, CommitIdHex, CreateWorkspaceError, MaterializeError, OpKind, OpMeta, Repo,
+    StartPoint,
 };
 use reef_lib::spec::SPEC_FILE;
 use reef_lib::telemetry::elapsed_ms;
@@ -65,6 +66,7 @@ use super::manager::{forget_jj_workspace, remove_state_dir};
 use super::stores::{StorePlan, StoreTarget, TreeAt, store_targets};
 use super::{
     CreateSpec, CreateTimings, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry,
+    op_meta,
 };
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
@@ -75,6 +77,16 @@ use crate::store::{MountedStore, StoreManager};
 
 /// The description of a colocated repository's ref import before a create.
 const IMPORT_DESCRIPTION: &str = "reef: import git refs";
+
+/// What a ref import before resolving a revision records (R2.03): for the
+/// workspace being created, moved or written for, when there is one, and
+/// the agent that asked.
+pub(super) fn import_meta(workspace: Option<WorkspaceId>, agent: Option<&str>) -> OpMeta {
+    let mut meta = OpMeta::new(OpKind::ImportRefs, IMPORT_DESCRIPTION);
+    meta.workspace = workspace.map(|id| id.as_hex());
+    meta.agent = agent.map(str::to_owned);
+    meta
+}
 
 /// Step 2's answer; also a move's (R1.06).
 pub(super) struct ResolvedStart {
@@ -91,6 +103,10 @@ pub(super) struct ResolvedStart {
 
 impl Manager {
     /// Creates a workspace; see the module docs for the steps.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the create's seven steps in order; R2.03's agent tipped it over"
+    )]
     #[tracing::instrument(skip_all, fields(repo = %spec.repo, workspace_id))]
     pub async fn create(&self, spec: CreateSpec) -> Result<Created, ManagerError> {
         let started = Instant::now();
@@ -114,12 +130,14 @@ impl Manager {
         let wc_settings = self.wc_settings(watcher)?;
         let id = WorkspaceId::generate();
         tracing::Span::current().record("workspace_id", tracing::field::display(id));
+        let agent = spec.agent.clone().unwrap_or_else(|| spec.owner.clone());
         let paths = self.new_paths(repo.id, id, spec.path.as_deref())?;
         let backend = self.select_backend(spec.backend, repo.id, &paths).await?;
         lap.next();
 
         // 2.
-        let resolved = resolve_start(&handle, spec.start.clone(), None).await?;
+        let import = import_meta(Some(id), Some(&agent));
+        let resolved = resolve_start(&handle, spec.start.clone(), None, import).await?;
         let length = self
             .leases
             .length_with_spec(spec.lease, resolved.spec.lease)?;
@@ -132,7 +150,7 @@ impl Manager {
         timings.base_ms = lap.next();
 
         // 4.
-        let mut undo = Undo::new(handle.clone(), id);
+        let mut undo = Undo::new(handle.clone(), id, agent.clone());
         materialize(backend, &base, &paths, &mut undo).await?;
         timings.materialize_ms = lap.next();
         let (_mounting, plan, mounted) = self
@@ -142,8 +160,15 @@ impl Manager {
 
         // 5.
         let generation = handle.generation();
-        let created =
-            create_jj_workspace(&handle, id, &paths, resolved.start.clone(), wc_settings).await;
+        let created = create_jj_workspace(
+            &handle,
+            id,
+            &paths,
+            resolved.start.clone(),
+            wc_settings,
+            &agent,
+        )
+        .await;
         let (ws, op_id, wc) = undo.or_undo(created).await?;
         undo.jj_workspace = true;
         undo.state_dir = Some(paths.state_dir.clone());
@@ -525,16 +550,17 @@ async fn materialize(
 /// Step 2, on the repository thread; also a move's target (R1.06). The
 /// revision is a revset naming one commit (R2.02); `@` is `workspace`'s
 /// working-copy commit (the jj name of a moving workspace), and invalid
-/// without one.
+/// without one. `import` is what a ref import first records.
 pub(super) async fn resolve_start(
     handle: &RepoHandle,
     start: Start,
     workspace: Option<String>,
+    import: OpMeta,
 ) -> Result<ResolvedStart, ManagerError> {
     handle
         .call_async(move |head| {
             async move {
-                refresh_for_resolve(head).await?;
+                refresh_for_resolve(head, &import).await?;
                 let mut chosen = None;
                 let scope = RevsetScope {
                     workspace: workspace.as_deref(),
@@ -609,14 +635,17 @@ pub(super) async fn resolve_start(
 
 /// Reloads the repository thread at head and, in a colocated repository,
 /// imports git refs, so operations the `jj` CLI wrote on the registered
-/// root (bookmarks, new changes) count when a revision is resolved.
+/// root (bookmarks, new changes) count when a revision is resolved. The
+/// import, if it changes anything, is recorded with `import`
+/// ([`import_meta`]).
 pub(super) async fn refresh_for_resolve(
     head: &mut crate::repo::RepoHead,
+    import: &OpMeta,
 ) -> Result<(), ManagerError> {
     head.reload().await?;
     if head.colocated {
         let begun = Instant::now();
-        let imported = head.repo.import_git_refs(IMPORT_DESCRIPTION).await?;
+        let imported = head.repo.import_git_refs(import).await?;
         tracing::info!(
             op_id = ?imported.op_id.as_ref().map(ToString::to_string),
             elapsed_ms = elapsed_ms(begun),
@@ -656,31 +685,32 @@ pub(super) fn default_start(repo: &Repo) -> Result<DefaultStart, ManagerError> {
 
 /// Step 5, on the repository thread: the jj workspace, its handle, the
 /// operation, and its working-copy commit. A failure after jj committed
-/// the operation forgets the workspace again before returning.
+/// the operation forgets the workspace again before returning. `agent`
+/// caused both.
 async fn create_jj_workspace(
     handle: &RepoHandle,
     id: WorkspaceId,
     paths: &WorkspacePaths,
     start: StartPoint,
     wc_settings: reef_lib::jj::UserSettings,
+    agent: &str,
 ) -> Result<(Repo, String, ChangeSummary), ManagerError> {
     let name = id.jj_workspace_name();
     let root = paths.root.clone();
     let state_dir = paths.state_dir.clone();
-    let description = format!("reef: create workspace {id}");
+    let meta = op_meta(
+        OpKind::CreateWorkspace,
+        format!("reef: create workspace {id}"),
+        id,
+        agent,
+    );
+    let agent = agent.to_owned();
     handle
         .call_async(move |head| {
             async move {
                 let created = head
                     .repo
-                    .create_workspace_with(
-                        &name,
-                        &root,
-                        &state_dir,
-                        start,
-                        &description,
-                        &wc_settings,
-                    )
+                    .create_workspace_with(&name, &root, &state_dir, start, &meta, &wc_settings)
                     .await;
                 let (ws, op_id) = match created {
                     Ok(created) => created,
@@ -693,7 +723,7 @@ async fn create_jj_workspace(
                                 | CreateWorkspaceError::WorkspaceStore(_)
                                 | CreateWorkspaceError::Path(_)
                         ) {
-                            forget_on_thread(head, &name, id).await;
+                            forget_on_thread(head, &name, id, &agent).await;
                         }
                         return Err(error.into());
                     }
@@ -702,7 +732,7 @@ async fn create_jj_workspace(
                     Ok(wc) => Ok((ws, op_id.to_string(), wc)),
                     Err(error) => {
                         drop(ws);
-                        forget_on_thread(head, &name, id).await;
+                        forget_on_thread(head, &name, id, &agent).await;
                         std::fs::remove_dir_all(&state_dir).ok();
                         Err(error.into())
                     }
@@ -714,9 +744,19 @@ async fn create_jj_workspace(
 }
 
 /// Forgets `name` from inside a repository-thread job, logging failure.
-async fn forget_on_thread(head: &mut crate::repo::RepoHead, name: &str, id: WorkspaceId) {
-    let description = format!("reef: release workspace {id} (create failed)");
-    match head.repo.forget_workspace(name, &description).await {
+async fn forget_on_thread(
+    head: &mut crate::repo::RepoHead,
+    name: &str,
+    id: WorkspaceId,
+    agent: &str,
+) {
+    let meta = op_meta(
+        OpKind::ReleaseWorkspace,
+        format!("reef: release workspace {id} (create failed)"),
+        id,
+        agent,
+    );
+    match head.repo.forget_workspace(name, &meta).await {
         Ok(_) | Err(reef_lib::jj::ForgetWorkspaceError::NoSuchWorkspace(_)) => {}
         Err(error) => tracing::error!(
             workspace_id = %id,
@@ -765,6 +805,8 @@ pub(super) async fn seed(
 struct Undo {
     handle: RepoHandle,
     id: WorkspaceId,
+    /// The create's agent, who also causes its undoing.
+    agent: String,
     /// The backend and the paths it materialized (step 4).
     backend: Option<(Box<dyn Backend>, WorkspacePaths)>,
     /// Whether the jj workspace exists (step 5).
@@ -777,10 +819,11 @@ struct Undo {
 }
 
 impl Undo {
-    fn new(handle: RepoHandle, id: WorkspaceId) -> Self {
+    fn new(handle: RepoHandle, id: WorkspaceId, agent: String) -> Self {
         Self {
             handle,
             id,
+            agent,
             backend: None,
             jj_workspace: false,
             state_dir: None,
@@ -818,6 +861,7 @@ impl Undo {
                 &self.handle,
                 id,
                 "reef: release workspace {id} (create failed)",
+                &self.agent,
             )
             .await
         {
@@ -896,8 +940,12 @@ mod tests {
             std::fs::write(git.join("HEAD"), format!("ref: {name}\n")).unwrap();
         }
         let settings = settings(&tmp.path().join("state"));
-        let mut repo = Repo::init_in_git_repo(&root, &settings).await.unwrap();
-        repo.import_git_refs("import").await.unwrap();
+        let mut repo = Repo::init_in_git_repo(&root, &settings, None)
+            .await
+            .unwrap();
+        repo.import_git_refs(&import_meta(None, None))
+            .await
+            .unwrap();
         (tmp, repo, commit.parse().unwrap())
     }
 

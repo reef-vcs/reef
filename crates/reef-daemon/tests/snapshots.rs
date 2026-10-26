@@ -495,8 +495,14 @@ async fn forgotten_workspace_is_recovered() {
     let root = repo.root.clone();
     tokio::task::spawn_blocking(move || {
         let mut main = pollster::block_on(Repo::open(&root, &test_settings())).unwrap();
-        pollster::block_on(main.forget_workspace(&name, "forget it behind the daemon's back"))
-            .unwrap();
+        pollster::block_on(main.forget_workspace(
+            &name,
+            &reef_lib::jj::OpMeta::new(
+                reef_lib::jj::OpKind::External,
+                "forget it behind the daemon's back",
+            ),
+        ))
+        .unwrap();
     })
     .await
     .unwrap();

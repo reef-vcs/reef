@@ -91,19 +91,21 @@ pub(super) struct Snapshotted {
 }
 
 /// Snapshots `target`'s workspace before a read when `needed` and the
-/// workspace is active; a failure fails the read.
+/// workspace is active, for `agent` (the request's `reef-agent`); a
+/// failure fails the read.
 pub(super) async fn snapshot_first(
     state: &AppState,
     target: &Target,
     needed: bool,
     arrived: Instant,
+    agent: Option<String>,
 ) -> Result<Snapshotted, Status> {
     let Some(record) = target.active().filter(|_| needed) else {
         return Ok(Snapshotted::default());
     };
     let taken = state
         .manager
-        .snapshot_for_read(record.id, arrived)
+        .snapshot_for_read(record.id, arrived, agent.clone())
         .await
         .map_err(|error| status(ReadError::Snapshot(Box::new(error))))?;
     let ReadSnapshot::Taken(outcome) = taken else {
@@ -119,7 +121,7 @@ pub(super) async fn snapshot_first(
             kind: v1::OperationKind::Snapshot,
             snapshot: Some(crate::snapshot::SnapshotKind::Explicit),
             workspace: Some(&workspace_id),
-            agent: &record.owner,
+            agent: agent.as_deref().unwrap_or(&record.owner),
         },
     )
     .await?;

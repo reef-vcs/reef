@@ -14,6 +14,7 @@ use jj_lib::op_walk::walk_ancestors;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
+use jj_lib::transaction::{Transaction, TransactionCommitError};
 
 use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
@@ -351,6 +352,87 @@ impl OpKind {
     }
 }
 
+/// What Reef records about an operation it writes (R2.03): its
+/// description and the `reef.*` attributes. Every transaction Reef commits
+/// records it through this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpMeta {
+    /// The operation's description.
+    pub description: String,
+    /// [`ATTR_KIND`].
+    pub kind: OpKind,
+    /// [`ATTR_SNAPSHOT_KIND`], for a snapshot.
+    pub snapshot_kind: Option<String>,
+    /// [`ATTR_WORKSPACE`]: the Reef workspace id the operation was for.
+    pub workspace: Option<String>,
+    /// [`ATTR_AGENT`]: who caused it.
+    pub agent: Option<String>,
+}
+
+impl OpMeta {
+    /// An operation of `kind` described by `description`, with no other
+    /// attributes.
+    pub fn new(kind: OpKind, description: impl Into<String>) -> OpMeta {
+        OpMeta {
+            description: description.into(),
+            kind,
+            snapshot_kind: None,
+            workspace: None,
+            agent: None,
+        }
+    }
+
+    /// With [`ATTR_SNAPSHOT_KIND`].
+    #[must_use]
+    pub fn snapshot_kind(mut self, kind: impl Into<String>) -> OpMeta {
+        self.snapshot_kind = Some(kind.into());
+        self
+    }
+
+    /// With [`ATTR_WORKSPACE`].
+    #[must_use]
+    pub fn workspace(mut self, id: impl Into<String>) -> OpMeta {
+        self.workspace = Some(id.into());
+        self
+    }
+
+    /// With [`ATTR_AGENT`].
+    #[must_use]
+    pub fn agent(mut self, agent: impl Into<String>) -> OpMeta {
+        self.agent = Some(agent.into());
+        self
+    }
+
+    /// Sets the attributes on `tx`: [`ATTR_KIND`] unless the kind is
+    /// [`OpKind::External`] (which stands for another jj client, so it
+    /// writes none: tests use it to write as one), the others when present
+    /// and not empty.
+    pub(crate) fn apply(&self, tx: &mut Transaction) {
+        if self.kind != OpKind::External {
+            tx.set_attribute(ATTR_KIND.to_owned(), self.kind.as_str().to_owned());
+        }
+        let optional = [
+            (ATTR_SNAPSHOT_KIND, &self.snapshot_kind),
+            (ATTR_WORKSPACE, &self.workspace),
+            (ATTR_AGENT, &self.agent),
+        ];
+        for (key, value) in optional {
+            if let Some(value) = value.as_deref().filter(|value| !value.is_empty()) {
+                tx.set_attribute(key.to_owned(), value.to_owned());
+            }
+        }
+    }
+
+    /// Applies the attributes and commits `tx` with the description.
+    pub(crate) async fn commit(
+        &self,
+        mut tx: Transaction,
+    ) -> Result<Arc<ReadonlyRepo>, TransactionCommitError> {
+        self.apply(&mut tx);
+        tx.commit(self.description.as_str()).await
+    }
+}
+
 /// How Reef reads an operation it did not just write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpClass {
@@ -378,6 +460,19 @@ const DESCRIBED: [(&str, OpKind); 4] = [
 const IMPORT_REFS: &str = "reef: import git refs";
 /// The prefix of `reef_lib::jj::undo`'s description.
 const UNDO_PREFIX: &str = "undo: restore to operation ";
+/// The descriptions of the write RPCs (R2.03), each followed by a full
+/// commit or operation id.
+const WRITES: [(&str, OpKind); 3] = [
+    (DESCRIBE_PREFIX, OpKind::Describe),
+    (ABANDON_PREFIX, OpKind::Abandon),
+    (REVERT_PREFIX, OpKind::Undo),
+];
+/// The description of a describe, before the commit id it rewrote.
+pub const DESCRIBE_PREFIX: &str = "reef: describe commit ";
+/// The description of an abandon, before the commit id it abandoned.
+pub const ABANDON_PREFIX: &str = "reef: abandon commit ";
+/// The description of an undo, before the operation id it reverted.
+pub const REVERT_PREFIX: &str = "reef: undo operation ";
 /// Every description Reef writes starts so, except jj's own texts.
 const REEF_PREFIX: &str = "reef: ";
 
@@ -442,6 +537,11 @@ pub fn classify(entry: &OpEntry) -> OpClass {
     }
     if description.starts_with(UNDO_PREFIX) {
         return class(OpKind::Undo, None);
+    }
+    for (prefix, kind) in WRITES {
+        if description.starts_with(prefix) {
+            return class(kind, None);
+        }
     }
     if description.starts_with(REEF_PREFIX) {
         return class(OpKind::Other, None);
@@ -742,5 +842,22 @@ mod tests {
         let fin = format!("reef: final snapshot of workspace {ID} (released)");
         let mark = is_reef_snapshot(&in_workspace(&fin, true, &name)).unwrap();
         assert_eq!(mark.kind, SnapshotMarkKind::Final);
+    }
+
+    #[test]
+    fn write_descriptions_classify_without_attributes() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for (description, kind) in [
+            (format!("{DESCRIBE_PREFIX}{commit}"), OpKind::Describe),
+            (format!("{ABANDON_PREFIX}{commit}"), OpKind::Abandon),
+            (format!("{REVERT_PREFIX}{commit}"), OpKind::Undo),
+        ] {
+            let mut op = entry(&description, false);
+            op.workspace = None;
+            op.parents = vec!["01".parse().unwrap()];
+            let class = classify(&op);
+            assert_eq!(class.kind, Some(kind), "{description}");
+            assert_eq!(class.workspace_id, None, "{description}");
+        }
     }
 }

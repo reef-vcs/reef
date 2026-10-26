@@ -12,6 +12,7 @@ use jj_lib::git::{GitImportError, GitImportOptions, GitSettings};
 use jj_lib::repo::Repo as _;
 use jj_lib::transaction::TransactionCommitError;
 
+use super::oplog::OpMeta;
 use super::repo::{OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
@@ -60,7 +61,7 @@ impl Classify for ImportRefsError {
 
 impl Repo {
     /// Imports the git repository's refs into jj's view in a transaction
-    /// described by `description`, committed only if it changes anything,
+    /// recorded with `meta`, committed only if it changes anything,
     /// and adopts the new operation, as the `jj` CLI does before each
     /// command in a colocated repository. Local branches become local
     /// bookmarks; remote-tracking bookmarks are not auto-tracked. Only
@@ -70,10 +71,10 @@ impl Repo {
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn import_git_refs(
         &mut self,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<ImportRefsOutcome, ImportRefsError> {
         let outcome = self
-            .import_git_refs_unlogged(description)
+            .import_git_refs_unlogged(meta)
             .await
             .inspect_err(|error| crate::log_failure!(error))?;
         if let Some(op_id) = &outcome.op_id {
@@ -94,7 +95,7 @@ impl Repo {
 
     async fn import_git_refs_unlogged(
         &mut self,
-        description: &str,
+        meta: &OpMeta,
     ) -> Result<ImportRefsOutcome, ImportRefsError> {
         let git_settings = GitSettings::from_settings(self.workspace.settings())?;
         let options = GitImportOptions {
@@ -117,7 +118,7 @@ impl Repo {
             });
         }
         tx.repo_mut().rebase_descendants().await?;
-        self.repo = tx.commit(description).await?;
+        self.repo = meta.commit(tx).await?;
         Ok(ImportRefsOutcome {
             op_id: Some(OperationIdHex::of(self.repo.op_id())),
             abandoned_commits: stats.abandoned_commits.len(),

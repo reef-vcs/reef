@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use prost::Message as _;
-use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
@@ -70,26 +69,7 @@ async fn declared_rpcs_say_not_implemented() {
             seen.insert($path);
         }};
     }
-    let mut changes = ChangeServiceClient::new(channel.clone());
-    check!(
-        changes,
-        describe_change,
-        DescribeChangeRequest,
-        "/reef.api.v1.ChangeService/DescribeChange"
-    );
-    check!(
-        changes,
-        abandon_change,
-        AbandonChangeRequest,
-        "/reef.api.v1.ChangeService/AbandonChange"
-    );
     let mut operations = OperationServiceClient::new(channel.clone());
-    check!(
-        operations,
-        undo_operation,
-        UndoOperationRequest,
-        "/reef.api.v1.OperationService/UndoOperation"
-    );
     check!(
         operations,
         subscribe_operations,
@@ -134,8 +114,8 @@ async fn declared_rpcs_say_not_implemented() {
         SubscribePresenceRequest,
         "/reef.api.v1.PresenceService/SubscribePresence"
     );
-    // R2.02 implements the other six.
-    assert_eq!(seen.len(), 10);
+    // R2.02 implements six more, R2.03 three.
+    assert_eq!(seen.len(), 7);
     // The client does not take a declared RPC of its own version for a
     // version mismatch.
     let error = daemon

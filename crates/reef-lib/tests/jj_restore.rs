@@ -14,6 +14,7 @@ use jj_lib::settings::UserSettings;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::{CreateWorkspaceError, RecreateWorkingCopyError, Repo, StartPoint};
+use reef_lib::jj::{OpKind, OpMeta};
 
 fn settings() -> UserSettings {
     user_settings(&Identity {
@@ -113,7 +114,13 @@ async fn a_workspace_whose_state_is_gone_gets_a_new_working_copy() {
     let (root, state) = (dir.path().join("ws"), dir.path().join("wc"));
     std::fs::create_dir(&root).unwrap();
     let (ws, _) = main
-        .create_workspace("reef-1", &root, &state, StartPoint::NewOn(base), "create")
+        .create_workspace(
+            "reef-1",
+            &root,
+            &state,
+            StartPoint::NewOn(base),
+            &OpMeta::new(OpKind::CreateWorkspace, "create"),
+        )
         .await
         .unwrap();
     let commit = ws.wc_change().unwrap().commit_id;

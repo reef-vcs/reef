@@ -90,6 +90,7 @@ impl StatusService for StatusHandler {
         request: Request<GetStatusRequest>,
     ) -> Result<Response<GetStatusResponse>, Status> {
         let arrived = Instant::now();
+        let agent = super::agent_of(request.metadata())?;
         let request = request.into_inner();
         let max_files = match usize::try_from(request.max_files) {
             Err(_) => return Err(status(NegativeMaxFiles(request.max_files))),
@@ -110,7 +111,7 @@ impl StatusService for StatusHandler {
         let snapshot = if request.skip_snapshot {
             None
         } else {
-            Some(snapshot_first(state, &target, target.workspace.is_some(), arrived).await?)
+            Some(snapshot_first(state, &target, target.workspace.is_some(), arrived, agent).await?)
         };
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
@@ -247,7 +248,7 @@ impl StatusService for StatusHandler {
             (Some(record), Some(found)) => {
                 let inspected = state
                     .manager
-                    .inspect(record.id, false, false)
+                    .inspect(record.id, false, false, None)
                     .await
                     .map_err(status)?;
                 let workspace = listed(

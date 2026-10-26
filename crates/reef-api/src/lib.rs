@@ -85,6 +85,16 @@ pub fn methods() -> impl Iterator<Item = &'static str> {
     ACCESS.iter().map(|(path, _)| *path)
 }
 
+/// The gRPC request metadata key naming the agent a write is for (R2.03):
+/// visible ASCII, at most [`AGENT_MAX_BYTES`] bytes. Every RPC that records
+/// an operation writes it as the operation's `reef.agent`; without it, the
+/// workspace's owner is the agent. It names who caused the write; it is
+/// not authentication.
+pub const AGENT_METADATA: &str = "reef-agent";
+
+/// The longest `reef-agent` value, in bytes.
+pub const AGENT_MAX_BYTES: usize = 256;
+
 /// The error envelope: a `google.rpc.Status` in `grpc-status-details-bin`
 /// with one `Any` of [`v1::ErrorDetail`] (ADR 0029), which stock tooling in
 /// every gRPC language decodes.
@@ -139,6 +149,33 @@ pub mod error {
     /// A change id filter that is not a hex or reverse-hex prefix.
     /// Metadata: `change`.
     pub const INVALID_CHANGE_ID: &str = "INVALID_CHANGE_ID";
+    /// A `reef-agent` request metadata value that is not visible ASCII or
+    /// is longer than 256 bytes (R2.03).
+    pub const INVALID_AGENT: &str = "INVALID_AGENT";
+    /// An `expected_commit_id` that is not a full commit id in lowercase
+    /// hex. Metadata: `commit_id`.
+    pub const INVALID_COMMIT_ID: &str = "INVALID_COMMIT_ID";
+    /// A description that contains a NUL.
+    pub const INVALID_DESCRIPTION: &str = "INVALID_DESCRIPTION";
+    /// The revision no longer names `expected_commit_id`. Metadata:
+    /// `expected_commit_id`, `commit_id` (what it names now).
+    pub const EXPECTED_COMMIT_MISMATCH: &str = "EXPECTED_COMMIT_MISMATCH";
+    /// A write to an immutable commit (`immutable()`, which includes the
+    /// root). Metadata: `commit_id`.
+    pub const IMMUTABLE_REVISION: &str = "IMMUTABLE_REVISION";
+    /// A write to a commit that is not visible at head; it would bring it
+    /// back. Metadata: `commit_id`.
+    pub const HIDDEN_REVISION: &str = "HIDDEN_REVISION";
+    /// An operation `UndoOperation` never undoes: the root, a merge, one
+    /// that adds or forgets a workspace, a workspace move, or one that
+    /// changed git refs. Metadata: `operation_id`.
+    pub const OPERATION_NOT_UNDOABLE: &str = "OPERATION_NOT_UNDOABLE";
+    /// An operation that is not an ancestor of the head. Metadata:
+    /// `operation_id`.
+    pub const OPERATION_NOT_IN_HISTORY: &str = "OPERATION_NOT_IN_HISTORY";
+    /// Something the operation changed has changed again since, so it
+    /// cannot be undone exactly. Metadata: `operation_id`.
+    pub const OPERATION_SUPERSEDED: &str = "OPERATION_SUPERSEDED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

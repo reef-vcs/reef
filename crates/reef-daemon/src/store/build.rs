@@ -81,6 +81,8 @@ pub struct BuildRequest {
     pub timeout: Duration,
     /// Build even if a sealed store exists, replacing it.
     pub force: bool,
+    /// The operations' `reef.agent`; `None` for [`BUILD_OWNER`] (R2.03).
+    pub agent: Option<String>,
 }
 
 /// Which stream an output line came from.
@@ -150,6 +152,10 @@ pub struct BuildResult {
 /// ([`BuildOutput::Started`]) and then its output, best effort. A command that exits non-zero is a result with `sealed =
 /// false`; a timeout, a shutdown, or a command that cannot start is an
 /// error.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the build's steps in order; R2.03's agent tipped it over"
+)]
 #[tracing::instrument(skip_all, fields(repo = %request.repo, store = %request.name, force = request.force))]
 pub async fn run(
     manager: Arc<Manager>,
@@ -160,7 +166,12 @@ pub async fn run(
     let begun = Instant::now();
     // 1.
     let (commit, store, target) = manager
-        .resolve_store(request.repo, request.rev.clone(), request.name.clone())
+        .resolve_store(
+            request.repo,
+            request.rev.clone(),
+            request.name.clone(),
+            request.agent.clone(),
+        )
         .await?;
     let stores = Arc::clone(manager.stores());
     let key = target.key.clone();
@@ -364,6 +375,7 @@ async fn build_in_scratch(
             lease: None,
             missing_stores: MissingStores::Skip,
             skip_store: Some(store.name.clone()),
+            agent: request.agent.clone(),
         })
         .await?;
     let ws = created.record.id;
@@ -420,6 +432,7 @@ async fn build_in_scratch(
         force: true,
         final_snapshot: false,
         detail: Some(BUILD_DETAIL),
+        agent: request.agent.clone(),
     };
     let op_id = match manager
         .leases()

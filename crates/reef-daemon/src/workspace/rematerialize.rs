@@ -26,10 +26,10 @@
 //! before the backup are gone: directories are caches.
 
 use futures::FutureExt as _;
-use reef_lib::jj::{ChangeSummary, CommitIdHex, Repo, StartPoint, UserSettings};
+use reef_lib::jj::{ChangeSummary, CommitIdHex, OpKind, OpMeta, Repo, StartPoint, UserSettings};
 
 use super::create::seed;
-use super::{Manager, ManagerError};
+use super::{Manager, ManagerError, op_meta};
 use crate::backend::{BackendKind, WorkspacePaths, backend_for};
 use crate::model::WorkspaceRecord;
 use crate::repo::RepoHandle;
@@ -80,7 +80,13 @@ impl Manager {
         };
 
         // 3.
-        let (ws, wc) = attach(handle, &name, &paths, commit, in_view, settings).await?;
+        let meta = op_meta(
+            OpKind::Other,
+            format!("reef: rematerialize workspace {id}"),
+            id,
+            &record.owner,
+        );
+        let (ws, wc) = attach(handle, &name, &paths, commit, in_view, settings, meta).await?;
 
         // 4.
         let ws = if let Some(base) = &base {
@@ -158,8 +164,9 @@ async fn attach(
     commit: CommitIdHex,
     in_view: bool,
     settings: UserSettings,
+    meta: OpMeta,
 ) -> Result<(Repo, ChangeSummary), ManagerError> {
-    let (name, id) = (name.to_owned(), paths.id);
+    let name = name.to_owned();
     let (root, state_dir) = (paths.root.clone(), paths.state_dir.clone());
     handle
         .call_async(move |head| {
@@ -168,17 +175,9 @@ async fn attach(
                     head.repo
                         .attach_workspace_with(&name, &root, &state_dir, &settings)?
                 } else {
-                    let description = format!("reef: rematerialize workspace {id}");
                     let start = StartPoint::Edit(commit);
                     head.repo
-                        .create_workspace_with(
-                            &name,
-                            &root,
-                            &state_dir,
-                            start,
-                            &description,
-                            &settings,
-                        )
+                        .create_workspace_with(&name, &root, &state_dir, start, &meta, &settings)
                         .await?
                         .0
                 };
