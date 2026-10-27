@@ -21,14 +21,22 @@ pub(super) struct Activity {
     /// The agent when neither `REEF_AGENT` nor a workspace's owner names
     /// one: the server's owner name.
     fallback: String,
-    reporters: Mutex<HashMap<(String, String), Reporter>>,
+    reporters: Mutex<Reporters>,
+}
+
+#[derive(Default)]
+struct Reporters {
+    by_subject: HashMap<(String, String), Reporter>,
+    /// Set by [`Activity::clear_all`]: a call still being served while the
+    /// server stops reports nothing that would outlive it.
+    closed: bool,
 }
 
 impl Activity {
     pub(super) fn new(fallback: String) -> Self {
         Self {
             fallback,
-            reporters: Mutex::new(HashMap::new()),
+            reporters: Mutex::new(Reporters::default()),
         }
     }
 
@@ -42,8 +50,13 @@ impl Activity {
             .reporters
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        reporters.retain(|_, reporter| reporter.is_live());
-        let reporter = reporters.entry(key).or_insert_with(|| {
+        if reporters.closed {
+            return;
+        }
+        reporters
+            .by_subject
+            .retain(|_, reporter| reporter.is_live());
+        let reporter = reporters.by_subject.entry(key).or_insert_with(|| {
             let subject = Subject {
                 agent: presence::agent(
                     ctx.agent.as_deref(),
@@ -67,15 +80,21 @@ impl Activity {
         });
     }
 
-    /// Clears every entry held, together, within [`CLEAR_DEADLINE`].
+    /// Clears every entry held, together, within [`CLEAR_DEADLINE`], and
+    /// reports nothing more.
     pub(super) async fn clear_all(&self) {
-        let reporters: Vec<Reporter> = self
-            .reporters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain()
-            .map(|(_, reporter)| reporter)
-            .collect();
+        let reporters: Vec<Reporter> = {
+            let mut reporters = self
+                .reporters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            reporters.closed = true;
+            reporters
+                .by_subject
+                .drain()
+                .map(|(_, reporter)| reporter)
+                .collect()
+        };
         let mut clears = JoinSet::new();
         for reporter in reporters {
             clears.spawn(reporter.clear());

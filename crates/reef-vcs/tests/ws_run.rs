@@ -633,15 +633,19 @@ async fn subscribed(daemon: &TestDaemon, n: usize) {
     }
 }
 
+/// A command that prints the activity entries it sees. The report is sent
+/// just after the spawn, so it may land after the watch subscribed: `--for
+/// 3` waits for it.
+const WATCH_ACTIVITY: &str =
+    r#""$REEF_BIN" --no-autostart presence watch --for 3 --kind activity -o json"#;
+
 // R2.11 8: `ws run` reports its command as an activity entry, under the
 // agent's name or else the workspace's owner, and clears it before the
 // release, with `--keep` too; a command that cannot start reports nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_run_reports_its_command() {
     let (daemon, repo) = with_repo().await;
-    // The report is sent just after the spawn, so it may land after the
-    // child subscribed: `--for 1` waits for it.
-    let script = r#""$REEF_BIN" --no-autostart presence watch --for 1 --kind activity -o json"#;
+    let script = WATCH_ACTIVITY;
     let mut command = reef(&daemon);
     command
         .env("REEF_BIN", env!("CARGO_BIN_EXE_reef"))
@@ -740,4 +744,46 @@ async fn ws_run_reports_its_command() {
     );
 
     assert!(of(&missing, "activity").is_empty(), "{events:?}");
+}
+
+// R2.11 8: attached with --workspace and no agent name, `ws run` reports
+// under the attached workspace's owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_reports_for_an_attached_workspace() {
+    let (daemon, repo) = with_repo().await;
+    let script = WATCH_ACTIVITY;
+    let created = finish({
+        let mut command = reef(&daemon);
+        command.args(["-o", "json", "ws", "create", "--repo", &repo.id]);
+        command
+    })
+    .await;
+    assert!(created.status.success(), "{}", stderr(&created));
+    let created: Value = serde_json::from_str(&stdout(&created)).unwrap();
+    let attached_id = created["id"].as_str().unwrap();
+    let mut command = reef(&daemon);
+    command
+        .env("REEF_BIN", env!("CARGO_BIN_EXE_reef"))
+        .args([
+            "-o",
+            "text",
+            "ws",
+            "run",
+            "--workspace",
+            attached_id,
+            "--",
+            "sh",
+            "-c",
+        ])
+        .arg(script);
+    let output = finish(command).await;
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["presence"]["workspace_id"], attached_id);
+    assert_eq!(
+        lines[0]["presence"]["agent"],
+        reef_client::default_owner(),
+        "the attached workspace's owner"
+    );
 }

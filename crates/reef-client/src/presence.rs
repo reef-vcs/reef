@@ -135,14 +135,14 @@ impl Cadence {
 }
 
 /// The agent an entry names: the name the client sends as `reef-agent`,
-/// else the owner of the workspace the entry names, else `fallback`. Blank
-/// names fall through.
+/// else the owner of the workspace the entry names, else `fallback`. A
+/// blank name, or one the daemon would refuse as an agent (an owner need
+/// not be visible ASCII, nor at most 256 bytes), falls through.
 pub fn agent(given: Option<&str>, owner: Option<&str>, fallback: &str) -> String {
     [given, owner]
         .into_iter()
         .flatten()
-        .map(str::trim)
-        .find(|name| !name.is_empty())
+        .find_map(|name| crate::check_agent(name).ok().flatten())
         .unwrap_or(fallback)
         .to_owned()
 }
@@ -329,6 +329,9 @@ async fn run(api: Arc<dyn PresenceApi>, subject: Subject, cadence: Cadence, shar
                     Ok(Err(error)) => {
                         tracing::debug!(error = %ErrorChain(&error), "presence report failed");
                     }
+                    // A first report that timed out may still have made
+                    // an entry the reporter never learns of; it lapses
+                    // after its TTL.
                     Err(_) => tracing::debug!("presence report timed out"),
                 }
             }
@@ -677,6 +680,58 @@ mod tests {
         }
     }
 
+    // 4, with an entry held: an unreachable daemon keeps the id, and a
+    // refusal because the workspace ended stops without a clear.
+    #[tokio::test(start_paused = true)]
+    async fn failures_with_an_entry_held() {
+        let fake = Fake::new(vec![
+            Answer::Ok,
+            Answer::Fail(tonic::Status::unavailable("daemon is down")),
+            Answer::Ok,
+            Answer::Fail(refused(
+                tonic::Code::FailedPrecondition,
+                reef_api::v1::ErrorKind::Conflict,
+                "",
+            )),
+        ]);
+        let reporter = Reporter::start(fake.clone(), subject(), Cadence::REFRESH);
+        reporter.set(doing("a"));
+        settle().await;
+        advance(REFRESH_EVERY).await;
+        advance(REFRESH_EVERY).await;
+        advance(REFRESH_EVERY).await;
+        advance(REFRESH_EVERY * 3).await;
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 4, "{reports:?}");
+        for (_, replacement) in &reports[1..] {
+            assert_eq!(replacement.presence_id, "0000000000000001");
+        }
+        assert!(!reporter.is_live());
+        reporter.clear().await;
+        assert_eq!(fake.clears(), Vec::<String>::new(), "the daemon ended it");
+    }
+
+    // 4, bursts: a report refused at the cap waits for the next set.
+    #[tokio::test(start_paused = true)]
+    async fn burst_drops_a_refused_report() {
+        let fake = Fake::new(vec![Answer::Fail(refused(
+            tonic::Code::Unavailable,
+            reef_api::v1::ErrorKind::Unavailable,
+            reef_api::error::TOO_MANY_PRESENCE_ENTRIES,
+        ))]);
+        let reporter = Reporter::start(fake.clone(), subject(), Cadence::BURST);
+        reporter.set(doing("get_status"));
+        settle().await;
+        advance(Duration::from_secs(30)).await;
+        assert_eq!(fake.reports().len(), 1);
+        reporter.set(doing("list_files"));
+        settle().await;
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 2, "{reports:?}");
+        assert_eq!(reports[1].1.presence_id, "");
+        assert_eq!(reports[1].1.activity, "list_files");
+    }
+
     // 5
     #[tokio::test(start_paused = true)]
     async fn burst_does_not_refresh() {
@@ -724,6 +779,14 @@ mod tests {
         reporter.clear().await;
         assert_eq!(fake.reports().len(), 0, "nothing before set");
         assert!(fake.clears().is_empty(), "no entry held");
+
+        // A set the task has not yet sent is dropped by a clear.
+        let fake = Fake::new(vec![]);
+        let reporter = Reporter::start(fake.clone(), subject(), Cadence::REFRESH);
+        reporter.set(doing("a"));
+        reporter.clear().await;
+        assert_eq!(fake.reports().len(), 0, "never sent");
+        assert!(fake.clears().is_empty(), "no entry held");
     }
 
     // 7
@@ -734,5 +797,11 @@ mod tests {
         assert_eq!(agent(Some("  "), Some("u@h:1"), "u@h"), "u@h:1");
         assert_eq!(agent(None, None, "u@h"), "u@h");
         assert_eq!(agent(Some(""), Some(""), "u@h"), "u@h");
+        assert_eq!(agent(None, Some("équipe"), "u@h"), "u@h", "not ASCII");
+        assert_eq!(
+            agent(None, Some(&"x".repeat(300)), "u@h"),
+            "u@h",
+            "too long"
+        );
     }
 }

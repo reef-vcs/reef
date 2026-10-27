@@ -1795,7 +1795,8 @@ async fn presence_report_replaces_by_file() {
     assert!(left.is_empty(), "{left:?}");
 }
 
-// R2.11 12: the cap per agent, with the CLI's hint.
+// R2.11 12: the cap per agent, with the CLI's hint. Entries last ten
+// minutes, so none lapses however slowly the 32 reports run.
 #[tokio::test(flavor = "multi_thread")]
 async fn presence_report_cap_hint() {
     let (daemon, repo) = fixture().await;
@@ -1809,6 +1810,8 @@ async fn presence_report_cap_hint() {
                 "capbot",
                 "presence",
                 "report",
+                "--ttl",
+                "10m",
                 &format!("task {n}"),
             ],
         )
@@ -1863,6 +1866,8 @@ async fn ws_renew() {
     )
     .await;
     assert_eq!(wrong.status.code(), Some(5), "{}", stderr(&wrong));
+    let wrong: Value = serde_json::from_str(&stdout(&wrong)).unwrap();
+    assert!(wrong["error"]["next"].is_null(), "{wrong}");
     err(
         &daemon,
         &repo.root,

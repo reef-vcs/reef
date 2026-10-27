@@ -13,7 +13,7 @@
 //! replace or clear it, directly (`--id`) or through a file (`--id-file`).
 
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -311,24 +311,27 @@ fn read_id_file(file: &Path) -> Result<Option<String>, CliError> {
     }
 }
 
-/// Writes `id` and a newline to `file` through a file beside it, so a
-/// reader never sees half an id.
+/// Writes `id` and a newline to `file` through a new temporary file beside
+/// it, created exclusively under a random name, so a reader never sees
+/// half an id and nothing planted at a predictable name is written through.
 fn write_id_file(file: &Path, id: &str) -> Result<(), CliError> {
-    let name = file.file_name().map_or_else(
-        || "presence".into(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let temporary = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let written = std::fs::write(&temporary, format!("{id}\n"))
-        .and_then(|()| std::fs::rename(&temporary, file));
-    written.map_err(|source| {
-        let _ = std::fs::remove_file(&temporary);
-        CliError::Io {
-            op: "write",
-            path: file.to_owned(),
-            source,
-        }
-    })
+    let io_error = |source| CliError::Io {
+        op: "write",
+        path: file.to_owned(),
+        source,
+    };
+    let parent = match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
+    temporary
+        .write_all(format!("{id}\n").as_bytes())
+        .map_err(io_error)?;
+    temporary
+        .persist(file)
+        .map(drop)
+        .map_err(|error| io_error(error.error))
 }
 
 fn remove_id_file(file: &Path) -> Result<(), CliError> {
