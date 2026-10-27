@@ -46,6 +46,7 @@ rmcp.workspace = true            # `reef mcp` (R2.13)
 schemars.workspace = true        # its tools' input schemas
 base64.workspace = true          # `edit_files`' `content_base64`
 indexmap.workspace = true        # `.mcp.json` merged in its own order (R2.13)
+tempfile.workspace = true        # `presence report --id-file` writes through a temporary file (R2.11)
 
 [dev-dependencies]
 prost-reflect.workspace = true   # the tools' annotations against the descriptor set (R2.13)
@@ -57,7 +58,6 @@ reef-daemon = { workspace = true, features = ["testing"] }
 reef-lib.workspace = true        # tests open jj repositories; never a normal dependency (R2.05)
 reef-testing.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true    # tests/old_daemon.rs serves its fake 0.1 daemon on a Unix socket
 toml.workspace = true

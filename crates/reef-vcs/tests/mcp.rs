@@ -969,3 +969,122 @@ async fn concurrent_calls() {
     let (_, waited) = result_of(&mcp.response(wait).await);
     assert_eq!(waited["timed_out"], true);
 }
+
+/// The live `activity` entries, through `reef presence watch`.
+async fn activities(daemon: &TestDaemon, dir: &Path) -> Vec<Value> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
+    command.env_remove("REEF_AGENT").env_remove("REEF_SOCKET");
+    let output = command
+        .env("REEF_STATE_DIR", daemon.state_dir())
+        .current_dir(dir)
+        .args([
+            "--no-autostart",
+            "presence",
+            "watch",
+            "--kind",
+            "activity",
+            "--for",
+            "0",
+            "-o",
+            "json",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["presence"].clone())
+        .collect()
+}
+
+/// The live `activity` entry for workspace `ws` by `agent`, once it says
+/// `activity`.
+async fn activity_of(
+    daemon: &TestDaemon,
+    dir: &Path,
+    ws: &str,
+    agent: &str,
+    activity: &str,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found: Vec<Value> = activities(daemon, dir)
+            .await
+            .into_iter()
+            .filter(|entry| entry["workspace_id"] == ws && entry["agent"] == agent)
+            .collect();
+        assert!(found.len() <= 1, "one entry per subject: {found:?}");
+        if let Some(entry) = found.first()
+            && entry["activity"] == activity
+        {
+            return entry.clone();
+        }
+        assert!(Instant::now() < deadline, "no {activity} entry: {found:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// R2.11 15: each call is reported as its subject's activity, under the
+// agent's name or the workspace's owner, and cleared when the server
+// exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_reports_its_calls() {
+    let (daemon, repo) = fixture().await;
+    let mut mcp = server(&daemon, &repo.root).await;
+    let ws = create(&mut mcp).await;
+    let ws_id = id(&ws);
+    mcp.ok("get_status", json!({"workspace": ws_id})).await;
+    let first = activity_of(&daemon, &repo.root, &ws_id, &owner(), "get_status").await;
+    assert_eq!(first["by_daemon"], false);
+    assert_eq!(first["change_id"], ws["change_id"]);
+    assert_eq!(
+        millis(&first["expires_at"]) - millis(&first["updated_at"]),
+        60_000
+    );
+    mcp.ok("list_files", json!({"workspace": ws_id})).await;
+    let second = activity_of(&daemon, &repo.root, &ws_id, &owner(), "list_files").await;
+    assert_eq!(second["id"], first["id"], "replaced, not added");
+
+    // Repository scope has an entry of its own; list_repositories names
+    // no scope.
+    let in_repo = activities(&daemon, &repo.root)
+        .await
+        .into_iter()
+        .filter(|entry| entry["workspace_id"].is_null())
+        .count();
+    assert_eq!(in_repo, 1, "create_workspace's");
+    let before = activities(&daemon, &repo.root).await.len();
+    mcp.ok("list_repositories", json!({})).await;
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(activities(&daemon, &repo.root).await.len(), before);
+
+    let mut named = command(&daemon, &repo.root);
+    named.env("REEF_AGENT", "bot-2");
+    let mut named = Mcp::start(named).await;
+    named.ok("get_status", json!({"workspace": ws_id})).await;
+    activity_of(&daemon, &repo.root, &ws_id, "bot-2", "get_status").await;
+
+    let (status, took) = mcp.close().await;
+    assert!(status.success(), "{status:?}");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    let left = activities(&daemon, &repo.root).await;
+    assert!(
+        left.iter().all(|entry| entry["agent"] == "bot-2"),
+        "the closed server's entries are cleared: {left:?}"
+    );
+    assert_eq!(left.len(), 1, "{left:?}");
+}
+
+/// An RFC 3339 time from the JSON as Unix milliseconds.
+fn millis(value: &Value) -> u128 {
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("not a time: {value}"));
+    humantime::parse_rfc3339_weak(text.trim_end_matches('Z'))
+        .unwrap_or_else(|e| panic!("{e}: {text}"))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}

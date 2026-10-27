@@ -1,4 +1,4 @@
-//! `reef ws create | list | inspect | snapshot | release | move | run | gc`.
+//! `reef ws create | list | inspect | snapshot | renew | release | move | run | gc`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,11 +10,12 @@ use reef_api::v1::{
 };
 use reef_client::ROOT_CHECKOUT;
 use reef_client::default_owner;
-use reef_client::json::{Created, GcReport, Inspected, Released, Snapshotted, Workspace};
+use reef_client::json::{Created, GcReport, Inspected, Lease, Released, Snapshotted, Workspace};
 use reef_error::{Advice, ErrorKind};
+use serde::Serialize;
 
 use super::changes::{note_divergence, short, workspace_after};
-use super::render::GcReports;
+use super::render::{GcReports, lease_text, now_ms, span};
 use super::repo::missing;
 use super::{CliError, Ctx, RepoArg, absolute, scope, ws_move, ws_run};
 
@@ -62,6 +63,15 @@ enum WsCommand {
         /// The operation's description [default: Reef's own, naming the workspace].
         #[arg(short = 'm', long = "message", value_name = "TEXT")]
         message: Option<String>,
+    },
+    /// Renew a workspace's lease: what `ws run` does while its command runs.
+    #[command(after_help = "Example: reef ws renew   # inside the workspace")]
+    Renew {
+        /// A workspace id, unique prefix, or path inside it [default: the one you are in].
+        workspace: Option<String>,
+        /// Renew this lease, failing unless it is the workspace's current one.
+        #[arg(long, value_name = "ID")]
+        lease_id: Option<String>,
     },
     /// Snapshot a workspace, then remove its directory and end its lease.
     #[command(visible_alias = "rm")]
@@ -233,6 +243,10 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Snapshot { workspace, message } => {
             snapshot(ctx, workspace.as_deref(), message.as_deref()).await
         }
+        WsCommand::Renew {
+            workspace,
+            lease_id,
+        } => renew(ctx, workspace.as_deref(), lease_id.as_deref()).await,
         WsCommand::Release {
             workspace,
             no_snapshot,
@@ -252,6 +266,75 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     done.map(|()| ExitCode::SUCCESS)
 }
 
+/// The workspace `workspace` names, else the one you are in, as the
+/// daemon reads it: a canonical path or an id.
+async fn named_or_current(ctx: &Ctx, workspace: Option<&str>) -> Result<String, CliError> {
+    match workspace {
+        Some(workspace) => scope::workspace_arg(workspace),
+        None => match scope::implicit_workspace(ctx).await? {
+            Some(ws) => Ok(ws.id),
+            None => Err(CliError::Precheck {
+                kind: ErrorKind::InvalidArgument,
+                reason: reef_api::error::WORKSPACE_REQUIRED,
+                message: "not in a workspace".to_owned(),
+                advice: Advice::run(
+                    "Name the workspace, or run this inside one.",
+                    ["reef", "ws", "list"],
+                ),
+            }),
+        },
+    }
+}
+
+/// What `ws renew` renewed.
+#[derive(Debug, Serialize)]
+struct Renewed {
+    workspace_id: String,
+    lease: Lease,
+}
+
+/// `reef ws renew` (R2.11): one heartbeat for a lease held outside `ws
+/// run`, of the workspace's current lease unless `lease_id` names one. No
+/// owner check: renewing does not take the workspace over.
+async fn renew(ctx: &Ctx, workspace: Option<&str>, lease_id: Option<&str>) -> Result<(), CliError> {
+    let named = named_or_current(ctx, workspace).await?;
+    let ws = ctx
+        .call(ctx.client.inspect_workspace("", &named, false))
+        .await?
+        .workspace
+        .ok_or_else(|| missing("workspace"))?;
+    let lease_id = match lease_id {
+        Some(id) => id.to_owned(),
+        None => ws
+            .lease
+            .as_ref()
+            .ok_or_else(|| missing("lease"))?
+            .id
+            .clone(),
+    };
+    let response = ctx
+        .call(ctx.client.renew_lease("", &ws.id, &lease_id))
+        .await?;
+    let lease = Lease::from(response.lease.as_ref().ok_or_else(|| missing("lease"))?);
+    let every = lease
+        .heartbeat_every_ms
+        .map(|ms| format!(", heartbeat every {}", span(i64::try_from(ms).unwrap_or(0))))
+        .unwrap_or_default();
+    let note = format!(
+        "renewed lease {} of {}: {}{every}",
+        lease.id,
+        ws.id,
+        lease_text(Some(&lease), now_ms())
+    );
+    ctx.out.done(
+        &Renewed {
+            workspace_id: ws.id,
+            lease,
+        },
+        &note,
+    )
+}
+
 /// `reef ws snapshot` (R2.27): the explicit form of what `ws inspect` does
 /// on the way to its report, with the workspace read afterwards so a
 /// divergent result shows.
@@ -260,23 +343,7 @@ async fn snapshot(
     workspace: Option<&str>,
     message: Option<&str>,
 ) -> Result<(), CliError> {
-    let id = match workspace {
-        Some(workspace) => scope::workspace_arg(workspace)?,
-        None => match scope::implicit_workspace(ctx).await? {
-            Some(ws) => ws.id,
-            None => {
-                return Err(CliError::Precheck {
-                    kind: ErrorKind::InvalidArgument,
-                    reason: reef_api::error::WORKSPACE_REQUIRED,
-                    message: "not in a workspace".to_owned(),
-                    advice: Advice::run(
-                        "Name the workspace, or run this inside one.",
-                        ["reef", "ws", "list"],
-                    ),
-                });
-            }
-        },
-    };
+    let id = named_or_current(ctx, workspace).await?;
     let response = ctx
         .call(
             ctx.client

@@ -103,7 +103,7 @@ fn inside(ws: &v1::Workspace, in_run: bool) -> Inside {
 }
 
 /// What to do in `ws`, by its state: release a healthy one when done (or
-/// nothing, inside `ws run`), list a divergent one's commits (R2.27),
+/// nothing, inside `ws run`), renew one in its grace period (R2.11), list a divergent one's commits (R2.27),
 /// inspect a flagged one, make another if it is gone.
 fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
     let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
@@ -121,9 +121,9 @@ fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
             argv(&["reef", "ws", "inspect", &ws.id]),
         ),
         ("active", "in_grace") if !in_run => (
-            "Its lease ran out and it is reclaimed when the grace period ends; release it now."
+            "Its lease ran out; renew it to keep working here, or release it. It is reclaimed when the grace period ends."
                 .to_owned(),
-            argv(&["reef", "ws", "release", &ws.id]),
+            argv(&["reef", "ws", "renew", &ws.id]),
         ),
         ("active", "active" | "in_grace") if in_run => (
             "Work here; `ws run` snapshots and releases this workspace when your command exits."
@@ -286,6 +286,11 @@ mod tests {
         let (_, next) = advise(&workspace("active", Some("active")), false);
         assert_eq!(next, ["reef", "ws", "release", "0123456789abcdef"]);
         let (hint, next) = advise(&workspace("active", Some("active")), true);
+        assert!(next.is_empty() && hint.contains("ws run"), "{hint}");
+        let (hint, next) = advise(&workspace("active", Some("in_grace")), false);
+        assert_eq!(next, ["reef", "ws", "renew", "0123456789abcdef"]);
+        assert!(hint.contains("renew"), "{hint}");
+        let (hint, next) = advise(&workspace("active", Some("in_grace")), true);
         assert!(next.is_empty() && hint.contains("ws run"), "{hint}");
         let (_, next) = advise(&workspace("released", Some("ended")), false);
         assert_eq!(next, ["reef", "ws", "create", "--repo", "fedcba9876543210"]);

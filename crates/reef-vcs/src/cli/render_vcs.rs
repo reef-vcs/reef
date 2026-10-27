@@ -386,6 +386,18 @@ impl TextRender for PresenceLine {
     }
 }
 
+/// A reported presence entry (R2.11): the entry in JSON, its id alone in
+/// text, so `id=$(reef presence report -o text ...)` works.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct Reported(pub(crate) Presence);
+
+impl TextRender for Reported {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "{}", self.0.id)
+    }
+}
+
 /// What a live presence entry says, in a few words.
 fn presence_says(presence: &Presence) -> String {
     if let Some(activity) = &presence.activity {

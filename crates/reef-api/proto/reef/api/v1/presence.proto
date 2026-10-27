@@ -18,6 +18,13 @@ service PresenceService {
   // client may report kind PRESENCE_KIND_LEASE or replace an entry the
   // daemon reports. Nothing is persisted: entries end with the daemon.
   //
+  // A client reporting for a process it runs keeps one entry per subject:
+  // it replaces it by id at most once a second and before its TTL runs out
+  // while the activity lasts, reports it again without `presence_id` on
+  // PRESENCE_NOT_FOUND, and clears it when the process ends. `agent` is
+  // the name the client sends as `reef-agent`, else the owner of the
+  // workspace the entry names (R2.11).
+  //
   // Errors: INVALID_ARGUMENT with reason INVALID_AGENT; INVALID_PRESENCE_ID
   // (metadata `presence_id`); PRESENCE_MISMATCH (metadata `presence_id`,
   // `field`) when a fixed field differs; DAEMON_PRESENCE (metadata `kind`

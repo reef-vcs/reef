@@ -151,6 +151,9 @@ impl AdviceCtx {
             reason::INVALID_CHANGE_ID => {
                 Advice::hint("--change takes a change id prefix, in hex or reverse hex.")
             }
+            reason::TOO_MANY_PRESENCE_ENTRIES => Advice::hint(
+                "Replace your entry instead of reporting a new one: pass --id with the id a report printed, or the same --id-file each time; reef presence clear ends one.",
+            ),
             reason::PATH_NOT_FOUND if !get("commit_id").is_empty() => {
                 let commit = get("commit_id");
                 let mut words = vec!["file", "list"];

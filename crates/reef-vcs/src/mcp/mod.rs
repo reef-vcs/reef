@@ -6,13 +6,15 @@
 //! call and remade once when the daemon goes away; the scope rule, applied
 //! per call with no state between calls, since a harness may route several
 //! agents through one server; the leases of the workspaces the server
-//! creates ([`leases`]); and errors, which are tool results carrying the
+//! creates ([`leases`]); the presence entries that say which tool was
+//! called where ([`presence`], R2.11); and errors, which are tool results carrying the
 //! CLI's error object with the daemon's `hint` and `next`, never JSON-RPC
 //! errors, so the model sees them. Stdout carries only the protocol; notes
 //! and logs go to stderr.
 
 mod args;
 mod leases;
+mod presence;
 mod results;
 mod tools;
 mod wait;
@@ -40,6 +42,7 @@ use tokio::sync::Mutex;
 use crate::cli::scope::{self, Scope, ScopeArgs};
 use crate::cli::{self, CliError, Ctx, Global, Out, error_object};
 use leases::Leases;
+use presence::Activity;
 use tools::{TOOLS, ToolDef};
 
 /// What the server tells a client about itself, at most 1,000 bytes.
@@ -89,6 +92,8 @@ pub(crate) struct ReefServer {
     /// The connection, made on the first call that needs the daemon.
     ctx: Mutex<Option<Arc<Ctx>>>,
     leases: Leases,
+    /// Shared with [`serve`], which clears the entries at exit.
+    activity: Arc<Activity>,
     /// Whether the launch environment names a repository: `REEF_WORKSPACE`,
     /// or a git or jj checkout around the current directory. When it does
     /// not, a call that names none is [`REPOSITORY_REQUIRED`].
@@ -98,6 +103,8 @@ pub(crate) struct ReefServer {
 /// What a tool gets: the server, the connection, and the request.
 pub(super) struct Call<'a> {
     pub(super) server: &'a ReefServer,
+    /// The tool's name, which its presence entry says.
+    pub(super) tool: &'static str,
     pub(super) ctx: &'a Ctx,
     pub(super) request: &'a RequestContext<RoleServer>,
 }
@@ -105,7 +112,7 @@ pub(super) struct Call<'a> {
 impl Call<'_> {
     /// The scope `repo` and `workspace` name, else the launch scope
     /// (R2.27's rule), and the lease of a workspace the server owns kept
-    /// alive. Only the launch scope registers a checkout implicitly: a
+    /// alive. The call is reported as the scope's presence. Only the launch scope registers a checkout implicitly: a
     /// `repo` path is a sandboxed agent's choice, and registering it would
     /// have the daemon, outside the sandbox, write `.jj` there and later
     /// run git on its `.git/config` (S-07, S-13).
@@ -146,6 +153,7 @@ impl Call<'_> {
         if let Some(ws) = &scope.workspace {
             self.server.leases.keep(self.ctx, ws);
         }
+        self.server.activity.called(self.ctx, self.tool, &scope);
         Ok(scope)
     }
 
@@ -224,11 +232,14 @@ pub(crate) async fn serve(global: Global, out: &Out) -> Result<ExitCode, CliErro
     global.agent()?;
     let launch_scope =
         scope::env_workspace().is_some() || scope::current_dir().is_ok_and(|dir| in_checkout(&dir));
+    let owner = format!("{}:mcp", default_owner());
+    let activity = Arc::new(Activity::new(owner.clone()));
     let server = ReefServer {
         global,
         out: out.clone(),
         ctx: Mutex::new(None),
-        leases: Leases::new(format!("{}:mcp", default_owner())),
+        leases: Leases::new(owner),
+        activity: Arc::clone(&activity),
         launch_scope,
     };
     let internal = |message: String| CliError::Refused {
@@ -252,14 +263,23 @@ pub(crate) async fn serve(global: Global, out: &Out) -> Result<ExitCode, CliErro
     };
     tracing::debug!(target: "reef", "serving MCP on stdio");
     let cancel = service.cancellation_token();
-    tokio::select! {
+    let ended = tokio::select! {
         ended = service.waiting() => {
-            ended.map_err(|error| internal(format!("serve MCP: {error}")))?;
+            ended.map(|_| ()).map_err(|error| internal(format!("serve MCP: {error}")))
         }
-        _ = terminate.recv() => cancel.cancel(),
-        _ = interrupt.recv() => cancel.cancel(),
-    }
-    Ok(ExitCode::SUCCESS)
+        _ = terminate.recv() => {
+            cancel.cancel();
+            Ok(())
+        }
+        _ = interrupt.recv() => {
+            cancel.cancel();
+            Ok(())
+        }
+    };
+    // After the service stops: stdout is the protocol's, and the clear
+    // writes nothing to it.
+    activity.clear_all().await;
+    ended.map(|()| ExitCode::SUCCESS)
 }
 
 impl ReefServer {
@@ -297,6 +317,7 @@ impl ReefServer {
             let ctx = self.ctx().await?;
             let call = Call {
                 server: self,
+                tool: tool.name,
                 ctx: &ctx,
                 request,
             };

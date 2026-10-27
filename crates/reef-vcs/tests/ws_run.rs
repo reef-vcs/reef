@@ -602,3 +602,188 @@ async fn json_output() {
     assert_eq!(report["path"], ws["path"]);
     assert_eq!(report["change_id"], ws["change_id"]);
 }
+
+/// Stdout's JSON lines.
+fn json_lines(output: &Output) -> Vec<Value> {
+    stdout(output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect()
+}
+
+/// An RFC 3339 time from the JSON as Unix milliseconds.
+fn millis(value: &Value) -> u128 {
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("not a time: {value}"));
+    humantime::parse_rfc3339_weak(text.trim_end_matches('Z'))
+        .unwrap_or_else(|e| panic!("{e}: {text}"))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
+/// Waits until the daemon serves `n` subscriptions.
+async fn subscribed(daemon: &TestDaemon, n: usize) {
+    let subscriptions = &daemon.handle.state().subscriptions;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while subscriptions.active() < n {
+        assert!(Instant::now() < deadline, "the watch never subscribed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A command that prints the activity entries it sees. The report is sent
+/// just after the spawn, so it may land after the watch subscribed: `--for
+/// 3` waits for it.
+const WATCH_ACTIVITY: &str =
+    r#""$REEF_BIN" --no-autostart presence watch --for 3 --kind activity -o json"#;
+
+// R2.11 8: `ws run` reports its command as an activity entry, under the
+// agent's name or else the workspace's owner, and clears it before the
+// release, with `--keep` too; a command that cannot start reports nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_reports_its_command() {
+    let (daemon, repo) = with_repo().await;
+    let script = WATCH_ACTIVITY;
+    let mut command = reef(&daemon);
+    command
+        .env("REEF_BIN", env!("CARGO_BIN_EXE_reef"))
+        .args([
+            "-o", "text", "--agent", "bot-1", "ws", "run", "--repo", &repo.id, "--", "sh", "-c",
+        ])
+        .arg(script);
+    let output = finish(command).await;
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let entry = &lines[0]["presence"];
+    let ws = only_workspace(&daemon).await;
+    assert_eq!(entry["agent"], "bot-1");
+    assert_eq!(entry["workspace_id"], ws["id"]);
+    assert_eq!(entry["activity"], format!("running sh -c {script}"));
+    assert_eq!(entry["by_daemon"], false);
+    assert!(entry["change_id"].is_null(), "{entry}");
+    assert_eq!(
+        millis(&entry["expires_at"]) - millis(&entry["updated_at"]),
+        30_000
+    );
+
+    // Beside a watcher: the activity entry ends `cleared` before the
+    // workspace's lease entry ends `gone`, and names the owner.
+    let mut watcher = reef(&daemon);
+    watcher.args([
+        "presence", "watch", "--follow", "--kind", "activity", "--kind", "lease", "-o", "json",
+    ]);
+    let watcher = spawn(watcher);
+    subscribed(&daemon, 1).await;
+    let ran = finish(ws_run(&daemon, &repo, &["-o", "json", "--", "sleep", "1"])).await;
+    assert_eq!(code(&ran), 0, "{}", stderr(&ran));
+    let ran: Value = serde_json::from_str(&stdout(&ran)).unwrap();
+    let kept = finish(ws_run(
+        &daemon,
+        &repo,
+        &["-o", "json", "--keep", "--", "sleep", "1"],
+    ))
+    .await;
+    assert_eq!(code(&kept), 0, "{}", stderr(&kept));
+    let kept: Value = serde_json::from_str(&stdout(&kept)).unwrap();
+    let missing = finish(ws_run(
+        &daemon,
+        &repo,
+        &["-o", "json", "--", "/nonexistent"],
+    ))
+    .await;
+    assert_eq!(code(&missing), 127, "{}", stderr(&missing));
+    let missing: Value = serde_json::from_str(&stdout(&missing)).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    kill(pid_of(&watcher), Signal::SIGTERM).unwrap();
+    let events = json_lines(&wait(watcher).await);
+    let of = |ws: &Value, kind: &str| -> Vec<Value> {
+        events
+            .iter()
+            .filter(|event| {
+                event["presence"]["workspace_id"] == ws["workspace_id"]
+                    && event["presence"]["kind"] == kind
+            })
+            .cloned()
+            .collect()
+    };
+
+    let activity = of(&ran, "activity");
+    assert_eq!(activity.len(), 2, "{events:?}");
+    assert_eq!(activity[0]["ended"], false);
+    assert_eq!(activity[1]["end_reason"], "cleared");
+    let owner = activity[0]["presence"]["agent"].as_str().unwrap();
+    let (_, pid) = owner.rsplit_once(':').unwrap();
+    assert!(pid.parse::<u32>().is_ok(), "{owner}");
+    let lease_end = events
+        .iter()
+        .position(|event| {
+            event["presence"]["workspace_id"] == ran["workspace_id"]
+                && event["presence"]["kind"] == "lease"
+                && event["ended"] == true
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    let activity_end = events
+        .iter()
+        .position(|event| *event == activity[1])
+        .unwrap();
+    assert!(activity_end < lease_end, "{events:?}");
+    assert_eq!(events[lease_end]["end_reason"], "gone");
+    assert_eq!(events[lease_end]["presence"]["agent"], owner);
+
+    let activity = of(&kept, "activity");
+    assert_eq!(activity.len(), 2, "{events:?}");
+    assert_eq!(activity[1]["end_reason"], "cleared");
+    assert!(
+        workspaces(&daemon)
+            .await
+            .iter()
+            .any(|ws| ws["id"] == kept["workspace_id"] && ws["state"] == "active")
+    );
+
+    assert!(of(&missing, "activity").is_empty(), "{events:?}");
+}
+
+// R2.11 8: attached with --workspace and no agent name, `ws run` reports
+// under the attached workspace's owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_reports_for_an_attached_workspace() {
+    let (daemon, repo) = with_repo().await;
+    let script = WATCH_ACTIVITY;
+    let created = finish({
+        let mut command = reef(&daemon);
+        command.args(["-o", "json", "ws", "create", "--repo", &repo.id]);
+        command
+    })
+    .await;
+    assert!(created.status.success(), "{}", stderr(&created));
+    let created: Value = serde_json::from_str(&stdout(&created)).unwrap();
+    let attached_id = created["id"].as_str().unwrap();
+    let mut command = reef(&daemon);
+    command
+        .env("REEF_BIN", env!("CARGO_BIN_EXE_reef"))
+        .args([
+            "-o",
+            "text",
+            "ws",
+            "run",
+            "--workspace",
+            attached_id,
+            "--",
+            "sh",
+            "-c",
+        ])
+        .arg(script);
+    let output = finish(command).await;
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["presence"]["workspace_id"], attached_id);
+    assert_eq!(
+        lines[0]["presence"]["agent"],
+        reef_client::default_owner(),
+        "the attached workspace's owner"
+    );
+}

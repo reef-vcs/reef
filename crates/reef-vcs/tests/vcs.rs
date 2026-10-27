@@ -1559,3 +1559,332 @@ async fn presence_watch_survives_a_restart() {
     assert_eq!(lines[2]["presence"]["id"], after.id.as_str());
     assert_eq!(lines[2]["ended"], false);
 }
+
+/// An RFC 3339 time from the JSON as Unix milliseconds.
+fn millis(value: &Value) -> u128 {
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("not a time: {value}"));
+    humantime::parse_rfc3339_weak(text.trim_end_matches('Z'))
+        .unwrap_or_else(|e| panic!("{e}: {text}"))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
+/// The live presence entries the daemon holds of `kind`, by `agent`.
+async fn entries(daemon: &TestDaemon, dir: &Path, kind: &str, agent: &str) -> Vec<Value> {
+    json_lines(
+        &run_in(
+            daemon,
+            dir,
+            &[
+                "presence", "watch", "--kind", kind, "--by", agent, "--for", "0", "-o", "json",
+            ],
+        )
+        .await,
+    )
+    .into_iter()
+    .map(|line| line["presence"].clone())
+    .collect()
+}
+
+// R2.11 9: `presence report` in each of its forms and scopes, and `clear`.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_report_and_clear() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let entry = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "running the tests", "-o", "json"],
+    )
+    .await;
+    assert_eq!(entry["kind"], "activity");
+    assert_eq!(entry["activity"], "running the tests");
+    assert_eq!(entry["workspace_id"], ws.id.as_str());
+    assert_eq!(entry["change_id"], ws.change_id.as_str());
+    assert_eq!(entry["agent"], "test@host", "the workspace's owner");
+    assert_eq!(entry["by_daemon"], false);
+    let id = entry["id"].as_str().unwrap().to_owned();
+
+    let text = run_in(&daemon, &dir, &["presence", "report", "x", "-o", "text"]).await;
+    assert!(text.status.success(), "{}", stderr(&text));
+    let printed = stdout(&text);
+    let printed_id = printed.strip_suffix('\n').unwrap();
+    assert!(
+        printed_id.len() == 16 && printed_id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{printed:?}"
+    );
+    ok(&daemon, &dir, &["presence", "clear", printed_id]).await;
+
+    let replaced = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "--id", &id, "linting"],
+    )
+    .await;
+    assert_eq!(replaced["id"], id.as_str());
+    let live = entries(&daemon, &dir, "activity", "test@host").await;
+    assert_eq!(live.len(), 1, "{live:?}");
+    assert_eq!(live[0]["activity"], "linting");
+
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let editing = ok(
+        &daemon,
+        &dir.join("sub"),
+        &["presence", "report", "--path", "a.txt"],
+    )
+    .await;
+    assert_eq!(editing["kind"], "editing");
+    assert_eq!(strings(&editing["paths"]), ["sub/a.txt"]);
+
+    let progress = ok(
+        &daemon,
+        &dir,
+        &[
+            "presence", "report", "--phase", "build", "--done", "3", "--total", "10", "--unit",
+            "files",
+        ],
+    )
+    .await;
+    assert_eq!(progress["kind"], "progress");
+    assert_eq!(
+        progress["progress"],
+        serde_json::json!({"phase": "build", "done": 3, "total": 10, "unit": "files"})
+    );
+
+    let short = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "--ttl", "5s", "brief"],
+    )
+    .await;
+    assert_eq!(
+        millis(&short["expires_at"]) - millis(&short["updated_at"]),
+        5_000
+    );
+
+    let in_repo = ok(
+        &daemon,
+        &repo.root,
+        &["presence", "report", "--repo", &repo.id, "planning"],
+    )
+    .await;
+    assert!(in_repo["workspace_id"].is_null(), "{in_repo}");
+    assert_eq!(in_repo["repo_id"], repo.id.as_str());
+
+    // A watcher sees the clear.
+    let progress_id = progress["id"].as_str().unwrap().to_owned();
+    let mut command = reef(&daemon, &dir);
+    command.args([
+        "presence", "watch", "--kind", "progress", "--count", "2", "-o", "json",
+    ]);
+    let watch = tokio::task::spawn_blocking(move || command.output().unwrap());
+    subscribed(&daemon, 1).await;
+    let cleared = ok(&daemon, &dir, &["presence", "clear", &progress_id]).await;
+    assert_eq!(cleared, serde_json::json!({"cleared": [progress_id]}));
+    let events = json_lines(&watch.await.unwrap());
+    assert_eq!(events[1]["ended"], true, "{events:?}");
+    assert_eq!(events[1]["end_reason"], "cleared");
+    ok(&daemon, &dir, &["presence", "clear", &progress_id]).await;
+}
+
+// R2.11 10: the forms a report takes are checked before any call.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_report_usage() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    for args in [
+        &["presence", "report"][..],
+        &["presence", "report", "x", "--path", "a"],
+        &["presence", "report", "--total", "3"],
+        &["presence", "report", "x", "--unit", "files"],
+        &["presence", "report", "x", "--id", "a", "--id-file", "f"],
+        &["presence", "clear"],
+    ] {
+        let output = run_in(&daemon, &dir, args).await;
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    err(
+        &daemon,
+        &dir,
+        &["presence", "clear", "xyz"],
+        2,
+        "INVALID_PRESENCE_ID",
+    )
+    .await;
+    let lease = entries(&daemon, &dir, "lease", "test@host").await;
+    let lease_id = lease[0]["id"].as_str().unwrap();
+    err(
+        &daemon,
+        &dir,
+        &["presence", "clear", lease_id],
+        2,
+        "DAEMON_PRESENCE",
+    )
+    .await;
+}
+
+// R2.11 11: `--id-file` keeps one entry across processes, and `--id` of
+// an entry that ended reports a new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_report_replaces_by_file() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("presence");
+    let file_arg = file.to_str().unwrap();
+    let first = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "--id-file", file_arg, "a"],
+    )
+    .await;
+    let id = first["id"].as_str().unwrap().to_owned();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{id}\n"));
+    let second = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "--id-file", file_arg, "b"],
+    )
+    .await;
+    assert_eq!(second["id"], id.as_str());
+
+    ok(&daemon, &dir, &["presence", "clear", &id]).await;
+    let output = run_in(&daemon, &dir, &["presence", "report", "--id", &id, "c"]).await;
+    let anew = json(&output);
+    let anew_id = anew["id"].as_str().unwrap();
+    assert_ne!(anew_id, id);
+    assert!(
+        stderr(&output).contains(&format!(
+            "presence entry {id} had ended; reported a new one, {anew_id}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    ok(&daemon, &dir, &["presence", "clear", anew_id]).await;
+
+    // The file still names the cleared entry.
+    let renewed = ok(
+        &daemon,
+        &dir,
+        &["presence", "report", "--id-file", file_arg, "d"],
+    )
+    .await;
+    let renewed_id = renewed["id"].as_str().unwrap().to_owned();
+    assert_ne!(renewed_id, id);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{renewed_id}\n")
+    );
+    let cleared = ok(&daemon, &dir, &["presence", "clear", "--id-file", file_arg]).await;
+    assert_eq!(cleared, serde_json::json!({"cleared": [renewed_id]}));
+    assert!(!file.exists());
+    let again = ok(&daemon, &dir, &["presence", "clear", "--id-file", file_arg]).await;
+    assert_eq!(again, serde_json::json!({"cleared": []}));
+    let left = entries(&daemon, &dir, "activity", "test@host").await;
+    assert!(left.is_empty(), "{left:?}");
+}
+
+// R2.11 12: the cap per agent, with the CLI's hint. Entries last ten
+// minutes, so none lapses however slowly the 32 reports run.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_report_cap_hint() {
+    let (daemon, repo) = fixture().await;
+    let dir = repo.root.clone();
+    for n in 0..32 {
+        ok(
+            &daemon,
+            &dir,
+            &[
+                "--agent",
+                "capbot",
+                "presence",
+                "report",
+                "--ttl",
+                "10m",
+                &format!("task {n}"),
+            ],
+        )
+        .await;
+    }
+    let error = err(
+        &daemon,
+        &dir,
+        &["--agent", "capbot", "presence", "report", "one more"],
+        6,
+        "TOO_MANY_PRESENCE_ENTRIES",
+    )
+    .await;
+    let hint = error["hint"].as_str().unwrap();
+    assert!(hint.contains("--id-file"), "{hint}");
+}
+
+// R2.11 13: `ws renew` by id and from inside, and its refusals.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_renew() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let lease = ws.lease.as_ref().unwrap();
+    let before = lease.expires_at.unwrap();
+    let before = u128::try_from(before.seconds).unwrap() * 1000
+        + u128::try_from(before.nanos / 1_000_000).unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let renewed = ok(&daemon, &repo.root, &["ws", "renew", &ws.id, "-o", "json"]).await;
+    assert_eq!(renewed["workspace_id"], ws.id.as_str());
+    assert_eq!(renewed["lease"]["id"], lease.id.as_str());
+    let after = millis(&renewed["lease"]["expires_at"]);
+    assert!(after > before, "{after} > {before}");
+
+    let watched = entries(&daemon, &repo.root, "lease", "test@host").await;
+    assert_eq!(watched.len(), 1, "{watched:?}");
+    assert_eq!(millis(&watched[0]["lease"]["expires_at"]), after);
+
+    let inside = ok(&daemon, &path(&ws), &["ws", "renew"]).await;
+    assert_eq!(inside["lease"]["id"], lease.id.as_str());
+    let text = run_in(&daemon, &path(&ws), &["ws", "renew", "-o", "text"]).await;
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(
+        stderr(&text).starts_with(&format!("renewed lease {} of {}: ", lease.id, ws.id)),
+        "{}",
+        stderr(&text)
+    );
+
+    let wrong = run_in(
+        &daemon,
+        &repo.root,
+        &["ws", "renew", &ws.id, "--lease-id", "0000000000000000"],
+    )
+    .await;
+    assert_eq!(wrong.status.code(), Some(5), "{}", stderr(&wrong));
+    let wrong: Value = serde_json::from_str(&stdout(&wrong)).unwrap();
+    assert!(wrong["error"]["next"].is_null(), "{wrong}");
+    err(
+        &daemon,
+        &repo.root,
+        &["ws", "renew"],
+        2,
+        "WORKSPACE_REQUIRED",
+    )
+    .await;
+    let unknown = run_in(&daemon, &repo.root, &["ws", "renew", "ffffffffffffffff"]).await;
+    assert_eq!(unknown.status.code(), Some(3), "{}", stderr(&unknown));
+
+    ok(&daemon, &repo.root, &["ws", "release", &ws.id]).await;
+    let released = run_in(&daemon, &repo.root, &["ws", "renew", &ws.id]).await;
+    released.clone().assert().code(5);
+    let error: Value = serde_json::from_str(&stdout(&released)).unwrap();
+    assert_eq!(
+        next_of(&error["error"]),
+        ["reef", "ws", "create", "--repo", &repo.id]
+    );
+}
