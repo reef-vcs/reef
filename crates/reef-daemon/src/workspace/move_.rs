@@ -224,6 +224,7 @@ impl Manager {
             elapsed_ms = elapsed_ms(begun),
             "workspace moved"
         );
+        crate::presence::publish::moved(&self.presence, id);
         Ok(Moved {
             record,
             lease,

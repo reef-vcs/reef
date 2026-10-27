@@ -7,22 +7,67 @@ package reef.api.v1;
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/workspaces.proto";
 
 // Reporting and following presence.
 service PresenceService {
-  // Reports or replaces one presence entry, which lapses after its TTL
-  // unless reported again. Declared; R2.11 implements it.
+  // Reports a new presence entry, or replaces the live entry
+  // `presence_id` names, which lapses after its TTL unless reported again.
+  // An entry's kind, agent, repository and workspace are fixed; everything
+  // else may change. Any client holding an entry's id may replace it; no
+  // client may report kind PRESENCE_KIND_LEASE or replace an entry the
+  // daemon reports. Nothing is persisted: entries end with the daemon.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_AGENT; INVALID_PRESENCE_ID
+  // (metadata `presence_id`); PRESENCE_MISMATCH (metadata `presence_id`,
+  // `field`) when a fixed field differs; DAEMON_PRESENCE (metadata `kind`
+  // or `presence_id`); PRESENCE_TOO_LARGE (metadata `field`, `limit`);
+  // INVALID_PATH (metadata `path`); INVALID_CHANGE_ID (metadata `change`)
+  // for a `change` that is not a full change id; and with no reason for an
+  // unspecified kind, a field another kind carries, a negative TTL, or a
+  // `change` without `repo` or `workspace`. NOT_FOUND with reason
+  // PRESENCE_NOT_FOUND (metadata `presence_id`) for an entry that was
+  // cleared, expired, or reported before the daemon restarted: report it
+  // again without `presence_id`; REPOSITORY_NOT_FOUND,
+  // REPOSITORY_NOT_REGISTERED or WORKSPACE_NOT_FOUND. FAILED_PRECONDITION
+  // for a workspace that is not active. UNAVAILABLE with reason
+  // TOO_MANY_PRESENCE_ENTRIES (metadata `limit`, and `agent` for the cap
+  // per agent): at most 4,096 client entries, 32 per agent.
   rpc ReportPresence(ReportPresenceRequest) returns (ReportPresenceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
-  // Ends one presence entry now. Declared; R2.11 implements it.
+  // Ends one presence entry now. Clearing an id that names no live entry
+  // succeeds.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_PRESENCE_ID (metadata
+  // `presence_id`), or DAEMON_PRESENCE (metadata `presence_id`) for an
+  // entry the daemon reports.
   rpc ClearPresence(ClearPresenceRequest) returns (ClearPresenceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
     option idempotency_level = IDEMPOTENT;
   }
   // The current presence set, then changes to it as they happen. A frame
   // with no events is a keepalive, sent at least every 30 seconds.
-  // Declared; R2.10 implements it.
+  //
+  // The first frames carry every live entry the request matches; the frame
+  // that completes the set, empty when there is none, has `synced` set, and
+  // so has every later frame. Later frames carry changes: an entry that
+  // appeared or changed, at its latest state, or ended, at its last state.
+  // A frame holds an entry at most once and at most 1,000 events and
+  // 1 MiB; frames with events are at least 50 ms apart, and an isolated
+  // change is not delayed. Presence coalesces: a client that reads slowly
+  // may miss intermediate states of an entry, never its latest state or
+  // its end, and an entry that ends before it was sent is not sent. There
+  // is no cursor: a new subscription's set replaces what the client held.
+  // Read every stream opened on a connection, since they share its flow
+  // control window.
+  //
+  // Errors: INVALID_ARGUMENT for an unspecified or unknown kind. NOT_FOUND
+  // with reason REPOSITORY_NOT_FOUND (metadata `repo`),
+  // REPOSITORY_NOT_REGISTERED (metadata `path`), or WORKSPACE_NOT_FOUND
+  // (metadata `workspace`). UNAVAILABLE with reason TOO_MANY_SUBSCRIPTIONS
+  // (shared with SubscribeOperations), and with no reason, mid-stream,
+  // when the daemon shuts down: subscribe again.
   rpc SubscribePresence(SubscribePresenceRequest) returns (stream SubscribePresenceResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -35,7 +80,8 @@ enum PresenceKind {
   PRESENCE_KIND_UNSPECIFIED = 0;
   // What an agent is doing, as free text in `activity`.
   PRESENCE_KIND_ACTIVITY = 1;
-  // The paths an agent is editing.
+  // Paths being edited: reported by the daemon from snapshots (files
+  // changed), or by a client (files it is editing).
   PRESENCE_KIND_EDITING = 2;
   // A lease renewal, reported by the daemon.
   PRESENCE_KIND_LEASE = 3;
@@ -79,6 +125,12 @@ message Presence {
   google.protobuf.Timestamp updated_at = 10;
   // When it lapses unless reported again.
   google.protobuf.Timestamp expires_at = 11;
+  // For PRESENCE_KIND_LEASE: the lease as of the heartbeat this entry
+  // reports. Unset for other kinds.
+  Lease lease = 12;
+  // Reported by the daemon itself (leases, snapshots, creates, store
+  // builds). ReportPresence and ClearPresence refuse such an entry.
+  bool by_daemon = 13;
 }
 
 // Report presence.
@@ -91,7 +143,8 @@ message ReportPresenceRequest {
   string repo = 3;
   // The workspace it is about; empty for none.
   string workspace = 4;
-  // The change it is about; empty for none.
+  // The change it is about, as a full change id in hex or reverse hex;
+  // empty for none. Requires `repo` or `workspace`.
   string change = 5;
   // What it says.
   PresenceKind kind = 6;
@@ -101,8 +154,8 @@ message ReportPresenceRequest {
   repeated string paths = 8;
   // Progress, for PRESENCE_KIND_PROGRESS.
   Progress progress = 9;
-  // How long it lasts unless reported again; unset for 30 seconds, at most
-  // 10 minutes.
+  // How long it lasts unless reported again; unset for 30 seconds, clamped
+  // to 1 second at least and 10 minutes at most.
   google.protobuf.Duration ttl = 10;
 }
 
@@ -146,6 +199,24 @@ message SubscribePresenceResponse {
 message PresenceEvent {
   // The entry; its last state when `ended`.
   Presence presence = 1;
-  // It was cleared or expired.
+  // It was cleared, expired, or what it is about is gone.
   bool ended = 2;
+  // Why it ended; unspecified while it has not.
+  PresenceEndReason end_reason = 3;
+}
+
+// Why a presence entry ended.
+enum PresenceEndReason {
+  // Not ended; on an ended event, a reason the daemon no longer knew (the
+  // subscriber fell more than 4,096 changes behind and was resynchronized).
+  PRESENCE_END_REASON_UNSPECIFIED = 0;
+  // ClearPresence, or, for an entry the daemon reports, what it describes
+  // finished.
+  PRESENCE_END_REASON_CLEARED = 1;
+  // Not reported again before `expires_at`. For a lease entry: two
+  // heartbeats were missed; the lease itself may still be active.
+  PRESENCE_END_REASON_EXPIRED = 2;
+  // What it is about is gone: its workspace was released or reclaimed, or
+  // its repository forgotten.
+  PRESENCE_END_REASON_GONE = 3;
 }

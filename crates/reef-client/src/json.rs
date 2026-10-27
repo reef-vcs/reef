@@ -1971,3 +1971,119 @@ mod tests {
         assert!(Created::from_response(&v1::CreateWorkspaceResponse::default()).is_none());
     }
 }
+
+/// How far a long-running operation has got (R2.10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Progress {
+    /// What it is doing now.
+    pub phase: Option<String>,
+    /// Units done.
+    pub done: u64,
+    /// Units in all; `None` when unknown.
+    pub total: Option<u64>,
+    /// What a unit is.
+    pub unit: Option<String>,
+}
+
+/// One presence entry (R2.10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Presence {
+    /// The entry's id.
+    pub id: String,
+    /// Who reported it.
+    pub agent: String,
+    /// The repository it is about.
+    pub repo_id: Option<String>,
+    /// The workspace it is about.
+    pub workspace_id: Option<String>,
+    /// The change it is about, in hex.
+    pub change_id: Option<String>,
+    /// `activity`, `editing`, `lease`, or `progress`.
+    pub kind: String,
+    /// For `activity`.
+    pub activity: Option<String>,
+    /// For `editing`: repository-relative paths, most recent first.
+    pub paths: Vec<String>,
+    /// For `progress`.
+    pub progress: Option<Progress>,
+    /// For `lease`: the lease as of the heartbeat.
+    pub lease: Option<Lease>,
+    /// Reported by the daemon itself.
+    pub by_daemon: bool,
+    /// When it was last reported.
+    pub updated_at: Option<String>,
+    /// When it lapses unless reported again.
+    pub expires_at: Option<String>,
+    /// Unix milliseconds of `updated_at`, to tell a newer state.
+    #[serde(skip)]
+    pub updated_at_ms: i64,
+}
+
+/// A presence kind's JSON name.
+pub fn presence_kind(kind: i32) -> &'static str {
+    match v1::PresenceKind::try_from(kind) {
+        Ok(v1::PresenceKind::Activity) => "activity",
+        Ok(v1::PresenceKind::Editing) => "editing",
+        Ok(v1::PresenceKind::Lease) => "lease",
+        Ok(v1::PresenceKind::Progress) => "progress",
+        _ => UNKNOWN,
+    }
+}
+
+impl From<&v1::Presence> for Presence {
+    fn from(presence: &v1::Presence) -> Self {
+        Self {
+            id: presence.id.clone(),
+            agent: presence.agent.clone(),
+            repo_id: text(&presence.repo_id),
+            workspace_id: text(&presence.workspace_id),
+            change_id: text(&presence.change_id),
+            kind: presence_kind(presence.kind).to_owned(),
+            activity: text(&presence.activity),
+            paths: presence.paths.clone(),
+            progress: presence.progress.as_ref().map(|progress| Progress {
+                phase: text(&progress.phase),
+                done: progress.done,
+                total: (progress.total > 0).then_some(progress.total),
+                unit: text(&progress.unit),
+            }),
+            lease: presence.lease.as_ref().map(Lease::from),
+            by_daemon: presence.by_daemon,
+            updated_at: time(presence.updated_at.as_ref()),
+            expires_at: time(presence.expires_at.as_ref()),
+            updated_at_ms: presence.updated_at.as_ref().map_or(0, millis_of),
+        }
+    }
+}
+
+/// A change to one presence entry, as `reef presence watch` prints it
+/// (R2.10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PresenceEvent {
+    /// It ended: cleared, expired, or what it is about is gone.
+    pub ended: bool,
+    /// `cleared`, `expired`, or `gone`; `None` while it lives, or when the
+    /// reason is not known (an entry that vanished across a restart).
+    pub end_reason: Option<String>,
+    /// The entry; its last state when ended.
+    pub presence: Presence,
+}
+
+impl From<&v1::PresenceEvent> for PresenceEvent {
+    fn from(event: &v1::PresenceEvent) -> Self {
+        let end_reason = match v1::PresenceEndReason::try_from(event.end_reason) {
+            Ok(v1::PresenceEndReason::Cleared) => Some("cleared"),
+            Ok(v1::PresenceEndReason::Expired) => Some("expired"),
+            Ok(v1::PresenceEndReason::Gone) => Some("gone"),
+            _ => None,
+        };
+        Self {
+            ended: event.ended,
+            end_reason: end_reason.map(str::to_owned),
+            presence: event
+                .presence
+                .as_ref()
+                .map_or_else(|| Presence::from(&v1::Presence::default()), Presence::from),
+        }
+    }
+}

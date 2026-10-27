@@ -106,6 +106,7 @@ macro_rules! id_type {
 id_type!(RepoId, "A registered repository.");
 id_type!(WorkspaceId, "A leased workspace.");
 id_type!(LeaseId, "One lease on a workspace.");
+id_type!(PresenceId, "One presence entry (R2.10).");
 
 impl WorkspaceId {
     /// The name of the jj workspace backing this Reef workspace,

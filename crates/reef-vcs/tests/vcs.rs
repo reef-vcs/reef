@@ -1370,3 +1370,192 @@ async fn op_watch_survives_a_restart() {
     assert_eq!(lines[0]["id"], before["operation"]["id"]);
     assert_eq!(lines[1]["id"], after["operation"]["id"]);
 }
+
+fn activity(agent: &str, text: &str) -> v1::ReportPresenceRequest {
+    v1::ReportPresenceRequest {
+        agent: agent.to_owned(),
+        kind: v1::PresenceKind::Activity.into(),
+        activity: text.to_owned(),
+        ..v1::ReportPresenceRequest::default()
+    }
+}
+
+/// Waits until the daemon serves `n` subscriptions.
+async fn subscribed(daemon: &TestDaemon, n: usize) {
+    let subscriptions = &daemon.handle.state().subscriptions;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while subscriptions.active() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watch never subscribed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+// R2.10 19: `presence watch` prints the current set and changes, ends by
+// itself, and filters by kind and agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_watch() {
+    let (daemon, repo) = fixture().await;
+    let dir = repo.root.clone();
+    let empty = run_in(
+        &daemon,
+        &dir,
+        &["presence", "watch", "--for", "0", "-o", "json"],
+    )
+    .await;
+    assert!(empty.status.success(), "{}", stderr(&empty));
+    assert_eq!(stdout(&empty), "");
+
+    daemon
+        .client
+        .report_presence(activity("bot-1", "running tests"))
+        .await
+        .unwrap();
+    let lines = json_lines(
+        &run_in(
+            &daemon,
+            &dir,
+            &["presence", "watch", "--for", "0", "-o", "json"],
+        )
+        .await,
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["ended"], false);
+    assert!(lines[0]["end_reason"].is_null());
+    assert_eq!(lines[0]["presence"]["kind"], "activity");
+    assert_eq!(lines[0]["presence"]["agent"], "bot-1");
+    assert_eq!(lines[0]["presence"]["activity"], "running tests");
+    assert!(lines[0]["presence"]["workspace_id"].is_null());
+
+    let ws = create(&daemon, &repo).await;
+    let lease = json_lines(
+        &run_in(
+            &daemon,
+            &dir,
+            &[
+                "presence", "watch", "--kind", "lease", "--for", "0", "-o", "json",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(lease.len(), 1, "{lease:?}");
+    assert_eq!(lease[0]["presence"]["workspace_id"], ws.id.as_str());
+    assert_eq!(
+        lease[0]["presence"]["lease"]["id"],
+        ws.lease.as_ref().unwrap().id.as_str()
+    );
+    assert_eq!(lease[0]["presence"]["by_daemon"], true);
+
+    let mut command = reef(&daemon, &dir);
+    command.args([
+        "presence", "watch", "--by", "bot-2", "--count", "1", "-o", "json",
+    ]);
+    let watch = tokio::task::spawn_blocking(move || command.output().unwrap());
+    subscribed(&daemon, 1).await;
+    daemon
+        .client
+        .report_presence(activity("bot-2", "later"))
+        .await
+        .unwrap();
+    let later = json_lines(&watch.await.unwrap());
+    assert_eq!(later.len(), 1, "{later:?}");
+    assert_eq!(later[0]["presence"]["activity"], "later");
+
+    let text = run_in(
+        &daemon,
+        &dir,
+        &[
+            "presence", "watch", "--by", "bot-1", "--for", "0", "-o", "text",
+        ],
+    )
+    .await;
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert_eq!(stdout(&text).trim(), "activity bot-1 - running tests");
+
+    let usage = run_in(&daemon, &dir, &["presence", "watch", "--kind", "nope"]).await;
+    usage.clone().assert().code(2);
+    assert!(stderr(&usage).contains("editing"), "{}", stderr(&usage));
+
+    // `--follow` ends when nobody reads any more.
+    let script = format!(
+        "set -o pipefail; {} --no-autostart presence watch --follow -o json | head -1",
+        env!("CARGO_BIN_EXE_reef")
+    );
+    let mut shell = std::process::Command::new("bash");
+    shell
+        .args(["-c", &script])
+        .env("REEF_STATE_DIR", daemon.state_dir())
+        .current_dir(&dir);
+    let piped = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || shell.output().unwrap()),
+    )
+    .await
+    .expect("the pipeline ends")
+    .unwrap();
+    assert!(piped.status.success());
+    assert_eq!(stdout(&piped).lines().count(), 1, "{}", stdout(&piped));
+}
+
+// R2.10 20: `presence watch --follow` resubscribes after the daemon
+// restarts and stays a correct stream of changes: what vanished ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_watch_survives_a_restart() {
+    let (daemon, repo) = fixture().await;
+    let dir = repo.root.clone();
+    let before = daemon
+        .client
+        .report_presence(activity("bot", "before"))
+        .await
+        .unwrap()
+        .presence
+        .unwrap();
+    let mut watch = std::process::Command::new(env!("CARGO_BIN_EXE_reef"));
+    watch
+        .env_remove("REEF_SOCKET")
+        .env("REEF_STATE_DIR", daemon.state_dir())
+        .current_dir(&dir)
+        .args([
+            "--no-autostart",
+            "presence",
+            "watch",
+            "--kind",
+            "activity",
+            "--count",
+            "3",
+            "--follow",
+            "-o",
+            "json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = watch.spawn().unwrap();
+    subscribed(&daemon, 1).await;
+    let daemon = daemon.restart().await;
+    subscribed(&daemon, 1).await;
+    let after = daemon
+        .client
+        .report_presence(activity("bot", "after"))
+        .await
+        .unwrap()
+        .presence
+        .unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    .expect("the watch ends at its count")
+    .unwrap();
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0]["presence"]["id"], before.id.as_str());
+    assert_eq!(lines[0]["ended"], false);
+    assert_eq!(lines[1]["presence"]["id"], before.id.as_str());
+    assert_eq!(lines[1]["ended"], true);
+    assert!(lines[1]["end_reason"].is_null());
+    assert_eq!(lines[2]["presence"]["id"], after.id.as_str());
+    assert_eq!(lines[2]["ended"], false);
+}

@@ -38,6 +38,7 @@ use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
+use reef_api::v1::presence_service_client::PresenceServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
 use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::store_service_client::StoreServiceClient;
@@ -59,6 +60,10 @@ use reef_api::v1::{
     RegisterRepositoryRequest, RegisterRepositoryResponse, ReleaseWorkspaceRequest,
     ReleaseWorkspaceResponse, RenewLeaseRequest, RenewLeaseResponse, Repository, ResumeRequest,
     ResumeResponse, SnapshotWorkspaceRequest, SnapshotWorkspaceResponse, StoreInfo, Workspace,
+};
+use reef_api::v1::{
+    ClearPresenceRequest, ReportPresenceRequest, ReportPresenceResponse, SubscribePresenceRequest,
+    SubscribePresenceResponse,
 };
 use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
@@ -941,6 +946,43 @@ impl Client {
         let mut client =
             OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("SubscribeOperations", client.subscribe_operations(request))
+            .await
+    }
+
+    /// `PresenceService.ReportPresence` (R2.10): a new entry, or a
+    /// replacement of the one `presence_id` names.
+    pub async fn report_presence(
+        &self,
+        request: ReportPresenceRequest,
+    ) -> Result<ReportPresenceResponse, ClientError> {
+        let mut client =
+            PresenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ReportPresence", client.report_presence(request))
+            .await
+    }
+
+    /// `PresenceService.ClearPresence` (R2.10).
+    pub async fn clear_presence(&self, presence_id: &str) -> Result<(), ClientError> {
+        let mut client =
+            PresenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        let request = ClearPresenceRequest {
+            presence_id: presence_id.to_owned(),
+        };
+        self.call("ClearPresence", client.clear_presence(request))
+            .await
+            .map(|_| ())
+    }
+
+    /// `PresenceService.SubscribePresence` (R2.10): the stream of frames,
+    /// the current set first. No deadline, as
+    /// [`Client::subscribe_operations`].
+    pub async fn subscribe_presence(
+        &self,
+        request: SubscribePresenceRequest,
+    ) -> Result<tonic::Streaming<SubscribePresenceResponse>, ClientError> {
+        let mut client =
+            PresenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("SubscribePresence", client.subscribe_presence(request))
             .await
     }
 

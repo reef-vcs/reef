@@ -7,9 +7,9 @@
 //! The read RPCs (`status`, `changes`, `diff`, `operations`, and the file
 //! reads) run on [`crate::read::Reads`] (R2.02, ADR 0030); the writes
 //! (`changes`, undo in `operations`, and `EditFiles`) run through
-//! [`crate::workspace::Manager::rewrite`] (R2.03, R2.04). The RPCs later
-//! tickets implement (`presence`, and the operation subscription) answer
-//! [`crate::error::not_implemented`] for now.
+//! [`crate::workspace::Manager::rewrite`] (R2.03, R2.04). Every declared
+//! RPC is implemented; [`crate::error::not_implemented`] stays for RPCs
+//! later revisions declare ahead of their tickets.
 
 pub mod changes;
 pub mod compat;

@@ -425,7 +425,11 @@ fn finish_db(
             );
         }
     }
-    let leases = LeaseManager::new(opts.lease.clone(), Arc::clone(&db), Weak::new());
+    // Offline: nothing subscribes, so the heartbeats go nowhere.
+    let presence = Arc::new(crate::presence::PresenceHub::new(
+        crate::presence::Limits::default(),
+    ));
+    let leases = LeaseManager::new(opts.lease.clone(), Arc::clone(&db), Weak::new(), presence);
     let leases_extended = leases.apply_restart_grace()?;
     let workspaces_kept = db
         .workspaces(None, &[WorkspaceState::Active, WorkspaceState::Releasing])?

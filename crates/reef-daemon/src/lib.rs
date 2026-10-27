@@ -21,6 +21,7 @@ pub mod logging;
 pub mod maintenance;
 pub mod model;
 pub mod offline;
+pub mod presence;
 pub mod read;
 pub mod repo;
 mod run;

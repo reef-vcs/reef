@@ -167,6 +167,7 @@ impl Manager {
             detail: (!details.is_empty()).then(|| details.join("; ")),
         };
         self.db.finish_workspace(id, state, lease_end, &reclaim)?;
+        self.presence.end_workspace(id);
         entry.update_record(|record| {
             record.state = state;
             record.lease_id = None;

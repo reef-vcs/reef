@@ -95,7 +95,9 @@ pub fn router(state: Arc<AppState>) -> ApiRouter {
         .add_service(OperationServiceServer::new(OperationsHandler::new(
             Arc::clone(&state),
         )))
-        .add_service(PresenceServiceServer::new(PresenceHandler))
+        .add_service(PresenceServiceServer::new(PresenceHandler::new(
+            Arc::clone(&state),
+        )))
         .add_service(RepositoryServiceServer::new(RepositoriesService::new(
             Arc::clone(&state),
         )))

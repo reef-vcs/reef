@@ -1,5 +1,5 @@
-//! The `reef.api.v1` surface (R2.01, tests 8 to 13): declared RPCs say they
-//! are not implemented, unknown methods and 0.1 clients are named, lists
+//! The `reef.api.v1` surface (R2.01, tests 8 to 13): every declared RPC is
+//! implemented (R2.10), unknown methods and 0.1 clients are named, lists
 //! page, and writes return the operation they recorded.
 
 #![allow(
@@ -8,7 +8,6 @@
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
-use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -40,63 +39,58 @@ async fn channel(socket: &Path) -> Channel {
         .unwrap()
 }
 
-/// Asserts `status` is a declared RPC's `NOT_IMPLEMENTED` for `method`.
-fn assert_not_implemented(status: &tonic::Status, method: &str) {
-    assert_eq!(status.code(), Code::Unimplemented, "{method}: {status:?}");
-    let detail = reef_api::error::detail(status).unwrap_or_else(|| panic!("{method}: no detail"));
-    assert_eq!(detail.kind(), ErrorKind::Unsupported, "{method}");
-    assert_eq!(detail.reason, reef_api::error::NOT_IMPLEMENTED, "{method}");
-    assert_eq!(detail.metadata["method"], method);
-    assert_ne!(status.message(), "");
+/// Asserts `status` is not a declared RPC's `NOT_IMPLEMENTED`.
+fn assert_implemented(status: &tonic::Status, method: &str) {
+    assert_ne!(status.code(), Code::Unimplemented, "{method}: {status:?}");
+    let reason = reef_api::error::detail(status).map(|detail| detail.reason);
+    assert_ne!(
+        reason.as_deref(),
+        Some(reef_api::error::NOT_IMPLEMENTED),
+        "{method}"
+    );
 }
 
-// 8
+// 8, and R2.10's test 18: the presence RPCs were the last declared ones.
 #[tokio::test(flavor = "multi_thread")]
-async fn declared_rpcs_say_not_implemented() {
+async fn every_declared_rpc_is_implemented() {
     let daemon = TestDaemon::start().await;
     let channel = channel(daemon.handle.socket_path()).await;
-    let mut seen = BTreeSet::new();
-    macro_rules! check {
-        ($client:expr, $rpc:ident, $request:ident, $path:literal) => {{
-            let status = $client
-                .$rpc(v1::$request::default())
-                .await
-                .map(|_| ())
-                .unwrap_err();
-            assert_not_implemented(&status, $path);
-            seen.insert($path);
-        }};
-    }
     let mut presence = PresenceServiceClient::new(channel.clone());
-    check!(
-        presence,
-        report_presence,
-        ReportPresenceRequest,
-        "/reef.api.v1.PresenceService/ReportPresence"
+    let status = presence
+        .report_presence(v1::ReportPresenceRequest::default())
+        .await
+        .unwrap_err();
+    assert_implemented(&status, "ReportPresence");
+    assert_eq!(
+        reef_api::error::detail(&status).unwrap().reason,
+        reef_api::error::INVALID_AGENT
     );
-    check!(
-        presence,
-        clear_presence,
-        ClearPresenceRequest,
-        "/reef.api.v1.PresenceService/ClearPresence"
+    let status = presence
+        .clear_presence(v1::ClearPresenceRequest::default())
+        .await
+        .unwrap_err();
+    assert_implemented(&status, "ClearPresence");
+    assert_eq!(
+        reef_api::error::detail(&status).unwrap().reason,
+        reef_api::error::INVALID_PRESENCE_ID
     );
-    check!(
-        presence,
-        subscribe_presence,
-        SubscribePresenceRequest,
-        "/reef.api.v1.PresenceService/SubscribePresence"
-    );
-    // R2.02 implements six more, R2.03 three, R2.04 three, R2.09 one.
-    assert_eq!(seen.len(), 3);
+    let mut stream = presence
+        .subscribe_presence(v1::SubscribePresenceRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    let first = stream.message().await.unwrap().unwrap();
+    assert!(first.synced);
+    drop(stream);
     // The client does not take a declared RPC of its own version for a
     // version mismatch.
-    let error = daemon
+    let revision = daemon
         .client
         .daemon_status(true)
         .await
         .map(|status| status.api_revision)
         .unwrap();
-    assert_eq!(error, reef_api::API_REVISION);
+    assert_eq!(revision, reef_api::API_REVISION);
     daemon.stop().await;
 }
 

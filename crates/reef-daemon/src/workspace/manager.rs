@@ -26,6 +26,7 @@ use crate::model::{
     LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
     WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
+use crate::presence::PresenceHub;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
 use crate::snapshot::{Scheduler, SnapshotKind, TrackReason};
@@ -62,6 +63,8 @@ pub struct Manager {
     pub(super) leases: Arc<LeaseManager>,
     /// The shared dependency stores (R1.20).
     pub(super) stores: Arc<StoreManager>,
+    /// The live presence entries (R2.10).
+    pub(super) presence: Arc<PresenceHub>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -96,10 +99,12 @@ impl Manager {
                 config.max_concurrent_scans(),
                 manager.clone(),
             );
+            let presence = Arc::new(PresenceHub::new(config.presence.clone()));
             let leases = Arc::new(LeaseManager::new(
                 config.file.lease.clone(),
                 Arc::clone(&db),
                 manager.clone(),
+                Arc::clone(&presence),
             ));
             let stores = Arc::new(StoreManager::new(&config.paths.state_dir, Arc::clone(&db)));
             Manager {
@@ -114,6 +119,7 @@ impl Manager {
                 scheduler,
                 leases,
                 stores,
+                presence,
             }
         })
     }
@@ -126,6 +132,11 @@ impl Manager {
     /// The lease manager.
     pub fn leases(&self) -> &Arc<LeaseManager> {
         &self.leases
+    }
+
+    /// The live presence entries (R2.10).
+    pub fn presence(&self) -> &Arc<PresenceHub> {
+        &self.presence
     }
 
     /// The metadata database.
@@ -419,6 +430,7 @@ impl Manager {
         let lock = self.repo_lock(id);
         let _exclusive = lock.write().await;
         let record = self.repos.forget(&self.db, id)?;
+        self.presence.end_repository(id);
         self.bases
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -816,6 +828,7 @@ impl Manager {
         {
             tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
         }
+        self.presence.end_workspace(id);
     }
 }
 

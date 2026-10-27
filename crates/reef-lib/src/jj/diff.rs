@@ -498,6 +498,28 @@ async fn file_diff(
     Ok(diff)
 }
 
+/// The paths that differ from commit `from` to commit `to` in `repo`, in
+/// path order, `limit` at most: no copy detection and no content read, so
+/// it stays cheap after every snapshot (R2.10's editing presence).
+pub async fn changed_paths(
+    repo: &ReadonlyRepo,
+    from: &CommitIdHex,
+    to: &CommitIdHex,
+    limit: usize,
+) -> Result<Vec<String>, DiffError> {
+    let store = repo.store();
+    let from_tree = store.get_commit_async(&from.to_id()).await?.tree();
+    let to_tree = store.get_commit_async(&to.to_id()).await?.tree();
+    let mut stream = from_tree.diff_stream(&to_tree, &EverythingMatcher);
+    let mut paths = Vec::new();
+    while paths.len() < limit
+        && let Some(entry) = stream.next().await
+    {
+        paths.push(entry.path.as_internal_file_string().to_owned());
+    }
+    Ok(paths)
+}
+
 /// The diff from `from` to `to` in `repo`: a page of up to `options.limit`
 /// files after `options.after`, in path order, and the count over every
 /// page. `should_stop` is checked between files; when it returns true the

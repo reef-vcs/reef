@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use reef_api::v1::DiffFormat;
 use reef_client::json::{
     Change, ChangeSummary, Diff, FileChange, FileDiff, FileEntry, FileRead, LogEntry, Operation,
-    RepoStatus,
+    Presence, PresenceEvent, RepoStatus,
 };
 use serde::Serialize;
 
@@ -357,6 +357,61 @@ impl TextRender for OpLine {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         writeln!(w, "{}", op_line(&self.0))
     }
+}
+
+/// One event of `reef presence watch` (R2.10): one line of text, or the
+/// event as one JSON line.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct PresenceLine(pub(crate) PresenceEvent);
+
+impl TextRender for PresenceLine {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let event = &self.0;
+        let presence = &event.presence;
+        // Workspace ids are 16 hex; 8 tell them apart in a fleet.
+        let workspace = presence
+            .workspace_id
+            .as_deref()
+            .map_or("-", |id| id.get(..8).unwrap_or(id));
+        let says = if event.ended {
+            format!("ended ({})", event.end_reason.as_deref().unwrap_or("gone"))
+        } else {
+            presence_says(presence)
+        };
+        writeln!(w, "{} {} {workspace} {says}", presence.kind, presence.agent)
+    }
+}
+
+/// What a live presence entry says, in a few words.
+fn presence_says(presence: &Presence) -> String {
+    if let Some(activity) = &presence.activity {
+        return activity.clone();
+    }
+    if !presence.paths.is_empty() {
+        let mut shown: Vec<&str> = presence.paths.iter().take(3).map(String::as_str).collect();
+        let more = presence.paths.len().saturating_sub(3);
+        let more = (more > 0).then(|| format!("(+{more})"));
+        shown.extend(more.as_deref());
+        return shown.join(" ");
+    }
+    if let Some(progress) = &presence.progress {
+        let total = progress
+            .total
+            .map_or_else(String::new, |total| format!("/{total}"));
+        return format!(
+            "{} {}{total} {}",
+            progress.phase.as_deref().unwrap_or("-"),
+            progress.done,
+            progress.unit.as_deref().unwrap_or_default()
+        )
+        .trim_end()
+        .to_owned();
+    }
+    if let Some(lease) = &presence.lease {
+        return format!("lease until {}", lease.expires_at.as_deref().unwrap_or("-"));
+    }
+    String::new()
 }
 
 /// `reef op show`.

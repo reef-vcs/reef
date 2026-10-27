@@ -90,7 +90,7 @@ fn lease_end(end: Option<LeaseEnd>) -> v1::LeaseEndReason {
 }
 
 /// A lease as a message, its state computed at `now`.
-pub(super) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v1::Lease {
+pub(crate) fn lease(lease: &LeaseRecord, leases: &LeaseManager, now: Timestamp) -> v1::Lease {
     v1::Lease {
         id: lease.id.as_hex(),
         owner: lease.owner.clone(),
