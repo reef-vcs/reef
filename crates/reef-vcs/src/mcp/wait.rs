@@ -102,6 +102,9 @@ async fn wait(
     };
     loop {
         tokio::select! {
+            // Frames first: with a timeout of 0 the deadline has passed, and
+            // the wait ends at the first live frame instead.
+            biased;
             next = stream.message() => {
                 let frame = match next {
                     Ok(Some(frame)) => frame,
@@ -136,7 +139,9 @@ async fn wait(
                     return Ok(timed_out(last));
                 }
             }
-            () = tokio::time::sleep_until(deadline) => return Ok(timed_out(last)),
+            () = tokio::time::sleep_until(deadline), if !timeout.is_zero() => {
+                return Ok(timed_out(last));
+            }
             () = call.request.ct.cancelled() => return Ok(timed_out(last)),
             now = progress.tick(), if token.is_some() => {
                 if let Some(token) = &token {

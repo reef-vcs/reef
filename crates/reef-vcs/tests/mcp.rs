@@ -861,12 +861,22 @@ async fn wait_for_operations() {
         [&two["operation"]["id"], &three["operation"]["id"]],
         "{resumed}"
     );
+    // A timeout of 0 checks once: it returns what is already there.
+    let checked = waiter
+        .ok(
+            "wait_for_operations",
+            json!({"kinds": ["describe"], "after_operation": last, "timeout_seconds": 0}),
+        )
+        .await;
+    assert_eq!(checked["timed_out"], false, "{checked}");
+    assert_eq!(checked["operations"], resumed["operations"]);
 
     let started = Instant::now();
     let once = waiter
         .ok("wait_for_operations", json!({"timeout_seconds": 0}))
         .await;
     assert_eq!(once["timed_out"], true);
+    assert!(once["last_operation_id"].is_string(), "{once}");
     assert!(started.elapsed() < Duration::from_secs(2));
 
     // Another workspace's snapshot does not end a wait on this one.

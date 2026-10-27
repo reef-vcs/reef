@@ -807,7 +807,9 @@ enum Seen {
 /// and stops when only those are left to walk, so it reads about as many
 /// operations as it returns; jj-lib's `walk_ancestors_range` does the same
 /// but reads its first chunk without a bound. Past `limit` kept operations
-/// it stops with `truncated`. Never loads a repository and never writes.
+/// it stops with `truncated`. An operation behind the frontier whose
+/// parent is gone from the store (collected by GC) is walked no further.
+/// Never loads a repository and never writes.
 pub async fn walk_after(
     repo: &ReadonlyRepo,
     heads: &[OperationIdHex],
@@ -848,7 +850,7 @@ pub async fn walk_after(
             seen.insert(op.id().clone(), Seen::Kept);
             kept.insert(op.id().clone(), op.clone());
         }
-        for parent in op.parents().await? {
+        for parent in parents(&op, seen.get(op.id()) == Some(&Seen::Behind)).await? {
             match seen.get(parent.id()) {
                 None => {
                     seen.insert(parent.id().clone(), Seen::Wanted);
@@ -888,6 +890,26 @@ pub async fn walk_after(
         unreached,
         truncated,
     })
+}
+
+/// `op`'s parents. Behind the frontier, a missing one is skipped: GC keeps
+/// everything the heads reach, so what it collected is behind the frontier
+/// too, and a frontier from before a GC (its old operations kept by the undo
+/// window, their oldest parent collected) is then reported as unreached.
+async fn parents(op: &Operation, behind: bool) -> Result<Vec<Operation>, OpLookupError> {
+    if !behind {
+        return Ok(op.parents().await?);
+    }
+    let store = op.op_store();
+    let mut found = Vec::with_capacity(op.parent_ids().len());
+    for id in op.parent_ids() {
+        match store.read_operation(id).await {
+            Ok(data) => found.push(Operation::new(Arc::clone(&store), id.clone(), data)),
+            Err(OpStoreError::ObjectNotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(found)
 }
 
 /// Marks `id` and, if the walk kept them, its kept ancestors as behind the

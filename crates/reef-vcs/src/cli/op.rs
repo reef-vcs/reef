@@ -82,8 +82,8 @@ struct WatchArgs {
     #[arg(long, value_name = "OP")]
     after: Option<String>,
     /// Stop after printing this many operations.
-    #[arg(long, value_name = "N")]
-    count: Option<usize>,
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    count: Option<u64>,
     /// Stop after this many seconds [default: 30]; 0 prints what --after replays.
     #[arg(long = "for", value_name = "SECONDS", conflicts_with = "follow")]
     seconds: Option<u64>,
@@ -294,7 +294,9 @@ async fn watch(ctx: &Ctx, args: WatchArgs) -> Result<(), CliError> {
     let mut watcher = Watcher {
         ctx,
         effects: args.effects,
-        count: args.count,
+        count: args
+            .count
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX)),
         replay_only,
         printed: 0,
         heads: Vec::new(),
@@ -440,11 +442,19 @@ async fn stdout_closed() {
 }
 
 /// Whether `op watch` resubscribes after `error`: the daemon went away
-/// (unavailable with no reason) or the connection failed.
+/// (unavailable with no reason), the connection failed, or the transport
+/// broke mid-stream (a status the daemon did not write, with no
+/// `ErrorDetail`, as tonic reports a reset connection).
 fn reconnects(error: &CliError) -> bool {
     match error {
-        CliError::Daemon(ClientError::Rpc { kind, reason, .. }) => {
-            *kind == ErrorKind::Unavailable && reason.is_empty()
+        CliError::Daemon(ClientError::Rpc {
+            kind,
+            reason,
+            status,
+            ..
+        }) => {
+            (*kind == ErrorKind::Unavailable && reason.is_empty())
+                || reef_api::error::detail(status).is_none()
         }
         CliError::Daemon(ClientError::Connect { .. }) | CliError::Timeout { .. } => true,
         _ => false,

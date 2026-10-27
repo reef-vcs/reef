@@ -139,17 +139,13 @@ impl RepoHead {
         )
     }
 
-    /// Tells subscriptions a rewrite of the log (GC) begins, from the op
-    /// head when there is one; the guard ends it when dropped, after
+    /// Tells subscriptions a rewrite of the log (GC) begins; the guard
+    /// ends it when dropped, after
     /// [`crate::subscribe::events::Rewrite::moved_to`] if the op heads
     /// moved. `None` without subscriptions to tell.
-    pub async fn begin_rewrite(&self) -> Option<crate::subscribe::events::Rewrite> {
+    pub fn begin_rewrite(&self) -> Option<crate::subscribe::events::Rewrite> {
         let events = self.events.as_ref()?;
-        let before = match reef_lib::jj::oplog::op_heads(&self.readonly()).await {
-            Ok(heads) if heads.len() == 1 => heads.into_iter().next(),
-            _ => None,
-        };
-        Some(events.rewrite(self.id, before))
+        Some(events.rewrite(self.id))
     }
 
     /// Wakes subscriptions when the head moved from `before`: a job or

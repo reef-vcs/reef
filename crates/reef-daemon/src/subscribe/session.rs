@@ -82,6 +82,12 @@ struct Followed<F> {
     position: Position,
     /// The budget cut the last read short.
     more: bool,
+    /// Rewrites of the log (GC) this position has been moved across.
+    rewrites: u64,
+    /// A rewrite this position was behind: read up to the head it rewrote
+    /// (its old operations outlive the rewrite by the undo window), then
+    /// move to the rewritten head.
+    rebase: Option<(OperationIdHex, OperationIdHex)>,
     _follow: F,
 }
 
@@ -101,11 +107,14 @@ pub(crate) fn spawn<S: Source>(
             .into_iter()
             .map(|(repo, position)| {
                 let follow = source.follow(repo);
+                let rewrites = position.view.as_ref().map_or(0, |view| view.rewrites);
                 (
                     repo,
                     Followed {
                         position,
                         more: false,
+                        rewrites,
+                        rebase: None,
                         _follow: follow,
                     },
                 )
@@ -242,8 +251,9 @@ impl<S: Source> Session<S> {
                 let Some(view) = self.source.view(**repo) else {
                     return false;
                 };
-                view.rewrite_seq % 2 == 0
+                view.rewrite_seq.is_multiple_of(2)
                     && (followed.position.upto.is_some()
+                        || followed.rebase.is_some()
                         || followed.more
                         || followed
                             .position
@@ -293,6 +303,8 @@ impl<S: Source> Session<S> {
                             view: None,
                         },
                         more: false,
+                        rewrites: view.rewrites,
+                        rebase: None,
                         _follow: follow,
                     },
                 );
@@ -301,28 +313,30 @@ impl<S: Source> Session<S> {
         Ok(())
     }
 
-    /// Moves a position that had everything before a rewrite to the
-    /// rewritten head; any other position cannot continue.
+    /// Moves a position across a rewrite of the log: to the rewritten head
+    /// at once when it had everything before it, else after reading up to
+    /// the head the rewrite replaced. A position replaying, already moving
+    /// across one, or two rewrites behind cannot continue.
     fn apply_rewrites(&mut self) -> Result<(), Status> {
         for (repo, followed) in &mut self.followed {
-            let (Some(view), Some(seen)) = (self.source.view(*repo), &followed.position.view)
-            else {
+            let Some(view) = self.source.view(*repo) else {
                 continue;
             };
-            if view.rewrites == seen.rewrites {
+            if view.rewrites == followed.rewrites {
                 continue;
             }
-            let rebased = (view.rewrites == seen.rewrites + 1 && followed.position.upto.is_none())
-                .then(|| view.rebased(&followed.position.frontier))
-                .flatten();
-            let Some(frontier) = rebased else {
+            let movable = view.rewrites == followed.rewrites + 1
+                && followed.position.upto.is_none()
+                && followed.rebase.is_none();
+            let Some((before, after)) = view.last_rewrite.clone().filter(|_| movable) else {
                 return Err(status(SubscribeError::Rewritten { repo: *repo }));
             };
-            followed.position.frontier = frontier;
-            followed.position.view = Some(RepoView {
-                rewrites: view.rewrites,
-                ..seen.clone()
-            });
+            followed.rewrites = view.rewrites;
+            if followed.position.frontier.ids() == std::slice::from_ref(&before) {
+                followed.position.frontier = Frontier::new([after]);
+            } else {
+                followed.rebase = Some((before, after));
+            }
         }
         Ok(())
     }
@@ -344,6 +358,16 @@ impl<S: Source> Session<S> {
             let Some(view) = self.source.view(*repo) else {
                 continue;
             };
+            // During a rewrite, or after one not applied yet, the position
+            // is not one the log can be read from.
+            if !view.rewrite_seq.is_multiple_of(2) || view.rewrites != followed.rewrites {
+                followed.more = true;
+                continue;
+            }
+            let rebase_upto = followed
+                .rebase
+                .as_ref()
+                .map(|(before, _)| vec![before.clone()]);
             let budget = Budget {
                 operations: left,
                 bytes: self.limits.frame_bytes - bytes,
@@ -356,7 +380,7 @@ impl<S: Source> Session<S> {
                 .read(
                     *repo,
                     &followed.position.frontier,
-                    followed.position.upto.as_deref(),
+                    rebase_upto.as_deref().or(followed.position.upto.as_deref()),
                     budget,
                 )
                 .await;
@@ -382,17 +406,17 @@ impl<S: Source> Session<S> {
                 }
                 Err(ReadFailure::Failed(error)) => return Err(error),
             };
-            let seen = followed.position.view.replace(view);
-            if let (Some(seen), Some(now)) = (seen, followed.position.view.as_mut()) {
-                // Rewrites are applied by `apply_rewrites`, never skipped
-                // by a read.
-                now.rewrites = seen.rewrites;
-            }
+            followed.position.view = Some(view);
             followed.position.frontier = batch.frontier;
             followed.more = batch.more;
-            if !batch.more && followed.position.upto.take().is_some() {
-                // Replayed: read once more for what came since the start.
-                followed.more = true;
+            if !batch.more {
+                if let Some((_, after)) = followed.rebase.take() {
+                    followed.position.frontier = Frontier::new([after]);
+                    followed.more = true;
+                } else if followed.position.upto.take().is_some() {
+                    // Replayed: read once more for what came since the start.
+                    followed.more = true;
+                }
             }
             bytes += batch
                 .operations
@@ -540,6 +564,10 @@ mod tests {
                 return Err(ReadFailure::Rewritten);
             }
             let end = upto.map_or(operations - 1, |ids| parse(&ids[0]));
+            if end < at {
+                // The position is not behind the heads: not in their history.
+                return Err(ReadFailure::Rewritten);
+            }
             if end - at > budget.behind {
                 return Err(ReadFailure::Behind);
             }
@@ -718,6 +746,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_position_behind_a_rewrite_reads_up_to_it_first() {
+        let fake = Fake::new(4);
+        // Operations 2 and 3 are recorded but not read yet when GC begins.
+        let mut frames = fake.start(1, None, Limits::default());
+        next(&mut frames).await;
+        fake.edit(|log| {
+            log.view.rewrite_seq += 1;
+            log.view.version += 1;
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            frames.try_recv().is_err(),
+            "nothing is read during a rewrite"
+        );
+        // GC rewrote from `0003` to `0009`, and the rewrite ended.
+        fake.edit(|log| {
+            log.operations = 10;
+            log.view.rewrite_seq += 1;
+            log.view.rewrites += 1;
+            log.view.last_rewrite = Some((op_id(3), op_id(9)));
+            log.view.version += 1;
+        });
+        let frame = next(&mut frames).await;
+        assert_eq!(ids(&frame), [2, 3], "up to the head GC rewrote");
+        assert!(frame.live);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        fake.record(1);
+        assert_eq!(
+            ids(&next(&mut frames).await),
+            [10],
+            "then on from its rewrite"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn rewrites_move_a_caught_up_position_and_end_others() {
         let fake = Fake::new(3);
         let mut frames = fake.start(2, None, Limits::default());
@@ -728,7 +791,7 @@ mod tests {
             log.operations = 10;
             log.view.rewrite_seq += 2;
             log.view.rewrites += 1;
-            log.view.last_rewrite = Some((Some(op_id(2)), op_id(9)));
+            log.view.last_rewrite = Some((op_id(2), op_id(9)));
             log.view.version += 1;
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -739,7 +802,7 @@ mod tests {
         fake.edit(|log| {
             log.view.rewrite_seq += 2;
             log.view.rewrites += 1;
-            log.view.last_rewrite = Some((Some(op_id(3)), op_id(20)));
+            log.view.last_rewrite = Some((op_id(3), op_id(20)));
             log.view.version += 1;
         });
         let error = frames.recv().await.unwrap().unwrap_err();

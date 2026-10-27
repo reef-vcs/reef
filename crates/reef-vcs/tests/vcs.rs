@@ -1299,7 +1299,8 @@ async fn op_watch() {
         "{} --no-autostart op watch --after {head} --follow -o json | head -1",
         env!("CARGO_BIN_EXE_reef")
     );
-    let mut shell = std::process::Command::new("sh");
+    let script = format!("set -o pipefail; {script}");
+    let mut shell = std::process::Command::new("bash");
     shell
         .args(["-c", &script])
         .env("REEF_STATE_DIR", daemon.state_dir())
@@ -1345,9 +1346,18 @@ async fn op_watch_survives_a_restart() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = watch.spawn().unwrap();
-    ok(&daemon, &dir, &["describe", "-m", "before"]).await;
+    let subscriptions = &daemon.handle.state().subscriptions;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while subscriptions.active() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watch never subscribed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = ok(&daemon, &dir, &["describe", "-m", "before"]).await;
     let daemon = daemon.restart().await;
-    ok(&daemon, &dir, &["describe", "-m", "after"]).await;
+    let after = ok(&daemon, &dir, &["describe", "-m", "after"]).await;
     let output = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
@@ -1357,5 +1367,6 @@ async fn op_watch_survives_a_restart() {
     .unwrap();
     let lines = json_lines(&output);
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_ne!(lines[0]["id"], lines[1]["id"]);
+    assert_eq!(lines[0]["id"], before["operation"]["id"]);
+    assert_eq!(lines[1]["id"], after["operation"]["id"]);
 }

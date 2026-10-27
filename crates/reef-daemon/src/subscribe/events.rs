@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use reef_lib::jj::oplog::{self, Frontier};
+use reef_lib::jj::oplog;
 use reef_lib::jj::{OperationIdHex, ReadonlyRepo};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -48,20 +48,8 @@ pub(crate) struct RepoView {
     pub(crate) rewrite_seq: u64,
     /// Rewrites that moved the op heads.
     pub(crate) rewrites: u64,
-    /// The last of those: the head before, when it was the only one, and
-    /// the head after.
-    pub(crate) last_rewrite: Option<(Option<OperationIdHex>, OperationIdHex)>,
-}
-
-impl RepoView {
-    /// Where a subscription at `frontier` stands after the last rewrite:
-    /// at its new head when it had everything before it.
-    pub(crate) fn rebased(&self, frontier: &Frontier) -> Option<Frontier> {
-        let (Some(before), after) = self.last_rewrite.as_ref()? else {
-            return None;
-        };
-        (frontier.ids() == std::slice::from_ref(before)).then(|| Frontier::new([after.clone()]))
-    }
+    /// The last of those: the head it rewrote, and the head after.
+    pub(crate) last_rewrite: Option<(OperationIdHex, OperationIdHex)>,
 }
 
 /// The hub; one in [`crate::AppState::events`], shared with the
@@ -154,10 +142,9 @@ impl OpEvents {
         }
     }
 
-    /// A rewrite of `repo`'s log begins, from `before` when it is the only
-    /// op head. The returned guard ends it when dropped, after
-    /// [`Rewrite::moved_to`] if the op heads moved.
-    pub fn rewrite(self: &Arc<Self>, repo: RepoId, before: Option<OperationIdHex>) -> Rewrite {
+    /// A rewrite of `repo`'s log begins. The returned guard ends it when
+    /// dropped, after [`Rewrite::moved_to`] if the op heads moved.
+    pub fn rewrite(self: &Arc<Self>, repo: RepoId) -> Rewrite {
         self.with(|repos| {
             if let Some(watched) = repos.get_mut(&repo) {
                 watched.view.rewrite_seq += 1;
@@ -168,7 +155,6 @@ impl OpEvents {
         Rewrite {
             events: Arc::clone(self),
             repo,
-            before,
         }
     }
 
@@ -262,17 +248,15 @@ impl Drop for Follow {
 pub struct Rewrite {
     events: Arc<OpEvents>,
     repo: RepoId,
-    before: Option<OperationIdHex>,
 }
 
 impl Rewrite {
-    /// The op heads moved to `after`, the rewritten head.
-    pub fn moved_to(&self, after: &OperationIdHex) {
-        let before = self.before.clone();
+    /// The op heads moved from `before` to `after`, its rewrite.
+    pub fn moved_to(&self, before: &OperationIdHex, after: &OperationIdHex) {
         self.events.with(|repos| {
             if let Some(watched) = repos.get_mut(&self.repo) {
                 watched.view.rewrites += 1;
-                watched.view.last_rewrite = Some((before, after.clone()));
+                watched.view.last_rewrite = Some((before.clone(), after.clone()));
                 watched.heads = vec![after.clone()];
                 watched.view.version += 1;
             }

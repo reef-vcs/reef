@@ -140,7 +140,7 @@ impl AdviceCtx {
                 next: self.op_log(),
             },
             reason::TOO_FAR_BEHIND | reason::OPERATION_LOG_REWRITTEN => Advice {
-                hint: "Too much changed since --after, or the log was rewritten; read history with `reef op log`, then watch without --after.".to_owned(),
+                hint: "The stream's position is too far back, or the log was rewritten (garbage collection); read history with `reef op log`, then watch from now.".to_owned(),
                 next: self.op_log(),
             },
             reason::OPERATION_SUPERSEDED => Advice {

@@ -669,10 +669,44 @@ async fn replay_after_operation() {
         (Code::FailedPrecondition, "TOO_FAR_BEHIND".to_owned())
     );
     assert_eq!(metadata(&error, "repo_id"), repo.id);
+    // An operation dropped from the op heads, as `jj op abandon` leaves it.
+    let (kept, dropped) = concurrent(&repo.root);
+    drop_head(&repo.root, &dropped, &kept);
+    let error = refused(Start::AfterOperation(dropped.clone()), one).await;
+    assert_eq!(
+        reason(&error),
+        (
+            Code::FailedPrecondition,
+            "OPERATION_NOT_IN_HISTORY".to_owned()
+        )
+    );
+    assert_eq!(metadata(&error, "operation_id"), dropped);
+}
+
+/// Drops `dropped` from the op heads, leaving `kept`.
+fn drop_head(root: &Path, dropped: &str, kept: &str) {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories,
+    };
+    use jj_lib::op_store::OperationId;
+    use jj_lib::workspace::Workspace;
+    let workspace = Workspace::load(
+        &test_settings(),
+        root,
+        &default_backend_factories(),
+        &default_working_copy_factories(),
+    )
+    .unwrap();
+    pollster::block_on(workspace.repo_loader().op_heads_store().update_op_heads(
+        &[OperationId::try_from_hex(dropped).unwrap()],
+        &OperationId::try_from_hex(kept).unwrap(),
+    ))
+    .unwrap();
 }
 
 // 10
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one case per way to resume")]
 async fn resume_by_cursor() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon.client, &repo, "owner").await;
@@ -682,9 +716,11 @@ async fn resume_by_cursor() {
     let (_, frames) = operations(&mut stream, 1, SECOND).await;
     let cursor = frames.last().unwrap().cursor.clone();
     drop(stream);
+    let bot = daemon.client.clone().with_agent("bot-1").unwrap();
     let mut later = Vec::new();
     for n in 0..4 {
-        later.push(describe(&daemon.client, &ws, &format!("later {n}")).await);
+        let client = if n % 2 == 1 { &bot } else { &daemon.client };
+        later.push(describe(client, &ws, &format!("later {n}")).await);
     }
     let mut stream = subscribe(
         &daemon.client,
@@ -711,20 +747,22 @@ async fn resume_by_cursor() {
         SubscribeOperationsRequest {
             start: Some(Start::Cursor(cursor.clone())),
             filter: Some(OperationFilter {
-                kinds: vec![OperationKind::Snapshot.into()],
+                agents: vec!["bot-1".to_owned()],
                 ..OperationFilter::default()
             }),
             ..request(&repo)
         },
     )
     .await;
+    let mut filtered = Vec::new();
     loop {
         let next = frame(&mut stream, SECOND).await;
-        assert!(next.operations.is_empty(), "{:?}", next.operations);
         if next.live {
             break;
         }
+        filtered.extend(next.operations);
     }
+    assert_eq!(ids(&filtered), ids(&[later[1].clone(), later[3].clone()]));
 
     let error = daemon
         .client
@@ -809,6 +847,7 @@ async fn frames_and_keepalives() {
     let (daemon, repo) = fixture_with(|config| {
         config.subscribe.keepalive = Duration::from_millis(300);
         config.subscribe.frame_operations = 10;
+        config.subscribe.outside_poll = Duration::from_hours(1);
     })
     .await;
     let mut stream = subscribe(&daemon.client, request(&repo)).await;
@@ -818,18 +857,19 @@ async fn frames_and_keepalives() {
         assert!(next.operations.is_empty(), "{:?}", next.operations);
         assert_eq!(next.cursor, first.cursor);
     }
-    // 25 written while the daemon cannot deliver: frames of at most 10.
-    let pause = daemon
-        .handle
-        .state()
-        .repos
-        .get(repo.id.parse().unwrap())
-        .unwrap();
-    let guard = pause.pause(10 * SECOND).await.unwrap();
+    // 25 written by another process with the poll off, then loaded by the
+    // daemon in one reload: read at once, in frames of 10.
     for n in 0..25 {
         outside(&repo.root, &format!("burst-{n}"));
     }
-    drop(guard);
+    daemon
+        .client
+        .get_status(v1::GetStatusRequest {
+            repo: repo.id.clone(),
+            ..v1::GetStatusRequest::default()
+        })
+        .await
+        .unwrap();
     let (got, frames) = operations(&mut stream, 25, 5 * SECOND).await;
     assert_eq!(
         got.iter()
@@ -837,7 +877,13 @@ async fn frames_and_keepalives() {
             .collect::<Vec<_>>(),
         (0..25).map(|n| format!("burst-{n}")).collect::<Vec<_>>()
     );
-    assert!(frames.iter().all(|frame| frame.operations.len() <= 10));
+    // Keepalives come every 300 ms meanwhile.
+    let sizes: Vec<usize> = frames
+        .iter()
+        .map(|frame| frame.operations.len())
+        .filter(|&size| size > 0)
+        .collect();
+    assert_eq!(sizes, [10, 10, 5]);
 }
 
 // 13

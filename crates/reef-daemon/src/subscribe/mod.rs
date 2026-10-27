@@ -180,16 +180,18 @@ impl Advise for SubscribeError {
                 "Pass a cursor exactly as a frame returned it, or subscribe without one.".to_owned()
             }
             Self::TooFarBehind { limit, .. } => format!(
-                "More than {limit} operations were recorded after this point; read them with \
-                 ListOperations, then subscribe without a start."
+                "More than {} operations were recorded after this point; read them with \
+                 ListOperations, then subscribe without a start.",
+                thousands(*limit)
             ),
             Self::Rewritten { .. } => "This repository's operation log was rewritten (garbage \
                                        collection) since this point; read the state again and \
                                        subscribe without a start."
                 .to_owned(),
             Self::TooMany { limit } => format!(
-                "The daemon is serving its limit of {limit} subscriptions; close one and \
-                 subscribe again."
+                "The daemon is serving its limit of {} subscriptions; close one and \
+                 subscribe again.",
+                thousands(*limit)
             ),
             Self::AfterNeedsOneRepo => {
                 "after_operation needs exactly one repository in repos; resume several with \
@@ -201,5 +203,32 @@ impl Advise for SubscribeError {
                 .to_owned(),
             Self::NotInHistory(_) | Self::Forgotten(_) => return None,
         }))
+    }
+}
+
+/// `n` with commas between thousands, as the hints write numbers.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_write_thousands() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_024), "1,024");
+        assert_eq!(thousands(10_000), "10,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }
