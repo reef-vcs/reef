@@ -1106,6 +1106,76 @@ async fn carry_is_idempotent() {
     }
 }
 
+// Issue #80 (review): a file the carried check-out would overwrite that
+// changed after the scan is not overwritten; merging again over the tree
+// the scan took keeps the new edit, as a conflict with the write.
+#[tokio::test]
+async fn carry_does_not_overwrite_an_edit_after_the_scan() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let c2 = write_on(&mut fx, &c, &[content("a.txt", "api a\n")]).await;
+    write(&y_root, "late.txt", "late\n");
+
+    y.set_head(Arc::clone(fx.main.head()));
+    let carry = Carry {
+        from: c.clone(),
+        to: c2,
+        base: None,
+    };
+    let mut pending = y
+        .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(pending.carried());
+    let plan = pending.plan().clone();
+    let committed = commit_snapshot(
+        fx.main.head(),
+        &plan,
+        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
+    )
+    .await
+    .unwrap();
+    // The agent edits the write's path between the scan and the check-out.
+    write(&y_root, "a.txt", "agent's a, written later\n");
+    let error = pending
+        .check_out_carried(&committed.repo, &committed.commit_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, reef_lib::jj::SnapshotError::ChangedAfterScan(ref path) if path.ends_with("a.txt")),
+        "{error:?}"
+    );
+    drop(pending);
+    assert_eq!(
+        std::fs::read_to_string(y_root.join("a.txt")).unwrap(),
+        "agent's a, written later\n"
+    );
+
+    // The daemon's re-merge carry: the new edit meets the write's.
+    fx.main.set_head(Arc::clone(&committed.repo));
+    let again = Carry {
+        from: c.clone(),
+        to: committed.commit_id.clone(),
+        base: plan.carried.clone(),
+    };
+    let (merged, _) = carry_snapshot(&fx, &mut y, &c, &again).await;
+    assert_eq!(
+        conflicted_paths(&merged.repo, &merged.commit_id, 10).unwrap(),
+        (vec!["a.txt".to_owned()], 1)
+    );
+    let on_disk = std::fs::read_to_string(y_root.join("a.txt")).unwrap();
+    assert!(
+        on_disk.contains("agent's a") && on_disk.contains("api a"),
+        "{on_disk}"
+    );
+    assert_eq!(
+        file_in(&merged.repo, &merged.commit_id, "late.txt")
+            .await
+            .as_deref(),
+        Some("late\n")
+    );
+}
+
 // R1.13: a workspace jj forgot is recovered onto a new change on its last
 // commit's parents.
 #[tokio::test]

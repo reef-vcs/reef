@@ -188,12 +188,17 @@ pub enum SnapshotError {
     /// The operation could not be committed.
     #[error("failed to commit the snapshot operation")]
     Commit(#[from] TransactionCommitError),
+    /// A file a carried snapshot's check-out would overwrite changed on disk
+    /// after the scan; nothing was checked out (ADR 0039).
+    #[error("{0} changed after the scan; not overwriting it")]
+    ChangedAfterScan(String),
 }
 
 impl Classify for SnapshotError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::RepoBehind { .. }
+            | Self::ChangedAfterScan(_)
             | Self::RootCommit(_)
             | Self::Checkout(CheckoutError::ConcurrentCheckout) => ErrorKind::Conflict,
             Self::ExpectedCommitMissing(_) => ErrorKind::NotFound,
@@ -289,6 +294,39 @@ pub struct PendingSnapshot<'a> {
     narrowed: Option<Narrowed>,
     /// [`PendingSnapshot::check_out_carried`] ran.
     checked_out: bool,
+    /// For a carried scan, each file its check-out would overwrite or
+    /// remove, as the scan left it.
+    stamps: Vec<(PathBuf, Option<Stamp>)>,
+}
+
+/// What a file on disk looked like, to tell whether it changed: a writer
+/// changes at least one of these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    symlink: bool,
+    #[cfg(unix)]
+    inode: (u64, i64, i64),
+}
+
+impl Stamp {
+    /// `path`'s stamp; `None` when nothing is there.
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt as _;
+            (metadata.ino(), metadata.ctime(), metadata.ctime_nsec())
+        };
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            symlink: metadata.file_type().is_symlink(),
+            #[cfg(unix)]
+            inode,
+        })
+    }
 }
 
 /// A narrowed scan's own load of the tree state, saved by
@@ -344,13 +382,22 @@ impl PendingSnapshot<'_> {
     /// Checks `commit`, the carried snapshot's new commit in `repo`, out on
     /// disk: the paths where the merge differs from the files scanned, the
     /// write's own and any conflicted. Returns the files it updated, added
-    /// or removed.
+    /// or removed. A file among them that changed on disk since the scan is
+    /// [`SnapshotError::ChangedAfterScan`], with nothing checked out: jj's
+    /// check-out would overwrite it unread.
     pub async fn check_out_carried(
         &mut self,
         repo: &ReadonlyRepo,
         commit: &CommitIdHex,
     ) -> Result<u32, SnapshotError> {
         let commit = commit_by_hex(repo, commit).await?;
+        if let Some((path, _)) = self
+            .stamps
+            .iter()
+            .find(|(path, stamp)| Stamp::of(path) != *stamp)
+        {
+            return Err(SnapshotError::ChangedAfterScan(path.display().to_string()));
+        }
         self.updated_files = check_out(&mut self.locked, &commit).await?;
         self.checked_out = true;
         Ok(self.updated_files)
@@ -752,6 +799,7 @@ impl Repo {
     ) -> Result<PendingSnapshot<'_>, SnapshotError> {
         let max_new_file_size = max_new_file_size(self.workspace.settings())?;
         let base_ignores = self.ignores(extra)?;
+        let root = self.workspace_root().to_owned();
         let repo = Arc::clone(&self.repo);
         let name = self.workspace.workspace_name().to_owned();
         let head_op = OperationIdHex::of(repo.op_id());
@@ -801,6 +849,7 @@ impl Repo {
         let (tree_ids, labels) = new_tree.tree_ids_and_labels();
         let (mut tree_ids, mut labels) = (tree_ids.clone(), labels.clone());
         let mut carried = None;
+        let mut stamps = Vec::new();
 
         let own_last = async || match expected_commit {
             Some(id) => commit_by_hex(&repo, id).await,
@@ -832,8 +881,7 @@ impl Repo {
             }
             Some(wc) => {
                 let last = own_last().await?;
-                let trees = (&old_tree, &new_tree);
-                match carried_tree(&repo, (wc, &last), carry, trees).await? {
+                match carried_tree(&repo, (wc, &last), carry, &new_tree).await? {
                     Some(merged) if merged.tree_ids() == wc.tree_ids() => {
                         // The edits were already the write's.
                         updated_files = check_out(&mut locked, wc).await?;
@@ -841,6 +889,7 @@ impl Repo {
                         (CommitIdHex::of(wc.id()), false, false, None)
                     }
                     Some(merged) => {
+                        stamps = overwritten(&root, &new_tree, &merged).await?;
                         carried = Some(ScannedTree { tree_ids, labels });
                         let (merged_ids, merged_labels) = merged.tree_ids_and_labels();
                         (tree_ids, labels) = (merged_ids.clone(), merged_labels.clone());
@@ -876,6 +925,7 @@ impl Repo {
             updated_files,
             narrowed,
             checked_out: false,
+            stamps,
         })
     }
 
@@ -1017,13 +1067,13 @@ async fn check_out(
 /// A carried snapshot's tree, when `carry` names this move: `to` is `wc`,
 /// the view's commit (the write's), and `from` is `last`, the commit the
 /// working copy was checked out from. The tree is the merge of `wc`'s and
-/// the scanned `disk` over the carry's base, by default `recorded`, the tree
-/// the working copy last recorded (ADR 0039). `None` otherwise.
+/// the scanned `disk` over the carry's base, by default `last`'s tree
+/// (ADR 0039). `None` otherwise.
 async fn carried_tree(
     repo: &ReadonlyRepo,
     (wc, last): (&Commit, &Commit),
     carry: Option<&Carry>,
-    (recorded, disk): (&MergedTree, &MergedTree),
+    disk: &MergedTree,
 ) -> Result<Option<MergedTree>, BackendError> {
     let Some(carry) = carry.filter(|carry| {
         carry.to.as_str() == wc.id().hex() && carry.from.as_str() == last.id().hex()
@@ -1036,7 +1086,7 @@ async fn carried_tree(
             base.tree_ids.clone(),
             base.labels.clone(),
         ),
-        None => recorded.clone(),
+        None => last.tree(),
     };
     MergedTree::merge(Merge::from_vec(vec![
         (wc.tree(), format!("{} (rewritten)", wc.conflict_label())),
@@ -1045,6 +1095,27 @@ async fn carried_tree(
     ]))
     .await
     .map(Some)
+}
+
+/// The files on disk under `root` that checking `merged` out over the
+/// scanned `disk` tree would overwrite or remove, with their stamps now.
+async fn overwritten(
+    root: &Path,
+    disk: &MergedTree,
+    merged: &MergedTree,
+) -> Result<Vec<(PathBuf, Option<Stamp>)>, BackendError> {
+    let mut diff = disk.diff_stream(merged, &EverythingMatcher);
+    let mut stamps = Vec::new();
+    while let Some(entry) = diff.next().await {
+        // A path absent from the scan is not overwritten: jj's check-out
+        // skips a file it does not track.
+        if entry.values?.before.is_present() {
+            let path = entry.path.to_fs_path_unchecked(root);
+            let stamp = Stamp::of(&path);
+            stamps.push((path, stamp));
+        }
+    }
+    Ok(stamps)
 }
 
 /// Whether the locked working copy is stale against `repo`, by jj's

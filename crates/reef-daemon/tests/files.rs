@@ -1529,6 +1529,102 @@ async fn failed_follow_carries_at_the_next_snapshot() {
     daemon.stop().await;
 }
 
+// Issue #80 (review): a carried follow whose check-out fails after its
+// commit leaves a re-merge carry; the next snapshot checks the commit out
+// and records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_check_out_merges_again() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "a.txt", "a\n");
+    snapshot(client, &repo, &w).await;
+    let before = get(client, &repo, &w).await;
+
+    let request = rewrite(&repo, Some(&w), "@", vec![content("api.txt", "api\n")]);
+    let rpc = {
+        let client = client.clone();
+        async move { client.edit_files(request).await.unwrap() }
+    };
+    let edited = at_follow_hold(&daemon, rpc, || {
+        write(&w, "late.txt", "late\n");
+        scheduler.fail_check_outs(true);
+    })
+    .await;
+    scheduler.fail_check_outs(false);
+    let row = get(client, &repo, &w).await;
+    assert_eq!(
+        row.commit_id, before.commit_id,
+        "the row waits for the files"
+    );
+    assert_eq!(read(&w, "api.txt"), None, "nothing was checked out");
+
+    snapshot(client, &repo, &w).await;
+    let row = get(client, &repo, &w).await;
+    assert_eq!(
+        change_commits(client, &repo, &row.change_id).await,
+        std::slice::from_ref(&row.commit_id)
+    );
+    assert_eq!(read(&w, "api.txt").as_deref(), Some("api\n"));
+    assert_eq!(read(&w, "late.txt").as_deref(), Some("late\n"));
+    // Only the carried commit's operation follows the edit's.
+    let after = operations_after(client, &repo, &w, &edited.operation.unwrap().id).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert!(!row.divergent, "{row:?}");
+    daemon.stop().await;
+}
+
+// Issue #80 (review): an edit of X's `@` while X has unsnapshotted edits
+// and Y, on a child, writes: step 3's snapshot of X rebases Y's commit
+// without moving Y's row, and Y still carries.
+#[tokio::test(flavor = "multi_thread")]
+async fn descendant_of_a_busy_workspace_carries() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let x = create(client, &repo, "x@test", None).await;
+    write(&x, "x.txt", "x\n");
+    snapshot(client, &repo, &x).await;
+    let x_row = get(client, &repo, &x).await;
+    let y = create(
+        client,
+        &repo,
+        "y@test",
+        Some(create_workspace_request::Start::NewOn(
+            x_row.commit_id.clone(),
+        )),
+    )
+    .await;
+    write(&y, "y.txt", "y\n");
+    snapshot(client, &repo, &y).await;
+    // X's edit, not yet snapshotted: step 3 records it.
+    write(&x, "x-pending.txt", "pending\n");
+
+    let request = rewrite(&repo, Some(&x), "@", vec![content("api.txt", "api\n")]);
+    let rpc = {
+        let client = client.clone();
+        async move { client.edit_files(request).await.unwrap() }
+    };
+    at_follow_hold(&daemon, rpc, || write(&y, "y-late.txt", "late\n")).await;
+
+    let y_row = get(client, &repo, &y).await;
+    assert_eq!(y_row.change_id, y.change_id);
+    assert_eq!(
+        change_commits(client, &repo, &y_row.change_id).await,
+        std::slice::from_ref(&y_row.commit_id)
+    );
+    for path in ["x.txt", "x-pending.txt", "api.txt", "y.txt", "y-late.txt"] {
+        assert!(read(&y, path).is_some(), "{path} on disk");
+        assert!(
+            file(client, &repo, &y_row.commit_id, path).await.is_some(),
+            "{path} in Y's commit"
+        );
+    }
+    assert!(!y_row.divergent, "{y_row:?}");
+    assert_eq!(divergent_changes(client, &repo).await, Vec::<String>::new());
+    daemon.stop().await;
+}
+
 /// A plain channel to the daemon, for requests the client would not send.
 async fn raw_channel(socket: &Path) -> tonic::transport::Channel {
     let path = socket.to_owned();

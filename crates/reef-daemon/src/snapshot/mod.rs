@@ -320,6 +320,9 @@ struct Inner {
     /// Test hook: every snapshot fails before it scans.
     #[cfg(any(test, feature = "testing"))]
     fail_scans: AtomicBool,
+    /// Test hook: every carried snapshot's check-out fails.
+    #[cfg(any(test, feature = "testing"))]
+    fail_check_outs: AtomicBool,
 }
 
 /// One tracked workspace.
@@ -463,6 +466,8 @@ impl Scheduler {
                 held_follows: AtomicUsize::new(0),
                 #[cfg(any(test, feature = "testing"))]
                 fail_scans: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                fail_check_outs: AtomicBool::new(false),
             }),
         };
         if config.backend != WatcherBackend::Watchman {
@@ -744,7 +749,8 @@ impl Scheduler {
     }
 
     /// Test hook: while set, every snapshot fails after the scan hold and
-    /// before it scans, with an I/O error, as on a full disk.
+    /// after taking its carry, before it scans, with an I/O error, as on a
+    /// full disk.
     #[cfg(any(test, feature = "testing"))]
     pub fn fail_scans(&self, fail: bool) {
         self.inner.fail_scans.store(fail, Ordering::SeqCst);
@@ -757,6 +763,22 @@ impl Scheduler {
             return Some(std::io::Error::other("scans fail (test hook)"));
         }
         None
+    }
+
+    /// Test hook: while set, every carried snapshot's check-out fails after
+    /// its commit, as on a full disk (ADR 0039).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_check_outs(&self, fail: bool) {
+        self.inner.fail_check_outs.store(fail, Ordering::SeqCst);
+    }
+
+    /// Whether `Scheduler::fail_check_outs` (a test hook) is set.
+    pub(crate) fn check_outs_fail(&self) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        if self.inner.fail_check_outs.load(Ordering::SeqCst) {
+            return true;
+        }
+        false
     }
 
     /// Whether automatic snapshots of `ws` are paused.

@@ -27,6 +27,7 @@
 //! of its index row, so a crash between the two leaves rows naming an
 //! operation that exists.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
@@ -36,7 +37,7 @@ use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
     Carry, ChangeIdHex, CommitIdHex, IgnoreSources, OpKind, OpMeta, OperationIdHex, ReadonlyRepo,
-    Repo, SnapshotCommit, SnapshotError, commit_snapshot,
+    Repo, ScannedTree, SnapshotCommit, SnapshotError, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
@@ -337,14 +338,8 @@ impl Manager {
         let head = self.workspace_head(entry, true).await?;
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
-        if let Some(source) = self.scheduler.scan_failure() {
-            return Err(BackendError::Io {
-                op: "scan",
-                path: entry.paths.root.clone(),
-                source,
-            }
-            .into());
-        }
+        let scan_failure = self.scheduler.scan_failure();
+        let fail_check_out = self.scheduler.check_outs_fail();
         self.scheduler.take_reported(id, &mut trigger);
         let full = trigger.prefixes().is_none();
         let permit = self
@@ -379,12 +374,24 @@ impl Manager {
                     meta: &meta,
                     prefixes: prefixes.as_deref(),
                     carry: carry.as_ref(),
+                    committed: Cell::new(false),
+                    fail_check_out,
                 };
-                let ran = pipeline.run(repo, head, permit);
+                let ran = match scan_failure {
+                    Some(source) => Err(BackendError::Io {
+                        op: "scan",
+                        path: entry.paths.root.clone(),
+                        source,
+                    }
+                    .into()),
+                    None => pipeline.run(repo, head, permit),
+                };
                 if ran.is_err()
+                    && !pipeline.committed.get()
                     && let Some(carry) = carry
                 {
-                    // Unused, or replaced by a re-merge's (see `record`).
+                    // Unused: nothing was committed. A re-merge's carry
+                    // (see `record`) is set only after a commit.
                     entry.carry.restore(carry);
                 }
                 ran
@@ -505,6 +512,10 @@ struct Pipeline<'a> {
     prefixes: Option<&'a [PathBuf]>,
     /// What a write that moved the workspace handed this snapshot.
     carry: Option<&'a Carry>,
+    /// Set once the snapshot's operation is committed.
+    committed: Cell<bool>,
+    /// `Scheduler::fail_check_outs` (a test hook).
+    fail_check_out: bool,
 }
 
 impl Pipeline<'_> {
@@ -655,27 +666,14 @@ impl Pipeline<'_> {
             Ok(Err(error)) => return (Err(error.into()), None),
             Err(error) => return (Err(error.into()), None),
         };
+        self.committed.set(true);
         let new_head = Some(Arc::clone(&committed.repo));
         if pending.carried() {
             // The commit has the write's changes, which are not on disk yet:
             // the row moves to it only once they are.
-            let checked_out = pollster::block_on(
-                pending.check_out_carried(&committed.repo, &committed.commit_id),
-            );
-            match checked_out {
+            match self.check_out_carried(&mut pending, &committed, carried.clone()) {
                 Ok(files) => updated_files = files,
-                Err(error) => {
-                    // The next snapshot merges again over the tree this one
-                    // took, which gives this commit back (ADR 0039).
-                    if let Some(from) = self.expected {
-                        self.entry.carry.set(Carry {
-                            from: from.clone(),
-                            to: committed.commit_id.clone(),
-                            base: carried,
-                        });
-                    }
-                    return (Err(error.into()), new_head);
-                }
+                Err(error) => return (Err(error), new_head),
             }
         }
         let row = record_commit(self.db, self.entry, self.kind, &committed, recovered);
@@ -694,6 +692,40 @@ impl Pipeline<'_> {
             conflict,
         });
         (ran, new_head)
+    }
+}
+
+impl Pipeline<'_> {
+    /// A carried snapshot's check-out of `committed`, between its commit and
+    /// its row (ADR 0039). When it fails, the workspace's next snapshot
+    /// merges again over `base`, the tree this one took, which gives this
+    /// commit back with any edits made since.
+    fn check_out_carried(
+        &self,
+        pending: &mut reef_lib::jj::PendingSnapshot<'_>,
+        committed: &SnapshotCommit,
+        base: Option<ScannedTree>,
+    ) -> Result<u32, ManagerError> {
+        let checked_out = if self.fail_check_out {
+            Err(ManagerError::from(BackendError::Io {
+                op: "check out",
+                path: self.entry.paths.root.clone(),
+                source: std::io::Error::other("check-outs fail (test hook)"),
+            }))
+        } else {
+            pollster::block_on(pending.check_out_carried(&committed.repo, &committed.commit_id))
+                .map_err(ManagerError::from)
+        };
+        if checked_out.is_err()
+            && let Some(from) = self.expected
+        {
+            self.entry.carry.set(Carry {
+                from: from.clone(),
+                to: committed.commit_id.clone(),
+                base,
+            });
+        }
+        checked_out
     }
 }
 
