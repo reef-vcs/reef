@@ -1,14 +1,14 @@
-//! `reef config show`: the configuration the daemon would run with, resolved
-//! the same way ([`Config::load`]) without contacting it.
+//! `reef config show`: the configuration the daemon would run with,
+//! resolved the same way without contacting it. The daemon's binary
+//! resolves it (`reef-daemon config show`, R2.05); this prints what it
+//! wrote.
 //!
 //! Unlike other commands, its output defaults to text (TOML) even when
 //! stdout is not a terminal, because the text form is itself machine
 //! readable and loads back as a `config.toml` (`reef config show >
 //! config.toml`). `-o json` selects JSON.
 
-use reef_daemon::config::{Config, PathOverrides};
-
-use super::{CliError, Out, Output};
+use super::{CliError, Global, Out, Output, helper};
 
 /// `reef config`.
 #[derive(Debug, clap::Args)]
@@ -27,36 +27,18 @@ enum ConfigCommand {
 }
 
 impl Args {
-    pub(crate) fn run(self, overrides: &PathOverrides, out: &Out) -> Result<(), CliError> {
+    pub(crate) fn run(self, global: &Global, out: &Out) -> Result<(), CliError> {
         match self.command {
-            ConfigCommand::Show => show(overrides, out),
+            ConfigCommand::Show => show(global, out),
         }
     }
 }
 
-fn show(overrides: &PathOverrides, out: &Out) -> Result<(), CliError> {
-    let config = Config::load(overrides).map_err(CliError::Config)?;
-    let text = match out.mode() {
-        Output::Text => config.to_effective_toml(),
-        Output::Json => {
-            let mut value =
-                serde_json::to_value(config.effective_file()).map_err(|e| json_error(&e))?;
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "sources".to_owned(),
-                    serde_json::to_value(&config.sources).map_err(|e| json_error(&e))?,
-                );
-            }
-            format!("{value:#}\n")
-        }
-    };
-    out.raw(text.as_bytes())
-}
-
-fn json_error(error: &serde_json::Error) -> CliError {
-    CliError::Refused {
-        kind: reef_lib::error::ErrorKind::Internal,
-        message: format!("serialize the configuration: {error}"),
-        advice: None,
+fn show(global: &Global, out: &Out) -> Result<(), CliError> {
+    let mut args = vec!["config".into(), "show".into()];
+    if out.mode() == Output::Json {
+        args.push("--json".into());
     }
+    let text = helper::run(global, &args)?;
+    out.raw(&text)
 }

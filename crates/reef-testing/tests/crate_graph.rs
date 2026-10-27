@@ -1,38 +1,60 @@
-//! Enforces the workspace's crate dependency direction:
-//! `reef-vcs` → `reef-daemon` → `reef-lib`, with `reef-testing` standing
-//! apart so any crate can dev-depend on it (ADR 0007), and `reef-api`, the
-//! API schema, depending on no Reef crate while `reef-daemon` and
-//! `reef-vcs` depend on it (ADR 0029).
+//! Enforces the workspace's crate dependency direction (ADR 0033, which
+//! supersedes 0007): `reef-daemon` → `reef-lib` → `reef-error`, and the
+//! `reef` binary (`reef-vcs`) → `reef-client` → `reef-api` and
+//! `reef-error`, with nothing that links jj-lib anywhere in `reef`'s
+//! dependency graph (R2.05). `reef-testing` stands apart so any crate can
+//! dev-depend on it, and `reef-api`, the API schema, depends on no Reef
+//! crate (ADR 0029).
 
 #![allow(
     clippy::expect_used,
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 5] = [
+const MEMBERS: [&str; 7] = [
     "reef-api",
+    "reef-client",
     "reef-daemon",
+    "reef-error",
     "reef-lib",
     "reef-testing",
     "reef-vcs",
 ];
 
+/// What the `reef` binary and the thin client must never link: the daemon,
+/// the jj layer, and what only they need (R2.05).
+const NOT_IN_THE_CLIENT: [&str; 7] = [
+    "jj-lib",
+    "reef-lib",
+    "reef-daemon",
+    "gix",
+    "rusqlite",
+    "notify",
+    "watchman_client",
+];
+
 fn metadata() -> Value {
+    run_metadata(&["--no-deps"])
+}
+
+/// `cargo metadata` with the resolve graph.
+fn resolved_metadata() -> Value {
+    run_metadata(&[])
+}
+
+fn run_metadata(extra: &[&str]) -> Value {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--no-deps",
-            "--manifest-path",
-        ])
+        .args(["metadata", "--format-version", "1"])
+        .args(extra)
+        .arg("--manifest-path")
         .arg(&manifest)
         .output()
         .expect("failed to run cargo metadata");
@@ -80,7 +102,7 @@ fn assert_no_dependency(metadata: &Value, from: &str, to: &str) {
 }
 
 #[test]
-fn workspace_members_are_the_five_crates() {
+fn workspace_members_are_the_seven_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -92,11 +114,115 @@ fn workspace_members_are_the_five_crates() {
     assert_eq!(members, MEMBERS);
 }
 
+/// The Reef crates `name` depends on with `kind` (`normal` or `build`).
+fn reef_dependencies(metadata: &Value, name: &str, kinds: &[&str]) -> Vec<String> {
+    let mut found: Vec<String> = dependencies(metadata, name)
+        .into_iter()
+        .filter(|(dep, kind)| dep.starts_with("reef-") && kinds.contains(&kind.as_str()))
+        .map(|(dep, _)| dep)
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// R2.05 test 1: the edges between Reef crates that keep the client thin.
+#[test]
+fn crate_edges() {
+    let metadata = metadata();
+    let shipped = ["normal", "build"];
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-error", &shipped),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-client", &shipped),
+        ["reef-api", "reef-error"]
+    );
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-lib", &shipped),
+        ["reef-error"]
+    );
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-vcs", &shipped),
+        ["reef-api", "reef-client", "reef-error"]
+    );
+}
+
+/// R2.05 test 2: nothing the daemon or the jj layer links is reachable from
+/// the `reef` binary or the thin client over normal and build edges, on any
+/// target. Dev-dependencies (tests) are free to use them.
+#[test]
+fn reef_binary_has_no_jj_lib() {
+    let metadata = resolved_metadata();
+    let names: BTreeMap<&str, &str> = metadata["packages"]
+        .as_array()
+        .expect("packages is an array")
+        .iter()
+        .map(|p| {
+            (
+                p["id"].as_str().expect("id"),
+                p["name"].as_str().expect("name"),
+            )
+        })
+        .collect();
+    let nodes: BTreeMap<&str, &Value> = metadata["resolve"]["nodes"]
+        .as_array()
+        .expect("resolve.nodes is an array")
+        .iter()
+        .map(|node| (node["id"].as_str().expect("node id"), node))
+        .collect();
+    let id_of = |name: &str| {
+        names
+            .iter()
+            .find_map(|(id, n)| (*n == name).then_some(*id))
+            .unwrap_or_else(|| panic!("package {name} not found"))
+    };
+    for root in ["reef-vcs", "reef-client"] {
+        // Breadth first, remembering how each package was reached.
+        let mut via: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut queue = VecDeque::from([id_of(root)]);
+        let start = id_of(root);
+        via.insert(start, start);
+        while let Some(id) = queue.pop_front() {
+            let name = names[id];
+            if NOT_IN_THE_CLIENT.contains(&name) {
+                let mut path = vec![name];
+                let mut at = id;
+                while via[at] != at {
+                    at = via[at];
+                    path.push(names[at]);
+                }
+                path.reverse();
+                panic!("{root} reaches {name}: {}", path.join(" -> "));
+            }
+            for dep in nodes[id]["deps"].as_array().expect("deps is an array") {
+                let shipped = dep["dep_kinds"]
+                    .as_array()
+                    .expect("dep_kinds is an array")
+                    .iter()
+                    .any(|kind| kind["kind"].is_null() || kind["kind"] == "build");
+                let pkg = dep["pkg"].as_str().expect("dep pkg");
+                if shipped && !via.contains_key(pkg) {
+                    via.insert(pkg, id);
+                    queue.push_back(pkg);
+                }
+            }
+        }
+        assert!(
+            via.len() > 20,
+            "{root}: only {} packages reached",
+            via.len()
+        );
+    }
+}
+
 #[test]
 fn reef_lib_depends_on_no_higher_crate() {
     let metadata = metadata();
-    assert_no_dependency(&metadata, "reef-lib", "reef-daemon");
-    assert_no_dependency(&metadata, "reef-lib", "reef-vcs");
+    for higher in ["reef-daemon", "reef-vcs", "reef-client"] {
+        assert_no_dependency(&metadata, "reef-lib", higher);
+    }
 }
 
 #[test]

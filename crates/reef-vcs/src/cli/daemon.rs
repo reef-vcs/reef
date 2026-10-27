@@ -1,18 +1,18 @@
 //! `reef daemon run | start | stop | status`.
 
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use reef_daemon::DaemonArgs;
-use reef_daemon::client::json::Status;
-use reef_daemon::client::{self, Client, ClientError};
-use reef_lib::error::ErrorKind;
+use reef_client::json::Status;
+use reef_client::{Client, ClientError};
+use reef_error::ErrorKind;
 
-use super::{CliError, DEFAULT_TIMEOUT, Global, Out, Output, autostart};
+use super::{CliError, DEFAULT_TIMEOUT, Global, Out, Output, absolute, autostart};
 
 /// How long `stop` waits for the daemon to exit after SIGTERM.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -45,23 +45,38 @@ pub(crate) enum DaemonCommand {
     Status,
 }
 
-/// `reef daemon run`: [`reef_daemon::run_main`] in this process, before
-/// the CLI starts logging or a runtime.
-#[expect(clippy::print_stderr, reason = "the daemon's own failure report")]
-pub(crate) fn run_foreground(global: &Global) -> ExitCode {
-    let args = DaemonArgs {
-        state_dir: global.state_dir.clone(),
-        socket: global.socket.clone(),
-        config: global.config.clone(),
-        foreground: true,
+/// `reef daemon run`: `exec`s `reef-daemon --foreground` with the path
+/// flags as given, before the CLI starts logging or a runtime, so the
+/// daemon keeps this process's pid, stdio, environment and exit code
+/// (R2.05). Returns only if that fails.
+pub(crate) fn run_foreground(global: &Global, out: &Out) -> ExitCode {
+    let error = match exec_daemon(global) {
+        Ok(never) => match never {},
+        Err(error) => error,
     };
-    match reef_daemon::run_main(args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: {error:#}");
-            ExitCode::from(reef_daemon::exit_code(&error))
+    out.error(&error);
+    ExitCode::from(error.exit_code())
+}
+
+fn exec_daemon(global: &Global) -> Result<std::convert::Infallible, CliError> {
+    let program = autostart::daemon_binary()?;
+    let mut command = Command::new(&program);
+    command.arg("--foreground");
+    for (flag, value) in [
+        ("--state-dir", &global.state_dir),
+        ("--socket", &global.socket),
+        ("--config", &global.config),
+    ] {
+        if let Some(value) = value {
+            command.arg(flag).arg(absolute(value)?);
         }
     }
+    let source = command.exec();
+    Err(CliError::Io {
+        op: "run",
+        path: program,
+        source,
+    })
 }
 
 pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), CliError> {
@@ -74,12 +89,12 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         DaemonCommand::Stop { force } => stop(global, out, force).await,
         DaemonCommand::Status => {
             let config = global.load_config()?;
-            let client = connect_only(global, &config.paths.socket).await?;
+            let client = connect_only(global, &config.socket).await?;
             let status = status_of(&client, global).await?;
             if status.api != "v1" {
                 out.note(&format!(
                     "reef: this daemon is reef {} (API {}) and cannot serve this reef; `reef daemon stop` stops it and the next command starts reef {}",
-                    status.version, status.api, client::VERSION
+                    status.version, status.api, reef_client::VERSION
                 ));
             }
             out.object(&status)
@@ -121,7 +136,7 @@ async fn status_of(client: &Client, global: &Global) -> Result<Status, CliError>
 /// Whether a daemon reporting `status` is this reef's own: API v1 and the
 /// same version.
 fn current(status: &Status) -> bool {
-    status.api == "v1" && status.version == client::VERSION
+    status.api == "v1" && status.version == reef_client::VERSION
 }
 
 /// Idempotent: a running daemon is reported, not restarted, unless it
@@ -130,12 +145,12 @@ fn current(status: &Status) -> bool {
 /// reported with its version; a later call it cannot serve restarts it then.
 async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
     let config = global.load_config()?;
-    let status = match Client::connect(&config.paths.socket).await {
+    let status = match Client::connect(&config.socket).await {
         Ok(client) => {
             let status = status_of(&client, global).await?;
             drop(client);
             if status.api == "v1" {
-                if status.version == client::VERSION {
+                if status.version == reef_client::VERSION {
                     out.note(&format!("already running (pid {})", status.pid));
                 } else {
                     out.note(&format!(
@@ -146,7 +161,7 @@ async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
                 status
             } else {
                 let incompatible = ClientError::Incompatible {
-                    socket: config.paths.socket.clone(),
+                    socket: config.socket.clone(),
                     method: "daemon start".to_owned(),
                     daemon_version: status.version.clone(),
                     daemon_api: status.api.clone(),
@@ -212,7 +227,7 @@ pub(crate) async fn restart(
         return Err(old_daemon(*active_workspaces, incompatible));
     }
     let config = global.load_config()?;
-    let socket = &config.paths.socket;
+    let socket = &config.socket;
     match Client::connect(socket).await {
         Ok(client) => {
             let status = status_of(&client, global).await?;
@@ -243,8 +258,8 @@ pub(crate) async fn restart(
 /// never signals a daemon other than the one it checked. The pid stopped.
 async fn stop_daemon(global: &Global, force: bool, only: Option<u32>) -> Result<u32, CliError> {
     let config = global.load_config()?;
-    let socket = &config.paths.socket;
-    let pid_file = &config.paths.pid;
+    let socket = &config.socket;
+    let pid_file = &config.pid;
     let recorded = read_pid(pid_file);
     let Ok(client) = Client::connect(socket).await else {
         let detail = recorded.map_or_else(String::new, |pid| {

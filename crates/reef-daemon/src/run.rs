@@ -1,5 +1,6 @@
-//! The `reef-daemon` binary's body, callable in-process so `reef daemon run`
-//! (R1.22) runs the same code.
+//! The `reef-daemon` binary's body: [`run_main`] runs the daemon (`reef
+//! daemon run` execs the binary to do it, R2.05), and its subcommands are
+//! [`crate::offline`]'s. Callable in-process for tests (ADR 0012).
 
 use std::path::PathBuf;
 
@@ -12,6 +13,7 @@ use crate::config::{Config, ConfigError, PathOverrides};
 use crate::daemon::{Daemon, StartError, log_tightened, private_state_dir};
 use crate::lock::LockError;
 use crate::logging::{self, LogOptions, LoggingError};
+use crate::offline::Offline;
 
 /// The binary's command line.
 #[derive(Clone, Debug, Default, clap::Parser)]
@@ -30,6 +32,10 @@ pub struct DaemonArgs {
     /// by spawning the binary.
     #[arg(long)]
     pub foreground: bool,
+    /// A command that needs no running daemon (`config show`, `restore`),
+    /// for `reef`; none runs the daemon.
+    #[command(subcommand)]
+    pub command: Option<Offline>,
 }
 
 /// Resolves the configuration ([`Config::load`]), installs logging (stderr

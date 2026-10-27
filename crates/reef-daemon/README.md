@@ -4,7 +4,7 @@ The local service of **Reef**, version control built for a world where AI agents
 
 The version-control data model and merge logic live in `reef-lib`, which this crate depends on. Its own model is the inventory it keeps in SQLite (repositories, workspaces, leases, reclaims), in `reef_daemon::model` and `reef_daemon::db`. It contains no CLI code.
 
-`reef-vcs` depends on this crate and re-exports it. This crate never depends on `reef-vcs`. The design document and roadmap are at <https://github.com/reef-vcs/reef>.
+The `reef` binary (`reef-vcs`) does not depend on this crate: it talks to the daemon through `reef-client`, which this crate re-exports as `reef_daemon::client`, and runs this crate's binary for `reef daemon run` and for the two commands that need its library but no running daemon, `reef-daemon config show` and `reef-daemon restore` ([ADR 0033](../../docs/adr/0033-thin-client.md)). This crate never depends on `reef-vcs`. The design document and roadmap are at <https://github.com/reef-vcs/reef>.
 
 Run it in the foreground with `cargo run -p reef-daemon` (state in the platform state directory, or `REEF_STATE_DIR`); it stops cleanly on Ctrl-C or SIGTERM. The process and threading model is [ADR 0012](../../docs/adr/0012-daemon-process-model-and-threading.md); the state directory and `config.toml` are [ADR 0013](../../docs/adr/0013-daemon-state-directory-and-configuration.md), and `reef config show` prints the effective configuration. The API schema, `reef.api.v1`, is in the `reef-api` crate, compiled at build time without `protoc`; its conventions and error model are [ADR 0029](../../docs/adr/0029-daemon-api-v1.md). This crate serves it (`server`, `service`), and clients use `reef_daemon::client::Client`.
 

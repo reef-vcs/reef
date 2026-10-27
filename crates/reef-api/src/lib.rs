@@ -204,6 +204,15 @@ pub mod error {
     /// An edit at or under a shared store's mount in `reef.toml`. Metadata:
     /// `path`, `mount`, `edit_index`.
     pub const STORE_MOUNT_PATH: &str = "STORE_MOUNT_PATH";
+    /// A path in no registered repository, where a request names a
+    /// repository by a path inside it (R2.05). Metadata: `path`.
+    pub const REPOSITORY_NOT_REGISTERED: &str = "REPOSITORY_NOT_REGISTERED";
+    /// A repository id or prefix that names no registered repository
+    /// (R2.05). Metadata: `repo`, as given.
+    pub const REPOSITORY_NOT_FOUND: &str = "REPOSITORY_NOT_FOUND";
+    /// A workspace id, prefix, or path that names no workspace (R2.05).
+    /// Metadata: `workspace`, as given.
+    pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";
     /// A malformed edit: no action and no `executable`, an empty
     /// `old_text`, `executable` with a delete, `copy_from` naming its own
     /// path, or more than 1,000 edits. Metadata: `edit_index`, except for

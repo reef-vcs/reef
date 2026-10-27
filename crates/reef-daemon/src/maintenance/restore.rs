@@ -446,7 +446,11 @@ fn targets<'a>(
     opts: &RestoreOptions,
 ) -> Result<Vec<Target<'a>>, RestoreError> {
     let chosen: Vec<&RepoManifest> = match opts.repo {
-        Some(id) => vec![manifest.repo(id).ok_or(RestoreError::NoSuchRepo(id))?],
+        Some(id) => vec![
+            manifest
+                .repo(&id.as_hex())
+                .ok_or(RestoreError::NoSuchRepo(id))?,
+        ],
         None => manifest.repos.iter().collect(),
     };
     if opts.root.is_some() && chosen.len() > 1 {

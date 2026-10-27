@@ -29,8 +29,12 @@ use reef_testing::synth::Preset;
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// `reef` with a clean environment and the given state directory.
+mod common;
+
+/// `reef` with a clean environment and the given state directory, and this
+/// build's `reef-daemon` beside it for the commands that run it.
 fn reef_in(state_dir: &Path) -> Command {
+    common::daemon_bin();
     let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
     for var in [
         "REEF_SOCKET",
@@ -40,6 +44,7 @@ fn reef_in(state_dir: &Path) -> Command {
         "REEF_LOG_FORMAT",
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
+        "REEF_AGENT",
     ] {
         command.env_remove(var);
     }
@@ -550,14 +555,15 @@ fn short_tempdir() -> TempDir {
 fn autostart_spawns_daemon() {
     let tmp = short_tempdir();
     let state = tmp.path().join("state");
-    // A copy of `reef` with no `reef-daemon` beside it or on PATH, so the
-    // daemon started is this build's `reef daemon run`, never a stale
-    // `reef-daemon` from another build.
+    // A copy of `reef` with this build's `reef-daemon` beside it and
+    // nothing on PATH, so the daemon started is never a stale `reef-daemon`
+    // from another build.
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let exe = bin.join("reef");
     std::fs::copy(env!("CARGO_BIN_EXE_reef"), &exe).unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::daemon_beside(&bin);
     let _guard = StopOnDrop(state.clone());
     let reef = || {
         let mut command = Command::new(&exe);
@@ -669,30 +675,245 @@ fn completions_generate() {
     assert!(stdout(&output).contains("#compdef reef"));
 }
 
-// 11
+/// A copy of `reef` in `<tmp>/bin`, with nothing beside it.
+fn lone_reef(tmp: &Path) -> PathBuf {
+    let bin = tmp.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let exe = bin.join("reef");
+    std::fs::copy(env!("CARGO_BIN_EXE_reef"), &exe).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exe
+}
+
+/// `exe` with a clean environment, `PATH` its own directory only.
+fn lone_command(exe: &Path, state: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    for var in [
+        "REEF_SOCKET",
+        "REEF_CONFIG",
+        "REEF_LOG",
+        "RUST_LOG",
+        "REEF_OUTPUT",
+        "REEF_AGENT",
+    ] {
+        command.env_remove(var);
+    }
+    command
+        .env("REEF_STATE_DIR", state)
+        .env("PATH", exe.parent().unwrap());
+    command
+}
+
+/// R2.05 test 3: `reef daemon run` is an `exec` of `reef-daemon
+/// --foreground` with the path flags: the same pid, and its exit code.
 #[test]
-fn no_jj_lib_in_binary() {
-    fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                sources(&path, found);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                found.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    sources(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
+fn daemon_run_execs_reef_daemon() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let exe = lone_reef(tmp.path());
+    let script = exe.with_file_name("reef-daemon");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho \"pid $$\"\necho \"args $*\"\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let child = lone_command(&exe, &state)
+        .args(["--state-dir", state.to_str().unwrap(), "daemon", "run"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "pid {pid}\nargs --foreground --state-dir {}\n",
+            state.display()
+        )
     );
-    assert!(files.len() > 10, "{files:?}");
-    let needle = ["reef_lib", "::jj"].concat();
-    for file in files {
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert!(!text.contains(&needle), "{} uses {needle}", file.display());
+}
+
+/// R2.05 test 4: a `reef` with no `reef-daemon` beside it or on `PATH`
+/// cannot start a daemon, run one, or show its configuration: exit 3,
+/// naming the fix, and nothing created.
+#[test]
+fn no_daemon_binary() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let exe = lone_reef(tmp.path());
+    for args in [
+        &["repo", "list"][..],
+        &["daemon", "run"],
+        &["config", "show"],
+        &["restore", "/nonexistent"],
+    ] {
+        let output = lone_command(&exe, &state)
+            .arg("-o")
+            .arg("json")
+            .args(args)
+            .output()
+            .unwrap();
+        let text = failed(&output, 3, "not_found");
+        assert!(text.contains("no reef-daemon beside"), "{args:?}: {text}");
+        let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+        let hint = value["error"]["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("reef-daemon")
+                && hint.contains("cargo install")
+                && hint.contains("reef-vcs reef-daemon"),
+            "{hint}"
+        );
+        assert!(!state.exists(), "{args:?} created the state directory");
     }
+}
+
+/// R2.05 test 6: a `reef-daemon` that fails without its error object is
+/// an internal error naming it.
+#[test]
+fn helper_without_an_error_object() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let exe = lone_reef(tmp.path());
+    let script = exe.with_file_name("reef-daemon");
+    std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = lone_command(&exe, &state)
+        .args(["-o", "json", "config", "show"])
+        .output()
+        .unwrap();
+    let text = failed(&output, 1, "internal");
+    assert!(text.contains(&script.display().to_string()), "{text}");
+}
+
+/// R2.05 test 9: the CLI reads three keys of `config.toml` and ignores the
+/// rest, which only the daemon validates.
+#[tokio::test(flavor = "multi_thread")]
+async fn client_ignores_keys_it_does_not_read() {
+    let daemon = TestDaemon::start().await;
+    std::fs::write(
+        daemon.state_dir().join("config.toml"),
+        "[watcher]\nno_such_key = 1\n",
+    )
+    .unwrap();
+    let output = run(reef(&daemon), &["ws", "list"]).await;
+    assert_eq!(json(&output), Value::Array(vec![]));
+    // The daemon's own view still refuses it.
+    let output = run(reef(&daemon), &["-o", "json", "config", "show"]).await;
+    let text = failed(&output, 2, "invalid_argument");
+    assert!(text.contains("unknown key `watcher.no_such_key`"), "{text}");
+}
+
+/// The agent of the operation that created workspace `id`.
+async fn create_agent(client: &reef_client::Client, repo: &str, id: &str) -> String {
+    use reef_api::v1::{ListOperationsRequest, OperationFilter, OperationKind};
+    let page = client
+        .list_operations_page(ListOperationsRequest {
+            repo: repo.to_owned(),
+            filter: Some(OperationFilter {
+                workspaces: vec![id.to_owned()],
+                kinds: vec![OperationKind::CreateWorkspace.into()],
+                ..OperationFilter::default()
+            }),
+            ..ListOperationsRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.operations.len(), 1, "{page:?}");
+    page.operations[0].agent.clone()
+}
+
+/// R2.05 test 10: `--agent`, else `REEF_AGENT`, names every operation the
+/// CLI causes; with neither the daemon records the owner. A bad name is
+/// refused before any call.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_names_operations() {
+    let (daemon, repo) = with_repo().await;
+    let client = reef_client::Client::connect(&daemon.state_dir().join("daemon.sock"))
+        .await
+        .unwrap();
+    let create = |agent_flag: Option<&'static str>, agent_env: Option<&'static str>| {
+        let mut command = reef(&daemon);
+        if let Some(agent) = agent_env {
+            command.env("REEF_AGENT", agent);
+        }
+        if let Some(agent) = agent_flag {
+            command.args(["--agent", agent]);
+        }
+        command.args(["ws", "create", "--repo", &repo.id]);
+        run(command, &[])
+    };
+    for (flag, env, expected) in [
+        (Some("bot-1"), None, "bot-1"),
+        (None, Some("bot-2"), "bot-2"),
+        (Some("bot-3"), Some("bot-2"), "bot-3"),
+    ] {
+        let ws = json(&create(flag, env).await);
+        let id = ws["id"].as_str().unwrap();
+        assert_eq!(create_agent(&client, &repo.id, id).await, expected);
+    }
+    let ws = json(&create(None, None).await);
+    assert_eq!(
+        create_agent(&client, &repo.id, ws["id"].as_str().unwrap()).await,
+        ws["owner"].as_str().unwrap()
+    );
+
+    let long = "x".repeat(257);
+    for bad in ["bot\u{1}", long.as_str()] {
+        let output = run(reef(&daemon), &["--agent", bad, "ws", "list"]).await;
+        failed(&output, 2, "invalid_argument");
+        let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(value["error"]["reason"], "INVALID_AGENT", "{value}");
+        assert!(
+            value["error"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("REEF_AGENT"),
+            "{value}"
+        );
+    }
+    // Refused before the socket is tried: no daemon, and still exit 2.
+    let tmp = short_tempdir();
+    let output = reef_in(&tmp.path().join("state"))
+        .args(["--no-autostart", "--agent", "bot\u{1}", "ws", "list"])
+        .output()
+        .unwrap();
+    failed(&output, 2, "invalid_argument");
+}
+
+/// R2.05 test 12: a path in no registered repository, and a repository or
+/// workspace that does not exist, carry a reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn not_found_reasons() {
+    let (daemon, _repo) = with_repo().await;
+    let reason = |output: &Output| -> Value {
+        let value: Value = serde_json::from_str(&stdout(output)).unwrap();
+        value["error"]["reason"].clone()
+    };
+    let plain = plain_git_repo(&daemon);
+    let output = run(
+        reef(&daemon),
+        &[
+            "--no-register",
+            "ws",
+            "create",
+            "--repo",
+            plain.to_str().unwrap(),
+        ],
+    )
+    .await;
+    failed(&output, 3, "not_found");
+    assert_eq!(reason(&output), "REPOSITORY_NOT_REGISTERED");
+    assert_eq!(next_of(&output)[..3], ["reef", "repo", "register"]);
+
+    let output = run(reef(&daemon), &["ws", "inspect", "abcdabcdabcdabcd"]).await;
+    failed(&output, 3, "not_found");
+    assert_eq!(reason(&output), "WORKSPACE_NOT_FOUND");
+
+    let output = run(reef(&daemon), &["ws", "list", "--repo", "abcd"]).await;
+    failed(&output, 3, "not_found");
+    assert_eq!(reason(&output), "REPOSITORY_NOT_FOUND");
 }
 
 #[tokio::test(flavor = "multi_thread")]

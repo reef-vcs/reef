@@ -8,17 +8,24 @@
 //! `fuse-overlayfs`, `stale-recovered`), so the JSON did not change with
 //! the API (R2.01); a value this build does not know prints as `unknown`.
 //!
-//! These are output types only; nothing parses them back.
+//! These are output types; nothing parses them back, except [`ErrorObject`]
+//! and [`Restored`], which the `reef-daemon` binary's offline commands
+//! print for `reef` to read (R2.05).
 
 use reef_api::v1;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
-use crate::backend::BackendKind;
-use crate::model::{Attention, Timestamp};
-
-/// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision.
+/// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision,
+/// as the daemon's own timestamps print (a test in the daemon keeps the two
+/// equal); `<millis>ms` for an instant `time` cannot represent.
 pub fn rfc3339(time: &prost_types::Timestamp) -> String {
-    Timestamp(millis_of(time)).to_rfc3339()
+    let millis = millis_of(time);
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+        .ok()
+        .and_then(|time| time.format(&Rfc3339).ok())
+        .unwrap_or_else(|| format!("{millis}ms"))
 }
 
 /// A `google.protobuf.Timestamp` as Unix milliseconds.
@@ -39,18 +46,18 @@ fn text(value: &str) -> Option<String> {
 /// What an enum value this build does not know prints as.
 pub const UNKNOWN: &str = "unknown";
 
-/// A backend's name, as `workspaces.backend` stores it.
+/// A backend's name, as `workspaces.backend` stores it (the daemon's
+/// `BackendKind::as_str`; a test in the daemon keeps the two equal).
 pub fn backend_name(backend: i32) -> &'static str {
-    let kind = match v1::Backend::try_from(backend) {
-        Ok(v1::Backend::Copy) => BackendKind::Copy,
-        Ok(v1::Backend::Apfs) => BackendKind::ApfsClone,
-        Ok(v1::Backend::Reflink) => BackendKind::Reflink,
-        Ok(v1::Backend::Overlayfs) => BackendKind::Overlayfs,
-        Ok(v1::Backend::FuseOverlayfs) => BackendKind::FuseOverlayfs,
-        Ok(v1::Backend::Auto) => return "auto",
-        Ok(v1::Backend::Unspecified) | Err(_) => return UNKNOWN,
-    };
-    kind.as_str()
+    match v1::Backend::try_from(backend) {
+        Ok(v1::Backend::Copy) => "copy",
+        Ok(v1::Backend::Apfs) => "apfs",
+        Ok(v1::Backend::Reflink) => "reflink",
+        Ok(v1::Backend::Overlayfs) => "overlayfs",
+        Ok(v1::Backend::FuseOverlayfs) => "fuse-overlayfs",
+        Ok(v1::Backend::Auto) => "auto",
+        Ok(v1::Backend::Unspecified) | Err(_) => UNKNOWN,
+    }
 }
 
 /// A workspace state's name: `active`, `releasing`, `released`, or
@@ -66,21 +73,22 @@ pub fn state_name(state: i32) -> &'static str {
 }
 
 /// An attention reason's name, such as `final-snapshot-failed`; `None`
-/// when the workspace needs none.
+/// when the workspace needs none. The daemon's `Attention::as_str`; a test
+/// in the daemon keeps the two equal.
 pub fn attention_name(attention: i32) -> Option<&'static str> {
-    let reason = match v1::Attention::try_from(attention) {
+    let name = match v1::Attention::try_from(attention) {
         Ok(v1::Attention::Unspecified) => return None,
-        Ok(v1::Attention::Divergent) => Attention::Divergent,
-        Ok(v1::Attention::StaleRecovered) => Attention::StaleRecovered,
-        Ok(v1::Attention::FinalSnapshotFailed) => Attention::FinalSnapshotFailed,
-        Ok(v1::Attention::StoreHashMismatch) => Attention::StoreHashMismatch,
-        Ok(v1::Attention::StoreMissing) => Attention::StoreMissing,
-        Ok(v1::Attention::WatchFailed) => Attention::WatchFailed,
-        Ok(v1::Attention::UpperMissing) => Attention::UpperMissing,
-        Ok(v1::Attention::MountFailed) => Attention::MountFailed,
-        Err(_) => return Some(UNKNOWN),
+        Ok(v1::Attention::Divergent) => "divergent",
+        Ok(v1::Attention::StaleRecovered) => "stale-recovered",
+        Ok(v1::Attention::FinalSnapshotFailed) => "final-snapshot-failed",
+        Ok(v1::Attention::StoreHashMismatch) => "store-hash-mismatch",
+        Ok(v1::Attention::StoreMissing) => "store-missing",
+        Ok(v1::Attention::WatchFailed) => "watch-failed",
+        Ok(v1::Attention::UpperMissing) => "upper-missing",
+        Ok(v1::Attention::MountFailed) => "mount-failed",
+        Err(_) => UNKNOWN,
     };
-    Some(reason.as_str())
+    Some(name)
 }
 
 fn watcher_name(watcher: i32) -> &'static str {
@@ -784,6 +792,56 @@ impl From<&v1::GcReport> for GcReport {
             dry_run: report.dry_run,
         }
     }
+}
+
+/// `{"error": {...}}`: a failed command's JSON on stdout (ADR 0025), and
+/// what a `reef-daemon` offline command prints when it fails.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorObject {
+    /// The kind's `snake_case` name ([`crate::error::kind_text`]).
+    pub kind: String,
+    /// The daemon's `ErrorDetail.reason` (R2.01), when it has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// The error and its sources, as one line.
+    pub message: String,
+    /// How to fix it, one sentence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+    /// The command that fixes it, an argv starting `reef`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+}
+
+/// [`ErrorObject`] under its `error` key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorDocument {
+    /// The error.
+    pub error: ErrorObject,
+}
+
+/// What `reef restore` prints (R1.18).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restored {
+    /// The repositories restored.
+    pub repos: Vec<RestoredRepo>,
+    /// Active workspaces kept, rematerialized when the daemon starts.
+    pub workspaces_kept: u64,
+    /// Leases extended so their owners can come back.
+    pub leases_extended: u64,
+    /// Whether a repository's default workspace was recreated.
+    pub default_workspace_recreated: bool,
+    /// What was replaced, kept under `.replaced-<nanos>` names.
+    pub replaced: Vec<String>,
+}
+
+/// One repository `reef restore` restored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredRepo {
+    /// Its id, in hex.
+    pub id: String,
+    /// Its `.jj/repo`.
+    pub jj_repo_path: String,
 }
 
 #[cfg(test)]

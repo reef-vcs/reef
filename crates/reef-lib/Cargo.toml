@@ -27,6 +27,7 @@ bench = false
 watchman = ["jj-lib/watchman", "dep:watchman_client"]
 
 [dependencies]
+reef-error.workspace = true      # `reef_lib::error` (R2.05)
 jj-lib.workspace = true
 watchman_client = { workspace = true, optional = true }
 gix.workspace = true

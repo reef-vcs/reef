@@ -313,9 +313,9 @@ impl Drop for KillOnDrop {
 /// The `reef` binary. A workspace-wide build (`cargo nextest run
 /// --workspace`, `just test`) puts it beside `reef-daemon`; when it is not
 /// there (`-p reef-daemon`), or is older than `reef-daemon` and so may
-/// predate a change to the daemon library both link, it is built once, with
-/// the daemon library's features and profile as the tests build it, so that a `reef`
-/// that was only linked first is relinked and nothing else is rebuilt.
+/// predate a change to the client both link, it is built once, in the
+/// profile the tests are built in. `reef` links no daemon code (R2.05), so
+/// it needs none of this crate's features.
 pub fn reef_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
@@ -333,12 +333,6 @@ pub fn reef_bin() -> &'static Path {
                 "reef-vcs",
                 "--bin",
                 "reef",
-                "--features",
-                if cfg!(feature = "privileged-tests") {
-                    "reef-daemon/testing,reef-daemon/privileged-tests"
-                } else {
-                    "reef-daemon/testing"
-                },
                 "--message-format=json-render-diagnostics",
             ])
             // The load test runs in release.

@@ -4,7 +4,10 @@
 // characters, or an absolute path inside a registered root. `workspace`
 // accepts a workspace id, a unique prefix, or an absolute path inside an
 // active workspace's directory; where a request names a workspace, `repo`
-// may be empty and the workspace is looked up in every repository.
+// may be empty and the workspace is looked up in every repository. One
+// that names none is NOT_FOUND, reason REPOSITORY_NOT_FOUND (metadata
+// `repo`), REPOSITORY_NOT_REGISTERED for a path (metadata `path`), or
+// WORKSPACE_NOT_FOUND (metadata `workspace`).
 syntax = "proto3";
 
 package reef.api.v1;

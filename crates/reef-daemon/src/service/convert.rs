@@ -677,6 +677,50 @@ mod tests {
 
     use super::*;
 
+    /// R2.05 test 13: the thin client writes the daemon's names and
+    /// timestamps out instead of borrowing them; they stay equal.
+    #[test]
+    fn json_names_match_the_daemon() {
+        use reef_client::json::{attention_name, backend_name, rfc3339, snapshot_kind_name};
+        for kind in [
+            BackendKind::Copy,
+            BackendKind::ApfsClone,
+            BackendKind::Reflink,
+            BackendKind::Overlayfs,
+            BackendKind::FuseOverlayfs,
+        ] {
+            assert_eq!(backend_name(backend(kind).into()), kind.as_str());
+        }
+        for reason in Attention::ALL {
+            assert_eq!(
+                attention_name(attention(Some(*reason)).into()),
+                Some(reason.as_str())
+            );
+        }
+        assert_eq!(attention_name(attention(None).into()), None);
+        for kind in SnapshotKind::ALL {
+            assert_eq!(
+                snapshot_kind_name(snapshot_kind(*kind).into()),
+                kind.as_str()
+            );
+        }
+        for millis in [
+            0,
+            1,
+            -1,
+            -86_400_000_123,
+            1_700_000_000_123,
+            253_402_300_799_999,
+            i64::MAX / 1_000_000,
+        ] {
+            assert_eq!(
+                rfc3339(&timestamp(Timestamp(millis))),
+                Timestamp(millis).to_rfc3339(),
+                "{millis}"
+            );
+        }
+    }
+
     #[test]
     fn durations_split_into_seconds_and_nanos() {
         assert_eq!(

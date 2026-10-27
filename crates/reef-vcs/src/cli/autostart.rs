@@ -2,23 +2,23 @@
 //! nothing answers on the socket, and for `reef daemon start`.
 //!
 //! The program is `reef-daemon` beside the running `reef`, else the first
-//! on `PATH`, else `reef daemon run` (this binary, which runs the same
-//! code), so a `reef` installed alone still starts a daemon. It is spawned
+//! on `PATH` ([`locate`], which `reef daemon run`, `config show` and
+//! `restore` use too); `reef` itself contains no daemon (R2.05). It is spawned
 //! detached: stdin, stdout, and stderr on `/dev/null` (the daemon logs to
 //! `<state>/logs/`), its own process group, and `/` as its working
 //! directory so it never pins a workspace directory. Two CLIs starting it
 //! at once are settled by the daemon's single-instance lock: the loser
 //! exits and both connect to the winner.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use reef_daemon::client::{Client, ClientError};
-use reef_daemon::config::Config;
+use reef_client::paths::ClientConfig;
+use reef_client::{Client, ClientError};
 
 use super::{CliError, Global, absolute};
 
@@ -30,31 +30,21 @@ const AFTER_EXIT: Duration = Duration::from_secs(1);
 /// How often the socket is tried meanwhile.
 const POLL: Duration = Duration::from_millis(100);
 /// The daemon binary's name.
-const DAEMON_BIN: &str = "reef-daemon";
-
-/// What to run to start a daemon.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Program {
-    pub(crate) path: PathBuf,
-    /// `["daemon", "run"]` when the program is `reef` itself.
-    pub(crate) args: Vec<OsString>,
-}
+pub(crate) const DAEMON_BIN: &str = "reef-daemon";
 
 /// Starts a daemon for `config`'s socket and waits until it answers.
 /// Returns a connected client and the daemon's pid as it reports it.
-pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u32), CliError> {
-    let exe = std::env::current_exe().ok();
-    let program = locate(exe.as_deref(), std::env::var_os("PATH").as_deref()).ok_or_else(|| {
-        CliError::Autostart {
-            reason: format!("cannot find {DAEMON_BIN} or the reef binary itself"),
-        }
-    })?;
+pub(crate) async fn start(
+    global: &Global,
+    config: &ClientConfig,
+) -> Result<(Client, u32), CliError> {
+    let program = daemon_binary()?;
     let mut command = command(&program, global)?;
     let mut child = command.spawn().map_err(|error| CliError::Autostart {
-        reason: format!("run {}: {error}", program.path.display()),
+        reason: format!("run {}: {error}", program.display()),
     })?;
-    tracing::debug!(program = %program.path.display(), pid = child.id(), "daemon spawned");
-    let socket = &config.paths.socket;
+    tracing::debug!(program = %program.display(), pid = child.id(), "daemon spawned");
+    let socket = &config.socket;
     let mut deadline = Instant::now() + START_TIMEOUT;
     let mut exited: Option<ExitStatus> = None;
     loop {
@@ -74,8 +64,8 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
                     } => CliError::Autostart {
                         reason: format!(
                             "{} started reef {daemon_version} (API {daemon_api}), not this reef's {} (API v1); install the matching reef-daemon or remove that one",
-                            program.path.display(),
-                            reef_daemon::client::VERSION
+                            program.display(),
+                            reef_client::VERSION
                         ),
                     },
                     error => CliError::Daemon(error),
@@ -98,7 +88,7 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
     let reason = match exited {
         Some(status) => format!(
             "{} exited ({status}) before {} answered; run `reef daemon run` to see why",
-            program.path.display(),
+            program.display(),
             socket.display()
         ),
         None => format!(
@@ -111,8 +101,18 @@ pub(crate) async fn start(global: &Global, config: &Config) -> Result<(Client, u
     Err(CliError::Autostart { reason })
 }
 
-/// `reef-daemon` beside `exe`, else on `path_var`, else `exe daemon run`.
-pub(crate) fn locate(exe: Option<&Path>, path_var: Option<&OsStr>) -> Option<Program> {
+/// The `reef-daemon` this `reef` runs: beside it, else on `PATH`.
+pub(crate) fn daemon_binary() -> Result<PathBuf, CliError> {
+    let exe = std::env::current_exe().ok();
+    locate(exe.as_deref(), std::env::var_os("PATH").as_deref()).ok_or_else(|| {
+        CliError::NoDaemonBinary {
+            beside: exe.as_deref().and_then(Path::parent).map(Path::to_owned),
+        }
+    })
+}
+
+/// `reef-daemon` beside `exe`, else on `path_var`.
+pub(crate) fn locate(exe: Option<&Path>, path_var: Option<&OsStr>) -> Option<PathBuf> {
     let beside = exe.and_then(Path::parent).map(|dir| dir.join(DAEMON_BIN));
     let on_path = || {
         path_var
@@ -122,16 +122,7 @@ pub(crate) fn locate(exe: Option<&Path>, path_var: Option<&OsStr>) -> Option<Pro
             .map(|dir| dir.join(DAEMON_BIN))
             .find(|candidate| is_executable(candidate))
     };
-    if let Some(path) = beside.filter(|path| is_executable(path)).or_else(on_path) {
-        return Some(Program {
-            path,
-            args: Vec::new(),
-        });
-    }
-    exe.map(|exe| Program {
-        path: exe.to_owned(),
-        args: vec!["daemon".into(), "run".into()],
-    })
+    beside.filter(|path| is_executable(path)).or_else(on_path)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -141,9 +132,21 @@ fn is_executable(path: &Path) -> bool {
 
 /// The detached command. The path flags and variables the CLI was given
 /// are passed on absolute, since the daemon runs in `/`.
-fn command(program: &Program, global: &Global) -> Result<Command, CliError> {
-    let mut command = Command::new(&program.path);
-    command.args(&program.args);
+fn command(program: &Path, global: &Global) -> Result<Command, CliError> {
+    let mut command = Command::new(program);
+    path_flags(&mut command, global)?;
+    command
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    Ok(command)
+}
+
+/// The path flags and variables the CLI was given, onto `command`,
+/// absolute.
+pub(crate) fn path_flags(command: &mut Command, global: &Global) -> Result<(), CliError> {
     let paths = [
         ("--state-dir", &global.state_dir, "REEF_STATE_DIR"),
         ("--socket", &global.socket, "REEF_SOCKET"),
@@ -156,13 +159,7 @@ fn command(program: &Program, global: &Global) -> Result<Command, CliError> {
             command.env(var, absolute(Path::new(&value))?);
         }
     }
-    command
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    Ok(command)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -177,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_beside_then_path_then_self() {
+    fn prefers_beside_then_path() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         let other = tmp.path().join("other");
@@ -187,28 +184,23 @@ mod tests {
         executable(&reef);
         let path_var = std::env::join_paths([&other]).unwrap();
 
-        // Nothing anywhere: reef itself.
-        assert_eq!(
-            locate(Some(&reef), Some(&path_var)),
-            Some(Program {
-                path: reef.clone(),
-                args: vec!["daemon".into(), "run".into()],
-            })
-        );
-        // Not executable on PATH: still reef itself.
+        // Nothing anywhere: none; reef never runs a daemon itself (R2.05).
+        assert_eq!(locate(Some(&reef), Some(&path_var)), None);
+        // Not executable on PATH: still none.
         fs::write(other.join(DAEMON_BIN), "").unwrap();
-        assert_eq!(locate(Some(&reef), Some(&path_var)).unwrap().path, reef);
+        assert_eq!(locate(Some(&reef), Some(&path_var)), None);
         // On PATH.
         executable(&other.join(DAEMON_BIN));
         assert_eq!(
-            locate(Some(&reef), Some(&path_var)).unwrap().path,
-            other.join(DAEMON_BIN)
+            locate(Some(&reef), Some(&path_var)),
+            Some(other.join(DAEMON_BIN))
         );
         // Beside wins over PATH.
         executable(&bin.join(DAEMON_BIN));
-        let found = locate(Some(&reef), Some(&path_var)).unwrap();
-        assert_eq!(found.path, bin.join(DAEMON_BIN));
-        assert_eq!(found.args, Vec::<OsString>::new());
+        assert_eq!(
+            locate(Some(&reef), Some(&path_var)),
+            Some(bin.join(DAEMON_BIN))
+        );
         assert_eq!(locate(None, None), None);
     }
 }

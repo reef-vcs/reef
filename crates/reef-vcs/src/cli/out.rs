@@ -9,8 +9,9 @@
 
 use std::io::{self, IsTerminal as _, Write};
 
-use reef_daemon::error::Advice;
-use reef_lib::error::{Classify as _, ErrorChain};
+use reef_client::json::{ErrorDocument, ErrorObject};
+use reef_error::Advice;
+use reef_error::{Classify as _, ErrorChain};
 use serde::Serialize;
 
 use super::CliError;
@@ -213,32 +214,18 @@ impl Out {
     }
 
     fn error_object(&self, kind: &str, reason: &str, message: &str, advice: Option<&Advice>) {
-        /// The fields in the order a reader wants them.
-        #[derive(Serialize)]
-        struct ErrorObject<'a> {
-            kind: &'a str,
-            /// The daemon's `ErrorDetail.reason` (R2.01), when it has one.
-            #[serde(skip_serializing_if = "str::is_empty")]
-            reason: &'a str,
-            message: &'a str,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            hint: &'a str,
-            #[serde(skip_serializing_if = "<[String]>::is_empty")]
-            next: &'a [String],
-        }
-        #[derive(Serialize)]
-        struct Wrapper<'a> {
-            error: ErrorObject<'a>,
-        }
-        let error = ErrorObject {
-            kind,
-            reason,
-            message,
-            hint: advice.map_or("", |advice| advice.hint.as_str()),
-            next: advice.map_or(&[], |advice| advice.next.as_slice()),
+        // The object `reef-daemon`'s offline commands print too (R2.05).
+        let document = ErrorDocument {
+            error: ErrorObject {
+                kind: kind.to_owned(),
+                reason: reason.to_owned(),
+                message: message.to_owned(),
+                hint: advice.map_or_else(String::new, |advice| advice.hint.clone()),
+                next: advice.map_or_else(Vec::new, |advice| advice.next.clone()),
+            },
         };
         let mut buffer = Vec::new();
-        json_into(&mut buffer, &Wrapper { error });
+        json_into(&mut buffer, &document);
         // Already failing; a closed stdout changes nothing.
         let _ = self.raw(&buffer);
     }

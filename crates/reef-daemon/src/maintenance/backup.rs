@@ -55,7 +55,6 @@ use reef_api::v1::{BackupResponse, BackupStep};
 use reef_lib::error::{Classify, ErrorChain, ErrorKind, classify_by_source};
 use reef_lib::jj::{JJ_LIB_VERSION, OperationIdHex};
 use reef_lib::telemetry::elapsed_ms;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::backend::fs_util::restore_mtime;
@@ -65,10 +64,10 @@ use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp};
 use crate::repo::RepoThreadError;
 
-/// The manifest's `version`.
-pub const MANIFEST_VERSION: u32 = 1;
-/// The manifest's file name.
-pub const MANIFEST_FILE: &str = "manifest.json";
+pub use reef_client::backup::{
+    MANIFEST_FILE, MANIFEST_VERSION, Manifest, ManifestError, RepoManifest, SqliteManifest,
+};
+
 /// The database copy's file name.
 pub const SQLITE_FILE: &str = "reef.sqlite3";
 /// The operation heads' file name, in each repository's directory.
@@ -87,122 +86,14 @@ const GIT_SKIP: &[&str] = &["index", "logs", "hooks"];
 /// Milliseconds the online backup waits between steps.
 const SQLITE_STEP_PAUSE: Duration = Duration::from_millis(10);
 
-/// `manifest.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Manifest {
-    /// [`MANIFEST_VERSION`].
-    pub version: u32,
-    /// When the backup began, RFC 3339.
-    pub created_at: String,
-    /// The database's `meta.daemon_instance_id`.
-    pub daemon_instance_id: String,
-    /// The daemon's version.
-    pub reef_version: String,
-    /// [`JJ_LIB_VERSION`].
-    pub jj_lib_version: String,
-    /// The state directory backed up.
-    pub state_dir: PathBuf,
-    /// The repositories, in registration order.
-    pub repos: Vec<RepoManifest>,
-    /// The database copy.
-    pub sqlite: SqliteManifest,
-    /// Every repository's heads are written; a manifest without it is an
-    /// interrupted backup, which restore refuses.
-    #[serde(default)]
-    pub complete: bool,
-}
-
-/// One repository in the manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoManifest {
-    /// The repository's id, in hex.
-    pub id: String,
-    /// Its registered root.
-    pub root: PathBuf,
-    /// Its `.jj/repo` when backed up.
-    pub jj_repo_path: PathBuf,
-    /// Whether jj and git share the working copy (`git/` holds `.git`).
-    pub colocated: bool,
-    /// The operation heads, as `heads.json` has them.
-    pub op_heads: Vec<String>,
-    /// Files copied.
-    pub files: u64,
-    /// Bytes copied.
-    pub bytes: u64,
-    /// How long the repository thread was paused for step 3.
-    pub pause_ms: u64,
-}
-
-/// The database copy in the manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SqliteManifest {
-    /// Pages copied.
-    pub pages: u64,
-    /// The copy's size.
-    pub bytes: u64,
-}
-
-impl Manifest {
-    /// Reads `<dir>/manifest.json`.
-    pub fn read(dir: &Path) -> Result<Manifest, ManifestError> {
-        let path = dir.join(MANIFEST_FILE);
-        let text = fs::read_to_string(&path).map_err(|source| ManifestError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        serde_json::from_str(&text).map_err(|source| ManifestError::Parse { path, source })
-    }
-
-    /// Writes `<dir>/manifest.json` through a temporary file, so a crash
-    /// leaves the previous manifest whole.
-    fn write(&self, dir: &Path) -> Result<(), BackupError> {
-        let path = dir.join(MANIFEST_FILE);
-        let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
-        let text = serde_json::to_string_pretty(self).map_err(BackupError::Encode)?;
-        fs::write(&tmp, format!("{text}\n")).map_err(io_at(&tmp))?;
-        fs::rename(&tmp, &path).map_err(io_at(&path))
-    }
-
-    /// The repository with this id.
-    pub fn repo(&self, id: RepoId) -> Option<&RepoManifest> {
-        self.repos.iter().find(|repo| repo.id == id.as_hex())
-    }
-}
-
-/// Failure to read a manifest.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ManifestError {
-    /// The file could not be read.
-    #[error("read {}", path.display())]
-    Read {
-        /// The manifest.
-        path: PathBuf,
-        /// The underlying error.
-        #[source]
-        source: io::Error,
-    },
-    /// The file is not a manifest.
-    #[error("parse {}", path.display())]
-    Parse {
-        /// The manifest.
-        path: PathBuf,
-        /// The underlying error.
-        #[source]
-        source: serde_json::Error,
-    },
-}
-
-impl Classify for ManifestError {
-    fn kind(&self) -> ErrorKind {
-        match self {
-            Self::Read { source, .. } if source.kind() == io::ErrorKind::NotFound => {
-                ErrorKind::NotFound
-            }
-            Self::Read { source, .. } => classify_by_source(source),
-            Self::Parse { .. } => ErrorKind::InvalidArgument,
-        }
-    }
+/// Writes `<dir>/manifest.json` through a temporary file, so a crash
+/// leaves the previous manifest whole.
+fn write_manifest(manifest: &Manifest, dir: &Path) -> Result<(), BackupError> {
+    let path = dir.join(MANIFEST_FILE);
+    let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
+    let text = serde_json::to_string_pretty(manifest).map_err(BackupError::Encode)?;
+    fs::write(&tmp, format!("{text}\n")).map_err(io_at(&tmp))?;
+    fs::rename(&tmp, &path).map_err(io_at(&path))
 }
 
 impl Advise for ManifestError {
@@ -351,7 +242,7 @@ pub async fn run(
         sqlite: SqliteManifest { pages: 0, bytes: 0 },
         complete: false,
     };
-    manifest.write(dest)?;
+    write_manifest(&manifest, dest)?;
 
     // 2.
     super::quiesce::checkpoint(state, "PASSIVE");
@@ -378,7 +269,7 @@ pub async fn run(
         report(BackupStep::Heads, Some(record.id), 0, 0);
     }
     manifest.complete = true;
-    manifest.write(dest)?;
+    write_manifest(&manifest, dest)?;
     let finished = Timestamp::now();
     state
         .db

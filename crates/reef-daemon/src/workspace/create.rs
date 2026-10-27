@@ -656,8 +656,8 @@ pub(super) async fn refresh_for_resolve(
 }
 
 /// What a create's default start (R1.31) reports as `CreateResponse.start` when
-/// no bookmark matched.
-pub const ROOT_CHECKOUT: &str = "root checkout";
+/// no bookmark matched; the CLI compares against the same constant.
+pub use reef_client::ROOT_CHECKOUT;
 
 /// The commit a create without a start revision starts on (R1.31), and
 /// what it is: a bookmark (`master`, `main@origin`) or [`ROOT_CHECKOUT`].

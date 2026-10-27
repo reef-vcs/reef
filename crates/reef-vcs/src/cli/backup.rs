@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use reef_api::v1::BackupStep;
-use reef_daemon::client::ClientError;
-use reef_daemon::maintenance::backup::Manifest;
+use reef_client::ClientError;
+use reef_client::backup::Manifest;
 
 use super::render::size;
 use super::repo::missing;
@@ -83,7 +83,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     let manifest = Manifest::read(&dest).map_err(|error| CliError::Io {
         op: "read",
         path: PathBuf::from(&manifest_path),
-        source: std::io::Error::other(reef_lib::error::ErrorChain(&error).to_string()),
+        source: std::io::Error::other(reef_error::ErrorChain(&error).to_string()),
     })?;
     let files: u64 = manifest.repos.iter().map(|repo| repo.files).sum();
     let bytes: u64 =

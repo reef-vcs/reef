@@ -1,5 +1,5 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
-//! through [`reef_daemon::client::Client`], except `config show`,
+//! through [`reef_client::Client`], except `config show`,
 //! `completions`, `guide`, `init` when it registers nothing (`--check`,
 //! `--print`, `--no-register`), `daemon run`, and `restore`, which is
 //! offline (R1.18). Output follows [`out`]'s
@@ -17,6 +17,7 @@ mod daemon;
 mod env;
 mod error;
 mod guide;
+mod helper;
 mod here;
 mod init;
 mod out;
@@ -35,11 +36,10 @@ use std::time::Duration;
 
 use clap::{ArgAction, CommandFactory as _, Parser as _};
 use reef_api::v1::IfNotJj;
-use reef_daemon::client::{Client, ClientError};
-use reef_daemon::config::{Config, PathOverrides};
-use reef_daemon::error::Advice;
-use reef_daemon::logging::{self, LogOptions};
-use reef_lib::error::ErrorKind;
+use reef_client::logging::EnvLog;
+use reef_client::paths::{ClientConfig, PathOverrides};
+use reef_client::{Client, ClientError};
+use reef_error::{Advice, ErrorKind};
 
 pub(crate) use error::CliError;
 pub(crate) use out::{Out, Output};
@@ -120,6 +120,10 @@ pub(crate) struct Global {
     /// Log the CLI's own debug events on stderr (`-vv` for trace).
     #[arg(short, long, global = true, action = ArgAction::Count)]
     verbose: u8,
+    /// The agent named on the operations this command causes; overrides `REEF_AGENT`.
+    // `ws run` passes it on to its command as `REEF_AGENT` (R2.05).
+    #[arg(long, global = true, value_name = "NAME", env = AGENT_ENV, hide_env = true)]
+    agent: Option<String>,
 }
 
 impl Global {
@@ -131,8 +135,17 @@ impl Global {
         }
     }
 
-    fn load_config(&self) -> Result<Config, CliError> {
-        Config::load(&self.overrides()).map_err(CliError::Config)
+    fn load_config(&self) -> Result<ClientConfig, CliError> {
+        ClientConfig::load(&self.overrides()).map_err(CliError::Config)
+    }
+
+    /// The agent name, `--agent` else `REEF_AGENT`, checked and trimmed;
+    /// `None` when neither names one.
+    pub(crate) fn agent(&self) -> Result<Option<&str>, CliError> {
+        let Some(agent) = &self.agent else {
+            return Ok(None);
+        };
+        reef_client::check_agent(agent).map_err(CliError::Daemon)
     }
 
     /// `reef daemon start` with the flags that choose which daemon this
@@ -166,6 +179,8 @@ impl Global {
 /// The default for `-o`, so a harness that gives its agent a terminal can
 /// still have JSON everywhere.
 const OUTPUT_ENV: &str = "REEF_OUTPUT";
+/// The default for `--agent`, so a harness names each agent once (R2.05).
+pub(crate) const AGENT_ENV: &str = "REEF_AGENT";
 
 /// In the order `--help` lists them: the agent's path first.
 #[derive(Debug, clap::Subcommand)]
@@ -217,6 +232,9 @@ pub(crate) struct Ctx {
     /// it and retries (R1.25): `[repo] auto_register` and no
     /// `--no-register`.
     pub(crate) auto_register: bool,
+    /// `--agent` or `REEF_AGENT`, which the client sends on every call and
+    /// `ws run` passes on to its command.
+    pub(crate) agent: Option<String>,
 }
 
 impl Ctx {
@@ -311,20 +329,14 @@ impl Ctx {
 }
 
 /// Whether the daemon refused a request because no registered repository
-/// contains the path it named (`WorkspaceManager::resolve_repo`).
+/// contains the path it named: reason `REPOSITORY_NOT_REGISTERED` (R2.05).
+/// Every v1 daemon sends it; a 0.1 daemon is restarted before this matters.
 fn is_unregistered_path(error: &CliError) -> bool {
-    match error {
-        CliError::Daemon(ClientError::Rpc {
-            kind: ErrorKind::NotFound,
-            chain,
-            message,
-            ..
-        }) => chain
-            .first()
-            .unwrap_or(message)
-            .starts_with("repository containing "),
-        _ => false,
-    }
+    matches!(
+        error,
+        CliError::Daemon(ClientError::Rpc { reason, .. })
+            if reason == reef_api::error::REPOSITORY_NOT_REGISTERED
+    )
 }
 
 /// Parses the command line, runs the command, and maps its failure to an
@@ -347,13 +359,14 @@ pub(crate) fn main() -> ExitCode {
             }
         };
     };
-    // Before logging and the runtime: the daemon installs its own and must
-    // start before the process has any other thread.
+    // Before logging and the runtime: the daemon binary replaces this
+    // process, and must start before it has any other thread.
     if let Command::Daemon(daemon::Args {
         command: daemon::DaemonCommand::Run,
     }) = &command
     {
-        return daemon::run_foreground(&global);
+        let out = Out::detect(global.output, global.quiet);
+        return daemon::run_foreground(&global, &out);
     }
     // `config show` prints TOML unless asked for JSON; see its module. `ws
     // run`'s stdout is its command's, so it prints JSON only when asked. The
@@ -365,13 +378,10 @@ pub(crate) fn main() -> ExitCode {
         _ => global.output,
     };
     let out = Out::detect(flag, global.quiet);
-    let _logging = match init_logging(global.verbose) {
-        Ok(guard) => guard,
-        Err(error) => {
-            out.error(&error);
-            return ExitCode::from(error.exit_code());
-        }
-    };
+    if let Err(error) = init_logging(global.verbose) {
+        out.error(&error);
+        return ExitCode::from(error.exit_code());
+    }
     tracing::debug!(target: "reef", version = env!("CARGO_PKG_VERSION"), "starting");
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -389,7 +399,7 @@ pub(crate) fn main() -> ExitCode {
         // Only while no call has succeeded: one that did may have changed
         // something, which the rerun would repeat.
         Err(CliError::Daemon(error @ ClientError::Incompatible { .. }))
-            if rerunnable && !reef_daemon::client::any_call_answered() =>
+            if rerunnable && !reef_client::any_call_answered() =>
         {
             runtime.block_on(rerun(&global, &out, error, &args))
         }
@@ -449,23 +459,18 @@ fn old_daemon(global: &Global, error: ClientError) -> CliError {
 }
 
 /// The CLI's filter when neither `REEF_LOG` nor `RUST_LOG` is set and no
-/// `-v` is given. A command that runs daemon code in this process
-/// (`restore`) logs its `info` events for the daemon's log, not for the
-/// person at the terminal; `reef daemon run` sets up its own logging.
+/// `-v` is given: the CLI's own `info` events are not for the person at the
+/// terminal. `reef-daemon` sets up its own logging.
 const CLI_DEFAULT_FILTER: &str = "warn";
 
-fn init_logging(verbose: u8) -> Result<logging::LoggingGuard, CliError> {
-    let mut options = LogOptions::from_env().map_err(CliError::Logging)?;
-    match verbose {
-        0 => {
-            options
-                .filter
-                .get_or_insert_with(|| CLI_DEFAULT_FILTER.to_owned());
-        }
-        1 => options.filter = Some("debug".to_owned()),
-        _ => options.filter = Some("trace".to_owned()),
-    }
-    logging::init(&options).map_err(CliError::Logging)
+fn init_logging(verbose: u8) -> Result<(), CliError> {
+    let env = EnvLog::from_env().map_err(CliError::Logging)?;
+    let filter = match verbose {
+        0 => env.filter.unwrap_or_else(|| CLI_DEFAULT_FILTER.to_owned()),
+        1 => "debug".to_owned(),
+        _ => "trace".to_owned(),
+    };
+    reef_client::logging::init(&filter, env.format).map_err(CliError::Logging)
 }
 
 async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, CliError> {
@@ -474,7 +479,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,
-        Command::Config(args) => args.run(&global.overrides(), out),
+        Command::Config(args) => args.run(&global, out),
         Command::Completions { shell } => {
             let mut command = Cli::command();
             let mut buffer = Vec::new();
@@ -493,8 +498,10 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
 /// Connects to the daemon, starting it first when nothing answers on its
 /// socket, unless `--no-autostart`.
 pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError> {
+    // Before the socket is tried, so a bad name starts no daemon.
+    let agent = global.agent()?.map(str::to_owned);
     let config = global.load_config()?;
-    let socket = &config.paths.socket;
+    let socket = &config.socket;
     let client = match Client::connect(socket).await {
         Ok(client) => client,
         Err(ClientError::Connect { .. }) if !global.no_autostart => {
@@ -511,12 +518,17 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
         }
         Err(error) => return Err(CliError::Daemon(error)),
     };
+    let client = match &agent {
+        Some(agent) => client.with_agent(agent).map_err(CliError::Daemon)?,
+        None => client,
+    };
     Ok(Ctx {
         client,
         out: out.clone(),
         timeout: global.timeout.unwrap_or(DEFAULT_TIMEOUT),
         timeout_flag: global.timeout,
-        auto_register: config.file.repo.auto_register && !global.no_register,
+        auto_register: config.auto_register && !global.no_register,
+        agent,
     })
 }
 

@@ -208,8 +208,9 @@ jobs:
           "$(brew --prefix)/bin/reef" --version
           test -f "$(brew --prefix)/share/zsh/site-functions/_reef"
 
-  # `cargo binstall reef-vcs` resolves the URL this workflow publishes to, and the tarball has the
-  # binary where the metadata's bin-dir says. Before the release exists the download itself 404s.
+  # `cargo binstall reef-vcs reef-daemon` resolves the URL this workflow publishes to for both
+  # crates, and the tarball has each binary where the metadata's bin-dir says. Before the release
+  # exists the download itself 404s.
   binstall:
     name: cargo binstall
     needs: [check-version, checksums]
@@ -229,15 +230,18 @@ jobs:
         with:
           tool: cargo-binstall
       - run: |
-          cargo binstall --manifest-path crates/reef-vcs --dry-run --no-confirm --no-track \
-            --disable-strategies quick-install,compile --log-level debug reef-vcs >binstall.log 2>&1 || true
           name="reef-$VERSION-x86_64-unknown-linux-musl"
-          if ! grep -qF "https://github.com/reef-vcs/reef/releases/download/v$VERSION/$name.tar.gz" binstall.log; then
-            cat binstall.log
-            echo "::error::cargo binstall did not resolve $name.tar.gz"
-            exit 1
-          fi
-          tar -tzf "dist/$name.tar.gz" | grep -qx "$name/reef"
+          for pair in reef-vcs:reef reef-daemon:reef-daemon; do
+            crate=${pair%%:*} bin=${pair#*:}
+            cargo binstall --manifest-path "crates/$crate" --dry-run --no-confirm --no-track \
+              --disable-strategies quick-install,compile --log-level debug "$crate" >binstall.log 2>&1 || true
+            if ! grep -qF "https://github.com/reef-vcs/reef/releases/download/v$VERSION/$name.tar.gz" binstall.log; then
+              cat binstall.log
+              echo "::error::cargo binstall $crate did not resolve $name.tar.gz"
+              exit 1
+            fi
+            tar -tzf "dist/$name.tar.gz" | grep -qx "$name/$bin"
+          done
 
   release:
     name: publish

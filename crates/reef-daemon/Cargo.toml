@@ -15,6 +15,13 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# `cargo binstall reef-daemon` (R2.05): the same tarballs as `reef-vcs`'s, which carry both
+# binaries; `reef` runs this one. binstall falls back from a Linux gnu target to musl.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/reef-{ version }-{ target }.tar.gz"
+bin-dir = "reef-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 # Neither has #[bench] functions. Without this, `cargo bench -p reef-daemon -- <criterion args>`
 # also hands the arguments to their libtest harnesses, which reject them.
 [lib]
@@ -43,6 +50,8 @@ privileged-tests = []
 [dependencies]
 reef-lib.workspace = true
 reef-api.workspace = true
+reef-client.workspace = true     # the client, its JSON, and the path layering the CLI shares (R2.05)
+reef-error.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

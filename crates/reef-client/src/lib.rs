@@ -1,17 +1,28 @@
-//! The daemon client the CLI and tests use. It wraps the generated
-//! `reef.api.v1` clients, one method per implemented RPC plus `*_all`
-//! helpers that walk every page, so nothing else depends on their shape.
-//! [`WorkspacesApi`] is the same surface, less maintenance, as a trait, for
-//! code that wants to run against a fake daemon (R1.21's heartbeater);
-//! [`json`] is the stable JSON form of the responses that `reef -o json`
-//! prints (R1.22).
+//! The thin client of the Reef daemon (R2.05, ADR 0033): everything a
+//! process needs to talk to a daemon without being one, and without
+//! jj-lib. The CLI (`reef`) is built on it, and the daemon re-exports it as
+//! `reef_daemon::client` for its own tests.
+//!
+//! [`Client`] wraps the generated `reef.api.v1` clients, one method per
+//! implemented RPC plus `*_all` helpers that walk every page, so nothing
+//! else depends on their shape. [`WorkspacesApi`] is the same surface, less
+//! maintenance, as a trait, for code that wants to run against a fake
+//! daemon (R1.21's heartbeater); [`json`] is the stable JSON form of the
+//! responses that `reef -o json` prints (R1.22). [`paths`] finds the
+//! daemon's socket as the daemon does, [`error`] reads the API's error
+//! details, [`logging`] sets up stderr logging from `REEF_LOG*`, and
+//! [`backup`] reads a backup's manifest.
 //!
 //! A daemon of another version answers some calls with `UNIMPLEMENTED`. The
 //! client never returns that as is: it asks the daemon what it is
 //! (`GetDaemonStatus`, then 0.1's `reef.daemon.v0.Daemon/Status`) and
 //! returns [`ClientError::Incompatible`], which the CLI acts on (R2.01).
 
+pub mod backup;
+pub mod error;
 pub mod json;
+pub mod logging;
+pub mod paths;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -53,17 +64,19 @@ use reef_api::v1::{
     GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
     ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry,
 };
-use reef_lib::error::{Classify, ErrorKind};
+use reef_error::{Advice, Classify, ErrorKind};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 
-pub use reef_lib::jj::settings::parse_byte_size;
-
-use crate::error::{Advice, detail_of, kind_from_status};
+use crate::error::{advice_from_detail, detail_of, kind_from_status};
 
 /// The largest request a daemon decodes: tonic's default limit, which the
 /// server keeps (R2.04).
 pub const MAX_REQUEST_BYTES: usize = 4 << 20;
+
+/// What a create's default start (R1.31) reports as
+/// `CreateWorkspaceResponse.start` when no bookmark matched.
+pub const ROOT_CHECKOUT: &str = "root checkout";
 
 /// This build's version, which the client compares with the daemon's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -205,7 +218,7 @@ impl ClientError {
             Self::TooLarge { .. } => Some(Advice::hint(
                 "Edit large files in a workspace, or split the edits across requests.",
             )),
-            Self::Rpc { status, .. } => detail_of(status).and_then(|d| Advice::from_detail(&d)),
+            Self::Rpc { status, .. } => detail_of(status).and_then(|d| advice_from_detail(&d)),
         }
     }
 
@@ -276,15 +289,10 @@ impl Client {
     /// value.
     pub fn with_agent(mut self, agent: impl Into<String>) -> Result<Client, ClientError> {
         let agent = agent.into();
-        let text = agent.trim();
-        if text.is_empty() {
+        let Some(text) = check_agent(&agent)? else {
             self.agent = AgentInterceptor::default();
             return Ok(self);
-        }
-        let visible = text.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
-        if text.len() > reef_api::AGENT_MAX_BYTES || !visible {
-            return Err(ClientError::InvalidAgent(agent));
-        }
+        };
         let value = text
             .parse()
             .map_err(|_| ClientError::InvalidAgent(agent.clone()))?;
@@ -1110,15 +1118,49 @@ impl WorkspacesApi for Client {
     }
 }
 
+/// An agent name as [`Client::with_agent`] sends it: trimmed, `None` when
+/// empty, and refused unless it is visible ASCII of at most
+/// [`reef_api::AGENT_MAX_BYTES`] bytes, as the daemon requires. For a caller
+/// that checks the name before it connects (R2.05).
+pub fn check_agent(agent: &str) -> Result<Option<&str>, ClientError> {
+    let text = agent.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let visible = text.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
+    if text.len() > reef_api::AGENT_MAX_BYTES || !visible {
+        return Err(ClientError::InvalidAgent(agent.to_owned()));
+    }
+    Ok(Some(text))
+}
+
 /// The owner `reef ws create` sends when not given one: `<user>@<host>`,
 /// the user the process runs as and the machine's full hostname (README,
 /// Owner).
 pub fn default_owner() -> String {
-    format!(
-        "{}@{}",
-        crate::config::os_username(),
-        crate::config::machine_hostname()
-    )
+    format!("{}@{}", os_username(), machine_hostname())
+}
+
+/// The machine's full hostname, or `localhost` if it has none. The daemon
+/// records it on operations, so both agree.
+pub fn machine_hostname() -> String {
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// The name of the user the process runs as: the password database entry,
+/// else `$USER`, else the numeric uid.
+pub fn os_username() -> String {
+    let uid = nix::unistd::getuid();
+    nix::unistd::User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|user| user.name)
+        .or_else(|| std::env::var("USER").ok().filter(|name| !name.is_empty()))
+        .unwrap_or_else(|| uid.to_string())
 }
 
 #[cfg(test)]
@@ -1144,9 +1186,23 @@ mod tests {
     fn only_unserved_methods_are_probed() {
         assert!(is_unserved(&tonic::Status::unimplemented("")));
         assert!(!is_unserved(&tonic::Status::not_found("x")));
-        assert!(is_unserved(&crate::error::unknown_method("/x/Y")));
-        assert!(is_unserved(&crate::error::not_implemented("/x/Y")));
-        let other = crate::error::status(crate::service::page::NegativePageSize(-1));
-        assert!(!is_unserved(&other));
+        let with_reason = |code, reason: &str| {
+            let detail = reef_api::v1::ErrorDetail {
+                reason: reason.to_owned(),
+                ..reef_api::v1::ErrorDetail::default()
+            };
+            reef_api::error::status(code, "x".to_owned(), &detail)
+        };
+        let unimplemented = tonic::Code::Unimplemented;
+        assert!(is_unserved(&with_reason(
+            unimplemented,
+            reef_api::error::UNKNOWN_METHOD
+        )));
+        assert!(is_unserved(&with_reason(
+            unimplemented,
+            reef_api::error::NOT_IMPLEMENTED
+        )));
+        assert!(!is_unserved(&with_reason(unimplemented, "OTHER")));
+        assert!(!is_unserved(&with_reason(tonic::Code::InvalidArgument, "")));
     }
 }

@@ -137,7 +137,7 @@ mod tests {
     /// the check lives here.
     #[test]
     fn every_daemon_next_is_a_real_command() {
-        use reef_daemon::client::ClientError;
+        use reef_client::ClientError;
         use reef_daemon::db::DbError;
         use reef_daemon::error::status;
         use reef_daemon::lease::LeaseError;

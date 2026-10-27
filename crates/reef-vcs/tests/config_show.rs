@@ -13,11 +13,15 @@ use reef_daemon::config::FileConfig;
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod common;
+
 fn state_dir() -> TempDir {
     tempfile::Builder::new().prefix("reef-").tempdir().unwrap()
 }
 
 fn reef(state: &Path, args: &[&str], vars: &[(&str, &Path)]) -> Output {
+    // `reef config show` runs `reef-daemon config show` (R2.05).
+    common::daemon_bin();
     let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
     command
         .args(args)

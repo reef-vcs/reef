@@ -6,9 +6,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use reef_api::v1::{BuildStarted, build_store_response, output_line};
-use reef_daemon::client::ClientError;
-use reef_daemon::client::json::{BuiltStore, Store};
-use reef_lib::error::ErrorKind;
+use reef_client::ClientError;
+use reef_client::json::{BuiltStore, Store};
+use reef_error::ErrorKind;
 
 use super::out::shell_line;
 use super::repo::missing;

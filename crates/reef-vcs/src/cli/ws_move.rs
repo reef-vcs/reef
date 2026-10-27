@@ -3,7 +3,7 @@
 
 use reef_api::v1::MissingStores;
 use reef_api::v1::{MoveWorkspaceRequest, move_workspace_request};
-use reef_daemon::client::json::Moved;
+use reef_client::json::Moved;
 
 use super::repo::missing;
 use super::{CliError, Ctx};

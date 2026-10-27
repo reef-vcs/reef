@@ -12,9 +12,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use reef_api::v1::IfNotJj;
-use reef_daemon::client::json::Repository;
-use reef_daemon::error::Advice;
-use reef_lib::error::ErrorKind;
+use reef_client::json::Repository;
+use reef_error::Advice;
+use reef_error::ErrorKind;
 use serde::Serialize;
 
 use super::out::TextRender;

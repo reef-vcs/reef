@@ -8,10 +8,10 @@ use reef_api::v1::MissingStores;
 use reef_api::v1::{
     CreateWorkspaceRequest, ListWorkspacesRequest, WorkspaceState, create_workspace_request,
 };
-use reef_daemon::client::default_owner;
-use reef_daemon::client::json::{Created, GcReport, Inspected, Released, Workspace};
-use reef_daemon::workspace::ROOT_CHECKOUT;
-use reef_lib::error::ErrorKind;
+use reef_client::ROOT_CHECKOUT;
+use reef_client::default_owner;
+use reef_client::json::{Created, GcReport, Inspected, Released, Workspace};
+use reef_error::ErrorKind;
 
 use super::render::GcReports;
 use super::repo::missing;

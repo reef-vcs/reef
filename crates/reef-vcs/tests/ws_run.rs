@@ -62,6 +62,7 @@ fn reef(daemon: &TestDaemon) -> std::process::Command {
         "REEF_LOG",
         "RUST_LOG",
         "REEF_LOG_FORMAT",
+        "REEF_AGENT",
     ] {
         command.env_remove(var);
     }
@@ -238,6 +239,50 @@ async fn runs_command_in_workspace() {
     assert!(!Path::new(cwd).exists());
     let commit = ws["commit_id"].as_str().unwrap();
     assert!(tree_has(&repo.root, commit, "marker").await);
+}
+
+/// R2.05 test 11: `ws run` passes the agent on to its command as
+/// `REEF_AGENT`, and the operations it causes name it; with no agent the
+/// variable is unset.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_exports_the_agent() {
+    use reef_api::v1::{ListOperationsRequest, OperationFilter, OperationKind};
+    let (daemon, repo) = with_repo().await;
+    let script = r#"echo "${REEF_AGENT-unset}"; echo "$REEF_WORKSPACE"; echo x > agent-file"#;
+    let mut command = reef(&daemon);
+    command
+        .args([
+            "--agent", "bot-3", "ws", "run", "--repo", &repo.id, "--", "sh", "-c",
+        ])
+        .arg(script);
+    let output = finish(command).await;
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "bot-3", "{text}");
+    let client = reef_client::Client::connect(&daemon.config.paths.socket)
+        .await
+        .unwrap();
+    let page = client
+        .list_operations_page(ListOperationsRequest {
+            repo: repo.id.clone(),
+            filter: Some(OperationFilter {
+                workspaces: vec![lines[1].to_owned()],
+                kinds: vec![OperationKind::Snapshot.into()],
+                ..OperationFilter::default()
+            }),
+            ..ListOperationsRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(!page.operations.is_empty(), "{page:?}");
+    for operation in &page.operations {
+        assert_eq!(operation.agent, "bot-3", "{operation:?}");
+    }
+
+    let output = finish(ws_run(&daemon, &repo, &["--", "sh", "-c", script])).await;
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output).lines().next(), Some("unset"));
 }
 
 // 2
