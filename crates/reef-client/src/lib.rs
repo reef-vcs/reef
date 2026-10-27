@@ -62,7 +62,7 @@ use reef_api::v1::{
 use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
     GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
-    ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry,
+    ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry, Operation,
 };
 use reef_error::{Advice, Classify, ErrorKind};
 use tokio::net::UnixStream;
@@ -219,6 +219,16 @@ impl ClientError {
                 "Edit large files in a workspace, or split the edits across requests.",
             )),
             Self::Rpc { status, .. } => detail_of(status).and_then(|d| advice_from_detail(&d)),
+        }
+    }
+
+    /// The error's `ErrorDetail.metadata`: the values that go with its
+    /// reason; empty for an error that is not the daemon's.
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        static NONE: BTreeMap<String, String> = BTreeMap::new();
+        match self {
+            Self::Rpc { metadata, .. } => metadata,
+            _ => &NONE,
         }
     }
 
@@ -781,6 +791,33 @@ impl Client {
         }
     }
 
+    /// The first `limit` entries of the log `request` asks for (all when
+    /// 0), all read at the first page's operation, and whether more exist;
+    /// `request`'s page fields are ignored (R2.27).
+    pub async fn list_changes_limited(
+        &self,
+        request: ListChangesRequest,
+        limit: usize,
+    ) -> Result<Limited<LogEntry>, ClientError> {
+        let mut request = ListChangesRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_changes_page(request.clone()).await?;
+            if limited.at_operation.is_empty() {
+                limited.at_operation = response.at_operation;
+            }
+            limited.items.extend(response.entries);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
     /// `ChangeService.GetChange`.
     pub async fn get_change(
         &self,
@@ -828,6 +865,29 @@ impl Client {
             OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("ListOperations", client.list_operations(request))
             .await
+    }
+
+    /// The newest `limit` operations `request` asks for (all when 0), and
+    /// whether more exist; `request`'s page fields are ignored (R2.27).
+    pub async fn list_operations_limited(
+        &self,
+        request: ListOperationsRequest,
+        limit: usize,
+    ) -> Result<Limited<Operation>, ClientError> {
+        let mut request = ListOperationsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_operations_page(request.clone()).await?;
+            limited.items.extend(response.operations);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
     }
 
     /// `OperationService.GetOperation`, with its effects. `operation_id` is
@@ -973,6 +1033,49 @@ impl Client {
         let mut client =
             FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("EditFiles", client.edit_files(request)).await
+    }
+}
+
+/// The first items of a list read up to a limit (R2.27).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Limited<T> {
+    /// At most the limit's worth.
+    pub items: Vec<T>,
+    /// Whether the list has more than `items`.
+    pub more: bool,
+    /// The operation the list was read at; empty for the operation log.
+    pub at_operation: String,
+}
+
+impl<T> Default for Limited<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            more: false,
+            at_operation: String::new(),
+        }
+    }
+}
+
+impl<T> Limited<T> {
+    /// Whether to stop after a page whose next token is `next`: at the
+    /// end, or once `limit` (0 for none) items are held, cut to it.
+    fn cut(&mut self, limit: usize, next: &str) -> bool {
+        if limit > 0 && self.items.len() >= limit {
+            self.more = self.items.len() > limit || !next.is_empty();
+            self.items.truncate(limit);
+            return true;
+        }
+        next.is_empty()
+    }
+}
+
+/// The page size for reading `limit` items (0 for all): the limit, at most
+/// the largest page a daemon serves.
+fn limited_page_size(limit: usize) -> i32 {
+    match i32::try_from(limit) {
+        Ok(limit) if limit > 0 => limit.min(ALL_PAGE_SIZE),
+        _ => ALL_PAGE_SIZE,
     }
 }
 

@@ -26,7 +26,7 @@ Git worktrees, the current answer to agent isolation, make the problem concrete:
 1. **Snapshots, not commits.** The working copy is always a snapshot. No staging area, no uncommitted state.
 2. **Stable identity, mutable content.** A change has a permanent ID that survives rebase and amendment.
 3. **Conflicts are first-class objects.** A conflicted merge still produces a valid snapshot. It can be stored, delegated to a resolver, or fixed later. Nothing blocks.
-4. **Everything is undoable.** A global operation log records every mutation, so any agent action reverts in one call.
+4. **Everything is undoable.** A global operation log records every mutation, so any agent action reverts in one call (`reef undo <op>`).
 5. **Workspaces are caches, not truth.** Working directories are leased, copy-on-write, and reclaim themselves when the agent goes away. Deleting one loses nothing.
 6. **Hub and ephemeral workspaces.** One authoritative store per repository with lazy-fetching clients. Full clones are the exception.
 7. **Evidence rides with the change.** Test results and build hashes are signed, content-addressed objects linked to the snapshot they were computed on. Landing is gated on evidence, not on who pushed.
@@ -45,6 +45,7 @@ Phase 1 replaces git worktrees for agents working on existing git and [Jujutsu](
 - **Garbage collection.** `reef ws gc` reclaims operations past the undo window, base cache entries no workspace uses, and stale workspace records, and reports what it freed.
 - **Backup and restore.** `reef backup <dir>` copies the daemon's database and every repository's jj state while agents keep writing, pausing each repository only while its operation files are copied; `reef restore` brings it back offline, and the next start rebuilds every workspace's directory from its last snapshot without reclaiming any ([ADR 0020](docs/adr/0020-local-backup-format.md)). A quiesce RPC holds the daemon still for a filesystem snapshot instead.
 - **Shared dependency stores.** A `reef.toml` in the repository declares stores such as `node_modules` or `target`; `reef store build` builds one in a scratch workspace and seals it, and the daemon mounts it read-only into every workspace after verifying it against the lockfile hash.
+- **Changes without jj.** `reef status`, `log`, `show`, `diff`, `describe`, `abandon`, `undo`, `op log`, `op show`, `ws snapshot`, `file read` and `file list` look at and revert what agents did, from a workspace or the checkout, with JSON for each and a `next` command on every error with a known fix ([ADR 0034](docs/adr/0034-cli-over-the-vcs-services.md)).
 - **A CLI an agent can learn from.** `reef` alone prints a one-screen guide, `reef here` says which workspace you are in and what to run next, every error with a known fix carries it as a `hint` and a `next` command, and no command ever waits on input ([ADR 0025](docs/adr/0025-agent-facing-cli-contract.md)).
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 

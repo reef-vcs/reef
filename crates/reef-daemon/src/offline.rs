@@ -172,6 +172,7 @@ fn error_object(
         message: ErrorChain(error).to_string(),
         hint: advice.hint,
         next: advice.next,
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 

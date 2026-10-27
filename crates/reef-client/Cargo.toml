@@ -37,6 +37,7 @@ nix = { workspace = true, features = ["hostname", "user"] }   # the default owne
 etcetera.workspace = true        # the platform's default state directory
 toml.workspace = true            # the client's three keys of config.toml
 time.workspace = true            # RFC 3339 timestamps in the JSON
+base64.workspace = true          # `file read -o json` of bytes that are not UTF-8 (R2.27)
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -6,17 +6,16 @@
 //! says so and exits 0: not being in one is an answer, not an error.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use reef_api::v1::{self, GetWorkspaceRequest};
-use reef_client::ClientError;
 use reef_client::json::{Repository, Workspace, millis_of};
-use reef_error::ErrorKind;
 use serde::Serialize;
 
 use super::out::{TextRender, block, shell_line};
 use super::render::{lease_text, now_ms, span};
 use super::repo::missing;
+use super::scope::{current_dir, divergent_log, is_workspace_not_found};
 use super::{CliError, Ctx};
 
 /// Operation ids are shown by this many characters, as `ws inspect` does.
@@ -78,34 +77,12 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
             ctx.out.object(&inside(&ws, from_env.is_some()))
         }
-        Err(CliError::Daemon(error)) if from_env.is_none() && is_not_found(&error) => {
+        Err(CliError::Daemon(error)) if from_env.is_none() && is_workspace_not_found(&error) => {
             let repos = ctx.call(ctx.client.list_repositories()).await?;
             ctx.out.object(&outside(&cwd, &repos))
         }
         Err(error) => Err(error),
     }
-}
-
-/// The current directory, canonical like the paths the daemon records.
-fn current_dir() -> Result<PathBuf, CliError> {
-    let io_error = |source| CliError::Io {
-        op: "read the current directory",
-        path: PathBuf::from("."),
-        source,
-    };
-    std::env::current_dir()
-        .and_then(std::fs::canonicalize)
-        .map_err(io_error)
-}
-
-fn is_not_found(error: &ClientError) -> bool {
-    matches!(
-        error,
-        ClientError::Rpc {
-            kind: ErrorKind::NotFound,
-            ..
-        }
-    )
 }
 
 /// The answer for `ws`; `in_run` when `ws run` started this process, which
@@ -126,8 +103,8 @@ fn inside(ws: &v1::Workspace, in_run: bool) -> Inside {
 }
 
 /// What to do in `ws`, by its state: release a healthy one when done (or
-/// nothing, inside `ws run`), inspect a divergent or flagged one, make
-/// another if it is gone.
+/// nothing, inside `ws run`), list a divergent one's commits (R2.27),
+/// inspect a flagged one, make another if it is gone.
 fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
     let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
     let lease_state = ws
@@ -135,8 +112,12 @@ fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
         .as_ref()
         .map_or("expired", |lease| lease.state.as_str());
     match (ws.state.as_str(), lease_state) {
-        ("active", "active" | "in_grace") if ws.divergent || ws.attention.is_some() => (
-            "Its change is divergent or needs attention; inspect it before going on.".to_owned(),
+        ("active", "active" | "in_grace") if ws.divergent => (
+            "Its change is divergent: two or more commits of one change. List them, then abandon the one to drop (reef abandon <commit id>).".to_owned(),
+            divergent_log(&ws.id, &ws.change_id),
+        ),
+        ("active", "active" | "in_grace") if ws.attention.is_some() => (
+            "It needs attention; inspect it before going on.".to_owned(),
             argv(&["reef", "ws", "inspect", &ws.id]),
         ),
         ("active", "in_grace") if !in_run => (
@@ -313,7 +294,23 @@ mod tests {
         assert!(hint.contains("expired"), "{hint}");
         let mut divergent = workspace("active", Some("active"));
         divergent.divergent = true;
-        let (_, next) = advise(&divergent, true);
+        divergent.change_id = "01".into();
+        let (hint, next) = advise(&divergent, true);
+        assert_eq!(
+            next,
+            [
+                "reef",
+                "log",
+                "--workspace",
+                "0123456789abcdef",
+                "-r",
+                "change_id(zy)"
+            ]
+        );
+        assert!(hint.contains("reef abandon"), "{hint}");
+        let mut flagged = workspace("active", Some("active"));
+        flagged.attention = Some("store-missing".into());
+        let (_, next) = advise(&flagged, true);
         assert_eq!(next, ["reef", "ws", "inspect", "0123456789abcdef"]);
     }
 

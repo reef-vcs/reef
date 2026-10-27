@@ -218,6 +218,9 @@ pub mod error {
     /// path, or more than 1,000 edits. Metadata: `edit_index`, except for
     /// the count.
     pub const INVALID_EDIT: &str = "INVALID_EDIT";
+    /// A workspace could not be snapshotted before a read or a write
+    /// (R2.27). Metadata: `workspace_id`. Kind: the snapshot error's own.
+    pub const SNAPSHOT_FAILED: &str = "SNAPSHOT_FAILED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

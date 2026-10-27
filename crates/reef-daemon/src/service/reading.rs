@@ -107,7 +107,12 @@ pub(super) async fn snapshot_first(
         .manager
         .snapshot_for_read(record.id, arrived, agent.clone())
         .await
-        .map_err(|error| status(ReadError::Snapshot(Box::new(error))))?;
+        .map_err(|error| {
+            status(ReadError::Snapshot {
+                workspace: record.id,
+                source: Box::new(error),
+            })
+        })?;
     let ReadSnapshot::Taken(outcome) = taken else {
         return Ok(Snapshotted::default());
     };

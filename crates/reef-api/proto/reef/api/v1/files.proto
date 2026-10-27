@@ -23,7 +23,8 @@ service FileService {
   // (metadata `path`), or a revision reason; NOT_FOUND with reason
   // PATH_NOT_FOUND (metadata `path`, `commit_id`); FAILED_PRECONDITION with
   // reason NOT_A_FILE (metadata `path`, `type`, `commit_id`) for a
-  // directory or submodule.
+  // directory or submodule; and a failed snapshot's own error, with reason
+  // SNAPSHOT_FAILED (metadata `workspace_id`).
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -39,7 +40,8 @@ service FileService {
   // Errors: INVALID_ARGUMENT with reason INVALID_PATH, INVALID_PAGE_TOKEN,
   // or a revision reason; NOT_FOUND with reason PATH_NOT_FOUND;
   // FAILED_PRECONDITION with reason NOT_A_DIRECTORY (metadata `path`,
-  // `type`, `commit_id`).
+  // `type`, `commit_id`); and a failed snapshot's own error, with reason
+  // SNAPSHOT_FAILED (metadata `workspace_id`).
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;

@@ -32,7 +32,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{Advice, Advise};
-use crate::model::RepoId;
+use crate::model::{RepoId, WorkspaceId};
 use crate::repo::{RepoHandle, RepoThreadError};
 
 /// Repositories at an operation kept loaded.
@@ -97,9 +97,16 @@ pub enum ReadError {
     /// The repository could not be reloaded at head.
     #[error("reload the repository")]
     Open(#[from] OpenError),
-    /// The snapshot a read takes first failed.
+    /// The snapshot a read takes first failed: reason `SNAPSHOT_FAILED`
+    /// (R2.27).
     #[error("snapshot before reading")]
-    Snapshot(#[source] Box<crate::workspace::ManagerError>),
+    Snapshot {
+        /// The workspace.
+        workspace: WorkspaceId,
+        /// Why.
+        #[source]
+        source: Box<crate::workspace::ManagerError>,
+    },
 }
 
 impl Classify for ReadError {
@@ -109,7 +116,7 @@ impl Classify for ReadError {
             Self::Cancelled => ErrorKind::Unavailable,
             Self::RepoThread(error) => error.kind(),
             Self::Open(error) => error.kind(),
-            Self::Snapshot(error) => error.kind(),
+            Self::Snapshot { source, .. } => source.kind(),
         }
     }
 }
@@ -117,7 +124,7 @@ impl Classify for ReadError {
 impl Advise for ReadError {
     fn advice(&self) -> Option<Advice> {
         match self {
-            Self::Snapshot(error) => Some(error.advice().unwrap_or_else(|| {
+            Self::Snapshot { source, .. } => Some(source.advice().unwrap_or_else(|| {
                 Advice::hint("Pass skip_snapshot to read the last recorded snapshot.")
             })),
             _ => None,

@@ -23,7 +23,7 @@ reef 0.1.0 (21887d1cd101, aarch64-apple-darwin)
 
 The installer checks the tarball against the release's `SHA256SUMS`, never prompts, and never uses `sudo`. `REEF_VERSION=0.1.0` pins a release and `REEF_INSTALL_DIR` installs elsewhere. Or install with `brew install reef-vcs/tap/reef`, or `cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`, or from source with `cargo install --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`. Install both: `reef` runs the daemon from `reef-daemon`, beside it or on `PATH`. The tarballs and the formula carry shell completions; `reef completions zsh` prints them too. The binaries are not signed yet. From 0.1.0, the release workflow attests each tarball's build provenance: with a logged-in `gh`, `gh attestation verify reef-<version>-<target>.tar.gz --repo reef-vcs/reef` checks that a tarball was built by this repository's release workflow. The Linux binaries are static and run in any container.
 
-Reef needs macOS 13 or later on APFS, or Linux with kernel overlayfs (a daemon with `CAP_SYS_ADMIN`, typically root in a VM or container) or `fuse-overlayfs` on `PATH`, or btrfs or XFS for reflinks. A root daemon makes every client of its socket root and runs store builds as root, so use the kernel tier in a VM or container dedicated to the agents, and give it a state directory of its own (`REEF_STATE_DIR=/var/lib/reef`, say): it refuses one another user owns, such as yours under `sudo -E`. Anywhere else it copies, which works but is slow on large trees. In a container, put the state directory on a volume: kernel overlayfs cannot stack on the container's own overlay filesystem, so without one Reef uses fuse-overlayfs. Reef itself doesn't need `jj`, but you'll use it to look at what agents did: install [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0), the version Reef is built on.
+Reef needs macOS 13 or later on APFS, or Linux with kernel overlayfs (a daemon with `CAP_SYS_ADMIN`, typically root in a VM or container) or `fuse-overlayfs` on `PATH`, or btrfs or XFS for reflinks. A root daemon makes every client of its socket root and runs store builds as root, so use the kernel tier in a VM or container dedicated to the agents, and give it a state directory of its own (`REEF_STATE_DIR=/var/lib/reef`, say): it refuses one another user owns, such as yours under `sudo -E`. Anywhere else it copies, which works but is slow on large trees. In a container, put the state directory on a volume: kernel overlayfs cannot stack on the container's own overlay filesystem, so without one Reef uses fuse-overlayfs. Reef doesn't need `jj`: `reef status`, `reef log`, `reef diff` and `reef undo` show and revert what agents did. If you use [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0), the version Reef is built on, it works in your checkout alongside Reef.
 
 ## Start the daemon
 
@@ -81,10 +81,10 @@ ID                STATE   CHANGE    OWNER                                  LEASE
 28a325ae9b734048  active  pursxlpq  you@laptop:16849                       29m left  apfs     -          ~/Library/.../ws/28a325ae9b734048
 ```
 
-The agent works in that path. Inside a workspace, `REEF_WORKSPACE` names it, and `reef here` prints the workspace, its change, its lease, and what to do next. When the agent exits, its edits are a jj change. A Reef workspace is a jj workspace, so look at it from your checkout with `jj`:
+The agent works in that path. Inside a workspace, `REEF_WORKSPACE` names it, and `reef here` prints the workspace, its change, its lease, and what to do next. When the agent exits, its edits are a jj change. Look at it from your checkout:
 
 ```sh
-jj diff --git -r pursxlpq
+reef diff -r pursxlpq
 ```
 
 ```text
@@ -97,6 +97,19 @@ diff --git a/NOTES.md b/NOTES.md
 ```
 
 A workspace whose agent changed nothing leaves no change behind.
+
+## Look at what changed
+
+These work from your checkout, or inside a workspace, where `@` is the workspace's change and each command snapshots it first:
+
+```sh
+reef status
+reef log --limit 10
+reef show pursxlpq
+reef op log --limit 5
+```
+
+`reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef op log` lists what agents did, newest first, with the agent that did it. `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints JSON when piped, and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
 ## Set up your agent
 
@@ -132,7 +145,7 @@ The lease has a five-minute grace period (`lease.grace`) after it ends. About si
 
 ```sh
 reef ws list --all
-jj file show -r tmvnprqw NOTES.md
+reef file read -r tmvnprqw NOTES.md
 ```
 
 ```text
@@ -158,7 +171,13 @@ ID                STATE   CHANGE    ...  ATTENTION  ...
 be530c94842cd504  active  ztxnkruw  ...  -          ...
 ```
 
-Nothing is lost. For now you resolve it with jj in your checkout (`jj log -r 'change_id(ztxnkruw)'`, then `jj squash` or `jj abandon`); Phase 2 makes it a Reef operation.
+Nothing is lost, and `reef here` in the divergent workspace names the command that lists both versions:
+
+```sh
+reef log -r 'change_id(ztxnkruw)'
+```
+
+Abandon the one to drop with `reef abandon <commit id>`; the workspace on it moves to the other.
 
 ## Shared dependency stores
 
@@ -231,7 +250,6 @@ undo_window = "7d"   # snapshots and operations kept at least this long
 ## Known limitations in Phase 1
 
 - Watcher snapshots are local: they stay in the repository on this machine and are never pushed or exported to git.
-- Two workspaces editing one change make it divergent. Nothing is lost; resolving it is a jj operation for now ([ADR 0018](adr/0018-snapshot-staleness-and-divergence.md)).
 - New workspaces start on `main`, `origin/HEAD`'s branch, `master` or `trunk` ([ADR 0022](adr/0022-shared-dependency-stores.md) decision 8 has the order). In a repository with none of these they start on the checkout's own working-copy change, and a `jj` command in the checkout rebases them; pass `--new-on <branch>`.
 - In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one ([ADR 0024](adr/0024-repository-onboarding.md)).
 - A workspace directory has neither `.git` nor `.jj`, so `git` and `jj` commands inside it fail: agents work on files, and you run `git` and `jj` in your checkout ([ADR 0014](adr/0014-workspace-model-on-jj.md)).

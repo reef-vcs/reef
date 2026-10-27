@@ -63,8 +63,9 @@ service OperationService {
   // Errors: as for GetOperation, and FAILED_PRECONDITION with reason
   // OPERATION_NOT_IN_HISTORY (not an ancestor of the head) or
   // OPERATION_SUPERSEDED (metadata `operation_id` for these and
-  // OPERATION_NOT_UNDOABLE), for a `workspace` that is not active, or when
-  // a workspace could not be snapshotted first (nothing is written).
+  // OPERATION_NOT_UNDOABLE), for a `workspace` that is not active, or with
+  // reason SNAPSHOT_FAILED (metadata `workspace_id`) when a workspace could
+  // not be snapshotted first (nothing is written).
   rpc UndoOperation(UndoOperationRequest) returns (UndoOperationResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
