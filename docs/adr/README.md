@@ -49,3 +49,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0035](0035-mcp-server.md) | MCP server | accepted |
 | [0036](0036-operation-log-subscriptions.md) | Operation log subscriptions | accepted |
 | [0037](0037-presence-channel.md) | Presence channel | accepted |
+| [0038](0038-subscription-broker.md) | Subscription broker | accepted |

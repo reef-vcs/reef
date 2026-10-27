@@ -36,7 +36,7 @@ The declaration leaves open who implements which RPC (R2.01's brief gave the rep
 - Editing entries appear a debounce and a scan after a write, and only in workspaces with a watcher or explicit snapshots; an agent's declared intent is R2.11's.
 - Daemon entries name the workspace's owner. `ws run`'s workspaces are owned by `user@host:<pid>`, so filtering by an agent name misses them until R2.11 decides whether `ws run` passes the agent as the owner.
 - Three streams stalled on one connection would stall every stream on it (hyper's client windows: 2 MiB per stream, 5 MiB per connection); the service comment tells clients to read every stream they open.
-- Each subscription reads the hub's broadcast; R2.22 measures 500 and decides whether the broadcast moves into its broker.
+- Each subscription reads the hub's broadcast; R2.22 measures 500 and decides whether the broadcast moves into its broker. R2.22 kept presence on the hub ([0038](0038-subscription-broker.md), decision 9).
 
 ## Alternatives considered
 

@@ -3,7 +3,7 @@ name: Load tests
 # The Phase 1 load test (R1.23, docs/load-tests.md): 200 workspaces with active watchers on one
 # daemon, gated on the steady-state write-to-snapshot p95. Weekly on medium, by hand on either
 # preset, and on a pull request that changes the test itself (a dispatch needs the workflow on
-# main first).
+# main first). The subscription load test (R2.22) is subscription-load.yml.
 on:
   schedule:
     - cron: "23 5 * * 0"     # Sundays 05:23 UTC, medium
@@ -17,6 +17,7 @@ on:
   pull_request:
     paths:
       - crates/reef-daemon/tests/load.rs
+      - crates/reef-daemon/tests/common/load.rs
       - .github/workflows/load.yml
 
 concurrency:

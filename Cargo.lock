@@ -2933,6 +2933,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-broker"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "tokio",
+]
+
+[[package]]
 name = "reef-client"
 version = "0.1.0"
 dependencies = [
@@ -2982,6 +2990,7 @@ dependencies = [
  "rand",
  "rayon",
  "reef-api",
+ "reef-broker",
  "reef-client",
  "reef-daemon",
  "reef-error",

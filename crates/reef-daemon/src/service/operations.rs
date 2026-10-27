@@ -39,8 +39,10 @@ use crate::daemon::AppState;
 use crate::error::status;
 use crate::model::{RepoId, WorkspaceState};
 use crate::read::{PinnedGone, Reads, Stop};
+use crate::subscribe::broker::BrokerSource;
+use crate::subscribe::events::RepoView;
 use crate::subscribe::feed::LogSource;
-use crate::subscribe::session::{self, Position};
+use crate::subscribe::session::{self, Position, Source as SessionSource};
 use crate::subscribe::{SubscribeError, cursor};
 
 /// Operations a page examines at most.
@@ -489,12 +491,15 @@ impl OperationService for OperationsHandler {
                 (BTreeMap::from([(*repo, Frontier::new([found.id]))]), true)
             }
         };
+        // The source first: each position's view is the source's, whose
+        // version may be a ring's rather than `OpEvents`' (R2.22).
+        let source = Source::new(state, matcher);
         let followed = named.clone().unwrap_or_else(|| state.events.repos());
         let mut positions = BTreeMap::new();
         for repo in followed {
             // The view before the heads: anything recorded in between
             // shows as a change.
-            let Some(view) = state.events.view(repo) else {
+            let Some(view) = source.view(repo) else {
                 if named.is_some() {
                     return Err(status(SubscribeError::Forgotten(repo)));
                 }
@@ -548,20 +553,45 @@ impl OperationService for OperationsHandler {
                 },
             );
         }
-        let source = LogSource {
-            state: Arc::clone(state),
-            matcher,
+        let start = session::Start { named, positions };
+        let frames = match source {
+            Source::Broker(source) => {
+                session::spawn(source, limits, state.shutdown.clone(), slot, start)
+            }
+            Source::Log(source) => {
+                session::spawn(source, limits, state.shutdown.clone(), slot, start)
+            }
         };
-        let frames = session::spawn(
-            source,
-            limits,
-            state.shutdown.clone(),
-            slot,
-            session::Start { named, positions },
-        );
         Ok(Response::new(Box::pin(
             tokio_stream::wrappers::ReceiverStream::new(frames),
         )))
+    }
+}
+
+/// Where a subscription's operations come from: the broker's rings (R2.22),
+/// or the log alone when the broker is off.
+enum Source {
+    Broker(BrokerSource),
+    Log(LogSource),
+}
+
+impl Source {
+    fn new(state: &Arc<AppState>, matcher: Arc<OpMatcher>) -> Source {
+        if state.broker.enabled() {
+            Source::Broker(BrokerSource::new(Arc::clone(state), matcher))
+        } else {
+            Source::Log(LogSource {
+                state: Arc::clone(state),
+                matcher,
+            })
+        }
+    }
+
+    fn view(&self, repo: RepoId) -> Option<RepoView> {
+        match self {
+            Source::Broker(source) => SessionSource::view(source, repo),
+            Source::Log(source) => SessionSource::view(source, repo),
+        }
     }
 }
 

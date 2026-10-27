@@ -1,13 +1,14 @@
-//! What one subscription reads from one repository's log: the seam R2.22's
-//! broker plugs into. This ticket reads the log per subscription; the
-//! broker serves the same call from memory and changes nothing else.
+//! What one subscription reads from one repository's log (R2.09): since
+//! R2.22 the broker's fallback, for a position its ring does not hold, and
+//! [`deliver`], the conversion of one operation the broker's ingest and
+//! this read share, so a frame's operations are the same from either.
 
 use std::sync::Arc;
 
 use prost::Message as _;
 use reef_api::v1;
-use reef_lib::jj::oplog::{self, Frontier, OpLookupError};
-use reef_lib::jj::{OperationIdHex, ReadonlyRepo};
+use reef_lib::jj::oplog::{self, Frontier, OpEntry, OpLookupError};
+use reef_lib::jj::{Operation, OperationIdHex, ReadonlyRepo};
 use tonic::Status;
 
 use crate::daemon::AppState;
@@ -16,6 +17,7 @@ use crate::model::RepoId;
 use crate::service::convert;
 use crate::service::op_filter::OpMatcher;
 use crate::service::reading::Records;
+use crate::subscribe::broker::Delivered;
 use crate::subscribe::events::{Follow, RepoView};
 use crate::subscribe::session::Source;
 
@@ -122,7 +124,7 @@ async fn read_blocking(
     }
     let mut more = range.operations.len() > budget.operations;
     let examined = &range.operations[..range.operations.len().min(budget.operations)];
-    let entries: Vec<_> = examined.iter().map(oplog::entry).collect();
+    let entries: Vec<OpEntry> = examined.iter().map(oplog::entry).collect();
     let records = Records::of(state, &entries).map_err(ReadFailure::Failed)?;
 
     let mut batch = Batch {
@@ -141,25 +143,53 @@ async fn read_blocking(
             break;
         }
         computed += 1;
-        let effects = state.reads.effects(repo, tip, operation).await;
-        if matcher.names_changes() && !matcher.touches(effects.as_ref()) {
+        let delivered = deliver(state, repo, tip, &records, operation, entry.clone()).await;
+        if matcher.names_changes() && !matcher.touches(delivered.effects.as_ref()) {
             batch.frontier.advance(entry);
             continue;
         }
-        let mut message = records.operation(entry, repo);
-        message.effects = effects.as_ref().map(convert::effects);
-        let size = message.encoded_len();
         let first = batch.operations.is_empty() && budget.first_free;
-        if !first && bytes + size > budget.bytes {
+        if !first && bytes + delivered.encoded > budget.bytes {
             more = true;
             break;
         }
-        bytes += size;
-        batch.operations.push(message);
+        bytes += delivered.encoded;
+        batch.operations.push(delivered.message);
         batch.frontier.advance(entry);
     }
     batch.more = more;
     Ok(batch)
+}
+
+/// `operation` (whose entry is `entry`) of `repo` converted once, with its
+/// effects computed over `tip`'s store through the shared cache: what a
+/// frame sends and what a filter reads.
+pub(crate) async fn deliver(
+    state: &AppState,
+    repo: RepoId,
+    tip: &Arc<ReadonlyRepo>,
+    records: &Records,
+    operation: &Operation,
+    entry: OpEntry,
+) -> Delivered {
+    let class = oplog::classify(&entry);
+    let owner = class
+        .workspace_id
+        .as_deref()
+        .and_then(|id| records.owner(id))
+        .map(str::to_owned);
+    let effects = state.reads.effects(repo, tip, operation).await;
+    let mut message = records.operation(&entry, repo);
+    message.effects = effects.as_ref().map(convert::effects);
+    let encoded = message.encoded_len();
+    Delivered {
+        entry,
+        class,
+        owner,
+        effects,
+        message,
+        encoded,
+    }
 }
 
 /// The daemon's operation log as a session's [`Source`].

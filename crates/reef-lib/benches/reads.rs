@@ -217,8 +217,8 @@ fn read_benches(c: &mut Criterion) {
 
     // R2.09: what one subscription reads for the operations after its
     // position, classified: one new operation (the per-subscriber cost of
-    // every operation, which R2.22's broker removes) and a thousand (a
-    // reader catching up).
+    // every operation until R2.22's broker, which reads it once per
+    // repository) and a thousand (a reader catching up).
     let mut ids = vec![oplog::op_id_of(&repo.readonly())];
     for n in 0..1000 {
         let tx = repo.readonly().start_transaction();

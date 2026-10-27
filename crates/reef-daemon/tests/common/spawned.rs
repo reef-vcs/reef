@@ -79,6 +79,30 @@ impl SpawnedDaemon {
         .await
     }
 
+    /// [`SpawnedDaemon::spawn`] in a process whose `RLIMIT_NOFILE` is
+    /// `soft` and `hard`, set between fork and exec so the test process
+    /// keeps its own (R2.22).
+    pub async fn spawn_with_open_files(
+        soft: u64,
+        hard: u64,
+        configure: impl FnOnce(&mut FileConfig),
+    ) -> SpawnedDaemon {
+        let tmp = short_tempdir();
+        let root = tmp.path().to_owned();
+        let mut config = FileConfig::default();
+        configure(&mut config);
+        Self::start_limited(
+            root,
+            config,
+            Dirs {
+                root: Some(tmp),
+                out: Some(short_tempdir()),
+            },
+            Some((soft, hard)),
+        )
+        .await
+    }
+
     /// [`SpawnedDaemon::spawn`] with the state directory under `root`, which
     /// the caller owns (the disk-full tests' small volume).
     pub async fn spawn_in(root: &Path, configure: impl FnOnce(&mut FileConfig)) -> SpawnedDaemon {
@@ -96,6 +120,15 @@ impl SpawnedDaemon {
     }
 
     async fn start(root: PathBuf, config: FileConfig, dirs: Dirs) -> SpawnedDaemon {
+        Self::start_limited(root, config, dirs, None).await
+    }
+
+    async fn start_limited(
+        root: PathBuf,
+        config: FileConfig,
+        dirs: Dirs,
+        open_files: Option<(u64, u64)>,
+    ) -> SpawnedDaemon {
         let stderr_path = dirs.out.as_ref().unwrap().path().join("daemon.stderr");
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -112,6 +145,22 @@ impl SpawnedDaemon {
             &[("REEF_CONFIG", config_file.to_str().unwrap())],
         );
         command.stdout(Stdio::null()).stderr(stderr);
+        if let Some((soft, hard)) = open_files {
+            use std::os::unix::process::CommandExt as _;
+            #[allow(unsafe_code, reason = "pre_exec runs between fork and exec")]
+            // SAFETY: setrlimit is async-signal-safe, and the closure
+            // allocates nothing.
+            unsafe {
+                command.pre_exec(move || {
+                    nix::sys::resource::setrlimit(
+                        nix::sys::resource::Resource::RLIMIT_NOFILE,
+                        soft,
+                        hard,
+                    )
+                    .map_err(std::io::Error::from)
+                });
+            }
+        }
         let mut child = command.spawn().unwrap();
         let pid = child.id();
         // A killed daemon leaves its socket file, so the file existing says
@@ -213,7 +262,14 @@ impl SpawnedDaemon {
     /// Generates a `preset` tree at `<root>/<preset>`, makes it a jj
     /// repository snapshotted once, and registers it.
     pub async fn register_synth(&self, preset: Preset) -> SyntheticRepo {
-        let root = self.root.join(format!("{preset:?}").to_lowercase());
+        self.register_synth_at(&format!("{preset:?}").to_lowercase(), preset)
+            .await
+    }
+
+    /// [`SpawnedDaemon::register_synth`] at `<root>/<name>`, for several
+    /// repositories of one preset.
+    pub async fn register_synth_at(&self, name: &str, preset: Preset) -> SyntheticRepo {
+        let root = self.root.join(name);
         let at = root.clone();
         tokio::task::spawn_blocking(move || init_synthetic_repo(&at, preset))
             .await

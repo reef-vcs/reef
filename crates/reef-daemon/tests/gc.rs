@@ -741,6 +741,17 @@ async fn gc_keeps_caught_up_subscriptions() {
     assert!(first.live);
     let before = first.cursor;
     past_this_second().await;
+    // R2.22, 13: the ring is primed and the subscription has read it
+    // there before GC: a ring hit, so its next read is from memory.
+    let primed = Instant::now();
+    while daemon.handle.state().broker.stats().ring_reads == 0 {
+        assert!(
+            primed.elapsed() < Duration::from_secs(5),
+            "the ring is primed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let broker_before = daemon.handle.state().broker.stats();
 
     let report = gc(&daemon, &repo, false).await;
     assert_eq!(report.jj_error, "", "{report:?}");
@@ -761,6 +772,11 @@ async fn gc_keeps_caught_up_subscriptions() {
     assert_eq!(created.parent_ids, vec![head], "nothing from the rewrite");
     assert_eq!(created.kind(), OperationKind::CreateWorkspace);
     assert_eq!(created.workspace_id, ws.id);
+    // R2.22, 13: the ring restarted at the rewritten head, where the
+    // caught-up subscription moved, so it never read the log.
+    let broker_after = daemon.handle.state().broker.stats();
+    assert_eq!(broker_after.resets, broker_before.resets + 1);
+    assert_eq!(broker_after.log_reads, broker_before.log_reads);
 
     let error = daemon
         .client

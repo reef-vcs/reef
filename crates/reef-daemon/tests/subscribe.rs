@@ -1,6 +1,8 @@
 //! `SubscribeOperations` (R2.09, tests 4 to 15): the stream of the
 //! operation log through the daemon, its filters, resuming, frames,
-//! backpressure, shutdown and the subscription cap.
+//! backpressure, shutdown and the subscription cap. Since R2.22 sessions
+//! are served from the broker's rings; tests 5, 10 and 11 also run with
+//! the broker off (R2.22's test 9), so the log path stays tested.
 
 #![allow(
     clippy::unwrap_used,
@@ -37,6 +39,22 @@ async fn fixture_with(configure: impl FnOnce(&mut Config)) -> (TestDaemon, Synth
 
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
     fixture_with(|_| {}).await
+}
+
+/// Whether sessions are served from R2.22's broker or read the log
+/// themselves, as before it (test 9 runs some of R2.09's tests both ways).
+#[derive(Clone, Copy, Debug)]
+enum Served {
+    Broker,
+    Log,
+}
+
+impl Served {
+    fn configure(self, config: &mut Config) {
+        if let Served::Log = self {
+            config.subscribe.ring_operations = 0;
+        }
+    }
 }
 
 async fn create(client: &Client, repo: &SyntheticRepo, owner: &str) -> v1::Workspace {
@@ -249,10 +267,21 @@ async fn first_frame_is_immediate() {
 
 // 5
 #[tokio::test(flavor = "multi_thread")]
-#[expect(clippy::too_many_lines, reason = "one write per write path")]
 async fn every_write_path_wakes_subscribers() {
+    every_write_path_wakes(Served::Broker).await;
+}
+
+// R2.22, 9
+#[tokio::test(flavor = "multi_thread")]
+async fn every_write_path_wakes_subscribers_from_the_log() {
+    every_write_path_wakes(Served::Log).await;
+}
+
+#[expect(clippy::too_many_lines, reason = "one write per write path")]
+async fn every_write_path_wakes(served: Served) {
     let (daemon, repo) = fixture_with(|config| {
         config.subscribe.outside_poll = Duration::from_hours(1);
+        served.configure(config);
     })
     .await;
     let client = daemon.client.clone().with_agent("bot-1").unwrap();
@@ -706,9 +735,19 @@ fn drop_head(root: &Path, dropped: &str, kept: &str) {
 
 // 10
 #[tokio::test(flavor = "multi_thread")]
-#[expect(clippy::too_many_lines, reason = "one case per way to resume")]
 async fn resume_by_cursor() {
-    let (daemon, repo) = fixture().await;
+    resume_by_cursor_served(Served::Broker).await;
+}
+
+// R2.22, 9
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_by_cursor_from_the_log() {
+    resume_by_cursor_served(Served::Log).await;
+}
+
+#[expect(clippy::too_many_lines, reason = "one case per way to resume")]
+async fn resume_by_cursor_served(served: Served) {
+    let (daemon, repo) = fixture_with(|config| served.configure(config)).await;
     let ws = create(&daemon.client, &repo, "owner").await;
     let mut stream = subscribe(&daemon.client, request(&repo)).await;
     frame(&mut stream, SECOND).await;
@@ -820,7 +859,24 @@ async fn resume_by_cursor() {
 // 11
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_subscriber_is_held_not_dropped() {
-    let (daemon, repo) = fixture().await;
+    slow_subscriber_is_held(Served::Broker).await;
+}
+
+// R2.22, 9
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_subscriber_is_held_not_dropped_from_the_log() {
+    slow_subscriber_is_held(Served::Log).await;
+}
+
+async fn slow_subscriber_is_held(served: Served) {
+    // Frames 250 ms apart, so the slow reader's operations coalesce however
+    // long a describe takes under load: HTTP/2's window takes its 90 small
+    // frames while it does not read, so its session is never held (R2.22).
+    let (daemon, repo) = fixture_with(|config| {
+        config.subscribe.frame_interval = Duration::from_millis(250);
+        served.configure(config);
+    })
+    .await;
     let ws = create(&daemon.client, &repo, "owner").await;
     let mut slow = subscribe(&daemon.client, request(&repo)).await;
     frame(&mut slow, SECOND).await;

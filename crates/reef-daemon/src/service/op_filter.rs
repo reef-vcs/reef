@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use reef_api::v1;
 use reef_lib::jj::effects::OpEffects;
-use reef_lib::jj::oplog::{self, ATTR_AGENT, OpEntry};
+use reef_lib::jj::oplog::{self, ATTR_AGENT, OpClass, OpEntry};
 use tonic::Status;
 
 use super::convert::{self, known};
@@ -69,7 +69,17 @@ impl OpMatcher {
         entry: &OpEntry,
         owner: impl Fn(&str) -> Option<&'a str>,
     ) -> bool {
-        let class = oplog::classify(entry);
+        self.keeps_classified(entry, &oplog::classify(entry), owner)
+    }
+
+    /// [`OpMatcher::keeps`] with `entry`'s classification already made:
+    /// R2.22's broker classifies an operation once for every session.
+    pub(crate) fn keeps_classified<'a>(
+        &self,
+        entry: &OpEntry,
+        class: &OpClass,
+        owner: impl Fn(&str) -> Option<&'a str>,
+    ) -> bool {
         if !self.kinds.is_empty()
             && !self
                 .kinds

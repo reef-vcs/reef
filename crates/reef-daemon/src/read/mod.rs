@@ -278,6 +278,23 @@ impl Reads {
         self.blocking(handle, None, read).await
     }
 
+    /// [`Reads::run`] without a permit, for the subscription broker's
+    /// ingest (R2.22): one per followed repository, so bounded by
+    /// repositories, and it must not queue behind sessions catching up from
+    /// the log, or every subscriber of a repository waits for the slowest.
+    pub(crate) async fn run_unbounded<T, F, Fut>(
+        &self,
+        handle: &RepoHandle,
+        read: F,
+    ) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+    {
+        self.blocking(handle, None, read).await
+    }
+
     async fn blocking<T, F, Fut>(
         &self,
         handle: &RepoHandle,

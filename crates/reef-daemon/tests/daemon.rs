@@ -335,7 +335,8 @@ fn log_file_is_json_lines() {
     // A fresh state directory logs its migration first, on Linux the watcher
     // its inotify limits (R1.13), with `watchman` installed the socket it
     // found (R1.14), a tightened state directory, the uids registration
-    // accepts and, as root, a warning (RX.01); nothing else at info comes before the start event.
+    // accepts and, as root, a warning (RX.01), and the open-file limit
+    // (R2.22); nothing else at info comes before the start event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
@@ -347,6 +348,7 @@ fn log_file_is_json_lines() {
         "using WATCHMAN_SOCK from the environment",
         "cannot find the watchman socket; each Watchman snapshot will look for it",
         "registration accepts repositories these uids own",
+        "open file limit",
         // The temporary directory may be created 0755.
         "a private directory had group or other permissions; changed it to 0700",
         reef_daemon::daemon::ROOT_WARNING,
@@ -580,4 +582,86 @@ async fn daemon_settings_carry_the_operation_identity() {
         format!("reef@{}", host.to_lowercase())
     );
     daemon.stop().await;
+}
+
+// R2.22, 15: a daemon started under a shell's default soft limit raises
+// it and serves hundreds of clients; at its hard limit it backs off
+// accepting instead of spinning, and accepts again once descriptors free.
+#[tokio::test(flavor = "multi_thread")]
+async fn serves_hundreds_of_connections() {
+    use common::load::{process_cpu_secs, raise_open_file_limit};
+    use common::spawned::SpawnedDaemon;
+    use nix::sys::resource::{Resource, getrlimit};
+    use reef_api::v1::SubscribeOperationsRequest;
+
+    // The test holds 400 connections itself.
+    raise_open_file_limit();
+    let (_, hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+    let daemon = SpawnedDaemon::spawn_with_open_files(256, hard, |_| {}).await;
+    let raised = wait_for_line(&daemon, "open file limit").await;
+    assert_eq!(raised["before"], 256, "{raised}");
+    assert!(raised["limit"].as_u64().unwrap() > 400, "{raised}");
+    let begun = std::time::Instant::now();
+    let mut streams = Vec::new();
+    for _ in 0..400 {
+        let client = Client::connect(&daemon.socket).await.unwrap();
+        let stream = client
+            .subscribe_operations(SubscribeOperationsRequest::default())
+            .await
+            .unwrap();
+        streams.push((client, stream));
+    }
+    for (_, stream) in &mut streams {
+        let left = Duration::from_secs(5).saturating_sub(begun.elapsed());
+        tokio::time::timeout(left, stream.message())
+            .await
+            .expect("every first frame within 5 s")
+            .unwrap()
+            .unwrap();
+    }
+    drop(streams);
+    drop(daemon);
+
+    // At a hard limit of 300: 400 bare connections run it out.
+    let daemon = SpawnedDaemon::spawn_with_open_files(300, 300, |_| {}).await;
+    // Those it cannot accept wait in the listen backlog, which macOS caps
+    // at `kern.ipc.somaxconn` (128); a connect past it is refused, and
+    // only the descriptors matter here.
+    let mut held = Vec::new();
+    for _ in 0..400 {
+        if let Ok(stream) = tokio::net::UnixStream::connect(&daemon.socket).await {
+            held.push(stream);
+        }
+    }
+    assert!(held.len() > 300, "only {} connected", held.len());
+    wait_for_line(&daemon, "accept failed; backing off").await;
+    let cpu = process_cpu_secs(daemon.pid);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let spent = process_cpu_secs(daemon.pid) - cpu;
+    assert!(
+        spent < 0.5,
+        "{spent} s of CPU in 2 s at the limit: spinning"
+    );
+    held.truncate(200);
+    let client = Client::connect(&daemon.socket).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), client.status())
+        .await
+        .expect("accepted again once descriptors free")
+        .unwrap();
+}
+
+/// The first of the daemon's log events containing `pattern`, waiting up
+/// to 5 s for it to be written.
+async fn wait_for_line(daemon: &common::spawned::SpawnedDaemon, pattern: &str) -> Value {
+    let begun = std::time::Instant::now();
+    loop {
+        if let Some(event) = daemon.stderr_lines(pattern).into_iter().next() {
+            return event;
+        }
+        assert!(
+            begun.elapsed() < Duration::from_secs(5),
+            "no `{pattern}` in the daemon's log"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

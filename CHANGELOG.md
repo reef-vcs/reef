@@ -6,6 +6,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Added
 
+- `reef-broker`, the subscription broker ([ADR 0038](docs/adr/0038-subscription-broker.md)): bounded in-memory rings between a log and the streams that follow it, generic over topic, position and item, with no jj-lib or gRPC dependency.
+- A subscription load test (`crates/reef-daemon/tests/subscription_load.rs`, [docs/load-tests.md](docs/load-tests.md)): 500 operation-log and 500 presence subscribers at 1,000 operations a minute, every delivery checked, gated on p99 within 100 ms. `subscription-load.yml` runs it on both runners.
 - `reef ws run` reports the command it runs as a presence entry (`running <command line>`), refreshed every 10 seconds and cleared when the command exits, before the release. `reef mcp` reports, per repository or workspace its calls name, the last tool called there, for a minute after the call, and clears its entries when it exits. Both name the agent from `--agent` or `REEF_AGENT`, else the workspace's owner.
 - `reef presence report` reports what you are doing: `TEXT` for an activity, `--path` for files you are editing, `--phase` and `--done` for progress, in the current workspace or repository; it prints the entry's id (`-o text`) or the entry. `--id` replaces an entry, and `--id-file` keeps the id in a file for callers that are separate processes, such as a harness's hooks; an entry that had ended is reported anew. `reef presence clear` ends entries by id or `--id-file`.
 - `reef ws renew` renews a workspace's lease, the one you are in by default: what `ws run` does for its command, for a workspace held outside `ws run`. `reef here` suggests it for a lease in its grace period.
@@ -48,6 +50,9 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - Commands other than `reef config show` read only `daemon.socket`, `daemon.pid_file` and `repo.auto_register` from `config.toml`, so an unrelated bad key no longer stops them; the daemon still refuses to start on it, and `reef config show` names it.
 - `reef-vcs` re-exports `reef-api` and `reef-client` instead of `reef-lib` and `reef-daemon`, and its `watchman` feature is gone.
 - `ws create --change`/`--new-on`, `ws move`, and `store build --rev` take a jj revset naming one commit, resolved in jj's order: tags, bookmarks, commit id prefixes, then change id prefixes. A bookmark whose name is also an id prefix (`cafe`) now names the bookmark, and hex text that prefixes both a commit id and a change id names the commit. A divergent change id or a conflicted bookmark is now `invalid_argument` (exit 2, reason `AMBIGUOUS_REVISION`, with the commits in the hint) instead of `conflict` (exit 5).
+
+- Operation subscriptions are served from an in-memory broker ([ADR 0038](docs/adr/0038-subscription-broker.md)): the daemon reads each new operation once per followed repository, however many subscribe, and reads the log for a subscriber only behind the ring. Frames are unchanged.
+- `reef-daemon` raises its open-file limit at start (to 10,240 on macOS, 65,536 elsewhere, within the hard limit) and logs it, so hundreds of clients can connect to a daemon started from a shell whose limit is 256. At the limit it backs off accepting for 100 ms and warns, instead of spinning a core in the accept loop.
 
 ### Upgrading from 0.1
 
