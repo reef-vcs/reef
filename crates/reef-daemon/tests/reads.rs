@@ -851,7 +851,10 @@ async fn operations() {
     }
     // The watcher stays on (debounce 50 ms), so it may snapshot each write
     // before the RPC that follows it does; that RPC then records no
-    // snapshot. The expected list below follows what each RPC reports.
+    // snapshot. The expected list below follows what each RPC reports, and
+    // a watcher snapshot must stand in for each one that recorded none.
+    // `writes::every_operation_is_tagged` checks the explicit, move and
+    // final kinds with the watcher off.
     write(&ws, "explicit.txt", "e\n");
     let explicit = client
         .snapshot_workspace("", &ws.id, "")
@@ -914,6 +917,33 @@ async fn operations() {
     let not_watcher: Vec<(OperationKind, SnapshotKind)> =
         ours.iter().copied().filter(|op| *op != watcher).collect();
     assert_eq!(not_watcher, expected);
+    // Newest first: every watcher snapshot is between the create and the
+    // release, and each write an RPC did not record was the watcher's.
+    let at = |kind: OperationKind| ours.iter().position(|op| op.0 == kind).unwrap();
+    let watchers = |from: usize, to: usize| {
+        ours[from + 1..to]
+            .iter()
+            .filter(|op| **op == watcher)
+            .count()
+    };
+    let (release_at, move_at, create_at) = (
+        at(OperationKind::ReleaseWorkspace),
+        at(OperationKind::MoveWorkspace),
+        at(OperationKind::CreateWorkspace),
+    );
+    assert_eq!(
+        watchers(release_at, create_at),
+        ours.iter().filter(|op| **op == watcher).count(),
+        "{ours:?}"
+    );
+    assert!(
+        watchers(release_at, move_at) >= usize::from(!released),
+        "{ours:?}"
+    );
+    assert!(
+        watchers(move_at, create_at) >= 1 + usize::from(!moved) + usize::from(!explicit),
+        "{ours:?}"
+    );
     assert!(
         all.iter()
             .filter(|op| op.workspace_id == ws.id)

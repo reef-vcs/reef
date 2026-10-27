@@ -89,10 +89,12 @@ fn run(program: &str, args: &[&str]) {
     );
 }
 
-/// Unmounts `path` the way an administrator (or a reboot) would. A stopped
-/// in-process daemon's blocking threads (a watcher snapshot's scan) may
-/// still hold a directory in it for a moment, so `EBUSY` is retried for
-/// up to 10 s.
+/// Unmounts `path` the way an administrator (or a reboot) would. Right
+/// after an in-process daemon stops, something can still hold the mount
+/// for a moment (seen in CI with fuse-overlayfs; the holder is not known:
+/// perhaps the watch attach thread, or the FUSE daemon's own teardown), so
+/// a busy mount is retried for up to 10 s. `LC_ALL=C` keeps the message in
+/// English.
 fn unmount(kind: BackendKind, path: &Path) {
     let path = path.to_str().unwrap();
     let (program, args): (&str, &[&str]) = match kind {
@@ -101,7 +103,11 @@ fn unmount(kind: BackendKind, path: &Path) {
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let output = Command::new(program).args(args).output().unwrap();
+        let output = Command::new(program)
+            .args(args)
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() {
             return;
