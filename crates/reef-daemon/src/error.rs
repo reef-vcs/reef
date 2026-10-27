@@ -278,9 +278,9 @@ fn presence_reason(error: &PresenceError) -> Option<(&'static str, BTreeMap<Stri
             (reason::TOO_MANY_PRESENCE_ENTRIES, metadata)
         }
         PresenceError::InvalidAgent => (reason::INVALID_AGENT, BTreeMap::new()),
-        PresenceError::Invalid(_)
-        | PresenceError::WorkspaceEnded(_)
-        | PresenceError::ShuttingDown => return None,
+        PresenceError::Invalid(_) | PresenceError::Ended | PresenceError::ShuttingDown => {
+            return None;
+        }
     })
 }
 

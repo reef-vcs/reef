@@ -33,15 +33,23 @@ pub fn lease(
     heartbeat_every: Duration,
 ) {
     let owner = lease.owner.clone();
-    hub.publish_daemon(DaemonKey::Lease(workspace), |_| Report {
-        agent: owner,
-        repo: Some(repo),
-        workspace: Some(workspace),
-        change_id: change_id.to_owned(),
-        kind: PresenceKind::Lease,
-        lease: Some(lease),
-        ttl: heartbeat_every * 2,
-        ..Report::default()
+    let expires = |lease: &v1::Lease| lease.expires_at.as_ref().map(|at| (at.seconds, at.nanos));
+    hub.publish_daemon(DaemonKey::Lease(workspace), |previous| {
+        // Two renewers can publish out of order; keep the later lease.
+        let lease = match previous.and_then(|previous| previous.lease.as_ref()) {
+            Some(held) if expires(held) > expires(&lease) => held.clone(),
+            _ => lease,
+        };
+        Report {
+            agent: owner,
+            repo: Some(repo),
+            workspace: Some(workspace),
+            change_id: change_id.to_owned(),
+            kind: PresenceKind::Lease,
+            lease: Some(lease),
+            ttl: heartbeat_every * 2,
+            ..Report::default()
+        }
     });
 }
 
@@ -59,7 +67,8 @@ pub fn editing(
     let ttl = hub.limits().editing_ttl;
     hub.publish_daemon(DaemonKey::Editing(workspace), |previous| {
         let mut merged = paths;
-        if let Some(previous) = previous {
+        // Paths on another change are not this change's edits.
+        if let Some(previous) = previous.filter(|previous| previous.change_id == change_id) {
             for path in &previous.paths {
                 if !merged.contains(path) {
                     merged.push(path.clone());
@@ -123,6 +132,15 @@ pub(crate) fn editing_hook(state: Weak<AppState>) -> SnapshotHook {
                 Some(from) => changed(&state, record.repo_id, from, to, permits).await,
                 None => Vec::new(),
             };
+            // A move or another change since the snapshot makes it stale:
+            // publishing would bring back the old change's entry.
+            let current = state
+                .manager
+                .entry(record.id)
+                .map(|entry| entry.record().change_id);
+            if current.as_deref() != Some(change_id.as_str()) {
+                return;
+            }
             editing(
                 state.manager.presence(),
                 record.repo_id,
@@ -387,5 +405,32 @@ mod tests {
         );
         moved(&hub, ws);
         assert_eq!(hub.entries().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn editing_starts_over_on_another_change() {
+        let hub = hub(Duration::ZERO);
+        let (repo, ws) = (RepoId::generate(), WorkspaceId::generate());
+        editing(&hub, repo, ws, "o", "c1", vec!["a".into()]);
+        editing(&hub, repo, ws, "o", "c2", vec!["b".into()]);
+        let entry = hub.daemon_entry(DaemonKey::Editing(ws)).unwrap();
+        assert_eq!(
+            (entry.change_id.as_str(), entry.paths.as_slice()),
+            ("c2", &["b".to_owned()][..])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_entry_never_goes_back() {
+        let hub = hub(Duration::ZERO);
+        let (repo, ws) = (RepoId::generate(), WorkspaceId::generate());
+        let at = |seconds| v1::Lease {
+            expires_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+            ..v1::Lease::default()
+        };
+        lease(&hub, repo, ws, "c", at(20), Duration::from_secs(1));
+        lease(&hub, repo, ws, "c", at(10), Duration::from_secs(1));
+        let entry = hub.daemon_entry(DaemonKey::Lease(ws)).unwrap();
+        assert_eq!(entry.lease.unwrap().expires_at.unwrap().seconds, 20);
     }
 }

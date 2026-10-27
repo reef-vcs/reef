@@ -135,6 +135,38 @@ struct Inner {
     ended_reasons: HashMap<PresenceId, PresenceEndReason>,
     ended_workspaces: VecDeque<WorkspaceId>,
     ended_workspace_set: HashSet<WorkspaceId>,
+    ended_repos: VecDeque<RepoId>,
+    ended_repo_set: HashSet<RepoId>,
+}
+
+impl Inner {
+    /// Whether `report` names a workspace that ended or a repository that
+    /// was forgotten: a report that raced the end.
+    fn names_gone(&self, report: &Report) -> bool {
+        report
+            .workspace
+            .is_some_and(|workspace| self.ended_workspace_set.contains(&workspace))
+            || report
+                .repo
+                .is_some_and(|repo| self.ended_repo_set.contains(&repo))
+    }
+}
+
+/// Remembers `id` in a ring of `capacity`, forgetting the oldest.
+fn remember<T: Copy + Eq + std::hash::Hash>(
+    ring: &mut VecDeque<T>,
+    set: &mut HashSet<T>,
+    id: T,
+    capacity: usize,
+) {
+    if set.insert(id) {
+        ring.push_back(id);
+        if ring.len() > capacity
+            && let Some(old) = ring.pop_front()
+        {
+            set.remove(&old);
+        }
+    }
 }
 
 /// The live presence entries; one in [`crate::AppState::presence`].
@@ -227,10 +259,8 @@ impl PresenceHub {
             return Err(PresenceError::DaemonKind);
         }
         let mut inner = self.lock();
-        if let Some(workspace) = report.workspace
-            && inner.ended_workspace_set.contains(&workspace)
-        {
-            return Err(PresenceError::WorkspaceEnded(workspace));
+        if inner.names_gone(&report) {
+            return Err(PresenceError::Ended);
         }
         if let Some(id) = replace {
             let Some(entry) = inner.entries.get(&id) else {
@@ -305,9 +335,7 @@ impl PresenceHub {
             .and_then(|id| inner.entries.get(&id))
             .map(|entry| &entry.change.presence);
         let report = build(previous);
-        if let Some(workspace) = report.workspace
-            && inner.ended_workspace_set.contains(&workspace)
-        {
+        if inner.names_gone(&report) {
             return existing.unwrap_or_else(|| new_id(&inner));
         }
         let id = existing.unwrap_or_else(|| new_id(&inner));
@@ -330,14 +358,17 @@ impl PresenceHub {
     /// naming it from now on.
     pub fn end_workspace(&self, workspace: WorkspaceId) {
         let mut inner = self.lock();
-        if inner.ended_workspace_set.insert(workspace) {
-            inner.ended_workspaces.push_back(workspace);
-            if inner.ended_workspaces.len() > ENDED_WORKSPACES
-                && let Some(old) = inner.ended_workspaces.pop_front()
-            {
-                inner.ended_workspace_set.remove(&old);
-            }
-        }
+        let Inner {
+            ended_workspaces,
+            ended_workspace_set,
+            ..
+        } = &mut *inner;
+        remember(
+            ended_workspaces,
+            ended_workspace_set,
+            workspace,
+            ENDED_WORKSPACES,
+        );
         let ids: Vec<PresenceId> = inner
             .entries
             .iter()
@@ -349,9 +380,16 @@ impl PresenceHub {
         }
     }
 
-    /// Ends every entry naming `repo` (`GONE`).
+    /// Ends every entry naming `repo` (`GONE`), and refuses reports naming
+    /// it from now on.
     pub fn end_repository(&self, repo: RepoId) {
         let mut inner = self.lock();
+        let Inner {
+            ended_repos,
+            ended_repo_set,
+            ..
+        } = &mut *inner;
+        remember(ended_repos, ended_repo_set, repo, ENDED_WORKSPACES);
         let ids: Vec<PresenceId> = inner
             .entries
             .iter()
@@ -778,7 +816,7 @@ mod tests {
         assert_eq!(hub.entries().len(), 1);
         assert!(matches!(
             hub.report(None, in_ws.clone()).unwrap_err(),
-            PresenceError::WorkspaceEnded(_)
+            PresenceError::Ended
         ));
         hub.publish_daemon(DaemonKey::Lease(ws), |_| in_ws.clone());
         assert_eq!(
@@ -793,6 +831,23 @@ mod tests {
             .filter_map(|change| change.end)
             .collect();
         assert_eq!(ends, [PresenceEndReason::Gone; 3]);
+    }
+
+    #[tokio::test]
+    async fn a_report_racing_a_forget_is_refused() {
+        let hub = PresenceHub::new(limits());
+        let repo = RepoId::generate();
+        hub.end_repository(repo);
+        let in_repo = Report {
+            repo: Some(repo),
+            ..activity("a", "x")
+        };
+        assert!(matches!(
+            hub.report(None, in_repo.clone()).unwrap_err(),
+            PresenceError::Ended
+        ));
+        hub.publish_daemon(DaemonKey::Progress(1), |_| in_repo);
+        assert_eq!(hub.entries().len(), 0);
     }
 
     #[tokio::test]

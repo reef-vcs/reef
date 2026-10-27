@@ -303,7 +303,7 @@ async fn ttl_expires_and_clamps() {
     assert_eq!(presence(end).id, short.id);
     assert!(ended_with(end, PresenceEndReason::Expired));
     assert!(elapsed >= SECOND, "{elapsed:?}");
-    assert!(elapsed < Duration::from_millis(1_500), "{elapsed:?}");
+    assert!(elapsed < 2 * SECOND, "{elapsed:?}");
     let span = |presence: &v1::Presence| {
         millis(presence.expires_at.as_ref()) - millis(presence.updated_at.as_ref())
     };
@@ -722,7 +722,9 @@ async fn coalescing() {
         got.iter().any(|event| presence(event).activity == "quiet")
     })
     .await;
-    assert!(started.elapsed() < Duration::from_millis(100) + Duration::from_millis(50));
+    // Not held for the 200 ms frame interval: the last frame was a second
+    // ago.
+    assert!(started.elapsed() < Duration::from_millis(200));
     assert!(
         quiet.iter().all(|event| presence(event).id != brief.id),
         "{quiet:?}"

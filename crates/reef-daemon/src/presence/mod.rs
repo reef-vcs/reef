@@ -39,8 +39,8 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_ENTRY_BYTES: usize = 4_096;
 /// Ended entries whose end reason the hub remembers, for a resync.
 pub(crate) const ENDED_RING: usize = 4_096;
-/// Ended workspaces the hub remembers, so a report that raced the end is
-/// refused.
+/// Ended workspaces, and forgotten repositories, the hub remembers, so a
+/// report that raced the end is refused.
 pub(crate) const ENDED_WORKSPACES: usize = 1_024;
 
 /// What presence may cost and how its frames are cut. Not a
@@ -154,9 +154,10 @@ pub enum PresenceError {
     /// repository.
     #[error("{0}")]
     Invalid(String),
-    /// The workspace ended while the report was made.
-    #[error("workspace {0} is no longer active")]
-    WorkspaceEnded(crate::model::WorkspaceId),
+    /// The workspace ended, or the repository was forgotten, while the
+    /// report was made.
+    #[error("the workspace or repository the entry names is gone")]
+    Ended,
     /// The daemon is shutting down; no reason.
     #[error("the daemon is shutting down")]
     ShuttingDown,
@@ -173,7 +174,7 @@ impl Classify for PresenceError {
             | Self::TooLarge { .. }
             | Self::InvalidAgent
             | Self::Invalid(_) => ErrorKind::InvalidArgument,
-            Self::WorkspaceEnded(_) => ErrorKind::Conflict,
+            Self::Ended => ErrorKind::Conflict,
             Self::TooMany { .. } | Self::ShuttingDown => ErrorKind::Unavailable,
         }
     }
@@ -203,11 +204,15 @@ impl Advise for PresenceError {
                 "Clear entries you no longer need, or replace one by its presence_id instead of \
                  reporting a new one."
             }
+            Self::Ended => {
+                "The workspace was released or reclaimed, or its repository forgotten; report \
+                 without it."
+            }
             Self::ShuttingDown => {
                 "The daemon is shutting down; subscribe again when it is back; the set you \
                  receive then replaces what you held."
             }
-            Self::InvalidAgent | Self::Invalid(_) | Self::WorkspaceEnded(_) => return None,
+            Self::InvalidAgent | Self::Invalid(_) => return None,
         }))
     }
 }

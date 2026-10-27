@@ -204,10 +204,9 @@ impl Watcher<'_> {
             if event.ended {
                 self.held.remove(&id);
             } else {
-                let unchanged = self
-                    .held
-                    .get(&id)
-                    .is_some_and(|held| held.updated_at_ms == event.presence.updated_at_ms);
+                // A resubscribed set repeats what was printed; any field
+                // that differs is a change, even within one millisecond.
+                let unchanged = self.held.get(&id) == Some(&event.presence);
                 self.held.insert(id, event.presence.clone());
                 if unchanged {
                     continue;

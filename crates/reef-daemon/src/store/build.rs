@@ -166,6 +166,22 @@ pub async fn run(
     shutdown: CancellationToken,
 ) -> Result<BuildResult, ManagerError> {
     let begun = Instant::now();
+    // Ended when dropped, whatever the outcome (R2.10); an existing store
+    // answers within the delay, so it shows nothing.
+    let progress = Progress::start(
+        manager.presence(),
+        Report {
+            agent: request
+                .agent
+                .clone()
+                .unwrap_or_else(|| BUILD_OWNER.to_owned()),
+            repo: Some(request.repo),
+            ..Report::default()
+        },
+        "resolve",
+        0,
+        "lines",
+    );
     // 1.
     let (commit, store, target) = manager
         .resolve_store(
@@ -204,21 +220,7 @@ pub async fn run(
         .into());
     }
 
-    // Ended when dropped, whatever the outcome (R2.10).
-    let progress = Progress::start(
-        manager.presence(),
-        Report {
-            agent: request
-                .agent
-                .clone()
-                .unwrap_or_else(|| BUILD_OWNER.to_owned()),
-            repo: Some(request.repo),
-            ..Report::default()
-        },
-        "create",
-        0,
-        "lines",
-    );
+    progress.phase("create", 0);
 
     // 2.
     let _running = stores.start_build(&key)?;

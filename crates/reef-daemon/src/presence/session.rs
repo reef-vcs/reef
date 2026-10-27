@@ -277,7 +277,7 @@ impl Session {
     fn cut(&mut self) -> (Vec<reef_api::v1::PresenceEvent>, bool) {
         let mut events = Vec::new();
         let mut bytes = 0;
-        while events.len() < self.limits.frame_events {
+        while events.len() < self.limits.frame_events.max(1) {
             let Some(entry) = self.pending.first_entry() else {
                 break;
             };

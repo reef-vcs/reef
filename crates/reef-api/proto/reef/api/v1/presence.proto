@@ -54,8 +54,8 @@ service PresenceService {
   // so has every later frame. Later frames carry changes: an entry that
   // appeared or changed, at its latest state, or ended, at its last state.
   // A frame holds an entry at most once and at most 1,000 events and
-  // 1 MiB; frames with events are at least 50 ms apart, and an isolated
-  // change is not delayed. Presence coalesces: a client that reads slowly
+  // 1 MiB; frames with events are at least 50 ms apart, except the rest of
+  // a frame those bounds cut, and an isolated change is not delayed. Presence coalesces: a client that reads slowly
   // may miss intermediate states of an entry, never its latest state or
   // its end, and an entry that ends before it was sent is not sent. There
   // is no cursor: a new subscription's set replaces what the client held.

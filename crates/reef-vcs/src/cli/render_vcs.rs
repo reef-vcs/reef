@@ -375,7 +375,10 @@ impl TextRender for PresenceLine {
             .as_deref()
             .map_or("-", |id| id.get(..8).unwrap_or(id));
         let says = if event.ended {
-            format!("ended ({})", event.end_reason.as_deref().unwrap_or("gone"))
+            match &event.end_reason {
+                Some(reason) => format!("ended ({reason})"),
+                None => "ended".to_owned(),
+            }
         } else {
             presence_says(presence)
         };
