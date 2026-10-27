@@ -73,7 +73,9 @@ service ChangeService {
   }
   // Abandons one commit: how a divergent change is resolved (R1.13).
   // Workspaces on the commit or its descendants are snapshotted first, in
-  // operations of their own, and take the result afterwards (ADR 0031).
+  // operations of their own, and take the result afterwards (ADR 0031); a
+  // workspace that stays on its change keeps edits made after its
+  // snapshot, carried onto its new commit (ADR 0039).
   //
   // When the commit's change has another visible commit that does not
   // descend from it (the newest by committer time when there are several),

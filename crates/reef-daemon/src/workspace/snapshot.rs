@@ -15,7 +15,9 @@
 //!    its result becomes the thread's head.
 //! 4. (blocking) Update the row and index the operation as a local snapshot
 //!    (R1.16), then save the working-copy state at the new operation (or at
-//!    the head, when nothing was committed).
+//!    the head, when nothing was committed). A snapshot carried onto a
+//!    write's commit (issue #80, ADR 0039) first checks the new commit out,
+//!    so the row names it only once the files are its.
 //! 5. (async) Log; when the working-copy commit moved, check the mounted
 //!    stores' lockfiles against the commit (R1.20, on the repository
 //!    thread), so the answer to an explicit snapshot already carries the
@@ -25,6 +27,7 @@
 //! of its index row, so a crash between the two leaves rows naming an
 //! operation that exists.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
@@ -33,8 +36,8 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
-    ChangeIdHex, CommitIdHex, IgnoreSources, OpKind, OpMeta, OperationIdHex, ReadonlyRepo, Repo,
-    SnapshotCommit, SnapshotError, commit_snapshot,
+    Carry, ChangeIdHex, CommitIdHex, IgnoreSources, OpKind, OpMeta, OperationIdHex, ReadonlyRepo,
+    Repo, ScannedTree, SnapshotCommit, SnapshotError, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
@@ -59,6 +62,10 @@ use crate::snapshot::{ScanPermit, Scheduled, SnapshotKind, SnapshotOutcome, Trig
 pub const REEFIGNORE: &str = ".reefignore";
 
 /// What the blocking half of a snapshot did.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts the outcome and its log line report"
+)]
 struct Ran {
     recorded: Recorded,
     adopted: bool,
@@ -73,6 +80,9 @@ struct Ran {
     walk_ms: u64,
     /// It covered only the reported paths.
     narrowed: bool,
+    /// It was carried onto a write's commit; `conflict`: with a conflict.
+    carried: bool,
+    conflict: bool,
 }
 
 /// Whether the snapshot wrote an operation.
@@ -328,6 +338,8 @@ impl Manager {
         let head = self.workspace_head(entry, true).await?;
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
+        let scan_failure = self.scheduler.scan_failure();
+        let fail_check_out = self.scheduler.check_outs_fail();
         self.scheduler.take_reported(id, &mut trigger);
         let full = trigger.prefixes().is_none();
         let permit = self
@@ -348,6 +360,9 @@ impl Manager {
                 let jj = Arc::clone(&entry.jj);
                 let mut guard = jj.lock().unwrap_or_else(PoisonError::into_inner);
                 let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
+                // Under the jj lock and the scan lock: exactly this
+                // snapshot uses it.
+                let carry = entry.carry.take();
                 let pipeline = Pipeline {
                     entry: &entry,
                     db: &db,
@@ -358,8 +373,28 @@ impl Manager {
                     spec: &spec,
                     meta: &meta,
                     prefixes: prefixes.as_deref(),
+                    carry: carry.as_ref(),
+                    committed: Cell::new(false),
+                    fail_check_out,
                 };
-                pipeline.run(repo, head, permit)
+                let ran = match scan_failure {
+                    Some(source) => Err(BackendError::Io {
+                        op: "scan",
+                        path: entry.paths.root.clone(),
+                        source,
+                    }
+                    .into()),
+                    None => pipeline.run(repo, head, permit),
+                };
+                if ran.is_err()
+                    && !pipeline.committed.get()
+                    && let Some(carry) = carry
+                {
+                    // Unused: nothing was committed. A re-merge's carry
+                    // (see `record`) is set only after a commit.
+                    entry.carry.restore(carry);
+                }
+                ran
             })
             .await??
         };
@@ -409,6 +444,7 @@ impl Manager {
             commit_id,
             change_id,
             rewrote,
+            carried: ran.carried,
             latency_ms: elapsed_ms(started),
             paths_count: trigger.paths_count(),
             narrowed: ran.narrowed,
@@ -419,7 +455,7 @@ impl Manager {
         log_outcome(
             &outcome,
             record.repo_id,
-            ran.updated_files,
+            (ran.updated_files, ran.conflict),
             trigger.everything,
             begun,
         );
@@ -474,6 +510,12 @@ struct Pipeline<'a> {
     meta: &'a OpMeta,
     /// What to narrow the scan to; `None` scans everything.
     prefixes: Option<&'a [PathBuf]>,
+    /// What a write that moved the workspace handed this snapshot.
+    carry: Option<&'a Carry>,
+    /// Set once the snapshot's operation is committed.
+    committed: Cell<bool>,
+    /// `Scheduler::fail_check_outs` (a test hook).
+    fail_check_out: bool,
 }
 
 impl Pipeline<'_> {
@@ -487,13 +529,13 @@ impl Pipeline<'_> {
     ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
         fn scan<'r>(
             repo: &'r mut Repo,
-            expected: Option<&CommitIdHex>,
+            (expected, carry): (Option<&CommitIdHex>, Option<&Carry>),
             sources: &IgnoreSources<'_>,
             prefixes: Option<&[PathBuf]>,
         ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
-            pollster::block_on(repo.begin_snapshot(expected, sources, prefixes))
+            pollster::block_on(repo.begin_snapshot(expected, carry, sources, prefixes))
         }
-        let (expected, prefixes) = (self.expected, self.prefixes);
+        let (expected, prefixes) = ((self.expected, self.carry), self.prefixes);
         match permit.pool() {
             Some(pool) => pool.install(move || scan(repo, expected, sources, prefixes)),
             None => scan(repo, expected, sources, prefixes),
@@ -558,10 +600,10 @@ impl Pipeline<'_> {
     /// building a sibling of an operation that exists.
     fn record(
         &self,
-        pending: reef_lib::jj::PendingSnapshot<'_>,
+        mut pending: reef_lib::jj::PendingSnapshot<'_>,
     ) -> (Result<Ran, ManagerError>, Option<Arc<ReadonlyRepo>>) {
         let adopted = pending.adopted();
-        let updated_files = pending.updated_files();
+        let mut updated_files = pending.updated_files();
         let millis =
             |time: std::time::Duration| u64::try_from(time.as_millis()).unwrap_or(u64::MAX);
         let scan_ms = millis(pending.scan_time());
@@ -594,6 +636,8 @@ impl Pipeline<'_> {
                     load_ms,
                     walk_ms,
                     narrowed,
+                    carried: false,
+                    conflict: false,
                 })
                 .map_err(ManagerError::from);
             return (ran, None);
@@ -601,6 +645,8 @@ impl Pipeline<'_> {
 
         let plan = pending.plan().clone();
         let recovered = plan.recover.is_some();
+        let carried = plan.carried.clone();
+        let conflict = carried.is_some() && !plan.tree_ids.is_resolved();
         let meta = self.meta.clone();
         let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
@@ -620,9 +666,18 @@ impl Pipeline<'_> {
             Ok(Err(error)) => return (Err(error.into()), None),
             Err(error) => return (Err(error.into()), None),
         };
+        self.committed.set(true);
+        let new_head = Some(Arc::clone(&committed.repo));
+        if pending.carried() {
+            // The commit has the write's changes, which are not on disk yet:
+            // the row moves to it only once they are.
+            match self.check_out_carried(&mut pending, &committed, carried.clone()) {
+                Ok(files) => updated_files = files,
+                Err(error) => return (Err(error), new_head),
+            }
+        }
         let row = record_commit(self.db, self.entry, self.kind, &committed, recovered);
         let finished = pollster::block_on(pending.finish(&committed.op_id));
-        let new_head = Some(Arc::clone(&committed.repo));
         let ran = row.and(finished.map_err(ManagerError::from)).map(|()| Ran {
             recorded: Recorded::Committed(committed),
             adopted: false,
@@ -633,8 +688,44 @@ impl Pipeline<'_> {
             load_ms,
             walk_ms,
             narrowed,
+            carried: carried.is_some(),
+            conflict,
         });
         (ran, new_head)
+    }
+}
+
+impl Pipeline<'_> {
+    /// A carried snapshot's check-out of `committed`, between its commit and
+    /// its row (ADR 0039). When it fails, the workspace's next snapshot
+    /// merges again over `base`, the tree this one took, which gives this
+    /// commit back with any edits made since.
+    fn check_out_carried(
+        &self,
+        pending: &mut reef_lib::jj::PendingSnapshot<'_>,
+        committed: &SnapshotCommit,
+        base: Option<ScannedTree>,
+    ) -> Result<u32, ManagerError> {
+        let checked_out = if self.fail_check_out {
+            Err(ManagerError::from(BackendError::Io {
+                op: "check out",
+                path: self.entry.paths.root.clone(),
+                source: std::io::Error::other("check-outs fail (test hook)"),
+            }))
+        } else {
+            pollster::block_on(pending.check_out_carried(&committed.repo, &committed.commit_id))
+                .map_err(ManagerError::from)
+        };
+        if checked_out.is_err()
+            && let Some(from) = self.expected
+        {
+            self.entry.carry.set(Carry {
+                from: from.clone(),
+                to: committed.commit_id.clone(),
+                base,
+            });
+        }
+        checked_out
     }
 }
 
@@ -702,18 +793,38 @@ fn record_commit(
     Ok(())
 }
 
-/// The snapshot's log event: `info` when it wrote an operation or adopted a
-/// rewrite, `warn` when it diverged or recovered, `debug` otherwise.
+/// The snapshot's log event: `info` when it wrote an operation, carried
+/// edits onto a write's commit, or adopted a rewrite; `warn` when it
+/// diverged, recovered, or carried with a conflict; `debug` otherwise.
 /// `everything`: an event since the previous snapshot said anything may
-/// have changed.
+/// have changed. `conflict`: the carried commit has one.
 fn log_outcome(
     outcome: &SnapshotOutcome,
     repo: crate::model::RepoId,
-    updated_files: u32,
+    (updated_files, conflict): (u32, bool),
     everything: bool,
     begun: Instant,
 ) {
     let kind = outcome.kind.as_str();
+    if outcome.carried && conflict {
+        tracing::warn!(
+            workspace_id = %outcome.workspace,
+            %repo,
+            commit_id = %outcome.commit_id,
+            files_count = updated_files,
+            conflict,
+            "edits made during a write carried onto its commit, with a conflict"
+        );
+    } else if outcome.carried {
+        tracing::info!(
+            workspace_id = %outcome.workspace,
+            %repo,
+            commit_id = %outcome.commit_id,
+            files_count = updated_files,
+            conflict,
+            "edits made during a write carried onto its commit"
+        );
+    }
     if outcome.divergent {
         tracing::warn!(
             workspace_id = %outcome.workspace,

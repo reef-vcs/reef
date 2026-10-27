@@ -1,7 +1,9 @@
 //! The write side of `reef.api.v1` (R2.03, tests 8 to 16): describe,
 //! abandon (resolving a divergent change) and undo through the daemon,
 //! with the live workspaces they move, the `reef.*` attributes every
-//! operation carries, and the `reef-agent` request metadata.
+//! operation carries, and the `reef-agent` request metadata. Issue #80's
+//! tests 10 to 12: edits a workspace makes during an abandon or an undo
+//! that keeps it on its change are carried onto its new commit.
 
 #![allow(
     clippy::unwrap_used,
@@ -10,6 +12,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -184,6 +187,48 @@ async fn divergent_commits(client: &Client, ws: &v1::Workspace) -> usize {
         .await
         .unwrap()
         .len()
+}
+
+/// Runs `rpc` with the write held between its write and its follow-ups
+/// (`Scheduler::hold_follows`), making the workspaces' late edits with
+/// `late` meanwhile.
+async fn at_follow_hold<T: Send + 'static>(
+    daemon: &TestDaemon,
+    rpc: impl Future<Output = T> + Send + 'static,
+    late: impl FnOnce(),
+) -> T {
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_follows().await;
+    let task = tokio::spawn(rpc);
+    let begun = Instant::now();
+    while scheduler.held_follows() == 0 {
+        assert!(
+            begun.elapsed() < Duration::from_secs(30),
+            "the write never reached its follow-ups"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    late();
+    drop(hold);
+    task.await.unwrap()
+}
+
+/// The visible commits of the change `change_id`.
+async fn change_commits(client: &Client, ws: &v1::Workspace, change_id: &str) -> Vec<String> {
+    client
+        .list_changes(v1::ListChangesRequest {
+            workspace: ws.id.clone(),
+            revset: "all()".to_owned(),
+            skip_snapshot: true,
+            ..v1::ListChangesRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| entry.change)
+        .filter(|change| change.change_id == change_id)
+        .map(|change| change.commit_id)
+        .collect()
 }
 
 // 8
@@ -964,6 +1009,197 @@ async fn agent_metadata() {
             .len(),
         before
     );
+    daemon.stop().await;
+}
+
+// Issue #80, 10: an abandon of W's `@` with late edits in W and in V on
+// a child: V stays on its change and carries; W, moved to a new change,
+// keeps ADR 0018's fourth arm, which brings its change back.
+#[tokio::test(flavor = "multi_thread")]
+async fn abandon_carries_late_edits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test").await;
+    write(&w, "base.txt", "base\n");
+    assert!(snapshot(client, &repo, &w).await);
+    let w_row = get(client, &repo, &w).await;
+    let v = create_at(
+        client,
+        &repo,
+        "v@test",
+        Some(create_workspace_request::Start::NewOn(
+            w_row.commit_id.clone(),
+        )),
+    )
+    .await;
+    write(&v, "child.txt", "child\n");
+    assert!(snapshot(client, &repo, &v).await);
+
+    let rpc = {
+        let (client, request) = (client.clone(), abandon(&w, "@", ""));
+        async move { client.abandon_change(request).await.unwrap() }
+    };
+    let response = at_follow_hold(&daemon, rpc, || {
+        write(&v, "v-late.txt", "v late\n");
+        write(&w, "w-late.txt", "w late\n");
+    })
+    .await;
+
+    let v_row = get(client, &repo, &v).await;
+    assert_eq!(v_row.change_id, v.change_id);
+    assert_eq!(
+        change_commits(client, &v, &v_row.change_id).await,
+        std::slice::from_ref(&v_row.commit_id)
+    );
+    for (path, contents) in [("child.txt", "child\n"), ("v-late.txt", "v late\n")] {
+        assert_eq!(read(&v, path).as_deref(), Some(contents), "{path} on disk");
+        assert_eq!(
+            file_at(&repo.root, &v_row.commit_id, path).await.as_deref(),
+            Some(contents),
+            "{path} in V's commit"
+        );
+    }
+    assert_eq!(read(&v, "base.txt"), None);
+    assert!(!v_row.divergent, "{v_row:?}");
+
+    // W: its change comes back with its late edit, not divergent.
+    let w_after = get(client, &repo, &w).await;
+    assert_eq!(w_after.change_id, w_row.change_id);
+    assert_eq!(read(&w, "base.txt").as_deref(), Some("base\n"));
+    assert_eq!(read(&w, "w-late.txt").as_deref(), Some("w late\n"));
+    assert!(!w_after.divergent, "{w_after:?}");
+    assert_eq!(w_after.attention(), Attention::Unspecified);
+    // The abandon's new empty change is left with no workspace (issue
+    // #80's open question 1).
+    let created: Vec<v1::ChangeEffect> = response
+        .operation
+        .unwrap()
+        .effects
+        .unwrap()
+        .changes
+        .into_iter()
+        .filter(|effect| effect.kind() == v1::ChangeEffectKind::Created)
+        .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    let empty = change(client, &w, &created[0].commit_id).await;
+    assert!(!empty.hidden, "{empty:?}");
+    assert_ne!(empty.change_id, w_after.change_id);
+    assert_ne!(empty.change_id, v_row.change_id);
+    daemon.stop().await;
+}
+
+// Issue #80, 11: resolving a divergent change from A while B, on the
+// losing commit, writes: B's late edit lands on A's version, in one commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolving_abandon_carries_the_losers_late_edits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let a = create(client, &repo, "a@test").await;
+    let b = create_at(
+        client,
+        &repo,
+        "b@test",
+        Some(create_workspace_request::Start::Change(a.change_id.clone())),
+    )
+    .await;
+    write(&a, "from-a.txt", "a\n");
+    write(&b, "from-b.txt", "b\n");
+    assert!(snapshot(client, &repo, &a).await);
+    assert!(snapshot(client, &repo, &b).await);
+    let row_b = get(client, &repo, &b).await;
+    assert!(row_b.divergent);
+
+    let rpc = {
+        let (client, request) = (
+            client.clone(),
+            abandon(&a, &row_b.commit_id, &row_b.commit_id),
+        );
+        async move { client.abandon_change(request).await.unwrap() }
+    };
+    at_follow_hold(&daemon, rpc, || write(&b, "late-b.txt", "late\n")).await;
+
+    assert_eq!(read(&b, "from-a.txt").as_deref(), Some("a\n"));
+    assert_eq!(read(&b, "late-b.txt").as_deref(), Some("late\n"));
+    assert_eq!(read(&b, "from-b.txt"), None);
+    let after_b = get(client, &repo, &b).await;
+    assert_eq!(after_b.change_id, a.change_id);
+    assert_eq!(
+        change_commits(client, &a, &a.change_id).await,
+        std::slice::from_ref(&after_b.commit_id)
+    );
+    assert_eq!(divergent_commits(client, &a).await, 0);
+    // A, idle, adopts the change's new commit at its next snapshot.
+    assert!(!snapshot(client, &repo, &a).await);
+    assert_eq!(read(&a, "late-b.txt").as_deref(), Some("late\n"));
+    for row in [get(client, &repo, &a).await, get(client, &repo, &b).await] {
+        assert!(!row.divergent, "{row:?}");
+        assert_eq!(row.attention(), Attention::Unspecified, "{row:?}");
+        assert_eq!(row.commit_id, after_b.commit_id);
+    }
+    daemon.stop().await;
+}
+
+// Issue #80, 12: undoing an edit of W's `@` while W writes gives the
+// undone state plus the late edit, in one commit of W's change.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_carries_late_edits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test").await;
+    write(&w, "a.txt", "a\n");
+    assert!(snapshot(client, &repo, &w).await);
+    let edited = client
+        .edit_files(v1::EditFilesRequest {
+            repo: repo.id.clone(),
+            workspace: w.id.clone(),
+            target: Some(v1::edit_files_request::Target::Revision("@".to_owned())),
+            edits: vec![
+                v1::FileEdit {
+                    path: "a.txt".to_owned(),
+                    action: Some(v1::file_edit::Action::Content(b"x a\n".to_vec())),
+                    executable: None,
+                },
+                v1::FileEdit {
+                    path: "x.txt".to_owned(),
+                    action: Some(v1::file_edit::Action::Content(b"x\n".to_vec())),
+                    executable: None,
+                },
+            ],
+            ..v1::EditFilesRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&w, "x.txt").as_deref(),
+        Some("x\n"),
+        "W followed the edit"
+    );
+
+    let rpc = {
+        let (client, request) = (
+            client.clone(),
+            undo(&repo, Some(&w), &edited.operation.unwrap().id),
+        );
+        async move { client.undo_operation(request).await.unwrap() }
+    };
+    at_follow_hold(&daemon, rpc, || write(&w, "late.txt", "late\n")).await;
+
+    assert_eq!(read(&w, "a.txt").as_deref(), Some("a\n"));
+    assert_eq!(read(&w, "x.txt"), None);
+    assert_eq!(read(&w, "late.txt").as_deref(), Some("late\n"));
+    let row = get(client, &repo, &w).await;
+    assert_eq!(
+        change_commits(client, &w, &row.change_id).await,
+        std::slice::from_ref(&row.commit_id)
+    );
+    assert_eq!(
+        file_at(&repo.root, &row.commit_id, "late.txt")
+            .await
+            .as_deref(),
+        Some("late\n")
+    );
+    assert_eq!(file_at(&repo.root, &row.commit_id, "x.txt").await, None);
+    assert!(!row.divergent, "{row:?}");
     daemon.stop().await;
 }
 

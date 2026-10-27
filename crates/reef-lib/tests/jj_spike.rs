@@ -525,7 +525,7 @@ async fn sibling_operation_is_reported() {
         .unwrap();
 
     let err = second
-        .begin_snapshot(None, &IgnoreSources::default(), None)
+        .begin_snapshot(None, None, &IgnoreSources::default(), None)
         .await
         .err()
         .unwrap();
@@ -540,7 +540,7 @@ async fn sibling_operation_is_reported() {
 
     second.reload_at_head().await.unwrap();
     let pending = second
-        .begin_snapshot(None, &IgnoreSources::default(), None)
+        .begin_snapshot(None, None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(!pending.changed());
@@ -560,7 +560,7 @@ async fn unsaved_state_after_commit_adopts() {
     write(dir.path(), "a.txt", "hello\n");
     let head = Arc::clone(repo.head());
     let pending = repo
-        .begin_snapshot(None, &IgnoreSources::default(), None)
+        .begin_snapshot(None, None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.changed());
@@ -572,7 +572,7 @@ async fn unsaved_state_after_commit_adopts() {
     repo.set_head(Arc::clone(&committed.repo));
 
     let pending = repo
-        .begin_snapshot(None, &IgnoreSources::default(), None)
+        .begin_snapshot(None, None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.adopted(), "{pending:?}");

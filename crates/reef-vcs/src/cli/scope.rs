@@ -356,7 +356,7 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// `reef log --workspace <id> -r 'change_id(<reverse hex>)'`: the commits
 /// of a divergent workspace's change, for the note after a write and for
-/// `here` (issue #80).
+/// `here` (ADR 0018).
 pub(crate) fn divergent_log(workspace_id: &str, change_id: &str) -> Vec<String> {
     vec![
         "reef".to_owned(),

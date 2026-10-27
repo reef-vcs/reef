@@ -38,6 +38,10 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - API revision 3: `FileEdit.copy_from`.
 - API revision 2: `OperationEffects.change_count` and `bookmark_count`, `CHANGE_EFFECT_KIND_HIDDEN`, `BookmarkEffect.conflicted`, `WorkspaceStatus.conflicted_path_count`, and `FileDiff`'s `old_no_final_newline`, `new_no_final_newline`, `too_large` and `invalid_utf8`.
 
+### Fixed
+
+- A write that rewrites the commit a busy workspace sits on (`EditFiles`, `AbandonChange`, `UndoOperation`) no longer makes that workspace's change divergent: edits made during the write are carried onto the new commit in the same change, and an overlap with the write is left as a conflict there (#80, [ADR 0039](docs/adr/0039-carrying-edits-through-a-write.md)).
+
 ### Changed
 
 - `reef status` is a command, no longer a usage error pointing at `reef here`. Prefixes that named one command now name several and are usage errors listing them: `reef s` and `reef st` (formerly `store`), `reef d` (formerly `daemon`), `reef a` (formerly `guide`). `reef sto`, `reef da` and `reef gu` still work.

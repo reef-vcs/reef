@@ -215,6 +215,10 @@ pub struct SnapshotOutcome {
     /// The commit an operation rewrote, when `changed` and the change was
     /// not recovered (R2.10).
     pub rewrote: Option<CommitIdHex>,
+    /// The workspace's edits were carried onto the commit a write moved it
+    /// to, rather than diverging (issue #80, ADR 0039): `rewrote` is the
+    /// write's commit.
+    pub carried: bool,
     /// From the first event that triggered it (or from the request) to the
     /// working-copy state being saved.
     pub latency_ms: u64,
@@ -306,6 +310,19 @@ struct Inner {
     /// Test hook: snapshots waiting at the hold now.
     #[cfg(any(test, feature = "testing"))]
     held: AtomicUsize,
+    /// Test hook: while [`Scheduler::hold_follows`]' guard holds it for
+    /// writing, every write waits between its write and its follow-ups.
+    #[cfg(any(test, feature = "testing"))]
+    follow_hold: Arc<tokio::sync::RwLock<()>>,
+    /// Test hook: writes waiting at the follow hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held_follows: AtomicUsize,
+    /// Test hook: every snapshot fails before it scans.
+    #[cfg(any(test, feature = "testing"))]
+    fail_scans: AtomicBool,
+    /// Test hook: every carried snapshot's check-out fails.
+    #[cfg(any(test, feature = "testing"))]
+    fail_check_outs: AtomicBool,
 }
 
 /// One tracked workspace.
@@ -443,6 +460,14 @@ impl Scheduler {
                 scan_hold: Arc::new(tokio::sync::RwLock::new(())),
                 #[cfg(any(test, feature = "testing"))]
                 held: AtomicUsize::new(0),
+                #[cfg(any(test, feature = "testing"))]
+                follow_hold: Arc::new(tokio::sync::RwLock::new(())),
+                #[cfg(any(test, feature = "testing"))]
+                held_follows: AtomicUsize::new(0),
+                #[cfg(any(test, feature = "testing"))]
+                fail_scans: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                fail_check_outs: AtomicBool::new(false),
             }),
         };
         if config.backend != WatcherBackend::Watchman {
@@ -697,6 +722,65 @@ impl Scheduler {
         }
     }
 
+    /// Test hook: until the guard drops, every write through
+    /// `Manager::rewrite` waits after its write (step 4) and before its
+    /// follow-ups (step 5), with its workspaces still locked.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_follows(&self) -> FollowHold {
+        FollowHold(Arc::clone(&self.inner.follow_hold).write_owned().await)
+    }
+
+    /// Test hook: how many writes wait at [`Scheduler::hold_follows`]' hold
+    /// now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_follows(&self) -> usize {
+        self.inner.held_follows.load(Ordering::SeqCst)
+    }
+
+    /// Where a write waits while `Scheduler::hold_follows` (a test hook)
+    /// holds it.
+    pub(crate) async fn follow_hold_point(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.inner.held_follows.fetch_add(1, Ordering::SeqCst);
+            drop(self.inner.follow_hold.read().await);
+            self.inner.held_follows.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Test hook: while set, every snapshot fails after the scan hold and
+    /// after taking its carry, before it scans, with an I/O error, as on a
+    /// full disk.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_scans(&self, fail: bool) {
+        self.inner.fail_scans.store(fail, Ordering::SeqCst);
+    }
+
+    /// The failure `Scheduler::fail_scans` (a test hook) asks for, if set.
+    pub(crate) fn scan_failure(&self) -> Option<std::io::Error> {
+        #[cfg(any(test, feature = "testing"))]
+        if self.inner.fail_scans.load(Ordering::SeqCst) {
+            return Some(std::io::Error::other("scans fail (test hook)"));
+        }
+        None
+    }
+
+    /// Test hook: while set, every carried snapshot's check-out fails after
+    /// its commit, as on a full disk (ADR 0039).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_check_outs(&self, fail: bool) {
+        self.inner.fail_check_outs.store(fail, Ordering::SeqCst);
+    }
+
+    /// Whether `Scheduler::fail_check_outs` (a test hook) is set.
+    pub(crate) fn check_outs_fail(&self) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        if self.inner.fail_check_outs.load(Ordering::SeqCst) {
+            return true;
+        }
+        false
+    }
+
     /// Whether automatic snapshots of `ws` are paused.
     pub(crate) fn is_paused(&self, ws: WorkspaceId) -> bool {
         self.inner
@@ -871,6 +955,14 @@ impl Scheduler {
 #[must_use = "dropping the guard lets the held snapshots scan at once"]
 #[derive(Debug)]
 pub struct ScanHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
+
+/// Holds every write before its follow-ups; see [`Scheduler::hold_follows`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held writes follow at once"]
+#[derive(Debug)]
+pub struct FollowHold(
     #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
 );
 

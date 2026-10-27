@@ -1,6 +1,6 @@
 //! `reef show`, `describe` and `abandon` (R2.27), and what every write run
 //! in a workspace does afterwards: read the workspace once more and note a
-//! divergent result (issue #80), which the write's own answer does not
+//! divergent result (ADR 0018), which the write's own answer does not
 //! show for the caller's workspace.
 
 use reef_api::v1::{
