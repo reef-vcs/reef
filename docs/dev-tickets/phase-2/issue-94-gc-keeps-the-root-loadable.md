@@ -76,7 +76,7 @@ Anything else is **skipped**. Skipping means: no lock, no write, a `warn` log na
 Before loading at head, GC takes each held workspace's lock, in name order, with `jj_lib::lock::FileLock::try_lock(<dir>/.jj/working_copy/working_copy.lock)`. It polls every 50 ms until 2 s have passed in total (`CHECKOUT_LOCK_WAIT`).
 
 - **Busy.** If any lock is still busy, nothing is abandoned in this run: GC releases what it took and goes on to the operation store's GC, the index and `git gc` without a rewrite. Those touch nothing still reachable, so a workspace whose lock was busy is safe. `GcOutcome.abandon_blocked` names the first busy workspace and its path. The issue suggested skipping only the busy workspace and reporting it. That would abandon its operation's ancestors and strand it, which is the bug itself; refusing is what GC already does for a Reef workspace it cannot settle.
-- **Why before loading at head.** No `jj` command can snapshot in a held workspace between GC's load and its write, so the operation each checkout names, read under the lock, is the one GC classifies. A `jj` command that wants the lock while GC holds it blocks (jj's `FileLock::lock`) and proceeds once GC releases it.
+- **Why before loading at head.** No `jj` command can snapshot in a held workspace between GC's load and its write, so the operation each checkout names, read under the lock, is the one GC classifies. A `jj` command that wants the lock while GC holds it blocks (jj's `FileLock::lock`) and proceeds once GC releases it. (Review correction: one that loaded the repository at the old head fails with jj's sibling-operation error instead, and one that committed before GC's load writes its old id when it checks out; the implementation checks every checkout again before collecting. See ADR 0040.)
 - **Release.** GC holds the locks through the rewrite, the op heads move and the checkout writes, and releases them before the callback and the collection. A `jj` command in the root waits for at most that long: the reparent writes one file per kept operation.
 - **No `start_mutation`.** Reef writes the checkout itself while it holds the lock (below), because `start_mutation` would block on Reef's own lock.
 
@@ -148,7 +148,7 @@ Reef's own workspaces are unchanged. `settle` snapshots and matches each active 
   `operations_abandoned` is 0 when blocked.
 - **The daemon** (`gc_jj`):
   - A blocked abandon sets `JjStep.error` to `no operations were abandoned: <AbandonBlocked>; run reef ws gc again when it finishes`. This is the same prefix as the settle refusal; the CLI prints it and exits 8.
-  - Each `CheckoutMove` is logged: `info` "jj workspace moved onto the rewritten operation log" for `Rewritten` and `ToHead` (`workspace`, `path`, `from_op_id`, `op_id`); `warn` "jj workspace left for `jj workspace update-stale`" for `LeftForRecovery` (with a hint naming the command and the directory); `warn` for `Skipped`; `debug` for `Unchanged`.
+  - Each `CheckoutMove` is logged, by reef-lib where the move happens (so a failed GC's moves are logged too): `info` "jj workspace moved onto the rewritten operation log" for `Rewritten` and `ToHead` (`workspace`, `path`, `from_op_id`, `op_id`); `warn` "jj workspace left for `jj workspace update-stale`" for `LeftForRecovery` (with a hint naming the command and the directory); `warn` for `Skipped`; `debug` for `Unchanged`.
 - **No `GcReport` field.** A list of moved jj workspaces would be a schema change (API revision 6, a digest, a CLI column) for information the user needs only when something goes wrong. The two cases that need the user say so in `jj_error` or in jj's own message. Reef's own rebinds are not reported either. `API_REVISION` stays 5; `api_digest_matches_revision` passes unchanged. See open question 1.
 
 ### Text
@@ -186,7 +186,7 @@ Reef's own workspaces are unchanged. `settle` snapshots and matches each active 
 
 ### `crates/reef-daemon/`
 
-- `src/workspace/gc.rs`: `gc_jj` maps `abandon_blocked` into `JjStep.error`; the job logs each `CheckoutMove`; the module doc.
+- `src/workspace/gc.rs`: `gc_jj` maps `abandon_blocked` into `JjStep.error`; the module doc.
 - `src/maintenance/gc.rs`: the module doc line.
 
 ### `crates/reef-vcs/`
@@ -214,7 +214,7 @@ Reef's own workspaces are unchanged. `settle` snapshots and matches each active 
     - a `GcReport` field.
 - **ADR 0031** gains one header line, `- Amended by: [0039](…), [0040](0040-gc-and-the-users-jj-workspaces.md)`, replacing its current "Amended by" line, and nothing else.
 - **`CHANGELOG.md`**, under Unreleased:
-  - In "Fixed": "`reef ws gc` no longer leaves `jj` unusable in the repository's own checkout ("Could not read working copy's operation", with `jj workspace update-stale` failing too). GC now moves the operation your checkout, and any workspace you added with `jj workspace add`, last recorded onto the rewritten log, under jj's working-copy lock. While a `jj` command holds that lock, GC abandons no operations and says so (#94, [ADR 0040](docs/adr/0040-gc-and-the-users-jj-workspaces.md))."
+  - In "Fixed": "`reef ws gc` no longer leaves `jj` unusable in the repository's own checkout ("Could not read working copy's operation", with `jj workspace update-stale` failing too). GC now moves the operation your checkout, and any workspace you added with `jj workspace add`, last recorded onto the rewritten log, under jj's working-copy lock. While a `jj` command holds that lock, GC abandons no operations and says so (#94, [ADR 0040](../../adr/0040-gc-and-the-users-jj-workspaces.md))." (In the CHANGELOG the link is `docs/adr/…`, from the repository root.)
   - In "Upgrading from 0.1": "A checkout where `jj` fails after a 0.1 `reef ws gc` is repaired by the next `reef ws gc` when its files match its commit. Otherwise that GC removes the stranded operation, and `jj workspace update-stale` there recovers it with a recovery commit."
 - **`docs/dev-tickets/phase-2/README.md`**: the row `| #94 | [issue-94-gc-keeps-the-root-loadable.md](issue-94-gc-keeps-the-root-loadable.md) | M | R1.17, R2.09 | #95 (the jj step on a timer) |`.
 - **Unchanged**: `docs/dev-phases.md`, R1.17's brief (a record of what was decided then), `docs/quickstart.md:250`, and the threat model. The workspace store and `.jj` are not repository content, since jj refuses `.jj` paths in a checkout; Reef already writes the root's `.jj`, and the repository check above keeps writes inside this repository's workspaces.
@@ -228,7 +228,7 @@ Fixtures for `crates/reef-lib/tests/jj_gc.rs`, beside `init()` and `settings()`:
 - `settings_at(t: SystemTime) -> UserSettings`: `settings().config().clone()`, plus a `ConfigLayer::parse(ConfigSource::User, "debug.operation-timestamp = \"<t as RFC 3339>\"")`, into `UserSettings::from_config_and_home_dir(config, None)`.
 - `age_op_store(root, t)`: `File::open(p)?.set_modified(t)` for every file under `.jj/repo/op_store/operations` and `views`.
 - `old_history() -> (TempDir, Repo)`: `Repo::init_internal_git` with `settings_at(now − 10 d)`, then `two_snapshots` on that `Repo`, then `age_op_store(root, now − 10 d)`. It returns the root reopened with `settings()`, so later operations are recent. `KEEP` is `now − 7 d`.
-- `strand_like_0_1(root, keep_newer)`: what `Repo::gc` did before this ticket, with jj-lib directly. It loads at head, finds the cut as `first_older_than` does, runs `op_walk::reparent_range`, `update_op_heads` and `op_store().gc(heads, keep_newer)`, and touches no checkout. It produces #94's state.
+- `strand_like_0_1(root, keep_newer)`: what `Repo::gc` did before this ticket, with jj-lib directly. It loads at head, finds the cut as `first_older_than` does, runs `op_walk::reparent_range`, `update_op_heads`, `op_store().gc(heads, keep_newer)` and the index `reinit`, and touches no checkout. It produces #94's state. The `reinit` is needed: without it the old operation's index segment survives and loading it does not walk the pruned ancestors.
 - `jj_cli()`: `Some(())` when `jj --version` starts with `jj 0.46.`, else prints "skipped: …" and returns `None`, as `jj_workspace.rs:511` does. CLI calls set `JJ_CONFIG` to a missing file.
 
 ### `crates/reef-lib/tests/jj_gc.rs`

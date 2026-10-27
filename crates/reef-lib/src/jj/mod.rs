@@ -34,7 +34,10 @@ pub mod tree_names;
 pub mod undo;
 pub mod workspace;
 
-pub use gc::{GcError, GcOutcome, WorkingCopyCheckError};
+pub use gc::{
+    AbandonBlocked, CHECKOUT_LOCK_WAIT, CheckoutMove, CheckoutOutcome, GcError, GcOutcome,
+    WorkingCopyCheckError,
+};
 pub use git::{ImportRefsError, ImportRefsOutcome};
 pub use ignore::IgnoreSources;
 pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeStateReadError};

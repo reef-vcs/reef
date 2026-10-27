@@ -40,6 +40,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- `reef ws gc` no longer leaves `jj` unusable in the repository's own checkout ("Could not read working copy's operation", with `jj workspace update-stale` failing too). GC now moves the operation your checkout, and any workspace you added with `jj workspace add`, last recorded onto the rewritten log, under jj's working-copy lock. While a `jj` command holds that lock, GC abandons no operations and says so (#94, [ADR 0040](docs/adr/0040-gc-and-the-users-jj-workspaces.md)).
 - A write that rewrites the commit a busy workspace sits on (`EditFiles`, `AbandonChange`, `UndoOperation`) no longer makes that workspace's change divergent: edits made during the write are carried onto the new commit in the same change, and an overlap with the write is left as a conflict there (#80, [ADR 0039](docs/adr/0039-carrying-edits-through-a-write.md)).
 
 ### Changed
@@ -61,6 +62,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 ### Upgrading from 0.1
 
 A 0.1 daemon keeps running after the binaries are replaced. The first `reef` command restarts it when it has no active workspaces. Otherwise the command fails with exit code 9 and `next` set to `reef daemon stop`: stop it once its `ws run` sessions end, and the next command starts the new one. A 0.1 `reef` against the new daemon is told to upgrade (exit 5); its `daemon status` and `daemon stop` keep working.
+
+A checkout where `jj` fails after a 0.1 `reef ws gc` is repaired by the next `reef ws gc` when its files match its commit. Otherwise that GC removes the stranded operation, and `jj workspace update-stale` there recovers it with a recovery commit.
 
 ## [0.1.0] - 2026-10-25
 

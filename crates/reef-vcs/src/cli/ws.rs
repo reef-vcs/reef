@@ -94,9 +94,9 @@ enum WsCommand {
     /// Delete old operations, unused bases, and released workspace records.
     ///
     /// Removes what is older than `gc.undo_window` (7 days) and bases no
-    /// active workspace uses, after snapshotting every active workspace.
-    /// `jj` in the repository's own checkout then needs `jj workspace
-    /// update-stale`. Exits 8, report printed, if the jj step failed.
+    /// active workspace uses, after snapshotting every active workspace;
+    /// `jj` keeps working in your checkout. Exits 8, report printed, if the
+    /// jj step stopped short (as while a `jj` command holds your checkout).
     Gc {
         /// Only this repository (id, id prefix, or path) [default: every
         /// registered repository].
