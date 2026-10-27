@@ -550,10 +550,15 @@ async fn store_mount_is_not_walked() {
     }
     // A tenth of the full scan's walk, or 5 ms where that rounds to less.
     // With debug assertions jj checks every scan's whole tree against its
-    // file states, which no narrowing removes: there, no longer than the
-    // full scan.
+    // file states, which no narrowing removes: there, about the full scan,
+    // with half again for a loaded runner (macos-15 measured 22 ms against
+    // 20 for the workspace's 1,000 files). jj never walks through the
+    // mount's symlink, and a walk that reached the store would record its
+    // files, so `changed` and the paths above are the real check; this
+    // bound only flags a walk grown far slower.
     let bound = if cfg!(debug_assertions) {
-        full.walk_ms.max(5)
+        let full = full.walk_ms.max(5);
+        full.saturating_add(full / 2)
     } else {
         full.walk_ms.max(50) / 10
     };

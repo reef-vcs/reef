@@ -849,22 +849,37 @@ async fn operations() {
         assert!(Instant::now() < deadline, "no watcher snapshot");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    // The watcher stays on (debounce 50 ms), so it may snapshot each write
+    // before the RPC that follows it does; that RPC then records no
+    // snapshot. The expected list below follows what each RPC reports, and
+    // a watcher snapshot must stand in for each one that recorded none.
+    // `writes::every_operation_is_tagged` checks the explicit, move and
+    // final kinds with the watcher off.
     write(&ws, "explicit.txt", "e\n");
-    client.snapshot_workspace("", &ws.id, "").await.unwrap();
+    let explicit = client
+        .snapshot_workspace("", &ws.id, "")
+        .await
+        .unwrap()
+        .operation
+        .is_some();
     write(&ws, "before-move.txt", "m\n");
-    client
+    let moved = client
         .move_workspace(MoveWorkspaceRequest {
             workspace: ws.id.clone(),
             target: Some(move_workspace_request::Target::NewOn("@".into())),
             ..MoveWorkspaceRequest::default()
         })
         .await
-        .unwrap();
+        .unwrap()
+        .final_snapshot
+        .is_some();
     write(&ws, "before-release.txt", "r\n");
-    client
+    let released = client
         .release_workspace("", &ws.id, true, false)
         .await
-        .unwrap();
+        .unwrap()
+        .final_snapshot
+        .is_some();
     // An operation the user writes on the root with jj.
     with_tx(&repo.root, "new empty commit", |_| {});
 
@@ -886,17 +901,48 @@ async fn operations() {
         .filter(|op| op.workspace_id == ws.id)
         .map(|op| (op.kind(), op.snapshot_kind()))
         .collect();
+    let watcher = (OperationKind::Snapshot, SnapshotKind::Watcher);
+    assert!(ours.contains(&watcher), "{ours:?}");
+    let expected: Vec<(OperationKind, SnapshotKind)> = [
+        Some((OperationKind::ReleaseWorkspace, SnapshotKind::Unspecified)),
+        released.then_some((OperationKind::Snapshot, SnapshotKind::Final)),
+        Some((OperationKind::MoveWorkspace, SnapshotKind::Unspecified)),
+        moved.then_some((OperationKind::Snapshot, SnapshotKind::Move)),
+        explicit.then_some((OperationKind::Snapshot, SnapshotKind::Explicit)),
+        Some((OperationKind::CreateWorkspace, SnapshotKind::Unspecified)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let not_watcher: Vec<(OperationKind, SnapshotKind)> =
+        ours.iter().copied().filter(|op| *op != watcher).collect();
+    assert_eq!(not_watcher, expected);
+    // Newest first: every watcher snapshot is between the create and the
+    // release, and each write an RPC did not record was the watcher's.
+    let at = |kind: OperationKind| ours.iter().position(|op| op.0 == kind).unwrap();
+    let watchers = |from: usize, to: usize| {
+        ours[from + 1..to]
+            .iter()
+            .filter(|op| **op == watcher)
+            .count()
+    };
+    let (release_at, move_at, create_at) = (
+        at(OperationKind::ReleaseWorkspace),
+        at(OperationKind::MoveWorkspace),
+        at(OperationKind::CreateWorkspace),
+    );
     assert_eq!(
-        ours,
-        [
-            (OperationKind::ReleaseWorkspace, SnapshotKind::Unspecified),
-            (OperationKind::Snapshot, SnapshotKind::Final),
-            (OperationKind::MoveWorkspace, SnapshotKind::Unspecified),
-            (OperationKind::Snapshot, SnapshotKind::Move),
-            (OperationKind::Snapshot, SnapshotKind::Explicit),
-            (OperationKind::Snapshot, SnapshotKind::Watcher),
-            (OperationKind::CreateWorkspace, SnapshotKind::Unspecified),
-        ]
+        watchers(release_at, create_at),
+        ours.iter().filter(|op| **op == watcher).count(),
+        "{ours:?}"
+    );
+    assert!(
+        watchers(release_at, move_at) >= usize::from(!released),
+        "{ours:?}"
+    );
+    assert!(
+        watchers(move_at, create_at) >= 1 + usize::from(!moved) + usize::from(!explicit),
+        "{ours:?}"
     );
     assert!(
         all.iter()
