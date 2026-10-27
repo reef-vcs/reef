@@ -540,7 +540,7 @@ fn to_u32(n: usize) -> u32 {
 }
 
 /// An operation's effects as a message.
-pub(super) fn effects(effects: &OpEffects) -> v1::OperationEffects {
+pub(crate) fn effects(effects: &OpEffects) -> v1::OperationEffects {
     v1::OperationEffects {
         changes: effects
             .changes

@@ -88,6 +88,25 @@ impl Out {
         self.raw(&buffer)
     }
 
+    /// One item of a stream (`op watch`), written and flushed at once: a
+    /// line of compact JSON in JSON mode (JSON Lines), its text form
+    /// otherwise. Whether stdout is still open.
+    pub(crate) fn stream_item<T: Serialize + TextRender>(
+        &self,
+        value: &T,
+    ) -> Result<bool, CliError> {
+        let mut buffer = Vec::new();
+        match self.mode {
+            Output::Json => {
+                if serde_json::to_writer(&mut buffer, value).is_ok() {
+                    buffer.push(b'\n');
+                }
+            }
+            Output::Text => value.render(&mut buffer).map_err(CliError::Stdout)?,
+        }
+        self.raw_open(&buffer)
+    }
+
     /// A result that has no text form beyond a note: `value` on stdout in
     /// JSON mode, `note` on stderr in text mode.
     pub(crate) fn done<T: Serialize>(&self, value: &T, note: &str) -> Result<(), CliError> {

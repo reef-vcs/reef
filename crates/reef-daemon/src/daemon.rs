@@ -107,6 +107,10 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     /// Reads over jj state (R2.02).
     pub reads: Arc<crate::read::Reads>,
+    /// What subscriptions wait on: every repository's operations (R2.09).
+    pub events: Arc<crate::subscribe::OpEvents>,
+    /// The open subscriptions (R2.09).
+    pub subscriptions: crate::subscribe::Subscriptions,
     /// Work to do after the server stops and before the repository threads
     /// do.
     pub hooks: ShutdownHooks,
@@ -320,7 +324,8 @@ impl Daemon {
             allow_foreign_owner = owners.allow_foreign,
             "registration accepts repositories these uids own"
         );
-        let repos = Arc::new(RepoRegistry::with_owners(owners));
+        let events = Arc::new(crate::subscribe::OpEvents::default());
+        let repos = Arc::new(RepoRegistry::with_owners(owners).with_events(Arc::clone(&events)));
         let manager = Manager::new(
             config.clone(),
             Arc::clone(&db),
@@ -336,6 +341,8 @@ impl Daemon {
             manager,
             started: Instant::now(),
             reads: Arc::new(crate::read::Reads::new(shutdown.clone())),
+            events,
+            subscriptions: crate::subscribe::Subscriptions::default(),
             shutdown,
             hooks: ShutdownHooks::default(),
             reindexed: Mutex::new(HashMap::new()),
@@ -353,6 +360,7 @@ impl Daemon {
             }
         };
 
+        Arc::clone(&state.events).poll(state.config.subscribe.outside_poll, state.shutdown.clone());
         let router = server::router(Arc::clone(&state));
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             UnixListenerStream::new(listener),

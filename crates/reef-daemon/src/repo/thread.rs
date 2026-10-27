@@ -7,11 +7,12 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use reef_lib::error::ErrorChain;
-use reef_lib::jj::{CheckedTrees, Repo, UserSettings};
+use reef_lib::jj::{CheckedTrees, ReadonlyRepo, Repo, UserSettings};
 use tokio::sync::oneshot;
 
 use super::{RegistryError, RepoHandle, RepoHead};
 use crate::model::RepositoryRecord;
+use crate::subscribe::OpEvents;
 
 /// A job: runs on the thread with the repository and replies by itself.
 pub(super) type Job = Box<dyn FnOnce(&mut RepoHead) + Send>;
@@ -45,6 +46,8 @@ impl std::fmt::Debug for Message {
 #[derive(Debug)]
 pub(super) struct RepoThread {
     pub(super) handle: RepoHandle,
+    /// The repository as loaded when the thread started.
+    pub(super) tip: Arc<ReadonlyRepo>,
     join: JoinHandle<()>,
 }
 
@@ -53,6 +56,7 @@ impl RepoThread {
     pub(super) fn spawn(
         record: &RepositoryRecord,
         settings: UserSettings,
+        events: Option<Arc<OpEvents>>,
     ) -> Result<RepoThread, RegistryError> {
         let id = record.id;
         let (tx, rx) = mpsc::channel();
@@ -73,7 +77,7 @@ impl RepoThread {
                         return;
                     }
                 };
-                let _ = loaded_tx.send(Ok(()));
+                let _ = loaded_tx.send(Ok(repo.readonly()));
                 let head = RepoHead {
                     id,
                     root: record.root,
@@ -84,13 +88,15 @@ impl RepoThread {
                     dirty: false,
                     reopen: false,
                     generation: shared,
+                    events,
                 };
                 run(head, &rx);
             })
             .map_err(|source| RegistryError::Spawn { id, source })?;
         match loaded.recv() {
-            Ok(Ok(())) => Ok(RepoThread {
+            Ok(Ok(tip)) => Ok(RepoThread {
                 handle: RepoHandle { id, tx, generation },
+                tip,
                 join,
             }),
             Ok(Err(source)) => {
@@ -131,6 +137,7 @@ fn run(mut head: RepoHead, rx: &mpsc::Receiver<Message>) {
     for message in rx {
         match message {
             Message::Job(job) => {
+                let before = head.position();
                 if head.dirty {
                     // A reload failed after the previous job; try again so
                     // this job does not start from a stale operation.
@@ -145,6 +152,7 @@ fn run(mut head: RepoHead, rx: &mpsc::Receiver<Message>) {
                 if head.dirty {
                     reload(&mut head);
                 }
+                head.notify_if_moved(&before);
             }
             Message::Pause {
                 resumed,

@@ -712,3 +712,67 @@ async fn thousand_snapshots_then_gc(undo_window: Duration) -> (u64, u64) {
     assert_eq!(report.jj_error, "", "{report:?}");
     (after_first, after_gc)
 }
+
+// R2.09 16: a subscription caught up when GC rewrites the log moves to the
+// rewritten head and goes on; a cursor from before the rewrite cannot
+// resume.
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_keeps_caught_up_subscriptions() {
+    use reef_api::v1::{
+        OperationKind, SubscribeOperationsRequest, subscribe_operations_request::Start,
+    };
+    use reef_daemon::client::ClientError;
+
+    let (daemon, repo) = fixture().await;
+    // No active workspace: GC records nothing before its rewrite, so the
+    // subscription is caught up when it begins.
+    let ws = create(&daemon, &repo, None).await;
+    release(&daemon, &repo, &ws).await;
+    let request = SubscribeOperationsRequest {
+        repos: vec![repo.id.clone()],
+        ..SubscribeOperationsRequest::default()
+    };
+    let mut stream = daemon
+        .client
+        .subscribe_operations(request.clone())
+        .await
+        .unwrap();
+    let first = stream.message().await.unwrap().unwrap();
+    assert!(first.live);
+    let before = first.cursor;
+    past_this_second().await;
+
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+    assert!(op_count(&repo.root).await <= 2, "the log was cut");
+    let head = open(&repo.root).await.op_id().to_string();
+
+    let ws = create(&daemon, &repo, None).await;
+    let created = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("a frame in time")
+            .unwrap()
+            .unwrap();
+        if let Some(op) = frame.operations.first() {
+            break op.clone();
+        }
+    };
+    assert_eq!(created.parent_ids, vec![head], "nothing from the rewrite");
+    assert_eq!(created.kind(), OperationKind::CreateWorkspace);
+    assert_eq!(created.workspace_id, ws.id);
+
+    let error = daemon
+        .client
+        .subscribe_operations(SubscribeOperationsRequest {
+            start: Some(Start::Cursor(before)),
+            ..request
+        })
+        .await
+        .unwrap_err();
+    let ClientError::Rpc { status, reason, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(reason, "OPERATION_LOG_REWRITTEN");
+}

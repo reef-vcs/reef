@@ -347,6 +347,18 @@ impl TextRender for OpLines {
     }
 }
 
+/// One operation of `reef op watch`: `op log`'s line, or the object
+/// `op show` prints as one JSON line.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct OpLine(pub(crate) Operation);
+
+impl TextRender for OpLine {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "{}", op_line(&self.0))
+    }
+}
+
 /// `reef op show`.
 #[derive(Debug, Serialize)]
 #[serde(transparent)]

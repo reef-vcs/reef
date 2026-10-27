@@ -820,6 +820,21 @@ async fn wait_for_operations() {
     assert_eq!(again["operations"], json!([]));
     assert!(again["last_operation_id"].is_string());
 
+    // R2.09 test 20: a timed-out wait's last_operation_id resumes exactly
+    // where it stood, so a describe recorded between the calls is seen.
+    let between = writer
+        .ok("describe_change", json!({"description": "between\n"}))
+        .await;
+    let resumed = waiter
+        .ok(
+            "wait_for_operations",
+            json!({"kinds": ["describe"], "after_operation": again["last_operation_id"], "timeout_seconds": 5}),
+        )
+        .await;
+    assert_eq!(resumed["timed_out"], false, "{resumed}");
+    assert_eq!(resumed["operations"][0]["id"], between["operation"]["id"]);
+    let last = resumed["last_operation_id"].as_str().unwrap().to_owned();
+
     // Resuming from an older operation returns what happened since, at once.
     let two = writer
         .ok("describe_change", json!({"description": "two\n"}))

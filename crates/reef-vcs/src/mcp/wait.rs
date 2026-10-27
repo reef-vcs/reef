@@ -1,18 +1,18 @@
-//! `wait_for_operations`: "subscriptions as a wait tool" over what exists.
-//! `SubscribeOperations` is declared but not implemented (R2.09), so the
-//! tool polls `ListOperations` every [`POLL`], over a window that starts at
-//! a baseline operation's end and, while nothing matches, follows the log's
-//! head [`LAG`] behind it, so each poll reads only the last few seconds.
-//! When R2.09 lands it reads the stream instead, with the same inputs and
-//! result.
+//! `wait_for_operations`: "subscriptions as a wait tool". It reads
+//! `SubscribeOperations` (R2.09) from `after_operation`, or from the op
+//! heads when the call arrives, until a frame brings matching operations,
+//! the timeout passes, or the call is cancelled. Until R2.09 it polled
+//! `ListOperations`; its inputs and result did not change.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use reef_api::v1::{ListOperationsRequest, OperationFilter};
-use reef_client::json::{self, millis_of};
+use reef_api::v1::subscribe_operations_request::Start;
+use reef_api::v1::{OperationFilter, SubscribeOperationsRequest};
+use reef_client::ClientError;
+use reef_client::json;
+use reef_error::ErrorKind;
 use rmcp::model::ProgressNotificationParam;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
@@ -20,19 +20,10 @@ use tokio::time::Instant;
 use super::results::Waited;
 use super::tools::filter;
 use super::{Call, ToolError, args, parse, to_value};
-use crate::cli::repo::missing;
 use crate::cli::{CliError, Ctx};
 
-/// How often the log is read.
-const POLL: Duration = Duration::from_millis(500);
 /// How often a waiting call with a progress token reports progress.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10);
-/// How far behind the head the window starts once it moves: the log is
-/// walked newest first by end time and stops at the window's start, so an
-/// operation stamped before the head but recorded after it (another `jj`
-/// writer, concurrent heads merged later) is still seen. Operations seen
-/// before are told apart by id.
-const LAG: i64 = 2_000;
 /// The most operations one call returns, oldest first; the next call,
 /// from its `last_operation_id`, returns the rest.
 const MAX_RESULTS: usize = 100;
@@ -82,64 +73,6 @@ struct Log<'a> {
     include_effects: bool,
 }
 
-/// An operation's end, in milliseconds since the epoch.
-fn ended(operation: &reef_api::v1::Operation) -> i64 {
-    operation.ended_at.as_ref().map_or(0, millis_of)
-}
-
-fn timestamp(millis: i64) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: millis.div_euclid(1000),
-        nanos: i32::try_from(millis.rem_euclid(1000) * 1_000_000).unwrap_or(0),
-    }
-}
-
-impl Log<'_> {
-    /// The newest operation, matching or not.
-    async fn head(&self) -> Result<Option<reef_api::v1::Operation>, CliError> {
-        let response = self
-            .ctx
-            .call(self.ctx.client.list_operations_page(ListOperationsRequest {
-                repo: self.repo.clone(),
-                page_size: 1,
-                ..ListOperationsRequest::default()
-            }))
-            .await?;
-        Ok(response.operations.into_iter().next())
-    }
-
-    /// Every matching operation that ended at or after `from` (and before
-    /// `before`, when given), newest first. The millisecond of overlap
-    /// catches operations that ended in the same millisecond as `from`'s.
-    async fn since(
-        &self,
-        from: i64,
-        before: Option<i64>,
-    ) -> Result<Vec<reef_api::v1::Operation>, CliError> {
-        let mut request = ListOperationsRequest {
-            repo: self.repo.clone(),
-            filter: Some(self.filter.clone()),
-            ended_after: Some(timestamp(from - 1)),
-            ended_before: before.map(timestamp),
-            include_effects: self.include_effects,
-            page_size: 1000,
-            page_token: String::new(),
-        };
-        let mut operations = Vec::new();
-        loop {
-            let response = self
-                .ctx
-                .call(self.ctx.client.list_operations_page(request.clone()))
-                .await?;
-            operations.extend(response.operations);
-            if response.next_page_token.is_empty() {
-                return Ok(operations);
-            }
-            request.page_token = response.next_page_token;
-        }
-    }
-}
-
 async fn wait(
     call: &Call<'_>,
     log: &mut Log<'_>,
@@ -148,89 +81,73 @@ async fn wait(
 ) -> Result<Waited, ToolError> {
     let started = Instant::now();
     let deadline = started + timeout;
-    let from_head = after.is_none();
-    let baseline = match after {
-        Some(id) => {
-            let response = log
-                .ctx
-                .call(log.ctx.client.get_operation(&log.repo, &id))
-                .await?;
-            Some(response.operation.ok_or_else(|| missing("operation"))?)
-        }
-        None => log.head().await?,
+    let request = SubscribeOperationsRequest {
+        repos: vec![log.repo.clone()],
+        filter: Some(log.filter.clone()),
+        start: after.clone().map(Start::AfterOperation),
     };
-    let mut from = baseline.as_ref().map_or(0, ended);
-    // What is not new: the baseline, and for a wait from the head, the
-    // matching operations that ended in its millisecond, which happened
-    // before the call. An `after_operation` names where the caller's view
-    // ends, so only it is left out.
-    let same_millisecond = if from_head {
-        log.since(from, Some(from + 1)).await?
-    } else {
-        Vec::new()
-    };
-    let mut known: HashSet<String> = same_millisecond
-        .into_iter()
-        .map(|op| op.id)
-        .chain(baseline.as_ref().map(|op| op.id.clone()))
-        .collect();
-    let mut last = baseline.map(|op| op.id);
+    let mut stream = log
+        .ctx
+        .call(log.ctx.client.subscribe_operations(request))
+        .await?;
+    // Where the stream stands, matching or not: what a timed-out wait
+    // returns, so passing it back sees nothing twice.
+    let mut last = after;
     let token = call.request.meta.get_progress_token();
-    let mut next_progress = started + PROGRESS_EVERY;
+    let mut progress = tokio::time::interval_at(started + PROGRESS_EVERY, PROGRESS_EVERY);
+    let timed_out = |last: Option<String>| Waited {
+        operations: Vec::new(),
+        last_operation_id: last,
+        timed_out: true,
+    };
     loop {
-        let head = log.head().await?;
-        let found = log.since(from, None).await?;
-        let mut new: Vec<_> = found.iter().filter(|op| !known.contains(&op.id)).collect();
-        if !new.is_empty() {
-            new.reverse();
-            new.truncate(MAX_RESULTS);
-            return Ok(Waited {
-                last_operation_id: new.last().map(|op| op.id.clone()),
-                operations: new.into_iter().map(json::Operation::from).collect(),
-                timed_out: false,
-            });
-        }
-        if let Some(head) = head {
-            last = Some(head.id.clone());
-            // Nothing new matched up to the head: the window follows it.
-            if ended(&head) - LAG > from {
-                from = ended(&head) - LAG;
-                known = found
-                    .into_iter()
-                    .filter(|op| ended(op) >= from)
-                    .map(|op| op.id)
-                    .chain([head.id])
-                    .collect();
-            }
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(Waited {
-                operations: Vec::new(),
-                last_operation_id: last,
-                timed_out: true,
-            });
-        }
-        if let Some(token) = &token
-            && now >= next_progress
-        {
-            next_progress += PROGRESS_EVERY;
-            let progress = ProgressNotificationParam::new(
-                token.clone(),
-                now.duration_since(started).as_secs_f64(),
-            )
-            .with_total(timeout.as_secs_f64());
-            // A client that stopped listening cancels the call too.
-            let _ = call.request.peer.notify_progress(progress).await;
-        }
         tokio::select! {
-            () = tokio::time::sleep_until((now + POLL).min(deadline)) => {}
-            () = call.request.ct.cancelled() => {
-                return Ok(Waited {
-                    operations: Vec::new(),
-                    last_operation_id: last,
-                    timed_out: true,
-                });
+            next = stream.message() => {
+                let frame = match next {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        return Err(CliError::Refused {
+                            kind: ErrorKind::Unavailable,
+                            message: "the daemon ended the subscription".to_owned(),
+                            advice: None,
+                        }
+                        .into());
+                    }
+                    Err(status) => return Err(CliError::Daemon(ClientError::from(status)).into()),
+                };
+                if !frame.operations.is_empty() {
+                    let mut operations = frame.operations;
+                    operations.truncate(MAX_RESULTS);
+                    if !log.include_effects {
+                        for operation in &mut operations {
+                            operation.effects = None;
+                        }
+                    }
+                    return Ok(Waited {
+                        last_operation_id: operations.last().map(|op| op.id.clone()),
+                        operations: operations.iter().map(json::Operation::from).collect(),
+                        timed_out: false,
+                    });
+                }
+                if let Some(head) = frame.head_operation_ids.last() {
+                    last = Some(head.clone());
+                }
+                if timeout.is_zero() && frame.live {
+                    return Ok(timed_out(last));
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => return Ok(timed_out(last)),
+            () = call.request.ct.cancelled() => return Ok(timed_out(last)),
+            now = progress.tick(), if token.is_some() => {
+                if let Some(token) = &token {
+                    let progress = ProgressNotificationParam::new(
+                        token.clone(),
+                        now.duration_since(started).as_secs_f64(),
+                    )
+                    .with_total(timeout.as_secs_f64());
+                    // A client that stopped listening cancels the call too.
+                    let _ = call.request.peer.notify_progress(progress).await;
+                }
             }
         }
     }

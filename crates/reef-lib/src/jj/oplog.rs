@@ -1,7 +1,8 @@
 //! Reading the operation log, and recognizing the snapshot operations Reef
 //! writes (R1.16).
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -650,6 +651,11 @@ pub async fn lookup(repo: &ReadonlyRepo, text: &str) -> Result<OpEntry, OpLookup
     Ok(entry_of(&resolve_operation(repo, text).await?))
 }
 
+/// The operation `repo` is loaded at.
+pub fn op_id_of(repo: &ReadonlyRepo) -> OperationIdHex {
+    OperationIdHex::of(repo.op_id())
+}
+
 /// The current operation heads in `repo`'s store, sorted, read without
 /// loading or merging them: more than one while concurrent operations
 /// are unmerged.
@@ -703,6 +709,267 @@ pub async fn walk_from(
         }
     }
     Ok(walk)
+}
+
+/// Where a reader of the operation log stands (R2.09): the operations up
+/// to which it has seen every one, as a set because the log is a graph.
+/// Sorted full ids, one unless the log had concurrent heads; an operation
+/// is behind the frontier when it is a member or an ancestor of one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Frontier(Vec<OperationIdHex>);
+
+impl Frontier {
+    /// A frontier at `ids`.
+    pub fn new(ids: impl IntoIterator<Item = OperationIdHex>) -> Frontier {
+        let mut ids: Vec<OperationIdHex> = ids.into_iter().collect();
+        ids.sort();
+        ids.dedup();
+        Frontier(ids)
+    }
+
+    /// The members, sorted.
+    pub fn ids(&self) -> &[OperationIdHex] {
+        &self.0
+    }
+
+    /// Moves past `entry`, whose parents are behind the frontier or among
+    /// the operations already moved past: they leave, it joins. A merge
+    /// collapses its parents into one member.
+    pub fn advance(&mut self, entry: &OpEntry) {
+        self.0.retain(|id| !entry.parents.contains(id));
+        if let Err(at) = self.0.binary_search(&entry.id) {
+            self.0.insert(at, entry.id.clone());
+        }
+    }
+}
+
+/// What [`walk_after`] found.
+#[derive(Clone, Debug)]
+pub struct OpRange {
+    /// The operations after the frontier, each after its parents.
+    pub operations: Vec<Operation>,
+    /// Frontier members that are not heads and that no operation in the
+    /// range has as a parent: not in the history the heads reach (dropped
+    /// from the op heads, or rewritten). Empty when `truncated`.
+    pub unreached: Vec<OperationIdHex>,
+    /// More than the limit's operations are after the frontier;
+    /// `operations` is empty.
+    pub truncated: bool,
+}
+
+/// An operation ordered by end time, then id, as jj's own walks order
+/// them.
+struct ByEnd(Operation);
+
+impl ByEnd {
+    fn key(&self) -> (i64, &OperationId) {
+        (self.0.metadata().time.end.timestamp.0, self.0.id())
+    }
+}
+
+impl PartialEq for ByEnd {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for ByEnd {}
+
+impl PartialOrd for ByEnd {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByEnd {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+/// Where [`walk_after`] has got to with one operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    /// Queued, not behind the frontier as far as the walk knows.
+    Wanted,
+    /// Behind the frontier, not walked yet: queued, or only marked.
+    Unwanted { queued: bool },
+    /// Behind the frontier and walked.
+    Behind,
+    /// Walked and kept.
+    Kept,
+}
+
+/// The operations that are ancestors of `heads` (or heads) and not behind
+/// `frontier`, each after its parents; with `frontier` empty, every
+/// ancestor of `heads`. Walks newest end time first from the heads and the
+/// frontier together, marking the frontier's ancestors as it reaches them,
+/// and stops when only those are left to walk, so it reads about as many
+/// operations as it returns; jj-lib's `walk_ancestors_range` does the same
+/// but reads its first chunk without a bound. Past `limit` kept operations
+/// it stops with `truncated`. Never loads a repository and never writes.
+pub async fn walk_after(
+    repo: &ReadonlyRepo,
+    heads: &[OperationIdHex],
+    frontier: &Frontier,
+    limit: usize,
+) -> Result<OpRange, OpLookupError> {
+    let mut seen: HashMap<OperationId, Seen> = HashMap::new();
+    let mut queue = BinaryHeap::new();
+    let mut kept: HashMap<OperationId, Operation> = HashMap::new();
+    let mut wanted_queued = 0_usize;
+    for id in frontier.ids() {
+        let op = load_named(repo, id).await?;
+        seen.insert(op.id().clone(), Seen::Unwanted { queued: true });
+        queue.push(ByEnd(op));
+    }
+    for id in heads {
+        let op = load_named(repo, id).await?;
+        if !seen.contains_key(op.id()) {
+            seen.insert(op.id().clone(), Seen::Wanted);
+            wanted_queued += 1;
+            queue.push(ByEnd(op));
+        }
+    }
+    let mut truncated = false;
+    while wanted_queued > 0 {
+        let Some(ByEnd(op)) = queue.pop() else { break };
+        if seen.get(op.id()) == Some(&Seen::Unwanted { queued: true }) {
+            seen.insert(op.id().clone(), Seen::Behind);
+            for parent in op.parent_ids() {
+                unwant(parent, &mut seen, &mut kept, &mut wanted_queued);
+            }
+        } else {
+            wanted_queued -= 1;
+            if kept.len() == limit {
+                truncated = true;
+                break;
+            }
+            seen.insert(op.id().clone(), Seen::Kept);
+            kept.insert(op.id().clone(), op.clone());
+        }
+        for parent in op.parents().await? {
+            match seen.get(parent.id()) {
+                None => {
+                    seen.insert(parent.id().clone(), Seen::Wanted);
+                    wanted_queued += 1;
+                    queue.push(ByEnd(parent));
+                }
+                // Marked through a child, not walked: walk it so its own
+                // ancestors get marked.
+                Some(Seen::Unwanted { queued: false }) => {
+                    seen.insert(parent.id().clone(), Seen::Unwanted { queued: true });
+                    queue.push(ByEnd(parent));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if truncated {
+        return Ok(OpRange {
+            operations: Vec::new(),
+            unreached: Vec::new(),
+            truncated,
+        });
+    }
+    let operations = parents_first(kept);
+    let reached: HashSet<&OperationId> = operations
+        .iter()
+        .flat_map(|op| op.parent_ids().iter())
+        .collect();
+    let unreached = frontier
+        .ids()
+        .iter()
+        .filter(|id| !heads.contains(id) && !reached.contains(&id.to_id()))
+        .cloned()
+        .collect();
+    Ok(OpRange {
+        operations,
+        unreached,
+        truncated,
+    })
+}
+
+/// Marks `id` and, if the walk kept them, its kept ancestors as behind the
+/// frontier: an operation kept before a later-ending descendant of the
+/// frontier reached it (clocks out of step) is taken back.
+fn unwant(
+    id: &OperationId,
+    seen: &mut HashMap<OperationId, Seen>,
+    kept: &mut HashMap<OperationId, Operation>,
+    wanted_queued: &mut usize,
+) {
+    let mut pending = vec![id.clone()];
+    while let Some(id) = pending.pop() {
+        match seen.get(&id).copied() {
+            None => {
+                seen.insert(id, Seen::Unwanted { queued: false });
+            }
+            Some(Seen::Wanted) => {
+                *wanted_queued -= 1;
+                seen.insert(id, Seen::Unwanted { queued: true });
+            }
+            Some(Seen::Kept) => {
+                if let Some(op) = kept.remove(&id) {
+                    pending.extend(op.parent_ids().iter().cloned());
+                }
+                seen.insert(id, Seen::Behind);
+            }
+            Some(Seen::Unwanted { .. } | Seen::Behind) => {}
+        }
+    }
+}
+
+/// `ops` with every operation after its parents among them, oldest end
+/// time first where the graph leaves a choice.
+fn parents_first(mut ops: HashMap<OperationId, Operation>) -> Vec<Operation> {
+    let mut waiting: HashMap<OperationId, usize> = HashMap::new();
+    let mut children: HashMap<OperationId, Vec<OperationId>> = HashMap::new();
+    let mut ready = BinaryHeap::new();
+    for op in ops.values() {
+        let parents = op
+            .parent_ids()
+            .iter()
+            .filter(|parent| ops.contains_key(*parent))
+            .count();
+        for parent in op.parent_ids().iter().filter(|p| ops.contains_key(*p)) {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(op.id().clone());
+        }
+        if parents == 0 {
+            ready.push(Reverse(ByEnd(op.clone())));
+        } else {
+            waiting.insert(op.id().clone(), parents);
+        }
+    }
+    let mut ordered = Vec::with_capacity(ops.len());
+    while let Some(Reverse(ByEnd(op))) = ready.pop() {
+        for child in children.remove(op.id()).unwrap_or_default() {
+            if let Some(count) = waiting.get_mut(&child) {
+                *count -= 1;
+                if *count == 0 {
+                    waiting.remove(&child);
+                    if let Some(child) = ops.remove(&child) {
+                        ready.push(Reverse(ByEnd(child)));
+                    }
+                }
+            }
+        }
+        ops.remove(op.id());
+        ordered.push(op);
+    }
+    ordered
+}
+
+/// The operation `id` names, which must exist.
+async fn load_named(repo: &ReadonlyRepo, id: &OperationIdHex) -> Result<Operation, OpLookupError> {
+    match repo.loader().load_operation(&id.to_id()).await {
+        Ok(op) => Ok(op),
+        Err(OpStoreError::ObjectNotFound { .. }) => Err(OpLookupError::NotFound(id.to_string())),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// `repo`'s store loaded at `operation`, with that operation's view and an
@@ -772,6 +1039,34 @@ mod tests {
             workspace: Some(workspace.to_owned()),
             attributes: BTreeMap::new(),
         }
+    }
+
+    fn child(id: &str, parents: &[&str]) -> OpEntry {
+        OpEntry {
+            id: id.parse().unwrap(),
+            parents: parents.iter().map(|p| p.parse().unwrap()).collect(),
+            ..entry("op", false)
+        }
+    }
+
+    fn ids(frontier: &Frontier) -> Vec<&str> {
+        frontier.ids().iter().map(OperationIdHex::as_str).collect()
+    }
+
+    #[test]
+    fn frontiers_advance() {
+        let mut frontier = Frontier::new(["bb".parse().unwrap(), "aa".parse().unwrap()]);
+        assert_eq!(ids(&frontier), ["aa", "bb"], "sorted");
+        // A branch from an older operation adds a member.
+        frontier.advance(&child("cc", &["00"]));
+        assert_eq!(ids(&frontier), ["aa", "bb", "cc"]);
+        frontier.advance(&child("dd", &["aa"]));
+        assert_eq!(ids(&frontier), ["bb", "cc", "dd"]);
+        // A merge collapses its parents.
+        frontier.advance(&child("ee", &["bb", "cc", "dd"]));
+        assert_eq!(ids(&frontier), ["ee"]);
+        frontier.advance(&child("ee", &["bb"]));
+        assert_eq!(ids(&frontier), ["ee"], "no duplicates");
     }
 
     fn mark(description: &str) -> Option<SnapshotMarkKind> {

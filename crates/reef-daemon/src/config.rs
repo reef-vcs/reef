@@ -669,6 +669,9 @@ pub struct Config {
     pub sources: BTreeMap<String, Source>,
     /// Where the state directory and config file came from.
     pub origin: Origin,
+    /// Subscription limits (R2.09). Not a configuration-file key and not
+    /// in `config show`: set here by tests only.
+    pub subscribe: crate::subscribe::Limits,
 }
 
 /// Failure to resolve the configuration.
@@ -935,6 +938,7 @@ impl Config {
             log,
             sources,
             origin,
+            subscribe: crate::subscribe::Limits::default(),
         }
     }
 

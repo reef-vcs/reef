@@ -1747,6 +1747,166 @@ async fn op_walk_resumes() {
     assert_eq!(stopped.examined, 2);
 }
 
+/// The ids `walk_after` returns from `heads` after `frontier`.
+async fn after(
+    head: &ReadonlyRepo,
+    heads: &[&str],
+    frontier: &[&str],
+    limit: usize,
+) -> oplog::OpRange {
+    let heads: Vec<_> = heads.iter().map(|id| id.parse().unwrap()).collect();
+    let frontier = oplog::Frontier::new(frontier.iter().map(|id| id.parse().unwrap()));
+    oplog::walk_after(head, &heads, &frontier, limit)
+        .await
+        .unwrap()
+}
+
+fn range_ids(range: &oplog::OpRange) -> Vec<String> {
+    range.operations.iter().map(|op| op.id().hex()).collect()
+}
+
+/// Records an operation on `fx` and returns its id.
+async fn record(fx: &mut Fixture, name: &str) -> String {
+    let mut tx = fx.tx();
+    new_commit(&mut tx, &[], name).await;
+    fx.commit(tx, name).await;
+    fx.head().op_id().hex()
+}
+
+// R2.09 1
+#[tokio::test]
+async fn walk_after_is_parents_first() {
+    let mut fx = Fixture::new().await;
+    let start = fx.head().op_id().hex();
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        ids.push(record(&mut fx, &format!("op {n}")).await);
+    }
+    let head = fx.head();
+    let top = ids[4].as_str();
+    let range = after(&head, &[top], &[&start], 100).await;
+    assert_eq!(range_ids(&range), ids);
+    assert!(!range.truncated);
+    assert!(range.unreached.is_empty(), "{:?}", range.unreached);
+    assert!(
+        range_ids(&after(&head, &[top], &[top], 100).await).is_empty(),
+        "{:?}",
+        range_ids(&after(&head, &[top], &[top], 100).await)
+    );
+    let root = head.op_store().root_operation_id().hex();
+    let all = after(&head, &[top], &[&root], 100).await;
+    assert_eq!(all.operations.len(), 6, "the init operation and five");
+    assert_eq!(range_ids(&all)[1..], ids);
+    assert_eq!(range_ids(&after(&head, &[top], &[], 100).await)[0], root);
+    let cut = after(&head, &[top], &[&start], 3).await;
+    assert!(cut.truncated);
+    assert!(cut.operations.is_empty(), "{:?}", cut.operations);
+}
+
+// R2.09 2
+#[tokio::test]
+async fn walk_after_on_concurrent_heads() {
+    let mut fx = Fixture::new().await;
+    let base_id = record(&mut fx, "base").await;
+    let base = fx.head();
+    let b1 = record(&mut fx, "b1").await;
+    let mut tx = base.start_transaction();
+    new_commit(&mut tx, &[], "b2").await;
+    let b2 = tx.commit("b2").await.unwrap().op_id().hex();
+    let heads_before = oplog::op_heads(&fx.head()).await.unwrap();
+    assert_eq!(heads_before.len(), 2);
+    let merged = fx.head().loader().load_at_head().await.unwrap();
+    let m = merged.op_id().hex();
+    assert_eq!(merged.operation().parent_ids().len(), 2);
+
+    let range = after(&merged, &[&m], &[&base_id], 100).await;
+    let got = range_ids(&range);
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[2], m);
+    assert_eq!(
+        got[..2].iter().collect::<BTreeSet<_>>(),
+        [&b1, &b2].into_iter().collect()
+    );
+    let mut frontier = oplog::Frontier::new([base_id.parse().unwrap()]);
+    let mut seen = Vec::new();
+    for op in &range.operations {
+        frontier.advance(&oplog::entry(op));
+        seen.push(
+            frontier
+                .ids()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+    }
+    let mut both = vec![b1.clone(), b2.clone()];
+    both.sort();
+    assert_eq!(seen[1], both);
+    assert_eq!(seen[2], vec![m.clone()]);
+    let mut first = vec![got[0].clone()];
+    first.sort();
+    assert_eq!(seen[0], first);
+
+    let other = if got[0] == b1 { &b2 } else { &b1 };
+    assert_eq!(
+        range_ids(&after(&merged, &[&m], &[&got[0]], 100).await),
+        vec![other.clone(), m.clone()]
+    );
+    assert_eq!(
+        range_ids(&after(&merged, &[&m], &[&b1, &b2], 100).await),
+        vec![m.clone()]
+    );
+    // Walking wrote nothing.
+    assert_eq!(
+        oplog::op_heads(&merged).await.unwrap(),
+        vec![m.parse().unwrap()]
+    );
+}
+
+// R2.09 3
+#[tokio::test]
+async fn walk_after_reports_unreached() {
+    let mut fx = Fixture::new().await;
+    record(&mut fx, "base").await;
+    let base = fx.head();
+    let kept = record(&mut fx, "kept").await;
+    let mut tx = base.start_transaction();
+    new_commit(&mut tx, &[], "dropped").await;
+    let dropped = tx.commit("dropped").await.unwrap().op_id().clone();
+    // As `jj op abandon` leaves it: in the store, not a head.
+    fx.head()
+        .op_heads_store()
+        .update_op_heads(
+            std::slice::from_ref(&dropped),
+            &jj_lib::op_store::OperationId::try_from_hex(&kept).unwrap(),
+        )
+        .await
+        .unwrap();
+    let head = fx.head();
+    assert_eq!(
+        oplog::op_heads(&head).await.unwrap(),
+        vec![kept.parse().unwrap()]
+    );
+    let range = after(&head, &[&kept], &[&dropped.hex()], 100).await;
+    assert_eq!(
+        range
+            .unreached
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![dropped.hex()]
+    );
+    assert!(range_ids(&range).contains(&kept));
+    assert!(
+        after(&head, &[&kept], &[&kept], 100)
+            .await
+            .unreached
+            .is_empty(),
+        "{:?}",
+        after(&head, &[&kept], &[&kept], 100).await.unreached
+    );
+}
+
 // 9a (an amendment): past git's rename limit, a rename is a delete and an add.
 #[tokio::test]
 async fn renames_stop_at_the_limit() {

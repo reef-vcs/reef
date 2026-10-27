@@ -24,6 +24,7 @@ use reef_lib::jj::{CheckedTrees, OpenError, ReadonlyRepo, Repo, UserSettings};
 use tokio::sync::oneshot;
 
 use crate::model::{RepoId, RepositoryRecord};
+use crate::subscribe::OpEvents;
 
 mod exclude;
 mod registry;
@@ -52,6 +53,8 @@ pub struct RepoHead {
     /// How many times the repository was reopened; shared with every
     /// [`RepoHandle`].
     generation: Arc<AtomicU64>,
+    /// Told after every job that moved the head (R2.09).
+    events: Option<Arc<OpEvents>>,
 }
 
 impl RepoHead {
@@ -126,6 +129,38 @@ impl RepoHead {
     /// starts from the new operation.
     pub fn note_committed(&mut self) {
         self.dirty = true;
+    }
+
+    /// Where the head is: the loaded operation and the generation.
+    pub(super) fn position(&self) -> (reef_lib::jj::OperationIdHex, u64) {
+        (
+            reef_lib::jj::oplog::op_id_of(&self.repo.readonly()),
+            self.generation(),
+        )
+    }
+
+    /// Tells subscriptions a rewrite of the log (GC) begins, from the op
+    /// head when there is one; the guard ends it when dropped, after
+    /// [`crate::subscribe::events::Rewrite::moved_to`] if the op heads
+    /// moved. `None` without subscriptions to tell.
+    pub async fn begin_rewrite(&self) -> Option<crate::subscribe::events::Rewrite> {
+        let events = self.events.as_ref()?;
+        let before = match reef_lib::jj::oplog::op_heads(&self.readonly()).await {
+            Ok(heads) if heads.len() == 1 => heads.into_iter().next(),
+            _ => None,
+        };
+        Some(events.rewrite(self.id, before))
+    }
+
+    /// Wakes subscriptions when the head moved from `before`: a job or
+    /// the reload after it recorded, merged, or loaded an operation, or
+    /// the repository was reopened.
+    pub(super) fn notify_if_moved(&self, before: &(reef_lib::jj::OperationIdHex, u64)) {
+        if let Some(events) = &self.events
+            && self.position() != *before
+        {
+            events.moved(self.id, self.readonly());
+        }
     }
 }
 
@@ -299,6 +334,9 @@ pub struct RepoRegistry {
     register_turn: Mutex<()>,
     /// Whose repositories [`RepoRegistry::register`] accepts (RX.01, S-02).
     owners: OwnerPolicy,
+    /// Told of every repository opened and closed, and by each thread of
+    /// every move of its head (R2.09).
+    events: Option<Arc<OpEvents>>,
 }
 
 impl RepoRegistry {
@@ -316,6 +354,16 @@ impl RepoRegistry {
         }
     }
 
+    /// This registry, telling `events` of repositories and their
+    /// operations.
+    #[must_use]
+    pub fn with_events(self, events: Arc<OpEvents>) -> RepoRegistry {
+        RepoRegistry {
+            events: Some(events),
+            ..self
+        }
+    }
+
     /// Starts the thread for `record`, which loads the repository's default
     /// workspace at head, and returns its handle once loaded. Returns the
     /// existing handle if the repository is already open.
@@ -330,7 +378,7 @@ impl RepoRegistry {
         if let Some(handle) = self.get(record.id) {
             return Ok(handle);
         }
-        let thread = RepoThread::spawn(record, settings)?;
+        let thread = RepoThread::spawn(record, settings, self.events.clone())?;
         let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = threads.get(&record.id) {
             // Another caller opened it meanwhile; keep theirs.
@@ -341,6 +389,9 @@ impl RepoRegistry {
             return Ok(handle);
         }
         let handle = thread.handle.clone();
+        if let Some(events) = &self.events {
+            events.added(record.id, Arc::clone(&thread.tip));
+        }
         threads.insert(record.id, thread);
         Ok(handle)
     }
@@ -374,6 +425,9 @@ impl RepoRegistry {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
         if let Some(thread) = thread {
+            if let Some(events) = &self.events {
+                events.removed(id);
+            }
             thread.stop();
             self.lock_closed().push(thread);
         }

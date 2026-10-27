@@ -29,6 +29,7 @@ pub mod service;
 pub mod snapshot;
 pub mod spec;
 pub mod store;
+pub mod subscribe;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod watcher;

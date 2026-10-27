@@ -25,8 +25,9 @@ pub mod status;
 pub mod stores;
 pub mod workspaces;
 
-mod convert;
-mod reading;
+pub(crate) mod convert;
+pub(crate) mod op_filter;
+pub(crate) mod reading;
 
 /// An entry kind as `reef.api.v1.EntryType` names it, for error metadata
 /// (R2.04).
