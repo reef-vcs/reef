@@ -448,7 +448,7 @@ pub(super) struct Edit {
     pub(super) replace: Option<Replace>,
     /// Delete the file.
     pub(super) delete: Option<bool>,
-    /// Copy this file (repository-relative); with a delete of the old path, a rename.
+    /// Copy this file; with a delete of the old path, a rename.
     pub(super) copy_from: Option<String>,
     /// Set or clear the executable bit.
     pub(super) executable: Option<bool>,

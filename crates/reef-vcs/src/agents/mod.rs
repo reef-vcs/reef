@@ -401,13 +401,15 @@ const MCP_SERVER: &str = "reef";
 /// there. No absolute path, which would bake one machine's layout into a
 /// committed file; no `env`, since `REEF_AGENT` is the harness's to set;
 /// and no version, so a new `reef` does not make the file stale.
-pub(crate) fn mcp_entry() -> serde_json::Value {
+pub(crate) fn render_mcp_entry() -> serde_json::Value {
     serde_json::json!({"type": "stdio", "command": "reef", "args": ["mcp"]})
 }
 
 /// A JSON value whose objects keep their keys' order, so a merge changes
-/// nothing but Reef's entry. Not `serde_json`'s `preserve_order`: features
-/// unify across the build, and it would reorder `config show --json`.
+/// nothing but Reef's entry and whitespace (and a number's spelling:
+/// `1e5` is written `100000.0`). Not `serde_json`'s `preserve_order`:
+/// features unify across the build, and it would reorder `config show
+/// --json`.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 enum Json {
@@ -424,7 +426,7 @@ enum Json {
 /// `existing` is `None`.
 fn mcp_json(existing: Option<IndexMap<String, Json>>) -> String {
     let mut file = existing.unwrap_or_default();
-    // In the order a person writes it; `mcp_entry` is for comparing.
+    // In the order a person writes it; `render_mcp_entry` is for comparing.
     let text = |text: &str| Json::String(text.to_owned());
     let entry = Json::Object(IndexMap::from([
         ("type".to_owned(), text("stdio")),
@@ -464,7 +466,7 @@ fn merge_mcp_json(existing: Option<&str>) -> (Action, Option<String>) {
         Some(Json::Object(servers)) => {
             if let Some(entry) = servers.get(MCP_SERVER) {
                 let entry = serde_json::to_value(entry).unwrap_or_default();
-                return if entry == mcp_entry() {
+                return if entry == render_mcp_entry() {
                     (Action::Unchanged, None)
                 } else {
                     (

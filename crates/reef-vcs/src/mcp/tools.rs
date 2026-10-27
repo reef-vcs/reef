@@ -67,6 +67,13 @@ impl ToolDef {
         reef_api::access(self.rpc) == Some(v1::Access::Read)
     }
 
+    /// Whether a call is run again after the daemon went away during it:
+    /// reads, but not the wait, whose retry would take a new baseline and
+    /// miss what happened before the outage.
+    pub(super) fn retries(&self) -> bool {
+        self.reads() && self.name != "wait_for_operations"
+    }
+
     fn annotations(&self) -> ToolAnnotations {
         let annotations = ToolAnnotations::new()
             .read_only(self.reads())
@@ -150,33 +157,48 @@ fn inline_enums(schema: &mut Value) {
 
 /// Drops what a model does not need from a derived schema: `$schema`,
 /// integer `format`s and their `minimum: 0`, and `null` beside an optional
-/// field's type (the field is optional by not being `required`).
-fn compact(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.remove("$schema");
-            if object.remove("format").is_some() && object.get("minimum") == Some(&Value::from(0)) {
-                object.remove("minimum");
-            }
-            if let Some(Value::Array(types)) = object.get_mut("type") {
-                types.retain(|kind| kind != "null");
-                if types.len() == 1 {
-                    let kind = types.remove(0);
-                    object.insert("type".to_owned(), kind);
-                }
-            }
-            if let Some(Value::Array(any)) = object.get("anyOf")
-                && let [only, null] = any.as_slice()
-                && null == &serde_json::json!({"type": "null"})
-                && let Value::Object(only) = only.clone()
-            {
-                object.remove("anyOf");
-                object.extend(only);
-            }
-            object.values_mut().for_each(compact);
+/// field's type (the field is optional by not being `required`). `schema`
+/// is a schema object; the rules apply to schemas only, never to the maps
+/// of them (`properties`, `$defs`), whose keys are field names.
+fn compact(schema: &mut Value) {
+    let Value::Object(object) = schema else {
+        return;
+    };
+    object.remove("$schema");
+    if let Some(Value::Array(types)) = object.get_mut("type") {
+        types.retain(|kind| kind != "null");
+        if types.len() == 1 {
+            let kind = types.remove(0);
+            object.insert("type".to_owned(), kind);
         }
-        Value::Array(items) => items.iter_mut().for_each(compact),
-        _ => {}
+    }
+    if matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("integer" | "number")
+    ) && object.remove("format").is_some()
+        && object.get("minimum") == Some(&Value::from(0))
+    {
+        object.remove("minimum");
+    }
+    if let Some(Value::Array(any)) = object.get("anyOf")
+        && let [only, null] = any.as_slice()
+        && null == &serde_json::json!({"type": "null"})
+        && let Value::Object(only) = only.clone()
+    {
+        object.remove("anyOf");
+        object.extend(only);
+    }
+    for (key, value) in object.iter_mut() {
+        match (key.as_str(), value) {
+            ("properties" | "$defs", Value::Object(schemas)) => {
+                schemas.values_mut().for_each(compact);
+            }
+            ("items" | "additionalProperties", value) => compact(value),
+            ("anyOf" | "oneOf" | "allOf" | "prefixItems", Value::Array(schemas)) => {
+                schemas.iter_mut().for_each(compact);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -216,7 +238,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "get_status",
         title: "Get status",
         rpc: "/reef.api.v1.StatusService/GetStatus",
-        description: "Show what the workspace changes and the repository's state, after snapshotting the workspace; the repository's alone without a workspace. Returns {repository, repository_status, workspace_status}.",
+        description: "Show what the workspace changes, after a snapshot, and the repository's state. Returns {repository, repository_status, workspace_status}.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetStatus>,
@@ -276,7 +298,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "read_file",
         title: "Read file",
         rpc: "/reef.api.v1.FileService/ReadFile",
-        description: "Read a file at any revision, one range at a time, without a directory. Returns {path, size, content (text) or content_base64, offset, next_offset}; next_offset is null at the end.",
+        description: "Read a file at any revision, one range at a time, without a directory; pass the first range's at_operation on to read one version. Returns {path, size, content (text) or content_base64, offset, next_offset}; next_offset is null at the end.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::ReadFile>,
@@ -296,7 +318,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "wait_for_operations",
         title: "Wait for operations",
         rpc: "/reef.api.v1.OperationService/ListOperations",
-        description: "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones.",
+        description: "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::WaitForOperations>,
@@ -452,9 +474,10 @@ macro_rules! tool {
     };
 }
 
-/// A page size as the request takes it, `default` when not given.
+/// A page size as the request takes it, `default` when not given or 0.
 fn page(size: Option<u32>, default: i32) -> i32 {
-    size.map_or(default, |size| i32::try_from(size).unwrap_or(i32::MAX))
+    size.filter(|size| *size > 0)
+        .map_or(default, |size| i32::try_from(size).unwrap_or(i32::MAX))
 }
 
 /// `path` repository-relative: an absolute path inside the scope's
@@ -953,6 +976,12 @@ tool!(edit_files, args::EditFiles, |call, args| {
         .into_iter()
         .map(|edit| v1::FileEdit {
             path: repo_path(&scope, edit.path),
+            action: match edit.action {
+                Some(file_edit::Action::CopyFrom(source)) => {
+                    Some(file_edit::Action::CopyFrom(repo_path(&scope, source)))
+                }
+                action => action,
+            },
             ..edit
         })
         .collect();
@@ -999,6 +1028,8 @@ fn file_edit(index: usize, edit: args::Edit) -> Result<v1::FileEdit, ToolError> 
         actions.push(Action::Content(content.into_bytes()));
     }
     if let Some(encoded) = edit.content_base64 {
+        // Models wrap long base64 in lines.
+        let encoded: String = encoded.split_ascii_whitespace().collect();
         let bytes = STANDARD.decode(encoded.as_bytes()).map_err(|_| {
             refuse(
                 "content_base64 is not standard padded base64",
@@ -1120,6 +1151,73 @@ mod tests {
             assert_eq!(schema["type"], "object", "{}", tool.name);
             assert_eq!(schema["additionalProperties"], false, "{}", tool.name);
         }
+    }
+
+    /// Review finding 1: compaction drops keywords, never a field, at any
+    /// depth (`get_diff`'s `format` was taken for the integer keyword).
+    #[test]
+    fn compaction_keeps_every_field() {
+        /// Every field's path, through `$ref`, `anyOf`, and `items`.
+        fn fields(schema: &Value, root: &Value, at: &str, out: &mut Vec<String>) {
+            if let Some(name) = schema["$ref"]
+                .as_str()
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+            {
+                return fields(&root["$defs"][name], root, at, out);
+            }
+            if let Some(Value::Array(any)) = schema.get("anyOf") {
+                for option in any {
+                    fields(option, root, at, out);
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                fields(items, root, &format!("{at}[]"), out);
+            }
+            if let Some(Value::Object(properties)) = schema.get("properties") {
+                for (name, value) in properties {
+                    out.push(format!("{at}/{name}"));
+                    fields(value, root, &format!("{at}/{name}"), out);
+                }
+            }
+        }
+        fn same<T: JsonSchema + 'static>() {
+            let collect = |schema: &Value| {
+                let mut out = Vec::new();
+                fields(schema, schema, "", &mut out);
+                out.sort();
+                out
+            };
+            let raw = Value::Object((*schema_for_input::<T>().unwrap()).clone());
+            let compacted = Value::Object((*schema::<T>()).clone());
+            assert_eq!(collect(&compacted), collect(&raw), "{compacted}");
+        }
+        same::<args::ListRepositories>();
+        same::<args::ListWorkspaces>();
+        same::<args::GetWorkspace>();
+        same::<args::GetStatus>();
+        same::<args::ListChanges>();
+        same::<args::GetChange>();
+        same::<args::GetDiff>();
+        same::<args::ListOperations>();
+        same::<args::GetOperation>();
+        same::<args::ReadFile>();
+        same::<args::ListFiles>();
+        same::<args::WaitForOperations>();
+        same::<args::CreateWorkspace>();
+        same::<args::SnapshotWorkspace>();
+        same::<args::MoveWorkspace>();
+        same::<args::ReleaseWorkspace>();
+        same::<args::DescribeChange>();
+        same::<args::AbandonChange>();
+        same::<args::UndoOperation>();
+        same::<args::EditFiles>();
+        let diff = schema::<args::GetDiff>();
+        assert_eq!(
+            diff["properties"]["format"]["enum"],
+            serde_json::json!(["summary", "stat", "hunks"]),
+            "{diff:?}"
+        );
+        assert!(diff["properties"]["page_size"].get("format").is_none());
     }
 
     #[test]

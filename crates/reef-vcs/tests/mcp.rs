@@ -171,6 +171,12 @@ async fn handshake_and_tools() {
     };
     assert!(readonly("get_status") && readonly("wait_for_operations"));
     assert!(!readonly("edit_files") && !readonly("snapshot_workspace"));
+    let diff = tools.iter().find(|t| t["name"] == "get_diff").unwrap();
+    assert_eq!(
+        diff["inputSchema"]["properties"]["format"]["enum"],
+        json!(["summary", "stat", "hunks"]),
+        "{diff}"
+    );
     let bytes = serde_json::to_vec(&listed["result"]).unwrap().len();
     eprintln!("tools/list: {bytes} bytes");
     assert!(bytes <= 20_000, "tools/list is {bytes} bytes");
@@ -271,6 +277,20 @@ async fn scope_defaults() {
     );
     let status = outside.ok("get_status", json!({"repo": root_path})).await;
     assert_eq!(status["repository"]["id"], repo.id.as_str());
+    // A tool that takes only a workspace asks for one, not for `repo`
+    // (review finding 2).
+    let error = outside.err("snapshot_workspace", json!({})).await;
+    assert_eq!(error["reason"], "WORKSPACE_REQUIRED", "{error}");
+
+    // A `repo` path is never registered implicitly (review finding 12):
+    // only the launch checkout is.
+    let other = new_dir(&daemon, "other-git");
+    reef_testing::git::init_repo(&other, &[("README", "other\n")]);
+    let error = root
+        .err("get_status", json!({"repo": other.display().to_string()}))
+        .await;
+    assert_eq!(error["reason"], "REPOSITORY_NOT_REGISTERED", "{error}");
+    assert!(!other.join(".jj").exists(), "the daemon wrote .jj there");
 
     // A plain git checkout with --no-register: the daemon's error.
     let checkout = new_dir(&daemon, "plain-git");
@@ -611,7 +631,7 @@ async fn edit_files() {
                 {"path": "edit/new.txt", "content": "new\n"},
                 {"path": "edit/old.txt", "replace": {"old_text": "fix me", "new_text": "fixed"}},
                 {"path": "edit/gone.txt", "delete": true},
-                {"path": "edit/moved.txt", "copy_from": "edit/new.txt"},
+                {"path": "edit/moved.txt", "copy_from": dir.join("edit/new.txt").display().to_string()},
                 {"path": "edit/new.txt", "delete": true},
                 {"path": "edit/run.sh", "executable": true},
             ]}),
@@ -880,6 +900,14 @@ async fn wait_for_operations() {
     let started = Instant::now();
     waiter.ok("list_repositories", json!({})).await;
     assert!(started.elapsed() < Duration::from_secs(2));
+    // And it ended: a wait still running would hold the exit up to rmcp's
+    // 5 s drain (review finding 10).
+    let (status, took) = waiter.close().await;
+    assert!(status.success());
+    assert!(
+        took < Duration::from_secs(2),
+        "{took:?} to exit after a cancel"
+    );
 }
 
 // 16

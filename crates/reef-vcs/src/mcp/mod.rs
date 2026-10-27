@@ -105,7 +105,10 @@ pub(super) struct Call<'a> {
 impl Call<'_> {
     /// The scope `repo` and `workspace` name, else the launch scope
     /// (R2.27's rule), and the lease of a workspace the server owns kept
-    /// alive.
+    /// alive. Only the launch scope registers a checkout implicitly: a
+    /// `repo` path is a sandboxed agent's choice, and registering it would
+    /// have the daemon, outside the sandbox, write `.jj` there and later
+    /// run git on its `.git/config` (S-07, S-13).
     pub(super) async fn scope(
         &self,
         repo: Option<&String>,
@@ -116,7 +119,21 @@ impl Call<'_> {
             workspace: workspace.cloned(),
             repo: repo.cloned(),
         };
-        let scope = match scope::resolve(self.ctx, &args).await {
+        let unregistering;
+        let ctx = if repo.is_some() && self.ctx.auto_register {
+            unregistering = Ctx {
+                client: self.ctx.client.clone(),
+                out: self.ctx.out.clone(),
+                timeout: self.ctx.timeout,
+                timeout_flag: self.ctx.timeout_flag,
+                auto_register: false,
+                agent: self.ctx.agent.clone(),
+            };
+            &unregistering
+        } else {
+            self.ctx
+        };
+        let scope = match scope::resolve(ctx, &args).await {
             Err(error) if !given && !self.server.launch_scope && names_no_repository(&error) => {
                 return Err(ToolError::invalid(
                     REPOSITORY_REQUIRED,
@@ -137,14 +154,25 @@ impl Call<'_> {
         &self,
         workspace: Option<&String>,
     ) -> Result<(Scope, v1::Workspace), ToolError> {
-        let scope = self.scope(None, workspace).await?;
-        match scope.workspace.clone() {
-            Some(ws) => Ok((scope, ws)),
-            None => Err(ToolError::invalid(
+        let required = || {
+            ToolError::invalid(
                 reef_api::error::WORKSPACE_REQUIRED,
                 "the call names no workspace, and the server was not started in one",
                 "Pass workspace: its id or an absolute path inside it; list_workspaces lists them.",
-            )),
+            )
+        };
+        // Outside every checkout and workspace the launch scope is no
+        // repository either, whose error asks for `repo`, which these tools
+        // do not take.
+        let scope = match self.scope(None, workspace).await {
+            Err(ToolError::Own(error)) if error.reason == REPOSITORY_REQUIRED => {
+                return Err(required());
+            }
+            scope => scope?,
+        };
+        match scope.workspace.clone() {
+            Some(ws) => Ok((scope, ws)),
+            None => Err(required()),
         }
     }
 }
@@ -194,8 +222,8 @@ pub(super) fn to_value<T: Serialize>(value: &T) -> Result<Value, ToolError> {
 pub(crate) async fn serve(global: Global, out: &Out) -> Result<ExitCode, CliError> {
     // Before anything is served: a bad name is a usage error.
     global.agent()?;
-    let launch_scope = std::env::var_os("REEF_WORKSPACE").is_some_and(|id| !id.is_empty())
-        || scope::current_dir().is_ok_and(|dir| in_checkout(&dir));
+    let launch_scope =
+        scope::env_workspace().is_some() || scope::current_dir().is_ok_and(|dir| in_checkout(&dir));
     let server = ReefServer {
         global,
         out: out.clone(),
@@ -289,12 +317,15 @@ impl ReefServer {
                 }
                 CliError::Daemon(error) if went_away(&error) => {
                     self.reconnect(&ctx).await;
-                    if retried || !tool.reads() {
+                    if retried || !tool.retries() {
+                        let hint = if tool.reads() {
+                            "The daemon went away during the wait; wait again, with after_operation set to the last operation you saw."
+                        } else {
+                            "The daemon went away during the call; check whether it took effect (get_operation, list_operations) before retrying."
+                        };
                         return Err(CliError::Advised {
                             error: Box::new(error),
-                            advice: Advice::hint(
-                                "The daemon went away during the call; check whether it took effect (get_operation, list_operations) before retrying.",
-                            ),
+                            advice: Advice::hint(hint),
                         }
                         .into());
                     }

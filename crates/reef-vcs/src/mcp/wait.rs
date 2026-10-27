@@ -1,9 +1,10 @@
 //! `wait_for_operations`: "subscriptions as a wait tool" over what exists.
 //! `SubscribeOperations` is declared but not implemented (R2.09), so the
 //! tool polls `ListOperations` every [`POLL`], over a window that starts at
-//! a baseline operation's end and moves up to the log's head while nothing
-//! matches, so each poll reads only the last half second. When R2.09 lands
-//! it reads the stream instead, with the same inputs and result.
+//! a baseline operation's end and, while nothing matches, follows the log's
+//! head [`LAG`] behind it, so each poll reads only the last few seconds.
+//! When R2.09 lands it reads the stream instead, with the same inputs and
+//! result.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -26,6 +27,15 @@ use crate::cli::{CliError, Ctx};
 const POLL: Duration = Duration::from_millis(500);
 /// How often a waiting call with a progress token reports progress.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10);
+/// How far behind the head the window starts once it moves: the log is
+/// walked newest first by end time and stops at the window's start, so an
+/// operation stamped before the head but recorded after it (another `jj`
+/// writer, concurrent heads merged later) is still seen. Operations seen
+/// before are told apart by id.
+const LAG: i64 = 2_000;
+/// The most operations one call returns, oldest first; the next call,
+/// from its `last_operation_id`, returns the rest.
+const MAX_RESULTS: usize = 100;
 /// `timeout_seconds` when not given, and its largest value.
 const DEFAULT_TIMEOUT: u64 = 30;
 const MAX_TIMEOUT: u64 = 300;
@@ -138,6 +148,7 @@ async fn wait(
 ) -> Result<Waited, ToolError> {
     let started = Instant::now();
     let deadline = started + timeout;
+    let from_head = after.is_none();
     let baseline = match after {
         Some(id) => {
             let response = log
@@ -149,11 +160,16 @@ async fn wait(
         None => log.head().await?,
     };
     let mut from = baseline.as_ref().map_or(0, ended);
-    // What is not new: the baseline, and matching operations that ended in
-    // its millisecond, which a wait from the head has already seen.
-    let mut known: HashSet<String> = log
-        .since(from, Some(from + 1))
-        .await?
+    // What is not new: the baseline, and for a wait from the head, the
+    // matching operations that ended in its millisecond, which happened
+    // before the call. An `after_operation` names where the caller's view
+    // ends, so only it is left out.
+    let same_millisecond = if from_head {
+        log.since(from, Some(from + 1)).await?
+    } else {
+        Vec::new()
+    };
+    let mut known: HashSet<String> = same_millisecond
         .into_iter()
         .map(|op| op.id)
         .chain(baseline.as_ref().map(|op| op.id.clone()))
@@ -167,6 +183,7 @@ async fn wait(
         let mut new: Vec<_> = found.iter().filter(|op| !known.contains(&op.id)).collect();
         if !new.is_empty() {
             new.reverse();
+            new.truncate(MAX_RESULTS);
             return Ok(Waited {
                 last_operation_id: new.last().map(|op| op.id.clone()),
                 operations: new.into_iter().map(json::Operation::from).collect(),
@@ -175,9 +192,9 @@ async fn wait(
         }
         if let Some(head) = head {
             last = Some(head.id.clone());
-            // Nothing matched up to the head: the window moves up to it.
-            if ended(&head) > from {
-                from = ended(&head);
+            // Nothing new matched up to the head: the window follows it.
+            if ended(&head) - LAG > from {
+                from = ended(&head) - LAG;
                 known = found
                     .into_iter()
                     .filter(|op| ended(op) >= from)

@@ -149,7 +149,7 @@ async fn implicit(ctx: &Ctx) -> Result<Scope, CliError> {
 }
 
 /// `REEF_WORKSPACE`, when set and not blank, as `here` reads it.
-fn env_workspace() -> Option<String> {
+pub(crate) fn env_workspace() -> Option<String> {
     std::env::var("REEF_WORKSPACE")
         .ok()
         .filter(|id| !id.trim().is_empty())
@@ -291,7 +291,7 @@ pub(crate) fn default_list_path(scope: &Scope) -> Result<String, CliError> {
 fn given_path(scope: &Scope, base: Option<&Path>, given: &str) -> Result<String, CliError> {
     let path = Path::new(given);
     let relative = if path.is_absolute() {
-        relative_to(&scope.dir, path).or_else(|| through_symlinked_ancestor(&scope.dir, path))
+        inside(&scope.dir, path)
     } else {
         relative_to(&scope.dir, &base.unwrap_or(&scope.dir).join(path))
     };
