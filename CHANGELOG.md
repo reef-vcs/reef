@@ -6,6 +6,9 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Added
 
+- `reef mcp`, an MCP server over stdio ([ADR 0035](docs/adr/0035-mcp-server.md)): twenty tools named after the API's RPCs (`get_status`, `list_changes`, `get_diff`, `read_file`, `edit_files`, `describe_change`, `undo_operation`, `create_workspace`, `wait_for_operations` and the rest), returning the JSON `reef -o json` prints, with errors as tool results carrying the daemon's `hint`, `next` and `metadata`. No ADMIN RPC is a tool. Workspaces the server creates are heartbeated while it runs. `wait_for_operations` waits for operations matching a filter, polling the operation log.
+- `reef init` writes Reef's entry in `.mcp.json` with Claude Code's files, and with `--agents mcp`; it owns only `mcpServers.reef` and leaves the rest of the file as it was.
+- `json::Edited`, `edit_files`' result, in `reef-client`.
 - Commands over the VCS services ([ADR 0034](docs/adr/0034-cli-over-the-vcs-services.md)): `reef status`, `log`, `show`, `diff`, `describe`, `abandon`, `undo`, `op log`, `op show`, `ws snapshot`, `file read` and `file list`, from a workspace or a checkout, or with `--workspace` or `--repo`. Paths given are relative to the current directory; paths printed are repository-relative. Each prints JSON when piped (`file read` prints the file's bytes unless `-o json`), and errors from the API carry the CLI's own `hint` and a `next` built from the command and the error. Writes in a workspace return it afterwards and note on stderr when it is divergent, naming how to resolve it.
 - The JSON error object carries the daemon's `metadata` when there is any, such as `AMBIGUOUS_REVISION`'s `commit_ids`.
 - An error reason, `SNAPSHOT_FAILED` (metadata `workspace_id`), on a snapshot that fails before a read or a write; its kind is the snapshot error's.

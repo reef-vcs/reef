@@ -163,6 +163,7 @@ fn help_lists_every_command() {
         "file",
         "guide",
         "init",
+        "mcp",
         "daemon",
         "config",
         "repo",

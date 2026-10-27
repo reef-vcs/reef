@@ -2,17 +2,21 @@
 //! section in `AGENTS.md` and `CLAUDE.md`, and whole files Reef owns (the
 //! Claude Code skill, repository and user level, and the Cursor rule), all
 //! from the agent guide (`docs/agent-guide.md`, R1.26), so there is one
-//! guide and it cannot drift.
+//! guide and it cannot drift; and Reef's entry in `.mcp.json` (R2.13),
+//! which starts `reef mcp`.
 //!
 //! Everything here but [`apply`] is a pure function of the guide and what
 //! is on disk. Reef never overwrites text it did not write: a section lives
 //! between [`BEGIN`] and [`END`] marker lines and the bytes around it are
 //! kept as they are; a whole file is replaced only when its frontmatter has
-//! [`GENERATED_BY`].
+//! [`GENERATED_BY`]; in `.mcp.json`, Reef owns only `mcpServers.reef`.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 /// The section format version. A section of an older version is replaced;
 /// one of a newer version is left to the newer `reef` that wrote it.
@@ -56,6 +60,9 @@ pub(crate) enum Harness {
     },
     /// The Cursor rule, `.cursor/rules/reef.mdc`.
     CursorRule,
+    /// Reef's entry in `.mcp.json`, the project's MCP servers (Claude Code
+    /// reads it; R2.13).
+    McpJson,
 }
 
 impl Harness {
@@ -69,6 +76,7 @@ impl Harness {
             Harness::ClaudeSkill { user: false } => root.join(skill),
             Harness::ClaudeSkill { user: true } => home?.join(skill),
             Harness::CursorRule => root.join(".cursor/rules/reef.mdc"),
+            Harness::McpJson => root.join(".mcp.json"),
         })
     }
 
@@ -82,16 +90,20 @@ impl Harness {
 const USER_SKILL: Harness = Harness::ClaudeSkill { user: true };
 
 /// The harnesses a repository shows signs of, by files at `root` only:
-/// `AGENTS.md` always; Claude Code when `CLAUDE.md` or `.claude/` exists
-/// or `user` is set (which adds the user-level skill); Cursor when
-/// `.cursor/` exists.
+/// `AGENTS.md` always; Claude Code (its section, skill and `.mcp.json`
+/// entry) when `CLAUDE.md` or `.claude/` exists or `user` is set (which
+/// adds the user-level skill); Cursor when `.cursor/` exists.
 pub(crate) fn detect(root: &Path, user: bool) -> Vec<Harness> {
     let mut found = vec![Harness::AgentsMd];
     // `symlink_metadata`: a `CLAUDE.md` linked to a missing `AGENTS.md`
     // still counts.
     let claude_md = fs::symlink_metadata(root.join("CLAUDE.md")).is_ok();
     if user || claude_md || root.join(".claude").is_dir() {
-        found.extend([Harness::ClaudeMd, Harness::ClaudeSkill { user: false }]);
+        found.extend([
+            Harness::ClaudeMd,
+            Harness::ClaudeSkill { user: false },
+            Harness::McpJson,
+        ]);
     }
     if user {
         found.push(Harness::ClaudeSkill { user: true });
@@ -117,6 +129,7 @@ pub(crate) fn render(harness: Harness, guide: &Guide<'_>, version: &str) -> Stri
         }
         Harness::ClaudeSkill { .. } => format!("name: reef\ndescription: {DESCRIPTION}"),
         Harness::CursorRule => format!("description: {DESCRIPTION}\nalwaysApply: false"),
+        Harness::McpJson => return mcp_json(None),
     };
     format!(
         "---\n{frontmatter}\n{GENERATED_BY}\n---\n\n{preface}\n\n{}\n",
@@ -332,7 +345,9 @@ pub(crate) fn plan(
             }
         };
         let rendered = render(harness, guide, version);
-        let (action, contents) = if harness.is_whole_file() {
+        let (action, contents) = if harness == Harness::McpJson {
+            merge_mcp_json(existing.as_deref())
+        } else if harness.is_whole_file() {
             whole_file(existing.as_deref(), &rendered)
         } else {
             match splice(existing.as_deref(), &rendered) {
@@ -377,6 +392,99 @@ fn whole_file(existing: Option<&str>, rendered: &str) -> (Action, Option<String>
     } else {
         (Action::Update, Some(rendered))
     }
+}
+
+/// The key of Reef's server under `mcpServers`.
+const MCP_SERVER: &str = "reef";
+
+/// Reef's server entry: `reef mcp` from `PATH`, as every installer puts it
+/// there. No absolute path, which would bake one machine's layout into a
+/// committed file; no `env`, since `REEF_AGENT` is the harness's to set;
+/// and no version, so a new `reef` does not make the file stale.
+pub(crate) fn render_mcp_entry() -> serde_json::Value {
+    serde_json::json!({"type": "stdio", "command": "reef", "args": ["mcp"]})
+}
+
+/// A JSON value whose objects keep their keys' order, so a merge changes
+/// nothing but Reef's entry and whitespace (and a number's spelling:
+/// `1e5` is written `100000.0`). Not `serde_json`'s `preserve_order`:
+/// features unify across the build, and it would reorder `config show
+/// --json`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(serde_json::Number),
+    String(String),
+    Array(Vec<Json>),
+    Object(IndexMap<String, Json>),
+}
+
+/// `.mcp.json` as Reef writes it: `existing` with Reef's entry added, two-
+/// space JSON with a final newline; a new file with only the entry when
+/// `existing` is `None`.
+fn mcp_json(existing: Option<IndexMap<String, Json>>) -> String {
+    let mut file = existing.unwrap_or_default();
+    // In the order a person writes it; `render_mcp_entry` is for comparing.
+    let text = |text: &str| Json::String(text.to_owned());
+    let entry = Json::Object(IndexMap::from([
+        ("type".to_owned(), text("stdio")),
+        ("command".to_owned(), text("reef")),
+        ("args".to_owned(), Json::Array(vec![text("mcp")])),
+    ]));
+    match file
+        .entry("mcpServers".to_owned())
+        .or_insert_with(|| Json::Object(IndexMap::new()))
+    {
+        Json::Object(servers) => {
+            servers.insert(MCP_SERVER.to_owned(), entry);
+        }
+        other => *other = Json::Object(IndexMap::from([(MCP_SERVER.to_owned(), entry)])),
+    }
+    let mut text = serde_json::to_string_pretty(&file).unwrap_or_default();
+    text.push('\n');
+    text
+}
+
+/// The action for `.mcp.json`: Reef owns `mcpServers.reef` and nothing
+/// else. A missing (or blank) file is written with only Reef's entry; a
+/// file without it gets it added after the other servers, everything else
+/// kept in order; an entry that differs from Reef's was changed by someone
+/// (an `--agent`, an `env`) and is kept, as is a file that is not a JSON
+/// object. A CRLF file stays CRLF.
+fn merge_mcp_json(existing: Option<&str>) -> (Action, Option<String>) {
+    let Some(text) = existing.filter(|text| !text.trim().is_empty()) else {
+        return (Action::Write, Some(mcp_json(None)));
+    };
+    let not_object = || (Action::Skip("not a JSON object".to_owned()), None);
+    let Ok(Json::Object(file)) = serde_json::from_str::<Json>(text) else {
+        return not_object();
+    };
+    match file.get("mcpServers") {
+        None => {}
+        Some(Json::Object(servers)) => {
+            if let Some(entry) = servers.get(MCP_SERVER) {
+                let entry = serde_json::to_value(entry).unwrap_or_default();
+                return if entry == render_mcp_entry() {
+                    (Action::Unchanged, None)
+                } else {
+                    (
+                        Action::Skip(format!("mcpServers.{MCP_SERVER} is not reef init's")),
+                        None,
+                    )
+                };
+            }
+        }
+        Some(_) => return not_object(),
+    }
+    let merged = mcp_json(Some(file));
+    let merged = if existing.is_some_and(|text| text.contains("\r\n")) {
+        merged.replace('\n', "\r\n")
+    } else {
+        merged
+    };
+    (Action::Update, Some(merged))
 }
 
 /// Whether `text` opens with YAML frontmatter that has the
@@ -628,6 +736,67 @@ mod tests {
         assert_eq!(splice(Some(file), &section()), Splice::Newer(2));
     }
 
+    /// R2.13 test 17's merge cases.
+    #[test]
+    fn mcp_json_owns_only_reefs_entry() {
+        let entry = r#"{"type":"stdio","command":"reef","args":["mcp"]}"#;
+        let (action, written) = merge_mcp_json(None);
+        assert_eq!(action, Action::Write);
+        let written = written.unwrap();
+        assert_eq!(
+            written,
+            "{\n  \"mcpServers\": {\n    \"reef\": {\n      \"type\": \"stdio\",\n      \"command\": \"reef\",\n      \"args\": [\n        \"mcp\"\n      ]\n    }\n  }\n}\n"
+        );
+        assert_eq!(merge_mcp_json(Some(&written)), (Action::Unchanged, None));
+        // Others' keys and servers keep their order and values; Reef's
+        // entry goes after the other servers.
+        let theirs = r#"{"z": 1.5, "mcpServers": {"other": {"command": "x", "b": true, "a": null}}, "a": [2, 1]}"#;
+        let (action, merged) = merge_mcp_json(Some(theirs));
+        assert_eq!(action, Action::Update);
+        let merged = merged.unwrap();
+        let order: Vec<usize> = [
+            "\"z\"",
+            "\"other\"",
+            "\"b\"",
+            "\"a\": null",
+            "\"reef\"",
+            "\"a\": [",
+        ]
+        .iter()
+        .map(|key| {
+            merged
+                .find(key)
+                .unwrap_or_else(|| panic!("{key} in {merged}"))
+        })
+        .collect();
+        assert!(order.is_sorted(), "{merged}");
+        assert!(merged.contains("1.5"), "{merged}");
+        let (_, crlf) = merge_mcp_json(Some(&theirs.replace(", \"a\"", ",\r\n\"a\"")));
+        assert!(crlf.unwrap().contains("\r\n  \"mcpServers\""));
+        assert_eq!(
+            merge_mcp_json(Some(r#"{"other": 1}"#)).0,
+            Action::Update,
+            "no mcpServers: added"
+        );
+        // Changed by someone, or not Reef's to read: kept.
+        let changed = r#"{"mcpServers": {"reef": {"command": "reef", "args": ["mcp"], "env": {"REEF_AGENT": "a"}}}}"#;
+        assert_eq!(
+            merge_mcp_json(Some(changed)).0,
+            Action::Skip("mcpServers.reef is not reef init's".to_owned())
+        );
+        for bad in ["[]", "{", r#"{"mcpServers": []}"#] {
+            assert_eq!(
+                merge_mcp_json(Some(bad)).0,
+                Action::Skip("not a JSON object".to_owned()),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            merge_mcp_json(Some(&format!(r#"{{"mcpServers": {{"reef": {entry}}}}}"#))).0,
+            Action::Unchanged
+        );
+    }
+
     #[test]
     fn detection_is_by_files_at_the_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -637,16 +806,17 @@ mod tests {
             Harness::AgentsMd,
             Harness::ClaudeMd,
             Harness::ClaudeSkill { user: false },
+            Harness::McpJson,
         ];
-        assert_eq!(detect(root, true)[..3], claude);
-        assert_eq!(detect(root, true)[3], Harness::ClaudeSkill { user: true });
+        assert_eq!(detect(root, true)[..4], claude);
+        assert_eq!(detect(root, true)[4], Harness::ClaudeSkill { user: true });
         fs::write(root.join("CLAUDE.md"), "").unwrap();
         assert_eq!(detect(root, false), claude);
         fs::remove_file(root.join("CLAUDE.md")).unwrap();
         fs::create_dir(root.join(".claude")).unwrap();
         fs::create_dir(root.join(".cursor")).unwrap();
         assert_eq!(detect(root, false).last(), Some(&Harness::CursorRule));
-        assert_eq!(detect(root, false).len(), 4);
+        assert_eq!(detect(root, false).len(), 5);
     }
 
     #[test]

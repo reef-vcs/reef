@@ -109,6 +109,14 @@ watchman_client = "0.9"
 # form config.toml uses.
 clap_complete = "4"
 humantime = "2"
+# The MCP server (R2.13, ADR 0035): `reef mcp` over stdio. Exact, as for jj-lib: it releases
+# weekly at 3.x and its model types change across minors. No macros: the server's tool table is
+# by hand, which keeps rmcp-macros and darling out of `reef`.
+rmcp = { version = "=3.8.0", default-features = false, features = ["server", "transport-io"] }
+schemars = "1"                     # the tools' input schemas, the version rmcp uses
+# `.mcp.json` (R2.13): Reef's entry merged without reordering the rest. Not serde_json's
+# `preserve_order`, which features unify across the build and would reorder `config show --json`.
+indexmap = { version = "2", features = ["serde"] }
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

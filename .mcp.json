@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "reef": {
+      "type": "stdio",
+      "command": "reef",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

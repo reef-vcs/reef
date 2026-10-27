@@ -42,8 +42,13 @@ serde.workspace = true
 serde_json.workspace = true      # `-o json`
 tokio = { workspace = true, features = ["process"] }   # `ws run`'s child (R1.21)
 nix = { workspace = true, features = ["signal"] }   # `reef daemon stop`, `ws run`'s forwarding
+rmcp.workspace = true            # `reef mcp` (R2.13)
+schemars.workspace = true        # its tools' input schemas
+base64.workspace = true          # `edit_files`' `content_base64`
+indexmap.workspace = true        # `.mcp.json` merged in its own order (R2.13)
 
 [dev-dependencies]
+prost-reflect.workspace = true   # the tools' annotations against the descriptor set (R2.13)
 assert_cmd.workspace = true
 jj-lib.workspace = true          # tests/ws_run.rs reads the final snapshot's tree
 pollster.workspace = true

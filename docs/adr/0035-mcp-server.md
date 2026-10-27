@@ -1,0 +1,50 @@
+# 0035. MCP server
+
+- Status: accepted
+- Date: 2026-10-26
+- Ticket: R2.13
+
+## Context
+
+Phase 2's API serves status, the log, changes, diff, the operation log, describe, abandon, undo, files and workspaces ([0030](0030-reads-over-jj-state.md), [0031](0031-writes-over-jj-state.md), [0032](0032-files-without-a-workspace.md)), and the CLI is a thin client of it with JSON for every v1 message ([0033](0033-thin-client.md), [0034](0034-cli-over-the-vcs-services.md)). An agent whose harness speaks MCP, or one with no directory at all, had no way in: `EditFiles` has no CLI command by design, and there was no MCP server.
+
+What an MCP server has to decide beyond the API: which tools, under what names, with what hints for a client's confirmation policy; how a Reef error reaches the model; which repository and workspace a call means when the caller has no current directory the server can see; the leases of workspaces it creates; how an agent waits for another agent's work while `SubscribeOperations` is declared but not implemented; and how a harness finds the server.
+
+## Decision
+
+1. **`reef mcp`, stdio only, in the `reef` binary**, built with `rmcp` (exact version, no macros) on `reef_client::Client`. It takes the global flags and no arguments of its own. Stdout carries only the protocol; notes and logs go to stderr.
+2. **Twenty tools named after the RPCs they call**, in `snake_case`, with inputs named after the request's fields: `list_repositories`, `list_workspaces`, `get_workspace`, `get_status`, `list_changes`, `get_change`, `get_diff`, `list_operations`, `get_operation`, `read_file`, `list_files`, `wait_for_operations`, `create_workspace`, `snapshot_workspace`, `move_workspace`, `release_workspace`, `describe_change`, `abandon_change`, `undo_operation`, `edit_files`. The daemon's hints name RPCs and fields ("Pass skip_snapshot"), so they name the tool and argument to use.
+3. **No ADMIN RPC is a tool, and some fields are not inputs.** Registration, forget, GC, backup, quiesce, resume and store builds are not tools; `CreateWorkspace.path`, `backend` and `lease_length`, and `ReleaseWorkspace.force` and `skip_final_snapshot`, are not inputs. A harness starts its MCP servers outside the sandbox it gives the agent's shell, so the server's surface is what a sandboxed agent gets; `path`, `Backup.dest` and `BuildStore` are S-07's three ways out. `release_workspace` and `move_workspace` require `workspace`, so no call releases the directory the harness runs in by default. A table of every other v1 method says why it is not a tool, and a test fails until a new method is in one table or the other.
+4. **Annotations by rule from the schema.** `readOnlyHint` exactly for READ RPCs; for a write, `idempotentHint` exactly when its RPC is `IDEMPOTENT`, and `destructiveHint` false only for the two writes that replace nothing (a new workspace, a snapshot of files already on disk); `openWorldHint` false everywhere. They are hints, not authorization.
+5. **Results are `reef_client::json`'s**, the objects `reef -o json` prints, as structured content and as one text block holding the same JSON. Lists are wrapped in an object with their `next_page_token`; a list tool returns one page, smaller by default than the API's. Writes in a workspace return the workspace afterwards. No `outputSchema` until R2.24 derives schemas from the same types.
+6. **A Reef error is a tool result**, `isError: true` with `{"error": ErrorObject}`, the CLI's error object: `kind`, `reason`, `message`, the daemon's `hint` and `next`, and `metadata`. The CLI's advice table ([0034](0034-cli-over-the-vcs-services.md) decision 6) is not applied; its `next`s are command lines the caller never ran. The server's own checks (arguments against the input type, `edit_files`' shape, a missing scope) use the same object; a call outside every repository that names none is reason `REPOSITORY_REQUIRED`, which the daemon never sends. JSON-RPC errors are for an unknown tool, a malformed request, or a server bug.
+7. **The scope per call, no session state.** Each call resolves `workspace`, else `repo`, else `REEF_WORKSPACE` in the server's environment, else the workspace or repository containing the server's directory ([0034](0034-cli-over-the-vcs-services.md) decision 2). A harness may route several agents through one server, and a "current workspace" would let one agent's call land in another's. Paths are repository-relative; an absolute path inside the scope is made relative. Only the launch checkout is registered implicitly: a `repo` path in no registered repository is the daemon's `REPOSITORY_NOT_REGISTERED`, since registering a path a sandboxed agent chose would have the daemon, outside the sandbox, write `.jj` there and later run git on its `.git/config`.
+8. **The agent is the server's environment's**: `--agent`, else `REEF_AGENT`, checked before the server starts. The client's `clientInfo` names the harness, not the agent.
+9. **Leases are heartbeated while the server runs, and none released at exit.** Every active workspace the server created, or with its owner that a call named, is heartbeated with `ws run`'s heartbeater. The owner is `<user>@<host>:mcp` for every server of the user on the machine, so a restarted server takes over its predecessor's workspaces on the next call that names them. At exit the leases run their course and the daemon reclaims the workspaces with a final snapshot ([0019](0019-leases-and-reclaim.md)); a harness that restarts its server must not take a directory from an agent still editing it through its shell.
+10. **`wait_for_operations` polls the operation log** every 500 ms until operations matching a filter end after a baseline (`after_operation`, else the head), or the timeout (30 s by default, 300 at most). While nothing matches, its window follows the head 2 s behind it, so each poll reads a few seconds of the log and an operation stamped before the head but recorded after it is still seen; operations already seen are told apart by id. It returns at most 100, oldest first, with a `last_operation_id` to pass back; it is not retried after the daemon goes away, since a retry would take a new baseline; it sends progress notifications when asked and stops when cancelled. When R2.09 implements `SubscribeOperations` the tool reads the stream with the same inputs and result.
+11. **The connection is lazy**, made on the first call, so a harness can start the server before a daemon exists; `initialize` and `tools/list` need none. A daemon that goes away mid-call is reconnected (and restarted unless `--no-autostart`); a read is retried once, a write is not. Another daemon version is handled as the CLI handles it: an idle one is restarted once while no call has succeeded, a busy one is named with `reef daemon stop`.
+12. **Instructions and descriptions are the server's own.** The instructions (at most 1,000 bytes) say what the guide says that matters to tool callers; the agent guide is CLI text, full to its budget. Each tool's description is one to three sentences ending in the result's shape, not the proto comments, which are written for API implementers. Input schemas are compacted, and the whole `tools/list` result is held to 20,000 bytes by a test.
+13. **`reef init` owns `mcpServers.reef` in `.mcp.json`**: `{"type": "stdio", "command": "reef", "args": ["mcp"]}`, with no version and no absolute path. It is written with Claude Code's files, and by `--agents mcp`. The file is merged in its own order; an entry someone changed, or a file that is not a JSON object, is left alone and is not stale.
+
+## Consequences
+
+- An agent with no shell can read, edit, describe and revert through MCP, and an agent with one can wait for another agent's work without a loop of its own.
+- `reef` gains `rmcp`, `schemars` and their dependencies (about 15 crates); none links jj-lib.
+- The tool list costs tokens in every session that loads the server, used or not; the 20,000-byte budget bounds it, and R2.17 measures it.
+- Workspaces a server leaves behind hold disk until they are reclaimed, up to the lease and its grace (35 minutes by default) after it stops. A restarted server adopts a workspace only when a call names it: an agent that goes on editing through its shell without naming it loses the directory when the lease runs out (its final snapshot keeps the work). Adopting every `:mcp` workspace at start would keep other sessions' alive forever.
+- On end of input, `rmcp` lets calls in flight finish for up to 5 seconds before the process exits, so a harness that restarts its server during a long wait waits that long for the old one.
+- Any server of the user adopts a `:mcp` workspace a call names; the owner is informational and the release explicit, so two sessions naming one workspace both keep it alive.
+- An operator who denies a sandboxed agent the socket must also leave `reef mcp` out of the harness's MCP configuration ([threat model](../threat-model.md#harness-sandboxes)).
+- Waiting polls two RPCs a second per waiting call until R2.09.
+
+## Alternatives considered
+
+- **One tool per CLI command.** CLI argv in the API's place, and the CLI's path rule needs a current directory the caller does not have.
+- **A generic `call_rpc` tool over the descriptor set.** No annotations per call, and the model writes protobuf JSON.
+- **The proto comments as descriptions.** Implementer text with "Errors:" paragraphs, thousands of tokens per session; the reasons reach the model when they happen.
+- **Session state for a current workspace.** Wrong for shared servers.
+- **Releasing at exit.** A reconnect would destroy a directory the agent is still using.
+- **MCP resources for the log and files.** Clients read them inconsistently; tools are what agents call.
+- **`rmcp`'s `#[tool]` macros.** Annotations and argument errors would leave the table the tests check.
+- **`serde_json`'s `preserve_order` for `.mcp.json`.** Features unify across the build, and it would reorder `config show --json`.
+- **Listing on the MCP registry here.** The registry lists only servers with a package it can verify, and Reef publishes none; packaging is R2.25's.

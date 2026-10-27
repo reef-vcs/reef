@@ -1563,6 +1563,29 @@ impl Snapshotted {
     }
 }
 
+/// `FileService.EditFiles`' answer, as `reef mcp`'s `edit_files` returns it
+/// (R2.13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Edited {
+    /// The change afterwards.
+    pub change: Option<Change>,
+    /// The operation that recorded the edits.
+    pub operation: Option<Operation>,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+}
+
+impl Edited {
+    /// From the response and the workspace read after it.
+    pub fn from_response(response: &v1::EditFilesResponse, workspace: Option<Workspace>) -> Self {
+        Self {
+            change: response.change.as_ref().map(Change::from),
+            operation: operation(response.operation.as_ref()),
+            workspace,
+        }
+    }
+}
+
 /// An entry of `reef file list`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FileEntry {

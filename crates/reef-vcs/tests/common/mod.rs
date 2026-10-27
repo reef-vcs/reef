@@ -7,6 +7,8 @@
     reason = "each test binary uses some of these helpers; a panic is the failure report"
 )]
 
+pub(crate) mod mcp;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
