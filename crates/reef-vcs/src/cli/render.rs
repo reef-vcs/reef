@@ -1,10 +1,10 @@
-//! Text forms of the [`reef_daemon::client::json`] types, so each command's
+//! Text forms of the [`reef_client::json`] types, so each command's
 //! `run` stays a call and an [`Out`](super::Out) method.
 
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reef_daemon::client::json::{
+use reef_client::json::{
     Created, GcReport, Inspected, Lease, Moved, Repository, Status, Store, Workspace,
 };
 

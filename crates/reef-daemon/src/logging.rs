@@ -1,9 +1,9 @@
-//! Logging initialization shared by the `reef-daemon` and `reef` binaries
-//! (ADR 0009). Libraries only emit events; this module installs the one
-//! global subscriber.
+//! The daemon's logging (ADR 0009). Libraries only emit events; this module
+//! installs the one global subscriber, over [`reef_client::logging`]'s
+//! stderr layer, which the `reef` binary installs alone.
 //!
 //! Logs go to stderr. `REEF_LOG` (falling back to `RUST_LOG`, then `info`)
-//! is an [`EnvFilter`] directive. `REEF_LOG_FORMAT` is `auto`, `pretty`, or
+//! is an [`EnvFilter`](tracing_subscriber::EnvFilter) directive. `REEF_LOG_FORMAT` is `auto`, `pretty`, or
 //! `json`; `auto` means pretty when stderr is a terminal and JSON otherwise.
 //!
 //! The daemon also writes [`LogOptions::file`], always as JSON lines, through
@@ -16,29 +16,21 @@
 //! written synchronously and never drops.
 
 use std::ffi::OsString;
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use reef_lib::error::{Classify, ErrorKind};
+use reef_client::logging::{EnvLog, filter, stderr_layer};
+pub use reef_client::logging::{
+    FALLBACK_LOG_ENV, LOG_ENV, LOG_FORMAT_ENV, LogFormat, LoggingError,
+};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::filter::ParseError;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::UtcTime;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::daemon::PrivateDirError;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::{SubscriberInitExt as _, TryInitError};
 
-/// Environment variable holding the filter directive.
-pub const LOG_ENV: &str = "REEF_LOG";
-/// Environment variable read for the filter when [`LOG_ENV`] is unset,
-/// because every Rust user tries it first.
-pub const FALLBACK_LOG_ENV: &str = "RUST_LOG";
-/// Environment variable selecting the [`LogFormat`].
-pub const LOG_FORMAT_ENV: &str = "REEF_LOG_FORMAT";
 /// The filter used when neither variable is set.
 ///
 /// jj-lib's Watchman monitor logs three `info` lines on every snapshot of a
@@ -52,7 +44,7 @@ pub const DEFAULT_KEEP_DAYS: u32 = 7;
 /// What to log and how to format it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogOptions {
-    /// An [`EnvFilter`] directive such as `info` or `reef_lib=debug`.
+    /// An [`EnvFilter`](tracing_subscriber::EnvFilter) directive such as `info` or `reef_lib=debug`.
     /// `None` means [`DEFAULT_FILTER`].
     pub filter: Option<String>,
     /// The output format on stderr.
@@ -83,100 +75,6 @@ pub struct LoggingGuard {
     _file: Option<WorkerGuard>,
 }
 
-/// How log lines are written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LogFormat {
-    /// [`LogFormat::Pretty`] when stderr is a terminal, [`LogFormat::Json`]
-    /// otherwise.
-    #[default]
-    Auto,
-    /// One human-readable line per event.
-    Pretty,
-    /// One JSON object per event, the format log files and agents read.
-    Json,
-}
-
-impl FromStr for LogFormat {
-    type Err = LoggingError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "pretty" => Ok(Self::Pretty),
-            "json" => Ok(Self::Json),
-            _ => Err(LoggingError::InvalidFormat(value.to_owned())),
-        }
-    }
-}
-
-/// Failure to read logging options or install the subscriber.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum LoggingError {
-    /// An environment variable was set to a value that is not UTF-8.
-    #[error("{var} is not valid UTF-8")]
-    NotUnicode {
-        /// The variable's name.
-        var: &'static str,
-    },
-    /// The format was not one of `auto`, `pretty`, or `json`.
-    #[error("invalid log format {0:?}; expected auto, pretty, or json")]
-    InvalidFormat(String),
-    /// The filter directive did not parse.
-    #[error("invalid log filter {directive:?}")]
-    InvalidFilter {
-        /// The directive as given.
-        directive: String,
-        /// Why it did not parse.
-        #[source]
-        source: ParseError,
-    },
-    /// A global subscriber was already installed.
-    #[error("failed to install the log subscriber")]
-    AlreadySet(#[source] TryInitError),
-    /// The log directory is another user's (RX.01, S-01).
-    #[error("log directory {} is owned by uid {uid}, not by uid {euid}", path.display())]
-    LogDirNotOwned {
-        /// The directory.
-        path: PathBuf,
-        /// Its owner.
-        uid: u32,
-        /// The daemon's effective uid.
-        euid: u32,
-    },
-    /// The log directory could not be created.
-    #[error("create log directory {}", path.display())]
-    LogDir {
-        /// The directory.
-        path: PathBuf,
-        /// The underlying error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// The log file could not be opened.
-    #[error("open log file {}", path.display())]
-    File {
-        /// The log file, before its date suffix.
-        path: PathBuf,
-        /// The underlying error.
-        #[source]
-        source: InitError,
-    },
-}
-
-impl Classify for LoggingError {
-    fn kind(&self) -> ErrorKind {
-        match self {
-            Self::NotUnicode { .. } | Self::InvalidFormat(_) | Self::InvalidFilter { .. } => {
-                ErrorKind::InvalidArgument
-            }
-            Self::AlreadySet(_) => ErrorKind::Internal,
-            Self::LogDirNotOwned { .. } => ErrorKind::PermissionDenied,
-            Self::File { .. } | Self::LogDir { .. } => ErrorKind::Io,
-        }
-    }
-}
-
 impl LogOptions {
     /// Reads [`LOG_ENV`], [`FALLBACK_LOG_ENV`], and [`LOG_FORMAT_ENV`]. An
     /// empty variable counts as unset.
@@ -185,21 +83,7 @@ impl LogOptions {
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self, LoggingError> {
-        let get = |name: &'static str| match var(name) {
-            Some(value) if !value.is_empty() => value
-                .into_string()
-                .map(Some)
-                .map_err(|_| LoggingError::NotUnicode { var: name }),
-            _ => Ok(None),
-        };
-        let filter = match get(LOG_ENV)? {
-            Some(filter) => Some(filter),
-            None => get(FALLBACK_LOG_ENV)?,
-        };
-        let format = match get(LOG_FORMAT_ENV)? {
-            Some(format) => format.parse()?,
-            None => LogFormat::Auto,
-        };
+        let EnvLog { filter, format } = EnvLog::from_vars(var)?;
         Ok(Self {
             filter,
             format,
@@ -210,40 +94,7 @@ impl LogOptions {
 
 /// Installs the global subscriber. Returns an error if one is already set.
 pub fn init(opts: &LogOptions) -> Result<LoggingGuard, LoggingError> {
-    let directive = opts.filter.as_deref().unwrap_or(DEFAULT_FILTER);
-    let filter =
-        EnvFilter::builder()
-            .parse(directive)
-            .map_err(|source| LoggingError::InvalidFilter {
-                directive: directive.to_owned(),
-                source,
-            })?;
-    let terminal = std::io::stderr().is_terminal();
-    let json = match opts.format {
-        LogFormat::Auto => !terminal,
-        LogFormat::Pretty => false,
-        LogFormat::Json => true,
-    };
-    let (json_layer, pretty_layer) = if json {
-        let layer = fmt::layer()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(false)
-            .with_target(true)
-            .with_timer(UtcTime::rfc_3339())
-            .with_writer(std::io::stderr);
-        (Some(layer), None)
-    } else {
-        // Colour only on a terminal, and never when NO_COLOR is set.
-        let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-        let layer = fmt::layer()
-            .with_target(false)
-            .with_timer(UtcTime::rfc_3339())
-            .with_ansi(terminal && !no_color)
-            .with_writer(std::io::stderr);
-        (None, Some(layer))
-    };
+    let filter = filter(opts.filter.as_deref().unwrap_or(DEFAULT_FILTER))?;
     let mut tightened = None;
     let (file_layer, file_guard) = match &opts.file {
         Some(path) => {
@@ -264,8 +115,7 @@ pub fn init(opts: &LogOptions) -> Result<LoggingGuard, LoggingError> {
     };
     tracing_subscriber::registry()
         .with(filter)
-        .with(json_layer)
-        .with(pretty_layer)
+        .with(stderr_layer(opts.format))
         .with(file_layer)
         .try_init()
         .map_err(LoggingError::AlreadySet)?;
@@ -286,7 +136,7 @@ fn open_log_file(
 ) -> Result<(RollingFileAppender, Option<u32>), LoggingError> {
     let error = |source| LoggingError::File {
         path: path.to_owned(),
-        source,
+        source: Box::new(source),
     };
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let prefix = path
@@ -313,6 +163,8 @@ fn open_log_file(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use reef_lib::error::{Classify as _, ErrorKind};
 
     use super::*;
 

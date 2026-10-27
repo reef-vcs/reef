@@ -25,8 +25,8 @@ use nix::unistd::Pid;
 use reef_api::v1::{
     CreateWorkspaceRequest, Lease, LeaseState, RenewLeaseResponse, Workspace, WorkspaceState,
 };
-use reef_daemon::client::{ClientError, WorkspacesApi, default_owner, json};
-use reef_lib::error::{Classify as _, ErrorChain, ErrorKind};
+use reef_client::{ClientError, WorkspacesApi, default_owner, json};
+use reef_error::{Classify as _, ErrorChain, ErrorKind};
 use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{Signal as SignalStream, SignalKind, signal};
@@ -346,7 +346,7 @@ fn spawn(ctx: &Ctx, args: &Args, ws: &Workspace) -> io::Result<Child> {
     Command::new(program)
         .args(rest)
         .current_dir(&ws.path)
-        .envs(reef_env(ws, ctx.client.socket()))
+        .envs(reef_env(ws, ctx.client.socket(), ctx.agent.as_deref()))
         .envs(args.env.iter().map(|(key, value)| (key, value)))
         // A panic in `ws run` must not kill an agent mid-write.
         .kill_on_drop(false)

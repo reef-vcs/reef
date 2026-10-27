@@ -44,49 +44,10 @@ use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::workspace::ManagerError;
 
-/// How to fix an error (R1.26, ADR 0025): `ErrorDetail.hint` and
-/// `ErrorDetail.next`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Advice {
-    /// One sentence; empty if there is only a command.
-    pub hint: String,
-    /// An argv an agent can run verbatim, starting `reef`; empty if there
-    /// is only a hint. Never a placeholder.
-    pub next: Vec<String>,
-}
-
-impl Advice {
-    /// A hint with no command.
-    pub fn hint(hint: impl Into<String>) -> Advice {
-        Advice {
-            hint: hint.into(),
-            next: Vec::new(),
-        }
-    }
-
-    /// A hint and the command that follows it.
-    pub fn run<I, S>(hint: impl Into<String>, next: I) -> Advice
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Advice {
-            hint: hint.into(),
-            next: next.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    /// The advice an error status carries, if any.
-    pub fn from_detail(detail: &v1::ErrorDetail) -> Option<Advice> {
-        if detail.hint.is_empty() && detail.next.is_empty() {
-            return None;
-        }
-        Some(Advice {
-            hint: detail.hint.clone(),
-            next: detail.next.clone(),
-        })
-    }
-}
+pub use reef_client::error::{
+    KINDS, advice_from_detail, code_of, detail_of, kind_from_status, kind_of_proto, proto_kind,
+};
+pub use reef_error::Advice;
 
 /// An error that knows how it is fixed. Every error type with a
 /// `#[error(transparent)]` variant wrapping one of these implements it too,
@@ -151,70 +112,6 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         current = error.source();
     }
     None
-}
-
-/// Every kind, in the order the API documents them.
-pub const KINDS: [ErrorKind; 9] = [
-    ErrorKind::NotFound,
-    ErrorKind::AlreadyExists,
-    ErrorKind::InvalidArgument,
-    ErrorKind::Conflict,
-    ErrorKind::Unavailable,
-    ErrorKind::PermissionDenied,
-    ErrorKind::Io,
-    ErrorKind::Internal,
-    ErrorKind::Unsupported,
-];
-
-/// The gRPC code for an error kind: `NotFound` → `NOT_FOUND`,
-/// `AlreadyExists` → `ALREADY_EXISTS`, `InvalidArgument` →
-/// `INVALID_ARGUMENT`, `Conflict` → `FAILED_PRECONDITION`, `Unavailable` →
-/// `UNAVAILABLE`, `PermissionDenied` → `PERMISSION_DENIED`, `Io` and
-/// `Internal` → `INTERNAL`, `Unsupported` → `UNIMPLEMENTED`.
-pub fn code_of(kind: ErrorKind) -> Code {
-    match kind {
-        ErrorKind::NotFound => Code::NotFound,
-        ErrorKind::AlreadyExists => Code::AlreadyExists,
-        ErrorKind::InvalidArgument => Code::InvalidArgument,
-        ErrorKind::Conflict => Code::FailedPrecondition,
-        ErrorKind::Unavailable => Code::Unavailable,
-        ErrorKind::PermissionDenied => Code::PermissionDenied,
-        ErrorKind::Unsupported => Code::Unimplemented,
-        // `ErrorKind` is non-exhaustive; a kind added later is internal
-        // until it is given a code here.
-        _ => Code::Internal,
-    }
-}
-
-/// The kind as `ErrorDetail.kind`.
-pub fn proto_kind(kind: ErrorKind) -> v1::ErrorKind {
-    match kind {
-        ErrorKind::NotFound => v1::ErrorKind::NotFound,
-        ErrorKind::AlreadyExists => v1::ErrorKind::AlreadyExists,
-        ErrorKind::InvalidArgument => v1::ErrorKind::InvalidArgument,
-        ErrorKind::Conflict => v1::ErrorKind::Conflict,
-        ErrorKind::Unavailable => v1::ErrorKind::Unavailable,
-        ErrorKind::PermissionDenied => v1::ErrorKind::PermissionDenied,
-        ErrorKind::Io => v1::ErrorKind::Io,
-        ErrorKind::Unsupported => v1::ErrorKind::Unsupported,
-        _ => v1::ErrorKind::Internal,
-    }
-}
-
-/// The kind an `ErrorDetail.kind` names; unspecified, and a value this
-/// build does not know, is `Internal`.
-pub fn kind_of_proto(kind: v1::ErrorKind) -> ErrorKind {
-    match kind {
-        v1::ErrorKind::NotFound => ErrorKind::NotFound,
-        v1::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
-        v1::ErrorKind::InvalidArgument => ErrorKind::InvalidArgument,
-        v1::ErrorKind::Conflict => ErrorKind::Conflict,
-        v1::ErrorKind::Unavailable => ErrorKind::Unavailable,
-        v1::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
-        v1::ErrorKind::Io => ErrorKind::Io,
-        v1::ErrorKind::Unsupported => ErrorKind::Unsupported,
-        v1::ErrorKind::Internal | v1::ErrorKind::Unspecified => ErrorKind::Internal,
-    }
 }
 
 /// The name 0.1's `reef.daemon.v0.ErrorDetail.kind` carried: the variant's
@@ -437,6 +334,51 @@ fn edit_reason(error: &EditError) -> Option<(&'static str, BTreeMap<String, Stri
     Some((reason, metadata))
 }
 
+/// The reason of a lookup that found nothing: a repository or workspace
+/// that does not exist (R2.05).
+fn db_reason(error: &DbError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    let DbError::NotFound { what, id } = error else {
+        return None;
+    };
+    match *what {
+        "repository" => Some((
+            reef_api::error::REPOSITORY_NOT_FOUND,
+            meta(&[("repo", id.clone())]),
+        )),
+        "workspace" | "workspace containing" | "workspace path" => Some((
+            reef_api::error::WORKSPACE_NOT_FOUND,
+            meta(&[("workspace", id.clone())]),
+        )),
+        _ => None,
+    }
+}
+
+/// The [`DbError`] a `#[error(transparent)]` wrapper holds: its source
+/// skips it, so the chain walk never sees it.
+fn wrapped_db<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a DbError> {
+    if let Some(ManagerError::Db(db)) = error.downcast_ref::<ManagerError>() {
+        Some(db)
+    } else if let Some(LeaseError::Db(db)) = error.downcast_ref::<LeaseError>() {
+        Some(db)
+    } else if let Some(RegisterError::Db(db)) = error.downcast_ref::<RegisterError>() {
+        Some(db)
+    } else if let Some(GcRunError::Db(db)) = error.downcast_ref::<GcRunError>() {
+        Some(db)
+    } else if let Some(QuiesceError::Db(db)) = error.downcast_ref::<QuiesceError>() {
+        Some(db)
+    } else if let Some(BackupError::Db(db)) = error.downcast_ref::<BackupError>() {
+        Some(db)
+    } else if let Some(BaseCacheError::Db(db)) = error.downcast_ref::<BaseCacheError>() {
+        Some(db)
+    } else if let Some(ReindexError::Db(db)) = error.downcast_ref::<ReindexError>() {
+        Some(db)
+    } else if let Some(RestoreError::Db(db)) = error.downcast_ref::<RestoreError>() {
+        Some(db)
+    } else {
+        error.downcast_ref::<DbError>()
+    }
+}
+
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -449,33 +391,41 @@ fn reason_and_metadata(
         {
             return Some((reef_api::error::INVALID_PAGE_TOKEN, BTreeMap::new()));
         }
-        let found = if let Some(error) = error.downcast_ref::<RevisionError>() {
-            revision_reason(error)
-        } else if let Some(error) = error.downcast_ref::<OpLookupError>() {
-            lookup_reason(error)
-        } else if let Some(error) = error.downcast_ref::<PathError>() {
-            Some((
-                reef_api::error::INVALID_PATH,
-                BTreeMap::from([("path".to_owned(), error.path.clone())]),
-            ))
-        } else if error.downcast_ref::<InvalidAgent>().is_some() {
-            Some((reef_api::error::INVALID_AGENT, BTreeMap::new()))
-        } else if let Some(error) = error.downcast_ref::<RewriteError>() {
-            rewrite_reason(error)
-        } else if let Some(error) = error.downcast_ref::<UndoError>() {
-            undo_reason(error)
-        } else if let Some(error) = error.downcast_ref::<FileError>() {
-            file_reason(error)
-        } else if let Some(error) = error.downcast_ref::<EditError>() {
-            edit_reason(error)
-        } else {
-            error.downcast_ref::<InvalidChangeFilter>().map(|error| {
-                (
-                    reef_api::error::INVALID_CHANGE_ID,
-                    BTreeMap::from([("change".to_owned(), error.change.clone())]),
-                )
-            })
-        };
+        let found =
+            if let Some(ManagerError::NotRegistered(path)) = error.downcast_ref::<ManagerError>() {
+                Some((
+                    reef_api::error::REPOSITORY_NOT_REGISTERED,
+                    meta(&[("path", path.display().to_string())]),
+                ))
+            } else if let Some(db) = wrapped_db(error) {
+                db_reason(db)
+            } else if let Some(error) = error.downcast_ref::<RevisionError>() {
+                revision_reason(error)
+            } else if let Some(error) = error.downcast_ref::<OpLookupError>() {
+                lookup_reason(error)
+            } else if let Some(error) = error.downcast_ref::<PathError>() {
+                Some((
+                    reef_api::error::INVALID_PATH,
+                    BTreeMap::from([("path".to_owned(), error.path.clone())]),
+                ))
+            } else if error.downcast_ref::<InvalidAgent>().is_some() {
+                Some((reef_api::error::INVALID_AGENT, BTreeMap::new()))
+            } else if let Some(error) = error.downcast_ref::<RewriteError>() {
+                rewrite_reason(error)
+            } else if let Some(error) = error.downcast_ref::<UndoError>() {
+                undo_reason(error)
+            } else if let Some(error) = error.downcast_ref::<FileError>() {
+                file_reason(error)
+            } else if let Some(error) = error.downcast_ref::<EditError>() {
+                edit_reason(error)
+            } else {
+                error.downcast_ref::<InvalidChangeFilter>().map(|error| {
+                    (
+                        reef_api::error::INVALID_CHANGE_ID,
+                        BTreeMap::from([("change".to_owned(), error.change.clone())]),
+                    )
+                })
+            };
         if found.is_some() {
             return found;
         }
@@ -612,21 +562,6 @@ pub fn status<E: Classify + Error + 'static>(error: E) -> Status {
     status_from(&error, kind)
 }
 
-/// The kind of an error status: the `ErrorDetail`'s when the details carry
-/// one, else the inverse of [`code_of`] (`INTERNAL`, `UNKNOWN`, and every
-/// other code → `Internal`).
-pub fn kind_from_status(status: &Status) -> ErrorKind {
-    detail_of(status).map_or_else(
-        || kind_of_code(status.code()),
-        |detail| kind_of_proto(detail.kind()),
-    )
-}
-
-/// The `ErrorDetail` in a status's details, if it carries one.
-pub fn detail_of(status: &Status) -> Option<v1::ErrorDetail> {
-    reef_api::error::detail(status)
-}
-
 /// The version this daemon reports.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -703,19 +638,6 @@ pub fn v0_client(path: &str) -> Status {
         message,
         detail.encode_to_vec().into(),
     )
-}
-
-fn kind_of_code(code: Code) -> ErrorKind {
-    match code {
-        Code::NotFound => ErrorKind::NotFound,
-        Code::AlreadyExists => ErrorKind::AlreadyExists,
-        Code::InvalidArgument => ErrorKind::InvalidArgument,
-        Code::FailedPrecondition => ErrorKind::Conflict,
-        Code::Unavailable => ErrorKind::Unavailable,
-        Code::PermissionDenied => ErrorKind::PermissionDenied,
-        Code::Unimplemented => ErrorKind::Unsupported,
-        _ => ErrorKind::Internal,
-    }
 }
 
 /// The error's message and each source's, outermost first, skipping a
@@ -829,6 +751,58 @@ mod tests {
         ]
     }
 
+    /// R2.05 test 12: the three not-found reasons, with their metadata,
+    /// through the transparent wrappers the handlers return.
+    #[test]
+    fn not_found_reasons_carry_metadata() {
+        let reason = |status: &Status| {
+            let detail = detail_of(status).unwrap();
+            (
+                detail.reason,
+                detail.metadata.into_iter().collect::<Vec<_>>(),
+            )
+        };
+        let unregistered = status(ManagerError::NotRegistered("/src/app".into()));
+        assert_eq!(unregistered.code(), Code::NotFound);
+        assert_eq!(
+            reason(&unregistered),
+            (
+                reef_api::error::REPOSITORY_NOT_REGISTERED.to_owned(),
+                vec![("path".to_owned(), "/src/app".to_owned())]
+            )
+        );
+        let repo = DbError::NotFound {
+            what: "repository",
+            id: "abcd".into(),
+        };
+        assert_eq!(
+            reason(&status(ManagerError::Db(repo))),
+            (
+                reef_api::error::REPOSITORY_NOT_FOUND.to_owned(),
+                vec![("repo".to_owned(), "abcd".to_owned())]
+            )
+        );
+        for what in ["workspace", "workspace containing", "workspace path"] {
+            let ws = DbError::NotFound {
+                what,
+                id: "0123".into(),
+            };
+            assert_eq!(
+                reason(&status(LeaseError::Db(ws))),
+                (
+                    reef_api::error::WORKSPACE_NOT_FOUND.to_owned(),
+                    vec![("workspace".to_owned(), "0123".to_owned())]
+                ),
+                "{what}"
+            );
+        }
+        let other = DbError::NotFound {
+            what: "store",
+            id: "deps".into(),
+        };
+        assert_eq!(detail_of(&status(other)).unwrap().reason, "");
+    }
+
     #[test]
     fn error_kinds_round_trip() {
         let cases = one_error_per_kind();
@@ -870,7 +844,7 @@ mod tests {
 
     /// The advice a status carries, read back as a client reads it.
     fn advice_in(status: &Status) -> Advice {
-        Advice::from_detail(&detail_of(status).unwrap()).unwrap()
+        advice_from_detail(&detail_of(status).unwrap()).unwrap()
     }
 
     #[test]
@@ -1250,7 +1224,7 @@ mod tests {
         let status = status(BackendError::RootExists("/ws".into()));
         let detail = detail_of(&status).unwrap();
         assert!(detail.hint.is_empty() && detail.next.is_empty());
-        assert_eq!(Advice::from_detail(&detail), None);
+        assert_eq!(advice_from_detail(&detail), None);
     }
 
     #[test]

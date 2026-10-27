@@ -47,7 +47,7 @@ fn load(
     Config::load_with(
         overrides,
         |name| vars.get(name).cloned(),
-        || Err(ConfigError::NoHome),
+        || Err(PathsError::NoHome),
     )
 }
 
@@ -576,4 +576,88 @@ fn keys_match_the_struct() {
     let mut fields = fields;
     fields.sort();
     assert_eq!(fields, listed);
+}
+
+/// R2.05 test 8: the thin client and the daemon settle the same paths
+/// from the same flags, environment, defaults and file, so `reef` always
+/// finds the socket the daemon listens on.
+#[test]
+fn client_and_daemon_paths_agree() {
+    use reef_client::paths::ClientConfig;
+
+    let home = state_dir(None);
+    let default_state = home.path().join("default-state");
+    let runtime = home.path().join("run");
+    let named = state_dir(None);
+    let flag_config = named.path().join("flag.toml");
+    std::fs::write(&flag_config, "[daemon]\nsocket = \"from-flag-file.sock\"\n").unwrap();
+    let named_text = named.path().to_str().unwrap().to_owned();
+    let flag_config_text = flag_config.to_str().unwrap().to_owned();
+    let files: [Option<&str>; 5] = [
+        None,
+        Some("[daemon]\nsocket = \"rel.sock\"\n"),
+        Some("[daemon]\nsocket = \"/tmp/reef-abs.sock\"\npid_file = \"run/the.pid\"\n"),
+        Some("[repo]\nauto_register = false\n"),
+        Some("[log]\nkeep_days = 3\n"),
+    ];
+    let overrides = [
+        PathOverrides::default(),
+        PathOverrides {
+            socket: Some(PathBuf::from("/tmp/reef-flag.sock")),
+            ..PathOverrides::default()
+        },
+        PathOverrides {
+            config_file: Some(flag_config.clone()),
+            ..PathOverrides::default()
+        },
+    ];
+    let envs: [&[(&str, &str)]; 4] = [
+        &[],
+        &[(SOCKET_ENV, "/tmp/reef-env.sock")],
+        &[(STATE_DIR_ENV, &named_text)],
+        &[(CONFIG_ENV, &flag_config_text)],
+    ];
+    for runtime_dir in [None, Some(runtime.as_path())] {
+        for file in files {
+            // The default state directory's file.
+            std::fs::create_dir_all(&default_state).unwrap();
+            let path = default_state.join("config.toml");
+            match file {
+                Some(text) => std::fs::write(&path, text).unwrap(),
+                None => drop(std::fs::remove_file(&path)),
+            }
+            for overrides in &overrides {
+                for vars in envs {
+                    let vars: HashMap<&str, OsString> = vars
+                        .iter()
+                        .map(|(name, value)| (*name, OsString::from(value)))
+                        .collect();
+                    let defaults = || {
+                        Ok(PlatformDefaults {
+                            state_dir: default_state.clone(),
+                            runtime_dir: runtime_dir.map(Path::to_owned),
+                        })
+                    };
+                    let daemon =
+                        Config::load_with(overrides, |name| vars.get(name).cloned(), defaults)
+                            .unwrap();
+                    let client = ClientConfig::load_with(
+                        overrides,
+                        |name| vars.get(name).cloned(),
+                        defaults,
+                    )
+                    .unwrap();
+                    let case = format!("{file:?} {overrides:?} {vars:?} {runtime_dir:?}");
+                    assert_eq!(client.state_dir, daemon.paths.state_dir, "{case}");
+                    assert_eq!(client.socket, daemon.paths.socket, "{case}");
+                    assert_eq!(client.pid, daemon.paths.pid, "{case}");
+                    assert_eq!(client.config_file, daemon.paths.config_file, "{case}");
+                    assert_eq!(
+                        client.auto_register, daemon.file.repo.auto_register,
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
 }

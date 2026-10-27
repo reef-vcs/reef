@@ -7,13 +7,13 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::time::Duration;
 
-use reef_daemon::client::ClientError;
-use reef_daemon::config::ConfigError;
-use reef_daemon::error::Advice;
-use reef_daemon::logging::LoggingError;
-use reef_lib::error::{Classify, ErrorKind, classify_by_source};
+use reef_client::ClientError;
+use reef_client::logging::LoggingError;
+use reef_client::paths::PathsError;
+use reef_error::{Advice, Classify, ErrorKind, classify_by_source};
 
 /// A failed command.
 #[derive(Debug, thiserror::Error)]
@@ -63,7 +63,39 @@ pub(crate) enum CliError {
     },
     /// The configuration did not load.
     #[error("load the daemon's configuration")]
-    Config(#[source] ConfigError),
+    Config(#[source] PathsError),
+    /// No `reef-daemon` beside `reef` or on `PATH`: `reef` contains no
+    /// daemon (R2.05).
+    #[error(
+        "no reef-daemon beside {} or on PATH",
+        beside.as_deref().map_or_else(|| "reef".into(), |dir| dir.display().to_string())
+    )]
+    NoDaemonBinary {
+        /// The directory `reef` runs from.
+        beside: Option<PathBuf>,
+    },
+    /// A `reef-daemon` offline command (`config show`, `restore`) failed
+    /// and printed its error object.
+    #[error("{message}")]
+    Helper {
+        /// The kind, and so the exit code.
+        kind: ErrorKind,
+        /// The error's reason, when it has one.
+        reason: String,
+        /// Its whole chain.
+        message: String,
+        /// How to fix it.
+        advice: Option<Advice>,
+    },
+    /// A `reef-daemon` offline command failed without printing an error
+    /// object.
+    #[error("{} failed ({status}) without reporting why", program.display())]
+    HelperFailed {
+        /// The program.
+        program: PathBuf,
+        /// How it exited.
+        status: ExitStatus,
+    },
     /// Logging could not be set up.
     #[error("initialize logging")]
     Logging(#[source] LoggingError),
@@ -108,6 +140,10 @@ impl CliError {
     /// its own errors, the command's for the rest.
     pub(crate) fn advice(&self) -> Option<Advice> {
         match self {
+            Self::Daemon(ClientError::InvalidAgent(_)) => Some(Advice::hint(format!(
+                "An agent name is visible ASCII, at most {} bytes (--agent or REEF_AGENT).",
+                reef_api::AGENT_MAX_BYTES
+            ))),
             Self::Daemon(error) => error.advice(),
             Self::NotRunning {
                 start,
@@ -137,7 +173,10 @@ impl CliError {
                 },
                 next: stop.clone(),
             }),
-            Self::Refused { advice, .. } => advice.clone(),
+            Self::Refused { advice, .. } | Self::Helper { advice, .. } => advice.clone(),
+            Self::NoDaemonBinary { .. } => Some(Advice::hint(
+                "Install reef-daemon beside reef: the release tarball, install.sh and Homebrew ship both; from source, `cargo install --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`.",
+            )),
             Self::Timeout { .. } => Some(Advice::hint(
                 "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create.",
             )),
@@ -155,6 +194,7 @@ impl CliError {
         match self {
             Self::Daemon(error) => error.reason(),
             Self::OldDaemon { error, .. } => error.reason(),
+            Self::Helper { reason, .. } => reason,
             _ => "",
         }
     }
@@ -170,8 +210,9 @@ impl Classify for CliError {
             }
             Self::Config(error) => error.kind(),
             Self::Logging(error) => error.kind(),
-            Self::Runtime(_) | Self::Signals(_) => ErrorKind::Internal,
-            Self::Refused { kind, .. } => *kind,
+            Self::Runtime(_) | Self::Signals(_) | Self::HelperFailed { .. } => ErrorKind::Internal,
+            Self::Refused { kind, .. } | Self::Helper { kind, .. } => *kind,
+            Self::NoDaemonBinary { .. } => ErrorKind::NotFound,
             Self::Usage(_) => ErrorKind::InvalidArgument,
             Self::Io { source, .. } | Self::Stdout(source) => classify_by_source(source),
         }
@@ -179,19 +220,7 @@ impl Classify for CliError {
 }
 
 /// The JSON error object's `kind`: the kind's name in `snake_case`.
-pub(crate) fn kind_text(kind: ErrorKind) -> &'static str {
-    match kind {
-        ErrorKind::NotFound => "not_found",
-        ErrorKind::AlreadyExists => "already_exists",
-        ErrorKind::InvalidArgument => "invalid_argument",
-        ErrorKind::Conflict => "conflict",
-        ErrorKind::Unavailable => "unavailable",
-        ErrorKind::PermissionDenied => "permission_denied",
-        ErrorKind::Io => "io",
-        ErrorKind::Unsupported => "unsupported",
-        _ => "internal",
-    }
-}
+pub(crate) use reef_client::error::kind_text;
 
 #[cfg(test)]
 mod tests {

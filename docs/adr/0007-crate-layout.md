@@ -1,6 +1,6 @@
 # 0007. Crate layout
 
-- Status: accepted
+- Status: superseded by [0033](0033-thin-client.md)
 - Date: 2026-10-15
 - Ticket: R0.01
 

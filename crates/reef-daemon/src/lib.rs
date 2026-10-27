@@ -4,13 +4,13 @@
 //! It hosts the typed API, workspace materialization backends, the lease
 //! manager, filesystem watchers, and logging initialization. The data model
 //! and merge logic live in `reef-lib`; this crate wires them into a service.
-//! The `reef` binary (`reef-vcs`) depends on this crate; this crate never
-//! depends on it.
+//! The `reef` binary (`reef-vcs`) does not depend on this crate: it talks to
+//! the daemon through `reef-client`, which this crate re-exports as
+//! [`client`] (R2.05).
 //!
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
 
 pub mod backend;
-pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod db;
@@ -20,6 +20,7 @@ pub mod lock;
 pub mod logging;
 pub mod maintenance;
 pub mod model;
+pub mod offline;
 pub mod read;
 pub mod repo;
 mod run;
@@ -32,6 +33,8 @@ pub mod store;
 pub mod testing;
 pub mod watcher;
 pub mod workspace;
+
+pub use reef_client as client;
 
 pub use daemon::{AppState, Daemon, DaemonHandle, StartError};
 pub use run::{DaemonArgs, exit_code, run_main};

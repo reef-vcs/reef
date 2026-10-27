@@ -1,6 +1,6 @@
 [package]
 name = "reef-vcs"
-description = "Reef: version control for fleets of coding agents. Provides the `reef` binary and re-exports the Reef library and daemon crates."
+description = "Reef: version control for fleets of coding agents. Provides the `reef` binary, a thin client of the daemon (`reef-daemon`), and re-exports the API and client crates."
 readme = "README.md"
 keywords = ["vcs", "version-control", "agents", "jujutsu"]
 categories = ["development-tools", "command-line-utilities"]
@@ -26,17 +26,11 @@ pkg-fmt = "tgz"
 name = "reef"
 path = "src/main.rs"
 
-[features]
-default = ["watchman"]
-# Forwarded to reef-daemon (R1.14). reef-daemon has it in its own defaults too, so turning it
-# off takes `--no-default-features` on both.
-watchman = ["reef-daemon/watchman"]
-
 [dependencies]
-# Only for `reef_lib::error` (ErrorKind, Classify, ErrorChain); never `reef_lib::jj`, which
-# tests/cli.rs checks. R2.05 moves those types into the API crate and drops this dependency.
-reef-lib.workspace = true
-reef-daemon.workspace = true
+# The thin client and the error conventions, and no other Reef crate: `reef` links neither the
+# daemon nor jj-lib, which reef-testing's crate_graph test checks (R2.05, ADR 0033).
+reef-client.workspace = true
+reef-error.workspace = true
 reef-api.workspace = true        # the reef.api.v1 messages the CLI builds and prints (R2.01)
 prost-types.workspace = true     # google.protobuf.Duration in those messages
 tracing.workspace = true
@@ -55,6 +49,7 @@ jj-lib.workspace = true          # tests/ws_run.rs reads the final snapshot's tr
 pollster.workspace = true
 tonic.workspace = true           # statuses for the heartbeater's fake daemon
 reef-daemon = { workspace = true, features = ["testing"] }
+reef-lib.workspace = true        # tests open jj repositories; never a normal dependency (R2.05)
 reef-testing.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

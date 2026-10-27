@@ -57,12 +57,12 @@ From the first release on, prebuilt binaries for macOS and Linux on arm64 and x8
 ```sh
 curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh   # ~/.local/bin, no sudo
 brew install reef-vcs/tap/reef
-cargo binstall --git https://github.com/reef-vcs/reef reef-vcs
+cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon
 ```
 
 The installer verifies the tarball against the release's `SHA256SUMS`, never prompts, and takes `REEF_VERSION` to pin a release and `REEF_INSTALL_DIR` to install elsewhere. The binaries are not signed or notarized yet (R4.17). `reef --version` names the commit and target a binary was built from.
 
-From source, with a Rust toolchain: `cargo install --git https://github.com/reef-vcs/reef reef-vcs`, which installs only `reef` (it runs the daemon itself), or in a checkout:
+From source, with a Rust toolchain: `cargo install --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`, which installs `reef` and the daemon it runs, `reef-daemon` (`reef` contains no daemon of its own and looks for `reef-daemon` beside it, then on `PATH`), or in a checkout:
 
 ```sh
 cargo build --release
@@ -93,10 +93,12 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 
 ## Repository layout
 
+- `crates/reef-error`: the error conventions every crate shares: error kinds, classification, and advice.
 - `crates/reef-lib`: core library. Data model, jj-lib embedding, snapshots, operation log, undo.
 - `crates/reef-api`: the API schema, `reef.api.v1` (`proto/reef/api/v1`), and its generated Rust clients and servers ([ADR 0029](docs/adr/0029-daemon-api-v1.md)).
+- `crates/reef-client`: the thin client of the API, its stable JSON, and how to find the daemon, with no jj-lib ([ADR 0033](docs/adr/0033-thin-client.md)).
 - `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC services.
-- `crates/reef-vcs`: the `reef` binary and an umbrella library re-exporting the two above.
+- `crates/reef-vcs`: the `reef` binary, built on `reef-client` alone, and an umbrella library re-exporting the API and the client.
 - `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.
 
 ## Design

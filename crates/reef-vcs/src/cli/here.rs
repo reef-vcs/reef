@@ -9,9 +9,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use reef_api::v1::{self, GetWorkspaceRequest};
-use reef_daemon::client::ClientError;
-use reef_daemon::client::json::{Repository, Workspace, millis_of};
-use reef_lib::error::ErrorKind;
+use reef_client::ClientError;
+use reef_client::json::{Repository, Workspace, millis_of};
+use reef_error::ErrorKind;
 use serde::Serialize;
 
 use super::out::{TextRender, block, shell_line};

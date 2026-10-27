@@ -18,7 +18,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0004](0004-grpc-over-unix-socket.md) | gRPC with tonic over a Unix socket for the daemon API | accepted |
 | [0005](0005-tauri-desktop-shell.md) | Tauri 2 for the desktop shell | accepted |
 | [0006](0006-cel-for-policy.md) | CEL for repository policy | accepted |
-| [0007](0007-crate-layout.md) | Crate layout | accepted |
+| [0007](0007-crate-layout.md) | Crate layout | superseded by [0033](0033-thin-client.md) |
 | [0008](0008-jj-lib-embedding-findings.md) | jj-lib embedding findings | accepted |
 | [0009](0009-error-and-logging-conventions.md) | Error and logging conventions | accepted |
 | [0010](0010-dco-instead-of-cla.md) | DCO instead of CLA | accepted |
@@ -44,3 +44,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0030](0030-reads-over-jj-state.md) | Reads over jj state | accepted |
 | [0031](0031-writes-over-jj-state.md) | Writes over jj state | accepted |
 | [0032](0032-files-without-a-workspace.md) | Files without a workspace | accepted |
+| [0033](0033-thin-client.md) | Thin client | accepted |

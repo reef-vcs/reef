@@ -48,6 +48,7 @@ impl Fixture {
             "REEF_CONFIG",
             "REEF_OUTPUT",
             "REEF_WORKSPACE",
+            "REEF_AGENT",
         ] {
             command.env_remove(var);
         }

@@ -1,0 +1,26 @@
+[package]
+name = "reef-error"
+description = "Reef error conventions: the error kinds, classification, and advice every Reef crate shares. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+# None: the CLI (`reef-vcs`), the client (`reef-client`) and the jj layer (`reef-lib`) all depend
+# on this crate, so it may depend on nothing of theirs (R2.05, ADR 0033).
+[dependencies]
+
+[dev-dependencies]
+thiserror.workspace = true

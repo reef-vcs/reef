@@ -50,21 +50,15 @@ use reef_lib::jj::settings::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use reef_client::paths::{
+    CONFIG_ENV, PathOverrides, SOCKET_ENV, SOCKET_PATH_MAX, STATE_DIR_ENV, Source,
+};
+use reef_client::paths::{Layered, PathsError, PlatformDefaults, platform_defaults};
+pub(crate) use reef_client::{machine_hostname, os_username};
+
 use crate::backend::{BackendChoice, OverlayConfig};
 use crate::logging::{DEFAULT_KEEP_DAYS, LOG_FILE_PREFIX, LogOptions};
 use crate::model::RepoId;
-
-/// Environment variable overriding the state directory.
-pub const STATE_DIR_ENV: &str = "REEF_STATE_DIR";
-/// Environment variable overriding the socket path.
-pub const SOCKET_ENV: &str = "REEF_SOCKET";
-/// Environment variable overriding the config file path.
-pub const CONFIG_ENV: &str = "REEF_CONFIG";
-
-/// The longest socket path accepted, in bytes. `sockaddr_un.sun_path` is 104
-/// bytes on macOS (108 on Linux) including the terminating NUL; the stricter
-/// limit applies on both platforms.
-pub const SOCKET_PATH_MAX: usize = 103;
 
 /// Placeholder for the repository id in `workspace.root`.
 pub const REPO_ID_PLACEHOLDER: &str = "<repo-id>";
@@ -146,49 +140,6 @@ pub struct Paths {
     pub logs: PathBuf,
     /// Per-repository state, `<state>/repos`.
     pub repos: PathBuf,
-}
-
-/// Paths given explicitly, which win over the environment.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PathOverrides {
-    /// The state directory.
-    pub state_dir: Option<PathBuf>,
-    /// The socket path.
-    pub socket: Option<PathBuf>,
-    /// The config file.
-    pub config_file: Option<PathBuf>,
-}
-
-/// The layer a configuration value came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Source {
-    /// The built-in default.
-    Default,
-    /// `config.toml`.
-    File,
-    /// An environment variable.
-    Env,
-    /// A command-line flag ([`PathOverrides`]).
-    Flag,
-}
-
-impl Source {
-    /// `default`, `file`, `env`, or `flag`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::File => "file",
-            Self::Env => "env",
-            Self::Flag => "flag",
-        }
-    }
-}
-
-impl fmt::Display for Source {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 /// `config.toml` as written, every absent key at its default. The `Option`
@@ -790,6 +741,10 @@ pub enum ConfigError {
         #[source]
         source: Box<toml::de::Error>,
     },
+    /// A path error [`reef_client::paths`] added after this daemon mapped
+    /// its variants.
+    #[error(transparent)]
+    Paths(PathsError),
     /// A value parsed but breaks a rule, such as `lease.default` above
     /// `lease.max`.
     #[error("invalid {key} in the configuration file {}: {reason}", path.display())]
@@ -812,6 +767,7 @@ impl Classify for ConfigError {
             | Self::UnknownKey { .. }
             | Self::Invalid { .. } => ErrorKind::InvalidArgument,
             Self::Missing { .. } => ErrorKind::NotFound,
+            Self::Paths(error) => error.kind(),
             Self::Io { source, .. } | Self::Read { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
                     ErrorKind::PermissionDenied
@@ -821,6 +777,43 @@ impl Classify for ConfigError {
             }
         }
     }
+}
+
+impl From<PathsError> for ConfigError {
+    fn from(error: PathsError) -> Self {
+        match error {
+            PathsError::NoHome => Self::NoHome,
+            PathsError::SocketPathTooLong { path, max } => Self::SocketPathTooLong { path, max },
+            PathsError::Io { path, source } => Self::Io { path, source },
+            PathsError::Read { path, source } => Self::Read { path, source },
+            PathsError::Missing { path, source_layer } => Self::Missing { path, source_layer },
+            PathsError::Parse { path, source } => Self::Parse { path, source },
+            // `PathsError` is non-exhaustive: a variant added later keeps its
+            // own message and kind until it is given one here.
+            other => Self::Paths(other),
+        }
+    }
+}
+
+/// The daemon's [`Paths`] from the settled ones, with the files the
+/// client never needs.
+fn paths_from(
+    layered: Layered,
+    daemon: &DaemonSection,
+) -> Result<(Paths, Source, Source), ConfigError> {
+    let settled = layered.finish(daemon.socket.as_deref(), daemon.pid_file.as_deref())?;
+    let state_dir = settled.state_dir;
+    let paths = Paths {
+        config_file: settled.config_file,
+        db: state_dir.join(DB_FILE),
+        lock: state_dir.join(LOCK_FILE),
+        pid: settled.pid,
+        logs: state_dir.join("logs"),
+        repos: state_dir.join("repos"),
+        socket: settled.socket,
+        state_dir,
+    };
+    Ok((paths, settled.socket_source, settled.pid_source))
 }
 
 impl Paths {
@@ -834,10 +827,10 @@ impl Paths {
     fn resolve_with(
         overrides: &PathOverrides,
         env: impl Fn(&str) -> Option<OsString>,
-        defaults: impl FnOnce() -> Result<PlatformDefaults, ConfigError>,
+        defaults: impl FnOnce() -> Result<PlatformDefaults, PathsError>,
     ) -> Result<Paths, ConfigError> {
         let layered = Layered::resolve(overrides, env, defaults)?;
-        Ok(layered.finish(&DaemonSection::default())?.0)
+        Ok(paths_from(layered, &DaemonSection::default())?.0)
     }
 
     /// Paths under `state_dir` alone, ignoring the environment: the socket
@@ -848,103 +841,12 @@ impl Paths {
             state_dir: Some(state_dir.to_owned()),
             ..PathOverrides::default()
         };
-        Self::resolve_with(&overrides, |_| None, || Err(ConfigError::NoHome))
+        Self::resolve_with(&overrides, |_| None, || Err(PathsError::NoHome))
     }
 
     /// The state directory of one repository, `<state>/repos/<repo-id>`.
     pub fn repo_dir(&self, id: RepoId) -> PathBuf {
         self.repos.join(id.to_string())
-    }
-}
-
-/// The paths settled before the config file is read: the file's location
-/// depends on them.
-struct Layered {
-    state_dir: PathBuf,
-    state_dir_source: Source,
-    config_file: PathBuf,
-    config_file_source: Source,
-    /// From a flag or the environment; the file's `daemon.socket` and the
-    /// default come later.
-    socket: Option<(PathBuf, Source)>,
-    runtime_dir: Option<PathBuf>,
-}
-
-impl Layered {
-    fn resolve(
-        overrides: &PathOverrides,
-        env: impl Fn(&str) -> Option<OsString>,
-        defaults: impl FnOnce() -> Result<PlatformDefaults, ConfigError>,
-    ) -> Result<Layered, ConfigError> {
-        let given = |field: &Option<PathBuf>, var: &str| -> Result<_, ConfigError> {
-            let (path, source) = if let Some(path) = field {
-                (path.clone(), Source::Flag)
-            } else if let Some(value) = env(var).filter(|v| !v.is_empty()) {
-                (PathBuf::from(value), Source::Env)
-            } else {
-                return Ok(None);
-            };
-            Ok(Some((absolute(&path)?, source)))
-        };
-        let state_dir = given(&overrides.state_dir, STATE_DIR_ENV)?;
-        let socket = given(&overrides.socket, SOCKET_ENV)?;
-        let config_file = given(&overrides.config_file, CONFIG_ENV)?;
-
-        let (state_dir, state_dir_source, runtime_dir) = if let Some((dir, source)) = state_dir {
-            (dir, source, None)
-        } else {
-            let defaults = defaults()?;
-            (defaults.state_dir, Source::Default, defaults.runtime_dir)
-        };
-        let (config_file, config_file_source) =
-            config_file.unwrap_or_else(|| (state_dir.join("config.toml"), Source::Default));
-        Ok(Layered {
-            state_dir,
-            state_dir_source,
-            config_file,
-            config_file_source,
-            socket,
-            runtime_dir,
-        })
-    }
-
-    /// The final paths with the file's `[daemon]` section applied, and the
-    /// sources of `daemon.socket` and `daemon.pid_file`.
-    fn finish(self, daemon: &DaemonSection) -> Result<(Paths, Source, Source), ConfigError> {
-        let state_dir = self.state_dir;
-        // `join` keeps an absolute path as it is.
-        let (socket, socket_source) = match (self.socket, &daemon.socket) {
-            (Some(given), _) => given,
-            (None, Some(path)) => (state_dir.join(path), Source::File),
-            (None, None) => {
-                let socket = match self.runtime_dir {
-                    Some(runtime) => runtime.join("reef").join("daemon.sock"),
-                    None => state_dir.join("daemon.sock"),
-                };
-                (socket, Source::Default)
-            }
-        };
-        if socket.as_os_str().len() > SOCKET_PATH_MAX {
-            return Err(ConfigError::SocketPathTooLong {
-                path: socket,
-                max: SOCKET_PATH_MAX,
-            });
-        }
-        let (pid, pid_source) = match &daemon.pid_file {
-            Some(path) => (state_dir.join(path), Source::File),
-            None => (state_dir.join("daemon.pid"), Source::Default),
-        };
-        let paths = Paths {
-            config_file: self.config_file,
-            db: state_dir.join(DB_FILE),
-            lock: state_dir.join(LOCK_FILE),
-            pid,
-            logs: state_dir.join("logs"),
-            repos: state_dir.join("repos"),
-            socket,
-            state_dir,
-        };
-        Ok((paths, socket_source, pid_source))
     }
 }
 
@@ -958,7 +860,7 @@ impl Config {
     fn load_with(
         overrides: &PathOverrides,
         env: impl Fn(&str) -> Option<OsString>,
-        defaults: impl FnOnce() -> Result<PlatformDefaults, ConfigError>,
+        defaults: impl FnOnce() -> Result<PlatformDefaults, PathsError>,
     ) -> Result<Config, ConfigError> {
         let layered = Layered::resolve(overrides, env, defaults)?;
         let path = layered.config_file.clone();
@@ -980,7 +882,7 @@ impl Config {
             config_file: layered.config_file_source,
             config_file_read: read,
         };
-        let (paths, socket_source, pid_source) = layered.finish(&file.daemon)?;
+        let (paths, socket_source, pid_source) = paths_from(layered, &file.daemon)?;
         let mut sources = default_sources();
         for key in file_keys {
             sources.insert(key, Source::File);
@@ -1518,62 +1420,6 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
         }),
         None => Ok(()),
     }
-}
-
-/// The machine's full hostname, or `localhost` if it has none.
-pub(crate) fn machine_hostname() -> String {
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|name| name.into_string().ok())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "localhost".to_owned())
-}
-
-/// The name of the user the process runs as: the password database entry,
-/// else `$USER`, else the numeric uid.
-pub(crate) fn os_username() -> String {
-    let uid = nix::unistd::getuid();
-    nix::unistd::User::from_uid(uid)
-        .ok()
-        .flatten()
-        .map(|user| user.name)
-        .or_else(|| std::env::var("USER").ok().filter(|name| !name.is_empty()))
-        .unwrap_or_else(|| uid.to_string())
-}
-
-struct PlatformDefaults {
-    state_dir: PathBuf,
-    runtime_dir: Option<PathBuf>,
-}
-
-#[cfg(target_os = "macos")]
-fn platform_defaults() -> Result<PlatformDefaults, ConfigError> {
-    use etcetera::base_strategy::{Apple, BaseStrategy as _};
-    let apple = Apple::new().map_err(|_| ConfigError::NoHome)?;
-    Ok(PlatformDefaults {
-        state_dir: apple.data_dir().join("reef"),
-        runtime_dir: None,
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_defaults() -> Result<PlatformDefaults, ConfigError> {
-    use etcetera::base_strategy::{BaseStrategy as _, Xdg};
-    let xdg = Xdg::new().map_err(|_| ConfigError::NoHome)?;
-    let state = xdg
-        .state_dir()
-        .unwrap_or_else(|| xdg.home_dir().join(".local/state"));
-    Ok(PlatformDefaults {
-        state_dir: state.join("reef"),
-        runtime_dir: xdg.runtime_dir(),
-    })
-}
-
-fn absolute(path: &Path) -> Result<PathBuf, ConfigError> {
-    std::path::absolute(path).map_err(|source| ConfigError::Io {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 #[cfg(test)]

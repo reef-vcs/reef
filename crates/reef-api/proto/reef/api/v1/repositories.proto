@@ -1,7 +1,9 @@
 // Registering the repositories workspaces are created in.
 //
 // `repo` accepts a repo id, a unique id prefix of four or more hex
-// characters, or an absolute path inside a registered root.
+// characters, or an absolute path inside a registered root. One that names
+// none is NOT_FOUND, reason REPOSITORY_NOT_FOUND (metadata `repo`), or for
+// a path, REPOSITORY_NOT_REGISTERED (metadata `path`).
 syntax = "proto3";
 
 package reef.api.v1;

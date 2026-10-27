@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use reef_api::v1::IfNotJj;
-use reef_daemon::client::json::Repository;
-use reef_lib::error::ErrorKind;
+use reef_client::json::Repository;
+use reef_error::ErrorKind;
 
 use super::{CliError, Ctx, REGISTER_TIMEOUT, RepoArg, absolute};
 

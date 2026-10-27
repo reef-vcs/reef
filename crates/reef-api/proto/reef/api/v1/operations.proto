@@ -1,7 +1,9 @@
 // The operation log: every change to a repository is one jj operation.
 //
 // `repo` accepts a repo id, a unique id prefix of four or more hex
-// characters, or an absolute path inside a registered root. Operation ids
+// characters, or an absolute path inside a registered root. One that names
+// none is NOT_FOUND, reason REPOSITORY_NOT_FOUND (metadata `repo`), or for
+// a path, REPOSITORY_NOT_REGISTERED (metadata `path`). Operation ids
 // are full lowercase hex; a request may name one by a unique prefix.
 //
 // Every RPC that records an operation reads the `reef-agent` request

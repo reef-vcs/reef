@@ -31,6 +31,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tonic::{Request, Response, Status};
 
+mod common;
+
 const SOCKET_ENV: &str = "FAKE_V0_SOCKET";
 const STATE_ENV: &str = "FAKE_V0_STATE";
 const ACTIVE_ENV: &str = "FAKE_V0_ACTIVE";
@@ -167,8 +169,8 @@ impl Drop for FakeDaemon {
 }
 
 /// A short state directory (for the socket path), and a copy of `reef`
-/// with no `reef-daemon` beside it or on `PATH`, so a restarted daemon is
-/// this build's `reef daemon run`.
+/// with this build's `reef-daemon` beside it and nothing on `PATH`, so a
+/// restarted daemon is this build's.
 struct Setup {
     tmp: TempDir,
 }
@@ -185,6 +187,7 @@ impl Setup {
         let exe = bin.join("reef");
         std::fs::copy(env!("CARGO_BIN_EXE_reef"), &exe).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::daemon_beside(&bin);
         Setup { tmp }
     }
 
