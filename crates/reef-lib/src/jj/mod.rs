@@ -16,6 +16,7 @@ pub const JJ_LIB_VERSION: &str = "0.46.0";
 
 pub mod diff;
 pub mod effects;
+pub mod files;
 pub mod gc;
 pub mod git;
 pub mod ignore;

@@ -462,10 +462,12 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 3] = [
+const WRITES: [(&str, OpKind); 5] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
+    (EDIT_PREFIX, OpKind::Edit),
+    (NEW_CHANGE_PREFIX, OpKind::Edit),
 ];
 /// The description of a describe, before the commit id it rewrote.
 pub const DESCRIBE_PREFIX: &str = "reef: describe commit ";
@@ -473,6 +475,12 @@ pub const DESCRIBE_PREFIX: &str = "reef: describe commit ";
 pub const ABANDON_PREFIX: &str = "reef: abandon commit ";
 /// The description of an undo, before the operation id it reverted.
 pub const REVERT_PREFIX: &str = "reef: undo operation ";
+/// The description of an edit that rewrote a commit (R2.04), before the
+/// commit id it rewrote.
+pub const EDIT_PREFIX: &str = "reef: edit commit ";
+/// The description of an edit that created a change (R2.04), before its
+/// parent's commit id.
+pub const NEW_CHANGE_PREFIX: &str = "reef: new change on ";
 /// Every description Reef writes starts so, except jj's own texts.
 const REEF_PREFIX: &str = "reef: ";
 
@@ -851,6 +859,8 @@ mod tests {
             (format!("{DESCRIBE_PREFIX}{commit}"), OpKind::Describe),
             (format!("{ABANDON_PREFIX}{commit}"), OpKind::Abandon),
             (format!("{REVERT_PREFIX}{commit}"), OpKind::Undo),
+            (format!("{EDIT_PREFIX}{commit}"), OpKind::Edit),
+            (format!("{NEW_CHANGE_PREFIX}{commit}"), OpKind::Edit),
         ] {
             let mut op = entry(&description, false);
             op.workspace = None;

@@ -208,7 +208,7 @@ jobs:
       # workspaces. R2.02: a status read that snapshots a kernel overlay workspace first. R2.03: an
       # abandon whose follow-up checks the new tree out into an overlay's upper layer.
       - name: Kernel overlayfs and store bind mounts (root)
-        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/)) | test(/another_user|owned_root|sudo_user|root_daemon/) | binary(hostile_repo) | test(/before_the_watch_attaches|during_a_pending_attach|attach_inline/) | (binary(reads) & test(/status_snapshots_first/)) | (binary(writes) & test(/abandon_change/))'
+        run: sudo -E env "PATH=$PATH" cargo nextest run -p reef-daemon --features privileged-tests -E 'test(/overlay/) | binary(stores) | binary(disk_full) | (binary(integration) & test(/restart|store_shared/)) | test(/another_user|owned_root|sudo_user|root_daemon/) | binary(hostile_repo) | test(/before_the_watch_attaches|during_a_pending_attach|attach_inline/) | (binary(reads) & test(/status_snapshots_first/)) | (binary(writes) & test(/abandon_change/)) | (binary(files) & test(/edit_files_moves_workspaces/))'
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target

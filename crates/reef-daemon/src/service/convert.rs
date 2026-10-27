@@ -473,7 +473,7 @@ pub(super) fn log_entry(info: &ChangeInfo, node: &LogNode) -> v1::LogEntry {
     }
 }
 
-fn entry_type(kind: Option<EntryKind>) -> v1::EntryType {
+pub(super) fn entry_type(kind: Option<EntryKind>) -> v1::EntryType {
     match kind {
         None => v1::EntryType::Unspecified,
         Some(EntryKind::File) => v1::EntryType::File,

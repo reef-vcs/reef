@@ -22,6 +22,7 @@ The read RPCs (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ListOperatio
 | `reef: describe commit <commit id>` | `DESCRIBE` |
 | `reef: abandon commit <commit id>` | `ABANDON` |
 | `reef: undo operation <operation id>`, or `undo: restore to operation <id>` | `UNDO` |
+| `reef: edit commit <commit id>`, `reef: new change on <commit id>` | `EDIT` |
 | any other `reef: ` description | `OTHER` |
 | anything else, including jj's own `import git head` | `EXTERNAL` |
 
@@ -35,7 +36,9 @@ Since R2.03 every operation Reef records carries the attributes, so the descript
 | a move's pointer, and its roll-back | `move-workspace` | | the workspace | the request's `reef-agent`, else the owner |
 | a ref import before resolving a revision | `import-refs` | | the workspace being created, moved or written for | as that request |
 | `import git head` at registration, a rematerialization | `other` | | the workspace (rematerialization) | the request's `reef-agent` (registration), else the owner |
-| describe, abandon, undo | `describe`, `abandon`, `undo` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
+| describe, abandon, undo, edit | `describe`, `abandon`, `undo`, `edit` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
 | a store build's scratch create and release | as create and release | | the scratch workspace | the request's `reef-agent`, else `reef-store-build` |
 
 `DescribeChange`, `AbandonChange` and `UndoOperation` run through `Manager::rewrite` (`workspace/rewrite.rs`): plan on the repository thread, then take the repository's create lock shared and each moved workspace's scan lock in id order (as GC does), snapshot those workspaces one at a time, descendants first (abandon and undo), write one operation, and have each moved workspace take its new commit.
+
+`FileService` (`service/files.rs`, [ADR 0032](../../docs/adr/0032-files-without-a-workspace.md)) reads files and lists directories at a revision on the read pool, and `EditFiles` is a fourth write through `Manager::rewrite`: the edits (`reef_lib::jj::files`) are checked as a dry run when the write is planned, workspaces on the edited commit and its descendants (on the parent, for a new change) are snapshotted, the edits are applied to the tree and recorded as one commit, and workspaces on a rewritten commit take the new tree through jj's checkout. No directory is created for the edit itself.

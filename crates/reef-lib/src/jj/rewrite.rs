@@ -173,6 +173,53 @@ pub async fn writable(
     })
 }
 
+/// Resolves `revision` in `repo` as the parent of a new change (R2.04):
+/// [`writable`] without the immutability check, since building on trunk
+/// is the usual case. A hidden commit is refused: building on it would make
+/// it visible again. `workspaces` are those whose working-copy commit is
+/// the commit itself, sorted.
+pub async fn buildable(
+    repo: &ReadonlyRepo,
+    revision: &str,
+    expected: Option<&CommitIdHex>,
+    scope: &RevsetScope<'_>,
+) -> Result<Writable, RewriteError> {
+    let resolved = revset::resolve_revision(repo, revision, scope).await?;
+    if let Some(expected) = expected
+        && *expected != resolved.commit_id
+    {
+        return Err(RewriteError::Mismatch {
+            expected: expected.clone(),
+            actual: resolved.commit_id,
+        });
+    }
+    let info = Describer::new(repo, scope)?
+        .describe(&resolved.commit_id)
+        .await?;
+    if info.hidden {
+        return Err(RewriteError::Hidden(resolved.commit_id));
+    }
+    let workspaces = workspaces_at(repo, &resolved.commit_id);
+    Ok(Writable {
+        commit_id: resolved.commit_id,
+        change_id: resolved.change_id,
+        divergent: info.divergent,
+        workspaces,
+    })
+}
+
+/// The jj workspaces whose working-copy commit is `commit` itself, sorted
+/// (the view keeps them sorted).
+pub fn workspaces_at(repo: &ReadonlyRepo, commit: &CommitIdHex) -> Vec<String> {
+    let id = commit.to_id();
+    repo.view()
+        .wc_commit_ids()
+        .iter()
+        .filter(|(_, wc)| **wc == id)
+        .map(|(name, _)| name.as_str().to_owned())
+        .collect()
+}
+
 /// The jj workspaces whose working-copy commit is `commit` or descends
 /// from it, sorted (the view keeps them sorted).
 async fn workspaces_on_descendants(

@@ -240,7 +240,8 @@ pub fn check_paths(paths: &[String]) -> Result<Vec<RepoPathBuf>, PathError> {
         .collect()
 }
 
-fn entry_kind(value: &MergedTreeValue) -> Option<EntryKind> {
+/// What `value` holds; `None` when absent.
+pub(crate) fn entry_kind(value: &MergedTreeValue) -> Option<EntryKind> {
     if value.is_absent() {
         return None;
     }
@@ -316,6 +317,18 @@ async fn read_side(
         bytes,
         binary,
         too_large,
+    })
+}
+
+/// How a conflicted side is written out: jj's diff-style markers, with the
+/// merge options from `settings`. `ReadFile` uses the same (R2.04).
+pub(crate) fn materialize_options(
+    settings: &jj_lib::settings::UserSettings,
+) -> Result<ConflictMaterializeOptions, DiffError> {
+    Ok(ConflictMaterializeOptions {
+        marker_style: ConflictMarkerStyle::Diff,
+        marker_len: None,
+        merge: MergeOptions::from_settings(settings).map_err(DiffError::Settings)?,
     })
 }
 
@@ -525,11 +538,7 @@ pub async fn diff_page(
             copy_records(repo, commit.id(), to_commit.id(), &mut copies).await?;
         }
     }
-    let materialize = ConflictMaterializeOptions {
-        marker_style: ConflictMarkerStyle::Diff,
-        marker_len: None,
-        merge: MergeOptions::from_settings(repo.settings()).map_err(DiffError::Settings)?,
-    };
+    let materialize = materialize_options(repo.settings())?;
     let read = match options.format {
         DiffFormat::Summary => None,
         DiffFormat::Stat | DiffFormat::Hunks => Some(options.max_file_bytes),

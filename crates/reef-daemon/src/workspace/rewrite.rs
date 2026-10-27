@@ -1,14 +1,22 @@
-//! [`Manager::rewrite`]: describe, abandon and undo (R2.03, ADR 0031), with
-//! the live workspaces they move held still around the write.
+//! [`Manager::rewrite`]: describe, abandon and undo (R2.03, ADR 0031), and
+//! file edits (R2.04, ADR 0032), with the live workspaces they move held
+//! still around the write.
 //!
+//! 0. Check what needs no repository: an edit's paths and shape, a
+//!    description.
 //! 1. Plan, on the repository thread: resolve and check the request, and
-//!    list the jj workspaces whose working copy the write would move.
-//!    Nothing is written (a colocated repository's ref import aside).
+//!    list the jj workspaces whose working copy the write would move (for
+//!    an edit that creates a change, those on its parent). An edit is
+//!    applied as a dry run against the tree as it is now, so a request
+//!    wrong against it records nothing, unless a workspace sits on the
+//!    commit itself: its snapshot at step 3 may change that tree, and step
+//!    4 decides. Nothing is written (a colocated repository's ref import
+//!    aside).
 //! 2. Lock: the repository's create lock shared (so GC and a forget wait,
 //!    as for a move), then, for each active Reef workspace among them (and
 //!    an undo's named workspace), automatic snapshots paused and its scan
 //!    lock taken, in workspace id order, as GC does.
-//! 3. Snapshot (abandon and undo): each locked workspace, so no
+//! 3. Snapshot (abandon, undo and edit): each locked workspace, so no
 //!    unsnapshotted edit is overwritten. A failure stops the write before
 //!    anything is written. Describe changes no tree and takes none.
 //! 4. Write, on the repository thread: resolve and check again, then one
@@ -27,6 +35,7 @@ use std::sync::Arc;
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
+use reef_lib::jj::files;
 use reef_lib::jj::log::{ChangeInfo, Describer};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError, WorkingCopy};
@@ -65,6 +74,36 @@ pub enum Write {
         /// A full operation id or a unique prefix.
         operation: String,
     },
+    /// Edit files without a workspace (R2.04).
+    Edit {
+        /// The commit to rewrite, or to build a new change on.
+        target: EditTarget,
+        /// As for `Describe`.
+        expected: String,
+        /// The edits, in order; shared, since a write is cloned into each
+        /// step.
+        edits: Arc<[files::Edit]>,
+        /// The new description; `None` keeps the target's (empty for a new
+        /// change).
+        description: Option<String>,
+    },
+}
+
+/// What an edit writes to.
+#[derive(Clone, Debug)]
+pub enum EditTarget {
+    /// Rewrite the commit this revision names, keeping its change id.
+    Rewrite(String),
+    /// Create a new change on the commit this revision names.
+    NewOn(String),
+}
+
+impl EditTarget {
+    fn revision(&self) -> &str {
+        match self {
+            EditTarget::Rewrite(revision) | EditTarget::NewOn(revision) => revision,
+        }
+    }
 }
 
 impl Write {
@@ -73,6 +112,7 @@ impl Write {
             Write::Describe { .. } => OpKind::Describe,
             Write::Abandon { .. } => OpKind::Abandon,
             Write::Undo { .. } => OpKind::Undo,
+            Write::Edit { .. } => OpKind::Edit,
         }
     }
 }
@@ -100,8 +140,8 @@ pub struct Rewritten {
     /// For an undo, the snapshot of the named workspace taken first, if
     /// it recorded an operation.
     pub snapshot_op_id: Option<String>,
-    /// For a describe, the change afterwards (the current commit when the
-    /// description was already that).
+    /// For a describe or an edit, the change afterwards (the current commit
+    /// when nothing changed).
     pub change: Option<ChangeInfo>,
     /// For an abandon, the commit abandoned.
     pub abandoned: Option<CommitIdHex>,
@@ -150,9 +190,8 @@ impl Manager {
             agent,
             write,
         } = request;
-        if let Write::Describe { description, .. } = &write {
-            rewrite::normalize_description(description)?;
-        }
+        // 0.
+        check(&write)?;
         let named = workspace.map(|id| self.active_entry(id)).transpose()?;
         // The write's own operation falls back to the named workspace's
         // owner; each snapshot falls back to its own workspace's.
@@ -454,6 +493,25 @@ struct Target {
     undone: Option<OperationIdHex>,
 }
 
+/// Step 0: what a write can be refused for before it reads anything.
+fn check(write: &Write) -> Result<(), ManagerError> {
+    match write {
+        Write::Describe { description, .. } => {
+            rewrite::normalize_description(description)?;
+        }
+        Write::Edit {
+            edits, description, ..
+        } => {
+            if let Some(description) = description {
+                rewrite::normalize_description(description)?;
+            }
+            files::check_edits(edits)?;
+        }
+        Write::Abandon { .. } | Write::Undo { .. } => {}
+    }
+    Ok(())
+}
+
 /// `(before, after)` of every working copy whose commit changed.
 fn moved_copies<'a>(
     before: &'a [WorkingCopy],
@@ -520,24 +578,75 @@ async fn plan(
                 undone: Some(op_id),
             })
         }
+        Write::Edit {
+            target,
+            expected,
+            edits,
+            ..
+        } => {
+            if target.revision().trim().is_empty() {
+                return Err(RevisionError::Required.into());
+            }
+            let expected = rewrite::parse_expected(&head.repo.readonly(), expected)?;
+            refresh_for_resolve(head, &import_meta(workspace, agent)).await?;
+            let repo = head.repo.readonly();
+            let scope = scope(head, jj_name);
+            let found = match target {
+                EditTarget::Rewrite(revision) => {
+                    rewrite::writable(&repo, revision, expected.as_ref(), &scope).await?
+                }
+                EditTarget::NewOn(revision) => {
+                    rewrite::buildable(&repo, revision, expected.as_ref(), &scope).await?
+                }
+            };
+            if let Err(error) = files::dry_run(&repo, &found.commit_id, edits).await {
+                // A Reef workspace on the commit itself is snapshotted at
+                // step 3, which can change the tree the edits apply to: an
+                // edit of `@` sees the files on disk, as a read of `@`
+                // does. Step 4 decides then. Otherwise the refusal stands
+                // before anything is recorded.
+                let on_commit = rewrite::workspaces_at(&repo, &found.commit_id);
+                let snapshotted = on_commit.iter().any(|name| name.starts_with("reef-"));
+                if !snapshotted || !matches!(error, files::EditError::Edit { .. }) {
+                    return Err(error.into());
+                }
+            }
+            Ok(Planned {
+                workspaces: rewrite::descendants_first(&repo, &found.workspaces).await?,
+                undone: None,
+            })
+        }
     }
 }
 
-/// Resolves a describe's or abandon's revision again at step 4. A commit
-/// step 3's snapshot rewrote (the caller named a working-copy commit by id
-/// and its workspace had edits) is followed to its new commit; with an
-/// expected id, that is a mismatch naming the new commit.
+/// How a revision is checked at step 4.
+#[derive(Clone, Copy)]
+enum Check {
+    /// A commit to rewrite: [`rewrite::writable`].
+    Writable,
+    /// A new change's parent: [`rewrite::buildable`].
+    Buildable,
+}
+
+/// Resolves a write's revision again at step 4. A commit step 3's snapshot
+/// rewrote (the caller named a working-copy commit by id and its workspace
+/// had edits) is followed to its new commit; with an expected id, that is a
+/// mismatch naming the new commit.
 async fn resolve_target(
     head: &RepoHead,
     repo: &ReadonlyRepo,
-    revision: &str,
+    (revision, check): (&str, Check),
     expected: &str,
     target: &Target,
 ) -> Result<rewrite::Writable, ManagerError> {
     let jj_name = target.workspace.map(|id| id.jj_workspace_name());
     let scope = scope(head, jj_name.as_deref());
     let expected = rewrite::parse_expected(repo, expected)?;
-    let found = rewrite::writable(repo, revision, expected.as_ref(), &scope).await;
+    let resolve = async |revision: &str, expected: Option<&CommitIdHex>| match check {
+        Check::Writable => rewrite::writable(repo, revision, expected, &scope).await,
+        Check::Buildable => rewrite::buildable(repo, revision, expected, &scope).await,
+    };
+    let found = resolve(revision, expected.as_ref()).await;
     let Err(RewriteError::Hidden(old)) = &found else {
         return Ok(found?);
     };
@@ -551,7 +660,52 @@ async fn resolve_target(
         }
         .into());
     }
-    Ok(rewrite::writable(repo, new.as_str(), None, &scope).await?)
+    Ok(resolve(new.as_str(), None).await?)
+}
+
+/// Step 4 for an edit: resolve the target again, then rewrite it or build
+/// a new change on it. Returns the operation (none when nothing changed)
+/// and the commit the change is at afterwards.
+async fn commit_edit(
+    head: &mut RepoHead,
+    repo: &ReadonlyRepo,
+    edit_target: &EditTarget,
+    expected: &str,
+    (edits, description): (&[files::Edit], Option<&str>),
+    (target, meta): (&Target, &mut OpMeta),
+) -> Result<(Option<OperationIdHex>, CommitIdHex), ManagerError> {
+    let check = match edit_target {
+        EditTarget::Rewrite(_) => Check::Writable,
+        EditTarget::NewOn(_) => Check::Buildable,
+    };
+    let found = resolve_target(
+        head,
+        repo,
+        (edit_target.revision(), check),
+        expected,
+        target,
+    )
+    .await?;
+    let edited = match edit_target {
+        EditTarget::Rewrite(_) => {
+            meta.description = format!("{}{}", oplog::EDIT_PREFIX, found.commit_id);
+            head.repo
+                .edit_commit(&found.commit_id, edits, description, meta)
+                .await?
+        }
+        EditTarget::NewOn(_) => {
+            meta.description = format!("{}{}", oplog::NEW_CHANGE_PREFIX, found.commit_id);
+            Some(
+                head.repo
+                    .new_change_on(&found.commit_id, edits, description, meta)
+                    .await?,
+            )
+        }
+    };
+    Ok(match edited {
+        Some(edited) => (Some(edited.op_id), edited.commit_id),
+        None => (None, found.commit_id),
+    })
 }
 
 /// Step 4, on the repository thread: resolve and check again, then write.
@@ -573,20 +727,22 @@ async fn commit(
         before,
         after: Vec::new(),
     };
-    let mut described_commit = None;
+    // The commit a describe or an edit leaves, for the response's change.
+    let mut changed_commit = None;
     match write {
         Write::Describe {
             revision,
             description,
             expected,
         } => {
-            let found = resolve_target(head, &repo, revision, expected, &target).await?;
+            let found =
+                resolve_target(head, &repo, (revision, Check::Writable), expected, &target).await?;
             meta.description = format!("{}{}", oplog::DESCRIBE_PREFIX, found.commit_id);
             let described = head
                 .repo
                 .describe_commit(&found.commit_id, description, &meta)
                 .await?;
-            described_commit = Some(
+            changed_commit = Some(
                 described
                     .as_ref()
                     .map_or(&found.commit_id, |described| &described.commit_id)
@@ -595,7 +751,8 @@ async fn commit(
             written.op_id = described.map(|described| described.op_id);
         }
         Write::Abandon { revision, expected } => {
-            let found = resolve_target(head, &repo, revision, expected, &target).await?;
+            let found =
+                resolve_target(head, &repo, (revision, Check::Writable), expected, &target).await?;
             meta.description = format!("{}{}", oplog::ABANDON_PREFIX, found.commit_id);
             let abandoned = head.repo.abandon_commit(&found.commit_id, &meta).await?;
             written.op_id = Some(abandoned.op_id);
@@ -609,9 +766,27 @@ async fn commit(
             meta.description = format!("{}{undone}", oplog::REVERT_PREFIX);
             written.op_id = head.repo.revert_operation(&undone, &meta).await?;
         }
+        Write::Edit {
+            target: edit_target,
+            expected,
+            edits,
+            description,
+        } => {
+            let (op_id, commit) = commit_edit(
+                head,
+                &repo,
+                edit_target,
+                expected,
+                (edits, description.as_deref()),
+                (&target, &mut meta),
+            )
+            .await?;
+            changed_commit = Some(commit);
+            written.op_id = op_id;
+        }
     }
     let repo = head.repo.readonly();
-    if let Some(commit) = described_commit {
+    if let Some(commit) = changed_commit {
         let jj_name = target.workspace.map(|id| id.jj_workspace_name());
         let described = match Describer::new(&repo, &scope(head, jj_name.as_deref())) {
             Ok(describer) => describer.describe(&commit).await,

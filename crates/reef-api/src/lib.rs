@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 2;
+pub const API_REVISION: u32 = 3;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -56,6 +56,8 @@ pub const API_DIGESTS: &[&str] = &[
     // R2.02: effect counts, hidden commits, conflicted bookmarks, the
     // conflicted path count, and the diff content flags.
     "72a37ae68cf29402c100f1b917478aca6241278993a21c401c93b04214c3c8c3",
+    // R2.04: `FileEdit.copy_from`.
+    "6a6d33729c4704d856b04a54c5ec19d479810cfe830b5ab0c0dae2749c7a5751",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -143,8 +145,9 @@ pub mod error {
     pub const OPERATION_NOT_FOUND: &str = "OPERATION_NOT_FOUND";
     /// An operation id prefix shared by several. Metadata: `operation_id`.
     pub const AMBIGUOUS_OPERATION_ID: &str = "AMBIGUOUS_OPERATION_ID";
-    /// A path that is not repository-relative and `/`-separated. Metadata:
-    /// `path`.
+    /// A path that is not repository-relative and `/`-separated, or, for an
+    /// edit, names `.git` or `.jj` (R2.04). Metadata: `path`, and
+    /// `edit_index` when the path is an edit's.
     pub const INVALID_PATH: &str = "INVALID_PATH";
     /// A change id filter that is not a hex or reverse-hex prefix.
     /// Metadata: `change`.
@@ -176,6 +179,36 @@ pub mod error {
     /// Something the operation changed has changed again since, so it
     /// cannot be undone exactly. Metadata: `operation_id`.
     pub const OPERATION_SUPERSEDED: &str = "OPERATION_SUPERSEDED";
+    /// Nothing is at the path (R2.04). Metadata: `path`, and `commit_id`
+    /// for a read or `edit_index` for an edit.
+    pub const PATH_NOT_FOUND: &str = "PATH_NOT_FOUND";
+    /// A directory or submodule where a file is read, or something an edit
+    /// cannot write in place. Metadata: `path`, `type` (the `EntryType`
+    /// value's name), and `commit_id` for a read or `edit_index` for an
+    /// edit.
+    pub const NOT_A_FILE: &str = "NOT_A_FILE";
+    /// Something other than a directory where one is listed, or an edit's
+    /// ancestor that is not one. Metadata: `path`, `type`, and `commit_id`
+    /// for a listing or `edit_index` for an edit.
+    pub const NOT_A_DIRECTORY: &str = "NOT_A_DIRECTORY";
+    /// A replacement's `old_text` is not in the file. Metadata: `path`,
+    /// `edit_index`.
+    pub const TEXT_NOT_FOUND: &str = "TEXT_NOT_FOUND";
+    /// A replacement's `old_text` occurs more than once and `all` is not
+    /// set. Metadata: `path`, `edit_index`, `occurrences`.
+    pub const TEXT_NOT_UNIQUE: &str = "TEXT_NOT_UNIQUE";
+    /// A file larger than a text replacement reads or writes (16 MiB), or
+    /// edits holding more than 64 MiB of content in all. Metadata: `path`,
+    /// `edit_index`, `size`.
+    pub const FILE_TOO_LARGE: &str = "FILE_TOO_LARGE";
+    /// An edit at or under a shared store's mount in `reef.toml`. Metadata:
+    /// `path`, `mount`, `edit_index`.
+    pub const STORE_MOUNT_PATH: &str = "STORE_MOUNT_PATH";
+    /// A malformed edit: no action and no `executable`, an empty
+    /// `old_text`, `executable` with a delete, `copy_from` naming its own
+    /// path, or more than 1,000 edits. Metadata: `edit_index`, except for
+    /// the count.
+    pub const INVALID_EDIT: &str = "INVALID_EDIT";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
