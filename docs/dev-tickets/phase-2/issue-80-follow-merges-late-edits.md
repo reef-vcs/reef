@@ -201,14 +201,14 @@ just ci
 ## Out of scope
 
 - Carrying late edits across a move to another change (open question 1), and abandoning the plain abandon's empty commit when arm 4 moves the workspace back.
-- The general case of a workspace on a descendant of another busy workspace's change: an ordinary snapshot of the ancestor rebases the descendant's commit, and the descendant's edits then take arm 4. Only Reef's writes carry here; a follow-up issue should decide whether rebased descendants carry too.
+- The general case of a workspace on a descendant of another busy workspace's change: an ordinary snapshot of the ancestor rebases the descendant's commit, and the descendant's edits then take arm 4. Only Reef's writes carry here; #91 decides whether rebased descendants carry too.
 - Persisting carries across a restart; verifying files before jj's check-out overwrites them (upstream jj-lib's TODO).
 - Reporting the carried commit in a write's response (`EditFilesResponse.change` stays the write's own commit).
 
 ## Known limits
 
 - **An edit landing between the follow's scan and its check-out**, on a path the write changed or that conflicted, would be overwritten by the check-out: jj-lib checks nothing before writing (`local_working_copy.rs:2458`). Added in the implementation after review: the carried snapshot re-stats each file it would overwrite against stamps taken just after the scan, and fails into the re-merge carry (`ChangedAfterScan`) when one changed; what remains is the non-atomic gap around the re-stat, the adopt arm's size. Paths only the agent touches are never written by the check-out.
-- **A conflicted carry checked out but not saved** (a crash, or a failed save after the row moved) leaves markers the next scan reads as text (found in review; the adopt arm has the same gap).
+- **A conflicted carry checked out but not saved** (a crash, or a failed save after the row moved) leaves markers the next scan reads as text (found in review; the adopt arm has the same gap; #92).
 - **Undoing the write needs the carried snapshot undone first**: the write's working-copy move is superseded by the carried commit, so `UndoOperation` of the write is `OPERATION_SUPERSEDED` until that snapshot is undone, newest first, as for any snapshot after an edit (test 6).
 - **A descendant edited while its ancestor's carried follow runs** takes arm 4 at its next snapshot, since that follow rebases it after its own follow. Descendants-first order makes the window one follow.
 - **A restart between a write and the follow** drops carries; the workspace diverges as before.
