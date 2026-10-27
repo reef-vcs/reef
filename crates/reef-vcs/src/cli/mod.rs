@@ -1,5 +1,7 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
-//! through [`reef_client::Client`], except `config show`,
+//! through [`reef_client::Client`], the VCS commands (`status`, `log`,
+//! `show`, `diff`, `describe`, `abandon`, `undo`, `op`, `file`, `ws
+//! snapshot`; R2.27) included, except `config show`,
 //! `completions`, `guide`, `init` when it registers nothing (`--check`,
 //! `--print`, `--no-register`), `daemon run`, and `restore`, which is
 //! offline (R1.18). Output follows [`out`]'s
@@ -10,20 +12,29 @@
 //! `reef` alone, `reef here`, and names that are only ever added (aliases
 //! and unique prefixes resolve; nothing is renamed).
 
+mod advice;
 mod autostart;
 mod backup;
+mod changes;
 mod config;
 mod daemon;
+mod diff;
 mod env;
 mod error;
+mod file;
 mod guide;
 mod helper;
 mod here;
 mod init;
+mod log;
+mod op;
 mod out;
 mod render;
+mod render_vcs;
 mod repo;
 mod restore;
+mod scope;
+mod status;
 mod store;
 mod ws;
 mod ws_move;
@@ -191,6 +202,29 @@ enum Command {
     /// Show the workspace you are in, its lease, and what to do next.
     #[command(after_help = "Example: reef here -o json | jq .next")]
     Here(here::Args),
+    /// Show what the workspace changes, after a snapshot, and the repository's state.
+    Status(status::Args),
+    /// List changes, newest first.
+    #[command(after_help = "Example: reef log -r 'trunk()..@' --limit 20")]
+    Log(log::Args),
+    /// Show a change and the paths it changes.
+    Show(changes::ShowArgs),
+    /// Show the lines a change changes, or the difference between two revisions.
+    #[command(after_help = "Example: reef diff --from 'trunk()' --stat")]
+    Diff(diff::Args),
+    /// Set a change's description.
+    #[command(after_help = "Example: reef describe -m 'fix the parser'")]
+    Describe(changes::DescribeArgs),
+    /// Abandon a change: its descendants move onto its parents.
+    Abandon(changes::AbandonArgs),
+    /// Revert one operation (`reef op log` lists them).
+    Undo(op::UndoArgs),
+    /// List the operation log, or show one operation.
+    #[command(visible_alias = "operation", infer_subcommands = true)]
+    Op(op::Args),
+    /// Read files and list directories at any revision.
+    #[command(infer_subcommands = true)]
+    File(file::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -375,6 +409,8 @@ pub(crate) fn main() -> ExitCode {
         Command::Config(_) | Command::Guide(_) => global.output.or(Some(Output::Text)),
         Command::Ws(args) if args.is_run() => global.output.or(Some(Output::Text)),
         Command::Init(args) if args.prints_text() => global.output.or(Some(Output::Text)),
+        // `file read`'s bytes are its machine-readable form (R2.27).
+        Command::File(args) if args.is_read() => global.output.or(Some(Output::Text)),
         _ => global.output,
     };
     let out = Out::detect(flag, global.quiet);
@@ -434,7 +470,7 @@ async fn rerun(
     let Some(command) = command else {
         return Ok(ExitCode::SUCCESS);
     };
-    match run(global.clone(), command, out).await {
+    match Box::pin(run(global.clone(), command, out)).await {
         Err(CliError::Daemon(error @ ClientError::Incompatible { .. })) => {
             Err(old_daemon(&global, error))
         }
@@ -477,6 +513,15 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
         Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
+        Command::Status(args) => Box::pin(status::run(&connect(&global, out).await?, args)).await,
+        Command::Log(args) => log::run(&connect(&global, out).await?, args).await,
+        Command::Show(args) => changes::show(&connect(&global, out).await?, args).await,
+        Command::Diff(args) => diff::run(&connect(&global, out).await?, args).await,
+        Command::Describe(args) => changes::describe(&connect(&global, out).await?, args).await,
+        Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
+        Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
+        Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
+        Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global, out),
@@ -572,10 +617,10 @@ fn output_flag(args: &[OsString]) -> Option<Output> {
 
 /// Commands an agent guesses when it wants to know where it is, which
 /// Reef does not have: every agent in RX.07's scenario D tried `reef
-/// status` before `reef here`. A hint, never an alias: R2.02 owns `reef
-/// status` (ADR 0025). Unique prefixes of real commands (`st` for `store`)
-/// never get here.
-const ORIENTATION_GUESSES: &[&str] = &["status", "info", "where", "whereami", "whoami"];
+/// status` before `reef here`, and `status` became a command in R2.27. A
+/// hint, never an alias (ADR 0025). Unique prefixes of real commands never
+/// get here.
+const ORIENTATION_GUESSES: &[&str] = &["info", "where", "whereami", "whoami"];
 
 /// clap could not parse the command line: help and version print as clap
 /// prints them; anything else is a usage error, exit 2, with the JSON error
@@ -801,14 +846,17 @@ mod tests {
             assert_eq!(guess(&["reef", word]).as_deref(), Some(*word));
         }
         assert_eq!(
-            guess(&["reef", "-o", "json", "--state-dir", "/x", "status"]).as_deref(),
-            Some("status")
+            guess(&["reef", "-o", "json", "--state-dir", "/x", "whoami"]).as_deref(),
+            Some("whoami")
         );
-        assert_eq!(guess(&["reef", "ws", "status"]), None);
+        assert_eq!(guess(&["reef", "ws", "info"]), None);
         assert_eq!(guess(&["reef", "frobnicate"]), None);
         assert_eq!(guess(&["reef", "ws", "create", "--change"]), None);
-        // A unique prefix of a real command parses: `st` is `store`.
-        assert!(Cli::try_parse_from(args(&["reef", "st", "ls"])).is_ok());
+        // `status` is a command (R2.27), so `st` is no longer `store`'s
+        // unique prefix; `sto` is.
+        assert!(Cli::try_parse_from(args(&["reef", "status"])).is_ok());
+        assert!(Cli::try_parse_from(args(&["reef", "sto", "ls"])).is_ok());
+        assert!(Cli::try_parse_from(args(&["reef", "st", "ls"])).is_err());
     }
 
     #[test]

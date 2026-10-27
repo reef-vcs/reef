@@ -2924,6 +2924,7 @@ dependencies = [
 name = "reef-client"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "etcetera",
  "hyper-util",
  "nix",

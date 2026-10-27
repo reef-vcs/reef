@@ -8,10 +8,19 @@
 //! `fuse-overlayfs`, `stale-recovered`), so the JSON did not change with
 //! the API (R2.01); a value this build does not know prints as `unknown`.
 //!
+//! The VCS commands' types (R2.27) follow the same rules: keys are the v1
+//! field names, every object with a `change_id` also has
+//! `change_id_reverse_hex`, and a string the API leaves empty to mean
+//! "none" is `null` while free text such as a description stays a string.
+//!
 //! These are output types; nothing parses them back, except [`ErrorObject`]
 //! and [`Restored`], which the `reef-daemon` binary's offline commands
 //! print for `reef` to read (R2.05).
 
+use std::collections::BTreeMap;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use reef_api::v1;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -794,6 +803,832 @@ impl From<&v1::GcReport> for GcReport {
     }
 }
 
+// The VCS services' messages (R2.27): what `reef status`, `log`, `show`,
+// `diff`, `describe`, `abandon`, `undo`, `op`, `ws snapshot` and `file`
+// print. Enums print as lowercase names with `-` between words, an unknown
+// value as `unknown` and an unset one as `null`.
+
+/// An entry type's name: `file`, `executable`, `symlink`, `directory`,
+/// `conflict`, or `submodule`; `None` when unset.
+pub fn entry_type_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::EntryType::try_from(kind) {
+        Ok(v1::EntryType::Unspecified) => return None,
+        Ok(v1::EntryType::File) => "file",
+        Ok(v1::EntryType::Executable) => "executable",
+        Ok(v1::EntryType::Symlink) => "symlink",
+        Ok(v1::EntryType::Directory) => "directory",
+        Ok(v1::EntryType::Conflict) => "conflict",
+        Ok(v1::EntryType::Submodule) => "submodule",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A file change's name: `added`, `modified`, `deleted`, `renamed`, or
+/// `copied`; `None` when unset.
+pub fn file_change_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::FileChangeKind::try_from(kind) {
+        Ok(v1::FileChangeKind::Unspecified) => return None,
+        Ok(v1::FileChangeKind::Added) => "added",
+        Ok(v1::FileChangeKind::Modified) => "modified",
+        Ok(v1::FileChangeKind::Deleted) => "deleted",
+        Ok(v1::FileChangeKind::Renamed) => "renamed",
+        Ok(v1::FileChangeKind::Copied) => "copied",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Where a status's changed files came from: `snapshot`, `index`, `walk`,
+/// or `last-snapshot`; `None` when unset.
+pub fn status_source_name(source: i32) -> Option<&'static str> {
+    let name = match v1::StatusSource::try_from(source) {
+        Ok(v1::StatusSource::Unspecified) => return None,
+        Ok(v1::StatusSource::Snapshot) => "snapshot",
+        Ok(v1::StatusSource::Index) => "index",
+        Ok(v1::StatusSource::Walk) => "walk",
+        Ok(v1::StatusSource::LastSnapshot) => "last-snapshot",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A log graph edge's name: `direct`, `indirect`, or `missing`; `None`
+/// when unset.
+pub fn graph_edge_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::GraphEdgeKind::try_from(kind) {
+        Ok(v1::GraphEdgeKind::Unspecified) => return None,
+        Ok(v1::GraphEdgeKind::Direct) => "direct",
+        Ok(v1::GraphEdgeKind::Indirect) => "indirect",
+        Ok(v1::GraphEdgeKind::Missing) => "missing",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// What an operation did to a change: `created`, `rewritten`,
+/// `abandoned`, or `hidden`; `None` when unset.
+pub fn change_effect_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::ChangeEffectKind::try_from(kind) {
+        Ok(v1::ChangeEffectKind::Unspecified) => return None,
+        Ok(v1::ChangeEffectKind::Created) => "created",
+        Ok(v1::ChangeEffectKind::Rewritten) => "rewritten",
+        Ok(v1::ChangeEffectKind::Abandoned) => "abandoned",
+        Ok(v1::ChangeEffectKind::Hidden) => "hidden",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// An operation kind's name, its `reef.kind` attribute (`snapshot`,
+/// `create-workspace`, …; the daemon's `OpKind::as_str`); `None` when
+/// unset.
+pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::OperationKind::try_from(kind) {
+        Ok(v1::OperationKind::Unspecified) => return None,
+        Ok(v1::OperationKind::Snapshot) => "snapshot",
+        Ok(v1::OperationKind::CreateWorkspace) => "create-workspace",
+        Ok(v1::OperationKind::ReleaseWorkspace) => "release-workspace",
+        Ok(v1::OperationKind::MoveWorkspace) => "move-workspace",
+        Ok(v1::OperationKind::Describe) => "describe",
+        Ok(v1::OperationKind::Abandon) => "abandon",
+        Ok(v1::OperationKind::Undo) => "undo",
+        Ok(v1::OperationKind::Edit) => "edit",
+        Ok(v1::OperationKind::ImportRefs) => "import-refs",
+        Ok(v1::OperationKind::External) => "external",
+        Ok(v1::OperationKind::Other) => "other",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// [`snapshot_kind_name`], `None` when unset: an operation that is not a
+/// snapshot has no snapshot kind.
+pub fn snapshot_kind_opt(kind: i32) -> Option<&'static str> {
+    (kind != i32::from(v1::SnapshotKind::Unspecified)).then(|| snapshot_kind_name(kind))
+}
+
+fn name(value: Option<&'static str>) -> Option<String> {
+    value.map(str::to_owned)
+}
+
+/// An author or committer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Signature {
+    /// Their name.
+    pub name: String,
+    /// Their email.
+    pub email: String,
+    /// When.
+    pub at: Option<String>,
+}
+
+impl From<&v1::Signature> for Signature {
+    fn from(signature: &v1::Signature) -> Self {
+        Self {
+            name: signature.name.clone(),
+            email: signature.email.clone(),
+            at: time(signature.at.as_ref()),
+        }
+    }
+}
+
+/// One commit of a change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[expect(clippy::struct_excessive_bools, reason = "the v1 message's flags")]
+pub struct Change {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// The commit.
+    pub commit_id: String,
+    /// Its parents' commits.
+    pub parent_commit_ids: Vec<String>,
+    /// Its parents' changes, in hex.
+    pub parent_change_ids: Vec<String>,
+    /// Its description, verbatim.
+    pub description: String,
+    /// Its author.
+    pub author: Option<Signature>,
+    /// Its committer.
+    pub committer: Option<Signature>,
+    /// Its tree; `null` when the tree is conflicted.
+    pub tree_id: Option<String>,
+    /// Its tree is its parents'.
+    pub empty: bool,
+    /// Its tree has conflicts.
+    pub conflict: bool,
+    /// Its change has more than one visible commit.
+    pub divergent: bool,
+    /// It is in `immutable()`.
+    pub immutable: bool,
+    /// It is not visible at head.
+    pub hidden: bool,
+    /// Local bookmarks on it.
+    pub bookmarks: Vec<String>,
+    /// Tags on it.
+    pub tags: Vec<String>,
+    /// Reef workspaces whose working copy it is.
+    pub workspace_ids: Vec<String>,
+    /// jj workspaces whose working copy it is.
+    pub jj_workspaces: Vec<String>,
+}
+
+impl From<&v1::Change> for Change {
+    fn from(change: &v1::Change) -> Self {
+        Self {
+            change_id: change.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&change.change_id),
+            commit_id: change.commit_id.clone(),
+            parent_commit_ids: change.parent_commit_ids.clone(),
+            parent_change_ids: change.parent_change_ids.clone(),
+            description: change.description.clone(),
+            author: change.author.as_ref().map(Signature::from),
+            committer: change.committer.as_ref().map(Signature::from),
+            tree_id: text(&change.tree_id),
+            empty: change.empty,
+            conflict: change.conflict,
+            divergent: change.divergent,
+            immutable: change.immutable,
+            hidden: change.hidden,
+            bookmarks: change.bookmarks.clone(),
+            tags: change.tags.clone(),
+            workspace_ids: change.workspace_ids.clone(),
+            jj_workspaces: change.jj_workspaces.clone(),
+        }
+    }
+}
+
+fn change_or_default(change: Option<&v1::Change>) -> Change {
+    change.map_or_else(|| Change::from(&v1::Change::default()), Change::from)
+}
+
+/// An edge of the log's graph, from an entry to an ancestor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphEdge {
+    /// The ancestor's commit.
+    pub commit_id: String,
+    /// `direct`, `indirect`, or `missing`.
+    pub kind: Option<String>,
+}
+
+/// One entry of `reef log`: a change and its graph edges.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogEntry {
+    /// The change.
+    #[serde(flatten)]
+    pub change: Change,
+    /// Its edges to the ancestors in the log.
+    pub edges: Vec<GraphEdge>,
+}
+
+impl From<&v1::LogEntry> for LogEntry {
+    fn from(entry: &v1::LogEntry) -> Self {
+        Self {
+            change: change_or_default(entry.change.as_ref()),
+            edges: entry
+                .edges
+                .iter()
+                .map(|edge| GraphEdge {
+                    commit_id: edge.commit_id.clone(),
+                    kind: name(graph_edge_kind_name(edge.kind)),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// An operation of the repository's log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Operation {
+    /// Its id.
+    pub id: String,
+    /// Its repository.
+    pub repo_id: String,
+    /// Its parents.
+    pub parent_ids: Vec<String>,
+    /// Its description.
+    pub description: String,
+    /// When it started.
+    pub started_at: Option<String>,
+    /// When it ended.
+    pub ended_at: Option<String>,
+    /// The host it ran on.
+    pub hostname: String,
+    /// The user it ran as.
+    pub username: String,
+    /// Whether it is a working-copy snapshot.
+    pub is_snapshot: bool,
+    /// Its `reef.kind`.
+    pub kind: Option<String>,
+    /// For a snapshot: `watcher`, `explicit`, `final`, `move`, or
+    /// `shutdown`.
+    pub snapshot_kind: Option<String>,
+    /// The Reef workspace it ran for.
+    pub workspace_id: Option<String>,
+    /// The jj workspace it ran for.
+    pub jj_workspace: Option<String>,
+    /// The agent it ran for.
+    pub agent: Option<String>,
+    /// jj's operation attributes, verbatim.
+    pub attributes: BTreeMap<String, String>,
+    /// What it changed; `null` unless asked for.
+    pub effects: Option<OperationEffects>,
+}
+
+impl From<&v1::Operation> for Operation {
+    fn from(op: &v1::Operation) -> Self {
+        Self {
+            id: op.id.clone(),
+            repo_id: op.repo_id.clone(),
+            parent_ids: op.parent_ids.clone(),
+            description: op.description.clone(),
+            started_at: time(op.started_at.as_ref()),
+            ended_at: time(op.ended_at.as_ref()),
+            hostname: op.hostname.clone(),
+            username: op.username.clone(),
+            is_snapshot: op.is_snapshot,
+            kind: name(operation_kind_name(op.kind)),
+            snapshot_kind: name(snapshot_kind_opt(op.snapshot_kind)),
+            workspace_id: text(&op.workspace_id),
+            jj_workspace: text(&op.jj_workspace),
+            agent: text(&op.agent),
+            attributes: op.attributes.clone(),
+            effects: op.effects.as_ref().map(OperationEffects::from),
+        }
+    }
+}
+
+/// What an operation changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OperationEffects {
+    /// Changes it created, rewrote, abandoned, or hid.
+    pub changes: Vec<ChangeEffect>,
+    /// Bookmarks it moved.
+    pub bookmarks: Vec<BookmarkEffect>,
+    /// Working copies it moved.
+    pub working_copies: Vec<WorkingCopyEffect>,
+    /// How many changes, when `changes` is cut.
+    pub change_count: u32,
+    /// How many bookmarks, when `bookmarks` is cut.
+    pub bookmark_count: u32,
+}
+
+/// What an operation did to one change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangeEffect {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in reverse hex.
+    pub change_id_reverse_hex: String,
+    /// `created`, `rewritten`, `abandoned`, or `hidden`.
+    pub kind: Option<String>,
+    /// Its commit afterwards.
+    pub commit_id: Option<String>,
+    /// Its commit before.
+    pub previous_commit_id: Option<String>,
+}
+
+/// What an operation did to one bookmark.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BookmarkEffect {
+    /// The bookmark.
+    pub name: String,
+    /// Its remote; `null` for a local bookmark.
+    pub remote: Option<String>,
+    /// Its commit afterwards.
+    pub commit_id: Option<String>,
+    /// Its commit before.
+    pub previous_commit_id: Option<String>,
+    /// Whether it is conflicted afterwards.
+    pub conflicted: bool,
+}
+
+/// What an operation did to one working copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkingCopyEffect {
+    /// The Reef workspace.
+    pub workspace_id: Option<String>,
+    /// The jj workspace.
+    pub jj_workspace: String,
+    /// Its commit afterwards.
+    pub commit_id: Option<String>,
+    /// Its commit before.
+    pub previous_commit_id: Option<String>,
+}
+
+impl From<&v1::OperationEffects> for OperationEffects {
+    fn from(effects: &v1::OperationEffects) -> Self {
+        Self {
+            changes: effects
+                .changes
+                .iter()
+                .map(|change| ChangeEffect {
+                    change_id: change.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&change.change_id),
+                    kind: name(change_effect_kind_name(change.kind)),
+                    commit_id: text(&change.commit_id),
+                    previous_commit_id: text(&change.previous_commit_id),
+                })
+                .collect(),
+            bookmarks: effects
+                .bookmarks
+                .iter()
+                .map(|bookmark| BookmarkEffect {
+                    name: bookmark.name.clone(),
+                    remote: text(&bookmark.remote),
+                    commit_id: text(&bookmark.commit_id),
+                    previous_commit_id: text(&bookmark.previous_commit_id),
+                    conflicted: bookmark.conflicted,
+                })
+                .collect(),
+            working_copies: effects
+                .working_copies
+                .iter()
+                .map(|wc| WorkingCopyEffect {
+                    workspace_id: text(&wc.workspace_id),
+                    jj_workspace: wc.jj_workspace.clone(),
+                    commit_id: text(&wc.commit_id),
+                    previous_commit_id: text(&wc.previous_commit_id),
+                })
+                .collect(),
+            change_count: effects.change_count,
+            bookmark_count: effects.bookmark_count,
+        }
+    }
+}
+
+fn operation(op: Option<&v1::Operation>) -> Option<Operation> {
+    op.map(Operation::from)
+}
+
+/// A path a diff or a status reports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileChange {
+    /// Repository-relative, `/`-separated.
+    pub path: String,
+    /// `added`, `modified`, `deleted`, `renamed`, or `copied`.
+    pub kind: Option<String>,
+    /// Where a rename or copy came from.
+    pub old_path: Option<String>,
+    /// The type before; `null` when added.
+    pub old_type: Option<String>,
+    /// The type after; `null` when deleted.
+    pub new_type: Option<String>,
+}
+
+impl From<&v1::FileChange> for FileChange {
+    fn from(change: &v1::FileChange) -> Self {
+        Self {
+            path: change.path.clone(),
+            kind: name(file_change_kind_name(change.kind)),
+            old_path: text(&change.old_path),
+            old_type: name(entry_type_name(change.old_type)),
+            new_type: name(entry_type_name(change.new_type)),
+        }
+    }
+}
+
+/// A hunk of a file's diff.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Hunk {
+    /// Its first line on the old side, from 1.
+    pub old_start: u32,
+    /// Its lines on the old side.
+    pub old_lines: u32,
+    /// Its first line on the new side, from 1.
+    pub new_start: u32,
+    /// Its lines on the new side.
+    pub new_lines: u32,
+    /// Its lines, each prefixed ` `, `-`, or `+`.
+    pub lines: String,
+}
+
+/// One file of a diff.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[expect(clippy::struct_excessive_bools, reason = "the v1 message's flags")]
+pub struct FileDiff {
+    /// The path and how it changed.
+    #[serde(flatten)]
+    pub change: FileChange,
+    /// Either side is binary.
+    pub binary: bool,
+    /// Either side is conflicted.
+    pub conflict: bool,
+    /// Lines added; 0 with `--summary`.
+    pub lines_added: u32,
+    /// Lines removed; 0 with `--summary`.
+    pub lines_removed: u32,
+    /// Its hunks; empty with `--summary` and `--stat`.
+    pub hunks: Vec<Hunk>,
+    /// The hunks were cut at the line limit.
+    pub truncated: bool,
+    /// The old side has no final newline.
+    pub old_no_final_newline: bool,
+    /// The new side has no final newline.
+    pub new_no_final_newline: bool,
+    /// A side is over the size the daemon diffs.
+    pub too_large: bool,
+    /// A side is not UTF-8; its lines are lossy.
+    pub invalid_utf8: bool,
+}
+
+impl From<&v1::FileDiff> for FileDiff {
+    fn from(diff: &v1::FileDiff) -> Self {
+        Self {
+            change: FileChange::from(&diff.change.clone().unwrap_or_default()),
+            binary: diff.binary,
+            conflict: diff.conflict,
+            lines_added: diff.lines_added,
+            lines_removed: diff.lines_removed,
+            hunks: diff
+                .hunks
+                .iter()
+                .map(|hunk| Hunk {
+                    old_start: hunk.old_start,
+                    old_lines: hunk.old_lines,
+                    new_start: hunk.new_start,
+                    new_lines: hunk.new_lines,
+                    lines: hunk.lines.clone(),
+                })
+                .collect(),
+            truncated: diff.truncated,
+            old_no_final_newline: diff.old_no_final_newline,
+            new_no_final_newline: diff.new_no_final_newline,
+            too_large: diff.too_large,
+            invalid_utf8: diff.invalid_utf8,
+        }
+    }
+}
+
+/// `reef diff`: every file of a diff between two trees.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Diff {
+    /// The old side: one commit, or several merged.
+    pub from_commit_ids: Vec<String>,
+    /// The new side.
+    pub to_commit_id: String,
+    /// The operation read at.
+    pub at_operation: String,
+    /// Files that differ.
+    pub total_files: u32,
+    /// Each of them.
+    pub files: Vec<FileDiff>,
+}
+
+impl From<&v1::GetDiffResponse> for Diff {
+    fn from(diff: &v1::GetDiffResponse) -> Self {
+        Self {
+            from_commit_ids: diff.from_commit_ids.clone(),
+            to_commit_id: diff.to_commit_id.clone(),
+            at_operation: diff.at_operation.clone(),
+            total_files: diff.total_files,
+            files: diff.files.iter().map(FileDiff::from).collect(),
+        }
+    }
+}
+
+/// `reef show`: a change and the paths it changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangeSummary {
+    /// The change.
+    #[serde(flatten)]
+    pub change: Change,
+    /// The operation read at.
+    pub at_operation: String,
+    /// The paths it changes against its parents.
+    pub files: Vec<FileChange>,
+    /// How many.
+    pub total_files: u32,
+}
+
+impl ChangeSummary {
+    /// From `GetChange`'s answer and the summary diff of its commit.
+    pub fn from_responses(change: &v1::GetChangeResponse, diff: &v1::GetDiffResponse) -> Self {
+        Self {
+            change: change_or_default(change.change.as_ref()),
+            at_operation: change.at_operation.clone(),
+            files: diff
+                .files
+                .iter()
+                .map(|file| FileChange::from(&file.change.clone().unwrap_or_default()))
+                .collect(),
+            total_files: diff.total_files,
+        }
+    }
+}
+
+/// `reef status`: the repository, and the workspace when there is one.
+/// (`Status` is `daemon status`'s.)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepoStatus {
+    /// The repository.
+    pub repository: Option<Repository>,
+    /// The operation read at.
+    pub at_operation: String,
+    /// The repository's state.
+    pub repository_status: Option<RepositoryStatus>,
+    /// The workspace's; `null` in repository scope.
+    pub workspace_status: Option<WorkspaceStatus>,
+}
+
+/// A repository's state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryStatus {
+    /// `trunk()`.
+    pub trunk: Option<Change>,
+    /// The bookmark `trunk()` resolved through.
+    pub trunk_bookmark: Option<String>,
+    /// Its active workspaces, newest first, up to the cap.
+    pub active_workspaces: Vec<Workspace>,
+    /// How many.
+    pub active_workspace_count: u32,
+    /// The visible heads, up to the cap.
+    pub heads: Vec<Change>,
+    /// How many.
+    pub head_count: u32,
+    /// Mutable changes with conflicts, in hex.
+    pub conflicted_change_ids: Vec<String>,
+    /// Divergent changes, in hex.
+    pub divergent_change_ids: Vec<String>,
+    /// The head operation.
+    pub last_operation: Option<Operation>,
+}
+
+/// A workspace's state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkspaceStatus {
+    /// The workspace.
+    pub workspace: Option<Workspace>,
+    /// Its working-copy commit.
+    pub working_copy: Option<Change>,
+    /// That commit's parents.
+    pub parents: Vec<Change>,
+    /// Paths it changes against them, up to `--max-files`.
+    pub changed_files: Vec<FileChange>,
+    /// How many.
+    pub changed_file_count: u32,
+    /// Conflicted paths, up to the cap.
+    pub conflicted_paths: Vec<String>,
+    /// How many.
+    pub conflicted_path_count: u32,
+    /// `snapshot`, `index`, `walk`, or `last-snapshot`.
+    pub source: Option<String>,
+    /// The snapshot the status took, if it recorded one.
+    pub snapshot: Option<Operation>,
+}
+
+impl From<&v1::GetStatusResponse> for RepoStatus {
+    fn from(status: &v1::GetStatusResponse) -> Self {
+        Self {
+            repository: status.repository.as_ref().map(Repository::from),
+            at_operation: status.at_operation.clone(),
+            repository_status: status
+                .repository_status
+                .as_ref()
+                .map(|repo| RepositoryStatus {
+                    trunk: repo.trunk.as_ref().map(Change::from),
+                    trunk_bookmark: text(&repo.trunk_bookmark),
+                    active_workspaces: repo.active_workspaces.iter().map(Workspace::from).collect(),
+                    active_workspace_count: repo.active_workspace_count,
+                    heads: repo.heads.iter().map(Change::from).collect(),
+                    head_count: repo.head_count,
+                    conflicted_change_ids: repo.conflicted_change_ids.clone(),
+                    divergent_change_ids: repo.divergent_change_ids.clone(),
+                    last_operation: operation(repo.last_operation.as_ref()),
+                }),
+            workspace_status: status.workspace_status.as_ref().map(|ws| WorkspaceStatus {
+                workspace: ws.workspace.as_ref().map(Workspace::from),
+                working_copy: ws.working_copy.as_ref().map(Change::from),
+                parents: ws.parents.iter().map(Change::from).collect(),
+                changed_files: ws.changed_files.iter().map(FileChange::from).collect(),
+                changed_file_count: ws.changed_file_count,
+                conflicted_paths: ws.conflicted_paths.clone(),
+                conflicted_path_count: ws.conflicted_path_count,
+                source: name(status_source_name(ws.source)),
+                snapshot: operation(ws.snapshot.as_ref()),
+            }),
+        }
+    }
+}
+
+/// `reef describe`'s answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Described {
+    /// The change afterwards.
+    pub change: Option<Change>,
+    /// The operation; `null` when the description was already that.
+    pub operation: Option<Operation>,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+}
+
+impl Described {
+    /// From the response and the workspace read after it.
+    pub fn from_response(
+        response: &v1::DescribeChangeResponse,
+        workspace: Option<Workspace>,
+    ) -> Self {
+        Self {
+            change: response.change.as_ref().map(Change::from),
+            operation: operation(response.operation.as_ref()),
+            workspace,
+        }
+    }
+}
+
+/// `reef abandon`'s answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Abandoned {
+    /// The commit abandoned.
+    pub abandoned_commit_id: String,
+    /// The operation.
+    pub operation: Option<Operation>,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+}
+
+impl Abandoned {
+    /// From the response and the workspace read after it.
+    pub fn from_response(
+        response: &v1::AbandonChangeResponse,
+        workspace: Option<Workspace>,
+    ) -> Self {
+        Self {
+            abandoned_commit_id: response.abandoned_commit_id.clone(),
+            operation: operation(response.operation.as_ref()),
+            workspace,
+        }
+    }
+}
+
+/// `reef undo`'s answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Undone {
+    /// The operation that reverted it; `null` when there was nothing to
+    /// revert.
+    pub operation: Option<Operation>,
+    /// The snapshot taken first, if it recorded one.
+    pub snapshot: Option<Operation>,
+    /// The operation undone, in full.
+    pub undone_operation_id: String,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+}
+
+impl Undone {
+    /// From the response and the workspace read after it.
+    pub fn from_response(
+        response: &v1::UndoOperationResponse,
+        workspace: Option<Workspace>,
+    ) -> Self {
+        Self {
+            operation: operation(response.operation.as_ref()),
+            snapshot: operation(response.snapshot.as_ref()),
+            undone_operation_id: response.undone_operation_id.clone(),
+            workspace,
+        }
+    }
+}
+
+/// `reef ws snapshot`'s answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Snapshotted {
+    /// Whether anything changed.
+    pub changed: bool,
+    /// The working-copy commit afterwards.
+    pub commit_id: String,
+    /// How long the scan took.
+    pub scan_ms: u64,
+    /// The snapshot's operation; `null` when nothing changed.
+    pub operation: Option<Operation>,
+    /// The workspace afterwards.
+    pub workspace: Option<Workspace>,
+}
+
+impl Snapshotted {
+    /// From the response and the workspace read after it.
+    pub fn from_response(
+        response: &v1::SnapshotWorkspaceResponse,
+        workspace: Option<Workspace>,
+    ) -> Self {
+        Self {
+            changed: response.changed,
+            commit_id: response.commit_id.clone(),
+            scan_ms: response.scan_ms,
+            operation: operation(response.operation.as_ref()),
+            workspace,
+        }
+    }
+}
+
+/// An entry of `reef file list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileEntry {
+    /// Repository-relative, `/`-separated.
+    pub path: String,
+    /// `file`, `executable`, `symlink`, `directory`, `conflict`, or
+    /// `submodule`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// Its content's id; `null` for a directory or conflict.
+    pub file_id: Option<String>,
+}
+
+impl From<&v1::FileEntry> for FileEntry {
+    fn from(entry: &v1::FileEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            kind: name(entry_type_name(entry.r#type)),
+            file_id: text(&entry.file_id),
+        }
+    }
+}
+
+/// `reef file read -o json`: the file and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileRead {
+    /// Repository-relative, `/`-separated.
+    pub path: String,
+    /// `file`, `executable`, `symlink`, or `conflict`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// Its content's id.
+    pub file_id: Option<String>,
+    /// Its size in bytes.
+    pub size: u64,
+    /// The commit read.
+    pub commit_id: String,
+    /// The operation read at.
+    pub at_operation: String,
+    /// The bytes, when they are UTF-8; else `null`.
+    pub content: Option<String>,
+    /// The bytes in standard padded base64, when they are not UTF-8; else
+    /// `null`.
+    pub content_base64: Option<String>,
+}
+
+impl From<&v1::ReadFileResponse> for FileRead {
+    fn from(read: &v1::ReadFileResponse) -> Self {
+        let entry = read.entry.clone().unwrap_or_default();
+        let (content, content_base64) = match String::from_utf8(read.content.clone()) {
+            Ok(text) => (Some(text), None),
+            Err(error) => (None, Some(STANDARD.encode(error.into_bytes()))),
+        };
+        Self {
+            path: entry.path,
+            kind: name(entry_type_name(entry.r#type)),
+            file_id: text(&entry.file_id),
+            size: read.size,
+            commit_id: read.commit_id.clone(),
+            at_operation: read.at_operation.clone(),
+            content,
+            content_base64,
+        }
+    }
+}
+
 /// `{"error": {...}}`: a failed command's JSON on stdout (ADR 0025), and
 /// what a `reef-daemon` offline command prints when it fails.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,6 +1646,9 @@ pub struct ErrorObject {
     /// The command that fixes it, an argv starting `reef`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
+    /// The values that go with `reason`, `ErrorDetail.metadata` (R2.27).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// [`ErrorObject`] under its `error` key.
@@ -946,6 +1784,141 @@ mod tests {
                 "verified": true,
             }])
         );
+    }
+
+    /// R2.27 test 22: every value of every new enum by name, an unknown
+    /// value as `unknown`, an unset one as `None`.
+    #[test]
+    fn vcs_enums_print_their_names() {
+        type Name = fn(i32) -> Option<&'static str>;
+        let tables: [(Name, &[&str]); 7] = [
+            (
+                entry_type_name,
+                &[
+                    "file",
+                    "executable",
+                    "symlink",
+                    "directory",
+                    "conflict",
+                    "submodule",
+                ],
+            ),
+            (
+                file_change_kind_name,
+                &["added", "modified", "deleted", "renamed", "copied"],
+            ),
+            (
+                status_source_name,
+                &["snapshot", "index", "walk", "last-snapshot"],
+            ),
+            (graph_edge_kind_name, &["direct", "indirect", "missing"]),
+            (
+                change_effect_kind_name,
+                &["created", "rewritten", "abandoned", "hidden"],
+            ),
+            (
+                operation_kind_name,
+                &[
+                    "snapshot",
+                    "create-workspace",
+                    "release-workspace",
+                    "move-workspace",
+                    "describe",
+                    "abandon",
+                    "undo",
+                    "edit",
+                    "import-refs",
+                    "external",
+                    "other",
+                ],
+            ),
+            (
+                snapshot_kind_opt,
+                &["watcher", "explicit", "final", "move", "shutdown"],
+            ),
+        ];
+        for (name, values) in tables {
+            assert_eq!(name(0), None);
+            assert_eq!(name(99), Some(UNKNOWN));
+            for (value, expected) in (1..).zip(values.iter()) {
+                assert_eq!(name(value), Some(*expected));
+            }
+        }
+    }
+
+    #[test]
+    fn file_reads_carry_text_or_base64() {
+        let read = |content: &[u8]| {
+            serde_json::to_value(FileRead::from(&v1::ReadFileResponse {
+                entry: Some(v1::FileEntry {
+                    path: "a".into(),
+                    r#type: v1::EntryType::File.into(),
+                    file_id: "ff".into(),
+                }),
+                content: content.to_vec(),
+                size: 3,
+                commit_id: "c0".into(),
+                at_operation: "0p".into(),
+            }))
+            .unwrap()
+        };
+        let text = read(b"hi\n");
+        assert_eq!(text["content"], "hi\n");
+        assert_eq!(text["content_base64"], serde_json::Value::Null);
+        assert_eq!(text["type"], "file");
+        let bytes = read(&[0xff, 0x00, 0x80]);
+        assert_eq!(bytes["content"], serde_json::Value::Null);
+        assert_eq!(bytes["content_base64"], "/wCA");
+    }
+
+    #[test]
+    fn operations_print_effects_only_when_computed() {
+        let op = v1::Operation {
+            id: "0p".into(),
+            kind: v1::OperationKind::Describe.into(),
+            ..v1::Operation::default()
+        };
+        let plain = serde_json::to_value(Operation::from(&op)).unwrap();
+        assert_eq!(plain["effects"], serde_json::Value::Null);
+        assert_eq!(plain["kind"], "describe");
+        assert_eq!(plain["snapshot_kind"], serde_json::Value::Null);
+        assert_eq!(plain["workspace_id"], serde_json::Value::Null);
+        let with = v1::Operation {
+            effects: Some(v1::OperationEffects {
+                changes: vec![v1::ChangeEffect {
+                    change_id: "01".into(),
+                    kind: v1::ChangeEffectKind::Rewritten.into(),
+                    commit_id: "c1".into(),
+                    previous_commit_id: "c0".into(),
+                }],
+                change_count: 1,
+                ..v1::OperationEffects::default()
+            }),
+            ..op
+        };
+        let value = serde_json::to_value(Operation::from(&with)).unwrap();
+        let change = &value["effects"]["changes"][0];
+        assert_eq!(change["change_id_reverse_hex"], "zy");
+        assert_eq!(change["kind"], "rewritten");
+        assert_eq!(change["previous_commit_id"], "c0");
+    }
+
+    #[test]
+    fn error_objects_print_metadata_only_when_there_is_some() {
+        let mut error = ErrorObject {
+            kind: "conflict".into(),
+            message: "m".into(),
+            ..ErrorObject::default()
+        };
+        let value = serde_json::to_value(&error).unwrap();
+        assert!(value.get("metadata").is_none(), "{value}");
+        error.metadata.insert("commit_id".into(), "c0".into());
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["metadata"]["commit_id"], "c0");
+        // The helper protocol still parses a document without it.
+        let parsed: ErrorObject =
+            serde_json::from_str(r#"{"kind": "io", "message": "m"}"#).unwrap();
+        assert!(parsed.metadata.is_empty());
     }
 
     #[test]

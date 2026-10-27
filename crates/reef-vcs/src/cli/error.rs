@@ -5,6 +5,7 @@
 //! object, and may have an [`Advice`]: the `hint` and `next` of ADR 0025.
 //! A daemon error's `reason` (R2.01) is the JSON error object's `reason`.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitStatus;
@@ -22,6 +23,29 @@ pub(crate) enum CliError {
     /// daemon's message is already its whole chain.
     #[error(transparent)]
     Daemon(ClientError),
+    /// A daemon error with the CLI's own advice for its reason, which the
+    /// daemon could not give because it does not know the command (R2.27):
+    /// kind, reason, message and metadata the error's.
+    #[error("{error}")]
+    Advised {
+        /// The daemon's error, boxed: it holds the status.
+        error: Box<ClientError>,
+        /// The CLI's advice in place of the daemon's.
+        advice: Advice,
+    },
+    /// A check the CLI makes before its call, with the reason the daemon
+    /// would have given (R2.27), such as a path outside the workspace.
+    #[error("{message}")]
+    Precheck {
+        /// The kind, and so the exit code.
+        kind: ErrorKind,
+        /// The reason, as the daemon names it.
+        reason: &'static str,
+        /// The message.
+        message: String,
+        /// How to fix it.
+        advice: Advice,
+    },
     /// The running daemon is another version and cannot serve this reef,
     /// and was not restarted: it has active workspaces, or autostart is off
     /// (R2.01).
@@ -145,6 +169,7 @@ impl CliError {
                 reef_api::AGENT_MAX_BYTES
             ))),
             Self::Daemon(error) => error.advice(),
+            Self::Advised { advice, .. } | Self::Precheck { advice, .. } => Some(advice.clone()),
             Self::NotRunning {
                 start,
                 autostart_off,
@@ -193,9 +218,21 @@ impl CliError {
     pub(crate) fn reason(&self) -> &str {
         match self {
             Self::Daemon(error) => error.reason(),
-            Self::OldDaemon { error, .. } => error.reason(),
+            Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.reason(),
             Self::Helper { reason, .. } => reason,
+            Self::Precheck { reason, .. } => reason,
             _ => "",
+        }
+    }
+
+    /// The daemon's `ErrorDetail.metadata`, empty when there is none
+    /// (R2.27).
+    pub(crate) fn metadata(&self) -> &BTreeMap<String, String> {
+        static NONE: BTreeMap<String, String> = BTreeMap::new();
+        match self {
+            Self::Daemon(error) => error.metadata(),
+            Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.metadata(),
+            _ => &NONE,
         }
     }
 }
@@ -204,14 +241,16 @@ impl Classify for CliError {
     fn kind(&self) -> ErrorKind {
         match self {
             Self::Daemon(error) => error.kind(),
-            Self::OldDaemon { error, .. } => error.kind(),
+            Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.kind(),
             Self::NotRunning { .. } | Self::Autostart { .. } | Self::Timeout { .. } => {
                 ErrorKind::Unavailable
             }
             Self::Config(error) => error.kind(),
             Self::Logging(error) => error.kind(),
             Self::Runtime(_) | Self::Signals(_) | Self::HelperFailed { .. } => ErrorKind::Internal,
-            Self::Refused { kind, .. } | Self::Helper { kind, .. } => *kind,
+            Self::Refused { kind, .. }
+            | Self::Helper { kind, .. }
+            | Self::Precheck { kind, .. } => *kind,
             Self::NoDaemonBinary { .. } => ErrorKind::NotFound,
             Self::Usage(_) => ErrorKind::InvalidArgument,
             Self::Io { source, .. } | Self::Stdout(source) => classify_by_source(source),

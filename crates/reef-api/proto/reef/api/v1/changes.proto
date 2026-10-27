@@ -25,7 +25,8 @@
 // INVALID_PAGE_TOKEN; NOT_FOUND with reason REVISION_NOT_FOUND (metadata
 // `revision`), WORKING_COPY_NOT_FOUND (metadata `workspace_id`,
 // `at_operation`) or OPERATION_NOT_FOUND (metadata `operation_id`); and a
-// failed snapshot's own error.
+// failed snapshot's own error, with reason SNAPSHOT_FAILED (metadata
+// `workspace_id`).
 syntax = "proto3";
 
 package reef.api.v1;
@@ -84,7 +85,8 @@ service ChangeService {
   // commit on its parents. `UndoOperation` brings it back.
   //
   // Errors: as for DescribeChange, less INVALID_DESCRIPTION, and
-  // FAILED_PRECONDITION when a workspace could not be snapshotted first
+  // FAILED_PRECONDITION with reason SNAPSHOT_FAILED (metadata
+  // `workspace_id`) when a workspace could not be snapshotted first
   // (nothing is written).
   rpc AbandonChange(AbandonChangeRequest) returns (AbandonChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;

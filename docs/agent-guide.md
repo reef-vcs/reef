@@ -30,11 +30,11 @@ renewed until it exits.
 ## Output
 
 `-o json` or `REEF_OUTPUT=json` forces JSON: one object or array, or
-`{"error": {"kind", "reason", "message", "hint", "next"}}`. Exit 0 ok,
+`{"error": {"kind", "reason", "message", "hint", "next", "metadata"}}`. Exit 0 ok,
 2 usage, 3 not found, 4 exists, 5 conflict, 6 unavailable, 7 denied,
 8 I/O, 9 unsupported, 1 other; `ws run` exits with its command's code.
 
-## Not yet
+## Changes
 
-Undo, status, and diff come in Phase 2: run `jj` in the repository's own
-root, not in a workspace, to see changes.
+`reef status`, `reef log`, `reef show`, `reef diff`, `reef describe -m <text>`,
+`reef undo <op>` (`reef op log`). Revisions are jj revsets.

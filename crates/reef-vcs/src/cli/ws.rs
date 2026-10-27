@@ -1,4 +1,4 @@
-//! `reef ws create | list | inspect | release | move | run | gc`.
+//! `reef ws create | list | inspect | snapshot | release | move | run | gc`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,12 +10,13 @@ use reef_api::v1::{
 };
 use reef_client::ROOT_CHECKOUT;
 use reef_client::default_owner;
-use reef_client::json::{Created, GcReport, Inspected, Released, Workspace};
-use reef_error::ErrorKind;
+use reef_client::json::{Created, GcReport, Inspected, Released, Snapshotted, Workspace};
+use reef_error::{Advice, ErrorKind};
 
+use super::changes::{note_divergence, short, workspace_after};
 use super::render::GcReports;
 use super::repo::missing;
-use super::{CliError, Ctx, RepoArg, absolute, ws_move, ws_run};
+use super::{CliError, Ctx, RepoArg, absolute, scope, ws_move, ws_run};
 
 /// `reef ws`.
 #[derive(Debug, clap::Args)]
@@ -53,6 +54,14 @@ enum WsCommand {
         /// Report the last snapshot instead of taking one.
         #[arg(long)]
         no_snapshot: bool,
+    },
+    /// Snapshot a workspace's files now, as an operation of its own.
+    Snapshot {
+        /// A workspace id, unique prefix, or path inside it [default: the one you are in].
+        workspace: Option<String>,
+        /// The operation's description [default: Reef's own, naming the workspace].
+        #[arg(short = 'm', long = "message", value_name = "TEXT")]
+        message: Option<String>,
     },
     /// Snapshot a workspace, then remove its directory and end its lease.
     #[command(visible_alias = "rm")]
@@ -221,6 +230,9 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                 Inspected::from_response(&response).ok_or_else(|| missing("workspace"))?;
             ctx.out.object(&inspected)
         }
+        WsCommand::Snapshot { workspace, message } => {
+            snapshot(ctx, workspace.as_deref(), message.as_deref()).await
+        }
         WsCommand::Release {
             workspace,
             no_snapshot,
@@ -238,6 +250,56 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Move(args) => ws_move::run(ctx, args).await,
     };
     done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `reef ws snapshot` (R2.27): the explicit form of what `ws inspect` does
+/// on the way to its report, with the workspace read afterwards so a
+/// divergent result shows.
+async fn snapshot(
+    ctx: &Ctx,
+    workspace: Option<&str>,
+    message: Option<&str>,
+) -> Result<(), CliError> {
+    let id = match workspace {
+        Some(workspace) => scope::workspace_arg(workspace)?,
+        None => match scope::implicit_workspace(ctx).await? {
+            Some(ws) => ws.id,
+            None => {
+                return Err(CliError::Precheck {
+                    kind: ErrorKind::InvalidArgument,
+                    reason: reef_api::error::WORKSPACE_REQUIRED,
+                    message: "not in a workspace".to_owned(),
+                    advice: Advice::run(
+                        "Name the workspace, or run this inside one.",
+                        ["reef", "ws", "list"],
+                    ),
+                });
+            }
+        },
+    };
+    let response = ctx
+        .call(
+            ctx.client
+                .snapshot_workspace("", &id, message.unwrap_or_default()),
+        )
+        .await?;
+    let workspace = workspace_after(ctx, Some(&id)).await;
+    let snapshotted = Snapshotted::from_response(&response, workspace);
+    let ws = snapshotted
+        .workspace
+        .as_ref()
+        .map_or(id.as_str(), |ws| ws.id.as_str());
+    let note = match &snapshotted.operation {
+        Some(op) => format!(
+            "snapshot {} of {ws}: {}",
+            short(&op.id),
+            short(&snapshotted.commit_id)
+        ),
+        None => format!("nothing to snapshot in {ws}"),
+    };
+    ctx.out.done(&snapshotted, &note)?;
+    note_divergence(ctx, snapshotted.workspace.as_ref());
+    Ok(())
 }
 
 /// `ws list`'s default `--limit`: the one list that grows without bound in

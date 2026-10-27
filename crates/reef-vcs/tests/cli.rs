@@ -152,6 +152,15 @@ fn help_lists_every_command() {
     for command in [
         "ws",
         "here",
+        "status",
+        "log",
+        "show",
+        "diff",
+        "describe",
+        "abandon",
+        "undo",
+        "op",
+        "file",
         "guide",
         "init",
         "daemon",
@@ -170,7 +179,9 @@ fn help_lists_every_command() {
     }
     let output = reef_in(tmp.path()).args(["ws", "--help"]).output().unwrap();
     let text = stdout(&output);
-    for command in ["create", "list", "inspect", "release", "move", "run", "gc"] {
+    for command in [
+        "create", "list", "inspect", "snapshot", "release", "move", "run", "gc",
+    ] {
         assert!(
             text.lines()
                 .any(|line| line.trim_start().starts_with(&format!("{command} "))),
@@ -483,20 +494,18 @@ async fn exit_codes() {
     );
     assert_eq!(value["error"]["hint"], "Usage: reef ws [OPTIONS] <COMMAND>");
     // A guess at "where am I" points at `reef here` (RX.07), in both modes;
-    // the same word under a noun keeps the usage line.
-    let output = run(reef(&daemon), &["status"]).await;
+    // the same word under a noun keeps the usage line. (`status` became a
+    // command in R2.27.)
+    let output = run(reef(&daemon), &["info"]).await;
     let text = stderr(&output);
     output.clone().assert().code(2);
     assert!(text.contains("\nnext: reef here\n"), "{text}");
     let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
     assert_eq!(value["error"]["kind"], "invalid_argument");
-    assert_eq!(
-        value["error"]["message"],
-        "unrecognized subcommand 'status'"
-    );
+    assert_eq!(value["error"]["message"], "unrecognized subcommand 'info'");
     assert_eq!(
         value["error"]["hint"],
-        "Reef has no `status`; `reef here` shows the workspace you are in and its change."
+        "Reef has no `info`; `reef here` shows the workspace you are in and its change."
     );
     assert_eq!(value["error"]["next"], serde_json::json!(["reef", "here"]));
     let output = run(
@@ -516,7 +525,7 @@ async fn exit_codes() {
         text.ends_with("\nnext: reef --state-dir /nonexistent/state here\n"),
         "{text}"
     );
-    let output = run(reef(&daemon), &["ws", "status"]).await;
+    let output = run(reef(&daemon), &["ws", "info"]).await;
     let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
     assert_eq!(value["error"]["hint"], "Usage: reef ws [OPTIONS] <COMMAND>");
     assert!(value["error"].get("next").is_none(), "{value}");

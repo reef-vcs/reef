@@ -379,6 +379,20 @@ fn wrapped_db<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a DbError> {
     }
 }
 
+/// The workspace a snapshot before a read or a write failed in: reason
+/// `SNAPSHOT_FAILED` (R2.27), which shadows any reason of its cause.
+fn snapshot_failed(error: &(dyn Error + 'static)) -> Option<String> {
+    if let Some(ManagerError::RewriteSnapshot { id, .. }) = error.downcast_ref::<ManagerError>() {
+        return Some(id.as_hex());
+    }
+    if let Some(crate::read::ReadError::Snapshot { workspace, .. }) =
+        error.downcast_ref::<crate::read::ReadError>()
+    {
+        return Some(workspace.as_hex());
+    }
+    None
+}
+
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -391,41 +405,46 @@ fn reason_and_metadata(
         {
             return Some((reef_api::error::INVALID_PAGE_TOKEN, BTreeMap::new()));
         }
-        let found =
-            if let Some(ManagerError::NotRegistered(path)) = error.downcast_ref::<ManagerError>() {
-                Some((
-                    reef_api::error::REPOSITORY_NOT_REGISTERED,
-                    meta(&[("path", path.display().to_string())]),
-                ))
-            } else if let Some(db) = wrapped_db(error) {
-                db_reason(db)
-            } else if let Some(error) = error.downcast_ref::<RevisionError>() {
-                revision_reason(error)
-            } else if let Some(error) = error.downcast_ref::<OpLookupError>() {
-                lookup_reason(error)
-            } else if let Some(error) = error.downcast_ref::<PathError>() {
-                Some((
-                    reef_api::error::INVALID_PATH,
-                    BTreeMap::from([("path".to_owned(), error.path.clone())]),
-                ))
-            } else if error.downcast_ref::<InvalidAgent>().is_some() {
-                Some((reef_api::error::INVALID_AGENT, BTreeMap::new()))
-            } else if let Some(error) = error.downcast_ref::<RewriteError>() {
-                rewrite_reason(error)
-            } else if let Some(error) = error.downcast_ref::<UndoError>() {
-                undo_reason(error)
-            } else if let Some(error) = error.downcast_ref::<FileError>() {
-                file_reason(error)
-            } else if let Some(error) = error.downcast_ref::<EditError>() {
-                edit_reason(error)
-            } else {
-                error.downcast_ref::<InvalidChangeFilter>().map(|error| {
-                    (
-                        reef_api::error::INVALID_CHANGE_ID,
-                        BTreeMap::from([("change".to_owned(), error.change.clone())]),
-                    )
-                })
-            };
+        let found = if let Some(workspace) = snapshot_failed(error) {
+            Some((
+                reef_api::error::SNAPSHOT_FAILED,
+                meta(&[("workspace_id", workspace)]),
+            ))
+        } else if let Some(ManagerError::NotRegistered(path)) = error.downcast_ref::<ManagerError>()
+        {
+            Some((
+                reef_api::error::REPOSITORY_NOT_REGISTERED,
+                meta(&[("path", path.display().to_string())]),
+            ))
+        } else if let Some(db) = wrapped_db(error) {
+            db_reason(db)
+        } else if let Some(error) = error.downcast_ref::<RevisionError>() {
+            revision_reason(error)
+        } else if let Some(error) = error.downcast_ref::<OpLookupError>() {
+            lookup_reason(error)
+        } else if let Some(error) = error.downcast_ref::<PathError>() {
+            Some((
+                reef_api::error::INVALID_PATH,
+                BTreeMap::from([("path".to_owned(), error.path.clone())]),
+            ))
+        } else if error.downcast_ref::<InvalidAgent>().is_some() {
+            Some((reef_api::error::INVALID_AGENT, BTreeMap::new()))
+        } else if let Some(error) = error.downcast_ref::<RewriteError>() {
+            rewrite_reason(error)
+        } else if let Some(error) = error.downcast_ref::<UndoError>() {
+            undo_reason(error)
+        } else if let Some(error) = error.downcast_ref::<FileError>() {
+            file_reason(error)
+        } else if let Some(error) = error.downcast_ref::<EditError>() {
+            edit_reason(error)
+        } else {
+            error.downcast_ref::<InvalidChangeFilter>().map(|error| {
+                (
+                    reef_api::error::INVALID_CHANGE_ID,
+                    BTreeMap::from([("change".to_owned(), error.change.clone())]),
+                )
+            })
+        };
         if found.is_some() {
             return found;
         }
@@ -801,6 +820,41 @@ mod tests {
             id: "deps".into(),
         };
         assert_eq!(detail_of(&status(other)).unwrap().reason, "");
+    }
+
+    /// R2.27 test 20: both snapshot failures carry `SNAPSHOT_FAILED` and
+    /// the workspace, keep their kinds, and the write's keeps its `next`.
+    #[test]
+    fn snapshot_failures_have_a_reason() {
+        let (ws, _) = ids();
+        let cause = || {
+            Box::new(ManagerError::Db(DbError::Conflict {
+                what: "workspace",
+                id: ws.as_hex(),
+                reason: "is busy",
+            }))
+        };
+        let read = status(crate::read::ReadError::Snapshot {
+            workspace: ws,
+            source: cause(),
+        });
+        let write = status(ManagerError::RewriteSnapshot {
+            id: ws,
+            source: cause(),
+        });
+        for status in [&read, &write] {
+            let detail = detail_of(status).unwrap();
+            assert_eq!(detail.reason, reef_api::error::SNAPSHOT_FAILED);
+            assert_eq!(
+                detail.metadata.into_iter().collect::<Vec<_>>(),
+                [("workspace_id".to_owned(), ws.as_hex())]
+            );
+            assert_eq!(kind_from_status(status), ErrorKind::Conflict);
+        }
+        assert_eq!(
+            advice_in(&write).next,
+            ["reef", "ws", "inspect", &ws.as_hex()]
+        );
     }
 
     #[test]

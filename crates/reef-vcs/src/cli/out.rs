@@ -1,12 +1,13 @@
 //! Output rules (README, CLI). JSON (`-o json`, or stdout not a terminal):
 //! exactly one JSON value on stdout per command, an object or, for lists,
-//! an array, and on failure `{"error": {"kind", "message", "hint"?,
-//! "next"?}}`. Text (`-o text`, or a terminal): `key: value` blocks and
+//! an array, and on failure `{"error": {"kind", "reason"?, "message",
+//! "hint"?, "next"?, "metadata"?}}`. Text (`-o text`, or a terminal): `key: value` blocks and
 //! aligned columns. Errors always go to stderr as `error: <chain>`,
 //! followed by `hint: <sentence>` and `next: <command>` when the error has
 //! advice (ADR 0025); notes such as `released <id>` go to stderr in text
 //! mode only, and `-q` silences them.
 
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal as _, Write};
 
 use reef_client::json::{ErrorDocument, ErrorObject};
@@ -113,15 +114,22 @@ impl Out {
 
     /// Bytes on stdout as they are. A closed stdout (`reef ws list | head`)
     /// is not a failure.
+    pub(crate) fn raw(&self, bytes: &[u8]) -> Result<(), CliError> {
+        self.raw_open(bytes).map(|_| ())
+    }
+
+    /// [`Out::raw`], and whether stdout is still open, so a command
+    /// writing in pieces (`file read`) stops once nobody reads.
     #[expect(
         clippy::unused_self,
         reason = "every result goes through an `Out`, raw bytes too"
     )]
-    pub(crate) fn raw(&self, bytes: &[u8]) -> Result<(), CliError> {
+    pub(crate) fn raw_open(&self, bytes: &[u8]) -> Result<bool, CliError> {
         let mut stdout = io::stdout().lock();
         match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
-            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(CliError::Stdout(error)),
-            _ => Ok(()),
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+            Err(error) => Err(CliError::Stdout(error)),
         }
     }
 
@@ -186,6 +194,7 @@ impl Out {
                 error.reason(),
                 &message,
                 advice.as_ref(),
+                error.metadata(),
             );
         }
     }
@@ -209,11 +218,24 @@ impl Out {
         }
         if self.mode == Output::Json {
             let advice = fix.cloned().or_else(|| usage.map(Advice::hint));
-            self.error_object("invalid_argument", "", message, advice.as_ref());
+            self.error_object(
+                "invalid_argument",
+                "",
+                message,
+                advice.as_ref(),
+                &BTreeMap::new(),
+            );
         }
     }
 
-    fn error_object(&self, kind: &str, reason: &str, message: &str, advice: Option<&Advice>) {
+    fn error_object(
+        &self,
+        kind: &str,
+        reason: &str,
+        message: &str,
+        advice: Option<&Advice>,
+        metadata: &BTreeMap<String, String>,
+    ) {
         // The object `reef-daemon`'s offline commands print too (R2.05).
         let document = ErrorDocument {
             error: ErrorObject {
@@ -222,6 +244,7 @@ impl Out {
                 message: message.to_owned(),
                 hint: advice.map_or_else(String::new, |advice| advice.hint.clone()),
                 next: advice.map_or_else(Vec::new, |advice| advice.next.clone()),
+                metadata: metadata.clone(),
             },
         };
         let mut buffer = Vec::new();
