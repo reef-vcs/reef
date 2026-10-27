@@ -428,11 +428,11 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.PresenceService/ReportPresence",
-        "reported for the server's calls by R2.11, not as a tool",
+        "the server reports its calls' activity itself",
     ),
     (
         "/reef.api.v1.PresenceService/ClearPresence",
-        "reported for the server's calls by R2.11, not as a tool",
+        "the server clears its entries at exit",
     ),
     (
         "/reef.api.v1.PresenceService/SubscribePresence",

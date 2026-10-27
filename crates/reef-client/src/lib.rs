@@ -23,6 +23,7 @@ pub mod error;
 pub mod json;
 pub mod logging;
 pub mod paths;
+pub mod presence;
 
 use std::collections::BTreeMap;
 use std::future::Future;

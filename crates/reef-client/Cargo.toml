@@ -43,3 +43,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }   # paused clocks in the reporter's tests (R2.11)

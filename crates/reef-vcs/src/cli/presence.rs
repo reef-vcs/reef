@@ -6,18 +6,30 @@
 //! Across a daemon restart it resubscribes and stays a correct stream of
 //! changes: the new set replaces what it held, so it prints what is new or
 //! changed, and an end (with no reason) for each entry that is gone.
+//!
+//! `reef presence report` and `clear` (R2.11) let any process report an
+//! entry of its own. The entry outlives the process until its TTL runs
+//! out; its id, printed by the report, is what a later process passes to
+//! replace or clear it, directly (`--id`) or through a file (`--id-file`).
 
 use std::collections::{HashMap, HashSet};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use reef_api::v1::{self, SubscribePresenceRequest, SubscribePresenceResponse};
-use reef_client::ClientError;
+use reef_api::v1::{
+    self, ReportPresenceRequest, SubscribePresenceRequest, SubscribePresenceResponse,
+};
 use reef_client::json::{Presence, PresenceEvent};
+use reef_client::{ClientError, default_owner, presence};
+use serde::Serialize;
 use tokio::time::Instant;
 
-use super::render_vcs::PresenceLine;
-use super::scope::workspace_arg;
+use super::advice::AdviceCtx;
+use super::render_vcs::{PresenceLine, Reported};
+use super::scope::{self, ScopeArgs, workspace_arg};
 use super::stream::{Backoff, Stopped, run_until_stopped, until};
+use super::ws::lease_length;
 use super::{CliError, Ctx};
 
 /// How long `presence watch` runs without `--for` or `--follow`.
@@ -35,6 +47,61 @@ enum PresenceCommand {
     /// Print presence as it changes (JSON lines on a pipe).
     #[command(after_help = "Example: reef presence watch --for 0")]
     Watch(WatchArgs),
+    /// Report what you are doing, for presence watch (prints the entry's id).
+    #[command(
+        after_help = "Example: reef presence report --id-file .reef-presence \"running the tests\""
+    )]
+    Report(ReportArgs),
+    /// End presence entries you reported.
+    #[command(after_help = "Example: reef presence clear --id-file .reef-presence")]
+    Clear(ClearArgs),
+}
+
+/// `reef presence report`. Exactly one of TEXT, `--path`, or `--phase` and
+/// `--done` says what the entry is.
+#[derive(Debug, clap::Args)]
+struct ReportArgs {
+    /// What you are doing: an activity entry.
+    #[arg(value_name = "TEXT")]
+    text: Option<String>,
+    /// A file you are editing: an editing entry; repeatable.
+    #[arg(long = "path", value_name = "PATH")]
+    paths: Vec<String>,
+    /// The phase of a task: a progress entry.
+    #[arg(long, value_name = "NAME")]
+    phase: Option<String>,
+    /// Units done: a progress entry.
+    #[arg(long, value_name = "N")]
+    done: Option<u64>,
+    /// Units in all, with --phase or --done.
+    #[arg(long, value_name = "N")]
+    total: Option<u64>,
+    /// What a unit is, such as files, with --phase or --done.
+    #[arg(long, value_name = "UNIT")]
+    unit: Option<String>,
+    #[command(flatten)]
+    scope: ScopeArgs,
+    /// How long it lasts unless reported again [default: 30s; at most 10m].
+    #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
+    ttl: Option<Duration>,
+    /// Replace this entry, an id a report printed.
+    #[arg(long, value_name = "ID", conflicts_with = "id_file")]
+    id: Option<String>,
+    /// Replace the entry whose id FILE holds, if any, and write the id to it.
+    #[arg(long, value_name = "FILE")]
+    id_file: Option<PathBuf>,
+}
+
+/// `reef presence clear`.
+#[derive(Debug, clap::Args)]
+#[command(group(clap::ArgGroup::new("ids").required(true).multiple(true).args(["id", "id_file"])))]
+struct ClearArgs {
+    /// An entry's id; repeatable.
+    #[arg(value_name = "ID")]
+    id: Vec<String>,
+    /// Clear the entry whose id FILE holds, then remove FILE.
+    #[arg(long, value_name = "FILE")]
+    id_file: Option<PathBuf>,
 }
 
 /// `reef presence watch`.
@@ -87,6 +154,192 @@ impl From<KindArg> for v1::PresenceKind {
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     match args.command {
         PresenceCommand::Watch(args) => watch(ctx, args).await,
+        PresenceCommand::Report(args) => report(ctx, args).await,
+        PresenceCommand::Clear(args) => clear(ctx, args).await,
+    }
+}
+
+/// What a report says, from which of its forms was given.
+fn says(args: &ReportArgs) -> Result<(v1::PresenceKind, presence::State), CliError> {
+    let progress = args.phase.is_some() || args.done.is_some();
+    let forms = [args.text.is_some(), !args.paths.is_empty(), progress];
+    if forms.iter().filter(|given| **given).count() != 1 {
+        return Err(CliError::Usage(
+            "say what the entry is with exactly one of: TEXT (an activity), --path (editing), or --phase and --done (progress)"
+                .to_owned(),
+        ));
+    }
+    if !progress && (args.total.is_some() || args.unit.is_some()) {
+        return Err(CliError::Usage(
+            "--total and --unit go with --phase or --done".to_owned(),
+        ));
+    }
+    let state = presence::State::default();
+    Ok(if let Some(text) = &args.text {
+        let state = presence::State {
+            activity: text.clone(),
+            ..state
+        };
+        (v1::PresenceKind::Activity, state)
+    } else if progress {
+        let state = presence::State {
+            progress: Some(v1::Progress {
+                phase: args.phase.clone().unwrap_or_default(),
+                done: args.done.unwrap_or_default(),
+                total: args.total.unwrap_or_default(),
+                unit: args.unit.clone().unwrap_or_default(),
+            }),
+            ..state
+        };
+        (v1::PresenceKind::Progress, state)
+    } else {
+        (v1::PresenceKind::Editing, state)
+    })
+}
+
+async fn report(ctx: &Ctx, args: ReportArgs) -> Result<(), CliError> {
+    let (kind, mut state) = says(&args)?;
+    let ttl = match args.ttl {
+        Some(ttl) if ttl.is_zero() => None,
+        ttl => lease_length(ttl)?,
+    };
+    let held = match &args.id_file {
+        Some(file) => read_id_file(file)?,
+        None => args.id.clone(),
+    };
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    if kind == v1::PresenceKind::Editing {
+        state.paths = scope::given_paths(&scope, &args.paths)?;
+    }
+    let owner = scope.workspace.as_ref().map(|ws| ws.owner.as_str());
+    let request = ReportPresenceRequest {
+        presence_id: held.clone().unwrap_or_default(),
+        agent: presence::agent(ctx.agent.as_deref(), owner, &default_owner()),
+        repo: if scope.workspace.is_some() {
+            String::new()
+        } else {
+            scope.repo_id.clone()
+        },
+        workspace: scope.workspace_id(),
+        change: scope
+            .workspace
+            .as_ref()
+            .map(|ws| ws.change_id.clone())
+            .unwrap_or_default(),
+        kind: kind.into(),
+        activity: state.activity,
+        paths: state.paths,
+        progress: state.progress,
+        ttl,
+    };
+    let advice = AdviceCtx::new(&scope);
+    let answer = ctx.call(ctx.client.report_presence(request.clone())).await;
+    let response = match answer {
+        Err(CliError::Daemon(error))
+            if held.is_some() && error.reason() == reef_api::error::PRESENCE_NOT_FOUND =>
+        {
+            let fresh = ReportPresenceRequest {
+                presence_id: String::new(),
+                ..request
+            };
+            let response = ctx
+                .call(ctx.client.report_presence(fresh))
+                .await
+                .map_err(|error| advice.refine(error))?;
+            if let Some(entry) = &response.presence {
+                ctx.out.note(&format!(
+                    "reef: presence entry {} had ended; reported a new one, {}",
+                    held.as_deref().unwrap_or_default(),
+                    entry.id
+                ));
+            }
+            response
+        }
+        response => response.map_err(|error| advice.refine(error))?,
+    };
+    let entry = response
+        .presence
+        .as_ref()
+        .map(Presence::from)
+        .ok_or_else(|| super::repo::missing("presence"))?;
+    if let Some(file) = &args.id_file {
+        write_id_file(file, &entry.id)?;
+    }
+    ctx.out.object(&Reported(entry))
+}
+
+/// What `presence clear` cleared.
+#[derive(Debug, Serialize)]
+struct Cleared {
+    cleared: Vec<String>,
+}
+
+async fn clear(ctx: &Ctx, args: ClearArgs) -> Result<(), CliError> {
+    let mut ids = args.id.clone();
+    if let Some(file) = &args.id_file
+        && let Some(id) = read_id_file(file)?
+    {
+        ids.push(id);
+    }
+    for id in &ids {
+        ctx.call(ctx.client.clear_presence(id)).await?;
+    }
+    if let Some(file) = &args.id_file {
+        remove_id_file(file)?;
+    }
+    let note = if ids.is_empty() {
+        "nothing to clear".to_owned()
+    } else {
+        ids.iter()
+            .map(|id| format!("cleared {id}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    ctx.out.done(&Cleared { cleared: ids }, &note)
+}
+
+/// The id `file` holds; `None` when it is missing or blank.
+fn read_id_file(file: &Path) -> Result<Option<String>, CliError> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(Some(text.trim().to_owned()).filter(|id| !id.is_empty())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(CliError::Io {
+            op: "read",
+            path: file.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Writes `id` and a newline to `file` through a file beside it, so a
+/// reader never sees half an id.
+fn write_id_file(file: &Path, id: &str) -> Result<(), CliError> {
+    let name = file.file_name().map_or_else(
+        || "presence".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temporary = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let written = std::fs::write(&temporary, format!("{id}\n"))
+        .and_then(|()| std::fs::rename(&temporary, file));
+    written.map_err(|source| {
+        let _ = std::fs::remove_file(&temporary);
+        CliError::Io {
+            op: "write",
+            path: file.to_owned(),
+            source,
+        }
+    })
+}
+
+fn remove_id_file(file: &Path) -> Result<(), CliError> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CliError::Io {
+            op: "remove",
+            path: file.to_owned(),
+            source,
+        }),
     }
 }
 

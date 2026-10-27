@@ -9,6 +9,9 @@
 //! killed it, 127 or 126 if it could not be started), unless it exited 0
 //! and the release failed, which exits with the daemon error's code.
 //!
+//! While the command runs, `ws run` reports it as an `ACTIVITY` presence
+//! entry (R2.11), cleared when it exits, before the release.
+//!
 //! The release (or `--keep`'s snapshot) waits up to `--timeout` or
 //! [`FINISH_DEADLINE`], whichever is longer: a final snapshot of a large
 //! tree can outlast the usual RPC deadline, and the daemon finishes it
@@ -22,7 +25,8 @@ use std::time::Duration;
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use reef_api::v1::{CreateWorkspaceRequest, LeaseState, Workspace, WorkspaceState};
+use reef_api::v1::{CreateWorkspaceRequest, LeaseState, PresenceKind, Workspace, WorkspaceState};
+use reef_client::presence::{self, Cadence, Reporter, Subject};
 use reef_client::{default_owner, json};
 use reef_error::{Classify as _, ErrorChain, ErrorKind};
 use serde::Serialize;
@@ -180,9 +184,13 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     };
     let end = match spawn(ctx, &args, &ws) {
         Ok(child) => {
+            let reporter = report_command(ctx, &ws, &args.command);
             let heartbeats = tokio::spawn(heartbeats(heartbeater));
             let end = supervise(child, &mut signals, &ctx.out).await;
             heartbeats.abort();
+            // Before the release, so the entry ends `cleared` before the
+            // workspace's own entries end `gone`.
+            reporter.clear().await;
             end
         }
         Err(error) => {
@@ -239,6 +247,24 @@ fn prepare(ctx: &Ctx, ws: &Workspace) -> Result<(Heartbeater, Signals), CliError
     let notify = Box::new(move |text: &str| out.note(text));
     let heartbeater = Heartbeater::new(Arc::new(ctx.client.clone()), ws, lease, notify)?;
     Ok((heartbeater, Signals::install()?))
+}
+
+/// The presence entry for the command running in `ws`: `running <command
+/// line>`, refreshed until cleared. No change: the workspace may be moved
+/// while the command runs, and its lease entry carries the current one.
+fn report_command(ctx: &Ctx, ws: &Workspace, command: &[String]) -> Reporter {
+    let subject = Subject {
+        agent: presence::agent(ctx.agent.as_deref(), Some(&ws.owner), &default_owner()),
+        workspace: ws.id.clone(),
+        kind: PresenceKind::Activity,
+        ..Subject::default()
+    };
+    let reporter = Reporter::start(Arc::new(ctx.client.clone()), subject, Cadence::REFRESH);
+    reporter.set(presence::State {
+        activity: format!("running {}", purpose_of(command)),
+        ..presence::State::default()
+    });
+    reporter
 }
 
 /// `WorkspaceService.CreateWorkspace` with `ws run`'s defaults: the workspace, and what
