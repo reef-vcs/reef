@@ -115,7 +115,8 @@ pub struct Stats {
     pub hits: u64,
     /// Reads sent back to the log ([`Lookup::Miss`] or [`Lookup::Unknown`]).
     pub misses: u64,
-    /// [`Broker::start`]s of a topic already primed: rewrites and restarts.
+    /// [`Broker::start`]s of a topic already primed (rewrites and
+    /// restarts) and [`Broker::unprime`]s.
     pub restarts: u64,
 }
 
@@ -133,12 +134,19 @@ struct Ring<P, I> {
     followers: usize,
     /// When the last follower left.
     left_at: Option<Instant>,
+    /// From the broker's one counter, so a topic dropped and created again
+    /// never repeats a version a reader holds.
     version: u64,
+    /// Which incarnation of the topic this ring is, for its followers.
+    generation: u64,
+    /// The head's sequence number when last cleared, so sequence numbers
+    /// run on across an unprimed spell.
+    cleared_at: u64,
     changes: watch::Sender<u64>,
 }
 
 impl<P: Clone + Eq + Hash, I: Item> Ring<P, I> {
-    fn new() -> Ring<P, I> {
+    fn new(version: u64, generation: u64) -> Ring<P, I> {
         Ring {
             entries: VecDeque::new(),
             index: HashMap::new(),
@@ -146,8 +154,10 @@ impl<P: Clone + Eq + Hash, I: Item> Ring<P, I> {
             bytes: 0,
             followers: 0,
             left_at: None,
-            version: 0,
-            changes: watch::Sender::new(0),
+            version,
+            generation,
+            cleared_at: 0,
+            changes: watch::Sender::new(version),
         }
     }
 
@@ -159,9 +169,23 @@ impl<P: Clone + Eq + Hash, I: Item> Ring<P, I> {
         }
     }
 
-    fn changed(&mut self) {
-        self.version += 1;
+    /// Takes the broker's next version.
+    fn changed(&mut self, versions: &mut u64) {
+        *versions += 1;
+        self.version = *versions;
         self.changes.send_replace(self.version);
+    }
+
+    /// Empties the ring, unprimed: every read is [`Lookup::Unknown`] until
+    /// the next [`Broker::start`]. Returns the bytes it held.
+    fn clear(&mut self) -> usize {
+        if let Some((seq, _)) = self.head() {
+            self.cleared_at = seq;
+        }
+        self.entries.clear();
+        self.index.clear();
+        self.base = None;
+        std::mem::take(&mut self.bytes)
     }
 
     /// Drops the oldest entry: its position becomes the base.
@@ -182,6 +206,28 @@ struct State<K, P, I> {
     topics: HashMap<K, Ring<P, I>>,
     bytes: usize,
     stats: Stats,
+    /// The last version given to any ring; 0 is never one.
+    versions: u64,
+    /// The last generation given to a ring.
+    generations: u64,
+}
+
+/// `topic`'s ring in `topics`, created unprimed with the next version and
+/// generation if it does not exist, and whether it was.
+fn ring_of<'a, K: Clone + Eq + Hash, P: Clone + Eq + Hash, I: Item>(
+    topics: &'a mut HashMap<K, Ring<P, I>>,
+    versions: &mut u64,
+    generations: &mut u64,
+    topic: &K,
+) -> (&'a mut Ring<P, I>, bool) {
+    let mut created = false;
+    let ring = topics.entry(topic.clone()).or_insert_with(|| {
+        created = true;
+        *versions += 1;
+        *generations += 1;
+        Ring::new(*versions, *generations)
+    });
+    (ring, created)
 }
 
 /// Rings of items per topic `K`, between positions `P`; see the crate
@@ -216,6 +262,8 @@ where
                 topics: HashMap::new(),
                 bytes: 0,
                 stats: Stats::default(),
+                versions: 0,
+                generations: 0,
             }),
             limits,
             changes: watch::Sender::new(0),
@@ -266,16 +314,18 @@ where
     /// Counts a reader of `topic` until the guard drops, creating the topic
     /// unprimed if it does not exist.
     pub fn follow(self: &Arc<Self>, topic: K) -> Following<K, P, I> {
-        let created = {
+        let (created, generation) = {
             let mut state = self.lock();
-            let mut created = false;
-            let ring = state.topics.entry(topic.clone()).or_insert_with(|| {
-                created = true;
-                Ring::new()
-            });
+            let state = &mut *state;
+            let (ring, created) = ring_of(
+                &mut state.topics,
+                &mut state.versions,
+                &mut state.generations,
+                &topic,
+            );
             ring.followers += 1;
             ring.left_at = None;
-            created
+            (created, ring.generation)
         };
         if created {
             self.wanted.send_modify(|version| *version += 1);
@@ -283,12 +333,17 @@ where
         Following {
             broker: Arc::clone(self),
             topic,
+            generation,
         }
     }
 
-    fn unfollow(&self, topic: &K) {
+    /// One follower of `generation` of `topic` left; a ring that replaced
+    /// it since is not this follower's.
+    fn unfollow(&self, topic: &K, generation: u64) {
         let mut state = self.lock();
-        if let Some(ring) = state.topics.get_mut(topic) {
+        if let Some(ring) = state.topics.get_mut(topic)
+            && ring.generation == generation
+        {
             ring.followers = ring.followers.saturating_sub(1);
             if ring.followers == 0 {
                 ring.left_at = Some(Instant::now());
@@ -309,23 +364,49 @@ where
         {
             let mut state = self.lock();
             let state = &mut *state;
-            let created = !state.topics.contains_key(topic);
-            let ring = state.topics.entry(topic.clone()).or_insert_with(Ring::new);
-            if ring.base.is_some() {
-                state.stats.restarts += 1;
-            }
-            let seq = ring.head().map_or(0, |(seq, _)| seq);
-            state.bytes -= ring.bytes;
-            ring.entries.clear();
-            ring.index.clear();
-            ring.bytes = 0;
+            let (ring, created) = ring_of(
+                &mut state.topics,
+                &mut state.versions,
+                &mut state.generations,
+                topic,
+            );
+            let restarted = ring.base.is_some();
+            let seq = ring.head().map_or(ring.cleared_at, |(seq, _)| seq);
+            let freed = ring.clear();
             ring.index.insert(at.clone(), seq);
             ring.base = Some((at, seq));
-            ring.changed();
+            ring.changed(&mut state.versions);
+            state.bytes -= freed;
+            if restarted {
+                state.stats.restarts += 1;
+            }
             if created {
                 ring.left_at = Some(Instant::now());
                 self.wanted.send_modify(|version| *version += 1);
             }
+        }
+        self.bump();
+    }
+
+    /// Empties `topic`'s ring and leaves it unprimed, keeping its
+    /// followers: every read is [`Lookup::Unknown`], so readers go to the
+    /// log, until the producer [`Broker::start`]s it again. For a producer
+    /// that cannot read: its readers then meet the log's own error rather
+    /// than wait on a ring that no longer moves.
+    pub fn unprime(&self, topic: &K) {
+        {
+            let mut state = self.lock();
+            let state = &mut *state;
+            let Some(ring) = state.topics.get_mut(topic) else {
+                return;
+            };
+            if ring.base.is_none() {
+                return;
+            }
+            let freed = ring.clear();
+            ring.changed(&mut state.versions);
+            state.bytes -= freed;
+            state.stats.restarts += 1;
         }
         self.bump();
     }
@@ -378,7 +459,7 @@ where
                 state.bytes -= before - ring.bytes;
                 state.stats.evicted += 1;
             }
-            ring.changed();
+            ring.changed(&mut state.versions);
             while state.bytes > self.limits.total_bytes {
                 let Some(largest) = state
                     .topics
@@ -521,6 +602,7 @@ where
 {
     broker: Arc<Broker<K, P, I>>,
     topic: K,
+    generation: u64,
 }
 
 impl<K, P, I> fmt::Debug for Following<K, P, I>
@@ -541,7 +623,7 @@ where
     I: Item,
 {
     fn drop(&mut self) {
-        self.broker.unfollow(&self.topic);
+        self.broker.unfollow(&self.topic, self.generation);
     }
 }
 

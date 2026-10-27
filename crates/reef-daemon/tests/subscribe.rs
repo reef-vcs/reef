@@ -869,7 +869,14 @@ async fn slow_subscriber_is_held_not_dropped_from_the_log() {
 }
 
 async fn slow_subscriber_is_held(served: Served) {
-    let (daemon, repo) = fixture_with(|config| served.configure(config)).await;
+    // Frames 250 ms apart, so the slow reader's operations coalesce however
+    // long a describe takes under load: HTTP/2's window takes its 90 small
+    // frames while it does not read, so its session is never held (R2.22).
+    let (daemon, repo) = fixture_with(|config| {
+        config.subscribe.frame_interval = Duration::from_millis(250);
+        served.configure(config);
+    })
+    .await;
     let ws = create(&daemon.client, &repo, "owner").await;
     let mut slow = subscribe(&daemon.client, request(&repo)).await;
     frame(&mut slow, SECOND).await;

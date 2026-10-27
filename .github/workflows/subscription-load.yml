@@ -20,6 +20,12 @@ on:
       - crates/reef-daemon/src/subscribe/**
       - crates/reef-daemon/src/presence/**
       - crates/reef-daemon/src/limits.rs
+      - crates/reef-daemon/src/daemon.rs
+      - crates/reef-daemon/src/run.rs
+      - crates/reef-daemon/src/read/**
+      - crates/reef-daemon/src/service/operations.rs
+      - crates/reef-daemon/src/service/op_filter.rs
+      - crates/reef-lib/src/jj/oplog.rs
       - crates/reef-daemon/tests/subscription_load.rs
       - crates/reef-daemon/tests/common/load.rs
       - .github/workflows/subscription-load.yml

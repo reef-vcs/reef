@@ -287,7 +287,7 @@ fn changes() {
     let mut all = broker.changes();
     let _following = broker.follow("t");
     let mut one = broker.changes_of(&"t").unwrap();
-    assert_eq!(broker.version(&"t"), Some(0));
+    assert!(broker.version(&"t").unwrap() > 0, "0 is never a version");
     broker.start(&"t", 0);
     assert!(all.has_changed().unwrap());
     assert!(one.has_changed().unwrap());
@@ -323,4 +323,66 @@ fn changes() {
     assert!(all.has_changed().unwrap());
     assert_eq!(broker.version(&"t"), None);
     assert!(broker.changes_of(&"t").is_none());
+}
+
+// R2.22 review: a topic dropped and created again never repeats a
+// version a reader holds, and a follower of the old ring does not count
+// against the new one.
+#[tokio::test(start_paused = true)]
+async fn incarnations_are_told_apart() {
+    let broker = broker(Limits {
+        linger: Duration::from_secs(1),
+        ..Limits::default()
+    });
+    let old = broker.follow("t");
+    broker.start(&"t", 0);
+    append(&broker, "t", 1..=5, 10);
+    let seen = broker.version(&"t").unwrap();
+    broker.remove(&"t");
+
+    let new = broker.follow("t");
+    let created = broker.version(&"t").unwrap();
+    assert!(created > seen, "{created} after {seen}");
+    broker.start(&"t", 5);
+    append(&broker, "t", 6..=10, 10);
+    assert!(broker.version(&"t").unwrap() > seen);
+
+    // The old follower leaving does not leave the new ring unfollowed.
+    drop(old);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    broker.sweep(Instant::now());
+    assert_eq!(broker.wanted(), vec!["t"]);
+    drop(new);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    broker.sweep(Instant::now());
+    assert_eq!(broker.wanted(), Vec::<&str>::new());
+}
+
+// R2.22 review: a producer that cannot read unprimes its ring; readers
+// are sent to the log and woken, and sequence numbers run on after it.
+#[test]
+fn unprime_sends_readers_to_the_log() {
+    let broker = filled(Limits::default(), 5);
+    let mut all = broker.changes();
+    all.borrow_and_update();
+    let version = broker.version(&"t").unwrap();
+    broker.unprime(&"t");
+    assert!(all.has_changed().unwrap());
+    assert!(broker.version(&"t").unwrap() > version);
+    assert_eq!(positions(broker.read(&"t", &5, None, 100)), Err("unknown"));
+    assert_eq!(broker.head(&"t"), None);
+    assert_eq!(broker.stats().bytes, 0);
+    assert_eq!(broker.stats().restarts, 1);
+    broker.start(&"t", 9);
+    append(&broker, "t", [10], 10);
+    assert_eq!(
+        broker.head(&"t"),
+        Some((6, 10)),
+        "sequence numbers are not reused"
+    );
+    // Unpriming an unprimed or missing topic does nothing.
+    broker.unprime(&"u");
+    let _following = broker.follow("u");
+    broker.unprime(&"u");
+    assert_eq!(broker.stats().restarts, 1);
 }

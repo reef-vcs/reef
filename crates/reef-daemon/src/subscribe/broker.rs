@@ -184,6 +184,12 @@ pub(crate) fn supervise(state: &Arc<AppState>) {
 struct Supervisor {
     state: Arc<AppState>,
     tasks: HashMap<RepoId, (CancellationToken, JoinHandle<()>)>,
+    /// Ingests told to stop that may still be finishing a read. A
+    /// repository gets no new ingest until its old one has ended, so two
+    /// never write one ring (R2.22 review).
+    stopping: Vec<(RepoId, JoinHandle<()>)>,
+    /// Notified when an ingest ends.
+    ended: Arc<tokio::sync::Notify>,
     /// What sessions read from `OpEvents` besides versions, as last
     /// forwarded.
     shape: Vec<events::Shape>,
@@ -197,6 +203,8 @@ impl Supervisor {
         Supervisor {
             state,
             tasks: HashMap::new(),
+            stopping: Vec::new(),
+            ended: Arc::new(tokio::sync::Notify::new()),
             shape,
             last: BrokerStats::default(),
         }
@@ -207,6 +215,7 @@ impl Supervisor {
         let shutdown = self.state.shutdown.clone();
         let mut events = self.state.events.changes();
         let mut wanted = rings.wanted_changes();
+        let ended = Arc::clone(&self.ended);
         let linger = rings.limits().linger;
         let mut sweep =
             tokio::time::interval((linger / 2).clamp(Duration::from_millis(100), SWEEP_EVERY));
@@ -228,6 +237,7 @@ impl Supervisor {
                         break;
                     }
                 }
+                () = ended.notified() => {}
                 _ = sweep.tick() => rings.sweep(tokio::time::Instant::now()),
                 _ = summary.tick() => self.summary(),
             }
@@ -236,24 +246,42 @@ impl Supervisor {
             stop.cancel();
             let _ = task.await;
         }
+        for (_, task) in self.stopping.drain(..) {
+            let _ = task.await;
+        }
     }
 
     /// One ingest per wanted repository; none for the rest.
     fn reconcile(&mut self) {
         let wanted: HashSet<RepoId> = self.state.broker.rings.wanted().into_iter().collect();
-        self.tasks.retain(|repo, (stop, task)| {
-            let keep = wanted.contains(repo) && !task.is_finished();
-            if !keep {
+        let done: Vec<RepoId> = self
+            .tasks
+            .iter()
+            .filter(|(repo, (_, task))| !wanted.contains(*repo) || task.is_finished())
+            .map(|(repo, _)| *repo)
+            .collect();
+        for repo in done {
+            if let Some((stop, task)) = self.tasks.remove(&repo) {
                 stop.cancel();
+                self.stopping.push((repo, task));
             }
-            keep
-        });
+        }
+        self.stopping.retain(|(_, task)| !task.is_finished());
         for repo in wanted {
-            self.tasks.entry(repo).or_insert_with(|| {
-                let stop = self.state.shutdown.child_token();
-                let task = tokio::spawn(ingest(Arc::clone(&self.state), repo, stop.clone()));
-                (stop, task)
+            if self.tasks.contains_key(&repo) || self.stopping.iter().any(|(old, _)| *old == repo) {
+                continue;
+            }
+            let stop = self.state.shutdown.child_token();
+            let (state, ended, token) = (
+                Arc::clone(&self.state),
+                Arc::clone(&self.ended),
+                stop.clone(),
+            );
+            let task = tokio::spawn(async move {
+                ingest(state, repo, token).await;
+                ended.notify_one();
             });
+            self.tasks.insert(repo, (stop, task));
         }
     }
 
@@ -345,7 +373,9 @@ async fn ingest(state: Arc<AppState>, repo: RepoId, stop: CancellationToken) {
                 // replaced from the log, as R2.09 does.
                 match &view.last_rewrite {
                     Some((_, after)) => rings.start(&repo, Frontier::new([after.clone()])),
-                    None => rings.remove(&repo),
+                    // Primed again from the op heads below, keeping its
+                    // followers.
+                    None => rings.unprime(&repo),
                 }
                 read_at = None;
             }
@@ -354,7 +384,14 @@ async fn ingest(state: Arc<AppState>, repo: RepoId, stop: CancellationToken) {
                 match step(&state, repo, &view).await {
                     Step::Done => read_at = Some(view.version),
                     Step::Stale => {}
-                    Step::Failed => retry = true,
+                    Step::Failed => {
+                        // Sessions must not wait on a ring that no longer
+                        // moves: unprimed, they read the log, as before
+                        // R2.22, and meet its error if it persists. The
+                        // next read primes it again from the op heads.
+                        rings.unprime(&repo);
+                        retry = true;
+                    }
                 }
             }
         }

@@ -741,9 +741,10 @@ async fn gc_keeps_caught_up_subscriptions() {
     assert!(first.live);
     let before = first.cursor;
     past_this_second().await;
-    // R2.22, 13: the subscription's ring is primed before GC.
+    // R2.22, 13: the ring is primed and the subscription has read it
+    // there before GC: a ring hit, so its next read is from memory.
     let primed = Instant::now();
-    while daemon.handle.state().broker.stats().ingest_reads == 0 {
+    while daemon.handle.state().broker.stats().ring_reads == 0 {
         assert!(
             primed.elapsed() < Duration::from_secs(5),
             "the ring is primed"
