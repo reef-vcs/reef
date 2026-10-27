@@ -6,11 +6,12 @@
 
 use reef_api::v1::{ListFilesRequest, ReadFileRequest};
 use reef_client::json::{FileEntry, FileRead};
+use reef_error::{Advice, ErrorKind};
 
 use super::Output;
 use super::advice::AdviceCtx;
 use super::render_vcs::FileLines;
-use super::scope::{self, ReadArgs, ScopeArgs};
+use super::scope::{self, ReadArgs, Scope, ScopeArgs};
 use super::{CliError, Ctx};
 
 /// `reef file`.
@@ -76,6 +77,9 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         } => {
             let scope = scope::resolve(ctx, &scope).await?;
             let mut paths = scope::given_paths(&scope, &[path])?;
+            if paths.first().is_some_and(String::is_empty) {
+                return Err(root_is_a_directory(&scope, &revision));
+            }
             let advice = AdviceCtx {
                 operation_given: read.at_op.is_some(),
                 snapshots_first: !read.no_snapshot,
@@ -134,6 +138,21 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     }
 }
 
+/// `file read` of the root, which the API refuses as an invalid path: it is
+/// a directory, as for any other.
+fn root_is_a_directory(scope: &Scope, revision: &str) -> CliError {
+    let mut next: Vec<String> = ["reef", "file", "list", "-r", revision]
+        .map(str::to_owned)
+        .to_vec();
+    next.extend(scope.flags());
+    CliError::Precheck {
+        kind: ErrorKind::Conflict,
+        reason: reef_api::error::NOT_A_FILE,
+        message: "the repository's root is a directory, not a file".to_owned(),
+        advice: Advice::run("It is a directory; list it instead.", next),
+    }
+}
+
 /// The file `request` names: its bytes written range by range as they
 /// arrive, or the whole object with `-o json`. Ranges after the first read
 /// the commit the first one read, so a write in between cannot mix two
@@ -144,7 +163,9 @@ async fn read_file(ctx: &Ctx, request: ReadFileRequest) -> Result<(), CliError> 
         return ctx.out.object(&FileRead::from(&whole));
     }
     let first = ctx.call(ctx.client.read_file(request.clone())).await?;
-    ctx.out.raw(&first.content)?;
+    if !ctx.out.raw_open(&first.content)? {
+        return Ok(());
+    }
     let mut offset = u64::try_from(first.content.len()).unwrap_or(u64::MAX);
     let mut next = ReadFileRequest {
         revision: first.commit_id.clone(),
@@ -157,7 +178,9 @@ async fn read_file(ctx: &Ctx, request: ReadFileRequest) -> Result<(), CliError> 
         if range.content.is_empty() {
             break;
         }
-        ctx.out.raw(&range.content)?;
+        if !ctx.out.raw_open(&range.content)? {
+            break;
+        }
         offset = offset.saturating_add(u64::try_from(range.content.len()).unwrap_or(u64::MAX));
     }
     Ok(())

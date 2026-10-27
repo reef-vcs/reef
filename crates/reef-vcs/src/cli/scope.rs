@@ -91,7 +91,7 @@ impl Scope {
 pub(crate) async fn resolve(ctx: &Ctx, args: &ScopeArgs) -> Result<Scope, CliError> {
     if let Some(workspace) = &args.workspace {
         let repo = match &args.repo {
-            Some(repo) => RepoArg::parse(repo)?.text(),
+            Some(repo) => repo_text(ctx, &RepoArg::parse(repo)?).await?,
             None => String::new(),
         };
         let ws = lookup(ctx, repo, workspace_arg(workspace)?).await?;
@@ -177,19 +177,35 @@ async fn lookup(ctx: &Ctx, repo: String, workspace: String) -> Result<v1::Worksp
     response.workspace.ok_or_else(|| missing("workspace"))
 }
 
-/// `--repo`'s repository. A path inside a workspace means that
-/// workspace's repository: workspaces live outside their repository's
-/// root, so the path alone names none, and registering it would fail.
+/// `--repo`'s repository; see [`in_workspace_repo`].
 async fn repository(ctx: &Ctx, repo: &RepoArg) -> Result<Scope, CliError> {
-    if let RepoArg::Path(path) = repo {
-        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        match lookup(ctx, String::new(), canonical.display().to_string()).await {
-            Ok(ws) => return registered(ctx, &RepoArg::Named(ws.repo_id), true).await,
-            Err(CliError::Daemon(error)) if is_workspace_not_found(&error) => {}
-            Err(error) => return Err(error),
-        }
+    let repo = in_workspace_repo(ctx, repo)
+        .await?
+        .unwrap_or_else(|| repo.clone());
+    registered(ctx, &repo, true).await
+}
+
+/// `--repo`'s text as a request's `repo` field, alongside `--workspace`.
+async fn repo_text(ctx: &Ctx, repo: &RepoArg) -> Result<String, CliError> {
+    let repo = in_workspace_repo(ctx, repo)
+        .await?
+        .unwrap_or_else(|| repo.clone());
+    Ok(repo.text())
+}
+
+/// The repository of the workspace a `--repo` path is inside, if it is
+/// inside one: workspaces live outside their repository's root, so the
+/// path alone names no repository, and registering it would fail.
+async fn in_workspace_repo(ctx: &Ctx, repo: &RepoArg) -> Result<Option<RepoArg>, CliError> {
+    let RepoArg::Path(path) = repo else {
+        return Ok(None);
+    };
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    match lookup(ctx, String::new(), canonical.display().to_string()).await {
+        Ok(ws) => Ok(Some(RepoArg::Named(ws.repo_id))),
+        Err(CliError::Daemon(error)) if is_workspace_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
     }
-    registered(ctx, repo, true).await
 }
 
 /// Repository scope: `GetRepository`, registering a path in no registered
@@ -274,12 +290,12 @@ pub(crate) fn default_list_path(scope: &Scope) -> Result<String, CliError> {
 
 fn given_path(scope: &Scope, base: Option<&Path>, given: &str) -> Result<String, CliError> {
     let path = Path::new(given);
-    let absolute = if path.is_absolute() {
-        canonical_prefix(path)
+    let relative = if path.is_absolute() {
+        relative_to(&scope.dir, path).or_else(|| through_symlinked_ancestor(&scope.dir, path))
     } else {
-        base.unwrap_or(&scope.dir).join(path)
+        relative_to(&scope.dir, &base.unwrap_or(&scope.dir).join(path))
     };
-    relative_to(&scope.dir, &absolute).ok_or_else(|| CliError::Precheck {
+    relative.ok_or_else(|| CliError::Precheck {
         kind: ErrorKind::InvalidArgument,
         reason: reef_api::error::INVALID_PATH,
         message: format!("{given} is outside {}", scope.dir.display()),
@@ -290,28 +306,17 @@ fn given_path(scope: &Scope, base: Option<&Path>, given: &str) -> Result<String,
 /// How paths are given, for `INVALID_PATH`.
 pub(crate) const PATH_HINT: &str = "Paths are relative to the current directory inside the workspace or repository, or absolute inside it, and never leave it.";
 
-/// `path` with its longest existing ancestor made canonical, so an
-/// absolute path through a symlink (macOS's `/tmp`) compares with the
-/// canonical directories the daemon records. The rest may not exist at the
-/// working copy, only at another revision.
-fn canonical_prefix(path: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut current = path;
-    loop {
-        if let Ok(canonical) = std::fs::canonicalize(current) {
-            return rest
-                .iter()
-                .rev()
-                .fold(canonical, |path, part| path.join(part));
-        }
-        match (current.parent(), current.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_owned());
-                current = parent;
-            }
-            _ => return path.to_owned(),
-        }
-    }
+/// `path`, absolute and outside `dir` as written, relative to `dir` when
+/// one of its ancestors is `dir` through a symlink (macOS's `/tmp` is
+/// `/private/tmp`, and the daemon records canonical directories). Only
+/// that ancestor is resolved: components under `dir` are read through the
+/// tree, never through a symlink on disk, as the API reads them.
+fn through_symlinked_ancestor(dir: &Path, path: &Path) -> Option<String> {
+    let normal = normalize(path);
+    normal
+        .ancestors()
+        .find(|ancestor| std::fs::canonicalize(ancestor).is_ok_and(|real| real == dir))
+        .and_then(|ancestor| relative_to(ancestor, &normal))
 }
 
 /// `path`, absolute, relative to `dir` and `/`-separated after resolving
@@ -401,6 +406,34 @@ mod tests {
         assert_eq!(given(&ws, None, "src/a.rs").unwrap(), "src/a.rs");
         let flagged = scope("/ws/one", true);
         assert_eq!(given(&flagged, None, "a.rs").unwrap(), "a.rs");
+    }
+
+    /// Review finding 1 and 2: only an ancestor that is the directory
+    /// through a symlink is resolved; symlinks under it are kept, and `..`
+    /// in a part that does not exist is resolved first.
+    #[test]
+    fn absolute_paths_resolve_only_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("ws");
+        std::fs::create_dir_all(real.join("v2")).unwrap();
+        std::fs::write(real.join("README.md"), "r\n").unwrap();
+        std::os::unix::fs::symlink("README.md", real.join("link")).unwrap();
+        std::os::unix::fs::symlink("v2", real.join("latest")).unwrap();
+        std::os::unix::fs::symlink("/etc", real.join("out")).unwrap();
+        let alias = tmp.path().canonicalize().unwrap().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let ws = scope(real.to_str().unwrap(), false);
+        let at = |dir: &Path, rest: &str| dir.join(rest).display().to_string();
+        for dir in [&real, &alias] {
+            assert_eq!(given(&ws, None, &at(dir, "link")).unwrap(), "link");
+            assert_eq!(
+                given(&ws, None, &at(dir, "latest/a.txt")).unwrap(),
+                "latest/a.txt"
+            );
+            assert_eq!(given(&ws, None, &at(dir, "out")).unwrap(), "out");
+            assert_eq!(given(&ws, None, &at(dir, "gone/../x")).unwrap(), "x");
+        }
+        assert!(given(&ws, None, &at(&alias, "../elsewhere")).is_err());
     }
 
     #[test]

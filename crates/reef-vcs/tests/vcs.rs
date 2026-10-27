@@ -194,6 +194,22 @@ async fn scope_rules() {
         let status = ok(&daemon, &repo.root, &["status", "--workspace", flag]).await;
         assert_eq!(in_status(&status), ws.id.as_str(), "{flag}");
     }
+    // `--repo <a workspace path>` narrowing `--workspace` names the
+    // workspace's repository (review finding 5).
+    let ws_path = path(&ws);
+    let status = ok(
+        &daemon,
+        &repo.root,
+        &[
+            "status",
+            "--workspace",
+            &ws.id,
+            "--repo",
+            ws_path.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(in_status(&status), ws.id.as_str());
     // `--repo .` inside the workspace: its repository, and no workspace.
     let status = ok(&daemon, &path(&ws), &["status", "--repo", "."]).await;
     assert_eq!(status["workspace_status"], Value::Null);
@@ -772,6 +788,7 @@ async fn ws_snapshot() {
 
 // 12
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture, every read case")]
 async fn file_read() {
     let (daemon, repo) = fixture().await;
     let ws = create(&daemon, &repo).await;
@@ -817,6 +834,29 @@ async fn file_read() {
     let src = path(&ws).join("src");
     let output = run_in(&daemon, &src, &["file", "read", "a.rs"]).await;
     assert_eq!(output.stdout, b"fn a() {}\n");
+    // The root is a directory, as any other (review finding 4).
+    let error = err(
+        &daemon,
+        &path(&ws),
+        &["-o", "json", "file", "read", "."],
+        5,
+        "NOT_A_FILE",
+    )
+    .await;
+    let next = next_of(&error);
+    assert_eq!(
+        next,
+        [
+            "reef",
+            "file",
+            "list",
+            "-r",
+            "@",
+            "--workspace",
+            ws.id.as_str()
+        ]
+    );
+    json(&run_next(&daemon, &repo.root, &next).await);
 
     // `file read` prints text even on a pipe, so its errors are JSON only
     // when asked.
@@ -1139,9 +1179,12 @@ async fn prefixes() {
             assert!(text.contains(candidate), "{prefix}: {candidate}: {text}");
         }
     }
-    // `a` names `abandon` alone, or `abandon` and `guide` through its
-    // `agent-guide` alias: a usage error either way, never a guess.
+    // `a` names `abandon` and `guide` (clap counts its `agent-guide`
+    // alias): clap's error for a subcommand it cannot pick, not
+    // `abandon`'s for its missing REV, which a guess would give.
     let output = run_in(&daemon, &dir, &["a"]).await;
     output.clone().assert().code(2);
-    eprintln!("reef a: {}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("unrecognized subcommand 'a'"), "{text}");
+    assert!(!text.contains("<REV>"), "{text}");
 }

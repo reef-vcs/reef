@@ -114,15 +114,22 @@ impl Out {
 
     /// Bytes on stdout as they are. A closed stdout (`reef ws list | head`)
     /// is not a failure.
+    pub(crate) fn raw(&self, bytes: &[u8]) -> Result<(), CliError> {
+        self.raw_open(bytes).map(|_| ())
+    }
+
+    /// [`Out::raw`], and whether stdout is still open, so a command
+    /// writing in pieces (`file read`) stops once nobody reads.
     #[expect(
         clippy::unused_self,
         reason = "every result goes through an `Out`, raw bytes too"
     )]
-    pub(crate) fn raw(&self, bytes: &[u8]) -> Result<(), CliError> {
+    pub(crate) fn raw_open(&self, bytes: &[u8]) -> Result<bool, CliError> {
         let mut stdout = io::stdout().lock();
         match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
-            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(CliError::Stdout(error)),
-            _ => Ok(()),
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+            Err(error) => Err(CliError::Stdout(error)),
         }
     }
 
