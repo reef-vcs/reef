@@ -27,6 +27,7 @@ fn reef(state: &Path, args: &[&str], vars: &[(&str, &Path)]) -> Output {
         .args(args)
         .env("REEF_STATE_DIR", state)
         .env_remove("REEF_SOCKET")
+        .env_remove("REEF_AGENT")
         .env_remove("REEF_CONFIG")
         .env_remove("REEF_LOG")
         .env_remove("RUST_LOG");

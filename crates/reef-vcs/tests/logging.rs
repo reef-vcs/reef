@@ -9,7 +9,11 @@ use std::process::Command;
 
 use serde_json::Value;
 
+mod common;
+
 fn reef_config_show(vars: &[(&str, &str)]) -> std::process::Output {
+    // `reef config show` runs `reef-daemon config show` (R2.05).
+    common::daemon_bin();
     let tmp = tempfile::Builder::new().prefix("reef-").tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
     command
@@ -19,6 +23,7 @@ fn reef_config_show(vars: &[(&str, &str)]) -> std::process::Output {
         .env_remove("REEF_SOCKET")
         .env_remove("REEF_LOG")
         .env_remove("RUST_LOG")
+        .env_remove("REEF_AGENT")
         .env("REEF_LOG_FORMAT", "json");
     command.envs(vars.iter().copied());
     command.output().unwrap()

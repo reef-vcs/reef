@@ -275,10 +275,15 @@ async fn ws_run_exports_the_agent() {
         })
         .await
         .unwrap();
-    assert!(!page.operations.is_empty(), "{page:?}");
-    for operation in &page.operations {
-        assert_eq!(operation.agent, "bot-3", "{operation:?}");
-    }
+    // The release's final snapshot is the one `ws run` causes; a watcher
+    // snapshot of the write may land first, and names the owner.
+    let finals: Vec<_> = page
+        .operations
+        .iter()
+        .filter(|operation| operation.snapshot_kind() == reef_api::v1::SnapshotKind::Final)
+        .collect();
+    assert_eq!(finals.len(), 1, "{page:?}");
+    assert_eq!(finals[0].agent, "bot-3", "{:?}", finals[0]);
 
     let output = finish(ws_run(&daemon, &repo, &["--", "sh", "-c", script])).await;
     assert_eq!(code(&output), 0, "{}", stderr(&output));

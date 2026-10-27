@@ -208,10 +208,10 @@ pub mod error {
     /// repository by a path inside it (R2.05). Metadata: `path`.
     pub const REPOSITORY_NOT_REGISTERED: &str = "REPOSITORY_NOT_REGISTERED";
     /// A repository id or prefix that names no registered repository
-    /// (R2.05). Metadata: `repo`, as given.
+    /// (R2.05). Metadata: `repo`, the id or prefix looked up.
     pub const REPOSITORY_NOT_FOUND: &str = "REPOSITORY_NOT_FOUND";
     /// A workspace id, prefix, or path that names no workspace (R2.05).
-    /// Metadata: `workspace`, as given.
+    /// Metadata: `workspace`, the id, prefix, or path looked up.
     pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";
     /// A malformed edit: no action and no `executable`, an empty
     /// `old_text`, `executable` with a delete, `copy_from` naming its own

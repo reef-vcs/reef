@@ -567,7 +567,13 @@ fn autostart_spawns_daemon() {
     let _guard = StopOnDrop(state.clone());
     let reef = || {
         let mut command = Command::new(&exe);
-        for var in ["REEF_SOCKET", "REEF_CONFIG", "REEF_LOG", "RUST_LOG"] {
+        for var in [
+            "REEF_SOCKET",
+            "REEF_CONFIG",
+            "REEF_LOG",
+            "RUST_LOG",
+            "REEF_AGENT",
+        ] {
             command.env_remove(var);
         }
         command.env("REEF_STATE_DIR", &state).env("PATH", &bin);
@@ -714,7 +720,7 @@ fn daemon_run_execs_reef_daemon() {
     let script = exe.with_file_name("reef-daemon");
     std::fs::write(
         &script,
-        "#!/bin/sh\necho \"pid $$\"\necho \"args $*\"\nexit 7\n",
+        "#!/bin/sh\necho \"pid $$\"\necho \"args $*\"\necho \"state $REEF_STATE_DIR\"\nexit 7\n",
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -729,7 +735,8 @@ fn daemon_run_execs_reef_daemon() {
     assert_eq!(
         stdout(&output),
         format!(
-            "pid {pid}\nargs --foreground --state-dir {}\n",
+            "pid {pid}\nargs --foreground --state-dir {}\nstate {}\n",
+            state.display(),
             state.display()
         )
     );
@@ -1637,6 +1644,7 @@ async fn every_command_completes_with_stdin_closed() {
                 "REEF_CONFIG",
                 "REEF_OUTPUT",
                 "REEF_WORKSPACE",
+                "REEF_AGENT",
             ] {
                 command.env_remove(var);
             }

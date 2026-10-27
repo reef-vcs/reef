@@ -741,6 +741,10 @@ pub enum ConfigError {
         #[source]
         source: Box<toml::de::Error>,
     },
+    /// A path error [`reef_client::paths`] added after this daemon mapped
+    /// its variants.
+    #[error(transparent)]
+    Paths(PathsError),
     /// A value parsed but breaks a rule, such as `lease.default` above
     /// `lease.max`.
     #[error("invalid {key} in the configuration file {}: {reason}", path.display())]
@@ -763,6 +767,7 @@ impl Classify for ConfigError {
             | Self::UnknownKey { .. }
             | Self::Invalid { .. } => ErrorKind::InvalidArgument,
             Self::Missing { .. } => ErrorKind::NotFound,
+            Self::Paths(error) => error.kind(),
             Self::Io { source, .. } | Self::Read { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
                     ErrorKind::PermissionDenied
@@ -783,12 +788,9 @@ impl From<PathsError> for ConfigError {
             PathsError::Read { path, source } => Self::Read { path, source },
             PathsError::Missing { path, source_layer } => Self::Missing { path, source_layer },
             PathsError::Parse { path, source } => Self::Parse { path, source },
-            // `PathsError` is non-exhaustive; a variant added later reads as
-            // an I/O failure until it is given one here.
-            other => Self::Io {
-                path: PathBuf::new(),
-                source: io::Error::other(other.to_string()),
-            },
+            // `PathsError` is non-exhaustive: a variant added later keeps its
+            // own message and kind until it is given one here.
+            other => Self::Paths(other),
         }
     }
 }

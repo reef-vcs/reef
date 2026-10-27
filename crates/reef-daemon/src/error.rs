@@ -372,6 +372,8 @@ fn wrapped_db<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a DbError> {
         Some(db)
     } else if let Some(ReindexError::Db(db)) = error.downcast_ref::<ReindexError>() {
         Some(db)
+    } else if let Some(RestoreError::Db(db)) = error.downcast_ref::<RestoreError>() {
+        Some(db)
     } else {
         error.downcast_ref::<DbError>()
     }

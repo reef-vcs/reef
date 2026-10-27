@@ -23,6 +23,16 @@ pub(crate) fn run(global: &Global, args: &[OsString]) -> Result<Vec<u8>, CliErro
     let program = daemon_binary()?;
     let mut command = Command::new(&program);
     path_flags(&mut command, global)?;
+    // `-v` asks for the library's debug events, as when it ran in-process.
+    match global.verbose {
+        0 => {}
+        1 => {
+            command.env("REEF_LOG", "debug");
+        }
+        _ => {
+            command.env("REEF_LOG", "trace");
+        }
+    }
     let output = command
         .args(args)
         .stdin(Stdio::null())

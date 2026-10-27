@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -310,19 +310,49 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// The newest modification time of any file under `crates/<name>` for
+/// each of `crates`: what a binary built from them must not be older than.
+fn newest_source(crates: &[&str]) -> Option<SystemTime> {
+    fn walk(dir: &Path, newest: &mut Option<SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, newest);
+            } else if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                *newest = (*newest).max(Some(modified));
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut newest = None;
+    for name in crates {
+        walk(&root.join(name), &mut newest);
+    }
+    newest
+}
+
+/// The crates `reef` is built from (R2.05: no daemon code).
+const REEF_SOURCES: &[&str] = &["reef-vcs", "reef-client", "reef-api", "reef-error"];
+
 /// The `reef` binary. A workspace-wide build (`cargo nextest run
 /// --workspace`, `just test`) puts it beside `reef-daemon`; when it is not
-/// there (`-p reef-daemon`), or is older than `reef-daemon` and so may
-/// predate a change to the client both link, it is built once, in the
-/// profile the tests are built in. `reef` links no daemon code (R2.05), so
-/// it needs none of this crate's features.
+/// there (`-p reef-daemon`), or is older than a source file of a crate it
+/// is built from, it is built once, in the profile the tests are built in.
+/// A daemon-only change does not make it stale: `reef` links no daemon
+/// code (R2.05), so it needs none of this crate's features either.
 pub fn reef_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let daemon = Path::new(env!("CARGO_BIN_EXE_reef-daemon"));
         let beside = daemon.with_file_name("reef");
-        let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        if beside.is_file() && modified(&beside) >= modified(daemon) {
+        let modified = std::fs::metadata(&beside).and_then(|m| m.modified()).ok();
+        if modified.is_some() && modified >= newest_source(REEF_SOURCES) {
             return beside;
         }
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -364,6 +394,7 @@ pub fn reef(daemon: &SpawnedDaemon) -> Command {
         "REEF_LOG",
         "RUST_LOG",
         "REEF_LOG_FORMAT",
+        "REEF_AGENT",
     ] {
         command.env_remove(var);
     }

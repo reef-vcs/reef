@@ -22,7 +22,7 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 
 use crate::DaemonArgs;
 use crate::config::{Config, ConfigError, PathOverrides};
-use crate::error::{Advice, Advise, advice_of, reason_of};
+use crate::error::{Advice, Advise};
 use crate::maintenance::backup::{Manifest, ManifestError};
 use crate::maintenance::restore::{RestoreError, RestoreOptions, restore};
 use crate::model::RepoId;
@@ -158,16 +158,17 @@ pub fn run(args: &DaemonArgs, command: Offline) -> ExitCode {
     }
 }
 
-/// The error object for `error`, as `reef` builds one for its own errors.
+/// The error object for `error`, as `reef` printed it when it ran these
+/// commands in its own process: the error's own advice, and no reason.
 fn error_object(
     error: &(dyn Error + 'static),
     kind: ErrorKind,
     advice: Option<Advice>,
 ) -> ErrorObject {
-    let advice = advice.or_else(|| advice_of(error)).unwrap_or_default();
+    let advice = advice.unwrap_or_default();
     ErrorObject {
         kind: kind_text(kind).to_owned(),
-        reason: reason_of(error).unwrap_or_default().to_owned(),
+        reason: String::new(),
         message: ErrorChain(error).to_string(),
         hint: advice.hint,
         next: advice.next,

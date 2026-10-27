@@ -44,7 +44,8 @@ pub(crate) fn run(global: &Global, out: &Out, args: &Args) -> Result<(), CliErro
         command.extend(["--into".into(), absolute(into)?.into()]);
     }
     if let Some(repo) = &args.repo {
-        command.extend(["--repo".into(), repo.into()]);
+        // One argument, so a value starting with `-` is not read as a flag.
+        command.push(format!("--repo={repo}").into());
     }
     if let Some(root) = &args.root {
         command.extend(["--root".into(), absolute(root)?.into()]);

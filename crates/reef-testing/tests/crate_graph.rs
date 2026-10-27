@@ -43,9 +43,10 @@ fn metadata() -> Value {
     run_metadata(&["--no-deps"])
 }
 
-/// `cargo metadata` with the resolve graph.
+/// `cargo metadata` with the resolve graph, every feature of every member
+/// on, so no feature can pull the daemon in unseen.
 fn resolved_metadata() -> Value {
-    run_metadata(&[])
+    run_metadata(&["--all-features"])
 }
 
 fn run_metadata(extra: &[&str]) -> Value {
