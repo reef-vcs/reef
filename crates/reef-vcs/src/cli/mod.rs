@@ -1,7 +1,8 @@
 //! The `reef` command line (R1.22): every command is a call to the daemon
 //! through [`reef_client::Client`], the VCS commands (`status`, `log`,
 //! `show`, `diff`, `describe`, `abandon`, `undo`, `op`, `file`, `ws
-//! snapshot`; R2.27) included, except `config show`,
+//! snapshot`; R2.27) and `reef mcp`'s tools ([`crate::mcp`], R2.13)
+//! included, except `config show`,
 //! `completions`, `guide`, `init` when it registers nothing (`--check`,
 //! `--print`, `--no-register`), `daemon run`, and `restore`, which is
 //! offline (R1.18). Output follows [`out`]'s
@@ -15,14 +16,15 @@
 mod advice;
 mod autostart;
 mod backup;
-mod changes;
+pub(crate) mod changes;
 mod config;
-mod daemon;
+pub(crate) mod daemon;
 mod diff;
 mod env;
 mod error;
 mod file;
 mod guide;
+pub(crate) mod heartbeat;
 mod helper;
 mod here;
 mod init;
@@ -31,9 +33,9 @@ mod op;
 mod out;
 mod render;
 mod render_vcs;
-mod repo;
+pub(crate) mod repo;
 mod restore;
-mod scope;
+pub(crate) mod scope;
 mod status;
 mod store;
 mod ws;
@@ -53,7 +55,7 @@ use reef_client::{Client, ClientError};
 use reef_error::{Advice, ErrorKind};
 
 pub(crate) use error::CliError;
-pub(crate) use out::{Out, Output};
+pub(crate) use out::{Out, Output, error_object};
 
 /// The RPC deadline when `--timeout` is not given.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -231,6 +233,9 @@ enum Command {
     /// Set up a repository for coding agents: register it and write AGENTS.md and the like.
     #[command(after_help = "Example: reef init --check   # in CI: exit 3 if a file is stale")]
     Init(init::Args),
+    /// Serve Reef's API to an agent harness over MCP on stdio (put it in the harness's config).
+    #[command(after_help = "Example: claude mcp add reef -- reef mcp")]
+    Mcp,
     /// Register and forget repositories.
     #[command(infer_subcommands = true)]
     Repo(repo::Args),
@@ -406,6 +411,8 @@ pub(crate) fn main() -> ExitCode {
     // run`'s stdout is its command's, so it prints JSON only when asked. The
     // guide is prose for a model to read; JSON escapes would cost it tokens.
     let flag = match &command {
+        // Stdout is the protocol's; the server writes only notes, to stderr.
+        Command::Mcp => Some(Output::Text),
         Command::Config(_) | Command::Guide(_) => global.output.or(Some(Output::Text)),
         Command::Ws(args) if args.is_run() => global.output.or(Some(Output::Text)),
         Command::Init(args) if args.prints_text() => global.output.or(Some(Output::Text)),
@@ -430,7 +437,10 @@ pub(crate) fn main() -> ExitCode {
             return ExitCode::from(error.exit_code());
         }
     };
-    let rerunnable = !matches!(command, Command::Daemon(_));
+    // `mcp` reruns nothing itself (it retries per call), and tokio's stdin
+    // reader is a blocking thread that would hold up the runtime's drop.
+    let rerunnable = !matches!(command, Command::Daemon(_) | Command::Mcp);
+    let background = matches!(command, Command::Mcp);
     let result = match runtime.block_on(run(global.clone(), command, &out)) {
         // Only while no call has succeeded: one that did may have changed
         // something, which the rerun would repeat.
@@ -444,6 +454,9 @@ pub(crate) fn main() -> ExitCode {
         }
         result => result,
     };
+    if background {
+        runtime.shutdown_background();
+    }
     match result {
         Ok(code) => code,
         Err(error) => {
@@ -480,7 +493,7 @@ async fn rerun(
 
 /// A daemon that cannot serve this reef and is not restarted, with the
 /// `reef daemon stop` that lets the next command start the matching one.
-fn old_daemon(global: &Global, error: ClientError) -> CliError {
+pub(crate) fn old_daemon(global: &Global, error: ClientError) -> CliError {
     let active_workspaces = match &error {
         ClientError::Incompatible {
             active_workspaces, ..
@@ -523,6 +536,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
+        Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global, out),
         Command::Completions { shell } => {

@@ -189,13 +189,7 @@ impl Out {
             }
         }
         if self.mode == Output::Json {
-            self.error_object(
-                kind_text(error.kind()),
-                error.reason(),
-                &message,
-                advice.as_ref(),
-                error.metadata(),
-            );
+            self.print_error(error_object(error));
         }
     }
 
@@ -218,39 +212,51 @@ impl Out {
         }
         if self.mode == Output::Json {
             let advice = fix.cloned().or_else(|| usage.map(Advice::hint));
-            self.error_object(
+            self.print_error(object(
                 "invalid_argument",
                 "",
                 message,
                 advice.as_ref(),
                 &BTreeMap::new(),
-            );
+            ));
         }
     }
 
-    fn error_object(
-        &self,
-        kind: &str,
-        reason: &str,
-        message: &str,
-        advice: Option<&Advice>,
-        metadata: &BTreeMap<String, String>,
-    ) {
-        // The object `reef-daemon`'s offline commands print too (R2.05).
-        let document = ErrorDocument {
-            error: ErrorObject {
-                kind: kind.to_owned(),
-                reason: reason.to_owned(),
-                message: message.to_owned(),
-                hint: advice.map_or_else(String::new, |advice| advice.hint.clone()),
-                next: advice.map_or_else(Vec::new, |advice| advice.next.clone()),
-                metadata: metadata.clone(),
-            },
-        };
+    fn print_error(&self, error: ErrorObject) {
         let mut buffer = Vec::new();
-        json_into(&mut buffer, &document);
+        json_into(&mut buffer, &ErrorDocument { error });
         // Already failing; a closed stdout changes nothing.
         let _ = self.raw(&buffer);
+    }
+}
+
+/// The JSON error object of a failed command, which `reef mcp` returns as a
+/// tool's error result too (R2.13).
+pub(crate) fn error_object(error: &CliError) -> ErrorObject {
+    object(
+        kind_text(error.kind()),
+        error.reason(),
+        &ErrorChain(error).to_string(),
+        error.advice().as_ref(),
+        error.metadata(),
+    )
+}
+
+/// The object `reef-daemon`'s offline commands print too (R2.05).
+fn object(
+    kind: &str,
+    reason: &str,
+    message: &str,
+    advice: Option<&Advice>,
+    metadata: &BTreeMap<String, String>,
+) -> ErrorObject {
+    ErrorObject {
+        kind: kind.to_owned(),
+        reason: reason.to_owned(),
+        message: message.to_owned(),
+        hint: advice.map_or_else(String::new, |advice| advice.hint.clone()),
+        next: advice.map_or_else(Vec::new, |advice| advice.next.clone()),
+        metadata: metadata.clone(),
     }
 }
 

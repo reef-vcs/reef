@@ -210,6 +210,7 @@ fn detects_claude_and_cursor() {
             ("AGENTS.md", "wrote"),
             ("CLAUDE.md", "wrote"),
             (".claude/skills/reef/SKILL.md", "wrote"),
+            (".mcp.json", "wrote"),
             (".cursor/rules/reef.mdc", "wrote"),
         ])
     );
@@ -250,6 +251,7 @@ fn detects_claude_and_cursor() {
             ("AGENTS.md", "unchanged"),
             ("CLAUDE.md", "wrote"),
             (".claude/skills/reef/SKILL.md", "wrote"),
+            (".mcp.json", "wrote"),
             (".cursor/rules/reef.mdc", "unchanged"),
         ])
     );
@@ -357,6 +359,7 @@ fn claude_md_importing_agents_md_is_skipped() {
             ("AGENTS.md", "wrote"),
             ("CLAUDE.md", "skipped"),
             (".claude/skills/reef/SKILL.md", "wrote"),
+            (".mcp.json", "wrote"),
         ])
     );
     assert_eq!(value["files"][1]["reason"], "imports AGENTS.md");
@@ -426,6 +429,79 @@ fn check_exit_codes() {
     );
 }
 
+/// R2.13 test 17: Reef's entry in `.mcp.json`, and nothing else in it.
+#[test]
+fn mcp_json_entry() {
+    let repo = Fixture::new();
+    let value = json(&repo.init(&["--agents", "claude"]));
+    assert!(
+        actions(&value, &repo.root).contains(&(".mcp.json".to_owned(), "wrote".to_owned())),
+        "{value}"
+    );
+    let written: Value = serde_json::from_str(&repo.read(".mcp.json")).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers": {"reef": {"type": "stdio", "command": "reef", "args": ["mcp"]}}})
+    );
+    let again = json(&repo.init(&["--agents", "claude"]));
+    assert!(
+        actions(&again, &repo.root).contains(&(".mcp.json".to_owned(), "unchanged".to_owned())),
+        "{again}"
+    );
+    json(&repo.init(&["--check", "--agents", "claude"]));
+
+    // Another server and a top-level key keep their order; Reef's comes
+    // after the other server, and CRLF stays.
+    let theirs = "{\r\n  \"mcpServers\": {\r\n    \"other\": {\"command\": \"x\"}\r\n  },\r\n  \"extra\": true\r\n}\r\n";
+    repo.write(".mcp.json", theirs);
+    json(&repo.init(&["--agents", "mcp"]));
+    let merged = repo.read(".mcp.json");
+    assert!(merged.contains("\r\n"), "{merged:?}");
+    let at = |key: &str| {
+        merged
+            .find(key)
+            .unwrap_or_else(|| panic!("{key}: {merged}"))
+    };
+    assert!(
+        at("\"other\"") < at("\"reef\"") && at("\"reef\"") < at("\"extra\""),
+        "{merged}"
+    );
+
+    // An entry someone changed is kept, and is not stale.
+    let changed = r#"{"mcpServers": {"reef": {"command": "reef", "args": ["mcp"], "env": {"REEF_AGENT": "me"}}}}"#;
+    repo.write(".mcp.json", changed);
+    let value = json(&repo.init(&["--agents", "mcp"]));
+    let file = value["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"].as_str().unwrap().ends_with(".mcp.json"))
+        .unwrap();
+    assert_eq!(file["action"], "skipped", "{value}");
+    assert_eq!(file["reason"], "mcpServers.reef is not reef init's");
+    assert_eq!(repo.read(".mcp.json"), changed);
+    json(&repo.init(&["--check", "--agents", "mcp"]));
+    repo.write(".mcp.json", "not json");
+    let value = json(&repo.init(&["--agents", "mcp"]));
+    assert!(value.to_string().contains("not a JSON object"), "{value}");
+
+    // `--agents mcp` writes AGENTS.md and .mcp.json only.
+    let fresh = Fixture::new();
+    let value = json(&fresh.init(&["--agents", "mcp"]));
+    assert_eq!(
+        actions(&value, &fresh.root),
+        pairs(&[("AGENTS.md", "wrote"), (".mcp.json", "wrote")])
+    );
+    fs::remove_file(fresh.root.join(".mcp.json")).unwrap();
+    let output = fresh.init(&["--check", "--agents", "mcp"]);
+    output.clone().assert().code(3);
+    assert!(
+        stdout(&output).contains(".mcp.json (missing)"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 #[test]
 fn print_matches_section() {
     let repo = Fixture::new();
@@ -452,6 +528,7 @@ fn user_skill() {
             ("AGENTS.md", "wrote"),
             ("CLAUDE.md", "wrote"),
             (".claude/skills/reef/SKILL.md", "wrote"),
+            (".mcp.json", "wrote"),
             (user.to_str().unwrap(), "wrote"),
         ])
     );

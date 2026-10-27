@@ -1,6 +1,6 @@
 //! The CLI against a 0.1 daemon (R2.01, tests 15 to 17): `daemon status`
 //! and `stop` still work, a busy one is named with exit 9, and an idle one
-//! is restarted.
+//! is restarted; `reef mcp` does the same per call (R2.13, test 19).
 //!
 //! The 0.1 daemon is a fake: this test binary run again as its ignored
 //! `fake_v0_daemon` test, serving only `reef.daemon.v0.Daemon/Status` from
@@ -22,12 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use common::mcp::Mcp;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use reef_api::v0::daemon_server::{Daemon, DaemonServer};
 use reef_api::v0::{StatusRequest, StatusResponse};
 use reef_daemon::testing::short_tmp;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tonic::{Request, Response, Status};
 
@@ -219,6 +220,29 @@ impl Setup {
             .args(args);
         command.output().unwrap()
     }
+
+    /// `reef mcp` as [`Setup::reef`] runs a command, from the temporary
+    /// directory.
+    fn mcp(&self) -> tokio::process::Command {
+        let bin = self.tmp.path().join("bin");
+        let mut command = tokio::process::Command::new(bin.join("reef"));
+        for var in [
+            "REEF_CONFIG",
+            "REEF_LOG",
+            "RUST_LOG",
+            "REEF_OUTPUT",
+            "REEF_WORKSPACE",
+        ] {
+            command.env_remove(var);
+        }
+        command
+            .env("REEF_STATE_DIR", self.state())
+            .env("REEF_SOCKET", self.socket())
+            .env("PATH", &bin)
+            .current_dir(self.tmp.path())
+            .arg("mcp");
+        command
+    }
 }
 
 impl Drop for Setup {
@@ -348,4 +372,35 @@ fn old_daemon_start_restarts_an_idle_one_and_names_a_busy_one() {
     );
     std::thread::sleep(Duration::from_millis(200));
     assert!(!fake.exited(), "a busy daemon must not be stopped");
+}
+
+/// R2.13 test 19: a tool call against a busy 0.1 daemon is a tool error
+/// naming it, and against an idle one restarts it and answers.
+#[test]
+fn mcp_against_an_old_daemon() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let all = json!({"all_repositories": true});
+    let setup = Setup::new();
+    let fake = FakeDaemon::spawn(&setup.state(), &setup.socket(), 2);
+    runtime.block_on(async {
+        let mut mcp = Mcp::start(setup.mcp()).await;
+        let error = mcp.err("list_workspaces", all.clone()).await;
+        assert_eq!(error["kind"], "unsupported", "{error}");
+        assert_eq!(error["reason"], "API_VERSION_MISMATCH");
+        assert_eq!(error["next"], json!(["reef", "daemon", "stop"]));
+        assert!(mcp.close().await.0.success());
+    });
+    assert!(!fake.exited(), "a busy daemon must not be stopped");
+
+    let setup = Setup::new();
+    let fake = FakeDaemon::spawn(&setup.state(), &setup.socket(), 0);
+    runtime.block_on(async {
+        let mut mcp = Mcp::start(setup.mcp()).await;
+        let listed = mcp.ok("list_workspaces", all.clone()).await;
+        assert_eq!(listed["workspaces"], json!([]), "{listed}");
+        let stderr = mcp.stderr();
+        assert!(stderr.contains("reef: restarted the daemon"), "{stderr}");
+        assert!(mcp.close().await.0.success());
+    });
+    assert!(fake.exits(), "the old daemon is still running");
 }

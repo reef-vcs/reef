@@ -63,6 +63,7 @@ enum Agents {
     None,
     Claude,
     Cursor,
+    Mcp,
 }
 
 /// The JSON result.
@@ -180,12 +181,16 @@ fn harnesses(args: &Args) -> Result<Option<Vec<Harness>>, CliError> {
                 Harness::AgentsMd,
                 Harness::ClaudeMd,
                 Harness::ClaudeSkill { user: false },
+                Harness::McpJson,
                 Harness::CursorRule,
             ]),
-            Agents::Claude => {
-                list.extend([Harness::ClaudeMd, Harness::ClaudeSkill { user: false }]);
-            }
+            Agents::Claude => list.extend([
+                Harness::ClaudeMd,
+                Harness::ClaudeSkill { user: false },
+                Harness::McpJson,
+            ]),
             Agents::Cursor => list.push(Harness::CursorRule),
+            Agents::Mcp => list.push(Harness::McpJson),
         }
     }
     if !list.is_empty() && list[0] != Harness::AgentsMd {

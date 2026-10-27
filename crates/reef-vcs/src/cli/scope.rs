@@ -306,6 +306,13 @@ fn given_path(scope: &Scope, base: Option<&Path>, given: &str) -> Result<String,
 /// How paths are given, for `INVALID_PATH`.
 pub(crate) const PATH_HINT: &str = "Paths are relative to the current directory inside the workspace or repository, or absolute inside it, and never leave it.";
 
+/// `path`, absolute, relative to `dir` (directly, or through a symlinked
+/// ancestor that is `dir`); `None` when it is outside. `reef mcp`'s
+/// absolute paths (R2.13).
+pub(crate) fn inside(dir: &Path, path: &Path) -> Option<String> {
+    relative_to(dir, path).or_else(|| through_symlinked_ancestor(dir, path))
+}
+
 /// `path`, absolute and outside `dir` as written, relative to `dir` when
 /// one of its ancestors is `dir` through a symlink (macOS's `/tmp` is
 /// `/private/tmp`, and the daemon records canonical directories). Only
