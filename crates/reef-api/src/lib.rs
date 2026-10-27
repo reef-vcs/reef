@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 3;
+pub const API_REVISION: u32 = 4;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -58,6 +58,8 @@ pub const API_DIGESTS: &[&str] = &[
     "72a37ae68cf29402c100f1b917478aca6241278993a21c401c93b04214c3c8c3",
     // R2.04: `FileEdit.copy_from`.
     "6a6d33729c4704d856b04a54c5ec19d479810cfe830b5ab0c0dae2749c7a5751",
+    // R2.09: `SubscribeOperationsResponse.head_operation_ids`.
+    "d241492eea1920f2aaa0c22e384e4f49c428f69dba269ed8532410d607c32874",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -221,6 +223,18 @@ pub mod error {
     /// A workspace could not be snapshotted before a read or a write
     /// (R2.27). Metadata: `workspace_id`. Kind: the snapshot error's own.
     pub const SNAPSHOT_FAILED: &str = "SNAPSHOT_FAILED";
+    /// A `SubscribeOperations` cursor that does not decode (R2.09).
+    pub const INVALID_CURSOR: &str = "INVALID_CURSOR";
+    /// More than 10,000 operations were recorded in a repository after a
+    /// subscription's position, at its start or while its client was not
+    /// reading (R2.09). Metadata: `repo_id`.
+    pub const TOO_FAR_BEHIND: &str = "TOO_FAR_BEHIND";
+    /// A repository's operation log was rewritten (garbage collection)
+    /// after a subscription's position, so it cannot continue from there
+    /// (R2.09). Metadata: `repo_id`.
+    pub const OPERATION_LOG_REWRITTEN: &str = "OPERATION_LOG_REWRITTEN";
+    /// The daemon is serving its limit of subscriptions (R2.09).
+    pub const TOO_MANY_SUBSCRIPTIONS: &str = "TOO_MANY_SUBSCRIPTIONS";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

@@ -820,6 +820,21 @@ async fn wait_for_operations() {
     assert_eq!(again["operations"], json!([]));
     assert!(again["last_operation_id"].is_string());
 
+    // R2.09 test 20: a timed-out wait's last_operation_id resumes exactly
+    // where it stood, so a describe recorded between the calls is seen.
+    let between = writer
+        .ok("describe_change", json!({"description": "between\n"}))
+        .await;
+    let resumed = waiter
+        .ok(
+            "wait_for_operations",
+            json!({"kinds": ["describe"], "after_operation": again["last_operation_id"], "timeout_seconds": 5}),
+        )
+        .await;
+    assert_eq!(resumed["timed_out"], false, "{resumed}");
+    assert_eq!(resumed["operations"][0]["id"], between["operation"]["id"]);
+    let last = resumed["last_operation_id"].as_str().unwrap().to_owned();
+
     // Resuming from an older operation returns what happened since, at once.
     let two = writer
         .ok("describe_change", json!({"description": "two\n"}))
@@ -846,12 +861,22 @@ async fn wait_for_operations() {
         [&two["operation"]["id"], &three["operation"]["id"]],
         "{resumed}"
     );
+    // A timeout of 0 checks once: it returns what is already there.
+    let checked = waiter
+        .ok(
+            "wait_for_operations",
+            json!({"kinds": ["describe"], "after_operation": last, "timeout_seconds": 0}),
+        )
+        .await;
+    assert_eq!(checked["timed_out"], false, "{checked}");
+    assert_eq!(checked["operations"], resumed["operations"]);
 
     let started = Instant::now();
     let once = waiter
         .ok("wait_for_operations", json!({"timeout_seconds": 0}))
         .await;
     assert_eq!(once["timed_out"], true);
+    assert!(once["last_operation_id"].is_string(), "{once}");
     assert!(started.elapsed() < Duration::from_secs(2));
 
     // Another workspace's snapshot does not end a wait on this one.

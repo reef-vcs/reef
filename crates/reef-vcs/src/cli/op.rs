@@ -2,15 +2,28 @@
 //! log, one operation with its effects, and the revert of one operation.
 //! `undo` always names its operation: watchers and other agents record
 //! operations every second, so "the last one" is rarely the caller's.
+//!
+//! `reef op watch` (R2.09) prints operations as they are recorded, from
+//! `SubscribeOperations`, and always ends by itself unless `--follow`: an
+//! agent's command must return (ADR 0025).
 
-use reef_api::v1::{self, ListOperationsRequest, OperationFilter, UndoOperationRequest};
+use std::time::Duration;
+
+use reef_api::v1::subscribe_operations_request::Start;
+use reef_api::v1::{
+    self, ListOperationsRequest, OperationFilter, SubscribeOperationsRequest,
+    SubscribeOperationsResponse, UndoOperationRequest,
+};
+use reef_client::ClientError;
 use reef_client::json::{Operation, Undone};
 use reef_error::{Advice, ErrorKind};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::time::Instant;
 
 use super::advice::AdviceCtx;
 use super::changes::{note_divergence, short, workspace_after};
 use super::log::LOG_LIMIT;
-use super::render_vcs::{OpLines, OpShow};
+use super::render_vcs::{OpLine, OpLines, OpShow};
 use super::repo::missing;
 use super::scope::{self, ScopeArgs, workspace_arg};
 use super::{CliError, Ctx};
@@ -36,11 +49,55 @@ enum OpCommand {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
     },
+    /// Print operations as they are recorded (JSON lines on a pipe).
+    #[command(after_help = "Example: reef op watch --kind describe --count 1")]
+    Watch(WatchArgs),
 }
 
 /// `reef op log`.
 #[derive(Debug, clap::Args)]
 struct LogArgs {
+    #[command(flatten)]
+    filter: FilterArgs,
+    /// Include what each operation changed.
+    #[arg(long)]
+    effects: bool,
+    /// Show at most this many; 0 for all. A cut is noted on stderr.
+    #[arg(long, value_name = "N", default_value_t = LOG_LIMIT)]
+    limit: usize,
+    /// The repository (id, id prefix, or path) [default: the one you are in].
+    #[arg(long, value_name = "REPO")]
+    repo: Option<String>,
+}
+
+/// `reef op watch`.
+#[derive(Debug, clap::Args)]
+struct WatchArgs {
+    #[command(flatten)]
+    filter: FilterArgs,
+    /// Include what each operation changed.
+    #[arg(long)]
+    effects: bool,
+    /// Print the operations after this one first (id or unique prefix).
+    #[arg(long, value_name = "OP")]
+    after: Option<String>,
+    /// Stop after printing this many operations.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    count: Option<u64>,
+    /// Stop after this many seconds [default: 30]; 0 prints what --after replays.
+    #[arg(long = "for", value_name = "SECONDS", conflicts_with = "follow")]
+    seconds: Option<u64>,
+    /// Keep watching until interrupted or --count.
+    #[arg(long)]
+    follow: bool,
+    /// The repository (id, id prefix, or path) [default: the one you are in].
+    #[arg(long, value_name = "REPO")]
+    repo: Option<String>,
+}
+
+/// `op log`'s and `op watch`'s filter.
+#[derive(Debug, clap::Args)]
+struct FilterArgs {
     /// Only operations for this workspace (id, prefix, or path); repeatable.
     #[arg(long, value_name = "WS")]
     workspace: Vec<String>,
@@ -53,15 +110,25 @@ struct LogArgs {
     /// Only operations of this kind; repeatable.
     #[arg(long, value_enum, value_name = "KIND")]
     kind: Vec<KindArg>,
-    /// Include what each operation changed.
-    #[arg(long)]
-    effects: bool,
-    /// Show at most this many; 0 for all. A cut is noted on stderr.
-    #[arg(long, value_name = "N", default_value_t = LOG_LIMIT)]
-    limit: usize,
-    /// The repository (id, id prefix, or path) [default: the one you are in].
-    #[arg(long, value_name = "REPO")]
-    repo: Option<String>,
+}
+
+impl FilterArgs {
+    fn filter(self) -> Result<OperationFilter, CliError> {
+        Ok(OperationFilter {
+            workspaces: self
+                .workspace
+                .iter()
+                .map(|ws| workspace_arg(ws))
+                .collect::<Result<_, _>>()?,
+            changes: self.change,
+            agents: self.by,
+            kinds: self
+                .kind
+                .into_iter()
+                .map(|kind| v1::OperationKind::from(kind).into())
+                .collect(),
+        })
+    }
 }
 
 /// An operation kind, by its `reef.kind` name.
@@ -124,26 +191,14 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             let operation = response.operation.ok_or_else(|| missing("operation"))?;
             ctx.out.object(&OpShow(Operation::from(&operation)))
         }
+        OpCommand::Watch(args) => watch(ctx, args).await,
     }
 }
 
 async fn log(ctx: &Ctx, args: LogArgs) -> Result<(), CliError> {
     let scope = scope::resolve_repo_only(ctx, args.repo.as_deref()).await?;
     let advice = AdviceCtx::new(&scope);
-    let filter = OperationFilter {
-        workspaces: args
-            .workspace
-            .iter()
-            .map(|ws| workspace_arg(ws))
-            .collect::<Result<_, _>>()?,
-        changes: args.change,
-        agents: args.by,
-        kinds: args
-            .kind
-            .into_iter()
-            .map(|kind| v1::OperationKind::from(kind).into())
-            .collect(),
-    };
+    let filter = args.filter.filter()?;
     let request = ListOperationsRequest {
         repo: scope.repo_id.clone(),
         filter: Some(filter),
@@ -202,4 +257,206 @@ pub(crate) async fn undo(ctx: &Ctx, args: UndoArgs) -> Result<(), CliError> {
     ctx.out.done(&undone, &note)?;
     note_divergence(ctx, undone.workspace.as_ref());
     Ok(())
+}
+
+/// How long `op watch` runs without `--for` or `--follow`: the MCP wait
+/// tool's default.
+const WATCH_FOR: Duration = Duration::from_secs(30);
+/// Reconnection backoff, doubling between these.
+const RECONNECT_FIRST: Duration = Duration::from_millis(100);
+const RECONNECT_MAX: Duration = Duration::from_secs(2);
+/// How long `--follow` keeps reconnecting before it fails.
+const RECONNECT_FOLLOW: Duration = Duration::from_secs(60);
+
+/// Why a watch stopped.
+enum Stopped {
+    /// `--count` reached, a signal, or a closed stdout.
+    Done,
+    /// The time ran out.
+    Time,
+}
+
+async fn watch(ctx: &Ctx, args: WatchArgs) -> Result<(), CliError> {
+    let scope = scope::resolve_repo_only(ctx, args.repo.as_deref()).await?;
+    let advice = AdviceCtx {
+        operation_given: args.after.is_some(),
+        ..AdviceCtx::new(&scope)
+    };
+    let request = SubscribeOperationsRequest {
+        repos: vec![scope.repo_id.clone()],
+        filter: Some(args.filter.filter()?),
+        start: args.after.clone().map(Start::AfterOperation),
+    };
+    let seconds = args.seconds.map_or(WATCH_FOR, Duration::from_secs);
+    // `--for 0` ends at the first live frame instead.
+    let replay_only = args.seconds == Some(0);
+    let deadline = (!args.follow && !replay_only).then(|| Instant::now() + seconds);
+    let mut watcher = Watcher {
+        ctx,
+        effects: args.effects,
+        count: args
+            .count
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX)),
+        replay_only,
+        printed: 0,
+        heads: Vec::new(),
+    };
+    let mut terminate = signal(SignalKind::terminate()).map_err(CliError::Signals)?;
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(CliError::Signals)?;
+    let stopped = tokio::select! {
+        stopped = watcher.run(request, deadline) => stopped,
+        _ = terminate.recv() => Ok(Stopped::Done),
+        _ = interrupt.recv() => Ok(Stopped::Done),
+        () = stdout_closed() => Ok(Stopped::Done),
+    }
+    .map_err(|error| advice.refine(error))?;
+    if let Stopped::Time = stopped
+        && let Some(at) = watcher.heads.last()
+    {
+        let at = short(at);
+        ctx.out.note(&format!(
+            "reef: stopped after {} s at operation {at}; reef op watch --after {at} continues",
+            seconds.as_secs()
+        ));
+    }
+    Ok(())
+}
+
+/// One `op watch`: what it printed and where the stream stands.
+struct Watcher<'a> {
+    ctx: &'a Ctx,
+    effects: bool,
+    count: Option<usize>,
+    /// `--for 0`: stop at the first live frame.
+    replay_only: bool,
+    printed: usize,
+    /// The last frame's `head_operation_ids`.
+    heads: Vec<String>,
+}
+
+impl Watcher<'_> {
+    /// Subscribes and prints until it stops, resubscribing from the last
+    /// frame's cursor after the daemon goes away.
+    async fn run(
+        &mut self,
+        mut request: SubscribeOperationsRequest,
+        deadline: Option<Instant>,
+    ) -> Result<Stopped, CliError> {
+        let until = |deadline: Option<Instant>| async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        let mut backoff = RECONNECT_FIRST;
+        let mut failing_since: Option<Instant> = None;
+        loop {
+            let subscribed = tokio::select! {
+                () = until(deadline) => return Ok(Stopped::Time),
+                subscribed = self.ctx.call(self.ctx.client.subscribe_operations(request.clone())) => subscribed,
+            };
+            let error = match subscribed {
+                Ok(mut stream) => {
+                    loop {
+                        let next = tokio::select! {
+                            () = until(deadline) => return Ok(Stopped::Time),
+                            next = stream.message() => next,
+                        };
+                        match next {
+                            Ok(Some(frame)) => {
+                                failing_since = None;
+                                backoff = RECONNECT_FIRST;
+                                if let Some(stopped) = self.print(&frame)? {
+                                    return Ok(stopped);
+                                }
+                                request.start = Some(Start::Cursor(frame.cursor));
+                            }
+                            // Ended without a status: the connection went.
+                            Ok(None) => break None,
+                            Err(status) => break Some(CliError::Daemon(ClientError::from(status))),
+                        }
+                    }
+                }
+                Err(error) => Some(error),
+            };
+            if let Some(error) = error {
+                let since = *failing_since.get_or_insert_with(Instant::now);
+                if !reconnects(&error)
+                    || (deadline.is_none() && since.elapsed() >= RECONNECT_FOLLOW)
+                {
+                    return Err(error);
+                }
+            }
+            tokio::select! {
+                () = until(deadline) => return Ok(Stopped::Time),
+                () = tokio::time::sleep(backoff) => {}
+            }
+            backoff = (backoff * 2).min(RECONNECT_MAX);
+        }
+    }
+
+    /// Prints a frame's operations; `Some` when the watch is done.
+    fn print(&mut self, frame: &SubscribeOperationsResponse) -> Result<Option<Stopped>, CliError> {
+        for operation in &frame.operations {
+            let mut operation = Operation::from(operation);
+            if !self.effects {
+                operation.effects = None;
+            }
+            if !self.ctx.out.stream_item(&OpLine(operation))? {
+                return Ok(Some(Stopped::Done));
+            }
+            self.printed += 1;
+            if self.count.is_some_and(|count| self.printed >= count) {
+                return Ok(Some(Stopped::Done));
+            }
+        }
+        self.heads.clone_from(&frame.head_operation_ids);
+        if self.replay_only && frame.live {
+            return Ok(Some(Stopped::Done));
+        }
+        Ok(None)
+    }
+}
+
+/// Resolves once nobody reads stdout: a pipe whose reader exited. Checked
+/// every 200 ms, so `op watch --follow | head -1` ends after its line even
+/// when nothing more is recorded to write.
+async fn stdout_closed() {
+    use std::os::fd::AsFd as _;
+
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let stdout = std::io::stdout();
+        // macOS reports the hang-up only to a poll that asks for POLLOUT.
+        let mut fds = [PollFd::new(stdout.as_fd(), PollFlags::POLLOUT)];
+        let closed = PollFlags::POLLERR | PollFlags::POLLHUP;
+        if poll(&mut fds, PollTimeout::ZERO).is_ok_and(|ready| ready > 0)
+            && fds[0]
+                .revents()
+                .is_some_and(|events| events.intersects(closed))
+        {
+            return;
+        }
+    }
+}
+
+/// Whether `op watch` resubscribes after `error`: the daemon went away
+/// (unavailable with no reason), the connection failed, or the transport
+/// broke mid-stream (a status the daemon did not write, with no
+/// `ErrorDetail`, as tonic reports a reset connection).
+fn reconnects(error: &CliError) -> bool {
+    match error {
+        CliError::Daemon(ClientError::Rpc {
+            kind,
+            reason,
+            status,
+            ..
+        }) => {
+            (*kind == ErrorKind::Unavailable && reason.is_empty())
+                || reef_api::error::detail(status).is_none()
+        }
+        CliError::Daemon(ClientError::Connect { .. }) | CliError::Timeout { .. } => true,
+        _ => false,
+    }
 }

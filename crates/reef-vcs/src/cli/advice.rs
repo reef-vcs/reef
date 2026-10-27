@@ -139,6 +139,10 @@ impl AdviceCtx {
                 hint: "That operation is not in the current history; `reef op log` lists the ones that are.".to_owned(),
                 next: self.op_log(),
             },
+            reason::TOO_FAR_BEHIND | reason::OPERATION_LOG_REWRITTEN => Advice {
+                hint: "The stream's position is too far back, or the log was rewritten (garbage collection); read history with `reef op log`, then watch from now.".to_owned(),
+                next: self.op_log(),
+            },
             reason::OPERATION_SUPERSEDED => Advice {
                 hint: "Later operations changed what it did; undo them first, newest first."
                     .to_owned(),

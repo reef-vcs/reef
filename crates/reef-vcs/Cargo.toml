@@ -41,7 +41,7 @@ humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true      # `-o json`
 tokio = { workspace = true, features = ["process"] }   # `ws run`'s child (R1.21)
-nix = { workspace = true, features = ["signal"] }   # `reef daemon stop`, `ws run`'s forwarding
+nix = { workspace = true, features = ["signal", "poll"] }   # `reef daemon stop`, `ws run`'s forwarding; `op watch` sees a closed stdout
 rmcp.workspace = true            # `reef mcp` (R2.13)
 schemars.workspace = true        # its tools' input schemas
 base64.workspace = true          # `edit_files`' `content_base64`

@@ -1188,3 +1188,185 @@ async fn prefixes() {
     assert!(text.contains("unrecognized subcommand 'a'"), "{text}");
     assert!(!text.contains("<REV>"), "{text}");
 }
+
+/// The newest operation's id, from `op log`.
+async fn head_op(daemon: &TestDaemon, dir: &Path) -> String {
+    ok(daemon, dir, &["op", "log", "--limit", "1"]).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Stdout's JSON lines.
+fn json_lines(output: &Output) -> Vec<Value> {
+    assert!(output.status.success(), "{}", stderr(output));
+    stdout(output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect()
+}
+
+// R2.09 18: `op watch` prints operations as they are recorded and ends by
+// itself. Each watch starts from `--after` the head before the test's
+// write, so a write made before it has subscribed is still seen.
+#[tokio::test(flavor = "multi_thread")]
+async fn op_watch() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+
+    let head = head_op(&daemon, &dir).await;
+    let mut command = reef(&daemon, &dir);
+    command.args([
+        "op", "watch", "--after", &head, "--kind", "describe", "--count", "1", "-o", "json",
+    ]);
+    let watch = tokio::task::spawn_blocking(move || command.output().unwrap());
+    ok(&daemon, &dir, &["describe", "-m", "watched"]).await;
+    let lines = json_lines(&watch.await.unwrap());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["kind"], "describe");
+    assert!(lines[0]["effects"].is_null());
+
+    let head = head_op(&daemon, &dir).await;
+    ok(&daemon, &dir, &["describe", "-m", "text"]).await;
+    let text = run_in(
+        &daemon,
+        &dir,
+        &[
+            "op", "watch", "--after", &head, "--count", "1", "-o", "text",
+        ],
+    )
+    .await;
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(stdout(&text).contains("describe"), "{}", stdout(&text));
+
+    // Nothing new: exit 0, nothing on stdout, and where to continue.
+    let head = head_op(&daemon, &dir).await;
+    let quiet = run_in(
+        &daemon,
+        &dir,
+        &["op", "watch", "--after", &head, "--for", "1"],
+    )
+    .await;
+    assert!(quiet.status.success(), "{}", stderr(&quiet));
+    assert_eq!(stdout(&quiet), "");
+    let note = stderr(&quiet);
+    let continues = note
+        .split("reef op watch --after ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("{note}"))
+        .to_owned();
+    ok(&daemon, &dir, &["describe", "-m", "later"]).await;
+    let later = json_lines(
+        &run_in(
+            &daemon,
+            &dir,
+            &["op", "watch", "--after", &continues, "--for", "0"],
+        )
+        .await,
+    );
+    assert_eq!(later.len(), 1, "{later:?}");
+    assert_eq!(later[0]["kind"], "describe", "{later:?}");
+    let with_effects = json_lines(
+        &run_in(
+            &daemon,
+            &dir,
+            &[
+                "op",
+                "watch",
+                "--after",
+                &continues,
+                "--for",
+                "0",
+                "--effects",
+            ],
+        )
+        .await,
+    );
+    assert!(with_effects[0]["effects"].is_object(), "{with_effects:?}");
+
+    let usage = run_in(&daemon, &dir, &["op", "watch", "--kind", "nope"]).await;
+    usage.clone().assert().code(2);
+    assert!(stderr(&usage).contains("describe"), "{}", stderr(&usage));
+    let bad = run_in(&daemon, &dir, &["op", "watch", "--after", "zzzz"]).await;
+    failed(&bad, 2, "INVALID_OPERATION_ID");
+
+    // `--follow` ends when nobody reads any more.
+    let head = head_op(&daemon, &dir).await;
+    ok(&daemon, &dir, &["describe", "-m", "piped"]).await;
+    let script = format!(
+        "{} --no-autostart op watch --after {head} --follow -o json | head -1",
+        env!("CARGO_BIN_EXE_reef")
+    );
+    let script = format!("set -o pipefail; {script}");
+    let mut shell = std::process::Command::new("bash");
+    shell
+        .args(["-c", &script])
+        .env("REEF_STATE_DIR", daemon.state_dir())
+        .current_dir(&dir);
+    let piped = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || shell.output().unwrap()),
+    )
+    .await
+    .expect("the pipeline ends")
+    .unwrap();
+    assert!(piped.status.success());
+    assert_eq!(stdout(&piped).lines().count(), 1, "{}", stdout(&piped));
+}
+
+// R2.09 19: `op watch --follow` resubscribes from its cursor after the
+// daemon restarts, printing nothing twice and missing nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn op_watch_survives_a_restart() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let head = head_op(&daemon, &dir).await;
+    let mut watch = std::process::Command::new(env!("CARGO_BIN_EXE_reef"));
+    watch
+        .env_remove("REEF_SOCKET")
+        .env("REEF_STATE_DIR", daemon.state_dir())
+        .current_dir(&dir)
+        .args([
+            "--no-autostart",
+            "op",
+            "watch",
+            "--after",
+            &head,
+            "--kind",
+            "describe",
+            "--count",
+            "2",
+            "--follow",
+            "-o",
+            "json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = watch.spawn().unwrap();
+    let subscriptions = &daemon.handle.state().subscriptions;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while subscriptions.active() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watch never subscribed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = ok(&daemon, &dir, &["describe", "-m", "before"]).await;
+    let daemon = daemon.restart().await;
+    let after = ok(&daemon, &dir, &["describe", "-m", "after"]).await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    .expect("the watch ends at its count")
+    .unwrap();
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["id"], before["operation"]["id"]);
+    assert_eq!(lines[1]["id"], after["operation"]["id"]);
+}

@@ -133,11 +133,11 @@ impl Repo {
     /// the op heads move fails, this [`Repo`] is still reloaded at the new
     /// head (best effort) before the error returns.
     pub async fn gc(&mut self, keep_newer: SystemTime) -> Result<GcOutcome, GcError> {
-        self.gc_with(keep_newer, &mut |_| {}).await
+        self.gc_with(keep_newer, &mut |_, _| {}).await
     }
 
-    /// [`Repo::gc`], calling `abandoned` with the new head right after the
-    /// op heads move to it, before anything is collected: where the caller
+    /// [`Repo::gc`], calling `abandoned` with the head it rewrote and the
+    /// new head right after the op heads move to it, before anything is collected: where the caller
     /// moves its working copies there ([`Repo::rebind_working_copy`]), so
     /// no failure or crash in the collection that follows can strand them.
     /// Not called when nothing is abandoned.
@@ -145,7 +145,7 @@ impl Repo {
     pub async fn gc_with(
         &mut self,
         keep_newer: SystemTime,
-        abandoned: &mut dyn FnMut(&OperationIdHex),
+        abandoned: &mut dyn FnMut(&OperationIdHex, &OperationIdHex),
     ) -> Result<GcOutcome, GcError> {
         let mut moved = false;
         let result = self.gc_unlogged(keep_newer, abandoned, &mut moved).await;
@@ -172,7 +172,7 @@ impl Repo {
     async fn gc_unlogged(
         &mut self,
         keep_newer: SystemTime,
-        abandoned: &mut dyn FnMut(&OperationIdHex),
+        abandoned: &mut dyn FnMut(&OperationIdHex, &OperationIdHex),
         moved: &mut bool,
     ) -> Result<GcOutcome, GcError> {
         let loader = self.repo.loader().clone();
@@ -202,7 +202,10 @@ impl Repo {
                 .update_op_heads(&[head.id().clone()], &new_head)
                 .await?;
             *moved = true;
-            abandoned(&OperationIdHex::of(&new_head));
+            abandoned(
+                &OperationIdHex::of(head.id()),
+                &OperationIdHex::of(&new_head),
+            );
             operations_abandoned = stats.unreachable_count;
             tracing::debug!(
                 rewritten_count = stats.rewritten_count,

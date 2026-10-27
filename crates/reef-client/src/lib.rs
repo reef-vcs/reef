@@ -45,7 +45,8 @@ use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
 use reef_api::v1::{
     AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest, DescribeChangeResponse,
     EditFilesRequest, EditFilesResponse, ListFilesRequest, ListFilesResponse, ReadFileRequest,
-    ReadFileResponse, UndoOperationRequest, UndoOperationResponse,
+    ReadFileResponse, SubscribeOperationsRequest, SubscribeOperationsResponse,
+    UndoOperationRequest, UndoOperationResponse,
 };
 use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
@@ -926,6 +927,20 @@ impl Client {
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("AbandonChange", client.abandon_change(request))
+            .await
+    }
+
+    /// `OperationService.SubscribeOperations` (R2.09): the stream of
+    /// frames, once the daemon has accepted the subscription. No deadline:
+    /// the caller bounds the call and each wait for a frame itself. An
+    /// error mid-stream converts with `ClientError::from`.
+    pub async fn subscribe_operations(
+        &self,
+        request: SubscribeOperationsRequest,
+    ) -> Result<tonic::Streaming<SubscribeOperationsResponse>, ClientError> {
+        let mut client =
+            OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("SubscribeOperations", client.subscribe_operations(request))
             .await
     }
 

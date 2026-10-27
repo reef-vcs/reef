@@ -112,7 +112,7 @@ tempfile.workspace = true
 reef-testing.workspace = true
 gix = { workspace = true, features = ["excludes"] }   # tests/workspaces.rs asks git's own ignore stack about `.jj` (R1.25)
 pollster.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }   # paused clocks in subscription tests (R2.09)
 sha2.workspace = true            # the conformance suite's tree digest (R1.11)
 nix = { workspace = true, features = ["signal", "hostname"] }   # SIGTERM in the binary test; the hostname check
 criterion.workspace = true

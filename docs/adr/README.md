@@ -47,3 +47,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0033](0033-thin-client.md) | Thin client | accepted |
 | [0034](0034-cli-over-the-vcs-services.md) | CLI over the VCS services | accepted |
 | [0035](0035-mcp-server.md) | MCP server | accepted |
+| [0036](0036-operation-log-subscriptions.md) | Operation log subscriptions | accepted |

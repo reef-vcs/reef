@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use prost::Message as _;
-use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
 use reef_api::v1::{
     self, CreateWorkspaceRequest, ErrorKind, GetDaemonStatusRequest, IfNotJj,
@@ -68,13 +67,6 @@ async fn declared_rpcs_say_not_implemented() {
             seen.insert($path);
         }};
     }
-    let mut operations = OperationServiceClient::new(channel.clone());
-    check!(
-        operations,
-        subscribe_operations,
-        SubscribeOperationsRequest,
-        "/reef.api.v1.OperationService/SubscribeOperations"
-    );
     let mut presence = PresenceServiceClient::new(channel.clone());
     check!(
         presence,
@@ -94,8 +86,8 @@ async fn declared_rpcs_say_not_implemented() {
         SubscribePresenceRequest,
         "/reef.api.v1.PresenceService/SubscribePresence"
     );
-    // R2.02 implements six more, R2.03 three, R2.04 three.
-    assert_eq!(seen.len(), 4);
+    // R2.02 implements six more, R2.03 three, R2.04 three, R2.09 one.
+    assert_eq!(seen.len(), 3);
     // The client does not take a declared RPC of its own version for a
     // version mismatch.
     let error = daemon

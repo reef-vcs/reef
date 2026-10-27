@@ -136,14 +136,14 @@ pub(super) async fn snapshot_first(
 /// What the daemon's records say about listed operations: their snapshot
 /// index rows and their workspaces' owners. Read on the async side.
 #[derive(Debug, Default)]
-pub(super) struct Records {
+pub(crate) struct Records {
     kinds: HashMap<OperationIdHex, crate::snapshot::SnapshotKind>,
     owners: HashMap<WorkspaceId, String>,
 }
 
 impl Records {
     /// The records of `entries`.
-    pub(super) fn of(state: &AppState, entries: &[OpEntry]) -> Result<Records, Status> {
+    pub(crate) fn of(state: &AppState, entries: &[OpEntry]) -> Result<Records, Status> {
         let ids: Vec<OperationIdHex> = entries.iter().map(|entry| entry.id.clone()).collect();
         let kinds = index::kinds_of(&state.db, &ids).map_err(status)?;
         let workspaces: BTreeSet<WorkspaceId> = entries
@@ -156,8 +156,14 @@ impl Records {
         Ok(Records { kinds, owners })
     }
 
+    /// The owner of the workspace `id` (hex), if it is one of the entries'.
+    pub(crate) fn owner(&self, id: &str) -> Option<&str> {
+        let id = id.parse::<WorkspaceId>().ok()?;
+        self.owners.get(&id).map(String::as_str)
+    }
+
     /// `entry` as a message, classified, without effects.
-    pub(super) fn operation(&self, entry: &OpEntry, repo: RepoId) -> v1::Operation {
+    pub(crate) fn operation(&self, entry: &OpEntry, repo: RepoId) -> v1::Operation {
         let class = oplog::classify(entry);
         let owner = class
             .workspace_id

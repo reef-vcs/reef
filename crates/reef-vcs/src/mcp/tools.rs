@@ -317,7 +317,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "wait_for_operations",
         title: "Wait for operations",
-        rpc: "/reef.api.v1.OperationService/ListOperations",
+        rpc: "/reef.api.v1.OperationService/SubscribeOperations",
         description: "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones.",
         destructive: false,
         idempotent: false,
@@ -425,10 +425,6 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
         "/reef.api.v1.WorkspaceService/RenewLease",
         "the server heartbeats",
-    ),
-    (
-        "/reef.api.v1.OperationService/SubscribeOperations",
-        "not implemented (R2.09); wait_for_operations",
     ),
     (
         "/reef.api.v1.PresenceService/ReportPresence",

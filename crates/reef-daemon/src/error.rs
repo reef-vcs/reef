@@ -42,6 +42,7 @@ use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
+use crate::subscribe::SubscribeError;
 use crate::workspace::ManagerError;
 
 pub use reef_client::error::{
@@ -92,6 +93,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<crate::read::ReadError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::read::PinnedGone>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<SubscribeError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
@@ -215,6 +218,30 @@ fn lookup_reason(error: &OpLookupError) -> Option<(&'static str, BTreeMap<String
         OpLookupError::NotFound(id) => (reason::OPERATION_NOT_FOUND, operation(id)),
         OpLookupError::Ambiguous(id) => (reason::AMBIGUOUS_OPERATION_ID, operation(id)),
         _ => return None,
+    })
+}
+
+fn subscribe_reason(error: &SubscribeError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        SubscribeError::InvalidCursor => (reason::INVALID_CURSOR, BTreeMap::new()),
+        SubscribeError::TooFarBehind { repo, .. } => {
+            (reason::TOO_FAR_BEHIND, meta(&[("repo_id", repo.as_hex())]))
+        }
+        SubscribeError::Rewritten { repo } => (
+            reason::OPERATION_LOG_REWRITTEN,
+            meta(&[("repo_id", repo.as_hex())]),
+        ),
+        SubscribeError::TooMany { .. } => (reason::TOO_MANY_SUBSCRIPTIONS, BTreeMap::new()),
+        SubscribeError::NotInHistory(id) => (
+            reason::OPERATION_NOT_IN_HISTORY,
+            meta(&[("operation_id", id.to_string())]),
+        ),
+        SubscribeError::Forgotten(repo) => (
+            reason::REPOSITORY_NOT_FOUND,
+            meta(&[("repo", repo.as_hex())]),
+        ),
+        SubscribeError::AfterNeedsOneRepo | SubscribeError::ShuttingDown => return None,
     })
 }
 
@@ -437,6 +464,8 @@ fn reason_and_metadata(
             file_reason(error)
         } else if let Some(error) = error.downcast_ref::<EditError>() {
             edit_reason(error)
+        } else if let Some(error) = error.downcast_ref::<SubscribeError>() {
+            subscribe_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

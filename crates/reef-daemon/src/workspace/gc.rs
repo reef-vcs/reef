@@ -258,9 +258,15 @@ async fn gc_job(
                 let dirs = head.repo.gc_measured_dirs();
                 let before = measure_blocking(&dirs);
                 let mut rebind_failures = Vec::new();
+                // Subscriptions read up to the rewritten head and move to
+                // its rewrite (R2.09).
+                let rewrite = head.begin_rewrite();
                 let outcome = head
                     .repo
-                    .gc_with(keep_newer, &mut |op_id| {
+                    .gc_with(keep_newer, &mut |rewritten, op_id| {
+                        if let Some(rewrite) = &rewrite {
+                            rewrite.moved_to(rewritten, op_id);
+                        }
                         for entry in &wcs {
                             if let Err(error) = rebind(entry, op_id) {
                                 tracing::error!(
@@ -277,6 +283,7 @@ async fn gc_job(
                         }
                     })
                     .await;
+                drop(rewrite);
                 let after = measure_blocking(&dirs);
                 (before, after, outcome, rebind_failures, head.readonly())
             }

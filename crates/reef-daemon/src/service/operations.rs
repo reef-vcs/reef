@@ -1,7 +1,8 @@
 //! `reef.api.v1.OperationService`: `ListOperations` and `GetOperation`
 //! (R2.02), `UndoOperation` (R2.03, through
-//! [`crate::workspace::Manager::rewrite`]). `SubscribeOperations` (R2.09)
-//! answers `UNIMPLEMENTED` with reason `NOT_IMPLEMENTED`.
+//! [`crate::workspace::Manager::rewrite`]), and `SubscribeOperations`
+//! (R2.09), which resolves its start here and streams from a
+//! [`crate::subscribe`] session.
 //!
 //! Operation reads never reload the repository and never merge concurrent
 //! operation heads: they walk from the heads the op heads store lists. A
@@ -9,7 +10,7 @@
 //! many operations the walk has taken so far and the last one's id, which
 //! the next page checks after skipping as many.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use std::time::SystemTime;
 use futures::Stream;
 use prost::Message as _;
 use reef_api::v1::operation_service_server::OperationService;
+use reef_api::v1::subscribe_operations_request::Start as StartAt;
 use reef_api::v1::{
     self, GetOperationRequest, GetOperationResponse, ListOperationsRequest, ListOperationsResponse,
     SubscribeOperationsRequest, SubscribeOperationsResponse, UndoOperationRequest,
@@ -25,17 +27,21 @@ use reef_api::v1::{
 };
 use reef_lib::error::{Classify, ErrorKind};
 use reef_lib::jj::effects::OpEffects;
-use reef_lib::jj::oplog::{self, ATTR_AGENT, OpEntry, OpLookupError};
+use reef_lib::jj::oplog::{self, Frontier, OpEntry, OpLookupError};
 use reef_lib::jj::{OperationIdHex, ReadonlyRepo};
 use tonic::{Request, Response, Status};
 
-use super::convert::{self, known};
+use super::convert;
+use super::op_filter::OpMatcher;
 use super::page::{MAX_PAGE_BYTES, PageRequest};
 use super::reading::{Records, bad_token, target};
 use crate::daemon::AppState;
-use crate::error::{not_implemented, status};
+use crate::error::status;
 use crate::model::{RepoId, WorkspaceState};
 use crate::read::{PinnedGone, Reads, Stop};
+use crate::subscribe::feed::LogSource;
+use crate::subscribe::session::{self, Position};
+use crate::subscribe::{SubscribeError, cursor};
 
 /// Operations a page examines at most.
 const MAX_EXAMINED: usize = 10_000;
@@ -107,17 +113,6 @@ fn system_time(timestamp: Option<&prost_types::Timestamp>) -> Option<SystemTime>
     whole.checked_add(nanos)
 }
 
-/// A request's `OperationFilter` and time bounds, resolved.
-#[derive(Debug, Default)]
-struct Filter {
-    workspaces: HashSet<String>,
-    changes: Vec<String>,
-    agents: HashSet<String>,
-    kinds: HashSet<i32>,
-    ended_after: Option<SystemTime>,
-    ended_before: Option<SystemTime>,
-}
-
 /// One operation a page returns.
 struct Listed {
     entry: OpEntry,
@@ -147,7 +142,9 @@ struct Walk {
     heads: Vec<OperationIdHex>,
     skip: usize,
     limit: usize,
-    filter: Filter,
+    filter: OpMatcher,
+    ended_after: Option<SystemTime>,
+    ended_before: Option<SystemTime>,
     owners: HashMap<String, String>,
     include_effects: bool,
     stop: Stop,
@@ -157,46 +154,11 @@ impl Walk {
     /// Whether the filter keeps `entry`, given its effects when the filter
     /// names changes.
     fn keeps(&self, entry: &OpEntry) -> bool {
-        let filter = &self.filter;
-        if filter
-            .ended_before
-            .is_some_and(|before| entry.end >= before)
-        {
+        if self.ended_before.is_some_and(|before| entry.end >= before) {
             return false;
         }
-        let class = oplog::classify(entry);
-        if !filter.kinds.is_empty()
-            && !filter
-                .kinds
-                .contains(&i32::from(convert::operation_kind(class.kind)))
-        {
-            return false;
-        }
-        let workspace = class.workspace_id.as_deref();
-        if !filter.workspaces.is_empty()
-            && !workspace.is_some_and(|id| filter.workspaces.contains(id))
-        {
-            return false;
-        }
-        if !filter.agents.is_empty() {
-            let agent = entry
-                .attributes
-                .get(ATTR_AGENT)
-                .or_else(|| workspace.and_then(|id| self.owners.get(id)));
-            if !agent.is_some_and(|agent| filter.agents.contains(agent)) {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn touches(&self, effects: Option<&OpEffects>) -> bool {
-        effects.is_some_and(|effects| {
-            self.filter
-                .changes
-                .iter()
-                .any(|prefix| effects.touches(prefix))
-        })
+        self.filter
+            .keeps(entry, |id| self.owners.get(id).map(String::as_str))
     }
 
     async fn run(self) -> Result<WalkPage, OpLookupError> {
@@ -210,17 +172,13 @@ impl Walk {
         let mut computed = 0;
         let walk = oplog::walk_from(&self.head, &self.heads, self.skip, async |operation| {
             let budget_spent = page.examined - self.skip >= MAX_EXAMINED
-                || (!self.filter.changes.is_empty() && computed == MAX_EFFECTS_COMPUTED);
+                || (self.filter.names_changes() && computed == MAX_EFFECTS_COMPUTED);
             if page.listed.len() == self.limit || budget_spent || self.stop.requested() {
                 page.more = true;
                 return ControlFlow::Break(());
             }
             let entry = oplog::entry(operation);
-            if self
-                .filter
-                .ended_after
-                .is_some_and(|after| entry.end <= after)
-            {
+            if self.ended_after.is_some_and(|after| entry.end <= after) {
                 // The walk emits in descending end time on one clock.
                 return ControlFlow::Break(());
             }
@@ -230,10 +188,10 @@ impl Walk {
                 return ControlFlow::Continue(());
             }
             let mut effects = None;
-            if !self.filter.changes.is_empty() {
+            if self.filter.names_changes() {
                 computed += 1;
                 effects = self.reads.effects(self.repo, &self.head, operation).await;
-                if !self.touches(effects.as_ref()) {
+                if !self.filter.touches(effects.as_ref()) {
                     return ControlFlow::Continue(());
                 }
             }
@@ -300,29 +258,11 @@ impl OperationService for OperationsHandler {
         .map_err(status)?;
         let state = &self.state;
         let target = target(state, &request.repo, "")?;
-        let wanted = request.filter.unwrap_or_default();
-        let mut filter = Filter {
-            agents: wanted.agents.into_iter().collect(),
-            ended_after: system_time(request.ended_after.as_ref()),
-            ended_before: system_time(request.ended_before.as_ref()),
-            ..Filter::default()
-        };
-        for workspace in &wanted.workspaces {
-            let record = state
-                .manager
-                .resolve_workspace(&target.repo.id.as_hex(), workspace)
-                .map_err(status)?;
-            filter.workspaces.insert(record.id.as_hex());
-        }
-        for change in wanted.changes {
-            let prefix =
-                change_prefix(&change).ok_or_else(|| status(InvalidChangeFilter { change }))?;
-            filter.changes.push(prefix);
-        }
-        for kind in wanted.kinds {
-            let kind: v1::OperationKind = known("filter.kinds", kind).map_err(status)?;
-            filter.kinds.insert(kind.into());
-        }
+        let filter = OpMatcher::resolve(
+            state,
+            &target.repo.id.as_hex(),
+            request.filter.unwrap_or_default(),
+        )?;
         let owners: HashMap<String, String> = state
             .manager
             .list(Some(target.repo.id), &[] as &[WorkspaceState], None)
@@ -364,6 +304,8 @@ impl OperationService for OperationsHandler {
             skip: start.skip,
             limit: page.size(),
             filter,
+            ended_after: system_time(request.ended_after.as_ref()),
+            ended_before: system_time(request.ended_before.as_ref()),
             owners,
             include_effects: request.include_effects,
             stop,
@@ -499,14 +441,148 @@ impl OperationService for OperationsHandler {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn subscribe_operations(
         &self,
-        _request: Request<SubscribeOperationsRequest>,
+        request: Request<SubscribeOperationsRequest>,
     ) -> Result<Response<Self::SubscribeOperationsStream>, Status> {
-        Err(not_implemented(
-            "/reef.api.v1.OperationService/SubscribeOperations",
-        ))
+        let request = request.into_inner();
+        let state = &self.state;
+        let limits = state.config.subscribe.clone();
+        let named = if request.repos.is_empty() {
+            None
+        } else {
+            let mut ids = Vec::new();
+            for repo in &request.repos {
+                let id = state.manager.resolve_repo(repo).map_err(status)?.id;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            Some(ids)
+        };
+        let scope = match named.as_deref() {
+            Some([only]) => only.as_hex(),
+            _ => String::new(),
+        };
+        let matcher = Arc::new(OpMatcher::resolve(
+            state,
+            &scope,
+            request.filter.unwrap_or_default(),
+        )?);
+        let slot = state
+            .subscriptions
+            .admit(limits.max_subscriptions)
+            .map_err(status)?;
+        let (given, after_operation) = match request.start {
+            None => (BTreeMap::new(), false),
+            Some(StartAt::Cursor(text)) => (cursor::decode(&text).map_err(status)?, false),
+            Some(StartAt::AfterOperation(text)) => {
+                let Some([repo]) = named.as_deref() else {
+                    return Err(status(SubscribeError::AfterNeedsOneRepo));
+                };
+                let found = blocking_read(state, *repo, move |tip| async move {
+                    oplog::lookup(&tip, &text).await
+                })
+                .await?
+                .map_err(status)?;
+                (BTreeMap::from([(*repo, Frontier::new([found.id]))]), true)
+            }
+        };
+        let followed = named.clone().unwrap_or_else(|| state.events.repos());
+        let mut positions = BTreeMap::new();
+        for repo in followed {
+            // The view before the heads: anything recorded in between
+            // shows as a change.
+            let Some(view) = state.events.view(repo) else {
+                if named.is_some() {
+                    return Err(status(SubscribeError::Forgotten(repo)));
+                }
+                continue;
+            };
+            let heads = blocking_read(
+                state,
+                repo,
+                |tip| async move { oplog::op_heads(&tip).await },
+            )
+            .await?
+            .map_err(status)?;
+            let Some(frontier) = given.get(&repo) else {
+                positions.insert(
+                    repo,
+                    Position {
+                        frontier: Frontier::new(heads),
+                        upto: None,
+                        view: Some(view),
+                    },
+                );
+                continue;
+            };
+            let (start, upto, behind) = (frontier.clone(), heads.clone(), limits.max_behind);
+            let range = blocking_read(state, repo, move |tip| async move {
+                oplog::walk_after(&tip, &upto, &start, behind).await
+            })
+            .await?;
+            let gone = |frontier: &Frontier| match frontier.ids() {
+                [only] if after_operation => SubscribeError::NotInHistory(only.clone()),
+                _ => SubscribeError::Rewritten { repo },
+            };
+            match range {
+                Ok(range) if range.truncated => {
+                    return Err(status(SubscribeError::TooFarBehind {
+                        repo,
+                        limit: limits.max_behind,
+                    }));
+                }
+                Ok(range) if !range.unreached.is_empty() => return Err(status(gone(frontier))),
+                Ok(_) => {}
+                Err(OpLookupError::NotFound(_)) => return Err(status(gone(frontier))),
+                Err(error) => return Err(status(error)),
+            }
+            positions.insert(
+                repo,
+                Position {
+                    frontier: frontier.clone(),
+                    upto: Some(heads),
+                    view: Some(view),
+                },
+            );
+        }
+        let source = LogSource {
+            state: Arc::clone(state),
+            matcher,
+        };
+        let frames = session::spawn(
+            source,
+            limits,
+            state.shutdown.clone(),
+            slot,
+            session::Start { named, positions },
+        );
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(frames),
+        )))
     }
+}
+
+/// Runs `read` over `repo` as its thread last loaded it, on the blocking
+/// pool.
+async fn blocking_read<T, F, Fut>(state: &AppState, repo: RepoId, read: F) -> Result<T, Status>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<ReadonlyRepo>) -> Fut + Send + 'static,
+    Fut: Future<Output = T>,
+{
+    let handle = state.manager.handle(repo).map_err(status)?;
+    let tip = match state.events.tip(repo) {
+        Some(tip) => tip,
+        None => state.reads.loaded(&handle).await.map_err(status)?,
+    };
+    state
+        .reads
+        .run(&handle, move || read(tip))
+        .await
+        .map_err(status)
 }
 
 #[cfg(test)]

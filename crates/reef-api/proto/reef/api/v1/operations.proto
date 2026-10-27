@@ -71,7 +71,36 @@ service OperationService {
   }
   // New operations as they are recorded, in frames, optionally replaying
   // history first. A frame with no operations is a keepalive, sent at least
-  // every 30 seconds. Declared; R2.09 implements it.
+  // every 30 seconds.
+  //
+  // Within a repository every operation comes after its parents, across
+  // frames too, and none comes twice; repositories interleave. The first
+  // frame of a subscription with a start replays history (`live` false);
+  // the first live frame is sent as soon as the replay is, and at once when
+  // there is no start, empty when nothing is new. A frame holds at most
+  // 1,000 operations and 1 MiB; live frames with operations are at least
+  // 50 ms apart, and an isolated operation is not delayed. Nothing is
+  // dropped: a client that stops reading is held back and catches up from
+  // the log when it reads again, unless more than 10,000 operations were
+  // recorded after its position. Operations written by other jj processes
+  // arrive within about 200 ms.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_CURSOR; with reason
+  // INVALID_OPERATION_ID or AMBIGUOUS_OPERATION_ID (metadata
+  // `operation_id`) for `after_operation`; with reason INVALID_CHANGE_ID
+  // (metadata `change`) for `filter.changes`; for an unknown
+  // `filter.kinds` value; and for `after_operation` without exactly one
+  // repository in `repos`. NOT_FOUND with reason REPOSITORY_NOT_FOUND
+  // (metadata `repo`), also mid-stream when a named repository is
+  // forgotten; REPOSITORY_NOT_REGISTERED (metadata `path`); for an unknown
+  // `filter.workspaces` value; and OPERATION_NOT_FOUND (metadata
+  // `operation_id`) for `after_operation`. FAILED_PRECONDITION with reason
+  // OPERATION_NOT_IN_HISTORY (metadata `operation_id`); TOO_FAR_BEHIND
+  // (metadata `repo_id`), at the start or mid-stream; and
+  // OPERATION_LOG_REWRITTEN (metadata `repo_id`), for a cursor or
+  // mid-stream after garbage collection. UNAVAILABLE with reason
+  // TOO_MANY_SUBSCRIPTIONS, and with no reason, mid-stream, when the
+  // daemon shuts down: resume with the last frame's `cursor`.
   rpc SubscribeOperations(SubscribeOperationsRequest) returns (stream SubscribeOperationsResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -343,9 +372,16 @@ message SubscribeOperationsResponse {
   // Parents before children within a repository, each with its effects.
   // Empty in a keepalive.
   repeated Operation operations = 1;
-  // The point to resume from after this frame.
+  // The point to resume from after this frame. Not bound to the filter.
   string cursor = 2;
   // False while replaying history after `after_operation` or `cursor`;
-  // true from the first frame of new operations on.
+  // true from the first frame of new operations on. The first live frame
+  // is sent at once, empty when nothing is new.
   bool live = 3;
+  // When `repos` names exactly one repository: the operation heads this
+  // frame's `cursor` stands at in it, full hex, sorted. Every operation that
+  // is one of them or their ancestor has been sent or filtered out, so one
+  // of them is an `after_operation` to resume from. One id unless the log
+  // has concurrent heads. Empty when following several repositories.
+  repeated string head_operation_ids = 4;
 }

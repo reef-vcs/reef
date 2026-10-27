@@ -347,6 +347,8 @@ The Docker VM is the one in [Linux](#linux) above: Docker Desktop on the M2 Max,
 | `effects_snapshot` | a snapshot operation's effects, uncached |
 | `diff_hunks_50` | 50 modified files with hunks |
 | `op_page_100` | 100 operations walked from the heads and classified, no effects |
+| `op_range_1` | the one operation after a position one behind the head, walked and classified: what each subscription reads per operation (R2.09), which R2.22's broker removes |
+| `op_range_1000` | the 1,000 operations after a position, walked and classified: a subscription catching up |
 
 Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 
@@ -359,6 +361,8 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 | `effects_snapshot` | 0.05 ms | 0.05 ms |
 | `diff_hunks_50` | 9.0 ms | 11.7 ms |
 | `op_page_100` | 1.6 ms | 1.6 ms |
+| `op_range_1` | 0.048 ms | |
+| `op_range_1000` | 17.2 ms | |
 
 Everything but `diff_summary_full` scales with what changed, not with the tree. `diff_summary_full` walks every path, and a page of a large diff pays that walk again to count `total_files`. Before R2.02 skipped rename and copy detection past 1,000 differing files (git's default `diff.renameLimit`), the git backend's detection took 764 ms of its 770 ms on `medium` and grew faster than the file count; the tree diff alone is 6 ms there.
 

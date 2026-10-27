@@ -246,6 +246,22 @@ impl Reads {
         self.blocking(handle, Some(permit), read).await
     }
 
+    /// [`Reads::run`] holding `permit`, one of another pool's (R2.09's
+    /// subscriptions have their own).
+    pub async fn run_holding<T, F, Fut>(
+        &self,
+        handle: &RepoHandle,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        read: F,
+    ) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+    {
+        self.blocking(handle, Some(permit), read).await
+    }
+
     /// [`Reads::run`] without a permit, for the effects a write's response
     /// reports: writes are bounded by the repository's thread already, and
     /// must not queue behind slow reads.

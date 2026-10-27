@@ -1623,7 +1623,11 @@ async fn every_command_completes_with_stdin_closed() {
     let (daemon, repo) = with_repo().await;
     let state = daemon.state_dir().to_owned();
     let mut lines: Vec<Vec<String>> = Vec::new();
-    for command in leaf_commands(&state) {
+    for mut command in leaf_commands(&state) {
+        // `op watch` waits 30 s for operations by default.
+        if command == ["op", "watch"] {
+            command.extend(["--for".to_owned(), "1".to_owned()]);
+        }
         if command.first().is_some_and(|noun| noun == "daemon")
             && command.get(1).is_some_and(|verb| verb != "status")
         {

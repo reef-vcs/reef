@@ -215,6 +215,36 @@ fn read_benches(c: &mut Criterion) {
         });
     });
 
+    // R2.09: what one subscription reads for the operations after its
+    // position, classified: one new operation (the per-subscriber cost of
+    // every operation, which R2.22's broker removes) and a thousand (a
+    // reader catching up).
+    let mut ids = vec![oplog::op_id_of(&repo.readonly())];
+    for n in 0..1000 {
+        let tx = repo.readonly().start_transaction();
+        let next = rt
+            .block_on(tx.commit(format!("bench: operation {n}")))
+            .expect("commit an operation");
+        repo.set_head(next);
+        ids.push(oplog::op_id_of(&repo.readonly()));
+    }
+    let head = repo.readonly();
+    let heads = rt.block_on(oplog::op_heads(&head)).expect("op heads");
+    for (bench, from) in [("op_range_1", ids.len() - 2), ("op_range_1000", 0)] {
+        let frontier = oplog::Frontier::new([ids[from].clone()]);
+        group.bench_function(BenchmarkId::new(name, bench), |b| {
+            b.iter(|| {
+                let range = rt
+                    .block_on(oplog::walk_after(&head, &heads, &frontier, 10_000))
+                    .expect("walk");
+                for operation in &range.operations {
+                    oplog::classify(&oplog::entry(operation));
+                }
+                range.operations.len()
+            });
+        });
+    }
+
     group.finish();
 }
 
