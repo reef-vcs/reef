@@ -581,3 +581,83 @@ async fn daemon_settings_carry_the_operation_identity() {
     );
     daemon.stop().await;
 }
+
+// R2.22, 15: a daemon started under a shell's default soft limit raises
+// it and serves hundreds of clients; at its hard limit it backs off
+// accepting instead of spinning, and accepts again once descriptors free.
+#[tokio::test(flavor = "multi_thread")]
+async fn serves_hundreds_of_connections() {
+    use common::load::{process_cpu_secs, raise_open_file_limit};
+    use common::spawned::SpawnedDaemon;
+    use nix::sys::resource::{Resource, getrlimit};
+    use reef_api::v1::SubscribeOperationsRequest;
+
+    // The test holds 400 connections itself.
+    raise_open_file_limit();
+    let (_, hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+    let daemon = SpawnedDaemon::spawn_with_open_files(256, hard, |_| {}).await;
+    let raised = wait_for_line(&daemon, "open file limit").await;
+    assert_eq!(raised["before"], 256, "{raised}");
+    assert!(raised["limit"].as_u64().unwrap() > 400, "{raised}");
+    let begun = std::time::Instant::now();
+    let mut streams = Vec::new();
+    for _ in 0..400 {
+        let client = Client::connect(&daemon.socket).await.unwrap();
+        let stream = client
+            .subscribe_operations(SubscribeOperationsRequest::default())
+            .await
+            .unwrap();
+        streams.push((client, stream));
+    }
+    for (_, stream) in &mut streams {
+        let left = Duration::from_secs(5).saturating_sub(begun.elapsed());
+        tokio::time::timeout(left, stream.message())
+            .await
+            .expect("every first frame within 5 s")
+            .unwrap()
+            .unwrap();
+    }
+    drop(streams);
+    drop(daemon);
+
+    // At a hard limit of 300: 400 bare connections run it out.
+    let daemon = SpawnedDaemon::spawn_with_open_files(300, 300, |_| {}).await;
+    let mut held = Vec::new();
+    for _ in 0..400 {
+        held.push(
+            tokio::net::UnixStream::connect(&daemon.socket)
+                .await
+                .unwrap(),
+        );
+    }
+    wait_for_line(&daemon, "accept failed; backing off").await;
+    let cpu = process_cpu_secs(daemon.pid);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let spent = process_cpu_secs(daemon.pid) - cpu;
+    assert!(
+        spent < 0.5,
+        "{spent} s of CPU in 2 s at the limit: spinning"
+    );
+    held.truncate(200);
+    let client = Client::connect(&daemon.socket).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), client.status())
+        .await
+        .expect("accepted again once descriptors free")
+        .unwrap();
+}
+
+/// The first of the daemon's log events containing `pattern`, waiting up
+/// to 5 s for it to be written.
+async fn wait_for_line(daemon: &common::spawned::SpawnedDaemon, pattern: &str) -> Value {
+    let begun = std::time::Instant::now();
+    loop {
+        if let Some(event) = daemon.stderr_lines(pattern).into_iter().next() {
+            return event;
+        }
+        assert!(
+            begun.elapsed() < Duration::from_secs(5),
+            "no `{pattern}` in the daemon's log"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

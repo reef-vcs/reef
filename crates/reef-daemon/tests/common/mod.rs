@@ -24,6 +24,7 @@ pub use reef_daemon::testing::{
 };
 use tempfile::TempDir;
 
+pub mod load;
 pub mod spawned;
 
 /// How long the binary gets to bind its socket, and to exit after SIGTERM.

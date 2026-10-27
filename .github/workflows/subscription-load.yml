@@ -1,0 +1,77 @@
+name: Subscription load test
+
+# The subscription load test (R2.22, docs/load-tests.md "Subscriptions"): 500 operation-log and
+# 500 presence subscribers on one daemon at 1,000 operations a minute, gated on delivery p99 within
+# 100 ms with nothing missed, repeated or reordered. Weekly, by hand, and on a pull request that
+# changes the broker, the subscription or presence code, or the test. Its own workflow, not a job
+# of load.yml, because pull_request paths filter whole workflows: these paths must not start
+# R1.23's 200-workspace run.
+on:
+  schedule:
+    - cron: "47 5 * * 0"     # Sundays 05:47 UTC, after load.yml's
+  workflow_dispatch:
+    inputs:
+      steady_secs:
+        description: Steady-state seconds
+        default: "300"
+  pull_request:
+    paths:
+      - crates/reef-broker/**
+      - crates/reef-daemon/src/subscribe/**
+      - crates/reef-daemon/src/presence/**
+      - crates/reef-daemon/src/limits.rs
+      - crates/reef-daemon/tests/subscription_load.rs
+      - crates/reef-daemon/tests/common/load.rs
+      - .github/workflows/subscription-load.yml
+
+concurrency:
+  group: subscription-load-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  subscriptions:
+    name: subscriptions ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # About 6 minutes of measurement after the release build.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      REEF_LOAD: "1"
+      REEF_SUBLOAD_STEADY_SECS: ${{ inputs.steady_secs || '300' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # ci.yml lints the test with warnings denied; a lint must not fail this run.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      - name: Record limits
+        run: ulimit -n -H; ulimit -n -S
+      - name: Build
+        run: cargo nextest run --release -p reef-daemon --test subscription_load --run-ignored all --no-run
+      # As the runner user: nothing here needs root, and the test raises its own open-file limit.
+      - name: Load test
+        run: cargo nextest run --release -p reef-daemon --test subscription_load --run-ignored all --no-fail-fast --no-capture
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: subload-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}
+          path: target/load/
+          retention-days: 90
+      - name: Drop reports before the cache is saved
+        if: always()
+        run: rm -rf target/load

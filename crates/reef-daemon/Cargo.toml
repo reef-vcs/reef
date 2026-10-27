@@ -52,6 +52,7 @@ reef-lib.workspace = true
 reef-api.workspace = true
 reef-client.workspace = true     # the client, its JSON, and the path layering the CLI shares (R2.05)
 reef-error.workspace = true
+reef-broker.workspace = true     # the subscription broker (R2.22)
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -64,7 +65,7 @@ time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true
 blake3.workspace = true          # store lockfile hashes (R1.20)
-nix = { workspace = true, features = ["hostname", "user", "signal"] }   # the default identity and jj's operation.hostname/username; killing a store build's process group (R1.20)
+nix = { workspace = true, features = ["hostname", "user", "signal", "resource"] }   # the default identity and jj's operation.hostname/username; killing a store build's process group (R1.20); the open-file limit (R2.22)
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
@@ -114,5 +115,5 @@ gix = { workspace = true, features = ["excludes"] }   # tests/workspaces.rs asks
 pollster.workspace = true
 tokio = { workspace = true, features = ["test-util"] }   # paused clocks in subscription tests (R2.09)
 sha2.workspace = true            # the conformance suite's tree digest (R1.11)
-nix = { workspace = true, features = ["signal", "hostname"] }   # SIGTERM in the binary test; the hostname check
+nix = { workspace = true, features = ["signal", "hostname", "resource"] }   # SIGTERM in the binary test; the hostname check; a spawned daemon's open-file limit (R2.22)
 criterion.workspace = true

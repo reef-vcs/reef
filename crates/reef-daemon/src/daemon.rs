@@ -68,7 +68,6 @@ use reef_lib::jj::settings::SettingsError;
 use reef_lib::telemetry::elapsed_ms;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::BaseCache;
@@ -111,6 +110,8 @@ pub struct AppState {
     pub events: Arc<crate::subscribe::OpEvents>,
     /// The open subscriptions (R2.09).
     pub subscriptions: crate::subscribe::Subscriptions,
+    /// The rings subscriptions are served from (R2.22).
+    pub broker: Arc<crate::subscribe::broker::OpBroker>,
     /// The live presence entries (R2.10); the manager's.
     pub presence: Arc<crate::presence::PresenceHub>,
     /// Work to do after the server stops and before the repository threads
@@ -335,6 +336,7 @@ impl Daemon {
             settings.clone(),
         );
         let shutdown = CancellationToken::new();
+        let broker = Arc::new(crate::subscribe::broker::OpBroker::new(&config.subscribe));
         let state = Arc::new(AppState {
             config,
             db,
@@ -345,6 +347,7 @@ impl Daemon {
             reads: Arc::new(crate::read::Reads::new(shutdown.clone())),
             events,
             subscriptions: crate::subscribe::Subscriptions::default(),
+            broker,
             presence: Arc::clone(manager.presence()),
             shutdown,
             hooks: ShutdownHooks::default(),
@@ -371,10 +374,11 @@ impl Daemon {
         };
 
         Arc::clone(&state.events).poll(state.config.subscribe.outside_poll, state.shutdown.clone());
+        crate::subscribe::broker::supervise(&state);
         state.presence.start(state.shutdown.clone());
         let router = server::router(Arc::clone(&state));
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
-            UnixListenerStream::new(listener),
+            crate::limits::Accepting::new(listener),
             state.shutdown.clone().cancelled_owned(),
         ));
         tracing::info!(

@@ -52,6 +52,17 @@ pub(crate) struct RepoView {
     pub(crate) last_rewrite: Option<(OperationIdHex, OperationIdHex)>,
 }
 
+/// What a session reads from [`OpEvents`] for one repository besides its
+/// version: the repository is open, and where its rewrites stand. R2.22's
+/// broker wakes sessions when these change; new operations wake them
+/// through its rings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Shape {
+    repo: RepoId,
+    rewrite_seq: u64,
+    rewrites: u64,
+}
+
 /// The hub; one in [`crate::AppState::events`], shared with the
 /// repository registry.
 #[derive(Debug)]
@@ -161,6 +172,22 @@ impl OpEvents {
     /// The repositories open now.
     pub(crate) fn repos(&self) -> Vec<RepoId> {
         self.with(|repos| repos.keys().copied().collect())
+    }
+
+    /// Every open repository's [`Shape`], sorted.
+    pub(crate) fn shapes(&self) -> Vec<Shape> {
+        let mut shapes: Vec<Shape> = self.with(|repos| {
+            repos
+                .iter()
+                .map(|(repo, watched)| Shape {
+                    repo: *repo,
+                    rewrite_seq: watched.view.rewrite_seq,
+                    rewrites: watched.view.rewrites,
+                })
+                .collect()
+        });
+        shapes.sort_by_key(|shape| shape.repo);
+        shapes
     }
 
     /// What a subscription compares for `repo`, if it is open.

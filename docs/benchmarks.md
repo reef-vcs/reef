@@ -347,7 +347,7 @@ The Docker VM is the one in [Linux](#linux) above: Docker Desktop on the M2 Max,
 | `effects_snapshot` | a snapshot operation's effects, uncached |
 | `diff_hunks_50` | 50 modified files with hunks |
 | `op_page_100` | 100 operations walked from the heads and classified, no effects |
-| `op_range_1` | the one operation after a position one behind the head, walked and classified: what each subscription reads per operation (R2.09), which R2.22's broker removes |
+| `op_range_1` | the one operation after a position one behind the head, walked and classified: what each subscription read per operation before R2.22's broker; since it, what the broker's ingest reads once per operation per followed repository |
 | `op_range_1000` | the 1,000 operations after a position, walked and classified: a subscription catching up |
 
 Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
@@ -365,6 +365,18 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 | `op_range_1000` | 17.2 ms | |
 
 Everything but `diff_summary_full` scales with what changed, not with the tree. `diff_summary_full` walks every path, and a page of a large diff pays that walk again to count `total_files`. Before R2.02 skipped rename and copy detection past 1,000 differing files (git's default `diff.renameLimit`), the git backend's detection took 764 ms of its 770 ms on `medium` and grew faster than the file count; the tree diff alone is 6 ms there.
+
+## Broker (R2.22)
+
+`crates/reef-broker/benches/broker.rs` measures the subscription broker's in-memory cost per operation ([ADR 0038](adr/0038-subscription-broker.md)), on a ring at its default bound of 4,096 operations of about 1.5 KiB: `cargo bench -p reef-broker --bench broker`. `bench.yml`'s `cargo bench --workspace` runs it.
+
+| Benchmark | Timed | M2 Max, median |
+| --- | --- | ---: |
+| `broker/append_1` | one operation appended to a full ring: an eviction and two index updates | 271 ns |
+| `broker/read_1` | the one entry after a position one behind the head | 48 ns |
+| `broker/fanout_500` | 500 readers each read the newest operation, filter it as the load test's classes do, and clone the message they keep: the in-memory fan-out of one operation at Phase 2's target | 41 µs |
+
+Before the broker each of 500 subscribers ran `op_range_1` (0.048 ms) plus two SQLite queries and a hop to the blocking pool per operation; now the ingest runs it once and the subscribers share `fanout_500`. The end-to-end figures, before and after, are in [`load-tests.md`, Subscriptions](load-tests.md#subscriptions-r222).
 
 ## Writes (R2.03)
 

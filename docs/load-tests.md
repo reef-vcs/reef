@@ -9,6 +9,7 @@ There are three suites, all in `crates/reef-daemon/tests/`:
 | `integration.rs` | Thirteen invariants against a spawned daemon on the `small` preset: an agent SIGKILLed mid-edit (and inside the debounce window) leaves its edits in a final snapshot and no directory; leases expire, and a heartbeat inside the grace revives one; two workspaces on one change diverge without seeing each other's files; a daemon SIGKILLed mid-snapshot or mid-create recovers with no row lacking a directory and no directory lacking a row; mounts and watchers return after a restart, and a write made while the daemon was down is snapshotted within `watcher.fallback_interval`; one inotify instance (Linux); a store shared by twenty; a move keeps its lease and directory; the CLI's JSON has the same keys on both platforms. | `ci.yml`'s `check` job on both runners; the restart and store tests also as root in the `overlayfs` job |
 | `disk_full.rs` | `ENOSPC` on the state directory's filesystem (a 256 MB sparse APFS image on macOS, a 256 MB tmpfs on Linux): the daemon stays up, snapshots fail and are logged at `error`, nothing is reclaimed without its final snapshot, the database passes `PRAGMA integrity_check`, and the edit made while full is snapshotted once space is freed. | `check` on macOS; as root in the `overlayfs` job on Linux (elsewhere it prints `skipped:`) |
 | `load.rs` | The load profile below, gated on the steady-state write-to-snapshot p95. | `load.yml`, and by hand |
+| `subscription_load.rs` | Phase 2's subscription target (R2.22): 500 operation-log and 500 presence subscribers at 1,000 operations a minute, every delivery checked, gated on p99 within 100 ms. See [Subscriptions](#subscriptions-r222). | `subscription-load.yml`, and by hand |
 
 Every test drives the real binaries: the kill tests need a pid to kill. `tests/common/spawned.rs` has `SpawnedDaemon` (start the binary on a temporary state directory with a `config.toml` the test writes, SIGKILL it, start it again on the same state) and `reef_bin()`, which finds the `reef` binary beside `reef-daemon` or builds it, since `cargo nextest run -p reef-daemon` does not.
 
@@ -171,3 +172,82 @@ The macOS runs' twenty `large` creates before the change were also slower than i
 - **Tearing down 200 `medium` workspaces on macOS takes 6 to 8 minutes; on Linux 7 seconds.** A release alone takes 0.8 s, but with 200 workspaces alive the median release took 15.7 s (8 in flight). A `sample` of a scratch daemon releasing them (installed release binaries, the same 200 workspaces) put almost all CPU in jj's working-copy scans (`fstatat` under `FileSnapshotter::visit_directory`) and in deleting released trees (`unlinkat` under `fs_util::remove_all`). Before R1.23's fallback change, its `watcher summary` lines showed 100 to 130 scans a minute, queued up to 153 deep and waiting up to 51 s for a permit: the 60 s fallback snapshot of every idle workspace running into the releases. After it, the queue stayed at one through the teardown, about 30 scans a minute (the releases' own final snapshots), and the teardown took 344 s instead of 458 (median release 13.9 s). The rest is the final snapshots and the deletions of 10,000-file cloned trees on the same APFS volume; on Linux a release removes an overlay's small upper directory instead. Deleting released trees at low priority, or in one background pass, is the follow-up.
 - **Memory grows with the tree, per workspace.** Peak resident size was 554 MB with 200 `medium` workspaces on macOS and 1.2 GB on Linux. With `large`, it was 3.5 GB for 200 workspaces on macOS (about 18 MB each) and 3.6 GB for 50 on Linux (about 73 MB each; why Linux needs four times as much is not established). One hundred or 200 `large` workspaces did not fit the 7.7 GB Linux VM: the kernel's OOM killer stopped the daemon partway through creating them, at 3.6 to 3.7 GB resident, beside the kernel memory of more than a million inotify watches. Each loaded working copy keeps its `tree_state` (one entry per tracked file) in memory. A machine meant to hold hundreds of 100,000-file workspaces needs that much memory, or the daemon needs to unload idle working copies (a Phase 2 question for the Scale section).
 - **Limits.** One inotify instance per daemon, as R1.13 designed; `medium` used 1,000 watches per workspace, so the default 1,048,576 holds 1,000 `medium` workspaces or 125 `large` ones. The scan pool defaults to one permit per CPU (12 here).
+
+## Subscriptions (R2.22)
+
+Phase 2's exit criterion: a subscriber receives operation log and presence events within 100 ms, "and that holds with 500 subscribers on one daemon at 1,000 operations per minute". `tests/subscription_load.rs` measures it against the release `reef-daemon` binary, and measured it before and after R2.22's broker ([ADR 0038](adr/0038-subscription-broker.md)). It shares `tests/common/load.rs` (process sampling, the machine, the report file) with `load.rs`.
+
+### Running it
+
+```sh
+REEF_LOAD=1 cargo nextest run --release -p reef-daemon --test subscription_load --run-ignored all --no-capture
+```
+
+It is `#[ignore]`d and does nothing without `REEF_LOAD=1`. With the defaults it takes about 6 minutes after the build; `REEF_SUBLOAD_STEADY_SECS=60` gives a 2-minute run for iteration. It needs no root and little disk (`small` repositories), and raises its own open-file limit, which the daemon it spawns inherits. Run nothing else meanwhile: the generator and the daemon share the machine. Knobs:
+
+| Variable | Default | |
+| --- | --- | --- |
+| `REEF_SUBLOAD_SUBSCRIBERS` | `500` | operation-log subscribers |
+| `REEF_SUBLOAD_PRESENCE_SUBSCRIBERS` | `500` | presence subscribers |
+| `REEF_SUBLOAD_CONNECTIONS` | `500` | client connections; subscriber `i` of each kind uses connection `i mod C` |
+| `REEF_SUBLOAD_OPS_PER_MIN` | `1000` | operations a minute |
+| `REEF_SUBLOAD_WORKSPACES` | `20` | writer workspaces, each running its operations in order |
+| `REEF_SUBLOAD_REPOS` | `1` | repositories; writers and subscribers spread round-robin |
+| `REEF_SUBLOAD_REPORTERS` | `20` | presence reporters, one report a second each |
+| `REEF_SUBLOAD_STEADY_SECS` | `300` | the steady state's length |
+| `REEF_SUBLOAD_PRESET` | `small` | the repositories' preset; writes and reads do not scale with the tree |
+
+`.github/workflows/subscription-load.yml` runs it on `ubuntu-24.04` and `macos-15`, as the runner user, and fails on either: on Sundays at 05:47 UTC, by hand (`gh workflow run subscription-load.yml`), and on a pull request that changes `reef-broker`, the daemon's `subscribe/` or `presence/` code, `limits.rs`, the test, or the workflow. It is its own workflow because `pull_request` paths filter whole workflows, and those paths must not start the 200-workspace run. Each job uploads `target/load/` as `subload-<os>-<sha>-<run id>`, kept 90 days.
+
+### The profile
+
+One spawned daemon with the default configuration, and:
+
+1. **Set up.** Register the repositories and create the writer workspaces, owned by `load@host`; one task renews every lease every 20 s.
+2. **Subscribe.** Open the connections, then the subscriptions, 50 every 100 ms. Operation subscribers each follow one repository with no start: 8 in 10 unfiltered (a UI, `reef op watch`), 1 in 10 filtered to one writer's workspace (an agent's wait tool), 1 in 10 to `kinds: [DESCRIBE]`. Presence subscribers are unfiltered. Each records its time to its first frame (for presence, to `synced`).
+3. **Warm up** for 30 s at the target rate.
+4. **Steady state** at the target rate, on an open-loop schedule: operation `k` is due at `k × 60 s / M` and goes to writer `k mod W`, alternately a `DescribeChange` of its `@` and a file write followed by `SnapshotWorkspace`; a writer that starts late records the slip. Reporters replace their `ACTIVITY` entry once a second. From 40% to 60% of the steady state, 10 unfiltered subscribers stop reading; at 80%, 100 others drop their streams and resubscribe at once from their last frame's cursor.
+5. **Burst** (recorded, not gated): every writer runs operations back to back for 10 s.
+6. **Check.** Each subscriber's operations, in order, are compared with `ListOperations` (with its filter) after the head its first frame stood at: missing, duplicated, out of order, or not expected. Each presence subscriber's live set must equal a fresh subscription's synced set once the reporters stop.
+
+**Latency** is the time a subscriber task gets the frame minus the operation's `ended_at` (the instant jj committed it), or for presence minus the entry's `updated_at`, on one host and one clock, as R2.09's and R2.10's latency tests measure. A stalled subscriber's deliveries are left out from the stall until its first frame past it, and a reconnecting one's from the drop to its first live frame; their catch-up times are reported.
+
+**The gate**, which fails the test: over the steady state, operation and presence delivery p99 within 100 ms and max within 2 s; no subscriber missing, repeating or reordering an operation; presence converged; no subscription ended by an error the test did not cause; no write failed; and at least 95% of the target rate achieved.
+
+### Reading the report
+
+`target/load/subscriptions-<os>-<UTC time>.json`, with the daemon's log beside it, holds the machine and parameters and: `subscribe.first_frame`; `steady.operations` (count, p50, p95, p99, p999, max, mean, `worst_subscriber_p99_ms`, and `by_class`) and `steady.presence` (the same, `events`, `converged`); `deliveries` (totals, and each subscriber with a nonzero count or an error); `frames_per_operation` for unfiltered subscribers; `stall.catch_up`; `reconnect` (`to_live`, `first_frame`, and `cap_retries`, resubscriptions refused for the 1,024 cap while dropped sessions were still closing); `writes` (achieved rate, start slip, each write RPC's latency); `burst`; `baseline_rtt_ms` (the median `GetDaemonStatus` round trip, once a second in the steady state); `daemon` (CPU seconds a minute in the steady state, peak RSS and threads, open descriptors mid-run, its open-file limit); `generator` (its own CPU); `broker`, the daemon's per-minute `subscription broker summary` lines (rings, items, bytes, operations ingested, ingest reads and their p50 and max, session reads served from rings and from the log, restarts, evictions, forwarded wake-ups); and `pass`.
+
+### Baseline
+
+Defaults (500 + 500 subscribers over 500 connections, 1,000 operations a minute, 300 s), release build, 2026-10-27. The M2 Max is the machine of the Phase 1 baseline (12 cores, 32 GB, macOS 27). "Before" is the test on the code before the broker (R2.22's first step), "after" with it.
+
+The Linux column is Docker Desktop's VM on the same machine (arm64, 12 vCPUs, 7.7 GB, kernel 6.10.14-linuxkit) in a `--privileged` `ubuntu:24.04` container, after the broker. The runner columns are `subscription-load.yml` on R2.22's pull request.
+
+| Measurement | M2 Max, before | M2 Max, after | Linux VM, after |
+| --- | ---: | ---: | ---: |
+| operation delivery p50 / p99 / max | 28.1 / **64.0** / 122.6 ms | 20.9 / **52.9** / 80.6 ms | 5.0 / **16.9** / 50.1 ms |
+| operation p99, worst subscriber | 68.9 ms | 57.5 ms | 18.5 ms |
+| presence delivery p50 / p99 / max | 12.3 / **53.9** / 60.4 ms | 17.1 / **56.5** / 61.5 ms | 18.4 / **59.2** / 69.2 ms |
+| missing / duplicated / out of order | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| operations a minute achieved, start slip p95 | 1,000, 381 ms | 1,000, 4 ms | 1,000, 8 ms |
+| write RPC p50 / p95: describe | 29.2 / 608.6 ms | 36.5 / 44.5 ms | 10.3 / 15.5 ms |
+| frames per operation (unfiltered) | 0.96 | 0.99 | 0.71 |
+| stall catch-up max, reconnect to live max | 47 ms, 55 ms | 38 ms, 59 ms | 21 ms, 58 ms |
+| burst: operations a minute, delivery p99 | 1,847, 68.9 ms | 1,029, 77.1 ms | 14,844, 57.1 ms |
+| daemon CPU, seconds a minute | 210.8 | 65.9 | 48.2 |
+| generator CPU, seconds a minute | 10.0 | 12.7 | 8.7 |
+| daemon peak RSS, threads, open descriptors | 146 MB, 240, 529 | 154 MB, 192, 521 | 207 MB, 180, 519 |
+| log reads per operation (broker summary) | about 500 | 0 by sessions, 1 by the ingest | 0 by sessions, 1 by the ingest |
+
+All three pass the gate. Runner columns: to be added from this pull request's `subscription-load.yml` run.
+
+### Findings
+
+- **The target held before the broker, at a price.** Per-subscriber reads met the 100 ms p99 on the M2 Max (64 ms), but the daemon spent 211 CPU-seconds a minute, three and a half cores, reading the log 500 times per operation, and the writes queued behind it: a describe's p95 was 609 ms and writers started up to 381 ms late (p95). On a machine with fewer cores, or with more subscribers, that is where it would have failed first.
+- **With the broker, fan-out is a copy.** Each operation is read from the log once (the summary lines: about 1,000 ingests and 500,000 ring reads a minute, no session read of the log, ingests at most 5 ms), the daemon's CPU fell to 66 seconds a minute, the p99 to 53 ms and the max from 123 to 81 ms, and writes stopped queueing (describe p95 45 ms, start slip p95 4 ms). The ring held its 4,096 operations in 7.3 MB. What CPU is left is per-session work the broker does not remove: each session's wake-up, filter, frame encoding and send, about 17,000 frames a second, and presence's 500 subscribers.
+- **One connection or several does not matter.** All 1,000 streams on one connection (`REEF_SUBLOAD_CONNECTIONS=1`, 60 s) delivered at p99 30 ms with 22 descriptors open in the daemon. Four repositories (`REEF_SUBLOAD_REPOS=4`, 60 s) delivered at p99 28 ms and used less CPU (53 s a minute): every append still wakes every session through the one daemon-wide wake-up, and one with nothing due costs a version comparison, so per-topic wake-ups can wait for the store.
+- **Presence is unchanged by the broker** (p99 54 and 57 ms): its hub already fanned out from memory, and most of its latency is its 50 ms coalescing of frames.
+- **Stalls and reconnects are cheap.** Ten subscribers that stopped reading for 60 s caught up within 38 ms of resuming (HTTP/2's per-stream window had taken their frames meanwhile); 100 that reconnected at once were live again within 59 ms. A few resubscriptions were refused for the 1,024-subscription cap (3 after, 17 before) because the dropped sessions had not closed yet; they succeeded at once on retry. 1,000 subscriptions leave 24 under the cap.
+- **The burst is noisy.** Back-to-back writes reached 1,029 to 2,028 operations a minute across runs on the same code, with delivery p99 72 to 83 ms; ten seconds is a small sample, and the repository thread serializes the writes.
+- **A daemon started from a macOS login shell inherits 256 descriptors** (`launchctl limit maxfiles`), and tonic's accept loop spun a core at the limit; R2.22's daemon raises its own limit and backs off (`daemon.rs`'s `serves_hundreds_of_connections`).

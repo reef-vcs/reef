@@ -69,6 +69,12 @@ pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
     }
     #[cfg(feature = "watchman")]
     log_socket_export(&socket);
+    // Before the runtime: hundreds of clients each hold a descriptor
+    // (R2.22).
+    match crate::limits::raise_open_file_limit() {
+        Ok((before, limit)) => tracing::info!(before, limit, "open file limit"),
+        Err(error) => tracing::warn!(error = %error, "cannot raise the open file limit"),
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("reef-daemon-worker")

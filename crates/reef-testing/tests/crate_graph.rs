@@ -3,8 +3,10 @@
 //! `reef` binary (`reef-vcs`) → `reef-client` → `reef-api` and
 //! `reef-error`, with nothing that links jj-lib anywhere in `reef`'s
 //! dependency graph (R2.05). `reef-testing` stands apart so any crate can
-//! dev-depend on it, and `reef-api`, the API schema, depends on no Reef
-//! crate (ADR 0029).
+//! dev-depend on it, `reef-api`, the API schema, depends on no Reef crate
+//! (ADR 0029), and `reef-broker`, the subscription broker the store reuses,
+//! depends on none either and links neither jj-lib nor gRPC (R2.22, ADR
+//! 0038).
 
 #![allow(
     clippy::expect_used,
@@ -17,8 +19,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 7] = [
+const MEMBERS: [&str; 8] = [
     "reef-api",
+    "reef-broker",
     "reef-client",
     "reef-daemon",
     "reef-error",
@@ -102,8 +105,12 @@ fn assert_no_dependency(metadata: &Value, from: &str, to: &str) {
     );
 }
 
+/// What the broker must never link (R2.22): it is the store's as much as
+/// the daemon's, so nothing of jj, gRPC or the daemon's database.
+const NOT_IN_THE_BROKER: [&str; 6] = ["jj-lib", "tonic", "prost", "rusqlite", "gix", "hyper"];
+
 #[test]
-fn workspace_members_are_the_seven_crates() {
+fn workspace_members_are_the_eight_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -148,6 +155,14 @@ fn crate_edges() {
         reef_dependencies(&metadata, "reef-vcs", &shipped),
         ["reef-api", "reef-client", "reef-error"]
     );
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-broker", &shipped),
+        Vec::<String>::new()
+    );
+    assert!(
+        reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-broker".to_owned()),
+        "the daemon serves subscriptions through the broker"
+    );
 }
 
 /// R2.05 test 2: nothing the daemon or the jj layer links is reachable from
@@ -156,6 +171,31 @@ fn crate_edges() {
 #[test]
 fn reef_binary_has_no_jj_lib() {
     let metadata = resolved_metadata();
+    for root in ["reef-vcs", "reef-client"] {
+        let reached = assert_unreachable(&metadata, root, &NOT_IN_THE_CLIENT, false);
+        assert!(reached > 20, "{root}: only {reached} packages reached");
+    }
+}
+
+/// R2.22 test 18: the broker links nothing of jj, gRPC or the daemon's
+/// database, and no Reef crate, over normal and build edges.
+#[test]
+fn reef_broker_links_no_jj_or_grpc() {
+    let metadata = resolved_metadata();
+    let reached = assert_unreachable(&metadata, "reef-broker", &NOT_IN_THE_BROKER, true);
+    assert!(reached > 1, "reef-broker: only {reached} packages reached");
+}
+
+/// Walks `root`'s normal and build edges on every target, failing with the
+/// path to the first package in `forbidden` it reaches, or with
+/// `no_reef_crates` the first Reef crate; returns how many packages it
+/// reached.
+fn assert_unreachable(
+    metadata: &Value,
+    root: &str,
+    forbidden: &[&str],
+    no_reef_crates: bool,
+) -> usize {
     let names: BTreeMap<&str, &str> = metadata["packages"]
         .as_array()
         .expect("packages is an array")
@@ -179,43 +219,38 @@ fn reef_binary_has_no_jj_lib() {
             .find_map(|(id, n)| (*n == name).then_some(*id))
             .unwrap_or_else(|| panic!("package {name} not found"))
     };
-    for root in ["reef-vcs", "reef-client"] {
-        // Breadth first, remembering how each package was reached.
-        let mut via: BTreeMap<&str, &str> = BTreeMap::new();
-        let mut queue = VecDeque::from([id_of(root)]);
-        let start = id_of(root);
-        via.insert(start, start);
-        while let Some(id) = queue.pop_front() {
-            let name = names[id];
-            if NOT_IN_THE_CLIENT.contains(&name) {
-                let mut path = vec![name];
-                let mut at = id;
-                while via[at] != at {
-                    at = via[at];
-                    path.push(names[at]);
-                }
-                path.reverse();
-                panic!("{root} reaches {name}: {}", path.join(" -> "));
+    // Breadth first, remembering how each package was reached.
+    let mut via: BTreeMap<&str, &str> = BTreeMap::new();
+    let start = id_of(root);
+    let mut queue = VecDeque::from([start]);
+    via.insert(start, start);
+    while let Some(id) = queue.pop_front() {
+        let name = names[id];
+        let reef_crate = id != start && name.starts_with("reef-");
+        if forbidden.contains(&name) || (no_reef_crates && reef_crate) {
+            let mut path = vec![name];
+            let mut at = id;
+            while via[at] != at {
+                at = via[at];
+                path.push(names[at]);
             }
-            for dep in nodes[id]["deps"].as_array().expect("deps is an array") {
-                let shipped = dep["dep_kinds"]
-                    .as_array()
-                    .expect("dep_kinds is an array")
-                    .iter()
-                    .any(|kind| kind["kind"].is_null() || kind["kind"] == "build");
-                let pkg = dep["pkg"].as_str().expect("dep pkg");
-                if shipped && !via.contains_key(pkg) {
-                    via.insert(pkg, id);
-                    queue.push_back(pkg);
-                }
+            path.reverse();
+            panic!("{root} reaches {name}: {}", path.join(" -> "));
+        }
+        for dep in nodes[id]["deps"].as_array().expect("deps is an array") {
+            let shipped = dep["dep_kinds"]
+                .as_array()
+                .expect("dep_kinds is an array")
+                .iter()
+                .any(|kind| kind["kind"].is_null() || kind["kind"] == "build");
+            let pkg = dep["pkg"].as_str().expect("dep pkg");
+            if shipped && !via.contains_key(pkg) {
+                via.insert(pkg, id);
+                queue.push_back(pkg);
             }
         }
-        assert!(
-            via.len() > 20,
-            "{root}: only {} packages reached",
-            via.len()
-        );
     }
+    via.len()
 }
 
 #[test]

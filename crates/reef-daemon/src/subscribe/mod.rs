@@ -5,8 +5,9 @@
 //!   heads catches other `jj` processes.
 //! - A subscription's position is a [`reef_lib::jj::oplog::Frontier`] per
 //!   repository, handed to clients as an opaque [`cursor`].
-//! - `feed::read` reads what follows a position; R2.22's broker replaces
-//!   its body and nothing else.
+//! - [`broker`] (R2.22, ADR 0038) reads each followed repository's new
+//!   operations once into a bounded ring that sessions are served from;
+//!   `feed::read` reads what follows a position the ring does not hold.
 //! - `session` is the task behind each stream: frames, keepalives,
 //!   backpressure, shutdown, and rewrites of the log.
 
@@ -21,6 +22,7 @@ use tokio::sync::Semaphore;
 use crate::error::{Advice, Advise};
 use crate::model::RepoId;
 
+pub mod broker;
 pub mod cursor;
 pub mod events;
 pub(crate) mod feed;
@@ -50,6 +52,16 @@ pub struct Limits {
     pub outside_poll: Duration,
     /// Subscriptions open at once, per daemon.
     pub max_subscriptions: usize,
+    /// Operations one repository's broker ring holds at most (R2.22),
+    /// within `max_behind`; 0 turns the broker off, and sessions read the
+    /// log as before it.
+    pub ring_operations: usize,
+    /// Bytes one repository's ring holds at most.
+    pub ring_bytes: usize,
+    /// Bytes every ring together holds at most.
+    pub ring_total_bytes: usize,
+    /// How long a ring nobody follows is kept.
+    pub ring_linger: Duration,
 }
 
 impl Default for Limits {
@@ -63,6 +75,10 @@ impl Default for Limits {
             keepalive: Duration::from_secs(15),
             outside_poll: Duration::from_millis(200),
             max_subscriptions: 1_024,
+            ring_operations: 4_096,
+            ring_bytes: 8 << 20,
+            ring_total_bytes: 64 << 20,
+            ring_linger: Duration::from_mins(1),
         }
     }
 }
