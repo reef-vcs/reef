@@ -21,11 +21,14 @@
 //!    anything is written. Describe changes no tree and takes none.
 //! 4. Write, on the repository thread: resolve and check again, then one
 //!    operation with the request's [`OpMeta`].
-//! 5. Follow: each locked workspace whose working-copy commit moved takes
-//!    the new commit: a row update when its tree is the same, else a
-//!    snapshot, which finds the working copy stale with no edits and
-//!    checks the new tree out. Then the rows' divergent marks are
-//!    reconciled with the new head.
+//! 5. Follow: every Reef workspace the write moved to another commit of its
+//!    change with another tree is handed a [`Carry`] for its next snapshot
+//!    (issue #80, ADR 0039). Then each locked workspace whose working-copy
+//!    commit moved takes the new commit, descendants first: a row update
+//!    when its tree is the same, else a snapshot, which finds the working
+//!    copy stale and checks the new tree out, carrying any edits made since
+//!    step 3 onto it in the same change. Then the rows' divergent marks
+//!    are reconciled with the new head.
 //!
 //! Without the locks, a describe committed between a snapshot's scan and
 //! its commit would make the change divergent (ADR 0018).
@@ -39,7 +42,7 @@ use reef_lib::jj::files;
 use reef_lib::jj::log::{ChangeInfo, Describer};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError, WorkingCopy};
-use reef_lib::jj::{CommitIdHex, OpKind, OpMeta, OperationIdHex, ReadonlyRepo, oplog, undo};
+use reef_lib::jj::{Carry, CommitIdHex, OpKind, OpMeta, OperationIdHex, ReadonlyRepo, oplog, undo};
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
 
@@ -274,7 +277,11 @@ impl Manager {
         };
 
         // 5.
-        let moved = self.follow(&locked, &written, agent.as_deref()).await;
+        self.scheduler.follow_hold_point().await;
+        self.register_carries(repo, &written);
+        let moved = self
+            .follow(&order, &locked, &written, agent.as_deref())
+            .await;
         self.reconcile_divergence(repo, &handle, &moved).await;
         drop(scans);
 
@@ -336,14 +343,30 @@ impl Manager {
         Ok(snapshotted)
     }
 
+    /// Step 5's carries (ADR 0039): every Reef workspace of `repo` the write
+    /// moved within its change, locked or not, since one it moved without
+    /// locking it carries at its next snapshot.
+    fn register_carries(&self, repo: RepoId, written: &Written) {
+        for (id, carry) in carries(&written.before, &written.after) {
+            if let Some(entry) = self.entry(id)
+                && entry.record().repo_id == repo
+            {
+                entry.carry.set(carry);
+            }
+        }
+    }
+
     /// Step 5's follows: each locked workspace whose working-copy commit
-    /// moved takes the new one. Failures are logged; the workspace adopts
-    /// at its next snapshot. A Reef workspace the write moved without
-    /// locking it (created or moved meanwhile) is logged; it follows at
-    /// its next snapshot, by ADR 0018. Returns the locked workspaces that
-    /// moved.
+    /// moved takes the new one, in `order` (descendants first, as step 3):
+    /// an ancestor's carried follow rebases its descendants, which, done
+    /// first, would move a descendant off its carry's commit. Failures are
+    /// logged; the workspace adopts, or carries, at its next snapshot. A
+    /// Reef workspace the write moved without locking it (created or moved
+    /// meanwhile) is logged; it follows at its next snapshot, by ADR 0018.
+    /// Returns the locked workspaces that moved.
     async fn follow(
         &self,
+        order: &[WorkspaceId],
         locked: &[&Arc<WorkspaceEntry>],
         written: &Written,
         agent: Option<&str>,
@@ -366,8 +389,11 @@ impl Manager {
             }
         }
         let mut followed_ids = BTreeSet::new();
-        for entry in locked {
-            let id = entry.paths.id;
+        for id in order {
+            let Some(entry) = locked.iter().find(|entry| entry.paths.id == *id) else {
+                continue;
+            };
+            let id = *id;
             let name = id.jj_workspace_name();
             let Some((before, after)) = moved.get(name.as_str()) else {
                 continue;
@@ -510,6 +536,25 @@ fn check(write: &Write) -> Result<(), ManagerError> {
         Write::Abandon { .. } | Write::Undo { .. } => {}
     }
     Ok(())
+}
+
+/// The carry for every Reef workspace that moved to another commit of the
+/// same change with another tree (ADR 0039). A move to another change, or
+/// one that kept the tree, carries nothing.
+fn carries(before: &[WorkingCopy], after: &[WorkingCopy]) -> Vec<(WorkspaceId, Carry)> {
+    moved_copies(before, after)
+        .into_iter()
+        .filter(|(was, now)| was.change_id == now.change_id && was.tree != now.tree)
+        .filter_map(|(was, now)| {
+            let id = now.workspace.strip_prefix("reef-")?.parse().ok()?;
+            let carry = Carry {
+                from: was.commit_id.clone(),
+                to: now.commit_id.clone(),
+                base: None,
+            };
+            Some((id, carry))
+        })
+        .collect()
 }
 
 /// `(before, after)` of every working copy whose commit changed.
@@ -807,4 +852,55 @@ async fn commit(
         }
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use reef_lib::jj::ChangeIdHex;
+
+    use super::*;
+
+    fn copy(workspace: &str, commit: &str, change: &str, tree: &str) -> WorkingCopy {
+        WorkingCopy {
+            workspace: workspace.to_owned(),
+            commit_id: commit.parse::<CommitIdHex>().unwrap(),
+            change_id: change.parse::<ChangeIdHex>().unwrap(),
+            tree: tree.to_owned(),
+            divergent: false,
+        }
+    }
+
+    #[test]
+    fn carries_only_moves_within_a_change_with_a_new_tree() {
+        let a = "reef-00000000000000aa";
+        let b = "reef-00000000000000bb";
+        let c = "reef-00000000000000cc";
+        let d = "reef-00000000000000dd";
+        let before = [
+            copy(a, "a1", "aa", "t1"),
+            copy(b, "b1", "bb", "t1"),
+            copy(c, "c1", "cc", "t1"),
+            copy(d, "d1", "dd", "t1"),
+            copy("default", "e1", "ee", "t1"),
+        ];
+        let after = [
+            // Same change, new tree: carries.
+            copy(a, "a2", "aa", "t2"),
+            // Another change (a plain abandon): none.
+            copy(b, "b2", "ff", "t2"),
+            // Same tree (a describe): none.
+            copy(c, "c2", "cc", "t1"),
+            // Did not move: none.
+            copy(d, "d1", "dd", "t1"),
+            // Not a Reef workspace: none.
+            copy("default", "e2", "ee", "t2"),
+        ];
+        let carries = carries(&before, &after);
+        assert_eq!(carries.len(), 1, "{carries:?}");
+        let (id, carry) = &carries[0];
+        assert_eq!(id.jj_workspace_name(), a);
+        assert_eq!(carry.from.as_str(), "a1");
+        assert_eq!(carry.to.as_str(), "a2");
+        assert_eq!(carry.base, None);
+    }
 }

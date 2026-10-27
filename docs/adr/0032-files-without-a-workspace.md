@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-26
 - Ticket: R2.04
+- Amended by: [0039](0039-carrying-edits-through-a-write.md)
 
 ## Context
 

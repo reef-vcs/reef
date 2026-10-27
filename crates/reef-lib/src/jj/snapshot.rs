@@ -15,6 +15,18 @@
 //!
 //! [`Repo::snapshot`] runs the three in one place.
 //!
+//! # Carried snapshots
+//!
+//! A write by Reef that moves a workspace to another commit of its change
+//! hands the workspace's next snapshot a [`Carry`] (issue #80, ADR 0039).
+//! When that snapshot finds the working copy stale with edits of its own,
+//! and the carry names exactly the move, it records the three-way merge of
+//! the write's tree and the files on disk, over the tree the working copy
+//! last recorded, as a rewrite of the write's commit, instead of diverging.
+//! The merged tree also holds the write's changes, which are not on disk:
+//! [`PendingSnapshot::check_out_carried`] writes them after the commit and
+//! before [`PendingSnapshot::finish`].
+//!
 //! # Narrowed scans
 //!
 //! A caller that knows which paths changed passes them to
@@ -203,6 +215,33 @@ impl Classify for SnapshotError {
     }
 }
 
+/// Reef's own write moved this workspace's working copy from `from` to `to`,
+/// two commits of one change with different trees (ADR 0039). Given to
+/// [`Repo::begin_snapshot`], it carries the workspace's edits since its last
+/// snapshot onto `to` rather than diverging.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Carry {
+    /// The commit the working copy was checked out from: the caller's
+    /// `expected_commit`.
+    pub from: CommitIdHex,
+    /// The commit the write put the working copy on: the view's.
+    pub to: CommitIdHex,
+    /// The tree the edits are measured from; `None` for the tree the
+    /// working copy last recorded. Set for a carry that is merged again
+    /// after its check-out failed: the disk tree that merge took
+    /// ([`SnapshotPlan::carried`]), so it is not taken twice.
+    pub base: Option<ScannedTree>,
+}
+
+/// A tree by its ids and conflict labels: plain data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScannedTree {
+    /// The tree.
+    pub tree_ids: Merge<TreeId>,
+    /// Its conflict labels.
+    pub labels: ConflictLabels,
+}
+
 /// What a scan found and how to record it: plain data, so it crosses from
 /// the workspace's thread to the repository's.
 #[derive(Clone, Debug)]
@@ -225,6 +264,10 @@ pub struct SnapshotPlan {
     /// workspace, so a new commit on `parents`, with a new change id, is
     /// created instead of a rewrite.
     pub recover: Option<Vec<CommitIdHex>>,
+    /// `Some(disk)`: the scan was carried onto `rewrite_of`, a write's
+    /// commit ([`Carry`]): `tree_ids` is the merge, and `disk` is the tree
+    /// on disk it merged, to merge over again if the check-out fails.
+    pub carried: Option<ScannedTree>,
 }
 
 /// The locked working copy after a scan, from [`Repo::begin_snapshot`].
@@ -244,6 +287,8 @@ pub struct PendingSnapshot<'a> {
     walk: Duration,
     updated_files: u32,
     narrowed: Option<Narrowed>,
+    /// [`PendingSnapshot::check_out_carried`] ran.
+    checked_out: bool,
 }
 
 /// A narrowed scan's own load of the tree state, saved by
@@ -286,6 +331,29 @@ impl PendingSnapshot<'_> {
     /// What to record when [`PendingSnapshot::changed`].
     pub fn plan(&self) -> &SnapshotPlan {
         &self.plan
+    }
+
+    /// Whether the scan was carried onto a write's commit
+    /// ([`SnapshotPlan::carried`]): after [`commit_snapshot`], call
+    /// [`PendingSnapshot::check_out_carried`] before
+    /// [`PendingSnapshot::finish`].
+    pub fn carried(&self) -> bool {
+        self.changed && self.plan.carried.is_some()
+    }
+
+    /// Checks `commit`, the carried snapshot's new commit in `repo`, out on
+    /// disk: the paths where the merge differs from the files scanned, the
+    /// write's own and any conflicted. Returns the files it updated, added
+    /// or removed.
+    pub async fn check_out_carried(
+        &mut self,
+        repo: &ReadonlyRepo,
+        commit: &CommitIdHex,
+    ) -> Result<u32, SnapshotError> {
+        let commit = commit_by_hex(repo, commit).await?;
+        self.updated_files = check_out(&mut self.locked, &commit).await?;
+        self.checked_out = true;
+        Ok(self.updated_files)
     }
 
     /// New files the scan left untracked, by repository-relative path.
@@ -335,8 +403,8 @@ impl PendingSnapshot<'_> {
         self.wc_change.as_ref()
     }
 
-    /// Files the adopt branch updated, added, or removed on disk; zero
-    /// otherwise.
+    /// Files the adopt branch, or [`PendingSnapshot::check_out_carried`],
+    /// updated, added, or removed on disk; zero otherwise.
     pub fn updated_files(&self) -> u32 {
         self.updated_files
     }
@@ -347,6 +415,10 @@ impl PendingSnapshot<'_> {
     pub async fn finish(self, op_id: &OperationIdHex) -> Result<(), SnapshotError> {
         let id = OperationId::try_from_hex(op_id.as_str())
             .ok_or_else(|| SnapshotError::InvalidOperationId(op_id.clone()))?;
+        debug_assert!(
+            !self.carried() || self.checked_out,
+            "a carried snapshot is checked out before its state is saved"
+        );
         // The tree state before the operation, as jj's own `finish` orders
         // them: a crash between the two leaves a working copy whose files
         // already are its commit's, which the next snapshot adopts.
@@ -565,7 +637,7 @@ impl Repo {
         let head = Arc::clone(&self.repo);
         let name = self.workspace_name().to_owned();
         let pending = self
-            .begin_snapshot(None, &IgnoreSources::default(), None)
+            .begin_snapshot(None, None, &IgnoreSources::default(), None)
             .await?;
         let scan = pending.scan_time();
         let untracked = pending.untracked().to_vec();
@@ -648,8 +720,14 @@ impl Repo {
     ///   edits since the last update, or with files that already match the
     ///   rewritten commit: check it out on disk
     ///   ([`PendingSnapshot::adopted`]); nothing to commit;
-    /// - stale with edits: plan a rewrite of `expected_commit` instead, which
-    ///   makes the change divergent ([`SnapshotPlan::divergent`]);
+    /// - stale with edits, and `carry` names this move (its `to` is the
+    ///   view's commit and its `from` is `expected_commit`): plan a rewrite
+    ///   of `to` with the three-way merge of `to`'s tree and the scanned
+    ///   one over the carry's base ([`SnapshotPlan::carried`]), or, when the
+    ///   merge is `to`'s tree, check it out as above (ADR 0039);
+    /// - stale with edits otherwise: plan a rewrite of `expected_commit`
+    ///   instead, which makes the change divergent
+    ///   ([`SnapshotPlan::divergent`]);
     /// - no working-copy commit in the view (the workspace was forgotten):
     ///   plan a new commit on `expected_commit`'s parents
     ///   ([`SnapshotPlan::recover`]).
@@ -661,9 +739,14 @@ impl Repo {
     /// UTF-8, or on macOS one whose spelling on disk cannot be read) scans
     /// everything. Pass prefixes only for a working copy loaded with the
     /// repository's own settings, without Watchman.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one match over ADR 0018's arms; the carried arm (ADR 0039) tipped it over"
+    )]
     pub async fn begin_snapshot(
         &mut self,
         expected_commit: Option<&CommitIdHex>,
+        carry: Option<&Carry>,
         extra: &IgnoreSources<'_>,
         prefixes: Option<&[PathBuf]>,
     ) -> Result<PendingSnapshot<'_>, SnapshotError> {
@@ -716,7 +799,8 @@ impl Repo {
             .map_or(Duration::ZERO, |narrowed| narrowed.load);
         let untracked = untracked(stats.untracked_paths);
         let (tree_ids, labels) = new_tree.tree_ids_and_labels();
-        let (tree_ids, labels) = (tree_ids.clone(), labels.clone());
+        let (mut tree_ids, mut labels) = (tree_ids.clone(), labels.clone());
+        let mut carried = None;
 
         let own_last = async || match expected_commit {
             Some(id) => commit_by_hex(&repo, id).await,
@@ -742,15 +826,31 @@ impl Repo {
                 // rewrite. The second case is a working copy whose state was
                 // not saved after its own snapshot was committed (a failed
                 // finish, a crash): the files already are the commit's.
-                let stats = locked.locked_wc().check_out(wc).await?;
+                updated_files = check_out(&mut locked, wc).await?;
                 adopted = true;
-                updated_files = stats.updated_files + stats.added_files + stats.removed_files;
                 (CommitIdHex::of(wc.id()), false, false, None)
             }
             Some(wc) => {
                 let last = own_last().await?;
-                let divergent = last.id() != wc.id();
-                (CommitIdHex::of(last.id()), true, divergent, None)
+                let trees = (&old_tree, &new_tree);
+                match carried_tree(&repo, (wc, &last), carry, trees).await? {
+                    Some(merged) if merged.tree_ids() == wc.tree_ids() => {
+                        // The edits were already the write's.
+                        updated_files = check_out(&mut locked, wc).await?;
+                        adopted = true;
+                        (CommitIdHex::of(wc.id()), false, false, None)
+                    }
+                    Some(merged) => {
+                        carried = Some(ScannedTree { tree_ids, labels });
+                        let (merged_ids, merged_labels) = merged.tree_ids_and_labels();
+                        (tree_ids, labels) = (merged_ids.clone(), merged_labels.clone());
+                        (CommitIdHex::of(wc.id()), true, false, None)
+                    }
+                    None => {
+                        let divergent = last.id() != wc.id();
+                        (CommitIdHex::of(last.id()), true, divergent, None)
+                    }
+                }
             }
         };
         Ok(PendingSnapshot {
@@ -762,6 +862,7 @@ impl Repo {
                 labels,
                 divergent,
                 recover,
+                carried,
             },
             changed,
             adopted,
@@ -774,6 +875,7 @@ impl Repo {
             walk,
             updated_files,
             narrowed,
+            checked_out: false,
         })
     }
 
@@ -900,6 +1002,49 @@ async fn scan(
         load,
     };
     Ok((new_tree, stats, walk, Some(narrowed)))
+}
+
+/// Checks `commit` out in the locked working copy; returns the files it
+/// updated, added, or removed.
+async fn check_out(
+    locked: &mut LockedWorkspace<'_>,
+    commit: &Commit,
+) -> Result<u32, CheckoutError> {
+    let stats = locked.locked_wc().check_out(commit).await?;
+    Ok(stats.updated_files + stats.added_files + stats.removed_files)
+}
+
+/// A carried snapshot's tree, when `carry` names this move: `to` is `wc`,
+/// the view's commit (the write's), and `from` is `last`, the commit the
+/// working copy was checked out from. The tree is the merge of `wc`'s and
+/// the scanned `disk` over the carry's base, by default `recorded`, the tree
+/// the working copy last recorded (ADR 0039). `None` otherwise.
+async fn carried_tree(
+    repo: &ReadonlyRepo,
+    (wc, last): (&Commit, &Commit),
+    carry: Option<&Carry>,
+    (recorded, disk): (&MergedTree, &MergedTree),
+) -> Result<Option<MergedTree>, BackendError> {
+    let Some(carry) = carry.filter(|carry| {
+        carry.to.as_str() == wc.id().hex() && carry.from.as_str() == last.id().hex()
+    }) else {
+        return Ok(None);
+    };
+    let base = match &carry.base {
+        Some(base) => MergedTree::new(
+            Arc::clone(repo.store()),
+            base.tree_ids.clone(),
+            base.labels.clone(),
+        ),
+        None => recorded.clone(),
+    };
+    MergedTree::merge(Merge::from_vec(vec![
+        (wc.tree(), format!("{} (rewritten)", wc.conflict_label())),
+        (base, format!("{} (snapshotted)", last.conflict_label())),
+        (disk.clone(), "working copy".to_owned()),
+    ]))
+    .await
+    .map(Some)
 }
 
 /// Whether the locked working copy is stale against `repo`, by jj's

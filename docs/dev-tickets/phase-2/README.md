@@ -29,6 +29,7 @@ Phase 1 is complete and released as 0.1.0 (2026-10-25). What it left behind, and
 | R2.10 | [R2.10-presence-channel.md](R2.10-presence-channel.md) | L | R2.09 | R2.11, R2.20, R2.22, R3.05, R3.36 |
 | R2.11 | [R2.11-agent-presence-reporting.md](R2.11-agent-presence-reporting.md) | M | R2.10 | R2.06, R2.07 (the reporting contract), R2.20, R2.25, R2.26, R3.36 |
 | R2.22 | [R2.22-subscription-load-test-and-broker.md](R2.22-subscription-load-test-and-broker.md) | L | R2.10 | R4.19 (the store's load test reuses the broker and the generator) |
+| #80 | [issue-80-follow-merges-late-edits.md](issue-80-follow-merges-late-edits.md) | M | R2.03, R2.04 | none listed |
 
 ## Departures from dev-phases.md
 

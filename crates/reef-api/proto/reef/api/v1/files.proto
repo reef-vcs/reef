@@ -57,7 +57,9 @@ service FileService {
   // tree before anything is recorded. Workspaces on the edited commit or
   // its descendants (on the parent, for `new_on`) are snapshotted first, in
   // operations of their own; afterwards those on a rewritten commit take
-  // the new tree. When nothing changes, nothing is recorded and `operation`
+  // the new tree, and edits a workspace made after its snapshot are
+  // carried onto it in the same change, an overlap left as a conflict
+  // there (ADR 0039). When nothing changes, nothing is recorded and `operation`
   // is unset. The author stays; the committer, and a new change's author,
   // are the daemon's identity. A request is at most 4 MiB (larger is
   // OUT_OF_RANGE, from gRPC) and 1,000 edits.

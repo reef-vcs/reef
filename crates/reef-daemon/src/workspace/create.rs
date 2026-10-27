@@ -65,8 +65,8 @@ use reef_lib::telemetry::elapsed_ms;
 use super::manager::{forget_jj_workspace, remove_state_dir};
 use super::stores::{StorePlan, StoreTarget, TreeAt, store_targets};
 use super::{
-    CreateSpec, CreateTimings, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry,
-    op_meta,
+    CarrySlot, CreateSpec, CreateTimings, Created, Manager, ManagerError, SnapshotSpec, Start,
+    WorkspaceEntry, op_meta,
 };
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
@@ -320,6 +320,7 @@ impl Manager {
             scan_started: Mutex::new(None),
             spec: Mutex::new(spec),
             stores: Mutex::new(stores),
+            carry: CarrySlot::default(),
         };
         self.insert_entry(record.id, Arc::new(entry));
         self.scheduler.track(record.id, TrackReason::Created).await;

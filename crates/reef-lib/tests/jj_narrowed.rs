@@ -46,7 +46,7 @@ async fn narrowed_snapshot(repo: &mut Repo, paths: &[&str]) -> (bool, bool) {
     let prefixes: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let head = Arc::clone(repo.head());
     let pending = repo
-        .begin_snapshot(None, &IgnoreSources::default(), Some(&prefixes))
+        .begin_snapshot(None, None, &IgnoreSources::default(), Some(&prefixes))
         .await
         .unwrap();
     let (narrowed, changed) = (pending.narrowed(), pending.changed());

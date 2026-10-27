@@ -16,7 +16,7 @@ use reef_lib::jj::{
     CommitIdHex, ForgetWorkspaceError, OpKind, OperationIdHex, ReadonlyRepo, UserSettings,
 };
 
-use super::{Inspected, ManagerError, WorkspaceEntry, op_meta};
+use super::{CarrySlot, Inspected, ManagerError, WorkspaceEntry, op_meta};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
@@ -668,6 +668,7 @@ impl Manager {
                 scan_started: Mutex::new(None),
                 spec: Mutex::new(spec),
                 stores: Mutex::new(stores),
+                carry: CarrySlot::default(),
             };
             self.insert_entry(id, Arc::new(entry));
             self.scheduler.track(id, TrackReason::Loaded).await;

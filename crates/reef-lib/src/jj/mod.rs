@@ -45,7 +45,8 @@ pub use repo::{
 };
 pub use restore::RecreateWorkingCopyError;
 pub use snapshot::{
-    Behind, PendingSnapshot, SnapshotCommit, SnapshotError, SnapshotPlan, commit_snapshot,
+    Behind, Carry, PendingSnapshot, ScannedTree, SnapshotCommit, SnapshotError, SnapshotPlan,
+    commit_snapshot,
 };
 pub use tree_names::{CheckedTrees, TreeNameError, check_git_head_tree_names};
 

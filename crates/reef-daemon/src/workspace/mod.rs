@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::repo::ReadError;
-use reef_lib::jj::snapshot::SnapshotError;
+use reef_lib::jj::snapshot::{Carry, SnapshotError};
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
     CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
@@ -104,6 +104,35 @@ pub struct WorkspaceEntry {
     pub spec: Mutex<SnapshotSpec>,
     /// The shared stores mounted in it (R1.20).
     pub stores: Mutex<Vec<MountedStore>>,
+    /// What a write that moved it within its change hands its next
+    /// snapshot (issue #80, ADR 0039).
+    pub carry: CarrySlot,
+}
+
+/// A workspace's [`Carry`], if a write left one. A leaf lock: never held
+/// across an `.await` or while taking another lock.
+#[derive(Debug, Default)]
+pub struct CarrySlot(Mutex<Option<Carry>>);
+
+impl CarrySlot {
+    /// Hands `carry` to the workspace's next snapshot, replacing any.
+    pub(crate) fn set(&self, carry: Carry) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(carry);
+    }
+
+    /// The carry for this snapshot, emptying the slot.
+    pub(crate) fn take(&self) -> Option<Carry> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
+    /// Puts back a carry a snapshot took and did not use, unless a newer
+    /// one was set meanwhile.
+    pub(crate) fn restore(&self, carry: Carry) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(carry);
+    }
 }
 
 /// The parts of a workspace's spec its snapshots and watcher apply, from
@@ -695,4 +724,33 @@ pub(crate) fn gone_advice(id: WorkspaceId, state: WorkspaceState, repo: RepoId) 
         ),
         ["reef", "ws", "create", "--repo", &repo.as_hex()],
     )
+}
+
+#[cfg(test)]
+mod carry_slot_tests {
+    use reef_lib::jj::CommitIdHex;
+
+    use super::*;
+
+    fn carry(to: &str) -> Carry {
+        Carry {
+            from: "aa".parse::<CommitIdHex>().unwrap(),
+            to: to.parse::<CommitIdHex>().unwrap(),
+            base: None,
+        }
+    }
+
+    #[test]
+    fn restore_keeps_a_newer_carry_and_take_empties() {
+        let slot = CarrySlot::default();
+        slot.set(carry("b1"));
+        let taken = slot.take().unwrap();
+        assert_eq!(slot.take(), None, "take empties the slot");
+        // A newer write's carry, set while the snapshot ran, wins.
+        slot.set(carry("b2"));
+        slot.restore(taken.clone());
+        assert_eq!(slot.take(), Some(carry("b2")));
+        slot.restore(taken);
+        assert_eq!(slot.take(), Some(carry("b1")));
+    }
 }

@@ -49,8 +49,10 @@ service OperationService {
   // operation: what it created is abandoned or rewritten back, what it hid
   // comes back, and the bookmarks and working copies it moved go back;
   // later operations stay. Workspaces the undo moves are snapshotted first
-  // and take the result afterwards (ADR 0031). When there is nothing to
-  // revert, `operation` is unset.
+  // and take the result afterwards (ADR 0031); a workspace that stays on
+  // its change keeps edits made after its snapshot, carried onto its new
+  // commit (ADR 0039). When there is nothing to revert, `operation` is
+  // unset.
   //
   // Never undone (INVALID_ARGUMENT, reason OPERATION_NOT_UNDOABLE): the
   // root operation, a merge of concurrent operations, one that adds or

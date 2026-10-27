@@ -1,7 +1,9 @@
 //! `reef.api.v1.FileService` through the daemon (R2.04, tests 9 to 16):
 //! reading and listing at a revision with the snapshot rule and pinned
 //! pages, and edits without a workspace, with the live workspaces they
-//! move, their refusals, concurrency, operations and undo.
+//! move, their refusals, concurrency, operations and undo. Issue #80's
+//! tests 6, 7 and 9: edits a workspace makes during an edit are carried
+//! onto its commit.
 
 #![allow(
     clippy::unwrap_used,
@@ -10,6 +12,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -225,6 +228,88 @@ async fn trunk(client: &Client, repo: &SyntheticRepo) -> v1::Change {
         .unwrap()
         .change
         .unwrap()
+}
+
+/// Runs `rpc` with the write held between its write and its follow-ups
+/// (`Scheduler::hold_follows`), making the workspace's late edits with
+/// `late` meanwhile.
+async fn at_follow_hold<T: Send + 'static>(
+    daemon: &TestDaemon,
+    rpc: impl Future<Output = T> + Send + 'static,
+    late: impl FnOnce(),
+) -> T {
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_follows().await;
+    let task = tokio::spawn(rpc);
+    let begun = Instant::now();
+    while scheduler.held_follows() == 0 {
+        assert!(
+            begun.elapsed() < Duration::from_secs(30),
+            "the write never reached its follow-ups"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    late();
+    drop(hold);
+    task.await.unwrap()
+}
+
+/// The visible commits of `ws`'s change.
+async fn change_commits(client: &Client, repo: &SyntheticRepo, change_id: &str) -> Vec<String> {
+    client
+        .list_changes(v1::ListChangesRequest {
+            repo: repo.id.clone(),
+            revset: "all()".to_owned(),
+            skip_snapshot: true,
+            ..v1::ListChangesRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| entry.change)
+        .filter(|change| change.change_id == change_id)
+        .map(|change| change.commit_id)
+        .collect()
+}
+
+/// `ws`'s operations recorded after `op`, newest first.
+async fn operations_after(
+    client: &Client,
+    repo: &SyntheticRepo,
+    ws: &v1::Workspace,
+    op: &str,
+) -> Vec<v1::Operation> {
+    let ops = operations(
+        client,
+        repo,
+        OperationFilter {
+            workspaces: vec![ws.id.clone()],
+            ..OperationFilter::default()
+        },
+    )
+    .await;
+    let at = ops
+        .iter()
+        .position(|listed| listed.id == op)
+        .expect("the operation is W's");
+    ops[..at].to_vec()
+}
+
+/// The commit ids of every divergent change, by jj's `divergent()`.
+async fn divergent_changes(client: &Client, repo: &SyntheticRepo) -> Vec<String> {
+    client
+        .list_changes(v1::ListChangesRequest {
+            repo: repo.id.clone(),
+            revset: "divergent()".to_owned(),
+            skip_snapshot: true,
+            ..v1::ListChangesRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| entry.change)
+        .map(|change| change.commit_id)
+        .collect()
 }
 
 /// Whether `id` is lowercase hex of `len` digits.
@@ -1035,7 +1120,8 @@ async fn concurrent_edits() {
     daemon.stop().await;
 }
 
-// 15
+// 15; tightened by issue #80: edits made during each write are carried
+// onto its commit.
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_while_the_workspace_writes() {
     let (daemon, repo) = fixture().await;
@@ -1086,29 +1172,23 @@ async fn edit_while_the_workspace_writes() {
         .filter(|change| change.change_id == row.change_id)
         .map(|change| change.commit_id)
         .collect();
-    let diverged = commits.len() > 1;
-    println!(
-        "edits while the workspace writes: {} visible commits, last write {last}",
-        commits.len()
-    );
+    assert_eq!(commits.len(), 1, "one visible commit of W's change");
     for i in 0..20 {
-        let mut found = false;
-        for commit in &commits {
-            found |= file(client, &repo, commit, &format!("api/{i}.txt"))
+        assert!(
+            file(client, &repo, &commits[0], &format!("api/{i}.txt"))
                 .await
-                .is_some();
-        }
-        assert!(found, "api/{i}.txt is in no visible commit of the change");
+                .is_some(),
+            "api/{i}.txt"
+        );
     }
-    let mut last_found = false;
-    for commit in &commits {
-        last_found |=
-            file(client, &repo, commit, "busy.txt").await.as_deref() == Some(&format!("{last}\n"));
-    }
-    assert!(last_found, "the last write is in a visible commit");
-    if diverged {
-        assert!(row.divergent, "{row:?}");
-    }
+    assert_eq!(
+        file(client, &repo, &commits[0], "busy.txt").await,
+        Some(format!("{last}\n")),
+        "the last write"
+    );
+    assert!(!row.divergent, "{row:?}");
+    assert_eq!(row.attention(), v1::Attention::Unspecified, "{row:?}");
+    assert_eq!(divergent_changes(client, &repo).await, Vec::<String>::new());
     daemon.stop().await;
 }
 
@@ -1232,6 +1312,220 @@ async fn edits_are_tagged_and_undoable() {
         reason(&error),
         (Code::FailedPrecondition, "OPERATION_SUPERSEDED".to_owned())
     );
+    daemon.stop().await;
+}
+
+// Issue #80, 6: edits W makes while an edit of its `@` is between its write
+// and its follow-up are carried onto the edit's commit, in W's change, as
+// one snapshot operation.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines, reason = "the carry, its operation, then undo")]
+async fn edit_carries_late_edits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "a.txt", "a\n");
+    write(&w, "b.txt", "b\n");
+    snapshot(client, &repo, &w).await;
+
+    let request = rewrite(
+        &repo,
+        Some(&w),
+        "@",
+        vec![content("a.txt", "api a\n"), content("api.txt", "api\n")],
+    );
+    let rpc = {
+        let client = client.clone();
+        async move { client.edit_files(request).await.unwrap() }
+    };
+    let edited = at_follow_hold(&daemon, rpc, || {
+        write(&w, "late.txt", "late\n");
+        write(&w, "b.txt", "late b\n");
+    })
+    .await;
+
+    let row = get(client, &repo, &w).await;
+    assert_eq!(
+        change_commits(client, &repo, &row.change_id).await,
+        std::slice::from_ref(&row.commit_id)
+    );
+    for (path, contents) in [
+        ("a.txt", "api a\n"),
+        ("api.txt", "api\n"),
+        ("late.txt", "late\n"),
+        ("b.txt", "late b\n"),
+    ] {
+        assert_eq!(read(&w, path).as_deref(), Some(contents), "{path} on disk");
+        assert_eq!(
+            file(client, &repo, &row.commit_id, path).await.as_deref(),
+            Some(contents),
+            "{path} in the commit"
+        );
+    }
+    assert!(!row.divergent, "{row:?}");
+    assert_eq!(row.attention(), v1::Attention::Unspecified, "{row:?}");
+    let status = client
+        .get_status(v1::GetStatusRequest {
+            workspace: w.id.clone(),
+            skip_snapshot: true,
+            ..v1::GetStatusRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        status.workspace_status.unwrap().conflicted_paths.is_empty(),
+        "no conflict"
+    );
+
+    // One snapshot operation for W after the edit's: the carry.
+    let edit_op = edited.operation.unwrap();
+    let after = operations_after(client, &repo, &w, &edit_op.id).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    let carried = &after[0];
+    assert_eq!(carried.kind(), OperationKind::Snapshot);
+    assert_eq!(carried.snapshot_kind(), SnapshotKind::Explicit);
+    assert_eq!(carried.agent, "w@test");
+    let effects = client
+        .get_operation(&repo.id, &carried.id)
+        .await
+        .unwrap()
+        .operation
+        .unwrap()
+        .effects;
+    assert!(
+        effects
+            .iter()
+            .flat_map(|effects| &effects.changes)
+            .any(|effect| effect.kind() == ChangeEffectKind::Rewritten
+                && effect.change_id == row.change_id
+                && effect.commit_id == row.commit_id),
+        "{effects:?}"
+    );
+    assert_ne!(
+        edited.change.unwrap().commit_id,
+        row.commit_id,
+        "the carry rewrote the edit's commit"
+    );
+
+    // Undo goes newest first: the edit is superseded until the carry is
+    // undone.
+    let undo = |operation_id: &str| UndoOperationRequest {
+        repo: repo.id.clone(),
+        workspace: w.id.clone(),
+        operation_id: operation_id.to_owned(),
+    };
+    let error = client.undo_operation(undo(&edit_op.id)).await.unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (Code::FailedPrecondition, "OPERATION_SUPERSEDED".to_owned())
+    );
+    client.undo_operation(undo(&carried.id)).await.unwrap();
+    client.undo_operation(undo(&edit_op.id)).await.unwrap();
+    assert_eq!(read(&w, "a.txt").as_deref(), Some("a\n"));
+    assert_eq!(read(&w, "b.txt").as_deref(), Some("b\n"));
+    assert_eq!(read(&w, "api.txt"), None);
+    assert_eq!(read(&w, "late.txt"), None);
+    daemon.stop().await;
+}
+
+// Issue #80, 7: where the edit and W's late edit change the same line, W's
+// one commit has a conflict, with markers on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn edit_late_overlap_is_a_conflict() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "a.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+
+    let request = rewrite(&repo, Some(&w), "@", vec![content("a.txt", "two\n")]);
+    let rpc = {
+        let client = client.clone();
+        async move { client.edit_files(request).await.unwrap() }
+    };
+    at_follow_hold(&daemon, rpc, || write(&w, "a.txt", "three\n")).await;
+
+    let row = get(client, &repo, &w).await;
+    let commits = change_commits(client, &repo, &row.change_id).await;
+    assert_eq!(commits, std::slice::from_ref(&row.commit_id));
+    let change = client
+        .get_change(GetChangeRequest {
+            repo: repo.id.clone(),
+            revision: row.commit_id.clone(),
+            ..GetChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    assert!(change.conflict, "{change:?}");
+    let status = client
+        .get_status(v1::GetStatusRequest {
+            workspace: w.id.clone(),
+            skip_snapshot: true,
+            ..v1::GetStatusRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(status.workspace_status.unwrap().conflicted_paths, ["a.txt"]);
+    let on_disk = read(&w, "a.txt").unwrap();
+    assert!(
+        on_disk.contains("two") && on_disk.contains("three"),
+        "{on_disk}"
+    );
+    assert!(!row.divergent, "{row:?}");
+    daemon.stop().await;
+}
+
+// Issue #80, 9: a follow-up that fails leaves the carry on the workspace,
+// and its next snapshot carries.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_follow_carries_at_the_next_snapshot() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "a.txt", "a\n");
+    snapshot(client, &repo, &w).await;
+    let before = get(client, &repo, &w).await;
+
+    let request = rewrite(&repo, Some(&w), "@", vec![content("api.txt", "api\n")]);
+    let rpc = {
+        let client = client.clone();
+        async move { client.edit_files(request).await.unwrap() }
+    };
+    let edited = at_follow_hold(&daemon, rpc, || {
+        write(&w, "late.txt", "late\n");
+        scheduler.fail_scans(true);
+    })
+    .await;
+    let row = get(client, &repo, &w).await;
+    assert_eq!(row.commit_id, before.commit_id, "the follow-up failed");
+    assert!(
+        client
+            .snapshot_workspace(&repo.id, &w.id, "")
+            .await
+            .is_err()
+    );
+
+    scheduler.fail_scans(false);
+    snapshot(client, &repo, &w).await;
+    let row = get(client, &repo, &w).await;
+    let after = operations_after(client, &repo, &w, &edited.operation.unwrap().id).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].kind(), OperationKind::Snapshot);
+    assert_eq!(
+        change_commits(client, &repo, &row.change_id).await,
+        std::slice::from_ref(&row.commit_id)
+    );
+    for path in ["api.txt", "late.txt"] {
+        assert!(
+            file(client, &repo, &row.commit_id, path).await.is_some(),
+            "{path}"
+        );
+        assert!(read(&w, path).is_some(), "{path} on disk");
+    }
+    assert!(!row.divergent, "{row:?}");
     daemon.stop().await;
 }
 
