@@ -31,6 +31,7 @@ mod init;
 mod log;
 mod op;
 mod out;
+mod presence;
 mod render;
 mod render_vcs;
 pub(crate) mod repo;
@@ -38,6 +39,7 @@ mod restore;
 pub(crate) mod scope;
 mod status;
 mod store;
+mod stream;
 mod ws;
 mod ws_move;
 mod ws_run;
@@ -224,6 +226,9 @@ enum Command {
     /// List the operation log, or show one operation.
     #[command(visible_alias = "operation", infer_subcommands = true)]
     Op(op::Args),
+    /// Show what agents are doing now: activity, editing, leases, progress.
+    #[command(infer_subcommands = true)]
+    Presence(presence::Args),
     /// Read files and list directories at any revision.
     #[command(infer_subcommands = true)]
     File(file::Args),
@@ -534,6 +539,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
+        Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,

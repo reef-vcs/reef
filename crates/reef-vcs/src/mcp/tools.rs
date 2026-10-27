@@ -428,15 +428,15 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.PresenceService/ReportPresence",
-        "not implemented (R2.10)",
+        "reported for the server's calls by R2.11, not as a tool",
     ),
     (
         "/reef.api.v1.PresenceService/ClearPresence",
-        "not implemented (R2.10)",
+        "reported for the server's calls by R2.11, not as a tool",
     ),
     (
         "/reef.api.v1.PresenceService/SubscribePresence",
-        "not implemented (R2.11)",
+        "a stream for live views; wait_for_operations waits",
     ),
     ("/reef.api.v1.MaintenanceService/CollectGarbage", "ADMIN"),
     (

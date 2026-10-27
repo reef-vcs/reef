@@ -36,6 +36,7 @@ use crate::maintenance::backup::{BackupError, ManifestError};
 use crate::maintenance::gc::GcRunError;
 use crate::maintenance::quiesce::QuiesceError;
 use crate::maintenance::restore::RestoreError;
+use crate::presence::PresenceError;
 use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
 use crate::service::operations::InvalidChangeFilter;
@@ -95,6 +96,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<crate::read::PinnedGone>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<SubscribeError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<PresenceError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
@@ -242,6 +245,42 @@ fn subscribe_reason(error: &SubscribeError) -> Option<(&'static str, BTreeMap<St
             meta(&[("repo", repo.as_hex())]),
         ),
         SubscribeError::AfterNeedsOneRepo | SubscribeError::ShuttingDown => return None,
+    })
+}
+
+fn presence_reason(error: &PresenceError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    let id = |id: &dyn std::fmt::Display| ("presence_id", id.to_string());
+    Some(match error {
+        PresenceError::NotFound(presence) => (reason::PRESENCE_NOT_FOUND, meta(&[id(presence)])),
+        PresenceError::InvalidId(text) => (reason::INVALID_PRESENCE_ID, meta(&[id(text)])),
+        PresenceError::Mismatch {
+            id: presence,
+            field,
+        } => (
+            reason::PRESENCE_MISMATCH,
+            meta(&[id(presence), ("field", (*field).to_owned())]),
+        ),
+        PresenceError::DaemonKind => (
+            reason::DAEMON_PRESENCE,
+            meta(&[("kind", "PRESENCE_KIND_LEASE".to_owned())]),
+        ),
+        PresenceError::DaemonEntry(presence) => (reason::DAEMON_PRESENCE, meta(&[id(presence)])),
+        PresenceError::TooLarge { field, limit } => (
+            reason::PRESENCE_TOO_LARGE,
+            meta(&[("field", (*field).to_owned()), ("limit", limit.clone())]),
+        ),
+        PresenceError::TooMany { limit, agent } => {
+            let mut metadata = meta(&[("limit", limit.to_string())]);
+            if let Some(agent) = agent {
+                metadata.insert("agent".to_owned(), agent.clone());
+            }
+            (reason::TOO_MANY_PRESENCE_ENTRIES, metadata)
+        }
+        PresenceError::InvalidAgent => (reason::INVALID_AGENT, BTreeMap::new()),
+        PresenceError::Invalid(_) | PresenceError::Ended | PresenceError::ShuttingDown => {
+            return None;
+        }
     })
 }
 
@@ -466,6 +505,8 @@ fn reason_and_metadata(
             edit_reason(error)
         } else if let Some(error) = error.downcast_ref::<SubscribeError>() {
             subscribe_reason(error)
+        } else if let Some(error) = error.downcast_ref::<PresenceError>() {
+            presence_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

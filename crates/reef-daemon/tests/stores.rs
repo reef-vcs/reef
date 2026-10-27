@@ -1159,3 +1159,99 @@ async fn build_announces_its_command() {
         "no info line with the argv"
     );
 }
+
+// R2.10's test 17: a build reports its progress over presence, and its
+// scratch workspace's create and lease entries come and go with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_build_progress() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        config.presence.progress_after = Duration::ZERO;
+    })
+    .await;
+    let spec = spec_building(
+        "for i in 1 2 3; do echo line$i; sleep 0.2; done; mkdir -p \"$REEF_STORE_DIR\" && cp deps.lock \"$REEF_STORE_DIR/manifest\"",
+    );
+    commit_at_root(&repo.root, &[("reef.toml", &spec), ("deps.lock", LOCKFILE)]).await;
+    let mut stream = daemon
+        .client
+        .subscribe_presence(v1::SubscribePresenceRequest {
+            repos: vec![repo.id.clone()],
+            ..v1::SubscribePresenceRequest::default()
+        })
+        .await
+        .unwrap();
+    while !stream.message().await.unwrap().unwrap().synced {}
+    let done = build(&daemon, &repo).await;
+    assert!(done.sealed);
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let scratch_lease_ended = |events: &[v1::PresenceEvent]| {
+        events.iter().any(|event| {
+            event.ended && event.presence.as_ref().unwrap().kind() == v1::PresenceKind::Lease
+        })
+    };
+    let build_ended = |events: &[v1::PresenceEvent]| {
+        events.iter().any(|event| {
+            let presence = event.presence.as_ref().unwrap();
+            event.ended
+                && presence.kind() == v1::PresenceKind::Progress
+                && presence.workspace_id.is_empty()
+        })
+    };
+    while !(scratch_lease_ended(&events) && build_ended(&events)) {
+        assert!(Instant::now() < deadline, "{events:#?}");
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        events.extend(next.events);
+    }
+    let mut phases: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
+    for event in &events {
+        let presence = event.presence.as_ref().unwrap();
+        if presence.kind() != v1::PresenceKind::Progress || !presence.workspace_id.is_empty() {
+            continue;
+        }
+        assert!(presence.by_daemon);
+        let progress = presence.progress.as_ref().unwrap();
+        assert_eq!(progress.unit, "lines");
+        if event.ended {
+            assert_eq!(event.end_reason(), v1::PresenceEndReason::Cleared);
+            continue;
+        }
+        if phases.last() != Some(&progress.phase) {
+            phases.push(progress.phase.clone());
+        }
+        if progress.phase == "build" {
+            lines.push(progress.done);
+        }
+    }
+    let mut order = ["resolve", "create", "build", "seal"].iter();
+    assert!(
+        phases.iter().all(|phase| order.any(|known| known == phase)),
+        "{phases:?}"
+    );
+    assert!(phases.contains(&"build".to_owned()), "{phases:?}");
+    assert!(lines.windows(2).all(|pair| pair[0] <= pair[1]), "{lines:?}");
+    assert!(lines.last().is_some_and(|done| *done >= 1), "{lines:?}");
+    let scratch = events
+        .iter()
+        .filter_map(|event| event.presence.as_ref())
+        .find(|presence| presence.kind() == v1::PresenceKind::Lease)
+        .unwrap()
+        .workspace_id
+        .clone();
+    assert!(events.iter().any(|event| {
+        let presence = event.presence.as_ref().unwrap();
+        presence.kind() == v1::PresenceKind::Progress && presence.workspace_id == scratch
+    }));
+    let lease_end = events
+        .iter()
+        .find(|event| {
+            event.ended && event.presence.as_ref().unwrap().kind() == v1::PresenceKind::Lease
+        })
+        .unwrap();
+    assert_eq!(lease_end.end_reason(), v1::PresenceEndReason::Gone);
+}

@@ -70,6 +70,8 @@ use super::{
 };
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
+use crate::presence::Report;
+use crate::presence::publish::Progress;
 use crate::repo::RepoHandle;
 use crate::snapshot::TrackReason;
 use crate::spec::ResolvedSpec;
@@ -77,6 +79,10 @@ use crate::store::{MountedStore, StoreManager};
 
 /// The description of a colocated repository's ref import before a create.
 const IMPORT_DESCRIPTION: &str = "reef: import git refs";
+
+/// The phases a create's progress entry counts: resolve, base, materialize,
+/// mount, jj, seed, insert and watch (R2.10).
+const CREATE_STEPS: u64 = 8;
 
 /// What a ref import before resolving a revision records (R2.03): for the
 /// workspace being created, moved or written for, when there is one, and
@@ -131,6 +137,19 @@ impl Manager {
         let id = WorkspaceId::generate();
         tracing::Span::current().record("workspace_id", tracing::field::display(id));
         let agent = spec.agent.clone().unwrap_or_else(|| spec.owner.clone());
+        // Ended when dropped, whatever the outcome (R2.10).
+        let progress = Progress::start(
+            &self.presence,
+            Report {
+                agent: spec.owner.clone(),
+                repo: Some(repo.id),
+                workspace: Some(id),
+                ..Report::default()
+            },
+            "resolve",
+            CREATE_STEPS,
+            "steps",
+        );
         let paths = self.new_paths(repo.id, id, spec.path.as_deref())?;
         let backend = self.select_backend(spec.backend, repo.id, &paths).await?;
         lap.next();
@@ -144,19 +163,23 @@ impl Manager {
         // Fails a create that would fail anyway before anything is made.
         self.plan_stores(&resolved.stores, &spec.store_rules(), &resolved.commit)?;
         timings.resolve_ms = lap.next();
+        progress.phase("base", 1);
 
         // 3.
         let (base, base_was_cached) = self.ensure_base(&handle, &resolved, &*backend).await?;
         timings.base_ms = lap.next();
+        progress.phase("materialize", 2);
 
         // 4.
         let mut undo = Undo::new(handle.clone(), id, agent.clone());
         materialize(backend, &base, &paths, &mut undo).await?;
         timings.materialize_ms = lap.next();
+        progress.phase("mount", 3);
         let (_mounting, plan, mounted) = self
             .mount_planned(&resolved, &spec, &paths.root, &mut undo)
             .await?;
         timings.mount_ms = lap.next();
+        progress.phase("jj", 4);
 
         // 5.
         let generation = handle.generation();
@@ -173,12 +196,14 @@ impl Manager {
         undo.jj_workspace = true;
         undo.state_dir = Some(paths.state_dir.clone());
         timings.jj_ms = lap.next();
+        progress.phase("seed", 5);
 
         // 6.
         let ws = undo
             .or_undo(seed(ws, &base, &paths, &wc.commit_id).await)
             .await?;
         timings.seed_ms = lap.next();
+        progress.phase("insert", 6);
 
         // 7.
         let now = Timestamp::now();
@@ -209,6 +234,7 @@ impl Manager {
             return Err(error.into());
         }
         timings.insert_ms = lap.next();
+        progress.phase("watch", 7);
         self.load_created(
             &record,
             &mut undo,

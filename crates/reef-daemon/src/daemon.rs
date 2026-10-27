@@ -111,6 +111,8 @@ pub struct AppState {
     pub events: Arc<crate::subscribe::OpEvents>,
     /// The open subscriptions (R2.09).
     pub subscriptions: crate::subscribe::Subscriptions,
+    /// The live presence entries (R2.10); the manager's.
+    pub presence: Arc<crate::presence::PresenceHub>,
     /// Work to do after the server stops and before the repository threads
     /// do.
     pub hooks: ShutdownHooks,
@@ -338,11 +340,12 @@ impl Daemon {
             db,
             repos,
             settings,
-            manager,
+            manager: Arc::clone(&manager),
             started: Instant::now(),
             reads: Arc::new(crate::read::Reads::new(shutdown.clone())),
             events,
             subscriptions: crate::subscribe::Subscriptions::default(),
+            presence: Arc::clone(manager.presence()),
             shutdown,
             hooks: ShutdownHooks::default(),
             reindexed: Mutex::new(HashMap::new()),
@@ -350,6 +353,13 @@ impl Daemon {
             quiesce: crate::maintenance::quiesce::Quiescer::default(),
         });
 
+        // Before any snapshot can run (R2.10).
+        state
+            .manager
+            .scheduler()
+            .on_snapshot(crate::presence::publish::editing_hook(Arc::downgrade(
+                &state,
+            )));
         let listener = match bring_up(&state).await {
             Ok(listener) => listener,
             Err(error) => {
@@ -361,6 +371,7 @@ impl Daemon {
         };
 
         Arc::clone(&state.events).poll(state.config.subscribe.outside_poll, state.shutdown.clone());
+        state.presence.start(state.shutdown.clone());
         let router = server::router(Arc::clone(&state));
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             UnixListenerStream::new(listener),

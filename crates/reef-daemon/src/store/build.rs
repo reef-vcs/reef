@@ -46,6 +46,8 @@ use tokio_util::sync::CancellationToken;
 use super::{MountMode, StoreError, StoreKey, StoreManager, mount};
 use crate::backend::{BackendChoice, BackendKind};
 use crate::model::{ReclaimReason, RepoId, StoreRecord, WorkspaceId};
+use crate::presence::Report;
+use crate::presence::publish::Progress;
 use crate::workspace::{
     CreateSpec, Manager, ManagerError, MissingStores, ReleaseSpec, Start, StoreTarget,
 };
@@ -164,6 +166,22 @@ pub async fn run(
     shutdown: CancellationToken,
 ) -> Result<BuildResult, ManagerError> {
     let begun = Instant::now();
+    // Ended when dropped, whatever the outcome (R2.10); an existing store
+    // answers within the delay, so it shows nothing.
+    let progress = Progress::start(
+        manager.presence(),
+        Report {
+            agent: request
+                .agent
+                .clone()
+                .unwrap_or_else(|| BUILD_OWNER.to_owned()),
+            repo: Some(request.repo),
+            ..Report::default()
+        },
+        "resolve",
+        0,
+        "lines",
+    );
     // 1.
     let (commit, store, target) = manager
         .resolve_store(
@@ -202,6 +220,8 @@ pub async fn run(
         .into());
     }
 
+    progress.phase("create", 0);
+
     // 2.
     let _running = stores.start_build(&key)?;
     let inserted = record_building(&manager, &stores, &key, &target.mount, request.repo)?;
@@ -210,7 +230,7 @@ pub async fn run(
     let ran = async {
         prepare_building(&building, &contents)?;
         build_in_scratch(
-            &manager, &request, &commit, &store, &target, &contents, lines, &shutdown,
+            &manager, &request, &commit, &store, &target, &contents, lines, &progress, &shutdown,
         )
         .await
     }
@@ -236,6 +256,7 @@ pub async fn run(
         already_built: false,
     };
     if status.success() {
+        progress.phase("seal", 0);
         let sealed = tokio::task::spawn_blocking({
             let stores = Arc::clone(&stores);
             let (building, key) = (building.clone(), result.key.clone());
@@ -361,6 +382,7 @@ async fn build_in_scratch(
     target: &StoreTarget,
     contents: &std::path::Path,
     lines: mpsc::Sender<BuildOutput>,
+    progress: &Progress,
     shutdown: &CancellationToken,
 ) -> Result<(std::process::ExitStatus, Option<String>), ManagerError> {
     // 3.
@@ -391,6 +413,7 @@ async fn build_in_scratch(
                 manager.leases().heartbeat_every(created.lease.length),
             );
             announce(store, commit, &lines).await;
+            progress.phase("build", 0);
             run_command(
                 manager,
                 ws,
@@ -400,6 +423,7 @@ async fn build_in_scratch(
                 contents,
                 request.timeout,
                 lines,
+                progress,
                 shutdown,
             )
             .await
@@ -496,6 +520,7 @@ async fn run_command(
     contents: &std::path::Path,
     timeout: Duration,
     lines: mpsc::Sender<BuildOutput>,
+    progress: &Progress,
     shutdown: &CancellationToken,
 ) -> Result<std::process::ExitStatus, StoreError> {
     let (program, args) = store.build.split_first().ok_or_else(|| StoreError::Spawn {
@@ -535,10 +560,16 @@ async fn run_command(
             stdout,
             OutputStream::Stdout,
             lines.clone(),
+            progress.clone(),
         )));
     }
     if let Some(stderr) = child.stderr.take() {
-        readers.push(tokio::spawn(forward(stderr, OutputStream::Stderr, lines)));
+        readers.push(tokio::spawn(forward(
+            stderr,
+            OutputStream::Stderr,
+            lines,
+            progress.clone(),
+        )));
     }
 
     let deadline = tokio::time::sleep(timeout);
@@ -619,6 +650,7 @@ async fn forward(
     reader: impl AsyncRead + Unpin,
     stream: OutputStream,
     lines: mpsc::Sender<BuildOutput>,
+    progress: Progress,
 ) {
     let mut reader = BufReader::new(reader);
     let mut buffer = Vec::new();
@@ -631,6 +663,7 @@ async fn forward(
         while matches!(buffer.last(), Some(b'\n' | b'\r')) {
             buffer.pop();
         }
+        progress.add(1);
         let line = OutputLine {
             text: String::from_utf8_lossy(&buffer).into_owned(),
             stream,

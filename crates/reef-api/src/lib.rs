@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 4;
+pub const API_REVISION: u32 = 5;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -60,6 +60,9 @@ pub const API_DIGESTS: &[&str] = &[
     "6a6d33729c4704d856b04a54c5ec19d479810cfe830b5ab0c0dae2749c7a5751",
     // R2.09: `SubscribeOperationsResponse.head_operation_ids`.
     "d241492eea1920f2aaa0c22e384e4f49c428f69dba269ed8532410d607c32874",
+    // R2.10: `Presence.lease`, `Presence.by_daemon`,
+    // `PresenceEvent.end_reason`.
+    "0064416d711687e5e6b1b5886b88ca0aecf0f0ddae49068fabc04b84cac1451e",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -235,6 +238,26 @@ pub mod error {
     pub const OPERATION_LOG_REWRITTEN: &str = "OPERATION_LOG_REWRITTEN";
     /// The daemon is serving its limit of subscriptions (R2.09).
     pub const TOO_MANY_SUBSCRIPTIONS: &str = "TOO_MANY_SUBSCRIPTIONS";
+    /// A `presence_id` that names no live presence entry: cleared,
+    /// expired, or reported before the daemon restarted (R2.10). Metadata:
+    /// `presence_id`.
+    pub const PRESENCE_NOT_FOUND: &str = "PRESENCE_NOT_FOUND";
+    /// A `presence_id` that is not 16 lowercase hex digits (R2.10).
+    /// Metadata: `presence_id`.
+    pub const INVALID_PRESENCE_ID: &str = "INVALID_PRESENCE_ID";
+    /// A replacement whose kind, agent, repository or workspace differs
+    /// from the entry's (R2.10). Metadata: `presence_id`, `field`.
+    pub const PRESENCE_MISMATCH: &str = "PRESENCE_MISMATCH";
+    /// A report of kind `PRESENCE_KIND_LEASE`, or a report or clear of an
+    /// entry the daemon reports itself (R2.10). Metadata: `kind` or
+    /// `presence_id`.
+    pub const DAEMON_PRESENCE: &str = "DAEMON_PRESENCE";
+    /// A presence field over its bound (R2.10). Metadata: `field`, `limit`.
+    pub const PRESENCE_TOO_LARGE: &str = "PRESENCE_TOO_LARGE";
+    /// The daemon holds its limit of client presence entries, in all or
+    /// for one agent (R2.10). Metadata: `limit`, and `agent` for the limit
+    /// per agent.
+    pub const TOO_MANY_PRESENCE_ENTRIES: &str = "TOO_MANY_PRESENCE_ENTRIES";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

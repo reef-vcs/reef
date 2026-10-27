@@ -212,6 +212,9 @@ pub struct SnapshotOutcome {
     pub commit_id: CommitIdHex,
     /// Its change, in hex.
     pub change_id: String,
+    /// The commit an operation rewrote, when `changed` and the change was
+    /// not recovered (R2.10).
+    pub rewrote: Option<CommitIdHex>,
     /// From the first event that triggered it (or from the request) to the
     /// working-copy state being saved.
     pub latency_ms: u64,

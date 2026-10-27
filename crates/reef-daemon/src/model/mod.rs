@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-pub use ids::{LeaseId, ParseIdError, RepoId, WorkspaceId};
+pub use ids::{LeaseId, ParseIdError, PresenceId, RepoId, WorkspaceId};
 
 /// A stored name that is not one of an enum's values.
 #[derive(Debug, thiserror::Error)]

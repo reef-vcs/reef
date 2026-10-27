@@ -30,6 +30,7 @@ use crate::model::{
     LeaseId, LeaseRecord, ReclaimReason, RepoId, Timestamp, WorkspaceId, WorkspaceRecord,
     WorkspaceState, duration_millis,
 };
+use crate::presence::{PresenceHub, publish as presence_publish};
 use crate::workspace::{
     Manager, ManagerError, ReclaimOutcome, ReleaseSpec, gone_advice, releasing_advice,
 };
@@ -200,6 +201,9 @@ pub struct LeaseManager {
     /// Open [`TickPause`]s: while any is, ticks reclaim nothing (a
     /// quiesce, R1.18).
     tick_pauses: AtomicUsize,
+    /// Where each issue and renewal is published as a lease heartbeat
+    /// (R2.10).
+    presence: Arc<PresenceHub>,
 }
 
 impl std::fmt::Debug for LeaseManager {
@@ -212,8 +216,14 @@ impl std::fmt::Debug for LeaseManager {
 
 impl LeaseManager {
     /// A lease manager for the [`Manager`] that `manager` will point to.
-    pub(crate) fn new(config: LeaseSection, db: Arc<Db>, manager: Weak<Manager>) -> LeaseManager {
+    pub(crate) fn new(
+        config: LeaseSection,
+        db: Arc<Db>,
+        manager: Weak<Manager>,
+        presence: Arc<PresenceHub>,
+    ) -> LeaseManager {
         LeaseManager {
+            presence,
             config,
             db,
             manager,
@@ -310,6 +320,7 @@ impl LeaseManager {
     ) -> Result<(), DbError> {
         self.db.insert_workspace_with_lease(record, lease)?;
         log_issued(lease);
+        self.publish(lease, &record.change_id);
         Ok(())
     }
 
@@ -327,6 +338,7 @@ impl LeaseManager {
         let lease = self.new_lease(ws, repo, owner, length, Timestamp::now());
         self.db.issue_lease(&lease)?;
         log_issued(&lease);
+        self.publish(&lease, &self.change_of(ws));
         Ok(lease)
     }
 
@@ -342,6 +354,7 @@ impl LeaseManager {
                     expires_at = %record.expires_at,
                     "lease renewed"
                 );
+                self.publish(&record, &self.change_of(ws));
                 Ok(record)
             }
             Renewal::NoWorkspace => Err(LeaseError::NotFound(ws)),
@@ -366,6 +379,28 @@ impl LeaseManager {
                 grace_ended_at,
             }),
         }
+    }
+
+    /// Publishes `lease`'s heartbeat entry, on its workspace's `change_id`.
+    fn publish(&self, lease: &LeaseRecord, change_id: &str) {
+        let message = crate::service::convert::lease(lease, self, Timestamp::now());
+        presence_publish::lease(
+            &self.presence,
+            lease.repo_id,
+            lease.workspace_id,
+            change_id,
+            message,
+            self.heartbeat_every(lease.length),
+        );
+    }
+
+    /// `ws`'s change, from its loaded entry; empty when it is not loaded.
+    fn change_of(&self, ws: WorkspaceId) -> String {
+        self.manager
+            .upgrade()
+            .and_then(|manager| manager.entry(ws))
+            .map(|entry| entry.record().change_id)
+            .unwrap_or_default()
     }
 
     /// Gives every unended lease at least `lease.restart_grace` from now,
@@ -605,7 +640,12 @@ mod tests {
     }
 
     fn manager(config: LeaseSection) -> LeaseManager {
-        LeaseManager::new(config, Arc::new(Db::open_in_memory().unwrap()), Weak::new())
+        LeaseManager::new(
+            config,
+            Arc::new(Db::open_in_memory().unwrap()),
+            Weak::new(),
+            Arc::new(PresenceHub::new(crate::presence::Limits::default())),
+        )
     }
 
     #[test]

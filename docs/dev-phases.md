@@ -143,8 +143,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R2.09 | Operation log subscription | Server-streaming RPC filtered by repository, change, workspace, or agent, woken by the repository thread for every operation Reef records and by a poll of the op heads for other jj writers. Resume from a given operation or a frame's cursor, at most 10,000 operations back. Server-side batching into frames; nothing dropped, a slow subscriber held back by flow control. Delivery within 100 ms for a few subscribers, with the per-subscriber log read behind the seam R2.22's broker replaces. The MCP wait tool moves onto the stream, and `reef op watch` prints it as JSON lines. | L | R2.02, R2.13, R2.27 |
-| R2.10 | Presence channel | Ephemeral presence over the same connection: agent activity, workspace being edited, lease heartbeats, long-running operation progress. Never persisted. | M | R2.09 |
-| R2.11 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically. A presence API for agents that want to report finer activity. | S | R2.10 |
+| R2.10 | Presence channel | Ephemeral presence over the same connection, as a second stream beside the operation log's: `ReportPresence`, `ClearPresence` and `SubscribePresence`, entries with a TTL and caps, the current set then changes coalesced per entry, so a slow subscriber gets each entry's latest state. The daemon reports what only it knows: lease heartbeats (lapsing after two missed), files a workspace's snapshots change, and the progress of workspace creates and store builds. `reef presence watch`. Never persisted. | L | R2.09 |
+| R2.11 | Agent presence reporting | `reef ws run` and the SDKs report presence automatically over R2.10's `ReportPresence`. A presence API for agents that want to report finer activity: `reef presence report` and `clear`. `reef ws renew` renews a lease held outside `ws run`. | S | R2.10 |
 | R2.12 | Replay | Reconstruct any live view at a past point from the operation log. Drives the scrubber in the UI. | M | R2.09 |
 
 ### Workstream: agent surface

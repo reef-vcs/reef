@@ -371,6 +371,8 @@ pub struct SnapshotCommit {
     pub commit_id: CommitIdHex,
     /// Its change: `rewrite_of`'s, or a new one when recovering.
     pub change_id: ChangeIdHex,
+    /// The commit it rewrote: `rewrite_of`; `None` when recovering.
+    pub rewrote: Option<CommitIdHex>,
     /// The rewritten commit was not the head's working-copy commit for the
     /// workspace, so the change now has more than one visible commit. True
     /// when the plan said so, and also when another workspace rewrote the
@@ -445,6 +447,7 @@ pub async fn commit_snapshot(
         op_id: OperationIdHex::of(repo.op_id()),
         commit_id: CommitIdHex::of(new_commit.id()),
         change_id: ChangeIdHex::of(new_commit.change_id()),
+        rewrote: plan.recover.is_none().then(|| plan.rewrite_of.clone()),
         divergent,
         end_time: super::oplog::system_time(repo.operation().metadata().time.end),
         repo,

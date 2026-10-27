@@ -365,7 +365,7 @@ impl Manager {
         };
         self.scheduler.report_untracked(id, &ran.untracked);
 
-        let (changed, adopted, divergent, recovered, op_id, commit_id, change_id) =
+        let (changed, adopted, divergent, recovered, op_id, commit_id, change_id, rewrote) =
             match &ran.recorded {
                 // The row, in the database and in memory, was written by the
                 // blocking half before the working-copy state.
@@ -377,6 +377,7 @@ impl Manager {
                     committed.op_id.clone(),
                     committed.commit_id.clone(),
                     committed.change_id.to_string(),
+                    committed.rewrote.clone(),
                 ),
                 Recorded::Unchanged {
                     head_op,
@@ -393,6 +394,7 @@ impl Manager {
                         op,
                         commit,
                         wc_change.to_string(),
+                        None,
                     )
                 }
             };
@@ -406,6 +408,7 @@ impl Manager {
             op_id,
             commit_id,
             change_id,
+            rewrote,
             latency_ms: elapsed_ms(started),
             paths_count: trigger.paths_count(),
             narrowed: ran.narrowed,

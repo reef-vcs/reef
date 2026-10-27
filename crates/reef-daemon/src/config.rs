@@ -672,6 +672,9 @@ pub struct Config {
     /// Subscription limits (R2.09). Not a configuration-file key and not
     /// in `config show`: set here by tests only.
     pub subscribe: crate::subscribe::Limits,
+    /// Presence limits (R2.10). Not a configuration-file key and not in
+    /// `config show`: set here by tests only.
+    pub presence: crate::presence::Limits,
 }
 
 /// Failure to resolve the configuration.
@@ -939,6 +942,7 @@ impl Config {
             sources,
             origin,
             subscribe: crate::subscribe::Limits::default(),
+            presence: crate::presence::Limits::default(),
         }
     }
 

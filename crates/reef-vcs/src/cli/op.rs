@@ -17,7 +17,6 @@ use reef_api::v1::{
 use reef_client::ClientError;
 use reef_client::json::{Operation, Undone};
 use reef_error::{Advice, ErrorKind};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::Instant;
 
 use super::advice::AdviceCtx;
@@ -26,6 +25,7 @@ use super::log::LOG_LIMIT;
 use super::render_vcs::{OpLine, OpLines, OpShow};
 use super::repo::missing;
 use super::scope::{self, ScopeArgs, workspace_arg};
+use super::stream::{Backoff, Stopped, run_until_stopped, until};
 use super::{CliError, Ctx};
 
 /// `reef op`.
@@ -262,19 +262,6 @@ pub(crate) async fn undo(ctx: &Ctx, args: UndoArgs) -> Result<(), CliError> {
 /// How long `op watch` runs without `--for` or `--follow`: the MCP wait
 /// tool's default.
 const WATCH_FOR: Duration = Duration::from_secs(30);
-/// Reconnection backoff, doubling between these.
-const RECONNECT_FIRST: Duration = Duration::from_millis(100);
-const RECONNECT_MAX: Duration = Duration::from_secs(2);
-/// How long `--follow` keeps reconnecting before it fails.
-const RECONNECT_FOLLOW: Duration = Duration::from_secs(60);
-
-/// Why a watch stopped.
-enum Stopped {
-    /// `--count` reached, a signal, or a closed stdout.
-    Done,
-    /// The time ran out.
-    Time,
-}
 
 async fn watch(ctx: &Ctx, args: WatchArgs) -> Result<(), CliError> {
     let scope = scope::resolve_repo_only(ctx, args.repo.as_deref()).await?;
@@ -301,15 +288,9 @@ async fn watch(ctx: &Ctx, args: WatchArgs) -> Result<(), CliError> {
         printed: 0,
         heads: Vec::new(),
     };
-    let mut terminate = signal(SignalKind::terminate()).map_err(CliError::Signals)?;
-    let mut interrupt = signal(SignalKind::interrupt()).map_err(CliError::Signals)?;
-    let stopped = tokio::select! {
-        stopped = watcher.run(request, deadline) => stopped,
-        _ = terminate.recv() => Ok(Stopped::Done),
-        _ = interrupt.recv() => Ok(Stopped::Done),
-        () = stdout_closed() => Ok(Stopped::Done),
-    }
-    .map_err(|error| advice.refine(error))?;
+    let stopped = run_until_stopped(watcher.run(request, deadline))
+        .await
+        .map_err(|error| advice.refine(error))?;
     if let Stopped::Time = stopped
         && let Some(at) = watcher.heads.last()
     {
@@ -342,14 +323,7 @@ impl Watcher<'_> {
         mut request: SubscribeOperationsRequest,
         deadline: Option<Instant>,
     ) -> Result<Stopped, CliError> {
-        let until = |deadline: Option<Instant>| async move {
-            match deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
-        };
-        let mut backoff = RECONNECT_FIRST;
-        let mut failing_since: Option<Instant> = None;
+        let mut backoff = Backoff::new();
         loop {
             let subscribed = tokio::select! {
                 () = until(deadline) => return Ok(Stopped::Time),
@@ -364,8 +338,7 @@ impl Watcher<'_> {
                         };
                         match next {
                             Ok(Some(frame)) => {
-                                failing_since = None;
-                                backoff = RECONNECT_FIRST;
+                                backoff.reset();
                                 if let Some(stopped) = self.print(&frame)? {
                                     return Ok(stopped);
                                 }
@@ -379,19 +352,14 @@ impl Watcher<'_> {
                 }
                 Err(error) => Some(error),
             };
-            if let Some(error) = error {
-                let since = *failing_since.get_or_insert_with(Instant::now);
-                if !reconnects(&error)
-                    || (deadline.is_none() && since.elapsed() >= RECONNECT_FOLLOW)
-                {
-                    return Err(error);
-                }
+            if let Some(error) = error
+                && !backoff.retry(&error, deadline)
+            {
+                return Err(error);
             }
-            tokio::select! {
-                () = until(deadline) => return Ok(Stopped::Time),
-                () = tokio::time::sleep(backoff) => {}
+            if !backoff.wait(deadline).await {
+                return Ok(Stopped::Time);
             }
-            backoff = (backoff * 2).min(RECONNECT_MAX);
         }
     }
 
@@ -415,48 +383,5 @@ impl Watcher<'_> {
             return Ok(Some(Stopped::Done));
         }
         Ok(None)
-    }
-}
-
-/// Resolves once nobody reads stdout: a pipe whose reader exited. Checked
-/// every 200 ms, so `op watch --follow | head -1` ends after its line even
-/// when nothing more is recorded to write.
-async fn stdout_closed() {
-    use std::os::fd::AsFd as _;
-
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    loop {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let stdout = std::io::stdout();
-        // macOS reports the hang-up only to a poll that asks for POLLOUT.
-        let mut fds = [PollFd::new(stdout.as_fd(), PollFlags::POLLOUT)];
-        let closed = PollFlags::POLLERR | PollFlags::POLLHUP;
-        if poll(&mut fds, PollTimeout::ZERO).is_ok_and(|ready| ready > 0)
-            && fds[0]
-                .revents()
-                .is_some_and(|events| events.intersects(closed))
-        {
-            return;
-        }
-    }
-}
-
-/// Whether `op watch` resubscribes after `error`: the daemon went away
-/// (unavailable with no reason), the connection failed, or the transport
-/// broke mid-stream (a status the daemon did not write, with no
-/// `ErrorDetail`, as tonic reports a reset connection).
-fn reconnects(error: &CliError) -> bool {
-    match error {
-        CliError::Daemon(ClientError::Rpc {
-            kind,
-            reason,
-            status,
-            ..
-        }) => {
-            (*kind == ErrorKind::Unavailable && reason.is_empty())
-                || reef_api::error::detail(status).is_none()
-        }
-        CliError::Daemon(ClientError::Connect { .. }) | CliError::Timeout { .. } => true,
-        _ => false,
     }
 }
