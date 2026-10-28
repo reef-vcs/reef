@@ -2091,3 +2091,239 @@ impl From<&v1::PresenceEvent> for PresenceEvent {
         }
     }
 }
+
+/// A symbol kind's name: `module`, `class`, `struct`, `interface`, `enum`,
+/// `type`, `function`, `method`, `field`, `variable`, `constant` or
+/// `macro`; `None` when unspecified (R2.14).
+pub fn symbol_kind_name(kind: i32) -> Option<&'static str> {
+    use v1::SymbolKind as K;
+    let name = match K::try_from(kind) {
+        Ok(K::Unspecified) => return None,
+        Ok(K::Module) => "module",
+        Ok(K::Class) => "class",
+        Ok(K::Struct) => "struct",
+        Ok(K::Interface) => "interface",
+        Ok(K::Enum) => "enum",
+        Ok(K::Type) => "type",
+        Ok(K::Function) => "function",
+        Ok(K::Method) => "method",
+        Ok(K::Field) => "field",
+        Ok(K::Variable) => "variable",
+        Ok(K::Constant) => "constant",
+        Ok(K::Macro) => "macro",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// The kind a name from [`symbol_kind_name`] stands for.
+pub fn symbol_kind_of(name: &str) -> Option<v1::SymbolKind> {
+    (1..=12)
+        .filter_map(|n| v1::SymbolKind::try_from(n).ok())
+        .find(|k| symbol_kind_name(*k as i32) == Some(name))
+}
+
+/// A symbol role's name: `definition` or `reference`.
+pub fn symbol_role_name(role: i32) -> Option<&'static str> {
+    let name = match v1::SymbolRole::try_from(role) {
+        Ok(v1::SymbolRole::Unspecified) => return None,
+        Ok(v1::SymbolRole::Definition) => "definition",
+        Ok(v1::SymbolRole::Reference) => "reference",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A symbol source's name: `tags` or `scip`.
+pub fn symbol_source_name(source: i32) -> Option<&'static str> {
+    let name = match v1::SymbolSource::try_from(source) {
+        Ok(v1::SymbolSource::Unspecified) => return None,
+        Ok(v1::SymbolSource::Tags) => "tags",
+        Ok(v1::SymbolSource::Scip) => "scip",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// An index state's name: `not_indexed`, `indexing` or `complete`.
+pub fn symbol_index_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::SymbolIndexState::try_from(state) {
+        Ok(v1::SymbolIndexState::Unspecified) => return None,
+        Ok(v1::SymbolIndexState::NotIndexed) => "not_indexed",
+        Ok(v1::SymbolIndexState::Indexing) => "indexing",
+        Ok(v1::SymbolIndexState::Complete) => "complete",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A skip reason's name: `too_large`, `binary`, `parse_timeout`,
+/// `too_many_occurrences` or `conflicted`.
+pub fn symbol_skip_reason_name(reason: i32) -> &'static str {
+    use v1::SymbolSkipReason as R;
+    match R::try_from(reason) {
+        Ok(R::TooLarge) => "too_large",
+        Ok(R::Binary) => "binary",
+        Ok(R::ParseTimeout) => "parse_timeout",
+        Ok(R::TooManyOccurrences) => "too_many_occurrences",
+        Ok(R::Conflicted) => "conflicted",
+        _ => UNKNOWN,
+    }
+}
+
+/// An upload rejection's name, as the API's value without its prefix in
+/// lower case: `invalid_path`, `content_mismatch` and so on.
+pub fn scip_rejection_name(reason: i32) -> &'static str {
+    use v1::ScipRejection as R;
+    match R::try_from(reason) {
+        Ok(R::InvalidPath) => "invalid_path",
+        Ok(R::DuplicatePath) => "duplicate_path",
+        Ok(R::PathNotFound) => "path_not_found",
+        Ok(R::NotAFile) => "not_a_file",
+        Ok(R::FileTooLarge) => "file_too_large",
+        Ok(R::ContentMismatch) => "content_mismatch",
+        Ok(R::InvalidDocument) => "invalid_document",
+        Ok(R::TooManyOccurrences) => "too_many_occurrences",
+        Ok(R::RangeOutOfBounds) => "range_out_of_bounds",
+        _ => UNKNOWN,
+    }
+}
+
+/// A range: `[start_line, start_column, end_line, end_column]`, 0-based
+/// lines and UTF-8 byte columns, end exclusive.
+pub type SourceRange = [u32; 4];
+
+fn source_range(range: Option<&v1::SourceRange>) -> Option<SourceRange> {
+    range.map(|r| [r.start_line, r.start_column, r.end_line, r.end_column])
+}
+
+/// A tree's indexing, as `reef symbols index` prints it (R2.14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolStatus {
+    /// The commit.
+    pub commit_id: String,
+    /// `not_indexed`, `indexing` or `complete`.
+    pub state: Option<String>,
+    /// Supported files.
+    pub files: u64,
+    /// Files with an entry, skipped ones included.
+    pub files_indexed: u64,
+    /// Files skipped.
+    pub files_skipped: u64,
+    /// Skipped files by reason.
+    pub skipped: BTreeMap<String, u64>,
+    /// Files with an uploaded SCIP document.
+    pub scip_files: u64,
+    /// Supported files by language.
+    pub languages: BTreeMap<String, u64>,
+    /// When the last pass ended.
+    pub indexed_at: Option<String>,
+}
+
+impl From<&v1::SymbolIndexStatus> for SymbolStatus {
+    fn from(status: &v1::SymbolIndexStatus) -> Self {
+        Self {
+            commit_id: status.commit_id.clone(),
+            state: name(symbol_index_state_name(status.state)),
+            files: status.files,
+            files_indexed: status.files_indexed,
+            files_skipped: status.files_skipped,
+            skipped: status
+                .skipped
+                .iter()
+                .map(|s| (symbol_skip_reason_name(s.reason).to_owned(), s.files))
+                .collect(),
+            scip_files: status.scip_files,
+            languages: status
+                .languages
+                .iter()
+                .map(|l| (l.language.clone(), l.files))
+                .collect(),
+            indexed_at: time(status.indexed_at.as_ref()),
+        }
+    }
+}
+
+/// One occurrence, as `reef symbols list` prints it (R2.14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolOccurrence {
+    /// The file.
+    pub path: String,
+    /// The display name.
+    pub name: String,
+    /// The SCIP symbol string; `null` for a tags reference.
+    pub symbol: Option<String>,
+    /// What it is.
+    pub kind: Option<String>,
+    /// `definition` or `reference`.
+    pub role: Option<String>,
+    /// The name's range.
+    pub range: Option<SourceRange>,
+    /// A definition's whole range.
+    pub definition_range: Option<SourceRange>,
+    /// The innermost definition containing it.
+    pub enclosing_symbol: Option<String>,
+    /// `tags` or `scip`.
+    pub source: Option<String>,
+    /// The file's language.
+    pub language: Option<String>,
+    /// SCIP's roles beyond definition: `import`, `write`, `test`,
+    /// `generated`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<&'static str>,
+}
+
+impl From<&v1::SymbolOccurrence> for SymbolOccurrence {
+    fn from(o: &v1::SymbolOccurrence) -> Self {
+        let flags = [
+            (o.is_import, "import"),
+            (o.is_write, "write"),
+            (o.is_test, "test"),
+            (o.is_generated, "generated"),
+        ]
+        .into_iter()
+        .filter_map(|(set, flag)| set.then_some(flag))
+        .collect();
+        Self {
+            path: o.path.clone(),
+            name: o.name.clone(),
+            symbol: text(&o.symbol),
+            kind: name(symbol_kind_name(o.kind)),
+            role: name(symbol_role_name(o.role)),
+            range: source_range(o.range.as_ref()),
+            definition_range: source_range(o.definition_range.as_ref()),
+            enclosing_symbol: text(&o.enclosing_symbol),
+            source: name(symbol_source_name(o.source)),
+            language: text(&o.language),
+            flags,
+        }
+    }
+}
+
+/// A document an upload did not store, or did not send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UploadProblem {
+    /// Its repository path.
+    pub path: String,
+    /// Why: a rejection's name, or `unreadable` and `too_large` for one the
+    /// CLI did not send.
+    pub reason: String,
+    /// In words; absent for one not sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// What `reef symbols upload` did (R2.14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolUpload {
+    /// The commit.
+    pub commit_id: String,
+    /// Documents stored.
+    pub accepted: u64,
+    /// Documents the daemon rejected.
+    pub rejected: Vec<UploadProblem>,
+    /// Documents the CLI did not send.
+    pub skipped: Vec<UploadProblem>,
+    /// The tree's status afterwards.
+    pub status: Option<SymbolStatus>,
+}

@@ -23,6 +23,7 @@ pub mod presence;
 pub mod repositories;
 pub mod status;
 pub mod stores;
+pub mod symbols;
 pub mod workspaces;
 
 pub(crate) mod convert;

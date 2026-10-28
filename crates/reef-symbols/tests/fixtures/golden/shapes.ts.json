@@ -1,0 +1,303 @@
+{
+  "has_errors": false,
+  "occurrences": [
+    {
+      "definition_range": [
+        0,
+        0,
+        4,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Module",
+      "name": "Geometry",
+      "range": [
+        0,
+        10,
+        0,
+        18
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Geometry/"
+    },
+    {
+      "definition_range": [
+        1,
+        9,
+        3,
+        3
+      ],
+      "enclosing": "Geometry",
+      "kind": "Interface",
+      "name": "Shape",
+      "range": [
+        1,
+        19,
+        1,
+        24
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Geometry/Shape#"
+    },
+    {
+      "definition_range": [
+        2,
+        4,
+        2,
+        18
+      ],
+      "enclosing": "Shape",
+      "kind": "Method",
+      "name": "area",
+      "range": [
+        2,
+        4,
+        2,
+        8
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Geometry/Shape#area()."
+    },
+    {
+      "definition_range": [
+        6,
+        7,
+        9,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Enum",
+      "name": "Color",
+      "range": [
+        6,
+        12,
+        6,
+        17
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Color#"
+    },
+    {
+      "definition_range": [
+        11,
+        0,
+        11,
+        38
+      ],
+      "enclosing": null,
+      "kind": "Type",
+      "name": "Point",
+      "range": [
+        11,
+        5,
+        11,
+        10
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Point#"
+    },
+    {
+      "definition_range": [
+        13,
+        0,
+        15,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Class",
+      "name": "Base",
+      "range": [
+        13,
+        15,
+        13,
+        19
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Base#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Base",
+      "kind": "Type",
+      "name": "Shape",
+      "range": [
+        13,
+        40,
+        13,
+        45
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        14,
+        2,
+        14,
+        25
+      ],
+      "enclosing": "Base",
+      "kind": "Method",
+      "name": "area",
+      "range": [
+        14,
+        11,
+        14,
+        15
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Base#area()."
+    },
+    {
+      "definition_range": [
+        17,
+        7,
+        28,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Class",
+      "name": "Circle",
+      "range": [
+        17,
+        13,
+        17,
+        19
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Circle#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Circle",
+      "kind": "Class",
+      "name": "Base",
+      "range": [
+        17,
+        28,
+        17,
+        32
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        18,
+        2,
+        18,
+        20
+      ],
+      "enclosing": "Circle",
+      "kind": "Field",
+      "name": "radius",
+      "range": [
+        18,
+        2,
+        18,
+        8
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Circle#radius."
+    },
+    {
+      "definition_range": [
+        25,
+        2,
+        27,
+        3
+      ],
+      "enclosing": "Circle",
+      "kind": "Method",
+      "name": "area",
+      "range": [
+        25,
+        2,
+        25,
+        6
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/Circle#area()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "area",
+      "kind": "Function",
+      "name": "square",
+      "range": [
+        26,
+        21,
+        26,
+        27
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        30,
+        0,
+        32,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "square",
+      "range": [
+        30,
+        9,
+        30,
+        15
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/square()."
+    },
+    {
+      "definition_range": [
+        34,
+        13,
+        34,
+        62
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "makeCircle",
+      "range": [
+        34,
+        13,
+        34,
+        23
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `shapes.ts`/makeCircle()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "makeCircle",
+      "kind": "Type",
+      "name": "Circle",
+      "range": [
+        34,
+        39,
+        34,
+        45
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "makeCircle",
+      "kind": "Class",
+      "name": "Circle",
+      "range": [
+        34,
+        53,
+        34,
+        59
+      ],
+      "role": "Reference",
+      "symbol": null
+    }
+  ]
+}

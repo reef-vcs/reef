@@ -244,6 +244,11 @@ impl FileService for FilesHandler {
         };
         let (rewritten, operation) =
             write_change(&self.state, &target, agent, write, OperationKind::Edit).await?;
+        if let Some(change) = &rewritten.change {
+            self.state
+                .symbols
+                .notice(target.repo.id, None, change.commit_id.clone());
+        }
         Ok(Response::new(EditFilesResponse {
             change: rewritten.change.as_ref().map(convert::change),
             operation,

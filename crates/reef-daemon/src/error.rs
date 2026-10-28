@@ -44,6 +44,7 @@ use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::subscribe::SubscribeError;
+use crate::symbols::SymbolError;
 use crate::workspace::ManagerError;
 
 pub use reef_client::error::{
@@ -99,6 +100,11 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<PresenceError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<SymbolError>() {
+            match error {
+                SymbolError::File(error) => file_advice(error),
+                error => error.advice(),
+            }
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
         } else if let Some(error) = error.downcast_ref::<RewriteError>() {
@@ -281,6 +287,31 @@ fn presence_reason(error: &PresenceError) -> Option<(&'static str, BTreeMap<Stri
         PresenceError::Invalid(_) | PresenceError::Ended | PresenceError::ShuttingDown => {
             return None;
         }
+    })
+}
+
+fn symbol_reason(error: &SymbolError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        SymbolError::Disabled => (reason::SYMBOLS_DISABLED, BTreeMap::new()),
+        SymbolError::NotIndexed { commit_id, missing } => (
+            reason::SYMBOLS_NOT_INDEXED,
+            meta(&[
+                ("commit_id", commit_id.clone()),
+                ("missing", missing.to_string()),
+            ]),
+        ),
+        SymbolError::InvalidQuery { field, .. } => (
+            reason::INVALID_SYMBOL_QUERY,
+            meta(&[("field", (*field).to_owned())]),
+        ),
+        SymbolError::InvalidUpload { field, .. } => (
+            reason::INVALID_UPLOAD,
+            meta(&[("field", (*field).to_owned())]),
+        ),
+        // Transparent: their sources are the inner error's sources.
+        SymbolError::File(error) => return file_reason(error),
+        _ => return None,
     })
 }
 
@@ -507,6 +538,8 @@ fn reason_and_metadata(
             subscribe_reason(error)
         } else if let Some(error) = error.downcast_ref::<PresenceError>() {
             presence_reason(error)
+        } else if let Some(error) = error.downcast_ref::<SymbolError>() {
+            symbol_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

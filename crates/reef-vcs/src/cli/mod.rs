@@ -40,6 +40,7 @@ pub(crate) mod scope;
 mod status;
 mod store;
 mod stream;
+mod symbols;
 mod ws;
 mod ws_move;
 mod ws_run;
@@ -232,6 +233,9 @@ enum Command {
     /// Read files and list directories at any revision.
     #[command(infer_subcommands = true)]
     File(file::Args),
+    /// Index and list symbols: definitions and references by file or name.
+    #[command(visible_alias = "sym", infer_subcommands = true)]
+    Symbols(symbols::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -541,6 +545,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
+        Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Daemon(args) => daemon::run(&global, out, args).await,

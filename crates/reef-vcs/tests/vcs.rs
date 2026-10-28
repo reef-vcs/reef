@@ -1888,3 +1888,169 @@ async fn ws_renew() {
         ["reef", "ws", "create", "--repo", &repo.id]
     );
 }
+
+/// A protobuf length-delimited field.
+fn field(out: &mut Vec<u8>, number: u32, bytes: &[u8]) {
+    varint(out, u64::from(number << 3 | 2));
+    varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+fn varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
+        value >>= 7;
+    }
+    out.push(u8::try_from(value).unwrap());
+}
+
+/// A SCIP index, encoded by hand: the tool, the project root, and for each
+/// path one definition of `f` at line 0, columns 4 to 5.
+fn scip_index(root: &str, paths: &[&str]) -> Vec<u8> {
+    let mut tool = Vec::new();
+    field(&mut tool, 1, b"scip-python");
+    field(&mut tool, 2, b"0.6.0");
+    let mut metadata = Vec::new();
+    field(&mut metadata, 2, &tool);
+    field(&mut metadata, 3, format!("file://{root}").as_bytes());
+    let mut index = Vec::new();
+    field(&mut index, 1, &metadata);
+    for path in paths {
+        let mut range = Vec::new();
+        for n in [0, 4, 5] {
+            varint(&mut range, n);
+        }
+        let mut occurrence = Vec::new();
+        field(&mut occurrence, 1, &range);
+        field(
+            &mut occurrence,
+            2,
+            format!("scip-python python x 1 `{path}`/f().").as_bytes(),
+        );
+        varint(&mut occurrence, 3 << 3);
+        varint(&mut occurrence, 1);
+        let mut document = Vec::new();
+        field(&mut document, 1, path.as_bytes());
+        field(&mut document, 2, &occurrence);
+        field(&mut index, 2, &document);
+    }
+    index
+}
+
+// 22 (R2.14)
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "the three commands and their exits")]
+async fn symbols_commands() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    write(&ws, "py/a.py", "def f():\n    return g()\n");
+    write(&ws, "py/b.py", "def f():\n    pass\n");
+    let dir = path(&ws);
+
+    // A file lists inline, with 1-based text and 0-based JSON.
+    let listed = ok(&daemon, &dir, &["symbols", "list", "py/a.py"]).await;
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["f", "g"], "{listed}");
+    assert_eq!(listed[0]["range"], serde_json::json!([0, 4, 0, 5]));
+    assert_eq!(listed[0]["kind"], "function");
+    assert_eq!(listed[0]["role"], "definition");
+    assert_eq!(
+        listed[1]["enclosing_symbol"],
+        "reef-tags . . . py/`a.py`/f()."
+    );
+    let text = run_in(&daemon, &dir, &["-o", "text", "sym", "ls", "py/a.py"]).await;
+    assert_eq!(
+        stdout(&text).lines().next(),
+        Some("py/a.py:1:5  function  definition  f")
+    );
+
+    // Not indexed yet: a name query says what to run.
+    let error = err(
+        &daemon,
+        &dir,
+        &["symbols", "list", "--name", "f"],
+        5,
+        "SYMBOLS_NOT_INDEXED",
+    )
+    .await;
+    assert_eq!(next_of(&error)[..3], ["reef", "symbols", "index"]);
+
+    // Index: exit 6 while indexing, 0 once complete.
+    let quick = run_in(&daemon, &dir, &["symbols", "index", "--wait", "0s"]).await;
+    if !quick.status.success() {
+        let error = failed(&quick, 6, "SYMBOLS_NOT_INDEXED");
+        assert_eq!(next_of(&error)[..3], ["reef", "symbols", "index"]);
+    }
+    let status = ok(&daemon, &dir, &["symbols", "index", "--wait", "5m"]).await;
+    assert_eq!(status["state"], "complete", "{status}");
+    assert!(status["languages"]["python"].as_u64().unwrap() >= 2);
+    let defs = ok(
+        &daemon,
+        &dir,
+        &["symbols", "list", "--name", "f", "--definitions"],
+    )
+    .await;
+    assert_eq!(defs.as_array().unwrap().len(), 2, "{defs}");
+    let funcs = ok(
+        &daemon,
+        &dir,
+        &[
+            "symbols", "list", "py", "--kind", "function", "--limit", "1",
+        ],
+    )
+    .await;
+    assert_eq!(funcs.as_array().unwrap().len(), 1);
+
+    // Upload: a.py accepted, b.py's file changed on disk (rejected), c.py unreadable (skipped).
+    let index_dir = tempfile::tempdir().unwrap();
+    let root = index_dir.path().join("py");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::copy(dir.join("py/a.py"), root.join("a.py")).unwrap();
+    std::fs::write(root.join("b.py"), "def f():\n    changed()\n").unwrap();
+    let file = index_dir.path().join("index.scip");
+    std::fs::write(
+        &file,
+        scip_index(root.to_str().unwrap(), &["a.py", "b.py", "c.py"]),
+    )
+    .unwrap();
+    let uploaded = ok(
+        &daemon,
+        &dir,
+        &[
+            "symbols",
+            "upload",
+            file.to_str().unwrap(),
+            "--prefix",
+            "py",
+        ],
+    )
+    .await;
+    assert_eq!(uploaded["accepted"], 1, "{uploaded}");
+    assert_eq!(uploaded["rejected"][0]["path"], "py/b.py");
+    assert_eq!(uploaded["rejected"][0]["reason"], "content_mismatch");
+    assert_eq!(uploaded["skipped"][0]["path"], "py/c.py");
+    assert_eq!(uploaded["skipped"][0]["reason"], "unreadable");
+    let scip = ok(&daemon, &dir, &["symbols", "list", "py/a.py"]).await;
+    assert_eq!(scip[0]["source"], "scip", "{scip}");
+
+    // Nothing accepted: exit 2.
+    std::fs::write(&file, scip_index(root.to_str().unwrap(), &["b.py"])).unwrap();
+    let output = run_in(
+        &daemon,
+        &dir,
+        &[
+            "symbols",
+            "upload",
+            file.to_str().unwrap(),
+            "--prefix",
+            "py",
+        ],
+    )
+    .await;
+    failed(&output, 2, "INVALID_UPLOAD");
+}

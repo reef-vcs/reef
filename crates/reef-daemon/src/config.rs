@@ -116,6 +116,16 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ("snapshot", &["max_new_file_size"]),
     ("repo", &["auto_register", "allow_foreign_owner"]),
     ("store", &["allow_builds"]),
+    (
+        "symbols",
+        &[
+            "enabled",
+            "background",
+            "workers",
+            "max_file_size",
+            "max_size",
+        ],
+    ),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -175,6 +185,8 @@ pub struct FileConfig {
     pub repo: RepoSection,
     /// `[store]`.
     pub store: StoreSection,
+    /// `[symbols]`.
+    pub symbols: SymbolsSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -531,6 +543,51 @@ pub struct StoreSection {
 impl Default for StoreSection {
     fn default() -> Self {
         Self { allow_builds: true }
+    }
+}
+
+/// `[symbols]`: the symbol index (R2.14, ADR 0042).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SymbolsSection {
+    /// The index runs. False: no background work, no database file, and
+    /// the `SymbolService` RPCs fail with `SYMBOLS_DISABLED`. Default true.
+    pub enabled: bool,
+    /// New snapshots' and edits' trees are indexed without being asked.
+    /// Default true.
+    pub background: bool,
+    /// Extraction threads, at low priority; 0 means a quarter of the cores,
+    /// from 1 to 4. Default 0; at most 64.
+    pub workers: usize,
+    /// Larger files are skipped, and uploads for them rejected. Default
+    /// 1 MiB; from 1 KiB to 16 MiB.
+    pub max_file_size: ByteSize,
+    /// The index's size per repository that GC evicts down to, never
+    /// evicting what live trees use. Default 2 GiB; at least 64 MiB.
+    pub max_size: ByteSize,
+}
+
+impl Default for SymbolsSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            background: true,
+            workers: 0,
+            max_file_size: ByteSize(1 << 20),
+            max_size: ByteSize(2 << 30),
+        }
+    }
+}
+
+impl SymbolsSection {
+    /// The extraction threads to run: `workers`, or a quarter of `cores`
+    /// from 1 to 4.
+    pub fn worker_count(&self, cores: usize) -> usize {
+        if self.workers == 0 {
+            (cores / 4).clamp(1, 4)
+        } else {
+            self.workers
+        }
     }
 }
 
@@ -1193,6 +1250,16 @@ impl Config {
                 "store",
                 vec![("allow_builds", f.store.allow_builds.to_string())],
             ),
+            (
+                "symbols",
+                vec![
+                    ("enabled", f.symbols.enabled.to_string()),
+                    ("background", f.symbols.background.to_string()),
+                    ("workers", f.symbols.workers.to_string()),
+                    ("max_file_size", s(&f.symbols.max_file_size.to_string())),
+                    ("max_size", s(&f.symbols.max_size.to_string())),
+                ],
+            ),
         ]
     }
 }
@@ -1423,6 +1490,21 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.log.keep_days >= 1,
             "log.keep_days",
             "must be at least 1".to_owned(),
+        ),
+        (
+            (1 << 10..=16 << 20).contains(&file.symbols.max_file_size.0),
+            "symbols.max_file_size",
+            "must be from 1KiB to 16MiB".to_owned(),
+        ),
+        (
+            file.symbols.max_size.0 >= 64 << 20,
+            "symbols.max_size",
+            "must be at least 64MiB".to_owned(),
+        ),
+        (
+            file.symbols.workers <= 64,
+            "symbols.workers",
+            "must be at most 64".to_owned(),
         ),
         (
             file.backup.sqlite_pages_per_step >= 1,

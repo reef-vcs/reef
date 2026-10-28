@@ -791,3 +791,84 @@ async fn edit_files_never_writes_through_a_symlink() {
     f.assert_alive().await;
     f.daemon.stop().await;
 }
+
+// R2.14: the symbol index parses repository content with C grammars in the
+// daemon. A symlink with a supported name is never read through, and
+// pathological files finish within the parse budget without taking the
+// daemon down.
+#[tokio::test(flavor = "multi_thread")]
+async fn symbols_parse_hostile_content() {
+    let daemon = TestDaemon::start().await;
+    let root = daemon.tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let readme = init_repo(&root, &[("README", "main\n")]);
+    let canary = daemon.tmp.path().join("canary.py");
+    std::fs::write(&canary, "def escaped():\n    pass\n").unwrap();
+    let before = std::fs::read(&canary).unwrap();
+    let nested = format!("const x = {}1{};\n", "[".repeat(20_000), "]".repeat(20_000));
+    let line = format!("var a = [{}];", "f(1),".repeat(220_000));
+    let line = &line[..(1 << 20) - 16];
+    let symlink = blob(&root, canary.to_str().unwrap().as_bytes());
+    let nested_blob = blob(&root, nested.as_bytes());
+    let line_blob = blob(&root, line.as_bytes());
+    let ok_blob = blob(&root, b"def fine():\n    pass\n");
+    let tree = raw_tree(
+        &root,
+        &[
+            (LINK, b"x.py", &symlink),
+            (FILE, b"nested.ts", &nested_blob),
+            (FILE, b"line.js", &line_blob),
+            (FILE, b"ok.py", &ok_blob),
+        ],
+    );
+    let main = commit_tree(&root, "refs/heads/main", &tree, Some(&readme));
+    let repo = daemon
+        .client
+        .register_repository(&root, IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap()
+        .repository
+        .unwrap()
+        .id;
+    let started = Instant::now();
+    let status = daemon
+        .client
+        .index_symbols(reef_api::v1::IndexSymbolsRequest {
+            repo: repo.clone(),
+            revision: main.clone(),
+            wait: Some(Duration::from_secs(120).try_into().unwrap()),
+            ..reef_api::v1::IndexSymbolsRequest::default()
+        })
+        .await
+        .unwrap()
+        .status
+        .unwrap();
+    assert_eq!(
+        status.state,
+        reef_api::v1::SymbolIndexState::Complete as i32
+    );
+    assert_eq!(status.files, 3, "the symlink is not counted: {status:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(std::fs::read(&canary).unwrap(), before);
+    let listed = daemon
+        .client
+        .list_symbols(reef_api::v1::ListSymbolsRequest {
+            repo: repo.clone(),
+            revision: main.clone(),
+            name: "escaped".into(),
+            ..reef_api::v1::ListSymbolsRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.symbols.len(),
+        0,
+        "nothing is indexed through the symlink"
+    );
+    // The daemon is still up.
+    daemon.client.status().await.unwrap();
+}

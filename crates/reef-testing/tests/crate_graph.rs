@@ -19,20 +19,21 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 8] = [
+const MEMBERS: [&str; 9] = [
     "reef-api",
     "reef-broker",
     "reef-client",
     "reef-daemon",
     "reef-error",
     "reef-lib",
+    "reef-symbols",
     "reef-testing",
     "reef-vcs",
 ];
 
 /// What the `reef` binary and the thin client must never link: the daemon,
 /// the jj layer, and what only they need (R2.05).
-const NOT_IN_THE_CLIENT: [&str; 7] = [
+const NOT_IN_THE_CLIENT: [&str; 9] = [
     "jj-lib",
     "reef-lib",
     "reef-daemon",
@@ -40,6 +41,8 @@ const NOT_IN_THE_CLIENT: [&str; 7] = [
     "rusqlite",
     "notify",
     "watchman_client",
+    "reef-symbols",
+    "tree-sitter",
 ];
 
 fn metadata() -> Value {
@@ -109,8 +112,12 @@ fn assert_no_dependency(metadata: &Value, from: &str, to: &str) {
 /// the daemon's, so nothing of jj, gRPC or the daemon's database.
 const NOT_IN_THE_BROKER: [&str; 6] = ["jj-lib", "tonic", "prost", "rusqlite", "gix", "hyper"];
 
+/// What the symbol extractor must not link (R2.14, ADR 0042): it takes bytes
+/// and returns symbols, for the daemon, the store and structural merge alike.
+const NOT_IN_SYMBOLS: [&str; 6] = ["jj-lib", "tonic", "rusqlite", "gix", "hyper", "tokio"];
+
 #[test]
-fn workspace_members_are_the_eight_crates() {
+fn workspace_members_are_the_nine_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -163,6 +170,14 @@ fn crate_edges() {
         reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-broker".to_owned()),
         "the daemon serves subscriptions through the broker"
     );
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-symbols", &shipped),
+        Vec::<String>::new()
+    );
+    assert!(
+        reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-symbols".to_owned()),
+        "the daemon extracts symbols"
+    );
 }
 
 /// R2.05 test 2: nothing the daemon or the jj layer links is reachable from
@@ -179,6 +194,13 @@ fn reef_binary_has_no_jj_lib() {
 
 /// R2.22 test 18: the broker links nothing of jj, gRPC or the daemon's
 /// database, and no Reef crate, over normal and build edges.
+#[test]
+fn reef_symbols_links_no_jj_grpc_or_sqlite() {
+    let metadata = resolved_metadata();
+    let reached = assert_unreachable(&metadata, "reef-symbols", &NOT_IN_SYMBOLS, true);
+    assert!(reached > 5, "reef-symbols: only {reached} packages reached");
+}
+
 #[test]
 fn reef_broker_links_no_jj_or_grpc() {
     let metadata = resolved_metadata();

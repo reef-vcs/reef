@@ -7,6 +7,7 @@ default-members = [
     "crates/reef-api",
     "crates/reef-client",
     "crates/reef-broker",
+    "crates/reef-symbols",
     "crates/reef-daemon",
     "crates/reef-vcs",
 ]
@@ -27,6 +28,7 @@ reef-lib = { path = "crates/reef-lib", version = "0.1.0" }
 reef-api = { path = "crates/reef-api", version = "0.1.0" }
 reef-client = { path = "crates/reef-client", version = "0.1.0" }
 reef-broker = { path = "crates/reef-broker", version = "0.1.0" }
+reef-symbols = { path = "crates/reef-symbols", version = "0.1.0" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.1.0" }
 reef-testing = { path = "crates/reef-testing", version = "0.1.0" }   # unpublished; see reef-daemon's `testing` feature
 
@@ -119,6 +121,19 @@ schemars = "1"                     # the tools' input schemas, the version rmcp 
 # `.mcp.json` (R2.13): Reef's entry merged without reordering the rest. Not serde_json's
 # `preserve_order`, which features unify across the build and would reorder `config show --json`.
 indexmap = { version = "2", features = ["serde"] }
+
+# The symbol index (R2.14, ADR 0042): tree-sitter tags extracted in the daemon. No `wasm`
+# (wasmtime) and no `bindgen`; grammar crates depend only on `tree-sitter-language`, so they are
+# not pinned to the core's version. `streaming-iterator` is what `QueryCursor::matches` returns.
+tree-sitter = { version = "0.27", default-features = false, features = ["std"] }
+streaming-iterator = "0.1"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"    # TypeScript and TSX; JavaScript goes through TSX
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+# SCIP's vendored schema (R2.14), compiled with protox like the API's. The version tonic-prost-build
+# already pulls in.
+prost-build = "0.14"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

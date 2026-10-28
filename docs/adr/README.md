@@ -53,3 +53,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0039](0039-carrying-edits-through-a-write.md) | Carrying edits through a write | accepted |
 | [0040](0040-gc-and-the-users-jj-workspaces.md) | GC and the user's jj workspaces | accepted |
 | [0041](0041-gc-on-a-timer.md) | GC on a timer | accepted |
+| [0042](0042-symbol-index.md) | Symbol index | accepted |

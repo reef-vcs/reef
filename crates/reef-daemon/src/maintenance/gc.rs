@@ -2,7 +2,7 @@
 //! and every `gc.interval` from the daemon's timer
 //! ([`super::timer`], #95, ADR 0041).
 //!
-//! Four steps per repository, in order, with creates of the repository held
+//! Five steps per repository, in order, with creates of the repository held
 //! off throughout (its create lock, exclusively):
 //!
 //! 1. **jj**: abandon the operations older than `keep_newer`, collect the
@@ -28,6 +28,11 @@
 //!    unused stores a forgotten repository built, and `.failed-*` and
 //!    `.replaced-*` directories from before `keep_newer`.
 //!    Creates in every repository wait while stores are removed.
+//! 5. **Symbols** (R2.14): the symbol index's entries and tree rows no
+//!    workspace's working copy uses and none used since `keep_newer`, and
+//!    then the least recently used down to `symbols.max_size`
+//!    (`symbols/gc.rs`). A failure is logged and the run goes on:
+//!    the index is a cache.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -396,7 +401,12 @@ async fn run_repo(
 
     let rest = clean_up(state, id, keep_newer, dry_run, store_leftovers).await;
 
-    // Whatever steps 2 to 4 came to: the jj step has rewritten the
+    // 5.
+    if let Err(error) = crate::symbols::gc::run(state, id, keep_newer, dry_run).await {
+        tracing::warn!(error = %ErrorChain(&error), "the symbols step of GC failed");
+    }
+
+    // Whatever steps 2 to 5 came to: the jj step has rewritten the
     // operation ids the index names.
     if !dry_run && let Some(handle) = &handle {
         reindex(state, handle, id).await;

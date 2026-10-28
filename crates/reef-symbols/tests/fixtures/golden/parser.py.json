@@ -1,0 +1,250 @@
+{
+  "has_errors": false,
+  "occurrences": [
+    {
+      "definition_range": [
+        2,
+        0,
+        2,
+        13
+      ],
+      "enclosing": null,
+      "kind": "Constant",
+      "name": "MAX_DEPTH",
+      "range": [
+        2,
+        0,
+        2,
+        9
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/MAX_DEPTH."
+    },
+    {
+      "definition_range": [
+        6,
+        0,
+        19,
+        40
+      ],
+      "enclosing": null,
+      "kind": "Class",
+      "name": "Parser",
+      "range": [
+        6,
+        6,
+        6,
+        12
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/Parser#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Parser",
+      "kind": "Class",
+      "name": "Base",
+      "range": [
+        6,
+        13,
+        6,
+        17
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Parser",
+      "kind": "Class",
+      "name": "Logged",
+      "range": [
+        6,
+        26,
+        6,
+        32
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        7,
+        4,
+        8,
+        24
+      ],
+      "enclosing": "Parser",
+      "kind": "Method",
+      "name": "__init__",
+      "range": [
+        7,
+        8,
+        7,
+        16
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/Parser#__init__()."
+    },
+    {
+      "definition_range": [
+        10,
+        4,
+        13,
+        33
+      ],
+      "enclosing": "Parser",
+      "kind": "Method",
+      "name": "parse",
+      "range": [
+        11,
+        8,
+        11,
+        13
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/Parser#parse()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "parse",
+      "kind": "Function",
+      "name": "tokenize",
+      "range": [
+        12,
+        17,
+        12,
+        25
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "parse",
+      "kind": "Function",
+      "name": "build",
+      "range": [
+        13,
+        20,
+        13,
+        25
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        15,
+        4,
+        19,
+        40
+      ],
+      "enclosing": "Parser",
+      "kind": "Method",
+      "name": "build",
+      "range": [
+        15,
+        8,
+        15,
+        13
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/Parser#build()."
+    },
+    {
+      "definition_range": [
+        16,
+        8,
+        17,
+        30
+      ],
+      "enclosing": "build",
+      "kind": "Function",
+      "name": "step",
+      "range": [
+        16,
+        12,
+        16,
+        16
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/Parser#build().step()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "step",
+      "kind": "Function",
+      "name": "emit",
+      "range": [
+        17,
+        19,
+        17,
+        23
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "build",
+      "kind": "Function",
+      "name": "step",
+      "range": [
+        19,
+        16,
+        19,
+        20
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "make_parser",
+      "kind": "Function",
+      "name": "register",
+      "range": [
+        22,
+        1,
+        22,
+        9
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        22,
+        0,
+        24,
+        23
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "make_parser",
+      "range": [
+        23,
+        4,
+        23,
+        15
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `parser.py`/make_parser()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "make_parser",
+      "kind": "Function",
+      "name": "Parser",
+      "range": [
+        24,
+        11,
+        24,
+        17
+      ],
+      "role": "Reference",
+      "symbol": null
+    }
+  ]
+}

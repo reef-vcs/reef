@@ -56,6 +56,9 @@ impl TestDaemon {
         let mut config = Config::with_defaults(paths);
         // No timed GC partway through a long test; a test turns it on.
         config.file.gc.interval = Duration::ZERO;
+        // No background indexing unless a test asks: timing tests must not
+        // share the CPU with a first index (R2.14).
+        config.file.symbols.background = false;
         configure(&mut config);
         let handle = Daemon::start(config.clone())
             .await
