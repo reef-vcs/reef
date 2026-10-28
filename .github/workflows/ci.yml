@@ -87,7 +87,10 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # macos-15 took 24 to 29 minutes on main by #96; the `heavy` group runs
+    # one test at a time (about 10 minutes there), and #95's GC timer tests
+    # added about 2 more.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
