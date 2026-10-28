@@ -65,7 +65,15 @@ Still to come in Phase 2: symbol-level diffs and a query layer, Python and TypeS
 
 ## Install
 
-Prebuilt binaries of the latest release, 0.1.0, for macOS and Linux on arm64 and x86_64 install with any one of these (the Linux binaries are static, so they run in any container). They have Phase 1 only; for what `main` adds, build from source below.
+**Ask your agent.** In the repository you want to use Reef in, give your coding agent (Claude Code, Codex, Cursor, or any agent with a shell) this prompt:
+
+```text
+Install Reef from https://github.com/reef-vcs/reef, then run `reef init` in this repository (with `--agents claude` if you are Claude Code) and walk me through anything I still need to do.
+```
+
+The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions: `AGENTS.md`, and `CLAUDE.md` and a skill for Claude Code when the repository already has its files or `--agents` names it. Later agent sessions then start in a workspace without being told. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
+
+**Or install it yourself.** Prebuilt binaries of the latest release, 0.1.0, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh   # ~/.local/bin, no sudo
@@ -73,19 +81,11 @@ brew install reef-vcs/tap/reef
 cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon
 ```
 
-The installer verifies the tarball against the release's `SHA256SUMS`, never prompts, and takes `REEF_VERSION` to pin a release and `REEF_INSTALL_DIR` to install elsewhere. The binaries are not signed or notarized yet (R4.17). `reef --version` names the commit and target a binary was built from.
+The installer checks the tarball against the release's `SHA256SUMS` and never prompts. The binaries are not signed or notarized yet (R4.17). The [quickstart](docs/quickstart.md#install) has the installer's options, the system requirements, and how to verify a tarball's provenance.
 
-From source, with a Rust toolchain: `cargo install --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`, which builds `main` and installs `reef` and the daemon it runs, `reef-daemon` (on `main`, `reef` contains no daemon of its own and looks for `reef-daemon` beside it, then on `PATH`), or in a checkout:
+The release has Phase 1 only. To use what `main` adds, build it with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. From a checkout, `cargo build --release` builds both into `target/release`. A build of `main` also reports 0.1.0; `reef --version` names the commit. Coming from 0.1.0, read [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) first.
 
-```sh
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
-reef daemon start
-cd /path/to/a/git/or/jj/repo
-reef ws run -- your-agent-command
-```
-
-`reef` alone prints the agent guide ([docs/agent-guide.md](docs/agent-guide.md)), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init` writes that guide into the repository's `AGENTS.md` (and `CLAUDE.md`, a Claude Code skill, and a Cursor rule when the repository uses them), so an agent starts in a workspace without being told; `reef init --check` in CI keeps them current. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
+Once installed, in a git or jj repository, `reef ws run -- <your agent command>` runs an agent in a fresh workspace. `reef` alone prints the [agent guide](docs/agent-guide.md), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init --check` in CI keeps the files `reef init` wrote current. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
 
 ## Roadmap
 
