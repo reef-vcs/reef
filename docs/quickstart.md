@@ -6,17 +6,9 @@ Reef gives each coding agent its own workspace: a copy-on-write copy of your git
 
 This page takes about ten minutes. The example repository is [`pillarjs/path-to-regexp`](https://github.com/pillarjs/path-to-regexp); any git or jj repository works. Output is from macOS, trimmed to the lines that matter (`...` marks the rest); the same steps were run on Linux with kernel overlayfs and with fuse-overlayfs, and the page says where Linux differs.
 
-> This page describes `main`, which is ahead of the latest release, 0.1.0. [Install](#install) says which steps 0.1.0 lacks and how to install `main`.
-
 ## Install
 
-Until the next release, the installer below gives you 0.1.0. Some steps on this page need `main`: `reef status`, `log`, `show`, `diff`, `describe`, `abandon`, `undo`, `op log`, `op watch` and `file read`, the `.mcp.json` that `reef init` writes, and the daemon's garbage collection timer (`[gc] interval`, which 0.1.0's daemon refuses to start on). With 0.1.0, [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0) in your checkout does what most of those commands do (`jj diff`, `jj log`, `jj file show` and the like), though 0.1.0's `reef ws gc` can leave `jj` there unable to load the repository ([#94](https://github.com/reef-vcs/reef/issues/94)). To follow every step, install `main` from source instead, with Rust 1.97.1 or later:
-
-```sh
-cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon
-```
-
-A build of `main` also reports 0.1.0, and `reef --version` names the commit it was built from. If you already run 0.1.0, read [Upgrading from 0.1](../CHANGELOG.md#upgrading-from-01) first. Otherwise, install the release:
+If you already run 0.1, read [Upgrading from 0.1](../CHANGELOG.md#upgrading-from-01) first.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh
@@ -24,16 +16,16 @@ reef --version
 ```
 
 ```text
-reef install: downloading reef 0.1.0 for aarch64-apple-darwin
-reef install: installed reef 0.1.0 (21887d1cd101, aarch64-apple-darwin) in /Users/you/.local/bin
+reef install: downloading reef 0.2.0 for aarch64-apple-darwin
+reef install: installed reef 0.2.0 (21887d1cd101, aarch64-apple-darwin) in /Users/you/.local/bin
 reef install: /Users/you/.local/bin is not on PATH; add this line to your shell's profile:
   export PATH="$HOME/.local/bin:$PATH"
-reef 0.1.0 (21887d1cd101, aarch64-apple-darwin)
+reef 0.2.0 (21887d1cd101, aarch64-apple-darwin)
 ```
 
-The installer checks the tarball against the release's `SHA256SUMS`, never prompts, and never uses `sudo`. `REEF_VERSION=0.1.0` pins a release and `REEF_INSTALL_DIR` installs elsewhere. Or install with `brew install reef-vcs/tap/reef`, or `cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`. Install both: `reef` runs the daemon from `reef-daemon`, beside it or on `PATH`. The tarballs and the formula carry shell completions; `reef completions zsh` prints them too. The binaries are not signed yet. From 0.1.0, the release workflow attests each tarball's build provenance: with a logged-in `gh`, `gh attestation verify reef-<version>-<target>.tar.gz --repo reef-vcs/reef` checks that a tarball was built by this repository's release workflow. The Linux binaries are static and run in any container.
+The installer checks the tarball against the release's `SHA256SUMS`, never prompts, and never uses `sudo`. `REEF_VERSION=0.2.0` pins a release and `REEF_INSTALL_DIR` installs elsewhere. Or install with `brew install reef-vcs/tap/reef`, or `cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon`, or build `main` from source with `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` (Rust 1.97.1 or later). Install both: `reef` runs the daemon from `reef-daemon`, beside it or on `PATH`. The tarballs and the formula carry shell completions; `reef completions zsh` prints them too. The binaries are not signed yet. From 0.1.0, the release workflow attests each tarball's build provenance: with a logged-in `gh`, `gh attestation verify reef-<version>-<target>.tar.gz --repo reef-vcs/reef` checks that a tarball was built by this repository's release workflow. The Linux binaries are static and run in any container.
 
-Reef needs macOS 13 or later on APFS, or Linux with kernel overlayfs (a daemon with `CAP_SYS_ADMIN`, typically root in a VM or container) or `fuse-overlayfs` on `PATH`, or btrfs or XFS for reflinks. A root daemon makes every client of its socket root and runs store builds as root, so use the kernel tier in a VM or container dedicated to the agents, and give it a state directory of its own (`REEF_STATE_DIR=/var/lib/reef`, say): it refuses one another user owns, such as yours under `sudo -E`. Anywhere else it copies, which works but is slow on large trees. In a container, put the state directory on a volume: kernel overlayfs cannot stack on the container's own overlay filesystem, so without one Reef uses fuse-overlayfs. On `main`, Reef doesn't need `jj`: `reef status`, `reef log`, `reef diff` and `reef undo` show and revert what agents did. If you use [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0), the version Reef is built on, it works in your checkout alongside Reef.
+Reef needs macOS 13 or later on APFS, or Linux with kernel overlayfs (a daemon with `CAP_SYS_ADMIN`, typically root in a VM or container) or `fuse-overlayfs` on `PATH`, or btrfs or XFS for reflinks. A root daemon makes every client of its socket root and runs store builds as root, so use the kernel tier in a VM or container dedicated to the agents, and give it a state directory of its own (`REEF_STATE_DIR=/var/lib/reef`, say): it refuses one another user owns, such as yours under `sudo -E`. Anywhere else it copies, which works but is slow on large trees. In a container, put the state directory on a volume: kernel overlayfs cannot stack on the container's own overlay filesystem, so without one Reef uses fuse-overlayfs. Reef doesn't need `jj`: `reef status`, `reef log`, `reef diff` and `reef undo` show and revert what agents did. If you use [jj 0.46](https://github.com/jj-vcs/jj/releases/tag/v0.46.0), the version Reef is built on, it works in your checkout alongside Reef.
 
 ## Start the daemon
 
@@ -255,7 +247,7 @@ backend = "auto"     # apfs, overlayfs, fuse-overlayfs, reflink, or copy
 backend = "auto"     # Watchman for repositories over 50,000 files when it is installed
 [gc]
 undo_window = "7d"   # snapshots and operations kept at least this long
-interval = "1d"      # how often the daemon collects garbage by itself; "0s" turns it off (main only)
+interval = "1d"      # how often the daemon collects garbage by itself; "0s" turns it off
 ```
 
 The daemon collects garbage daily: old snapshots, unused bases, and unused stores. `reef ws gc` runs it now, and `--dry-run` reports what it would free.

@@ -6,7 +6,7 @@
 # Never prompts and never uses sudo. Settings, all optional, from the
 # environment:
 #
-#   REEF_VERSION      the release to install, `0.1.0` or `v0.1.0`; default the
+#   REEF_VERSION      the release to install, `0.2.0` or `v0.2.0`; default the
 #                     latest. Pin it where many machines share an IP (CI).
 #   REEF_INSTALL_DIR  where the binaries go; default ~/.local/bin.
 #   REEF_INSTALL_URL  a base URL holding the release's tarballs and SHA256SUMS,

@@ -13,7 +13,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/reef-vcs/reef"
@@ -23,14 +23,14 @@ rust-version = "1.97.1"
 
 [workspace.dependencies]
 # Internal
-reef-error = { path = "crates/reef-error", version = "0.1.0" }
-reef-lib = { path = "crates/reef-lib", version = "0.1.0" }
-reef-api = { path = "crates/reef-api", version = "0.1.0" }
-reef-client = { path = "crates/reef-client", version = "0.1.0" }
-reef-broker = { path = "crates/reef-broker", version = "0.1.0" }
-reef-symbols = { path = "crates/reef-symbols", version = "0.1.0" }
-reef-daemon = { path = "crates/reef-daemon", version = "0.1.0" }
-reef-testing = { path = "crates/reef-testing", version = "0.1.0" }   # unpublished; see reef-daemon's `testing` feature
+reef-error = { path = "crates/reef-error", version = "0.2.0" }
+reef-lib = { path = "crates/reef-lib", version = "0.2.0" }
+reef-api = { path = "crates/reef-api", version = "0.2.0" }
+reef-client = { path = "crates/reef-client", version = "0.2.0" }
+reef-broker = { path = "crates/reef-broker", version = "0.2.0" }
+reef-symbols = { path = "crates/reef-symbols", version = "0.2.0" }
+reef-daemon = { path = "crates/reef-daemon", version = "0.2.0" }
+reef-testing = { path = "crates/reef-testing", version = "0.2.0" }   # unpublished; see reef-daemon's `testing` feature
 
 # Core
 jj-lib = "=0.46.0"

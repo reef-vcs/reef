@@ -65,9 +65,10 @@ jobs:
               echo "::error::publishing reef $version needs the tag v$version, Cargo.toml's workspace version; this run is for $REF"
               exit 1
             fi
-            # Fail now, not after the builds, if the release would have no notes.
-            scripts/release-notes.sh "$version" >/dev/null
           fi
+          # Fail now, not after the builds, if the release would have no
+          # notes; a dry run checks them too.
+          scripts/release-notes.sh "$version" >/dev/null
           echo "reef $version, publish: $publish"
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "publish=$publish" >>"$GITHUB_OUTPUT"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Prints CHANGELOG.md's section for a version, the GitHub Release's notes
 # (R1.28). The section runs from its `## [<version>]` or `## <version>`
-# heading to the next `## ` heading. A missing or empty section fails, and so
-# does the release. Read-only.
+# heading to the next `## ` heading, with relative links made absolute at the
+# tag. A missing or empty section fails, and so does the release. Read-only.
 #
 #   scripts/release-notes.sh <version> [changelog]
 
@@ -31,4 +31,10 @@ if [[ -z "$notes" ]]; then
     echo "error: $changelog has no section for $version (a \`## [$version]\` heading)" >&2
     exit 1
 fi
-printf '%s\n' "$notes"
+# The Release page is not the repository: a relative link (`docs/...`, or
+# `#anchor` within the changelog) points at the files as tagged.
+base="https://github.com/${GITHUB_REPOSITORY:-reef-vcs/reef}/blob/v$version"
+printf '%s\n' "$notes" | BASE="$base" perl -pe '
+    s{\]\((#[^)]*)\)}{]($ENV{BASE}/CHANGELOG.md$1)}g;
+    s{\]\((?![a-z][a-z0-9+.-]*:|#|/)([^)]+)\)}{]($ENV{BASE}/$1)}g;
+'
