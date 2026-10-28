@@ -68,10 +68,10 @@ Still to come in Phase 2: symbol-level diffs and a query layer, Python and TypeS
 **Ask your agent.** In the repository you want to use Reef in, give your coding agent (Claude Code, Codex, Cursor, or any agent with a shell) this prompt:
 
 ```text
-Install Reef from https://github.com/reef-vcs/reef, then run `reef init` in this repository (with `--agents claude` if you are Claude Code) and walk me through anything I still need to do.
+Install Reef from https://github.com/reef-vcs/reef, then run `reef init` in this repository and walk me through anything I still need to do.
 ```
 
-The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions: `AGENTS.md`, and `CLAUDE.md` and a skill for Claude Code when the repository already has its files or `--agents` names it. Later agent sessions then start in a workspace without being told. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
+The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions: `AGENTS.md`, which most agents read, plus the files of any harness the repository already has files for. Claude Code, which reads `CLAUDE.md` instead, is recognized when it runs `reef init` and gets its files either way. Later agent sessions then start in a workspace without being told. That recognition is new on `main`; with 0.1.0, in a repository with no Claude Code files yet, run `reef init --agents claude`. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
 
 **Or install it yourself.** Prebuilt binaries of the latest release, 0.1.0, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
 
