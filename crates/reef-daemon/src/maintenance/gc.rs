@@ -31,8 +31,9 @@
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
 //! nothing younger than the undo window, or than the last backup's
-//! retention, is deleted. GC never touches a workspace directory, a base an
-//! active workspace uses, or the user's `default` workspace.
+//! retention, is deleted. GC never touches a workspace directory or a base
+//! an active workspace uses, and writes nothing of the user's jj workspaces
+//! but the operation their working copy names (ADR 0040).
 
 use std::collections::HashSet;
 use std::io;

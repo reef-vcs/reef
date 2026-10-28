@@ -2,6 +2,8 @@
 //! eviction, ended workspace rows, the maintenance lock, and the working
 //! copies GC rebinds. Numbered as the brief numbers them. The brief's test
 //! configuration: `gc.undo_window = "0s"`, `base_cache.max_entries = 1`.
+//! The registered root's own jj checkout after GC (issue #94) is tested at
+//! the end, with the default undo window over backdated history.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,12 +16,16 @@ mod common;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::process::Output;
+use std::time::{Duration, Instant, SystemTime};
 
 use common::{SyntheticRepo, TestDaemon, test_settings};
 use jj_lib::backend::CommitId;
+use jj_lib::config::{ConfigLayer, ConfigSource};
+use jj_lib::lock::FileLock;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::settings::UserSettings;
 use reef_api::v1::{
     Attention, CreateWorkspaceRequest, GcReport, Workspace, create_workspace_request,
 };
@@ -28,7 +34,7 @@ use reef_daemon::model::WorkspaceId;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
 use reef_lib::jj::revset::RevisionError;
-use reef_testing::synth::Preset;
+use reef_testing::synth::{self, Preset, Spec};
 
 const OWNER: &str = "tester@host";
 
@@ -559,7 +565,7 @@ async fn stranded_working_copy_is_repaired_at_start() {
     tokio::task::spawn_blocking(move || {
         pollster::block_on(async {
             let mut main = Repo::open(&root, &test_settings()).await.unwrap();
-            main.gc(std::time::SystemTime::now()).await.unwrap();
+            main.gc(SystemTime::now()).await.unwrap();
         });
     })
     .await
@@ -870,4 +876,181 @@ async fn gc_with_an_undo_window_keeps_subscriptions() {
         (tonic::Code::FailedPrecondition, "OPERATION_LOG_REWRITTEN"),
         "{error:?}"
     );
+}
+
+const DAY: Duration = Duration::from_hours(24);
+
+/// `test_settings()` with every operation stamped `at`.
+fn settings_at(at: SystemTime) -> UserSettings {
+    let mut config = test_settings().config().clone();
+    let stamp = time::OffsetDateTime::from(at)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
+            &format!("debug.operation-timestamp = {stamp:?}"),
+        )
+        .unwrap(),
+    );
+    UserSettings::from_config_and_home_dir(config, None).unwrap()
+}
+
+/// Sets the mtime of every operation and view file under `root` to `at`.
+fn age_op_store(root: &Path, at: SystemTime) {
+    for dir in ["operations", "views"] {
+        let dir = root.join(".jj/repo/op_store").join(dir);
+        for entry in std::fs::read_dir(dir).unwrap() {
+            std::fs::File::open(entry.unwrap().path())
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+    }
+}
+
+/// #94's shape: a registered repository whose history is ten days old but
+/// for a recent snapshot in the root, which the root's working copy names.
+/// The default undo window (a week); explicit snapshots only.
+async fn old_root_fixture() -> (TestDaemon, SyntheticRepo) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_env("TEST_LOG"))
+        .with_test_writer()
+        .try_init();
+    let daemon = TestDaemon::start_with(|config| config.file.base_cache.max_entries = 1).await;
+    let root = daemon.tmp.path().join("repo");
+    let at = root.clone();
+    tokio::task::spawn_blocking(move || {
+        synth::generate(&at, &Spec::preset(Preset::Small), 7, false).unwrap();
+        let old = SystemTime::now() - 10 * DAY;
+        let mut repo = pollster::block_on(Repo::init_internal_git(&at, &settings_at(old))).unwrap();
+        pollster::block_on(repo.snapshot("snapshot")).unwrap();
+        std::fs::write(at.join("old.txt"), "old\n").unwrap();
+        pollster::block_on(repo.snapshot("old")).unwrap();
+        age_op_store(&at, old);
+        let mut repo = pollster::block_on(Repo::open(&at, &test_settings())).unwrap();
+        std::fs::write(at.join("root.txt"), "recent\n").unwrap();
+        assert!(pollster::block_on(repo.snapshot("recent")).unwrap().changed);
+    })
+    .await
+    .unwrap();
+    let registered = daemon
+        .client
+        .register_repository(&root, reef_api::v1::IfNotJj::Fail)
+        .await
+        .unwrap();
+    let repo = SyntheticRepo {
+        root: std::fs::canonicalize(&root).unwrap(),
+        id: registered.repository.unwrap().id,
+    };
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    (daemon, repo)
+}
+
+/// Runs the `jj` CLI in `dir` with no user config, or `None` unless `jj`
+/// 0.46 is on `PATH`.
+#[allow(
+    clippy::print_stdout,
+    reason = "a skipped CLI check says so in the test output"
+)]
+fn jj(dir: &Path, args: &[&str]) -> Option<Output> {
+    let version = std::process::Command::new("jj")
+        .arg("--version")
+        .output()
+        .ok()?;
+    let version = String::from_utf8_lossy(&version.stdout).into_owned();
+    if !version.trim().starts_with("jj 0.46.") {
+        println!("skipped: jj CLI is {:?}, not 0.46.x", version.trim());
+        return None;
+    }
+    Some(
+        std::process::Command::new("jj")
+            .args(args)
+            .current_dir(dir)
+            .env("JJ_CONFIG", dir.join(".jj/no-jj-config.toml"))
+            .output()
+            .expect("run jj"),
+    )
+}
+
+/// Issue #94 end to end: after `reef ws gc` abandons operations older than
+/// the window, `jj` in the registered root works with no `update-stale`,
+/// and the root's `@` and files are unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn root_jj_works_after_gc() {
+    let (daemon, repo) = old_root_fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "ws.txt", "in the workspace\n");
+    snapshot(&daemon, &repo, &ws).await;
+    let at = open(&repo.root).await.wc_change().unwrap();
+    let ops_before = op_count(&repo.root).await;
+
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+    let ops = op_count(&repo.root).await;
+    assert!(ops < ops_before, "{ops} of {ops_before} operations left");
+    let mut root = open(&repo.root).await;
+    assert_eq!(root.wc_change().unwrap(), at);
+    tokio::task::spawn_blocking(move || pollster::block_on(root.reload_at_working_copy_op()))
+        .await
+        .unwrap()
+        .expect("the root's operation loads");
+    assert_eq!(
+        std::fs::read_to_string(repo.root.join("root.txt")).unwrap(),
+        "recent\n"
+    );
+    write(&ws, "after-gc.txt", "after\n");
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+
+    let ops = op_count(&repo.root).await;
+    if let Some(st) = jj(&repo.root, &["st"]) {
+        assert!(st.status.success(), "{st:?}");
+        assert_eq!(op_count(&repo.root).await, ops, "jj st recorded nothing");
+        let log = jj(&repo.root, &["op", "log", "--limit", "3"]).unwrap();
+        assert!(log.status.success(), "{log:?}");
+    }
+}
+
+/// While a `jj` command holds the root's working-copy lock, GC abandons
+/// nothing and says why; once it is free, GC does.
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_abandons_nothing_while_the_root_is_locked() {
+    let (daemon, repo) = old_root_fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "ws.txt", "in the workspace\n");
+    snapshot(&daemon, &repo, &ws).await;
+    let ops = op_count(&repo.root).await;
+    let lock = FileLock::lock(repo.root.join(".jj/working_copy/working_copy.lock")).unwrap();
+
+    let report = gc(&daemon, &repo, false).await;
+    for part in [
+        "no operations were abandoned",
+        "jj workspace `default`",
+        &repo.root.display().to_string(),
+        "locked",
+    ] {
+        assert!(report.jj_error.contains(part), "{part}: {report:?}");
+    }
+    assert_eq!(op_count(&repo.root).await, ops);
+    write(&ws, "during.txt", "during\n");
+    let ops = op_count(&repo.root).await;
+    assert!(
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &ws.id, "")
+            .await
+            .unwrap()
+            .changed
+    );
+    assert_eq!(op_count(&repo.root).await, ops + 1);
+
+    drop(lock);
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+    assert!(op_count(&repo.root).await <= ops);
 }

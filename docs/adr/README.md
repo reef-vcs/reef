@@ -51,3 +51,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0037](0037-presence-channel.md) | Presence channel | accepted |
 | [0038](0038-subscription-broker.md) | Subscription broker | accepted |
 | [0039](0039-carrying-edits-through-a-write.md) | Carrying edits through a write | accepted |
+| [0040](0040-gc-and-the-users-jj-workspaces.md) | GC and the user's jj workspaces | accepted |

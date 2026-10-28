@@ -19,9 +19,10 @@
 //! next GC (before it snapshots) move them to the head
 //! ([`reef_lib::jj::Repo::rebind_if_stranded`]).
 //!
-//! The user's own `default` workspace is not touched; the next `jj` command
-//! there reports a stale working copy, which `jj workspace update-stale`
-//! resolves.
+//! The user's own jj workspaces (`default` at the root, any `jj workspace
+//! add`) are moved by [`reef_lib::jj::Repo::gc`] itself, under jj's
+//! working-copy lock; while a `jj` command holds one, nothing is abandoned
+//! (ADR 0040).
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
@@ -120,6 +121,11 @@ impl Manager {
             Ok(outcome) => {
                 step.reindex_ms = u64::try_from(outcome.reindex.as_millis()).unwrap_or(u64::MAX);
                 step.operations_abandoned = outcome.operations_abandoned;
+                if let Some(blocked) = outcome.abandon_blocked {
+                    step.error = Some(format!(
+                        "no operations were abandoned: {blocked}; run reef ws gc again when it finishes"
+                    ));
+                }
             }
             Err(error) => step.error = Some(ErrorChain(&error).to_string()),
         }
