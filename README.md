@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 1 (leased copy-on-write workspaces) is complete and released as [0.1.0](https://github.com/reef-vcs/reef/releases/tag/v0.1.0) (2026-10-25), with prebuilt binaries for macOS and Linux. Phase 2 (typed API, MCP server, and live state) is in progress on `main` and not yet released. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is in progress, and its work so far is released as [0.2.0](https://github.com/reef-vcs/reef/releases/tag/v0.2.0) (2026-10-28), with prebuilt binaries for macOS and Linux. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -36,9 +36,9 @@ A **proposal** is the unit of review: a change or stack of changes, with its evi
 
 ## What runs today
 
-Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositories. Release 0.1.0 is Phase 1, which replaces git worktrees for agents. `main` adds the Phase 2 work that has landed since; it is unreleased, so [build from source](#install) to use it, after reading [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01).
+Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositories. Release 0.1.0 was Phase 1, which replaces git worktrees for agents, and 0.2.0 adds the Phase 2 work so far. Coming from 0.1, read [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) first.
 
-### Released in 0.1.0 (Phase 1)
+### Phase 1 (0.1.0)
 
 - **A local daemon** (`reef daemon run|start|stop|status`) serving gRPC over a Unix socket, with its state, configuration, and logs under a per-user state directory. It serves many repositories; the first `reef` command in a checkout registers it, and in a plain git checkout first creates jj's side of a colocated repository (`.jj/` plus one line in `.git/info/exclude`).
 - **Leased workspaces.** `reef ws create` materializes a workspace on a change in a second or two on a 100k-file repository (under half a second on overlayfs), `reef ws run` runs a command inside a fresh workspace with the lease heartbeated for the life of the process and the workspace released on exit, `reef ws move` puts another change in a workspace's directory without giving up its lease, and `reef ws list|inspect|release` manage them. When an agent dies, its lease expires, a final snapshot lands in the store, and the directory is reclaimed. Nothing is lost.
@@ -51,7 +51,7 @@ Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositor
 - **Benchmarks** for snapshot cost and workspace creation on synthetic repositories of 1k to 100k files, published from CI on both platforms. See [docs/benchmarks.md](docs/benchmarks.md) for the numbers against the Phase 1 exit criteria.
 - **An onboarding benchmark.** A real Claude Code agent that has never seen Reef, given only `reef` on `PATH`, after `reef init`, with Reef not yet installed, and inside `reef ws run`: tool calls, failed `reef` calls, tokens, and cost to a working workspace, three trials each, run in CI on demand. See [docs/onboarding-benchmark.md](docs/onboarding-benchmark.md).
 
-### On `main` since 0.1.0 (Phase 2, unreleased)
+### Phase 2 so far (0.2.0)
 
 - **A typed API and a thin CLI.** The daemon serves `reef.api.v1`, a versioned protobuf schema checked by `buf` lint and breaking-change checks in CI ([ADR 0029](docs/adr/0029-daemon-api-v1.md)). The `reef` binary is a client of it with no jj-lib of its own ([ADR 0033](docs/adr/0033-thin-client.md)).
 - **Changes without jj.** `reef status`, `log`, `show`, `diff`, `describe`, `abandon`, `undo`, `op log`, `op show`, `ws snapshot`, `file read` and `file list` look at and revert what agents did, from a workspace or the checkout, with JSON for each and a `next` command on every error with a known fix ([ADR 0034](docs/adr/0034-cli-over-the-vcs-services.md)). The API also reads files, lists directories, and applies edits at any revision without a workspace directory ([ADR 0032](docs/adr/0032-files-without-a-workspace.md)).
@@ -71,9 +71,9 @@ Still to come in Phase 2: symbol-level diffs and a query layer, Python and TypeS
 Install Reef from https://github.com/reef-vcs/reef, then run `reef init` in this repository and walk me through anything I still need to do.
 ```
 
-The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions to `AGENTS.md`, plus the files of each agent that reads its own instead: those the repository already has files for, and the agent running `reef init` when Reef recognizes it. Later agent sessions then start in a workspace without being told. Recognizing the agent running it is new on `main`; with 0.1.0, name your agent with `reef init --agents` (`reef init --help` lists them) when the repository has none of its files yet. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
+The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions to `AGENTS.md`, plus the files of each agent that reads its own instead: those the repository already has files for, and the agent running `reef init` when Reef recognizes it. Later agent sessions then start in a workspace without being told. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
 
-**Or install it yourself.** Prebuilt binaries of the latest release, 0.1.0, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
+**Or install it yourself.** Prebuilt binaries of the latest release, 0.2.0, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh   # ~/.local/bin, no sudo
@@ -83,7 +83,7 @@ cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon
 
 The installer checks the tarball against the release's `SHA256SUMS` and never prompts. The binaries are not signed or notarized yet (R4.17). The [quickstart](docs/quickstart.md#install) has the installer's options, the system requirements, and how to verify a tarball's provenance.
 
-The release has Phase 1 only. To use what `main` adds, build it with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. From a checkout, `cargo build --release` builds both into `target/release`. A build of `main` also reports 0.1.0; `reef --version` names the commit. Coming from 0.1.0, read [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) first.
+To build from source, with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. It builds `main`, which can be ahead of the release; `reef --version` names the commit. From a checkout, `cargo build --release` builds both into `target/release`. Coming from 0.1, read [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) first.
 
 Once installed, in a git or jj repository, `reef ws run -- <your agent command>` runs an agent in a fresh workspace. `reef` alone prints the [agent guide](docs/agent-guide.md), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init --check` in CI keeps the files `reef init` wrote current. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
 
@@ -92,7 +92,7 @@ Once installed, in a git or jj repository, `reef ws run -- <your agent command>`
 Reef builds on Jujutsu's data model and Rust crates rather than starting clean. Each phase ships something independently useful.
 
 1. **Leased copy-on-write workspaces** (complete, released as 0.1.0). A daemon that creates workspaces via overlayfs or APFS clones, snapshots on a filesystem watcher, heartbeats leases, and reclaims expired workspaces with a final snapshot. Shared dependency store mounting. Ships as a standalone tool against existing git and jj repositories. This alone removes the worktree problem.
-2. **Typed API, MCP server, and live state** (in progress). Structured status, snapshot, diff, log, and undo over a local socket, with the CLI as a client. Live operation and presence streams. Symbol-level diffs for the first supported languages. A local web UI showing the fleet live.
+2. **Typed API, MCP server, and live state** (in progress; the work so far released as 0.2.0). Structured status, snapshot, diff, log, and undo over a local socket, with the CLI as a client. Live operation and presence streams. Symbol-level diffs for the first supported languages. A local web UI showing the fleet live.
 3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that batches rebased proposals, runs checks on the batch head, and bisects on failure. The triage inbox ships here as a web UI, then as a desktop app and as iOS and Android apps, so a human can steer and approve agents from anywhere.
 4. **Shared lazy object store.** A store server speaking the native protocol, with lazy fetch into the local cache and federation between stores.
 5. **Structural merge.** Tree-sitter based merge, starting from [Mergiraf](https://mergiraf.org), for Python, TypeScript, Go, and Rust.

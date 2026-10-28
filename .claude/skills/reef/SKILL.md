@@ -4,7 +4,7 @@ description: Isolate work in this repository in a Reef workspace (reef ws run), 
 generated-by: reef init
 ---
 
-Written by `reef init` (reef 0.1.0); `reef guide` prints the current guide.
+Written by `reef init` (reef 0.2.0); `reef guide` prints the current guide.
 
 # Reef
 

@@ -112,7 +112,7 @@ harness = false
 
 [dev-dependencies]
 # Without default features, so `--no-default-features` test builds really leave `watchman` off.
-reef-daemon = { path = ".", version = "0.1.0", default-features = false, features = ["testing"] }
+reef-daemon = { path = ".", version = "0.2.0", default-features = false, features = ["testing"] }
 jj-lib.workspace = true          # tests/workspaces.rs sets a bookmark the way `jj bookmark set` does
 serde_json.workspace = true
 tempfile.workspace = true

@@ -4,6 +4,10 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+The first release of Phase 2: a typed API, `reef.api.v1`, with the CLI as a thin client of it, so `reef` now needs `reef-daemon` beside it or on `PATH`; commands that look at and revert what agents did without jj; an MCP server; live operation and presence streams; a symbol index; and garbage collection on a timer. Coming from 0.1, read [Upgrading from 0.1](#upgrading-from-01) first.
+
 ### Added
 
 - The symbol index ([ADR 0042](docs/adr/0042-symbol-index.md)): `SymbolService` with `IndexSymbols`, `UploadScipDocuments` and `ListSymbols` (API revision 7). The daemon extracts tree-sitter tags for Python, TypeScript, TSX, JavaScript, Go and Rust itself, in the background for new snapshots and edits and on demand, and stores definitions and references with their ranges and enclosing definitions in a per-repository cache (`repos/<id>/symbols.sqlite3`), keyed by path and file content so unchanged files share entries across revisions. SCIP documents an indexer wrote are uploaded and checked against the file they describe. Four error reasons: `SYMBOLS_DISABLED`, `SYMBOLS_NOT_INDEXED`, `INVALID_SYMBOL_QUERY` and `INVALID_UPLOAD`. GC collects the index as its fifth step.
@@ -63,11 +67,12 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - Commands other than `reef config show` read only `daemon.socket`, `daemon.pid_file` and `repo.auto_register` from `config.toml`, so an unrelated bad key no longer stops them; the daemon still refuses to start on it, and `reef config show` names it.
 - `reef-vcs` re-exports `reef-api` and `reef-client` instead of `reef-lib` and `reef-daemon`, and its `watchman` feature is gone.
 - `ws create --change`/`--new-on`, `ws move`, and `store build --rev` take a jj revset naming one commit, resolved in jj's order: tags, bookmarks, commit id prefixes, then change id prefixes. A bookmark whose name is also an id prefix (`cafe`) now names the bookmark, and hex text that prefixes both a commit id and a change id names the commit. A divergent change id or a conflicted bookmark is now `invalid_argument` (exit 2, reason `AMBIGUOUS_REVISION`, with the commits in the hint) instead of `conflict` (exit 5).
-
 - Operation subscriptions are served from an in-memory broker ([ADR 0038](docs/adr/0038-subscription-broker.md)): the daemon reads each new operation once per followed repository, however many subscribe, and reads the log for a subscriber only behind the ring. Frames are unchanged.
 - `reef-daemon` raises its open-file limit at start (to 10,240 on macOS, 65,536 elsewhere, within the hard limit) and logs it, so hundreds of clients can connect to a daemon started from a shell whose limit is 256. At the limit it backs off accepting for 100 ms and warns, instead of spinning a core in the accept loop.
 
 ### Upgrading from 0.1
+
+`reef` no longer contains the daemon: install `reef-daemon` with it (`cargo install` and `cargo binstall` take both crate names; the tarballs and the Homebrew formula carry both).
 
 A 0.1 daemon keeps running after the binaries are replaced. The first `reef` command restarts it when it has no active workspaces. Otherwise the command fails with exit code 9 and `next` set to `reef daemon stop`: stop it once its `ws run` sessions end, and the next command starts the new one. A 0.1 `reef` against the new daemon is told to upgrade (exit 5); its `daemon status` and `daemon stop` keep working.
 

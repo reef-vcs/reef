@@ -4,7 +4,7 @@ This is a stub. The full disclosure policy arrives with R6.05 ([docs/dev-phases.
 
 ## Supported versions
 
-None yet. Reef is pre-release and nothing has been published for use, so no version receives security fixes. Fixes land on `main`.
+Reef is pre-1.0. Security fixes land on `main` and ship in the next release; no earlier release receives them, so run the latest.
 
 ## Reporting a vulnerability
 
