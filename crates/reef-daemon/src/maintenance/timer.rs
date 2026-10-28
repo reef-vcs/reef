@@ -2,10 +2,12 @@
 //! itself every `gc.interval`, over every repository, through
 //! [`super::gc::run_timed`].
 //!
-//! A run is due at the latest of `meta.last_gc_at + interval` (a last run
-//! in the future counts as now), `start_delay` after the timer started, and
-//! an in-memory floor: `interval` after the last timed run, or `busy_retry`
-//! after the maintenance lock was found held. `meta.last_gc_at` is written
+//! A run is due at the latest of `meta.last_gc_at + interval`, `start_delay`
+//! after the timer started, and an in-memory floor: `interval` after the
+//! last timed run, or `busy_retry` after the maintenance lock was found
+//! held. After the clock goes back, a last run in the future is ignored and
+//! the floor is pulled back to at most an interval from now, so a skewed
+//! clock never postpones GC by the size of the skew. `meta.last_gc_at` is written
 //! by timed runs and by manual full runs, so a restart does not reset the
 //! clock and `reef ws gc` postpones the next timed run.
 //!
@@ -73,19 +75,26 @@ pub(crate) trait Runner: Send + Sync + 'static {
     fn run(&self) -> impl Future<Output = Ran> + Send;
 }
 
-/// How long from `now` until a run is due: at `last + interval` (a `last`
-/// in the future counts as `now`), but not before `earliest`.
+/// How long from `now` until a run is due: at `last + interval`, but not
+/// before `earliest`. A `last` in the future (the clock went back) is
+/// ignored, as if no run were recorded.
 pub(crate) fn wait(
     interval: Duration,
     now: SystemTime,
     last: Option<SystemTime>,
     earliest: SystemTime,
 ) -> Duration {
-    let due = match last {
-        Some(last) => (last.min(now) + interval).max(earliest),
+    let due = match last.filter(|last| *last <= now) {
+        Some(last) => later(last, interval).max(earliest),
         None => earliest,
     };
     due.duration_since(now).unwrap_or(Duration::ZERO)
+}
+
+/// `at + by`, saturating instead of panicking on an absurd interval.
+fn later(at: SystemTime, by: Duration) -> SystemTime {
+    at.checked_add(by)
+        .unwrap_or_else(|| at + Duration::from_secs(1 << 40))
 }
 
 /// The timer's task, in a shutdown hook from before it starts.
@@ -140,7 +149,9 @@ async fn run_loop(
     stop: CancellationToken,
 ) {
     let started = runner.now();
-    let mut floor = started + limits.start_delay;
+    let mut floor = later(started, limits.start_delay);
+    // No floor is ever set further ahead than this.
+    let longest = interval.max(limits.start_delay).max(limits.busy_retry);
     tracing::info!(
         interval_ms = millis(interval),
         wait_ms = millis(wait(interval, started, runner.last_run(), floor)),
@@ -148,6 +159,7 @@ async fn run_loop(
     );
     loop {
         let now = runner.now();
+        floor = floor.min(later(now, longest));
         let until = wait(interval, now, runner.last_run(), floor);
         if !until.is_zero() {
             tokio::select! {
@@ -161,13 +173,13 @@ async fn run_loop(
         }
         // Never in a select: nothing may cut a run short.
         match runner.run().await {
-            Ran::Done => floor = runner.now() + interval,
+            Ran::Done => floor = later(runner.now(), interval),
             Ran::Busy => {
                 tracing::info!(
                     retry_ms = millis(limits.busy_retry),
                     "timed GC deferred: maintenance in progress"
                 );
-                floor = runner.now() + limits.busy_retry;
+                floor = later(runner.now(), limits.busy_retry);
             }
         }
     }
@@ -249,9 +261,17 @@ mod tests {
 
     // 3
     #[test]
-    fn a_last_run_in_the_future_counts_as_now() {
+    fn a_last_run_in_the_future_is_ignored() {
         let now = at(DAY);
-        assert_eq!(wait(DAY, now, Some(now + 5 * DAY), now), DAY);
+        assert_eq!(
+            wait(DAY, now, Some(now + 5 * DAY), now + 10 * MIN),
+            10 * MIN
+        );
+        assert_eq!(
+            wait(Duration::MAX, now, Some(now), now),
+            Duration::from_secs(1 << 40),
+            "an absurd interval saturates"
+        );
     }
 
     /// A wall clock that follows tokio's paused one, plus a jump the test
@@ -361,6 +381,16 @@ mod tests {
         // The machine slept 3 days; tokio's clock did not move meanwhile.
         *fake.jump.lock().unwrap() = 3 * DAY;
         until(&fake, 10 * MIN + Duration::from_secs(1)).await;
+        assert_eq!(fake.runs(), 1);
+    }
+
+    // 3, in the loop: a clock set back after a run does not postpone the
+    // next by the size of the skew.
+    #[tokio::test(start_paused = true)]
+    async fn a_clock_set_back_runs_within_the_start_delay() {
+        let fake = Fake::new(Some(at(30 * DAY)), None);
+        let (_timer, _stop) = start(&fake);
+        until(&fake, 11 * MIN).await;
         assert_eq!(fake.runs(), 1);
     }
 

@@ -1187,9 +1187,9 @@ async fn timed_gc_with_a_locked_root_abandons_nothing_and_finishes() {
     assert!(base_dirs(&daemon, &repo).contains(&released));
     let ops = op_count(&repo.root).await;
 
-    // Locked once the daemon is up, before the timer's first run.
-    let daemon = restart_with_the_timer(daemon, Duration::from_secs(3)).await;
+    // Locked across the restart, so the first timed run finds it held.
     let lock = FileLock::lock(repo.root.join(".jj/working_copy/working_copy.lock")).unwrap();
+    let daemon = restart_with_the_timer(daemon, Duration::ZERO).await;
     wait_for_a_full_run(&daemon).await;
     assert_eq!(op_count(&repo.root).await, ops, "nothing abandoned");
     assert!(

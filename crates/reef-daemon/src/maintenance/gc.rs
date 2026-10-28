@@ -53,6 +53,7 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::telemetry::elapsed_ms;
 
 use crate::backend::BaseCacheError;
+use crate::backend::base_cache::Evicted;
 use crate::config::{BackupSection, GcSection};
 use crate::daemon::AppState;
 use crate::db::{DbError, META_LAST_BACKUP_AT, META_LAST_GC_AT};
@@ -294,7 +295,7 @@ pub async fn run_timed(state: &AppState) -> TimedRun {
     let (records, last_backup) = match listed {
         Ok(listed) => listed,
         Err(error) => {
-            tracing::error!(error = %ErrorChain(&error), "timed GC cannot read the repositories; the next run retries");
+            tracing::error!(error = %ErrorChain(&error), "timed GC cannot read the repositories; it retries at the next interval");
             return run;
         }
     };
@@ -304,15 +305,20 @@ pub async fn run_timed(state: &AppState) -> TimedRun {
         return run;
     }
     tracing::info!(repo_count = records.len(), "timed GC started");
+    // The stores no repository owns go with the first report that gets
+    // through: a first repository that keeps failing must not keep them.
+    let mut leftovers = true;
     for (index, record) in records.iter().enumerate() {
         if state.shutdown.is_cancelled() {
             run.skipped = records.len() - index;
             tracing::info!(skipped_count = run.skipped, "timed GC stopped for shutdown");
             return run;
         }
-        let leftovers = index == 0;
         match run_repo(state, record, last_backup, false, leftovers, Trigger::Timer).await {
-            Ok(report) => run.reports.push(report),
+            Ok(report) => {
+                leftovers = false;
+                run.reports.push(report);
+            }
             Err(error) => {
                 tracing::error!(
                     repo = %record.id,
@@ -388,33 +394,15 @@ async fn run_repo(
         ),
     }
 
-    // 2.
-    let keep: HashSet<String> = state
-        .db
-        .workspaces(
-            Some(id),
-            &[WorkspaceState::Active, WorkspaceState::Releasing],
-        )?
-        .into_iter()
-        .map(|ws| ws.base_tree_id)
-        .collect();
-    let cache = manager.base_cache(id);
-    let max_entries = config.file.base_cache.max_entries;
-    let evicted =
-        tokio::task::spawn_blocking(move || cache.evict(&keep, max_entries, keep_newer, dry_run))
-            .await??;
+    let rest = clean_up(state, id, keep_newer, dry_run, store_leftovers).await;
 
-    // 3.
-    let (workspace_rows_removed, wc_bytes_freed) =
-        remove_ended_rows(state, id, keep_newer, dry_run).await?;
-
-    // 4.
-    let (stores_removed, store_bytes_freed) =
-        remove_stores(state, id, keep_newer, dry_run, store_leftovers).await?;
-
+    // Whatever steps 2 to 4 came to: the jj step has rewritten the
+    // operation ids the index names.
     if !dry_run && let Some(handle) = &handle {
         reindex(state, handle, id).await;
     }
+    let (evicted, (workspace_rows_removed, wc_bytes_freed), (stores_removed, store_bytes_freed)) =
+        rest?;
     let report = GcReport {
         repo_id: id,
         keep_newer: Timestamp::from(keep_newer),
@@ -449,6 +437,39 @@ async fn run_repo(
         "garbage collection finished"
     );
     Ok(report)
+}
+
+/// Steps 2 to 4 of [`run_repo`]: what was evicted, and the rows and the
+/// stores removed with their bytes.
+async fn clean_up(
+    state: &AppState,
+    id: RepoId,
+    keep_newer: SystemTime,
+    dry_run: bool,
+    store_leftovers: bool,
+) -> Result<(Vec<Evicted>, (u32, u64), (u32, u64)), GcRunError> {
+    // 2.
+    let keep: HashSet<String> = state
+        .db
+        .workspaces(
+            Some(id),
+            &[WorkspaceState::Active, WorkspaceState::Releasing],
+        )?
+        .into_iter()
+        .map(|ws| ws.base_tree_id)
+        .collect();
+    let cache = state.manager.base_cache(id);
+    let max_entries = state.config.file.base_cache.max_entries;
+    let evicted =
+        tokio::task::spawn_blocking(move || cache.evict(&keep, max_entries, keep_newer, dry_run))
+            .await??;
+
+    // 3.
+    let rows = remove_ended_rows(state, id, keep_newer, dry_run).await?;
+
+    // 4.
+    let stores = remove_stores(state, id, keep_newer, dry_run, store_leftovers).await?;
+    Ok((evicted, rows, stores))
 }
 
 /// Step 3: deletes the rows of workspaces that ended before `keep_newer`,

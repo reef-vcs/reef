@@ -335,8 +335,9 @@ fn log_file_is_json_lines() {
     // A fresh state directory logs its migration first, on Linux the watcher
     // its inotify limits (R1.13), with `watchman` installed the socket it
     // found (R1.14), a tightened state directory, the uids registration
-    // accepts and, as root, a warning (RX.01), and the open-file limit
-    // (R2.22); nothing else at info comes before the start event.
+    // accepts and, as root, a warning (RX.01), the open-file limit (R2.22),
+    // and the GC timer (#95); nothing else at info comes before the start
+    // event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
@@ -349,6 +350,8 @@ fn log_file_is_json_lines() {
         "cannot find the watchman socket; each Watchman snapshot will look for it",
         "registration accepts repositories these uids own",
         "open file limit",
+        "GC timer started",
+        "GC timer off",
         // The temporary directory may be created 0755.
         "a private directory had group or other permissions; changed it to 0700",
         reef_daemon::daemon::ROOT_WARNING,

@@ -55,13 +55,14 @@ impl fmt::Display for Task {
 #[must_use = "dropping the guard releases the maintenance lock at once"]
 #[derive(Debug)]
 pub struct Guard {
-    // Declared first, so the holder is cleared before the lock is free.
     holder: Arc<Mutex<Option<Task>>>,
     #[allow(dead_code, reason = "held for its drop")]
     lock: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Drop for Guard {
+    // Runs before any field drops, so the holder is cleared while the lock
+    // is still held, and a newer holder's name is never wiped.
     fn drop(&mut self) {
         *self.holder.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
