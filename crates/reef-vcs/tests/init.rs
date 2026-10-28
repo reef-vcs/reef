@@ -281,11 +281,12 @@ fn damaged_markers_and_newer_sections_are_skipped() {
     assert_eq!(repo.read("AGENTS.md"), newer);
 }
 
-/// Claude Code sets `CLAUDECODE=1` in the processes it starts: `auto`
-/// writes its files though the repository has none of them yet, a named
-/// list stays as named, and `--check` goes by the files alone.
+/// An agent Reef recognizes running `reef init` (Claude Code, by
+/// `CLAUDECODE=1`): `auto` writes its files though the repository has none
+/// of them yet, a named list stays as named, and `--check` goes by the
+/// files alone.
 #[test]
-fn claude_code_running_init_gets_its_files() {
+fn a_running_agent_gets_its_files() {
     let repo = Fixture::new();
     let state = repo.tmp.path().join("no-daemon");
     let init = |args: &[&str]| {

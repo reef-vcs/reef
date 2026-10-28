@@ -28,8 +28,8 @@ pub(crate) struct Args {
     #[arg(default_value = ".")]
     path: PathBuf,
     /// Which harnesses to write for, besides `AGENTS.md`: `auto` (those the
-    /// repository has files for, and Claude Code when it runs this), `all`,
-    /// `none`, or a list.
+    /// repository has files for, and the agent running this when Reef
+    /// recognizes it), `all`, `none`, or a list.
     #[arg(
         long,
         value_enum,
@@ -140,11 +140,14 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
             "--user writes under the home directory, and HOME is not set".to_owned(),
         ));
     }
-    // `--check` goes by the files alone, so its answer is the same in and
-    // out of Claude Code; a write from Claude Code left its files on disk.
-    let in_claude_code =
-        !args.check && agents::in_claude_code(std::env::var_os("CLAUDECODE").as_deref());
-    let harnesses = harnesses.unwrap_or_else(|| agents::detect(&root, args.user, in_claude_code));
+    // `--check` goes by the files alone, so its answer is the same whatever
+    // agent runs it; a write from an agent left its files on disk.
+    let running = if args.check {
+        Vec::new()
+    } else {
+        agents::running(|name| std::env::var_os(name))
+    };
+    let harnesses = harnesses.unwrap_or_else(|| agents::detect(&root, args.user, &running));
     let plan = agents::plan(&root, home.as_deref(), &harnesses, &guide, version)?;
     if args.check {
         check(&plan, &root, &args, global)?;
