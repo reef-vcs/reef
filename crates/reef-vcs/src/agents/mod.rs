@@ -11,6 +11,7 @@
 //! kept as they are; a whole file is replaced only when its frontmatter has
 //! [`GENERATED_BY`]; in `.mcp.json`, Reef owns only `mcpServers.reef`.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,29 +90,119 @@ impl Harness {
 /// The one harness whose file is outside the repository.
 const USER_SKILL: Harness = Harness::ClaudeSkill { user: true };
 
-/// The harnesses a repository shows signs of, by files at `root` only:
-/// `AGENTS.md` always; Claude Code (its section, skill and `.mcp.json`
-/// entry) when `CLAUDE.md` or `.claude/` exists or `user` is set (which
-/// adds the user-level skill); Cursor when `.cursor/` exists.
-pub(crate) fn detect(root: &Path, user: bool) -> Vec<Harness> {
-    let mut found = vec![Harness::AgentsMd];
-    // `symlink_metadata`: a `CLAUDE.md` linked to a missing `AGENTS.md`
-    // still counts.
-    let claude_md = fs::symlink_metadata(root.join("CLAUDE.md")).is_ok();
-    if user || claude_md || root.join(".claude").is_dir() {
-        found.extend([
+/// A coding agent that reads files of its own besides `AGENTS.md`, which
+/// every agent gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Agent {
+    /// `CLAUDE.md`, the Claude Code skill, and `.mcp.json`.
+    ClaudeCode,
+    /// The Cursor rule.
+    Cursor,
+}
+
+/// How `auto` recognizes an agent, and what it writes for it.
+struct Sign {
+    /// The agent this row is for.
+    agent: Agent,
+    /// Names at the root whose presence means the repository uses it; one
+    /// ending in `/` counts only as a directory.
+    names: &'static [&'static str],
+    /// A variable the agent sets, to this value, in the processes it
+    /// starts, so `reef init` run by the agent writes its files though the
+    /// repository has none yet. Only a variable the agent documents.
+    env: Option<(&'static str, &'static str)>,
+    /// What Reef writes for it in the repository.
+    harnesses: &'static [Harness],
+    /// What `--user` adds outside the repository, which also turns the
+    /// agent's files on.
+    user: Option<Harness>,
+}
+
+/// Every agent Reef writes files for besides `AGENTS.md`. Recognizing
+/// another agent is a row here; writing for a new one also needs its
+/// [`Harness`] variants and an `--agents` value.
+const SIGNS: &[Sign] = &[
+    Sign {
+        agent: Agent::ClaudeCode,
+        names: &["CLAUDE.md", ".claude/"],
+        // Its shells, hooks and MCP servers, and its IDE extensions'
+        // terminals.
+        env: Some(("CLAUDECODE", "1")),
+        harnesses: &[
             Harness::ClaudeMd,
             Harness::ClaudeSkill { user: false },
             Harness::McpJson,
-        ]);
-    }
-    if user {
-        found.push(Harness::ClaudeSkill { user: true });
-    }
-    if root.join(".cursor").is_dir() {
-        found.push(Harness::CursorRule);
+        ],
+        user: Some(USER_SKILL),
+    },
+    Sign {
+        agent: Agent::Cursor,
+        names: &[".cursor/"],
+        env: None,
+        harnesses: &[Harness::CursorRule],
+        user: None,
+    },
+];
+
+/// The harnesses `auto` writes: `AGENTS.md` always, then each agent's when
+/// the repository has its files at `root`, `user` asks for the agent's
+/// user-level file, or the agent is `running` `reef init`.
+pub(crate) fn detect(root: &Path, user: bool, running: &[Agent]) -> Vec<Harness> {
+    let mut found = vec![Harness::AgentsMd];
+    for sign in SIGNS {
+        let mut present = false;
+        let mut blocked = false;
+        for name in sign.names {
+            // `symlink_metadata`: a `CLAUDE.md` linked to a missing
+            // `AGENTS.md` still counts.
+            let exists = fs::symlink_metadata(root.join(name.trim_end_matches('/'))).is_ok();
+            match name.strip_suffix('/') {
+                Some(dir) if root.join(dir).is_dir() => present = true,
+                // A file, or a link to nothing, where the agent's directory
+                // goes: writing under it would fail.
+                Some(_) => blocked |= exists,
+                None => present |= exists,
+            }
+        }
+        let user = sign.user.filter(|_| user);
+        let running = !blocked && running.contains(&sign.agent);
+        if present || user.is_some() || running {
+            found.extend_from_slice(sign.harnesses);
+        }
+        found.extend(user);
     }
     found
+}
+
+/// What Reef writes for `agent` in the repository. Every [`Agent`] has a
+/// row in [`SIGNS`] (a test checks), so none is ever empty.
+pub(crate) fn harnesses(agent: Agent) -> &'static [Harness] {
+    SIGNS
+        .iter()
+        .find(|sign| sign.agent == agent)
+        .map_or(&[], |sign| sign.harnesses)
+}
+
+/// Every harness in the repository: `AGENTS.md`, then each agent's.
+pub(crate) fn all() -> Vec<Harness> {
+    let mut all = vec![Harness::AgentsMd];
+    for sign in SIGNS {
+        all.extend_from_slice(sign.harnesses);
+    }
+    all
+}
+
+/// The agents that say they started this process, by the variables in
+/// [`SIGNS`]; `var` looks one up (`std::env::var_os`).
+pub(crate) fn running(var: impl Fn(&str) -> Option<OsString>) -> Vec<Agent> {
+    SIGNS
+        .iter()
+        .filter(|sign| {
+            sign.env
+                .is_some_and(|(name, value)| var(name).is_some_and(|set| set == value))
+        })
+        .map(|sign| sign.agent)
+        .collect()
 }
 
 /// The text Reef writes for `harness`: for a section, the marker lines and
@@ -801,22 +892,99 @@ mod tests {
     fn detection_is_by_files_at_the_root() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        assert_eq!(detect(root, false), [Harness::AgentsMd]);
-        let claude = [
-            Harness::AgentsMd,
-            Harness::ClaudeMd,
-            Harness::ClaudeSkill { user: false },
-            Harness::McpJson,
-        ];
-        assert_eq!(detect(root, true)[..4], claude);
-        assert_eq!(detect(root, true)[4], Harness::ClaudeSkill { user: true });
+        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        let claude = [&[Harness::AgentsMd], harnesses(Agent::ClaudeCode)].concat();
+        assert_eq!(detect(root, true, &[])[..4], claude);
+        assert_eq!(detect(root, true, &[]).len(), 5);
+        assert_eq!(
+            detect(root, true, &[])[4],
+            Harness::ClaudeSkill { user: true }
+        );
         fs::write(root.join("CLAUDE.md"), "").unwrap();
-        assert_eq!(detect(root, false), claude);
+        assert_eq!(detect(root, false, &[]), claude);
         fs::remove_file(root.join("CLAUDE.md")).unwrap();
         fs::create_dir(root.join(".claude")).unwrap();
         fs::create_dir(root.join(".cursor")).unwrap();
-        assert_eq!(detect(root, false).last(), Some(&Harness::CursorRule));
-        assert_eq!(detect(root, false).len(), 5);
+        assert_eq!(detect(root, false, &[]).last(), Some(&Harness::CursorRule));
+        assert_eq!(detect(root, false, &[]).len(), 5);
+    }
+
+    #[test]
+    fn an_agents_directory_counts_only_as_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".cursor"), "").unwrap();
+        fs::write(root.join(".claude"), "").unwrap();
+        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        fs::remove_file(root.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join(".cursor")).unwrap();
+        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        assert_eq!(all()[0], Harness::AgentsMd);
+        assert_eq!(
+            all().len(),
+            1 + SIGNS.iter().map(|s| s.harnesses.len()).sum::<usize>()
+        );
+        assert_eq!(harnesses(Agent::Cursor), [Harness::CursorRule]);
+    }
+
+    /// Every agent, by a match that stops compiling when one is added.
+    fn every_agent() -> [Agent; 2] {
+        let every = [Agent::ClaudeCode, Agent::Cursor];
+        for agent in every {
+            match agent {
+                Agent::ClaudeCode | Agent::Cursor => {}
+            }
+        }
+        every
+    }
+
+    #[test]
+    fn every_agent_has_one_row() {
+        for agent in every_agent() {
+            let rows = SIGNS.iter().filter(|sign| sign.agent == agent).count();
+            assert_eq!(rows, 1, "{agent:?}");
+            assert!(!harnesses(agent).is_empty(), "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_agent_is_blocked_by_a_file_where_its_directory_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".claude"), "").unwrap();
+        assert_eq!(
+            detect(root, false, &[Agent::ClaudeCode]),
+            [Harness::AgentsMd]
+        );
+        fs::remove_file(root.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join(".claude")).unwrap();
+        assert_eq!(
+            detect(root, false, &[Agent::ClaudeCode]),
+            [Harness::AgentsMd]
+        );
+    }
+
+    #[test]
+    fn a_running_agent_counts_as_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = [&[Harness::AgentsMd], harnesses(Agent::ClaudeCode)].concat();
+        assert_eq!(detect(dir.path(), false, &[Agent::ClaudeCode]), claude);
+        assert_eq!(
+            detect(dir.path(), false, &[Agent::Cursor]),
+            [Harness::AgentsMd, Harness::CursorRule]
+        );
+        for sign in SIGNS {
+            let Some((name, value)) = sign.env else {
+                continue;
+            };
+            let set =
+                |set: &'static str| move |asked: &str| (asked == name).then(|| OsString::from(set));
+            assert_eq!(running(set(value)), [sign.agent], "{name}");
+            for other in ["", "0", "true"] {
+                assert_eq!(running(set(other)), [], "{name}={other:?}");
+            }
+        }
+        assert_eq!(running(|_| None), []);
     }
 
     #[test]
@@ -882,7 +1050,7 @@ mod tests {
     fn a_dangling_claude_md_link_counts_as_claude() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("AGENTS.md", dir.path().join("CLAUDE.md")).unwrap();
-        assert!(detect(dir.path(), false).contains(&Harness::ClaudeMd));
+        assert!(detect(dir.path(), false, &[]).contains(&Harness::ClaudeMd));
     }
 
     #[test]

@@ -49,6 +49,9 @@ impl Fixture {
             "REEF_OUTPUT",
             "REEF_WORKSPACE",
             "REEF_AGENT",
+            // Each variable in `agents::SIGNS`, by which an agent says it
+            // runs `reef init`.
+            "CLAUDECODE",
         ] {
             command.env_remove(var);
         }
@@ -278,6 +281,62 @@ fn damaged_markers_and_newer_sections_are_skipped() {
         "section v9 is from a newer reef"
     );
     assert_eq!(repo.read("AGENTS.md"), newer);
+}
+
+/// An agent Reef recognizes running `reef init` (Claude Code, by
+/// `CLAUDECODE=1`): `auto` writes its files though the repository has none
+/// of them yet, a named list stays as named, and `--check` goes by the
+/// files alone.
+#[test]
+fn a_running_agent_gets_its_files() {
+    let repo = Fixture::new();
+    let state = repo.tmp.path().join("no-daemon");
+    let init = |args: &[&str]| {
+        repo.reef(&state)
+            .env("CLAUDECODE", "1")
+            .args(["--no-register", "init"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let value = json(&init(&[]));
+    assert_eq!(
+        actions(&value, &repo.root),
+        pairs(&[
+            ("AGENTS.md", "wrote"),
+            ("CLAUDE.md", "wrote"),
+            (".claude/skills/reef/SKILL.md", "wrote"),
+            (".mcp.json", "wrote"),
+        ])
+    );
+    init(&["--check"]).assert().code(0);
+    // Outside Claude Code, the files it left are detected as before.
+    json(&repo.init(&["--check"]));
+
+    let other = Fixture::new();
+    let value = json(
+        &other
+            .reef(&state)
+            .env("CLAUDECODE", "1")
+            .args(["--no-register", "init", "--agents", "cursor"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        actions(&value, &other.root),
+        pairs(&[("AGENTS.md", "wrote"), (".cursor/rules/reef.mdc", "wrote")])
+    );
+    // `--check` in Claude Code does not ask for files it never wrote.
+    let plain = Fixture::new();
+    json(&plain.init(&[]));
+    plain
+        .reef(&state)
+        .env("CLAUDECODE", "1")
+        .args(["--no-register", "init", "--check"])
+        .output()
+        .unwrap()
+        .assert()
+        .code(0);
 }
 
 /// `--check` registers nothing, so it needs no daemon even without
