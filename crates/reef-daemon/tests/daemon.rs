@@ -625,19 +625,34 @@ async fn serves_hundreds_of_connections() {
     drop(streams);
     drop(daemon);
 
-    // At a hard limit of 300: 400 bare connections run it out.
+    // At a hard limit of 300: bare connections run it out.
     let daemon = SpawnedDaemon::spawn_with_open_files(300, 300, |_| {}).await;
-    // Those it cannot accept wait in the listen backlog, which macOS caps
-    // at `kern.ipc.somaxconn` (128); a connect past it is refused, and
-    // only the descriptors matter here.
+    // Those it has not accepted yet wait in the listen backlog, capped at
+    // `somaxconn` (128 on macOS), and a connect to a full one fails at once
+    // (ECONNREFUSED on macOS, EAGAIN on Linux). A slow accept loop can fill
+    // it before the daemon runs out, so a failed connect waits for the loop
+    // to catch up (#98), until the daemon says it ran out.
+    let begun = std::time::Instant::now();
     let mut held = Vec::new();
-    for _ in 0..400 {
-        if let Ok(stream) = tokio::net::UnixStream::connect(&daemon.socket).await {
-            held.push(stream);
+    let mut refused = None;
+    while daemon.stderr_lines("accept failed; backing off").is_empty() {
+        assert!(
+            begun.elapsed() < Duration::from_secs(10),
+            "{} connected and the daemon has not run out (last refusal: {refused:?})",
+            held.len()
+        );
+        match tokio::net::UnixStream::connect(&daemon.socket).await {
+            Ok(stream) => held.push(stream),
+            Err(error) => {
+                refused = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
-    assert!(held.len() > 300, "only {} connected", held.len());
-    wait_for_line(&daemon, "accept failed; backing off").await;
+    assert!(held.len() > 200, "ran out at only {} connected", held.len());
+    // Only Linux can catch a spin here: macOS drops a queued connection
+    // when `accept` fails for want of descriptors, so a daemon that did not
+    // back off would drain the backlog and go idle.
     let cpu = process_cpu_secs(daemon.pid);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let spent = process_cpu_secs(daemon.pid) - cpu;
@@ -645,8 +660,22 @@ async fn serves_hundreds_of_connections() {
         spent < 0.5,
         "{spent} s of CPU in 2 s at the limit: spinning"
     );
+    // Freeing descriptors lets the daemon drain the backlog, which on Linux
+    // may still be full: connect until there is room.
     held.truncate(200);
-    let client = Client::connect(&daemon.socket).await.unwrap();
+    let freed = std::time::Instant::now();
+    let client = loop {
+        match Client::connect(&daemon.socket).await {
+            Ok(client) => break client,
+            Err(error) => {
+                assert!(
+                    freed.elapsed() < Duration::from_secs(5),
+                    "no connection once descriptors free: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
     tokio::time::timeout(Duration::from_secs(5), client.status())
         .await
         .expect("accepted again once descriptors free")
