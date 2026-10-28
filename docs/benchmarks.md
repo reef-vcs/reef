@@ -431,3 +431,40 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 `list_recursive_last` close to `list_recursive_first` on `large` is what the cursor matcher buys: the last page skips every subtree before its cursor instead of walking 100,000 entries. `read_paged_16mib` is the known quadratic case (each page reads the whole blob), about 4.6 ms a page here. The edits cost what R2.03's writes do: one commit written plus committing the operation; 100 small blobs add little.
 
 End to end through the daemon (test build), `EditFiles` with no workspace (test `edit_files_without_a_workspace`, 20 calls) has a median of about 30 ms; with one workspace on the edited commit and one on its child, which are snapshotted first and follow afterwards (test `edit_files_moves_workspaces`), one call takes about 230 ms, mostly the scans and the check-out.
+
+## Symbols (R2.14)
+
+Two benches measure the symbol index ([ADR 0042](adr/0042-symbol-index.md)). Both are release builds on the M2 Max, run on 2026-10-28.
+
+**`crates/reef-symbols/benches/extract.rs`** times tag extraction of about 2,000 lines per language: `cargo bench -p reef-symbols --bench extract`. Python, TypeScript and Go repeat the crate's test fixtures; Rust is Reef's own `reef-lib/src/jj/files.rs`. The brief's target was 5 MB/s per core.
+
+| Benchmark | M2 Max, median | Throughput |
+| --- | ---: | ---: |
+| `extract/python` | 5.28 ms | 6.6 MiB/s |
+| `extract/typescript` | 4.51 ms | 6.8 MiB/s |
+| `extract/go` | 4.23 ms | 5.7 MiB/s |
+| `extract/rust` | 11.7 ms | 9.0 MiB/s |
+
+**`crates/reef-daemon/benches/symbols.rs`** times the index through the daemon on a synthetic repository: `REEF_BENCH_PRESET=medium cargo bench -p reef-daemon --features testing --bench symbols`.
+- **The first index** is timed once and printed, since a second run would find every entry.
+- **The other three** are criterion benches.
+- **About 70% of the synthetic files** have a supported extension, filled with pseudo-source the grammars parse by error recovery. This makes the benches a test of cost, not of what gets extracted.
+
+| Benchmark | `medium` (10,014 files) | `large` (100,014 files) | Target |
+| --- | ---: | ---: | --- |
+| `full_index`: first index, 4 workers | 6,880 files in 8.4 s | 70,062 files in 92 s | < 20 s, < 200 s |
+| `symbols.sqlite3` after it | 12.7 MiB | 87.8 MiB | — |
+| `incremental_one_file`: a child commit changing one file | 3.9 ms | 4.2 ms | < 25 ms |
+| `list_file`: `ListSymbols` of one file | 1.09 ms | 0.39 ms | < 2 ms |
+| `list_name`: `ListSymbols` by name | 19 ms (529 occurrences) | 1.29 s (4,973 occurrences) | < 20 ms for 50 |
+
+A name query loads every stored occurrence of the name, from every file version, and keeps those in the tree. Its cost grows with the hits across history, not with the page. Pushing the tree filter and the cursor into SQL is left to R2.16's query layer.
+
+**Binary sizes** come from the `dist` profile on the same Mac, before (`main` at `3a14316`) and after:
+
+| Binary | Before | After |
+| --- | ---: | ---: |
+| `reef-daemon` | 20.1 MB | 25.5 MB (+5.5 MB) |
+| `reef` | 7.67 MB | 7.90 MB (+0.23 MB) |
+
+`reef`'s growth is the `reef symbols` commands and their JSON. It links neither tree-sitter nor `reef-symbols`, which `crate_graph` checks.

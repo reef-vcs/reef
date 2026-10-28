@@ -1147,3 +1147,162 @@ async fn edits_are_undoable() {
         assert_eq!(oplog::classify(&entry).kind, Some(OpKind::Edit));
     }
 }
+
+// R2.14's tree reads: `walk_files`, `changed_files`, `tree_file` and
+// `read_file_id`.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one fixture, every read")]
+async fn walk_and_changed_files() {
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let parent = new_commit(
+        &mut tx,
+        &[],
+        &[
+            ("a.py", Entry::File(b"a = 1\n")),
+            ("bin/run.py", Entry::Exec(b"run()\n")),
+            ("gone.py", Entry::File(b"gone\n")),
+            ("keep.py", Entry::File(b"keep\n")),
+            ("link.py", Entry::Link("a.py")),
+            ("mod", Entry::Submodule),
+            ("notes.md", Entry::File(b"# notes\n")),
+        ],
+    )
+    .await;
+    let mut builder = MergedTreeBuilder::new(
+        tree_with(
+            &tx,
+            parent.tree(),
+            &[
+                ("a.py", Entry::File(b"a = 2\n")),
+                ("new.py", Entry::File(b"new\n")),
+            ],
+        )
+        .await,
+    );
+    builder.set_or_remove(path("gone.py"), Merge::absent());
+    let tree = builder.write_tree().await.unwrap();
+    let child = tx
+        .repo_mut()
+        .new_commit(vec![parent.id().clone()], tree)
+        .write()
+        .await
+        .unwrap();
+    fx.commit(tx).await;
+    let merged = conflicted(&mut fx).await;
+
+    let all = |_: &str| true;
+    let py = |p: &str| p.rsplit_once('.').is_some_and(|(_, ext)| ext == "py");
+    let walked = files::walk_files(&parent.tree(), &all).unwrap();
+    let kinds: Vec<(&str, EntryKind, bool)> = walked
+        .iter()
+        .map(|f| (f.path.as_str(), f.kind, f.file_id.is_empty()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("a.py", EntryKind::File, false),
+            ("bin/run.py", EntryKind::Executable, false),
+            ("gone.py", EntryKind::File, false),
+            ("keep.py", EntryKind::File, false),
+            ("link.py", EntryKind::Symlink, true),
+            ("mod", EntryKind::Submodule, true),
+            ("notes.md", EntryKind::File, false),
+        ]
+    );
+    assert!(walked[0].is_file() && walked[1].is_file() && !walked[4].is_file());
+    let walked_py: Vec<String> = files::walk_files(&parent.tree(), &py)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(
+        walked_py,
+        ["a.py", "bin/run.py", "gone.py", "keep.py", "link.py"]
+    );
+    let in_bin: Vec<String> = files::walk_files_in(&parent.tree(), "bin", &all)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(in_bin, ["bin/run.py"]);
+    let one: Vec<String> = files::walk_files_in(&parent.tree(), "a.py", &all)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(one, ["a.py"]);
+
+    // Conflicted paths are reported as conflicts, with no id.
+    let conflicts: Vec<(String, EntryKind)> = files::walk_files(&merged.tree(), &all)
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.kind == EntryKind::Conflict)
+        .map(|f| (f.path, f.kind))
+        .collect();
+    assert_eq!(conflicts.len(), 2, "{conflicts:?}");
+
+    let changed = files::changed_files(&parent.tree(), &child.tree(), &all)
+        .await
+        .unwrap();
+    let changed: Vec<(&str, Option<EntryKind>, Option<EntryKind>)> = changed
+        .iter()
+        .map(|c| {
+            (
+                c.path.as_str(),
+                c.before.as_ref().map(|f| f.kind),
+                c.after.as_ref().map(|f| f.kind),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changed,
+        [
+            ("a.py", Some(EntryKind::File), Some(EntryKind::File)),
+            ("gone.py", Some(EntryKind::File), None),
+            ("new.py", None, Some(EntryKind::File)),
+        ]
+    );
+    let changed_md = files::changed_files(&parent.tree(), &child.tree(), &|p: &str| {
+        p.rsplit_once('.').is_some_and(|(_, ext)| ext == "md")
+    })
+    .await
+    .unwrap();
+    assert_eq!(changed_md, []);
+
+    // The key names the tree, so an identical tree has the same key.
+    assert_ne!(
+        files::tree_key(&parent.tree()),
+        files::tree_key(&child.tree())
+    );
+    assert_eq!(
+        files::tree_key(&child.tree()),
+        files::tree_key(&child.tree())
+    );
+    assert!(
+        files::tree_key(&merged.tree()).contains('+'),
+        "a conflicted tree"
+    );
+
+    let a = files::tree_file(&child.tree(), "a.py")
+        .await
+        .unwrap()
+        .unwrap();
+    let bytes = files::read_file_id(&child.tree(), "a.py", &a.file_id, 16)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_deref(), Some(&b"a = 2\n"[..]));
+    let capped = files::read_file_id(&child.tree(), "a.py", &a.file_id, 3)
+        .await
+        .unwrap();
+    assert_eq!(capped, None, "larger than the cap");
+    assert_eq!(
+        files::tree_file(&child.tree(), "gone.py").await.unwrap(),
+        None
+    );
+    assert_eq!(
+        files::tree_file(&child.tree(), "bin").await.unwrap(),
+        None,
+        "a directory"
+    );
+}

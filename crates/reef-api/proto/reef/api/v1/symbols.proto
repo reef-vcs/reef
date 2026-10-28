@@ -1,0 +1,401 @@
+// The symbol index (R2.14, ADR 0042): definitions and references per file,
+// from tree-sitter tags the daemon extracts for Python, TypeScript, TSX,
+// JavaScript, Go and Rust, and from SCIP documents callers upload. Entries
+// are keyed by path and file content, so unchanged files share them across
+// revisions; the index is a cache, rebuilt by indexing again. `revision`,
+// `at_operation` and `skip_snapshot` are as in changes.proto. Paths are
+// repository-relative and `/`-separated. Positions are 0-based lines and
+// UTF-8 byte columns, with the end exclusive.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Indexing a revision's symbols, and reading them.
+service SymbolService {
+  // Starts or joins indexing of a revision's tree and waits up to `wait`
+  // for it: every supported file without an entry is extracted, the others
+  // reused. Returns the tree's status; a pass outlives its call and finishes
+  // in the background, so `wait` of zero is the status query. Indexing
+  // records no operation: what it writes is derived and rebuilt on demand.
+  // `revision` is required; when it uses `@`, the workspace is snapshotted
+  // first unless `skip_snapshot` or `at_operation` is set.
+  //
+  // Errors: FAILED_PRECONDITION with reason SYMBOLS_DISABLED;
+  // INVALID_ARGUMENT with reason REVISION_REQUIRED or a revision reason;
+  // and a failed snapshot's own error, with reason SNAPSHOT_FAILED
+  // (metadata `workspace_id`).
+  rpc IndexSymbols(IndexSymbolsRequest) returns (IndexSymbolsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Stores SCIP documents an indexer wrote for files of a revision, each
+  // checked against the file at that path: its blake3 must equal
+  // `content_digest`. Each document is accepted or rejected alone, and the
+  // call succeeds when every one is rejected. An accepted document replaces
+  // any earlier upload for the same path and content, and applies at every
+  // revision holding that file at that path. At most 1,000 documents, and
+  // the request at most 4 MiB (larger is OUT_OF_RANGE, from gRPC); send a
+  // large index in batches, which are independent. Records no operation.
+  //
+  // Errors: FAILED_PRECONDITION with reason SYMBOLS_DISABLED;
+  // INVALID_ARGUMENT with reason INVALID_UPLOAD (metadata `field`:
+  // `documents` for none or more than 1,000, `tool` for an empty tool
+  // name), REVISION_REQUIRED, or a revision reason; and a failed snapshot's
+  // own error, with reason SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc UploadScipDocuments(UploadScipDocumentsRequest) returns (UploadScipDocumentsResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // The occurrences of a revision's symbols, paged. By `path` alone: every
+  // occurrence in the file, or in the files under the directory (matched by
+  // whole components), in jj's path order and then by position; up to
+  // 1,000 files without an entry are extracted inline. By `name` or
+  // `symbol`: the occurrences of that display name or symbol string across
+  // the tree, or under `path` when set, which needs the tree indexed. Each
+  // file answers from one source: SCIP when an upload covers its exact
+  // content, else tags, unless `source` forces one. `roles` and `kinds` are
+  // ORed within each field and ANDed across fields.
+  //
+  // Errors: FAILED_PRECONDITION with reason SYMBOLS_DISABLED, or
+  // SYMBOLS_NOT_INDEXED (metadata `commit_id`, `missing`) for a name or
+  // symbol query on a tree not yet indexed, or a path holding more than
+  // 1,000 files without an entry; INVALID_ARGUMENT with reason
+  // INVALID_SYMBOL_QUERY (metadata `field`) for an empty `path` with
+  // neither `name` nor `symbol`, both of them, or a `symbol` that is not
+  // SCIP's grammar, INVALID_PATH, INVALID_PAGE_TOKEN, REVISION_REQUIRED, or
+  // a revision reason; and a failed snapshot's own error, with reason
+  // SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// What a symbol is.
+enum SymbolKind {
+  // Not known.
+  SYMBOL_KIND_UNSPECIFIED = 0;
+  // A module, namespace or package.
+  SYMBOL_KIND_MODULE = 1;
+  // A class.
+  SYMBOL_KIND_CLASS = 2;
+  // A struct or union.
+  SYMBOL_KIND_STRUCT = 3;
+  // An interface, trait or protocol.
+  SYMBOL_KIND_INTERFACE = 4;
+  // An enum.
+  SYMBOL_KIND_ENUM = 5;
+  // A type alias or other named type.
+  SYMBOL_KIND_TYPE = 6;
+  // A free function. A tags call reference has this kind.
+  SYMBOL_KIND_FUNCTION = 7;
+  // A function that belongs to a type.
+  SYMBOL_KIND_METHOD = 8;
+  // A field or property.
+  SYMBOL_KIND_FIELD = 9;
+  // A variable.
+  SYMBOL_KIND_VARIABLE = 10;
+  // A constant or static.
+  SYMBOL_KIND_CONSTANT = 11;
+  // A macro.
+  SYMBOL_KIND_MACRO = 12;
+}
+
+// Whether an occurrence defines its symbol or uses it.
+enum SymbolRole {
+  // Not set; in a filter, never valid.
+  SYMBOL_ROLE_UNSPECIFIED = 0;
+  // The symbol is defined here.
+  SYMBOL_ROLE_DEFINITION = 1;
+  // The symbol is used here.
+  SYMBOL_ROLE_REFERENCE = 2;
+}
+
+// Where a file's occurrences came from.
+enum SymbolSource {
+  // In a request: per file, SCIP when an upload covers it, else tags.
+  SYMBOL_SOURCE_UNSPECIFIED = 0;
+  // Tree-sitter tags the daemon extracted. A reference names no symbol,
+  // only its `name`.
+  SYMBOL_SOURCE_TAGS = 1;
+  // A SCIP document a caller uploaded.
+  SYMBOL_SOURCE_SCIP = 2;
+}
+
+// How far a tree's indexing has come.
+enum SymbolIndexState {
+  // Not set.
+  SYMBOL_INDEX_STATE_UNSPECIFIED = 0;
+  // No pass has run on the tree.
+  SYMBOL_INDEX_STATE_NOT_INDEXED = 1;
+  // A pass is running.
+  SYMBOL_INDEX_STATE_INDEXING = 2;
+  // A pass found or wrote an entry for every supported file. Garbage
+  // collection may later remove some; reads extract them again.
+  SYMBOL_INDEX_STATE_COMPLETE = 3;
+}
+
+// Why a supported file has no occurrences.
+enum SymbolSkipReason {
+  // Not set.
+  SYMBOL_SKIP_REASON_UNSPECIFIED = 0;
+  // Larger than `[symbols] max_file_size`.
+  SYMBOL_SKIP_REASON_TOO_LARGE = 1;
+  // A NUL byte in its first 8 KiB.
+  SYMBOL_SKIP_REASON_BINARY = 2;
+  // Parsing it took longer than a second.
+  SYMBOL_SKIP_REASON_PARSE_TIMEOUT = 3;
+  // More than 100,000 occurrences.
+  SYMBOL_SKIP_REASON_TOO_MANY_OCCURRENCES = 4;
+  // The path is conflicted in the tree.
+  SYMBOL_SKIP_REASON_CONFLICTED = 5;
+}
+
+// Why an uploaded SCIP document was not stored.
+enum ScipRejection {
+  // Not set.
+  SCIP_REJECTION_UNSPECIFIED = 0;
+  // The path is not repository-relative and `/`-separated.
+  SCIP_REJECTION_INVALID_PATH = 1;
+  // Another document in the request has the same path.
+  SCIP_REJECTION_DUPLICATE_PATH = 2;
+  // Nothing is at the path in the revision.
+  SCIP_REJECTION_PATH_NOT_FOUND = 3;
+  // A directory, symlink, submodule or conflict is at the path.
+  SCIP_REJECTION_NOT_A_FILE = 4;
+  // The file is larger than `[symbols] max_file_size`.
+  SCIP_REJECTION_FILE_TOO_LARGE = 5;
+  // The file's blake3 is not `content_digest`, or the digest is not 64
+  // lowercase hex digits: the document describes other bytes.
+  SCIP_REJECTION_CONTENT_MISMATCH = 6;
+  // The bytes are not a `scip.Document`, or a range or symbol in it is
+  // malformed.
+  SCIP_REJECTION_INVALID_DOCUMENT = 7;
+  // More than 100,000 occurrences, local symbols not counted.
+  SCIP_REJECTION_TOO_MANY_OCCURRENCES = 8;
+  // A range lies outside the file.
+  SCIP_REJECTION_RANGE_OUT_OF_BOUNDS = 9;
+}
+
+// A range in a file: 0-based lines and UTF-8 byte columns, end exclusive.
+message SourceRange {
+  // The first line.
+  uint32 start_line = 1;
+  // The byte column on the first line.
+  uint32 start_column = 2;
+  // The last line.
+  uint32 end_line = 3;
+  // The byte column on the last line, exclusive.
+  uint32 end_column = 4;
+}
+
+// One definition of, or reference to, a symbol.
+message SymbolOccurrence {
+  // The file.
+  string path = 1;
+  // The symbol string in SCIP's grammar. Tags definitions use the scheme
+  // `reef-tags` with an empty package; a tags reference has none.
+  string symbol = 2;
+  // The display name.
+  string name = 3;
+  // What the symbol is.
+  SymbolKind kind = 4;
+  // Definition or reference.
+  SymbolRole role = 5;
+  // The name's range.
+  SourceRange range = 6;
+  // A definition's whole range, from any decorator to its end; unset for a
+  // reference, and for a SCIP definition its indexer gave none.
+  SourceRange definition_range = 7;
+  // The symbol of the innermost definition containing this occurrence,
+  // other than itself: for a reference, its caller. Empty at the top level.
+  string enclosing_symbol = 8;
+  // Where it came from.
+  SymbolSource source = 9;
+  // The file's language: `python`, `typescript`, `tsx`, `javascript`, `go`,
+  // `rust`, or the SCIP document's own.
+  string language = 10;
+  // SCIP's Import role.
+  bool is_import = 11;
+  // SCIP's WriteAccess role.
+  bool is_write = 12;
+  // SCIP's Test role.
+  bool is_test = 13;
+  // SCIP's Generated role.
+  bool is_generated = 14;
+}
+
+// Supported files skipped for one reason.
+message SymbolSkipCount {
+  // Why.
+  SymbolSkipReason reason = 1;
+  // How many.
+  uint64 files = 2;
+}
+
+// Supported files of one language.
+message SymbolLanguageCount {
+  // The language.
+  string language = 1;
+  // How many.
+  uint64 files = 2;
+}
+
+// A tree's indexing.
+message SymbolIndexStatus {
+  // The commit the request resolved.
+  string commit_id = 1;
+  // How far it has come.
+  SymbolIndexState state = 2;
+  // Supported files in the tree, conflicted ones included.
+  uint64 files = 3;
+  // Files with an entry, skipped ones included.
+  uint64 files_indexed = 4;
+  // Files skipped, of `files_indexed` or conflicted.
+  uint64 files_skipped = 5;
+  // `files_skipped` by reason.
+  repeated SymbolSkipCount skipped = 6;
+  // Files of the tree, of any language, covered by an uploaded SCIP
+  // document.
+  uint64 scip_files = 7;
+  // `files` by language.
+  repeated SymbolLanguageCount languages = 8;
+  // When the last pass over the tree ended; unset before one has.
+  google.protobuf.Timestamp indexed_at = 9;
+}
+
+// Index a revision.
+message IndexSymbolsRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision. Required.
+  string revision = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Index the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+  // How long to wait for the pass: unset means 10 s, zero returns at once,
+  // and more than 10 minutes is 10 minutes.
+  google.protobuf.Duration wait = 6;
+}
+
+// A revision's indexing.
+message IndexSymbolsResponse {
+  // Its status.
+  SymbolIndexStatus status = 1;
+  // The operation the revision was resolved at.
+  string at_operation = 2;
+}
+
+// The indexer that wrote a SCIP index: its `ToolInfo`.
+message ScipTool {
+  // `ToolInfo.name`, such as `scip-typescript`. Required: an unspecified
+  // position encoding is read by it.
+  string name = 1;
+  // `ToolInfo.version`.
+  string version = 2;
+}
+
+// One SCIP document for one file.
+message ScipDocument {
+  // The file in the repository, which may differ from the document's
+  // `relative_path` when the indexer ran in a subdirectory.
+  string path = 1;
+  // blake3 of the bytes the indexer read, as 64 lowercase hex digits.
+  string content_digest = 2;
+  // One encoded `scip.Document`, as in `Index.documents`.
+  bytes document = 3;
+}
+
+// Upload SCIP documents.
+message UploadScipDocumentsRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision the indexer ran on. Required.
+  string revision = 3;
+  // Check against the last recorded snapshot instead of snapshotting
+  // first.
+  bool skip_snapshot = 4;
+  // The indexer.
+  ScipTool tool = 5;
+  // One to 1,000 documents.
+  repeated ScipDocument documents = 6;
+}
+
+// One document that was not stored.
+message ScipDocumentRejection {
+  // Its `path`.
+  string path = 1;
+  // Why.
+  ScipRejection reason = 2;
+  // In words.
+  string message = 3;
+}
+
+// What an upload stored.
+message UploadScipDocumentsResponse {
+  // The commit the request resolved.
+  string commit_id = 1;
+  // Documents stored.
+  uint64 accepted = 2;
+  // Documents not stored, in request order.
+  repeated ScipDocumentRejection rejected = 3;
+  // The tree's status afterwards.
+  SymbolIndexStatus status = 4;
+}
+
+// List occurrences.
+message ListSymbolsRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision. Required.
+  string revision = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+  // A file or a directory; with `name` or `symbol`, limits them to it.
+  string path = 6;
+  // An exact display name.
+  string name = 7;
+  // An exact symbol string.
+  string symbol = 8;
+  // Only these roles; empty for both.
+  repeated SymbolRole roles = 9;
+  // Only these kinds; empty for all.
+  repeated SymbolKind kinds = 10;
+  // Force one source for every file; unspecified chooses per file.
+  SymbolSource source = 11;
+  // Occurrences per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT. A page also ends before its
+  // response passes 3 MiB, so it may hold fewer.
+  int32 page_size = 12;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 13;
+}
+
+// A page of occurrences.
+message ListSymbolsResponse {
+  // In path order, then by position.
+  repeated SymbolOccurrence symbols = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+  // The commit the request resolved.
+  string commit_id = 3;
+  // The operation it was read at.
+  string at_operation = 4;
+  // The tree's status.
+  SymbolIndexStatus status = 5;
+}

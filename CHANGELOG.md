@@ -6,6 +6,10 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Added
 
+- The symbol index ([ADR 0042](docs/adr/0042-symbol-index.md)): `SymbolService` with `IndexSymbols`, `UploadScipDocuments` and `ListSymbols` (API revision 7). The daemon extracts tree-sitter tags for Python, TypeScript, TSX, JavaScript, Go and Rust itself, in the background for new snapshots and edits and on demand, and stores definitions and references with their ranges and enclosing definitions in a per-repository cache (`repos/<id>/symbols.sqlite3`), keyed by path and file content so unchanged files share entries across revisions. SCIP documents an indexer wrote are uploaded and checked against the file they describe. Four error reasons: `SYMBOLS_DISABLED`, `SYMBOLS_NOT_INDEXED`, `INVALID_SYMBOL_QUERY` and `INVALID_UPLOAD`. GC collects the index as its fifth step.
+- `reef symbols index`, `upload` and `list` (alias `sym`): index a revision, upload a SCIP index, and list a file's or directory's symbols or a name's occurrences, with JSON when piped.
+- `[symbols]` in `config.toml`: `enabled`, `background`, `workers`, `max_file_size` and `max_size`.
+- `reef-symbols`, the extraction crate: Reef's tag queries, SCIP's symbol grammar and SCIP normalization, with no jj-lib, gRPC or SQLite dependency.
 - The daemon runs garbage collection by itself every `[gc] interval` (default a day; `0s` turns it off), over every repository, 10 minutes after it starts at the earliest and a full interval after the last full run, timed or `reef ws gc` (#95, [ADR 0041](docs/adr/0041-gc-on-a-timer.md)). Its reports go to the daemon's log.
 - API revision 6: `GcReport.base_bytes_unshared`, what removing the base cache entries freed on disk, counting blocks shared between incremental bases once (measured on APFS). `reef ws gc` prints it beside the allocated size.
 - `reef-broker`, the subscription broker ([ADR 0038](docs/adr/0038-subscription-broker.md)): bounded in-memory rings between a log and the streams that follow it, generic over topic, position and item, with no jj-lib or gRPC dependency.

@@ -1,0 +1,123 @@
+{
+  "has_errors": false,
+  "occurrences": [
+    {
+      "definition_range": [
+        0,
+        0,
+        4,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Class",
+      "name": "Store",
+      "range": [
+        0,
+        6,
+        0,
+        11
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `app.js`/Store#"
+    },
+    {
+      "definition_range": [
+        1,
+        2,
+        3,
+        3
+      ],
+      "enclosing": "Store",
+      "kind": "Method",
+      "name": "get",
+      "range": [
+        1,
+        2,
+        1,
+        5
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `app.js`/Store#get()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "get",
+      "kind": "Function",
+      "name": "find",
+      "range": [
+        2,
+        22,
+        2,
+        26
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        6,
+        0,
+        8,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "open",
+      "range": [
+        6,
+        9,
+        6,
+        13
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `app.js`/open()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "open",
+      "kind": "Class",
+      "name": "Store",
+      "range": [
+        7,
+        13,
+        7,
+        18
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        10,
+        6,
+        12,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "close",
+      "range": [
+        10,
+        6,
+        10,
+        11
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . `app.js`/close()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "close",
+      "kind": "Function",
+      "name": "flush",
+      "range": [
+        11,
+        8,
+        11,
+        13
+      ],
+      "role": "Reference",
+      "symbol": null
+    }
+  ]
+}

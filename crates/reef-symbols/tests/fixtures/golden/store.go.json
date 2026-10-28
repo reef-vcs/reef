@@ -1,0 +1,367 @@
+{
+  "has_errors": false,
+  "occurrences": [
+    {
+      "definition_range": [
+        4,
+        6,
+        4,
+        19
+      ],
+      "enclosing": null,
+      "kind": "Constant",
+      "name": "Version",
+      "range": [
+        4,
+        6,
+        4,
+        13
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Version."
+    },
+    {
+      "definition_range": [
+        6,
+        4,
+        6,
+        19
+      ],
+      "enclosing": null,
+      "kind": "Variable",
+      "name": "Default",
+      "range": [
+        6,
+        4,
+        6,
+        11
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Default."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Default",
+      "kind": "Function",
+      "name": "New",
+      "range": [
+        6,
+        14,
+        6,
+        17
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        8,
+        5,
+        10,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Struct",
+      "name": "Store",
+      "range": [
+        8,
+        5,
+        8,
+        10
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Store#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Store",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        9,
+        11,
+        9,
+        17
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Store",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        9,
+        18,
+        9,
+        24
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        12,
+        5,
+        14,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Interface",
+      "name": "Getter",
+      "range": [
+        12,
+        5,
+        12,
+        11
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Getter#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Getter",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        13,
+        9,
+        13,
+        15
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Getter",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        13,
+        17,
+        13,
+        23
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        16,
+        5,
+        16,
+        14
+      ],
+      "enclosing": null,
+      "kind": "Type",
+      "name": "ID",
+      "range": [
+        16,
+        5,
+        16,
+        7
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/ID#"
+    },
+    {
+      "definition_range": null,
+      "enclosing": "ID",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        16,
+        8,
+        16,
+        14
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        18,
+        0,
+        20,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Function",
+      "name": "New",
+      "range": [
+        18,
+        5,
+        18,
+        8
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/New()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "New",
+      "kind": "Type",
+      "name": "Store",
+      "range": [
+        18,
+        12,
+        18,
+        17
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "New",
+      "kind": "Type",
+      "name": "Store",
+      "range": [
+        19,
+        9,
+        19,
+        14
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "New",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        19,
+        26,
+        19,
+        32
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "New",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        19,
+        33,
+        19,
+        39
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Get",
+      "kind": "Type",
+      "name": "Store",
+      "range": [
+        22,
+        9,
+        22,
+        14
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        22,
+        0,
+        24,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Method",
+      "name": "Get",
+      "range": [
+        22,
+        16,
+        22,
+        19
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Store#Get()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Get",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        22,
+        24,
+        22,
+        30
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Get",
+      "kind": "Type",
+      "name": "string",
+      "range": [
+        22,
+        32,
+        22,
+        38
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Close",
+      "kind": "Type",
+      "name": "Store",
+      "range": [
+        26,
+        8,
+        26,
+        13
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        26,
+        0,
+        28,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Method",
+      "name": "Close",
+      "range": [
+        26,
+        15,
+        26,
+        20
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Store#Close()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Close",
+      "kind": "Function",
+      "name": "Println",
+      "range": [
+        27,
+        5,
+        27,
+        12
+      ],
+      "role": "Reference",
+      "symbol": null
+    }
+  ]
+}

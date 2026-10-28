@@ -103,6 +103,8 @@ impl RepositoryService for RepositoriesService {
             .resolve_repo(&request.into_inner().repo)
             .map_err(status)?;
         tracing::Span::current().record("repo", tracing::field::display(record.id));
+        // Closed first: the directory holding it goes next.
+        self.state.symbols.forget(record.id);
         let forgotten = manager.forget_repository(record.id).await.map_err(status)?;
         Ok(Response::new(ForgetRepositoryResponse {
             repository: Some(Repository::from(&forgotten)),

@@ -1,0 +1,52 @@
+{
+  "has_errors": false,
+  "occurrences": [
+    {
+      "definition_range": null,
+      "enclosing": "Flush",
+      "kind": "Type",
+      "name": "Store",
+      "range": [
+        2,
+        9,
+        2,
+        14
+      ],
+      "role": "Reference",
+      "symbol": null
+    },
+    {
+      "definition_range": [
+        2,
+        0,
+        4,
+        1
+      ],
+      "enclosing": null,
+      "kind": "Method",
+      "name": "Flush",
+      "range": [
+        2,
+        16,
+        2,
+        21
+      ],
+      "role": "Definition",
+      "symbol": "reef-tags . . . pkg/store/Store#Flush()."
+    },
+    {
+      "definition_range": null,
+      "enclosing": "Flush",
+      "kind": "Function",
+      "name": "Close",
+      "range": [
+        3,
+        3,
+        3,
+        8
+      ],
+      "role": "Reference",
+      "symbol": null
+    }
+  ]
+}

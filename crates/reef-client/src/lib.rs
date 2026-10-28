@@ -24,6 +24,7 @@ pub mod json;
 pub mod logging;
 pub mod paths;
 pub mod presence;
+pub mod scip;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -43,6 +44,7 @@ use reef_api::v1::presence_service_client::PresenceServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
 use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::store_service_client::StoreServiceClient;
+use reef_api::v1::symbol_service_client::SymbolServiceClient;
 use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
 use reef_api::v1::{
     AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest, DescribeChangeResponse,
@@ -70,6 +72,10 @@ use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
     GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
     ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry, Operation,
+};
+use reef_api::v1::{
+    IndexSymbolsRequest, IndexSymbolsResponse, ListSymbolsRequest, ListSymbolsResponse,
+    UploadScipDocumentsRequest, UploadScipDocumentsResponse,
 };
 use reef_error::{Advice, Classify, ErrorKind};
 use tokio::net::UnixStream;
@@ -1091,6 +1097,69 @@ impl Client {
         let mut client =
             FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("EditFiles", client.edit_files(request)).await
+    }
+
+    /// `SymbolService.IndexSymbols` (R2.14).
+    pub async fn index_symbols(
+        &self,
+        request: IndexSymbolsRequest,
+    ) -> Result<IndexSymbolsResponse, ClientError> {
+        let mut client =
+            SymbolServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("IndexSymbols", client.index_symbols(request))
+            .await
+    }
+
+    /// `SymbolService.UploadScipDocuments` (R2.14). A request the daemon
+    /// would not decode (over gRPC's 4 MiB) is [`ClientError::TooLarge`],
+    /// not sent; [`scip::batches`] splits an index to fit.
+    pub async fn upload_scip_documents(
+        &self,
+        request: UploadScipDocumentsRequest,
+    ) -> Result<UploadScipDocumentsResponse, ClientError> {
+        let bytes = prost::Message::encoded_len(&request);
+        if bytes > MAX_REQUEST_BYTES {
+            return Err(ClientError::TooLarge {
+                bytes,
+                max: MAX_REQUEST_BYTES,
+            });
+        }
+        let mut client =
+            SymbolServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("UploadScipDocuments", client.upload_scip_documents(request))
+            .await
+    }
+
+    /// One page of `SymbolService.ListSymbols` (R2.14).
+    pub async fn list_symbols_page(
+        &self,
+        request: ListSymbolsRequest,
+    ) -> Result<ListSymbolsResponse, ClientError> {
+        let mut client =
+            SymbolServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ListSymbols", client.list_symbols(request)).await
+    }
+
+    /// The whole listing `request` asks for: every page's occurrences, with
+    /// the first page's other fields, all read at the first page's
+    /// operation; `request`'s page fields are ignored.
+    pub async fn list_symbols(
+        &self,
+        request: ListSymbolsRequest,
+    ) -> Result<ListSymbolsResponse, ClientError> {
+        let mut request = ListSymbolsRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        let mut whole = self.list_symbols_page(request.clone()).await?;
+        while !whole.next_page_token.is_empty() {
+            request.page_token = std::mem::take(&mut whole.next_page_token);
+            let next = self.list_symbols_page(request.clone()).await?;
+            whole.symbols.extend(next.symbols);
+            whole.next_page_token = next.next_page_token;
+        }
+        Ok(whole)
     }
 }
 

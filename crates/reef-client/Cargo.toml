@@ -38,6 +38,7 @@ etcetera.workspace = true        # the platform's default state directory
 toml.workspace = true            # the client's three keys of config.toml
 time.workspace = true            # RFC 3339 timestamps in the JSON
 base64.workspace = true          # `file read -o json` of bytes that are not UTF-8 (R2.27)
+blake3.workspace = true          # the content digest a SCIP upload names (R2.14)
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

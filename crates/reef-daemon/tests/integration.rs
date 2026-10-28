@@ -909,6 +909,7 @@ async fn same_cli_both_platforms() {
     // R2.27's commands, scoped to the workspace by flag.
     let ws_path = Path::new(created["path"].as_str().unwrap()).to_owned();
     std::fs::write(ws_path.join("shape.txt"), "shape\n").unwrap();
+    std::fs::write(ws_path.join("shape.py"), "def shape():\n    pass\n").unwrap();
     let scoped = |words: &[&str]| -> Value {
         let mut args = words.to_vec();
         args.extend(["--workspace", id.as_str()]);
@@ -935,6 +936,11 @@ async fn same_cli_both_platforms() {
     shapes.insert(
         "file read".into(),
         shape(&scoped(&["file", "read", "shape.txt"])),
+    );
+    // R2.14's: one file, so neither waits on indexing the whole tree.
+    shapes.insert(
+        "symbols list".into(),
+        shape(&scoped(&["symbols", "list", "shape.py"])),
     );
     shapes.insert("ws release".into(), shape(&run(&["ws", "release", &id])));
     shapes.insert("ws gc".into(), shape(&run(&["ws", "gc", "--repo", &repo])));

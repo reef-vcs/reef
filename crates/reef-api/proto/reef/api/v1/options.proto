@@ -15,7 +15,8 @@ enum Access {
   // is already on disk.
   ACCESS_READ = 1;
   // Records operations on the changes, workspaces, leases, or presence the
-  // request names.
+  // request names, or stores data other callers read, such as the symbol
+  // index's uploads.
   ACCESS_WRITE = 2;
   // Has daemon-wide or host-level effects: registration, garbage
   // collection, backup, quiesce, store builds.

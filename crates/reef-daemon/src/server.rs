@@ -1,7 +1,7 @@
 //! The gRPC router: every service the daemon serves, behind
 //! [`CompatLayer`].
 //!
-//! The daemon serves the eleven `reef.api.v1` services and, frozen,
+//! The daemon serves the twelve `reef.api.v1` services and, frozen,
 //! `reef.daemon.v0.Daemon/Status` (R2.01, ADR 0029). A request for a method
 //! it does not serve gets tonic's bare `UNIMPLEMENTED`, which a client
 //! cannot tell from a bug; [`CompatLayer`] rewrites that answer so every
@@ -31,6 +31,7 @@ use reef_api::v1::presence_service_server::PresenceServiceServer;
 use reef_api::v1::repository_service_server::RepositoryServiceServer;
 use reef_api::v1::status_service_server::StatusServiceServer;
 use reef_api::v1::store_service_server::StoreServiceServer;
+use reef_api::v1::symbol_service_server::SymbolServiceServer;
 use reef_api::v1::workspace_service_server::WorkspaceServiceServer;
 use tonic::body::Body;
 use tonic::codegen::http;
@@ -52,10 +53,11 @@ use crate::service::presence::PresenceHandler;
 use crate::service::repositories::RepositoriesService;
 use crate::service::status::StatusHandler;
 use crate::service::stores::StoresService;
+use crate::service::symbols::SymbolsHandler;
 use crate::service::workspaces::WorkspacesService;
 
 /// Every service [`router`] registers, by full name.
-pub const SERVED: [&str; 12] = [
+pub const SERVED: [&str; 13] = [
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
@@ -66,6 +68,7 @@ pub const SERVED: [&str; 12] = [
     "reef.api.v1.RepositoryService",
     "reef.api.v1.StatusService",
     "reef.api.v1.StoreService",
+    "reef.api.v1.SymbolService",
     "reef.api.v1.WorkspaceService",
     "reef.daemon.v0.Daemon",
 ];
@@ -105,6 +108,9 @@ pub fn router(state: Arc<AppState>) -> ApiRouter {
             &state,
         ))))
         .add_service(StoreServiceServer::new(StoresService::new(Arc::clone(
+            &state,
+        ))))
+        .add_service(SymbolServiceServer::new(SymbolsHandler::new(Arc::clone(
             &state,
         ))))
         .add_service(WorkspaceServiceServer::new(WorkspacesService::new(

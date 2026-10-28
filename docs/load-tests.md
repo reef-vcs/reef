@@ -29,6 +29,7 @@ It is `#[ignore]`d and does nothing without `REEF_LOAD=1`. Run it in release, th
 | `REEF_LOAD_WRITE_PERIOD_SECS` | `60` | how often each workspace writes in the steady state |
 | `REEF_LOAD_WATCHER` | `notify` | the watcher backend: `notify` or `watchman` (R1.30); each workspace's `watcher` field in the report says which one it got |
 | `REEF_LOAD_NARROWED_MAX_PATHS` | the daemon's (1,000) | `watcher.narrowed_max_paths`; `0` makes every notify snapshot a full scan, as before R1.30 |
+| `REEF_LOAD_SYMBOLS` | `0` | `1` turns on `[symbols] background`, so every snapshot's tree is indexed while the load runs (R2.14) |
 
 The `medium` run takes about 17 minutes on an M2 Max (six of them releasing the 200 workspaces; see the findings) and 7 in a Linux VM on the same machine, and needs about 4 GB free; `large` with 200 workspaces needs about 9 GB, takes about an hour on the M2 Max, and on Linux needs more than 8 GB of memory (the test checks the disk before it starts and stops with the figure). On Linux, run it as root so the daemon picks kernel overlayfs (`sudo -E env "PATH=$PATH" cargo nextest run ...`): unprivileged without `fuse-overlayfs` it falls back to plain copies, and twenty copies of `large` fill a CI runner's disk. Two hundred `large` workspaces watch 1.67 million directories, above Linux's default `fs.inotify.max_user_watches` (at most 1,048,576), so raise it first: `sudo sysctl -w fs.inotify.max_user_watches=4194304`.
 
@@ -172,6 +173,22 @@ The macOS runs' twenty `large` creates before the change were also slower than i
 - **Tearing down 200 `medium` workspaces on macOS takes 6 to 8 minutes; on Linux 7 seconds.** A release alone takes 0.8 s, but with 200 workspaces alive the median release took 15.7 s (8 in flight). A `sample` of a scratch daemon releasing them (installed release binaries, the same 200 workspaces) put almost all CPU in jj's working-copy scans (`fstatat` under `FileSnapshotter::visit_directory`) and in deleting released trees (`unlinkat` under `fs_util::remove_all`). Before R1.23's fallback change, its `watcher summary` lines showed 100 to 130 scans a minute, queued up to 153 deep and waiting up to 51 s for a permit: the 60 s fallback snapshot of every idle workspace running into the releases. After it, the queue stayed at one through the teardown, about 30 scans a minute (the releases' own final snapshots), and the teardown took 344 s instead of 458 (median release 13.9 s). The rest is the final snapshots and the deletions of 10,000-file cloned trees on the same APFS volume; on Linux a release removes an overlay's small upper directory instead. Deleting released trees at low priority, or in one background pass, is the follow-up.
 - **Memory grows with the tree, per workspace.** Peak resident size was 554 MB with 200 `medium` workspaces on macOS and 1.2 GB on Linux. With `large`, it was 3.5 GB for 200 workspaces on macOS (about 18 MB each) and 3.6 GB for 50 on Linux (about 73 MB each; why Linux needs four times as much is not established). One hundred or 200 `large` workspaces did not fit the 7.7 GB Linux VM: the kernel's OOM killer stopped the daemon partway through creating them, at 3.6 to 3.7 GB resident, beside the kernel memory of more than a million inotify watches. Each loaded working copy keeps its `tree_state` (one entry per tracked file) in memory. A machine meant to hold hundreds of 100,000-file workspaces needs that much memory, or the daemon needs to unload idle working copies (a Phase 2 question for the Scale section).
 - **Limits.** One inotify instance per daemon, as R1.13 designed; `medium` used 1,000 watches per workspace, so the default 1,048,576 holds 1,000 `medium` workspaces or 125 `large` ones. The scan pool defaults to one permit per CPU (12 here).
+
+## Background symbol indexing (R2.14)
+
+`medium`, 200 workspaces, release build, on the M2 Max, 2026-10-28. The two runs were back to back on one tree, the only difference being `REEF_LOAD_SYMBOLS`. With it on, every snapshot's tree is indexed in the background ([ADR 0042](adr/0042-symbol-index.md)): about 7,000 supported files once, then one or two files per snapshot.
+
+| Measurement | indexing off | indexing on (`REEF_LOAD_SYMBOLS=1`) |
+| --- | ---: | ---: |
+| steady-state write-to-snapshot p50 / p95 / max | 638 / **739** / 743 ms | 660 / **767** / 778 ms |
+| writes unsnapshotted after 30 s | 0 of 1,000 | 0 of 1,000 |
+| burst p50 / p95 / max | 4.1 / 7.4 / 7.8 s | 4.1 / 7.4 / 7.7 s |
+| 200 × `medium` create, total (p95 each) | 39.6 s (4,731 ms) | 39.5 s (4,729 ms) |
+| 20 × `large` create, max / mean | 1,216 / 984 ms | 1,248 / 1,002 ms |
+| 200 releases, total | 352 s | 359 s |
+| daemon peak threads, RSS | 283, 670 MB | 271, 691 MB |
+
+Both pass the gate. Indexing costs about 30 ms at the steady state's p95 and nothing measurable in the burst. Both runs' bursts are slower than the 2026-10-23 baseline's macOS column. That was before R1.30, and the cause is not this change. `background` therefore stays on by default (open question 1 in the brief).
 
 ## Subscriptions (R2.22)
 

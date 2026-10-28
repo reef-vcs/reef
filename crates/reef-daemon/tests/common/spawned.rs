@@ -64,6 +64,8 @@ struct Dirs {
 fn quiet_defaults() -> FileConfig {
     let mut config = FileConfig::default();
     config.gc.interval = Duration::ZERO;
+    // No background symbol indexing unless a test asks (R2.14).
+    config.symbols.background = false;
     config
 }
 

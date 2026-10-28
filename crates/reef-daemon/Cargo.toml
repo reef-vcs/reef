@@ -53,6 +53,7 @@ reef-api.workspace = true
 reef-client.workspace = true     # the client, its JSON, and the path layering the CLI shares (R2.05)
 reef-error.workspace = true
 reef-broker.workspace = true     # the subscription broker (R2.22)
+reef-symbols.workspace = true    # the symbol index's extraction (R2.14)
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -102,6 +103,11 @@ required-features = ["watchman"]
 # Workspace creation per backend and through the daemon (R1.12). See docs/benchmarks.md.
 [[bench]]
 name = "workspace_create"
+harness = false
+
+# The symbol index through the daemon (R2.14). See docs/benchmarks.md.
+[[bench]]
+name = "symbols"
 harness = false
 
 [dev-dependencies]

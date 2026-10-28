@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 6;
+pub const API_REVISION: u32 = 7;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -65,6 +65,8 @@ pub const API_DIGESTS: &[&str] = &[
     "0064416d711687e5e6b1b5886b88ca0aecf0f0ddae49068fabc04b84cac1451e",
     // #95: `GcReport.base_bytes_unshared`.
     "db4b28699abf97ae6ae52df8f5bb41129b9ead7cca29f2f4cf4700edec926c60",
+    // R2.14: `SymbolService`.
+    "c6eb256290b3d502e8605e71f2234a20891465cdd05b89f5060569c193d55736",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -260,6 +262,18 @@ pub mod error {
     /// for one agent (R2.10). Metadata: `limit`, and `agent` for the limit
     /// per agent.
     pub const TOO_MANY_PRESENCE_ENTRIES: &str = "TOO_MANY_PRESENCE_ENTRIES";
+    /// The symbol index is off: `[symbols] enabled = false` (R2.14).
+    pub const SYMBOLS_DISABLED: &str = "SYMBOLS_DISABLED";
+    /// A query that needs a tree indexed, on one that is not yet (R2.14).
+    /// Metadata: `commit_id`, `missing` (supported files without an entry).
+    pub const SYMBOLS_NOT_INDEXED: &str = "SYMBOLS_NOT_INDEXED";
+    /// A `ListSymbols` request with neither `path`, `name` nor `symbol`,
+    /// both `name` and `symbol`, or a `symbol` that is not SCIP's grammar
+    /// (R2.14). Metadata: `field`.
+    pub const INVALID_SYMBOL_QUERY: &str = "INVALID_SYMBOL_QUERY";
+    /// An upload with no documents or more than 1,000, or no tool name
+    /// (R2.14). Metadata: `field`.
+    pub const INVALID_UPLOAD: &str = "INVALID_UPLOAD";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
@@ -390,7 +404,14 @@ mod tests {
 
     #[test]
     fn writes_return_operations() {
-        const EXCEPT: [&str; 3] = ["RenewLease", "ReportPresence", "ClearPresence"];
+        // ADR 0029 decision 12's exceptions, and the symbol index's upload,
+        // which stores derived data and records no operation (ADR 0042).
+        const EXCEPT: [&str; 4] = [
+            "RenewLease",
+            "ReportPresence",
+            "ClearPresence",
+            "UploadScipDocuments",
+        ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())
             {

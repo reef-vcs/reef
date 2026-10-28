@@ -32,6 +32,7 @@ pub mod snapshot;
 pub mod spec;
 pub mod store;
 pub mod subscribe;
+pub mod symbols;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod watcher;

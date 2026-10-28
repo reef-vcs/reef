@@ -13,7 +13,9 @@
 //! (200), `REEF_LOAD_STEADY_SECS` (300), `REEF_LOAD_WRITE_PERIOD_SECS`
 //! (60), `REEF_LOAD_WATCHER` (`notify`, or `watchman`),
 //! `REEF_LOAD_NARROWED_MAX_PATHS` (the daemon's default; `0` scans every
-//! tracked file on every snapshot, as before R1.30). The report is
+//! tracked file on every snapshot, as before R1.30), `REEF_LOAD_SYMBOLS`
+//! (`0`; `1` indexes every snapshot's tree in the background, R2.14). The
+//! report is
 //! `target/load/<os>-<preset>-<timestamp>.json`, and a Markdown summary is
 //! printed.
 
@@ -75,6 +77,7 @@ struct Params {
     period: Duration,
     watcher: WatcherBackend,
     narrowed_max_paths: Option<usize>,
+    symbols: bool,
 }
 
 impl Params {
@@ -106,6 +109,7 @@ impl Params {
                     text.parse()
                         .unwrap_or_else(|_| panic!("REEF_LOAD_NARROWED_MAX_PATHS={text}"))
                 }),
+            symbols: number("REEF_LOAD_SYMBOLS", 0) == 1,
         }
     }
 }
@@ -137,6 +141,7 @@ fn configure(config: &mut FileConfig, params: &Params) {
     if let Some(max) = params.narrowed_max_paths {
         config.watcher.narrowed_max_paths = max;
     }
+    config.symbols.background = params.symbols;
     // Longer than the run: the heartbeats stop after the burst, and
     // creating and releasing 200 `large` workspaces on macOS each take more
     // than the default 30 minutes. An expiry would reclaim a workspace
@@ -182,6 +187,7 @@ async fn load_profile() {
             "workspaces": params.workspaces,
             "watcher": params.watcher.as_str(),
             "narrowed_max_paths": params.narrowed_max_paths,
+            "symbols": params.symbols,
             "steady_secs": params.steady.as_secs(),
             "write_period_secs": params.period.as_secs(),
             "create_concurrency": CREATE_CONCURRENCY,

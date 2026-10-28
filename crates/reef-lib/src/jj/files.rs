@@ -14,7 +14,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use bstr::ByteSlice as _;
-use futures::AsyncReadExt as _;
+use futures::{AsyncReadExt as _, StreamExt as _};
 use jj_lib::backend::{
     BackendError, CopyId, FileId, MergedTreeValue, MergedTreeValueExt as _, TreeValue,
 };
@@ -27,7 +27,7 @@ use jj_lib::matchers::{Matcher, PrefixMatcher, Visit, VisitDirs, VisitFiles};
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::{MergedTree, all_merged_tree_entries};
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
-use jj_lib::object_id::ObjectId as _;
+use jj_lib::object_id::ObjectId;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathComponentBuf};
 use jj_lib::tree::TreeMergeExt as _;
@@ -1283,6 +1283,226 @@ impl Repo {
             commit_id: CommitIdHex::of(new.id()),
         })
     }
+}
+
+// The symbol index's reads (R2.14, ADR 0042): a tree's files with their
+// ids, the files two trees differ in, and a blob by id, so the index keys
+// entries by path and content without materializing anything.
+
+/// A tree, as the symbol index holds one across reads.
+pub use jj_lib::merged_tree::MergedTree as Tree;
+
+fn repo_path(text: &str) -> Result<RepoPathBuf, FileError> {
+    RepoPathBuf::from_internal_string(text).map_err(|_| {
+        FileError::Path(PathError {
+            path: text.to_owned(),
+        })
+    })
+}
+
+/// A file of a tree, for the symbol index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeFile {
+    /// Repository-relative.
+    pub path: String,
+    /// What it is: a file, an executable, a symlink, a submodule or a
+    /// conflict. Never a directory.
+    pub kind: EntryKind,
+    /// The content id's bytes for a file or an executable; empty otherwise.
+    pub file_id: Vec<u8>,
+}
+
+impl TreeFile {
+    fn of(path: &RepoPath, value: &MergedTreeValue) -> Option<Self> {
+        let kind = kind_of(value)?;
+        if kind == EntryKind::Directory {
+            return None;
+        }
+        let file_id = match value.as_normal() {
+            Some(TreeValue::File { id, .. }) => id.as_bytes().to_vec(),
+            _ => Vec::new(),
+        };
+        Some(Self {
+            path: path.as_internal_file_string().to_owned(),
+            kind,
+            file_id,
+        })
+    }
+
+    /// A file or an executable: something with content to read.
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind, EntryKind::File | EntryKind::Executable)
+    }
+}
+
+/// Matches the files whose path `filter` accepts, at or under `dir` (the
+/// root when empty), and visits only the directories that can hold them.
+struct Filtered<'a>(&'a (dyn Fn(&str) -> bool + Sync), &'a str);
+
+impl std::fmt::Debug for Filtered<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Filtered")
+    }
+}
+
+impl Matcher for Filtered<'_> {
+    fn matches(&self, file: &RepoPath) -> bool {
+        let path = file.as_internal_file_string();
+        under(path, self.1) && (self.0)(path)
+    }
+
+    fn visit(&self, dir: &RepoPath) -> Visit {
+        let dir = dir.as_internal_file_string();
+        if !under(dir, self.1) && !under(self.1, dir) {
+            return Visit::Nothing;
+        }
+        Visit::Specific {
+            dirs: VisitDirs::All,
+            files: VisitFiles::All,
+        }
+    }
+}
+
+/// `commit`'s tree.
+pub async fn commit_tree(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+) -> Result<MergedTree, FileError> {
+    Ok(commit_of(repo, commit).await?.tree())
+}
+
+/// `commit`'s tree and its first parent's, when it has a parent other than
+/// the root.
+pub async fn commit_and_parent_trees(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+) -> Result<(MergedTree, Option<MergedTree>), FileError> {
+    let commit = commit_of(repo, commit).await?;
+    let root = repo.store().root_commit_id();
+    let parent = match commit.parent_ids().first() {
+        Some(id) if id != root => Some(repo.store().get_commit_async(id).await?.tree()),
+        _ => None,
+    };
+    Ok((commit.tree(), parent))
+}
+
+/// Every workspace's working-copy commit in `repo`'s view, deduplicated.
+pub fn working_copy_commits(repo: &ReadonlyRepo) -> Vec<CommitIdHex> {
+    let ids: BTreeSet<CommitIdHex> = repo
+        .view()
+        .wc_commit_ids()
+        .values()
+        .map(CommitIdHex::of)
+        .collect();
+    ids.into_iter().collect()
+}
+
+/// A tree's identity: its tree ids in hex, joined by `+` when it is
+/// conflicted. Two commits with one key hold the same files.
+pub fn tree_key(tree: &MergedTree) -> String {
+    tree.tree_ids()
+        .iter()
+        .map(ObjectId::hex)
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Whether `path` is `dir` or below it, by whole components; every path is
+/// under the root, `""`.
+fn under(path: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Every entry of `tree` that is not a directory and whose path `filter`
+/// accepts, in path order.
+pub fn walk_files(
+    tree: &MergedTree,
+    filter: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<Vec<TreeFile>, FileError> {
+    walk_files_in(tree, "", filter)
+}
+
+/// [`walk_files`] at or under `dir`, a file or a directory (the root when
+/// empty), reading only the trees on the way to it and below it.
+pub fn walk_files_in(
+    tree: &MergedTree,
+    dir: &str,
+    filter: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<Vec<TreeFile>, FileError> {
+    let mut files = Vec::new();
+    for (path, value) in tree.entries_matching(&Filtered(filter, dir)) {
+        files.extend(TreeFile::of(&path, &value?));
+    }
+    Ok(files)
+}
+
+/// A path whose entry differs between two trees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Repository-relative.
+    pub path: String,
+    /// Its entry in the old tree; `None` when absent or a directory.
+    pub before: Option<TreeFile>,
+    /// Its entry in the new tree; `None` when absent or a directory.
+    pub after: Option<TreeFile>,
+}
+
+/// The paths `filter` accepts whose entry differs from `from` to `to`, in
+/// path order.
+pub async fn changed_files(
+    from: &MergedTree,
+    to: &MergedTree,
+    filter: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<Vec<ChangedFile>, FileError> {
+    let matcher = Filtered(filter, "");
+    let mut stream = from.diff_stream(to, &matcher);
+    let mut changed = Vec::new();
+    while let Some(entry) = stream.next().await {
+        let values = entry.values.map_err(FileError::from)?;
+        changed.push(ChangedFile {
+            path: entry.path.as_internal_file_string().to_owned(),
+            before: TreeFile::of(&entry.path, &values.before),
+            after: TreeFile::of(&entry.path, &values.after),
+        });
+    }
+    Ok(changed)
+}
+
+/// The entry at `path` in `tree`, when it is not absent or a directory.
+pub async fn tree_file(tree: &MergedTree, path: &str) -> Result<Option<TreeFile>, FileError> {
+    let path = repo_path(path)?;
+    Ok(TreeFile::of(&path, &tree.path_value(&path).await?))
+}
+
+/// The content of file `id` at `path`, or `None` when it is larger than
+/// `max` bytes, which are then not read past `max + 1`.
+pub async fn read_file_id(
+    tree: &MergedTree,
+    path: &str,
+    id: &[u8],
+    max: u64,
+) -> Result<Option<Arc<[u8]>>, FileError> {
+    let path = &repo_path(path)?;
+    let id = FileId::new(id.to_vec());
+    let mut reader = tree.store().read_file(path, &id).await?;
+    let mut bytes = Vec::new();
+    (&mut reader)
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|source| BackendError::ReadFile {
+            path: path.to_owned(),
+            id: id.clone(),
+            source: source.into(),
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
+        return Ok(None);
+    }
+    Ok(Some(bytes.into()))
 }
 
 #[cfg(test)]

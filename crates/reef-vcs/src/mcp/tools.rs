@@ -453,6 +453,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.StoreService/ListStores",
         "for a person running the CLI",
     ),
+    (
+        "/reef.api.v1.SymbolService/IndexSymbols",
+        "tools/list is at its budget; R2.15 decides symbol tools (R2.14)",
+    ),
+    (
+        "/reef.api.v1.SymbolService/UploadScipDocuments",
+        "an indexer's output, uploaded by CI or `reef symbols upload`",
+    ),
+    (
+        "/reef.api.v1.SymbolService/ListSymbols",
+        "tools/list is at its budget; R2.15 decides symbol tools (R2.14)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.

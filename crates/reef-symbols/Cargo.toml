@@ -1,0 +1,47 @@
+[package]
+name = "reef-symbols"
+description = "Reef symbols: tree-sitter tag extraction and SCIP normalization for Reef's symbol index. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "symbols", "tree-sitter"]
+categories = ["development-tools", "parser-implementations"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+# No Reef crate, no jj-lib, no gRPC, no SQLite, no tokio: bytes in, symbols out, so the daemon
+# (R2.14), the phase-four store and phase five's structural merge share it, and `reef-testing`'s
+# crate_graph test keeps it that way (ADR 0042).
+[dependencies]
+tree-sitter.workspace = true
+streaming-iterator.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-rust.workspace = true
+prost.workspace = true           # SCIP documents
+blake3.workspace = true          # definition digests and upload content digests
+thiserror.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+prost-build.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true      # the golden files
+rand.workspace = true            # the no-panics corpus
+rand_chacha.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "extract"
+harness = false

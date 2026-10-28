@@ -128,6 +128,8 @@ pub struct AppState {
     pub maintenance: crate::maintenance::Lock,
     /// The quiesce in effect, if any (R1.18).
     pub quiesce: crate::maintenance::quiesce::Quiescer,
+    /// The symbol index (R2.14).
+    pub symbols: Arc<crate::symbols::SymbolIndex>,
 }
 
 impl fmt::Debug for AppState {
@@ -341,6 +343,7 @@ impl Daemon {
         );
         let shutdown = CancellationToken::new();
         let broker = Arc::new(crate::subscribe::broker::OpBroker::new(&config.subscribe));
+        let symbols = crate::symbols::SymbolIndex::new(&config.file.symbols, &config.paths);
         let state = Arc::new(AppState {
             config,
             db,
@@ -358,6 +361,7 @@ impl Daemon {
             reindexed: Mutex::new(HashMap::new()),
             maintenance: crate::maintenance::Lock::new(),
             quiesce: crate::maintenance::quiesce::Quiescer::default(),
+            symbols,
         });
 
         // Before any snapshot can run (R2.10).
@@ -367,6 +371,7 @@ impl Daemon {
             .on_snapshot(crate::presence::publish::editing_hook(Arc::downgrade(
                 &state,
             )));
+        crate::symbols::SymbolIndex::attach(&state);
         let listener = match bring_up(&state).await {
             Ok(listener) => listener,
             Err(error) => {
