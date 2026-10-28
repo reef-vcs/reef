@@ -129,7 +129,7 @@ wrote .claude/skills/reef/SKILL.md
 wrote /Users/you/.claude/skills/reef/SKILL.md
 ```
 
-`reef init` writes `AGENTS.md`, and `CLAUDE.md` and a Claude Code skill when the repository uses Claude Code. `--user` also writes the skill for every repository on this machine, and turns on the Claude files here. `reef init --check` exits 3 when a file is stale, for CI. `reef guide` prints the same text to paste into any other agent's instructions. Aider and Gemini CLI read `AGENTS.md` only when their configuration names it.
+`reef init` writes `AGENTS.md`, and `CLAUDE.md` and a Claude Code skill when the repository uses Claude Code or Claude Code runs `reef init`. `--user` also writes the skill for every repository on this machine, and turns on the Claude files here. `reef init --check` exits 3 when a file is stale, for CI. `reef guide` prints the same text to paste into any other agent's instructions. Aider and Gemini CLI read `AGENTS.md` only when their configuration names it.
 
 With Claude Code, `reef init` also writes `.mcp.json`, which starts `reef mcp`: Reef's API as MCP tools ([ADR 0035](adr/0035-mcp-server.md)). Claude Code asks before it starts a project's server. The tools default to the workspace or repository Claude Code was started in. An agent without a shell reads and edits files through them (`read_file`, `edit_files`), and `wait_for_operations` waits for another agent's describe or edit. For another harness, add `reef mcp` as a stdio server in its MCP configuration.
 

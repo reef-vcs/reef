@@ -51,6 +51,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Changed
 
+- `reef init` started from Claude Code (`CLAUDECODE=1`: its shells, hooks, and the terminals of its IDE extensions) writes Claude Code's files, `CLAUDE.md`, the skill and `.mcp.json`, even when the repository has none of them, so an agent told only to run `reef init` sets up the harness it is. An `--agents` list is unaffected, and `--check` goes by the repository's files alone, so it can pass where `reef init` from Claude Code would still add those files. `env -u CLAUDECODE reef init` writes as before.
 - A GC, backup or quiesce refused because maintenance is running now names what is running, such as a timed GC.
 - `reef status` is a command, no longer a usage error pointing at `reef here`. Prefixes that named one command now name several and are usage errors listing them: `reef s` and `reef st` (formerly `store`), `reef d` (formerly `daemon`), `reef a` (formerly `guide`). `reef sto`, `reef da` and `reef gu` still work.
 - `reef here` points a divergent workspace at `reef log --workspace <id> -r 'change_id(<id>)'`, which lists its commits, instead of `reef ws inspect`.

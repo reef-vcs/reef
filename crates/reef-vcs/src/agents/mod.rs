@@ -11,6 +11,7 @@
 //! kept as they are; a whole file is replaced only when its frontmatter has
 //! [`GENERATED_BY`]; in `.mcp.json`, Reef owns only `mcpServers.reef`.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,16 +90,18 @@ impl Harness {
 /// The one harness whose file is outside the repository.
 const USER_SKILL: Harness = Harness::ClaudeSkill { user: true };
 
-/// The harnesses a repository shows signs of, by files at `root` only:
-/// `AGENTS.md` always; Claude Code (its section, skill and `.mcp.json`
-/// entry) when `CLAUDE.md` or `.claude/` exists or `user` is set (which
-/// adds the user-level skill); Cursor when `.cursor/` exists.
-pub(crate) fn detect(root: &Path, user: bool) -> Vec<Harness> {
+/// The harnesses a repository shows signs of, by files at `root`, and the
+/// one running `reef init`: `AGENTS.md` always; Claude Code (its section,
+/// skill and `.mcp.json` entry) when `CLAUDE.md` or `.claude/` exists, when
+/// `in_claude_code` (Claude Code ran `reef init`; see [`in_claude_code`]),
+/// or when `user` is set (which adds the user-level skill); Cursor when
+/// `.cursor/` exists.
+pub(crate) fn detect(root: &Path, user: bool, in_claude_code: bool) -> Vec<Harness> {
     let mut found = vec![Harness::AgentsMd];
     // `symlink_metadata`: a `CLAUDE.md` linked to a missing `AGENTS.md`
     // still counts.
     let claude_md = fs::symlink_metadata(root.join("CLAUDE.md")).is_ok();
-    if user || claude_md || root.join(".claude").is_dir() {
+    if user || in_claude_code || claude_md || root.join(".claude").is_dir() {
         found.extend([
             Harness::ClaudeMd,
             Harness::ClaudeSkill { user: false },
@@ -112,6 +115,14 @@ pub(crate) fn detect(root: &Path, user: bool) -> Vec<Harness> {
         found.push(Harness::CursorRule);
     }
     found
+}
+
+/// Whether Claude Code started this process, from `CLAUDECODE`, which it
+/// sets to `1` in its shells, hooks and MCP servers and its IDE extensions
+/// set in their terminals. An agent told only to run `reef init` gets the
+/// files it reads in a repository that has none of Claude Code's yet.
+pub(crate) fn in_claude_code(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| value == "1")
 }
 
 /// The text Reef writes for `harness`: for a section, the marker lines and
@@ -801,22 +812,44 @@ mod tests {
     fn detection_is_by_files_at_the_root() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        assert_eq!(detect(root, false), [Harness::AgentsMd]);
+        assert_eq!(detect(root, false, false), [Harness::AgentsMd]);
         let claude = [
             Harness::AgentsMd,
             Harness::ClaudeMd,
             Harness::ClaudeSkill { user: false },
             Harness::McpJson,
         ];
-        assert_eq!(detect(root, true)[..4], claude);
-        assert_eq!(detect(root, true)[4], Harness::ClaudeSkill { user: true });
+        assert_eq!(detect(root, true, false)[..4], claude);
+        assert_eq!(
+            detect(root, true, false)[4],
+            Harness::ClaudeSkill { user: true }
+        );
         fs::write(root.join("CLAUDE.md"), "").unwrap();
-        assert_eq!(detect(root, false), claude);
+        assert_eq!(detect(root, false, false), claude);
         fs::remove_file(root.join("CLAUDE.md")).unwrap();
         fs::create_dir(root.join(".claude")).unwrap();
         fs::create_dir(root.join(".cursor")).unwrap();
-        assert_eq!(detect(root, false).last(), Some(&Harness::CursorRule));
-        assert_eq!(detect(root, false).len(), 5);
+        assert_eq!(
+            detect(root, false, false).last(),
+            Some(&Harness::CursorRule)
+        );
+        assert_eq!(detect(root, false, false).len(), 5);
+    }
+
+    #[test]
+    fn claude_code_running_init_counts_as_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = [
+            Harness::AgentsMd,
+            Harness::ClaudeMd,
+            Harness::ClaudeSkill { user: false },
+            Harness::McpJson,
+        ];
+        assert_eq!(detect(dir.path(), false, true), claude);
+        assert!(in_claude_code(Some("1".as_ref())));
+        for other in [None, Some(""), Some("0"), Some("true")] {
+            assert!(!in_claude_code(other.map(AsRef::as_ref)), "{other:?}");
+        }
     }
 
     #[test]
@@ -882,7 +915,7 @@ mod tests {
     fn a_dangling_claude_md_link_counts_as_claude() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("AGENTS.md", dir.path().join("CLAUDE.md")).unwrap();
-        assert!(detect(dir.path(), false).contains(&Harness::ClaudeMd));
+        assert!(detect(dir.path(), false, false).contains(&Harness::ClaudeMd));
     }
 
     #[test]
