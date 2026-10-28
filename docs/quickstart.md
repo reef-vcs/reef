@@ -245,9 +245,10 @@ backend = "auto"     # apfs, overlayfs, fuse-overlayfs, reflink, or copy
 backend = "auto"     # Watchman for repositories over 50,000 files when it is installed
 [gc]
 undo_window = "7d"   # snapshots and operations kept at least this long
+interval = "1d"      # how often the daemon collects garbage by itself; "0s" turns it off
 ```
 
-`reef ws gc` reclaims old snapshots, unused bases, and unused stores; `--dry-run` reports what it would free.
+The daemon collects garbage daily: old snapshots, unused bases, and unused stores. `reef ws gc` runs it now, and `--dry-run` reports what it would free.
 
 ## Known limitations in Phase 1
 

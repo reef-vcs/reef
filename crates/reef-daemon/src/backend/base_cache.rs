@@ -36,7 +36,7 @@ use reef_lib::jj::{MaterializeError, MaterializeStats};
 use reef_lib::telemetry::elapsed_ms;
 
 use super::BackendError;
-use super::fs_util::allocated_bytes;
+use super::fs_util::{Footprint, allocated_bytes, footprint};
 use crate::db::{Db, DbError};
 use crate::error::{Advice, Advise};
 use crate::model::{BaseCacheRecord, RepoId, Timestamp};
@@ -121,6 +121,9 @@ pub struct Evicted {
     pub tree_id: String,
     /// What its two directories had allocated.
     pub bytes: u64,
+    /// What no other file shared when it was removed (in a dry run, now),
+    /// where the filesystem can tell ([`Footprint::unshared_bytes`]).
+    pub unshared_bytes: Option<u64>,
 }
 
 /// Failure of a base cache operation.
@@ -455,6 +458,12 @@ impl BaseCache {
     /// names, and removes them; a crash part way leaves row-less `*.gc`
     /// directories, which the start-up sweep removes. The caller keeps
     /// creates of this repository out meanwhile, so `keep` stays true.
+    ///
+    /// Each entry is measured just before it is removed, so a block that
+    /// cloned entries share counts in the unshared bytes of the last of
+    /// them to go, once (#95). A dry run measures each entry as it is: a
+    /// lower bound, since blocks only the doomed entries share count in
+    /// none of them.
     pub fn evict(
         &self,
         keep: &HashSet<String>,
@@ -474,10 +483,10 @@ impl BaseCache {
                 continue;
             }
             let entry = BaseEntry::from_record(record);
-            let bytes = if dry_run {
-                allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?
-            } else if let Some(bytes) = self.evict_one(&entry)? {
-                bytes
+            let measured = if dry_run {
+                entry_footprint(&entry)?
+            } else if let Some(measured) = self.evict_one(&entry)? {
+                measured
             } else {
                 // Removed meanwhile; not this eviction's.
                 remaining -= 1;
@@ -486,17 +495,18 @@ impl BaseCache {
             remaining -= 1;
             evicted.push(Evicted {
                 tree_id: entry.tree_id,
-                bytes,
+                bytes: measured.allocated_bytes,
+                unshared_bytes: measured.unshared_bytes,
             });
         }
         Ok(evicted)
     }
 
-    /// Removes one entry for [`BaseCache::evict`]; returns its bytes, or
-    /// `None` if its row was gone already.
-    fn evict_one(&self, entry: &BaseEntry) -> Result<Option<u64>, BaseCacheError> {
+    /// Removes one entry for [`BaseCache::evict`]; returns what it took,
+    /// or `None` if its row was gone already.
+    fn evict_one(&self, entry: &BaseEntry) -> Result<Option<Footprint>, BaseCacheError> {
         self.with_key_lock(&entry.tree_id, || {
-            let bytes = allocated_bytes(&entry.path)? + allocated_bytes(&entry.state_dir)?;
+            let measured = entry_footprint(entry)?;
             if self.db.delete_base(self.repo_id, &entry.tree_id)?.is_none() {
                 // Removed meanwhile; nothing of it is ours to delete.
                 return Ok(None);
@@ -516,8 +526,13 @@ impl BaseCache {
                     }
                 }
             }
-            tracing::info!(tree_id = %entry.tree_id, freed_bytes = bytes, "base evicted");
-            Ok(Some(bytes))
+            tracing::info!(
+                tree_id = %entry.tree_id,
+                freed_bytes = measured.allocated_bytes,
+                unshared_bytes = measured.unshared_bytes,
+                "base evicted"
+            );
+            Ok(Some(measured))
         })
     }
 
@@ -698,6 +713,18 @@ fn sync_dir(dir: &Path) -> Result<(), BaseCacheError> {
             path: dir.to_owned(),
             source,
         })
+}
+
+/// An entry's two directories, measured together.
+fn entry_footprint(entry: &BaseEntry) -> Result<Footprint, BaseCacheError> {
+    let (tree, state) = (footprint(&entry.path)?, footprint(&entry.state_dir)?);
+    Ok(Footprint {
+        allocated_bytes: tree.allocated_bytes + state.allocated_bytes,
+        unshared_bytes: tree
+            .unshared_bytes
+            .zip(state.unshared_bytes)
+            .map(|(a, b)| a + b),
+    })
 }
 
 #[cfg(test)]
@@ -983,6 +1010,59 @@ mod tests {
             [] as [&str; 0]
         );
         assert_eq!(cache.entries().unwrap().len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn evict_counts_blocks_shared_by_cloned_entries_once() {
+        const BIG: u64 = 8 << 20;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = cache(tmp.path());
+        let first = cache
+            .ensure("0a0a", |dir, state| {
+                let stats = fake_materialize(dir, state)?;
+                std::fs::write(dir.join("big"), vec![7_u8; 8 << 20]).unwrap();
+                std::fs::File::open(dir.join("big"))
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+                Ok(stats)
+            })
+            .unwrap();
+        cache
+            .ensure_from(
+                "0b0b",
+                &first,
+                &crate::backend::apfs::ApfsBackend,
+                |dir, _| {
+                    std::fs::write(dir.join("file"), "changed").unwrap();
+                    Ok(MaterializeStats {
+                        files: 0,
+                        bytes: 8,
+                        elapsed: Duration::ZERO,
+                        checkout: CheckoutStatsSummary::default(),
+                    })
+                },
+            )
+            .unwrap();
+        let unshared = |evicted: &[Evicted]| -> u64 {
+            evicted
+                .iter()
+                .map(|entry| entry.unshared_bytes.expect("APFS tells"))
+                .sum()
+        };
+        let allocated = |evicted: &[Evicted]| -> u64 { evicted.iter().map(|e| e.bytes).sum() };
+        let none = HashSet::new();
+
+        let would = cache.evict(&none, 0, SystemTime::now(), true).unwrap();
+        assert_eq!(would.len(), 2);
+        assert!(allocated(&would) >= 2 * BIG, "{would:?}");
+        assert!(unshared(&would) < 1 << 20, "a lower bound: {would:?}");
+
+        let evicted = cache.evict(&none, 0, SystemTime::now(), false).unwrap();
+        assert_eq!(evicted.len(), 2);
+        assert!(unshared(&evicted) >= BIG, "{evicted:?}");
+        assert!(unshared(&evicted) < allocated(&evicted), "{evicted:?}");
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Garbage collection (R1.17): explicit only (`Maintenance.Gc`, `reef ws
-//! gc`); nothing runs it on a timer in Phase 1.
+//! Garbage collection (R1.17): on request (`Maintenance.Gc`, `reef ws gc`)
+//! and every `gc.interval` from the daemon's timer
+//! ([`super::timer`], #95, ADR 0041).
 //!
 //! Four steps per repository, in order, with creates of the repository held
 //! off throughout (its create lock, exclusively):
@@ -34,6 +35,14 @@
 //! retention, is deleted. GC never touches a workspace directory or a base
 //! an active workspace uses, and writes nothing of the user's jj workspaces
 //! but the operation their working copy names (ADR 0040).
+//!
+//! A timed run ([`run_timed`]) does the same over every repository, going
+//! on past one that fails where a requested run stops, and stops between
+//! repositories at shutdown. A full run, timed or requested over every
+//! repository and not a dry run, records its end in `meta.last_gc_at`,
+//! which the timer counts its interval from. `base_bytes_unshared`
+//! reports what eviction freed on disk with blocks cloned bases share
+//! counted once, beside `base_bytes_freed`, which counts each in full.
 
 use std::collections::HashSet;
 use std::io;
@@ -46,7 +55,7 @@ use reef_lib::telemetry::elapsed_ms;
 use crate::backend::BaseCacheError;
 use crate::config::{BackupSection, GcSection};
 use crate::daemon::AppState;
-use crate::db::{DbError, META_LAST_BACKUP_AT};
+use crate::db::{DbError, META_LAST_BACKUP_AT, META_LAST_GC_AT};
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, RepositoryRecord, Timestamp, WorkspaceState};
 use crate::snapshot::index;
@@ -70,8 +79,12 @@ pub struct GcReport {
     pub jj_error: Option<String>,
     /// Base cache entries removed.
     pub base_entries_removed: u32,
-    /// What they had allocated.
+    /// What they had allocated: an upper bound on what removing them freed.
     pub base_bytes_freed: u64,
+    /// What removing them freed on disk, blocks they shared counted once
+    /// (#95): `Some(0)` when none went, `None` unless every one was
+    /// measured.
+    pub base_bytes_unshared: Option<u64>,
     /// Ended workspace rows deleted.
     pub workspace_rows_removed: u32,
     /// What their `wc/<id>` state directories had allocated.
@@ -166,20 +179,64 @@ pub fn keep_newer(
 /// `meta.last_backup_at`, if a backup was ever taken. A value that does not
 /// parse is ignored with a warning.
 fn last_backup_at(state: &AppState) -> Result<Option<SystemTime>, DbError> {
-    let Some(text) = state.db.meta(META_LAST_BACKUP_AT)? else {
+    meta_time(state, META_LAST_BACKUP_AT)
+}
+
+/// `meta.last_gc_at`, if a full run ever ended (#95). A value that does not
+/// parse is ignored with a warning.
+pub fn last_gc_at(state: &AppState) -> Result<Option<SystemTime>, DbError> {
+    meta_time(state, META_LAST_GC_AT)
+}
+
+fn meta_time(state: &AppState, key: &str) -> Result<Option<SystemTime>, DbError> {
+    let Some(text) = state.db.meta(key)? else {
         return Ok(None);
     };
     if let Ok(millis) = text.parse::<u64>() {
         Ok(Some(UNIX_EPOCH + Duration::from_millis(millis)))
     } else {
-        tracing::warn!(value = %text, "meta.last_backup_at is not unix milliseconds; ignored");
+        tracing::warn!(key, value = %text, "meta value is not unix milliseconds; ignored");
         Ok(None)
     }
 }
 
+/// Records now as the end of a full run. A failure is logged: the timer
+/// then runs again at the next start.
+fn record_full_run(state: &AppState) {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    if let Err(error) = state.db.set_meta(META_LAST_GC_AT, &millis.to_string()) {
+        tracing::warn!(
+            error = %ErrorChain(&error),
+            "cannot record when GC ran; the next start runs it again"
+        );
+    }
+}
+
+/// What started a run, recorded in its span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    /// `Maintenance.CollectGarbage`.
+    Request,
+    /// The daemon's timer.
+    Timer,
+}
+
+impl Trigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Trigger::Request => "request",
+            Trigger::Timer => "timer",
+        }
+    }
+}
+
 /// Runs GC on `repo`, or on every registered repository, in registration
-/// order. Holds nothing but each repository's create lock; the caller holds
-/// the maintenance lock.
+/// order, stopping at the first that fails. Holds nothing but each
+/// repository's create lock; the caller holds the maintenance lock. A run
+/// over every repository that is not a dry run records its end in
+/// `meta.last_gc_at`.
 pub async fn run(
     state: &AppState,
     repo: Option<RepoId>,
@@ -193,18 +250,97 @@ pub async fn run(
     let mut reports = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
         let leftovers = index == 0;
-        reports.push(run_repo(state, record, last_backup, dry_run, leftovers).await?);
+        reports.push(
+            run_repo(
+                state,
+                record,
+                last_backup,
+                dry_run,
+                leftovers,
+                Trigger::Request,
+            )
+            .await?,
+        );
+    }
+    if repo.is_none() && !dry_run {
+        record_full_run(state);
     }
     Ok(reports)
 }
 
-#[tracing::instrument(skip_all, fields(repo = %record.id, dry_run = dry_run))]
+/// What a timed run did.
+#[derive(Debug, Default)]
+pub struct TimedRun {
+    /// One per repository that finished.
+    pub reports: Vec<GcReport>,
+    /// The repositories that failed.
+    pub failed: Vec<RepoId>,
+    /// Repositories left for shutdown.
+    pub skipped: usize,
+}
+
+/// The timer's run (#95): every registered repository in registration
+/// order, logging a repository that fails and going on to the next. Stops
+/// between repositories once shutdown begins, without recording the run.
+/// Otherwise records its end in `meta.last_gc_at`, failures included. The
+/// caller holds the maintenance lock.
+pub async fn run_timed(state: &AppState) -> TimedRun {
+    let begun = Instant::now();
+    let mut run = TimedRun::default();
+    let listed = state
+        .db
+        .repositories()
+        .and_then(|records| Ok((records, last_backup_at(state)?)));
+    let (records, last_backup) = match listed {
+        Ok(listed) => listed,
+        Err(error) => {
+            tracing::error!(error = %ErrorChain(&error), "timed GC cannot read the repositories; the next run retries");
+            return run;
+        }
+    };
+    if records.is_empty() {
+        tracing::debug!("timed GC: no repositories");
+        record_full_run(state);
+        return run;
+    }
+    tracing::info!(repo_count = records.len(), "timed GC started");
+    for (index, record) in records.iter().enumerate() {
+        if state.shutdown.is_cancelled() {
+            run.skipped = records.len() - index;
+            tracing::info!(skipped_count = run.skipped, "timed GC stopped for shutdown");
+            return run;
+        }
+        let leftovers = index == 0;
+        match run_repo(state, record, last_backup, false, leftovers, Trigger::Timer).await {
+            Ok(report) => run.reports.push(report),
+            Err(error) => {
+                tracing::error!(
+                    repo = %record.id,
+                    error = %ErrorChain(&error),
+                    "timed GC failed for this repository; the next run retries"
+                );
+                run.failed.push(record.id);
+            }
+        }
+    }
+    record_full_run(state);
+    tracing::info!(
+        repo_count = records.len(),
+        failed_count = run.failed.len(),
+        elapsed_ms = elapsed_ms(begun),
+        "timed GC finished"
+    );
+    run
+}
+
+#[tracing::instrument(skip_all, fields(repo = %record.id, dry_run = dry_run, trigger = trigger.as_str()))]
 async fn run_repo(
     state: &AppState,
     record: &RepositoryRecord,
     last_backup: Option<SystemTime>,
     dry_run: bool,
     store_leftovers: bool,
+    trigger: Trigger,
 ) -> Result<GcReport, GcRunError> {
     let begun = Instant::now();
     let id = record.id;
@@ -239,8 +375,17 @@ async fn run_repo(
         }
         Some(handle) => manager.gc_jj(id, handle, keep_newer).await,
     };
-    if let Some(error) = &jj.error {
-        tracing::error!(error = %error, "the jj step of GC stopped short");
+    match (&jj.error, trigger) {
+        (None, _) => {}
+        (Some(error), Trigger::Request) => {
+            tracing::error!(error = %error, "the jj step of GC stopped short");
+        }
+        // Unattended, a busy checkout or a workspace that would not settle
+        // is expected now and then.
+        (Some(error), Trigger::Timer) => tracing::warn!(
+            error = %error,
+            "the jj step of timed GC stopped short; the next run retries"
+        ),
     }
 
     // 2.
@@ -279,6 +424,7 @@ async fn run_repo(
         jj_error: jj.error,
         base_entries_removed: u32::try_from(evicted.len()).unwrap_or(u32::MAX),
         base_bytes_freed: evicted.iter().map(|entry| entry.bytes).sum(),
+        base_bytes_unshared: evicted.iter().map(|entry| entry.unshared_bytes).sum(),
         workspace_rows_removed,
         wc_bytes_freed,
         stores_removed,
@@ -294,6 +440,7 @@ async fn run_repo(
         reindex_ms = report.reindex_ms,
         base_entries_removed = report.base_entries_removed,
         base_bytes_freed = report.base_bytes_freed,
+        base_bytes_unshared = report.base_bytes_unshared,
         workspace_rows_removed = report.workspace_rows_removed,
         wc_bytes_freed = report.wc_bytes_freed,
         stores_removed = report.stores_removed,

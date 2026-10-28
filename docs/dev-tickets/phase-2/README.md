@@ -31,6 +31,7 @@ Phase 1 is complete and released as 0.1.0 (2026-10-25). What it left behind, and
 | R2.22 | [R2.22-subscription-load-test-and-broker.md](R2.22-subscription-load-test-and-broker.md) | L | R2.10 | R4.19 (the store's load test reuses the broker and the generator) |
 | #80 | [issue-80-follow-merges-late-edits.md](issue-80-follow-merges-late-edits.md) | M | R2.03, R2.04 | none listed |
 | #94 | [issue-94-gc-keeps-the-root-loadable.md](issue-94-gc-keeps-the-root-loadable.md) | M | R1.17, R2.09 | #95 (the jj step on a timer) |
+| #95 | [issue-95-gc-on-a-timer.md](issue-95-gc-on-a-timer.md) | M | R1.17, #94 | none listed |
 
 ## Departures from dev-phases.md
 

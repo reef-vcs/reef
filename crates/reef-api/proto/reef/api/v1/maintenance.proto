@@ -19,7 +19,9 @@ service MaintenanceService {
   // Garbage collection: jj's operations and git objects older than the
   // undo window, base cache entries no active workspace uses, ended
   // workspace records, and unused stores. Refused with UNAVAILABLE while
-  // another maintenance task (GC, backup, quiesce) runs.
+  // another maintenance task (GC, backup, quiesce) runs. The daemon also
+  // runs it by itself every `gc.interval` (default a day); UNAVAILABLE
+  // while that run is in progress too.
   rpc CollectGarbage(CollectGarbageRequest) returns (CollectGarbageResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
@@ -63,7 +65,7 @@ message CollectGarbageResponse {
 }
 
 // What garbage collection did to one repository. Byte counts are allocated
-// blocks.
+// blocks, except `base_bytes_unshared`.
 message GcReport {
   // The repository.
   string repo_id = 1;
@@ -82,7 +84,8 @@ message GcReport {
   string jj_error = 6;
   // Base cache entries removed.
   uint32 base_entries_removed = 7;
-  // What they had allocated.
+  // What they had allocated: an upper bound on what removing them freed
+  // (see `base_bytes_unshared`).
   uint64 base_bytes_freed = 8;
   // Ended workspace records deleted.
   uint32 workspace_rows_removed = 9;
@@ -96,6 +99,13 @@ message GcReport {
   uint64 elapsed_ms = 13;
   // Nothing was deleted; the counts are what would have gone.
   bool dry_run = 14;
+  // What removing the base cache entries freed on disk: for each, the bytes
+  // no other file or filesystem snapshot shared when it was removed
+  // (incremental bases share blocks with the base they were cloned from,
+  // which base_bytes_freed counts in full). In a dry run, what each entry
+  // holds alone now, a lower bound. Unset where the filesystem cannot tell
+  // (measured on APFS only); 0 when nothing was removed.
+  optional uint64 base_bytes_unshared = 15;
 }
 
 // A step of a backup.

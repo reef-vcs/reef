@@ -105,7 +105,10 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["backend", "root", "fuse_overlayfs", "overlay_nosuid"],
     ),
     ("base_cache", &["max_entries"]),
-    ("gc", &["undo_window", "git_executable", "reindex_limit"]),
+    (
+        "gc",
+        &["undo_window", "interval", "git_executable", "reindex_limit"],
+    ),
     (
         "backup",
         &["retention", "quiesce_max", "sqlite_pages_per_step"],
@@ -421,7 +424,7 @@ impl Default for BaseCacheSection {
     }
 }
 
-/// `[gc]`: garbage collection (R1.17).
+/// `[gc]`: garbage collection (R1.17) and its timer (#95).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GcSection {
@@ -429,6 +432,10 @@ pub struct GcSection {
     /// Default 7 days.
     #[serde(with = "duration")]
     pub undo_window: Duration,
+    /// How often the daemon runs GC by itself, over every repository.
+    /// Default 1 day; `0s` turns it off; otherwise at least 1 hour.
+    #[serde(with = "duration")]
+    pub interval: Duration,
     /// The `git` binary GC runs. Default `git`.
     pub git_executable: String,
     /// Default 100,000.
@@ -439,6 +446,7 @@ impl Default for GcSection {
     fn default() -> Self {
         Self {
             undo_window: Duration::from_hours(7 * 24),
+            interval: Duration::from_hours(24),
             git_executable: "git".to_owned(),
             reindex_limit: 100_000,
         }
@@ -675,6 +683,9 @@ pub struct Config {
     /// Presence limits (R2.10). Not a configuration-file key and not in
     /// `config show`: set here by tests only.
     pub presence: crate::presence::Limits,
+    /// The GC timer's delays (#95). Not a configuration-file key and not in
+    /// `config show`: set here by tests only.
+    pub gc_timer: crate::maintenance::timer::Limits,
 }
 
 /// Failure to resolve the configuration.
@@ -943,6 +954,7 @@ impl Config {
             origin,
             subscribe: crate::subscribe::Limits::default(),
             presence: crate::presence::Limits::default(),
+            gc_timer: crate::maintenance::timer::Limits::default(),
         }
     }
 
@@ -1144,6 +1156,7 @@ impl Config {
                 "gc",
                 vec![
                     ("undo_window", d(f.gc.undo_window)),
+                    ("interval", d(f.gc.interval)),
                     ("git_executable", s(&f.gc.git_executable)),
                     ("reindex_limit", n(f.gc.reindex_limit)),
                 ],
@@ -1400,6 +1413,11 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.base_cache.max_entries >= 1,
             "base_cache.max_entries",
             "must be at least 1".to_owned(),
+        ),
+        (
+            file.gc.interval.is_zero() || file.gc.interval >= Duration::from_hours(1),
+            "gc.interval",
+            "must be 0s (off) or at least 1h".to_owned(),
         ),
         (
             file.log.keep_days >= 1,

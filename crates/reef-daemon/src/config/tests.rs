@@ -181,6 +181,7 @@ fn defaults_load_with_no_file() {
     assert!(!f.workspace.overlay_nosuid);
     assert_eq!(f.base_cache.max_entries, 8);
     assert_eq!(f.gc.undo_window, days(7));
+    assert_eq!(f.gc.interval, days(1));
     assert_eq!(f.gc.git_executable, "git");
     assert_eq!(f.gc.reindex_limit, 100_000);
     assert_eq!(f.backup.retention, days(30));
@@ -375,6 +376,7 @@ fn validation_names_the_key() {
             "workspace.fuse_overlayfs",
         ),
         ("[gc]\ngit_executable = \"\"\n", "gc.git_executable"),
+        ("[gc]\ninterval = \"30m\"\n", "gc.interval"),
         (
             "[workspace]\nroot = \"/x/<state>/<repo-id>\"\n",
             "workspace.root",
@@ -387,6 +389,32 @@ fn validation_names_the_key() {
         assert_eq!(key, expected, "{text:?}");
         assert_eq!(err.kind(), ErrorKind::InvalidArgument);
     }
+}
+
+#[test]
+fn gc_interval_is_off_or_at_least_an_hour() {
+    assert_eq!(
+        load_file("[gc]\ninterval = \"0s\"\n")
+            .unwrap()
+            .file
+            .gc
+            .interval,
+        Duration::ZERO
+    );
+    assert_eq!(
+        load_file("[gc]\ninterval = \"1h\"\n")
+            .unwrap()
+            .file
+            .gc
+            .interval,
+        Duration::from_hours(1)
+    );
+    let err = load_file("[gc]\ninterval = \"30m\"\n").unwrap_err();
+    let ConfigError::Invalid { key, reason, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(key, "gc.interval");
+    assert_eq!(reason, "must be 0s (off) or at least 1h");
 }
 
 #[test]

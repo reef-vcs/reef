@@ -31,15 +31,44 @@ const BLOCK_UNIT: u64 = 512;
 /// everything under it, directories included. A file with several hard
 /// links under `path` is counted once. A missing `path` is zero.
 pub fn allocated_bytes(path: &Path) -> Result<u64, BackendError> {
+    walk_footprint(path, false).map(|footprint| footprint.allocated_bytes)
+}
+
+/// What `path` and everything under it take on disk, two ways (#95).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Footprint {
+    /// As [`allocated_bytes`]: every block in full, including blocks a
+    /// clone shares with its source.
+    pub allocated_bytes: u64,
+    /// The bytes no other file or filesystem snapshot shares, which
+    /// removing `path` would free at once: APFS's private size of each
+    /// file. `None` where the filesystem cannot tell (off APFS), or if any
+    /// file could not be measured.
+    pub unshared_bytes: Option<u64>,
+}
+
+/// [`allocated_bytes`] and, on APFS, the unshared bytes of `path`, in one
+/// walk with the same rules.
+pub fn footprint(path: &Path) -> Result<Footprint, BackendError> {
+    walk_footprint(path, true)
+}
+
+fn walk_footprint(path: &Path, unshared: bool) -> Result<Footprint, BackendError> {
     let mut seen = HashSet::new();
     let mut total = 0;
+    let mut private = (unshared && cfg!(target_os = "macos")).then_some(0_u64);
     for entry in WalkDir::new(path)
         .follow_links(false)
         .follow_root_links(false)
     {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(error) if error.depth() == 0 && is_not_found(&error) => return Ok(0),
+            Err(error) if error.depth() == 0 && is_not_found(&error) => {
+                return Ok(Footprint {
+                    allocated_bytes: 0,
+                    unshared_bytes: private,
+                });
+            }
             Err(error) => return Err(walk_error(path, error)),
         };
         let metadata = entry.metadata().map_err(|error| walk_error(path, error))?;
@@ -50,8 +79,30 @@ pub fn allocated_bytes(path: &Path) -> Result<u64, BackendError> {
             continue;
         }
         total += metadata.blocks() * BLOCK_UNIT;
+        if let Some(sum) = private
+            && metadata.is_file()
+        {
+            private = file_private_bytes(entry.path()).map(|bytes| sum + bytes);
+        }
     }
-    Ok(total)
+    Ok(Footprint {
+        allocated_bytes: total,
+        unshared_bytes: private,
+    })
+}
+
+/// One file's private size, `None` if it cannot be had.
+#[cfg(target_os = "macos")]
+fn file_private_bytes(path: &Path) -> Option<u64> {
+    super::apfs::private_bytes(path).unwrap_or_else(|error| {
+        tracing::debug!(path = %path.display(), error = %error, "cannot read the private size");
+        None
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_private_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// Bytes available to an unprivileged user on the filesystem holding
@@ -736,6 +787,19 @@ mod tests {
         assert!(
             allocated_bytes(&tree).unwrap() < one + 256 * 1024,
             "symlinks are not followed"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn footprint_is_unmeasured_off_macos() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("file"), vec![7u8; 64 * 1024]).unwrap();
+        let footprint = footprint(dir.path()).unwrap();
+        assert_eq!(footprint.unshared_bytes, None);
+        assert_eq!(
+            footprint.allocated_bytes,
+            allocated_bytes(dir.path()).unwrap()
         );
     }
 

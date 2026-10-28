@@ -311,7 +311,7 @@ See open question 2.
   - the GC row (`:206`) ends "Never runs automatically in Phase 1; #95 adds `gc.interval`."
 - **`CHANGELOG.md`**, under Unreleased:
   - In "Added":
-    - "The daemon runs garbage collection by itself every `[gc] interval` (default a day; `0s` turns it off), over every repository, 10 minutes after it starts at the earliest and a full interval after the last full run, timed or `reef ws gc` (#95, [ADR 0041](docs/adr/0041-gc-on-a-timer.md)). Its reports go to the daemon's log."
+    - "The daemon runs garbage collection by itself every `[gc] interval` (default a day; `0s` turns it off), over every repository, 10 minutes after it starts at the earliest and a full interval after the last full run, timed or `reef ws gc` (#95, ADR 0041, linked). Its reports go to the daemon's log."
     - "API revision 6: `GcReport.base_bytes_unshared`, what removing the base cache entries freed on disk, counting blocks shared between incremental bases once (measured on APFS). `reef ws gc` prints it beside the allocated size."
   - In "Changed": "A GC, backup or quiesce refused because maintenance is running now names what is running, such as a timed GC."
   - In "Upgrading from 0.1": "The daemon now collects garbage by itself, first 10 minutes after the new daemon starts; set `[gc] interval = "0s"` to keep it manual. That first run also repairs a checkout a 0.1 `reef ws gc` broke, as described above."
