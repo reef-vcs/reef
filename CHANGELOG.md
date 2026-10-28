@@ -6,6 +6,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Added
 
+- The daemon runs garbage collection by itself every `[gc] interval` (default a day; `0s` turns it off), over every repository, 10 minutes after it starts at the earliest and a full interval after the last full run, timed or `reef ws gc` (#95, [ADR 0041](docs/adr/0041-gc-on-a-timer.md)). Its reports go to the daemon's log.
+- API revision 6: `GcReport.base_bytes_unshared`, what removing the base cache entries freed on disk, counting blocks shared between incremental bases once (measured on APFS). `reef ws gc` prints it beside the allocated size.
 - `reef-broker`, the subscription broker ([ADR 0038](docs/adr/0038-subscription-broker.md)): bounded in-memory rings between a log and the streams that follow it, generic over topic, position and item, with no jj-lib or gRPC dependency.
 - A subscription load test (`crates/reef-daemon/tests/subscription_load.rs`, [docs/load-tests.md](docs/load-tests.md)): 500 operation-log and 500 presence subscribers at 1,000 operations a minute, every delivery checked, gated on p99 within 100 ms. `subscription-load.yml` runs it on both runners.
 - `reef ws run` reports the command it runs as a presence entry (`running <command line>`), refreshed every 10 seconds and cleared when the command exits, before the release. `reef mcp` reports, per repository or workspace its calls name, the last tool called there, for a minute after the call, and clears its entries when it exits. Both name the agent from `--agent` or `REEF_AGENT`, else the workspace's owner.
@@ -45,6 +47,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Changed
 
+- A GC, backup or quiesce refused because maintenance is running now names what is running, such as a timed GC.
 - `reef status` is a command, no longer a usage error pointing at `reef here`. Prefixes that named one command now name several and are usage errors listing them: `reef s` and `reef st` (formerly `store`), `reef d` (formerly `daemon`), `reef a` (formerly `guide`). `reef sto`, `reef da` and `reef gu` still work.
 - `reef here` points a divergent workspace at `reef log --workspace <id> -r 'change_id(<id>)'`, which lists its commits, instead of `reef ws inspect`.
 - An operation's `kind`, `snapshot_kind`, workspace and `agent` come from its `reef.*` attributes when it has them; `import git head` at registration is now `OTHER` rather than `EXTERNAL`.
@@ -64,6 +67,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 A 0.1 daemon keeps running after the binaries are replaced. The first `reef` command restarts it when it has no active workspaces. Otherwise the command fails with exit code 9 and `next` set to `reef daemon stop`: stop it once its `ws run` sessions end, and the next command starts the new one. A 0.1 `reef` against the new daemon is told to upgrade (exit 5); its `daemon status` and `daemon stop` keep working.
 
 A checkout where `jj` fails after a 0.1 `reef ws gc` is repaired by the next `reef ws gc` when its files match its commit. Otherwise that GC removes the stranded operation, and `jj workspace update-stale` there recovers it with a recovery commit.
+
+The daemon now collects garbage by itself, first 10 minutes after the new daemon starts; set `[gc] interval = "0s"` to keep it manual. That first run also repairs a checkout a 0.1 `reef ws gc` broke, as described above.
 
 ## [0.1.0] - 2026-10-25
 

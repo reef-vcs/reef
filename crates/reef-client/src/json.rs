@@ -766,8 +766,11 @@ pub struct GcReport {
     pub jj_error: Option<String>,
     /// Base cache entries removed.
     pub base_entries_removed: u32,
-    /// What they had allocated.
+    /// What they had allocated: an upper bound on what removing them freed.
     pub base_bytes_freed: u64,
+    /// What removing them freed on disk, counting blocks they shared once;
+    /// `null` where the filesystem cannot tell (#95).
+    pub base_bytes_unshared: Option<u64>,
     /// Ended workspace rows deleted.
     pub workspace_rows_removed: u32,
     /// What their state directories had allocated.
@@ -793,6 +796,7 @@ impl From<&v1::GcReport> for GcReport {
             jj_error: text(&report.jj_error),
             base_entries_removed: report.base_entries_removed,
             base_bytes_freed: report.base_bytes_freed,
+            base_bytes_unshared: report.base_bytes_unshared,
             workspace_rows_removed: report.workspace_rows_removed,
             wc_bytes_freed: report.wc_bytes_freed,
             stores_removed: report.stores_removed,

@@ -59,6 +59,14 @@ struct Dirs {
     out: Option<TempDir>,
 }
 
+/// The defaults with the GC timer off, so no timed GC lands partway
+/// through a long test (the load tests); a test can turn it on.
+fn quiet_defaults() -> FileConfig {
+    let mut config = FileConfig::default();
+    config.gc.interval = Duration::ZERO;
+    config
+}
+
 impl SpawnedDaemon {
     /// Starts the binary on a fresh temporary directory with the default
     /// configuration changed by `configure`, and waits until it answers
@@ -66,7 +74,7 @@ impl SpawnedDaemon {
     pub async fn spawn(configure: impl FnOnce(&mut FileConfig)) -> SpawnedDaemon {
         let tmp = short_tempdir();
         let root = tmp.path().to_owned();
-        let mut config = FileConfig::default();
+        let mut config = quiet_defaults();
         configure(&mut config);
         Self::start(
             root,
@@ -89,7 +97,7 @@ impl SpawnedDaemon {
     ) -> SpawnedDaemon {
         let tmp = short_tempdir();
         let root = tmp.path().to_owned();
-        let mut config = FileConfig::default();
+        let mut config = quiet_defaults();
         configure(&mut config);
         Self::start_limited(
             root,
@@ -106,7 +114,7 @@ impl SpawnedDaemon {
     /// [`SpawnedDaemon::spawn`] with the state directory under `root`, which
     /// the caller owns (the disk-full tests' small volume).
     pub async fn spawn_in(root: &Path, configure: impl FnOnce(&mut FileConfig)) -> SpawnedDaemon {
-        let mut config = FileConfig::default();
+        let mut config = quiet_defaults();
         configure(&mut config);
         Self::start(
             root.to_owned(),

@@ -3,7 +3,8 @@
 //! copies GC rebinds. Numbered as the brief numbers them. The brief's test
 //! configuration: `gc.undo_window = "0s"`, `base_cache.max_entries = 1`.
 //! The registered root's own jj checkout after GC (issue #94) is tested at
-//! the end, with the default undo window over backdated history.
+//! the end, with the default undo window over backdated history, then the
+//! GC timer (#95), numbered as its brief numbers them.
 
 #![allow(
     clippy::unwrap_used,
@@ -30,6 +31,8 @@ use reef_api::v1::{
     Attention, CreateWorkspaceRequest, GcReport, Workspace, create_workspace_request,
 };
 use reef_daemon::config::Config;
+use reef_daemon::db::META_LAST_GC_AT;
+use reef_daemon::maintenance::Task;
 use reef_daemon::model::WorkspaceId;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::Repo;
@@ -291,6 +294,18 @@ async fn base_cache_evicts_unreferenced() {
     let report = gc(&daemon, &repo, false).await;
     assert_eq!(report.base_entries_removed, 2, "{report:?}");
     assert!(report.base_bytes_freed > 0);
+    // #95: measured on APFS, where `b` and `c` were cloned from a base.
+    assert_eq!(
+        report.base_bytes_unshared.is_some(),
+        cfg!(target_os = "macos"),
+        "{report:?}"
+    );
+    if let Some(unshared) = report.base_bytes_unshared {
+        assert!(
+            unshared > 0 && unshared <= report.base_bytes_freed,
+            "{report:?}"
+        );
+    }
     let after: Vec<String> = std::fs::read_dir(bases_dir(&daemon, &repo))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -414,7 +429,12 @@ async fn dry_run_changes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn gc_refuses_during_maintenance() {
     let (daemon, repo) = fixture().await;
-    let held = daemon.handle.state().maintenance.try_acquire().unwrap();
+    let held = daemon
+        .handle
+        .state()
+        .maintenance
+        .try_acquire(Task::TimedGc)
+        .unwrap();
     let error = daemon
         .client
         .collect_garbage(&repo.id, false)
@@ -422,7 +442,9 @@ async fn gc_refuses_during_maintenance() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
     assert!(
-        error.to_string().contains("maintenance in progress"),
+        error
+            .to_string()
+            .contains("maintenance in progress (a timed GC)"),
         "{error}"
     );
     drop(held);
@@ -1053,4 +1075,207 @@ async fn gc_abandons_nothing_while_the_root_is_locked() {
     let report = gc(&daemon, &repo, false).await;
     assert_eq!(report.jj_error, "", "{report:?}");
     assert!(op_count(&repo.root).await <= ops);
+}
+
+// The GC timer (#95).
+
+/// `meta.last_gc_at`, once a full run records it; panics after 60 s.
+async fn wait_for_a_full_run(daemon: &TestDaemon) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(at) = daemon.handle.state().db.meta(META_LAST_GC_AT).unwrap() {
+            return at;
+        }
+        assert!(Instant::now() < deadline, "no timed GC within 60 s");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `daemon` restarted with the timer on, every hour, its first run
+/// `start_delay` after the start.
+async fn restart_with_the_timer(mut daemon: TestDaemon, start_delay: Duration) -> TestDaemon {
+    daemon.config.file.gc.interval = Duration::from_hours(1);
+    daemon.config.gc_timer.start_delay = start_delay;
+    let daemon = daemon.restart().await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    daemon
+}
+
+fn last_gc_at(daemon: &TestDaemon) -> Option<String> {
+    daemon.handle.state().db.meta(META_LAST_GC_AT).unwrap()
+}
+
+// 19
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_gc_runs_after_a_restart_and_records_its_time() {
+    let (daemon, repo) = fixture().await;
+    let [a, b, c] = three_trees(&daemon, &repo).await;
+    release(&daemon, &repo, &a).await;
+    release(&daemon, &repo, &b).await;
+    let kept = daemon
+        .handle
+        .state()
+        .db
+        .workspace(id_of(&c))
+        .unwrap()
+        .base_tree_id;
+    past_this_second().await;
+    assert_eq!(last_gc_at(&daemon), None, "the timer is off in the fixture");
+
+    let daemon = restart_with_the_timer(daemon, Duration::ZERO).await;
+    let at = wait_for_a_full_run(&daemon).await;
+    assert_eq!(base_dirs(&daemon, &repo), BTreeSet::from([kept]));
+    for gone in [&a, &b] {
+        let error = daemon.handle.state().db.workspace(id_of(gone)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound, "{error:?}");
+    }
+    write(&c, "after.txt", "after the timed GC\n");
+    assert!(
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &c.id, "")
+            .await
+            .unwrap()
+            .changed
+    );
+
+    // Not due again for an hour, restart or not.
+    let daemon = restart_with_the_timer(daemon, Duration::ZERO).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(last_gc_at(&daemon), Some(at));
+}
+
+// 20
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_full_manual_gc_records_its_time() {
+    let (daemon, repo) = fixture().await;
+    gc(&daemon, &repo, false).await;
+    assert_eq!(last_gc_at(&daemon), None, "one repository");
+    daemon.client.collect_garbage("", true).await.unwrap();
+    assert_eq!(last_gc_at(&daemon), None, "a dry run");
+    daemon.client.collect_garbage("", false).await.unwrap();
+    let millis: u64 = last_gc_at(&daemon).unwrap().parse().unwrap();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
+    let age = SystemTime::now().duration_since(at).unwrap();
+    assert!(age < Duration::from_mins(1), "{age:?}");
+}
+
+// 21
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_gc_with_a_locked_root_abandons_nothing_and_finishes() {
+    let (daemon, repo) = old_root_fixture().await;
+    let first = create(&daemon, &repo, None).await;
+    write(&first, "first.txt", "first\n");
+    snapshot(&daemon, &repo, &first).await;
+    // Active, so its base stays and the released one is over the cap.
+    let _second = create(
+        &daemon,
+        &repo,
+        Some(create_workspace_request::Start::NewOn(
+            first.change_id.clone(),
+        )),
+    )
+    .await;
+    release(&daemon, &repo, &first).await;
+    let released = daemon
+        .handle
+        .state()
+        .db
+        .workspace(id_of(&first))
+        .unwrap()
+        .base_tree_id;
+    assert!(base_dirs(&daemon, &repo).contains(&released));
+    let ops = op_count(&repo.root).await;
+
+    // Locked across the restart, so the first timed run finds it held.
+    let lock = FileLock::lock(repo.root.join(".jj/working_copy/working_copy.lock")).unwrap();
+    let daemon = restart_with_the_timer(daemon, Duration::ZERO).await;
+    wait_for_a_full_run(&daemon).await;
+    assert_eq!(op_count(&repo.root).await, ops, "nothing abandoned");
+    assert!(
+        !base_dirs(&daemon, &repo).contains(&released),
+        "the base cache step ran"
+    );
+    daemon.client.daemon_status(false).await.unwrap();
+
+    drop(lock);
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+    assert!(op_count(&repo.root).await < ops, "the next run abandons");
+}
+
+// 22
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_gc_goes_on_past_a_failed_repository() {
+    if nix::unistd::geteuid().is_root() {
+        return; // root removes what the mode below protects
+    }
+    let (daemon, first) = fixture().await;
+    let doomed = create(&daemon, &first, None).await;
+    release(&daemon, &first, &doomed).await;
+    // The first repository's released row cannot be removed: its state
+    // directory holds a directory GC cannot empty.
+    let state_dir = daemon
+        .handle
+        .state()
+        .db
+        .workspace(id_of(&doomed))
+        .unwrap()
+        .state_dir;
+    let locked = state_dir.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("file"), "kept\n").unwrap();
+    set_mode(&locked, 0o500);
+
+    let root = daemon.tmp.path().join("second");
+    let at = root.clone();
+    tokio::task::spawn_blocking(move || {
+        reef_daemon::testing::init_synthetic_repo(&at, Preset::Small);
+    })
+    .await
+    .unwrap();
+    let registered = daemon
+        .client
+        .register_repository(&root, reef_api::v1::IfNotJj::Fail)
+        .await
+        .unwrap();
+    let second = SyntheticRepo {
+        root: std::fs::canonicalize(&root).unwrap(),
+        id: registered.repository.unwrap().id,
+    };
+    let other = create(&daemon, &second, None).await;
+    release(&daemon, &second, &other).await;
+    past_this_second().await;
+
+    let daemon = restart_with_the_timer(daemon, Duration::ZERO).await;
+    wait_for_a_full_run(&daemon).await;
+    set_mode(&locked, 0o700);
+    let state = daemon.handle.state();
+    assert!(
+        state.db.workspace(id_of(&doomed)).is_ok(),
+        "the failed row stays"
+    );
+    let error = state.db.workspace(id_of(&other)).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NotFound, "the next repository ran");
+    assert!(base_dirs(&daemon, &second).is_empty());
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+// 23
+#[tokio::test(flavor = "multi_thread")]
+async fn timer_off_runs_nothing() {
+    let (mut daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    release(&daemon, &repo, &ws).await;
+    let before = base_dirs(&daemon, &repo);
+    assert_eq!(before.len(), 1);
+    daemon.config.gc_timer.start_delay = Duration::ZERO;
+    let daemon = daemon.restart().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(last_gc_at(&daemon), None);
+    assert_eq!(base_dirs(&daemon, &repo), before);
 }

@@ -79,6 +79,54 @@ pub(crate) fn clone_dir(from: &Path, to: &Path) -> io::Result<()> {
     clonefile(from, to, CLONE_NOOWNERCOPY)
 }
 
+/// The bytes of the file at `path` that no clone or filesystem snapshot
+/// shares, which deleting it would free at once: `getattrlist(2)`'s
+/// `ATTR_CMNEXT_PRIVATESIZE` (#95). `None` where the filesystem does not
+/// return it (anything but APFS). Symlinks are not followed; a directory
+/// reports 0.
+pub(crate) fn private_bytes(path: &Path) -> io::Result<Option<u64>> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    let mut request = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE,
+    };
+    // A u32 length, the returned `attribute_set_t` (five u32s), then the
+    // `off_t`, packed at 4-byte alignment.
+    let mut buffer = [0_u8; 64];
+    #[allow(
+        unsafe_code,
+        reason = "FFI; the path is a NUL-terminated string, and the buffer's real length is passed"
+    )]
+    // SAFETY: `path` is a valid C string and `request` a valid `attrlist`
+    // for the whole call; the kernel writes at most `buffer.len()` bytes to
+    // `buffer`, and keeps none of the pointers.
+    let result = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut request).cast(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            libc::FSOPT_NOFOLLOW | libc::FSOPT_ATTR_CMN_EXTENDED,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let u32_at = |at: usize| u32::from_ne_bytes(buffer[at..at + 4].try_into().unwrap_or_default());
+    // `attribute_set_t.forkattr` is its fifth word, after the length.
+    let returned_fork = u32_at(4 + 4 * 4);
+    if returned_fork & libc::ATTR_CMNEXT_PRIVATESIZE == 0 {
+        return Ok(None);
+    }
+    let size = i64::from_ne_bytes(buffer[24..32].try_into().unwrap_or_default());
+    Ok(Some(u64::try_from(size).unwrap_or(0)))
+}
+
 /// Clones one regular file: the per-file fallback's [`FileCopier`].
 /// `reflink_copy::reflink` fails rather than copying, and on macOS is
 /// `clonefile` with `CLONE_NOOWNERCOPY`.
@@ -226,7 +274,7 @@ mod tests {
 
     use super::*;
     use crate::backend::base_cache::PROBE_FILE;
-    use crate::backend::fs_util::{allocated_bytes, free_bytes, same_volume};
+    use crate::backend::fs_util::{allocated_bytes, footprint, free_bytes, same_volume};
     use crate::model::RepoId;
 
     /// A tree with files of distinct mtimes, an executable, a relative
@@ -543,5 +591,37 @@ mod tests {
                 free_before.saturating_sub(free_after) >> 20
             );
         }
+    }
+
+    #[test]
+    fn footprint_counts_a_clone_once() {
+        const SIZE: u64 = 8 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        fs::create_dir(&a).unwrap();
+        fs::write(a.join("big"), vec![7_u8; 8 << 20]).unwrap();
+        fs::File::open(a.join("big")).unwrap().sync_all().unwrap();
+        clone_dir(&a, &b).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(b.join("big"))
+            .unwrap();
+        file.write_all(&[1]).unwrap();
+        file.sync_all().unwrap();
+
+        for side in [&a, &b] {
+            let measured = footprint(side).unwrap();
+            assert!(measured.allocated_bytes >= SIZE, "{measured:?}");
+            let unshared = measured.unshared_bytes.expect("APFS tells");
+            assert!(unshared < 1 << 20, "{side:?}: {measured:?}");
+        }
+        fs::remove_dir_all(&a).unwrap();
+        let alone = footprint(&b).unwrap();
+        assert!(alone.unshared_bytes.unwrap() >= SIZE, "{alone:?}");
+    }
+
+    #[test]
+    fn private_bytes_is_none_off_apfs() {
+        assert_eq!(private_bytes(Path::new("/dev/null")).unwrap(), None);
     }
 }

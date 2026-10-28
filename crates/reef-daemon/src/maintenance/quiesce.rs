@@ -26,7 +26,7 @@ use rand::RngExt as _;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use tokio::task::JoinHandle;
 
-use super::{Busy, Guard};
+use super::{Busy, Guard, Task};
 use crate::daemon::AppState;
 use crate::db::DbError;
 use crate::error::{Advice, Advise};
@@ -158,11 +158,14 @@ pub async fn quiesce(
 ) -> Result<Quiesced, QuiesceError> {
     let cap = state.config.file.backup.quiesce_max;
     let max = if max.is_zero() { cap } else { max.min(cap) };
-    let Some(maintenance) = state.maintenance.try_acquire() else {
-        return Err(match state.quiesce.until() {
-            Some(until) => QuiesceError::Active { until },
-            None => Busy.into(),
-        });
+    let maintenance = match state.maintenance.try_acquire(Task::Quiesce) {
+        Ok(maintenance) => maintenance,
+        Err(busy) => {
+            return Err(match state.quiesce.until() {
+                Some(until) => QuiesceError::Active { until },
+                None => busy.into(),
+            });
+        }
     };
     let begun = Instant::now();
     let deadline = begun + max;

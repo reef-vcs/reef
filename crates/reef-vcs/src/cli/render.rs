@@ -326,8 +326,17 @@ pub(crate) fn size(bytes: u64) -> String {
 }
 
 /// One `ws gc` line after its label: `jj 120 MiB -> 41 MiB, bases 3
-/// removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0`.
+/// removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores
+/// 0`, without the unshared figure where it was not measured.
 fn gc_line(report: &GcReport) -> String {
+    let bases = match report.base_bytes_unshared {
+        Some(unshared) => format!(
+            "{}; {} unshared",
+            size(report.base_bytes_freed),
+            size(unshared)
+        ),
+        None => size(report.base_bytes_freed),
+    };
     let stores = if report.stores_removed == 0 {
         "0".to_owned()
     } else {
@@ -338,11 +347,10 @@ fn gc_line(report: &GcReport) -> String {
         )
     };
     format!(
-        "jj {} -> {}, bases {} removed ({}), workspaces {} rows ({}), stores {stores}",
+        "jj {} -> {}, bases {} removed ({bases}), workspaces {} rows ({}), stores {stores}",
         size(report.jj_bytes_before),
         size(report.jj_bytes_after),
         report.base_entries_removed,
-        size(report.base_bytes_freed),
         report.workspace_rows_removed,
         size(report.wc_bytes_freed),
     )
@@ -370,6 +378,15 @@ impl TextRender for GcReports {
             jj_error: None,
             base_entries_removed: 0,
             base_bytes_freed: 0,
+            // Only when every report has one.
+            base_bytes_unshared: if self.reports.is_empty() {
+                None
+            } else {
+                self.reports
+                    .iter()
+                    .map(|report| report.base_bytes_unshared)
+                    .sum()
+            },
             workspace_rows_removed: 0,
             wc_bytes_freed: 0,
             stores_removed: 0,
@@ -407,7 +424,7 @@ mod tests {
 
     #[test]
     fn gc_reports_read_as_one_line_each_and_a_total() {
-        let report = |id: &str, before: u64, after: u64| GcReport {
+        let report = |id: &str, before: u64, after: u64, unshared: Option<u64>| GcReport {
             repo_id: id.to_owned(),
             keep_newer: None,
             jj_bytes_before: before,
@@ -416,6 +433,7 @@ mod tests {
             jj_error: None,
             base_entries_removed: 3,
             base_bytes_freed: (12 << 30) / 10,
+            base_bytes_unshared: unshared,
             workspace_rows_removed: 7,
             wc_bytes_freed: 18 << 20,
             stores_removed: 0,
@@ -424,19 +442,40 @@ mod tests {
             dry_run: false,
         };
         let reports = GcReports {
-            reports: vec![report("aaaa", 120 << 20, 41 << 20), report("bbbb", 0, 0)],
+            reports: vec![
+                report("aaaa", 120 << 20, 41 << 20, Some(110 << 20)),
+                report("bbbb", 0, 0, None),
+            ],
             dry_run: false,
         };
         let mut buffer = Vec::new();
         reports.render(&mut buffer).unwrap();
         assert_eq!(
             String::from_utf8(buffer).unwrap(),
-            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0\n\
+            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores 0\n\
              repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0\n\
              total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0\n"
         );
         let json = serde_json::to_value(&reports).unwrap();
         assert!(json.is_array(), "{json}");
+        assert_eq!(json[0]["base_bytes_unshared"], 115_343_360);
+        assert!(json[1]["base_bytes_unshared"].is_null(), "{json}");
+
+        // With every report measured, the total sums them.
+        let reports = GcReports {
+            reports: vec![
+                report("aaaa", 0, 0, Some(110 << 20)),
+                report("bbbb", 0, 0, Some(10 << 20)),
+            ],
+            dry_run: false,
+        };
+        let mut buffer = Vec::new();
+        reports.render(&mut buffer).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(
+            text.ends_with("total: jj 0 B -> 0 B, bases 6 removed (2.4 GiB; 120 MiB unshared), workspaces 14 rows (36 MiB), stores 0\n"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use reef_api::v1::IfNotJj;
 use reef_lib::jj::Repo;
@@ -53,6 +54,8 @@ impl TestDaemon {
             .expect("create a temporary directory");
         let paths = Paths::in_state_dir(&tmp.path().join("state")).expect("resolve paths");
         let mut config = Config::with_defaults(paths);
+        // No timed GC partway through a long test; a test turns it on.
+        config.file.gc.interval = Duration::ZERO;
         configure(&mut config);
         let handle = Daemon::start(config.clone())
             .await

@@ -77,6 +77,10 @@ pub const META_CREATED_AT: &str = "created_at";
 /// `meta` key of when the last backup was taken, as decimal unix
 /// milliseconds; written by R1.18's backup, read by R1.17's GC.
 pub const META_LAST_BACKUP_AT: &str = "last_backup_at";
+/// `meta` key of when GC's last full run ended, as decimal unix
+/// milliseconds: written by timed runs and by manual runs over every
+/// repository, read by the GC timer (#95).
+pub const META_LAST_GC_AT: &str = "last_gc_at";
 /// `meta` key set by a restore (R1.18): the daemon's next start
 /// rematerializes every active workspace whose directory or working-copy
 /// state is missing instead of reclaiming it, then clears it. `1` when set.

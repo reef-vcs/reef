@@ -40,13 +40,16 @@
 //!    the daemon owns (S-01), and serve.
 //! 8. Start the lease expiry loop (R1.15), its first tick `lease.tick`
 //!    later; after the bind, so a failed start leaves no loop running.
+//! 9. Start the GC timer (#95) unless `gc.interval` is `0s`; its first run
+//!    is 10 minutes later at the earliest.
 //!
 //! # Shutdown
 //!
 //! [`DaemonHandle::shutdown`] cancels [`AppState::shutdown`]. The server stops
 //! accepting connections and in-flight requests get [`SHUTDOWN_GRACE`]; then
-//! the [`ShutdownHooks`] run (a quiesce in effect resumes, R1.18; the
-//! snapshot scheduler stops and its snapshots
+//! the [`ShutdownHooks`] run (a quiesce in effect resumes, R1.18; a timed
+//! GC in progress finishes the repository it is on, #95; the snapshot
+//! scheduler stops and its snapshots
 //! in flight end, R1.13; the lease expiry loop stops after any reclaim in
 //! progress, then every workspace with unsnapshotted events gets a
 //! `shutdown` snapshot, R1.15; leases are left as they are), every
@@ -76,6 +79,7 @@ use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::lease::LeaseError;
 use crate::lock::{InstanceLock, LockError};
+use crate::maintenance::timer::{DaemonRunner, GcTimer};
 use crate::model::{RepoId, RepositoryRecord};
 use crate::repo::{OwnerPolicy, RepoRegistry};
 use crate::server;
@@ -533,6 +537,14 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
             }
         })
     });
+    //    A timed GC in progress finishes its repository before the
+    //    scheduler stops, so its snapshots still work. The timer starts in
+    //    step 9.
+    let gc_timer = Arc::new(GcTimer::new());
+    let joined = Arc::clone(&gc_timer);
+    state.hooks.add("gc timer", move || {
+        Box::pin(async move { joined.join().await })
+    });
     state.manager.scheduler().start(&state.shutdown);
     let manager = Arc::clone(&state.manager);
     state.hooks.add("snapshot scheduler", move || {
@@ -541,6 +553,13 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     // 7. Bind.
     let listener = bind(&paths.socket).await?;
 
+    start_loops(state, &gc_timer);
+    Ok(listener)
+}
+
+/// Steps 8 and 9, after the bind: the lease expiry loop with its hooks,
+/// and the GC timer, whose hook step 6 registered.
+fn start_loops(state: &Arc<AppState>, gc_timer: &GcTimer) {
     // 8. The lease expiry loop. Its hook runs after the scheduler's, and the
     //    shutdown snapshots after both, so no reclaim or watcher snapshot
     //    races them.
@@ -560,7 +579,14 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
             manager.shutdown_snapshots().await;
         })
     });
-    Ok(listener)
+
+    // 9. The GC timer.
+    gc_timer.start(
+        state.config.file.gc.interval,
+        state.config.gc_timer,
+        DaemonRunner(Arc::downgrade(state)),
+        state.shutdown.clone(),
+    );
 }
 
 /// The end of step 5: [`crate::workspace::Manager::sweep_abandoned_creates`]

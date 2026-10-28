@@ -21,7 +21,7 @@ use super::convert::{request_duration, timestamp};
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::maintenance::gc::{self, GcReport};
-use crate::maintenance::{Busy, backup, quiesce};
+use crate::maintenance::{Task, backup, quiesce};
 use crate::model::RepoId;
 
 /// Progress messages buffered for a slow client; more are dropped.
@@ -59,6 +59,7 @@ impl From<&GcReport> for v1::GcReport {
             store_bytes_freed: report.store_bytes_freed,
             elapsed_ms: report.elapsed_ms,
             dry_run: report.dry_run,
+            base_bytes_unshared: report.base_bytes_unshared,
         }
     }
 }
@@ -90,9 +91,7 @@ impl MaintenanceService for MaintenanceHandler {
         // abandoning operations and moving the working copies to the new
         // head.
         let task = async move {
-            let Some(_maintenance) = state.maintenance.try_acquire() else {
-                return Err(status(Busy));
-            };
+            let _maintenance = state.maintenance.try_acquire(Task::Gc).map_err(status)?;
             let repo = if request.repo.trim().is_empty() {
                 None
             } else {
@@ -124,9 +123,10 @@ impl MaintenanceService for MaintenanceHandler {
         let dest = PathBuf::from(request.dest);
         let manifest_path = dest.join(backup::MANIFEST_FILE).display().to_string();
         let state = Arc::clone(&self.state);
-        let Some(maintenance) = state.maintenance.try_acquire() else {
-            return Err(status(Busy));
-        };
+        let maintenance = state
+            .maintenance
+            .try_acquire(Task::Backup)
+            .map_err(status)?;
         backup::prepare_dest(&state, &dest).map_err(status)?;
         let (events, stream) = mpsc::channel(PROGRESS_BUFFER);
         let (progress, mut steps) = mpsc::channel(PROGRESS_BUFFER);
