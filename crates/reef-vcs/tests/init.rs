@@ -49,6 +49,8 @@ impl Fixture {
             "REEF_OUTPUT",
             "REEF_WORKSPACE",
             "REEF_AGENT",
+            // Each variable in `agents::SIGNS`, by which an agent says it
+            // runs `reef init`.
             "CLAUDECODE",
         ] {
             command.env_remove(var);

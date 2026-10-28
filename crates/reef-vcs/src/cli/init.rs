@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use super::out::TextRender;
 use super::{CliError, Global, Out, Output, REGISTER_TIMEOUT, absolute, connect, guide, repo};
-use crate::agents::{self, Action, FileAction, FileError, Guide, Harness};
+use crate::agents::{self, Action, Agent, FileAction, FileError, Guide, Harness};
 
 /// `reef init`.
 #[derive(Debug, clap::Args)]
@@ -185,19 +185,9 @@ fn harnesses(args: &Args) -> Result<Option<Vec<Harness>>, CliError> {
         match agents {
             Agents::Auto => return Ok(None),
             Agents::None => {}
-            Agents::All => list.extend([
-                Harness::AgentsMd,
-                Harness::ClaudeMd,
-                Harness::ClaudeSkill { user: false },
-                Harness::McpJson,
-                Harness::CursorRule,
-            ]),
-            Agents::Claude => list.extend([
-                Harness::ClaudeMd,
-                Harness::ClaudeSkill { user: false },
-                Harness::McpJson,
-            ]),
-            Agents::Cursor => list.push(Harness::CursorRule),
+            Agents::All => list.extend(agents::all()),
+            Agents::Claude => list.extend_from_slice(agents::harnesses(Agent::ClaudeCode)),
+            Agents::Cursor => list.extend_from_slice(agents::harnesses(Agent::Cursor)),
             Agents::Mcp => list.push(Harness::McpJson),
         }
     }
