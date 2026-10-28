@@ -89,8 +89,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # macos-15 took 24 to 29 minutes on main by #96; the `heavy` group runs
     # one test at a time (about 10 minutes there), and #95's GC timer tests
-    # added about 2 more.
-    timeout-minutes: 40
+    # added about 2 more. By #104 the tests take 22 to 24 minutes, and a build
+    # that misses the cache (a lockfile or version change) about 8 more, so a
+    # cold run is about 40 minutes.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
