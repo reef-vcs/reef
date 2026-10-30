@@ -30,6 +30,7 @@ It is `#[ignore]`d and does nothing without `REEF_LOAD=1`. Run it in release, th
 | `REEF_LOAD_WATCHER` | `notify` | the watcher backend: `notify` or `watchman` (R1.30); each workspace's `watcher` field in the report says which one it got |
 | `REEF_LOAD_NARROWED_MAX_PATHS` | the daemon's (1,000) | `watcher.narrowed_max_paths`; `0` makes every notify snapshot a full scan, as before R1.30 |
 | `REEF_LOAD_SYMBOLS` | `0` | `1` turns on `[symbols] background`, so every snapshot's tree is indexed while the load runs (R2.14) |
+| `REEF_LOAD_HISTORY` | `1` | `0` turns off `[history] enabled`, the history index the daemon follows the operation log into by default (R2.16) |
 
 The `medium` run takes about 17 minutes on an M2 Max (six of them releasing the 200 workspaces; see the findings) and 7 in a Linux VM on the same machine, and needs about 4 GB free; `large` with 200 workspaces needs about 9 GB, takes about an hour on the M2 Max, and on Linux needs more than 8 GB of memory (the test checks the disk before it starts and stops with the figure). On Linux, run it as root so the daemon picks kernel overlayfs (`sudo -E env "PATH=$PATH" cargo nextest run ...`): unprivileged without `fuse-overlayfs` it falls back to plain copies, and twenty copies of `large` fill a CI runner's disk. Two hundred `large` workspaces watch 1.67 million directories, above Linux's default `fs.inotify.max_user_watches` (at most 1,048,576), so raise it first: `sudo sysctl -w fs.inotify.max_user_watches=4194304`.
 
@@ -189,6 +190,22 @@ The macOS runs' twenty `large` creates before the change were also slower than i
 | daemon peak threads, RSS | 283, 670 MB | 271, 691 MB |
 
 Both pass the gate. Indexing costs about 30 ms at the steady state's p95 and nothing measurable in the burst. Both runs' bursts are slower than the 2026-10-23 baseline's macOS column. That was before R1.30, and the cause is not this change. `background` therefore stays on by default (open question 1 in the brief).
+
+## History index (R2.16)
+
+`medium`, 200 workspaces, release build, on the M2 Max, 2026-10-30. The off run and the final on run used the same build of the daemon, differing only in `REEF_LOAD_HISTORY`. With it on (the default), the daemon follows every operation into the history index and computes each change's touches once it settles ([ADR 0044](adr/0044-history-index-and-query-layer.md)).
+
+| Measurement | history off (`REEF_LOAD_HISTORY=0`) | history on |
+| --- | ---: | ---: |
+| steady-state write-to-snapshot p50 / p95 / max | 683 / **710** / 852 ms | 702 / **716** / 880 ms |
+| writes unsnapshotted after 30 s | 0 of 1,000 | 0 of 1,000 |
+| burst p50 / p95 / max | 4.0 / 7.2 / 7.6 s | 4.1 / 7.2 / 7.6 s |
+| 200 × `medium` create, total (p95 each) | 40.3 s (4,745 ms) | 41.8 s (4,637 ms) |
+| 20 × `large` create, max / mean | 1,220 / 989 ms | 1,289 / 1,005 ms |
+| 200 releases, total | 343 s | 339 s |
+| daemon peak threads, RSS | 311, 723 MB | 328, 779 MB |
+
+Both pass the gate. The index costs under 1% at the steady state's p95 (the brief allowed 10%), nothing in the burst, and about 56 MB of peak memory. It stays on by default. A run before the review fixes (follower writes still on the runtime, the worker looking only at the 64 newest pending changes) measured 704 / 718 / 726 ms.
 
 ## Subscriptions (R2.22)
 

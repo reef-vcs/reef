@@ -56,6 +56,9 @@ pub struct JjStep {
     pub operations_abandoned: usize,
     /// Why the step stopped short, if it did; the other GC steps still run.
     pub error: Option<String>,
+    /// The kept operations' old ids to their new ones
+    /// ([`reef_lib::jj::GcOutcome::rewritten`]).
+    pub rewritten: Vec<(OperationIdHex, OperationIdHex)>,
 }
 
 impl Manager {
@@ -121,6 +124,7 @@ impl Manager {
             Ok(outcome) => {
                 step.reindex_ms = u64::try_from(outcome.reindex.as_millis()).unwrap_or(u64::MAX);
                 step.operations_abandoned = outcome.operations_abandoned;
+                step.rewritten = outcome.rewritten;
                 if let Some(blocked) = outcome.abandon_blocked {
                     step.error = Some(format!(
                         "no operations were abandoned: {blocked}; run reef ws gc again when it finishes"

@@ -2567,3 +2567,260 @@ pub struct SymbolUpload {
     /// The tree's status afterwards.
     pub status: Option<SymbolStatus>,
 }
+
+/// What became of a change in the history index (R2.16): `open`,
+/// `landed`, `abandoned` or `undone`; `None` when unset.
+pub fn change_outcome_name(outcome: i32) -> Option<&'static str> {
+    use v1::ChangeOutcome as O;
+    let name = match O::try_from(outcome) {
+        Ok(O::Unspecified) => return None,
+        Ok(O::Open) => "open",
+        Ok(O::Landed) => "landed",
+        Ok(O::Abandoned) => "abandoned",
+        Ok(O::Undone) => "undone",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+fn touch_state_name(state: i32) -> Option<&'static str> {
+    use v1::TouchState as S;
+    let name = match S::try_from(state) {
+        Ok(S::Unspecified) => return None,
+        Ok(S::Pending) => "pending",
+        Ok(S::Current) => "current",
+        Ok(S::Stale) => "stale",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+fn history_symbol_coverage_name(coverage: i32) -> Option<&'static str> {
+    use v1::HistorySymbolCoverage as C;
+    let name = match C::try_from(coverage) {
+        Ok(C::Unspecified) => return None,
+        Ok(C::Covered) => "covered",
+        Ok(C::Partial) => "partial",
+        Ok(C::TooLarge) => "too_large",
+        Ok(C::Disabled) => "disabled",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// One agent's writes to a change in one workspace (R2.16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangeActivity {
+    /// The agent; `null` for another jj client's writes and imports.
+    pub agent: Option<String>,
+    /// The workspace; `null` for none.
+    pub workspace_id: Option<String>,
+    /// The first write.
+    pub first_at: Option<String>,
+    /// The last write.
+    pub last_at: Option<String>,
+    /// How many operations wrote it.
+    pub operations: u32,
+    /// The last of them; `null` once GC abandoned it.
+    pub last_operation_id: Option<String>,
+}
+
+impl From<&v1::ChangeActivity> for ChangeActivity {
+    fn from(a: &v1::ChangeActivity) -> Self {
+        Self {
+            agent: text(&a.agent),
+            workspace_id: text(&a.workspace_id),
+            first_at: time(a.first_at.as_ref()),
+            last_at: time(a.last_at.as_ref()),
+            operations: a.operations,
+            last_operation_id: text(&a.last_operation_id),
+        }
+    }
+}
+
+/// A definition a change's net diff touched (R2.16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolTouch {
+    /// Its symbol.
+    pub symbol: String,
+    /// Its old symbol when moved under another; else `null`.
+    pub old_symbol: Option<String>,
+    /// Its display name.
+    pub name: String,
+    /// What it is.
+    pub kind: Option<String>,
+    /// How it changed.
+    pub change: Option<String>,
+    /// Its file.
+    pub path: String,
+}
+
+impl From<&v1::SymbolTouch> for SymbolTouch {
+    fn from(t: &v1::SymbolTouch) -> Self {
+        Self {
+            symbol: t.symbol.clone(),
+            old_symbol: text(&t.old_symbol),
+            name: t.name.clone(),
+            kind: name(symbol_kind_name(t.kind)),
+            change: name(symbol_change_kind_name(t.change)),
+            path: t.path.clone(),
+        }
+    }
+}
+
+/// One change of the history index (R2.16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryChange {
+    /// The change id.
+    pub change_id: String,
+    /// The same in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its latest commit.
+    pub commit_id: String,
+    /// What became of it.
+    pub outcome: Option<String>,
+    /// More than one visible commit.
+    pub divergent: bool,
+    /// Its net diff is empty.
+    pub empty: bool,
+    /// Its description's first line.
+    pub subject: String,
+    /// Its author's email.
+    pub author_email: Option<String>,
+    /// The first write.
+    pub first_at: Option<String>,
+    /// The last write.
+    pub last_at: Option<String>,
+    /// When it was seen landing.
+    pub landed_at: Option<String>,
+    /// When it was abandoned or undone.
+    pub ended_at: Option<String>,
+    /// Who wrote it, the latest first.
+    pub activity: Vec<ChangeActivity>,
+    /// Activity rows in all.
+    pub activity_count: u32,
+    /// The matched symbol touches.
+    pub touches: Vec<SymbolTouch>,
+    /// Matched touches in all.
+    pub touch_count: u32,
+    /// The matched paths.
+    pub matched_paths: Vec<String>,
+    /// Paths its net diff touches.
+    pub paths_changed: u32,
+    /// Only the first 10,000 paths are indexed.
+    pub paths_truncated: bool,
+    /// Symbols its net diff touches.
+    pub symbols_changed: u32,
+    /// `pending`, `current` or `stale`.
+    pub touches_state: Option<String>,
+    /// `covered`, `partial`, `too_large` or `disabled`.
+    pub symbols_coverage: Option<String>,
+}
+
+impl From<&v1::HistoryChange> for HistoryChange {
+    fn from(c: &v1::HistoryChange) -> Self {
+        Self {
+            change_id: c.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&c.change_id),
+            commit_id: c.commit_id.clone(),
+            outcome: name(change_outcome_name(c.outcome)),
+            divergent: c.divergent,
+            empty: c.empty,
+            subject: c.subject.clone(),
+            author_email: text(&c.author_email),
+            first_at: time(c.first_at.as_ref()),
+            last_at: time(c.last_at.as_ref()),
+            landed_at: time(c.landed_at.as_ref()),
+            ended_at: time(c.ended_at.as_ref()),
+            activity: c.activity.iter().map(ChangeActivity::from).collect(),
+            activity_count: c.activity_count,
+            touches: c.touches.iter().map(SymbolTouch::from).collect(),
+            touch_count: c.touch_count,
+            matched_paths: c.matched_paths.clone(),
+            paths_changed: c.paths_changed,
+            paths_truncated: c.paths_truncated,
+            symbols_changed: c.symbols_changed,
+            touches_state: name(touch_state_name(c.touches_state)),
+            symbols_coverage: name(history_symbol_coverage_name(c.symbols_coverage)),
+        }
+    }
+}
+
+/// One group's count (R2.16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangeGroup {
+    /// The agent, when grouped by agent.
+    pub agent: Option<String>,
+    /// The workspace, when grouped by workspace.
+    pub workspace_id: Option<String>,
+    /// The outcome, when grouped by outcome.
+    pub outcome: Option<String>,
+    /// How many.
+    pub count: u32,
+}
+
+impl From<&v1::ChangeGroup> for ChangeGroup {
+    fn from(g: &v1::ChangeGroup) -> Self {
+        Self {
+            agent: text(&g.agent),
+            workspace_id: text(&g.workspace_id),
+            outcome: name(change_outcome_name(g.outcome)),
+            count: g.count,
+        }
+    }
+}
+
+/// How much history an answer covers (R2.16).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct HistoryCoverage {
+    /// The earliest write the index holds.
+    pub oldest_at: Option<String>,
+    /// Older operations are still being read.
+    pub backfilling: bool,
+    /// Operations not read yet, up to 10,000.
+    pub behind: u32,
+    /// Changes whose touches are not computed yet.
+    pub pending: u32,
+    /// Symbol touches are computed.
+    pub symbols: bool,
+}
+
+impl From<&v1::HistoryCoverage> for HistoryCoverage {
+    fn from(c: &v1::HistoryCoverage) -> Self {
+        Self {
+            oldest_at: time(c.oldest_at.as_ref()),
+            backfilling: c.backfilling,
+            behind: c.behind,
+            pending: c.pending,
+            symbols: c.symbols,
+        }
+    }
+}
+
+/// `reef history`'s answer (R2.16): changes or groups, and the coverage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct History {
+    /// The changes, newest activity first; empty with `--group-by`.
+    pub changes: Vec<HistoryChange>,
+    /// The counts; empty without `--group-by`.
+    pub groups: Vec<ChangeGroup>,
+    /// More groups matched than listed.
+    pub groups_truncated: bool,
+    /// How much history the answer covers.
+    pub coverage: HistoryCoverage,
+}
+
+impl From<&v1::QueryChangesResponse> for History {
+    fn from(r: &v1::QueryChangesResponse) -> Self {
+        Self {
+            changes: r.changes.iter().map(HistoryChange::from).collect(),
+            groups: r.groups.iter().map(ChangeGroup::from).collect(),
+            groups_truncated: r.groups_truncated,
+            coverage: r
+                .coverage
+                .as_ref()
+                .map(HistoryCoverage::from)
+                .unwrap_or_default(),
+        }
+    }
+}

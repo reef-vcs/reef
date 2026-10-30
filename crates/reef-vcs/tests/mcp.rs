@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 20] = [
+const TOOLS: [&str; 21] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -34,6 +34,7 @@ const TOOLS: [&str; 20] = [
     "get_change",
     "get_diff",
     "list_operations",
+    "query_changes",
     "get_operation",
     "read_file",
     "list_files",
@@ -181,9 +182,12 @@ async fn handshake_and_tools() {
     eprintln!("tools/list: {bytes} bytes");
     // 20,000 until R2.15, whose symbol view of `get_diff` (the one input
     // whose purpose is fewer tokens per answer) took it to 20,048 after
-    // tightening `get_diff`'s own texts (ADR 0043). Raising it again needs
-    // the same argument in that ticket's brief.
-    assert!(bytes <= 20_250, "tools/list is {bytes} bytes");
+    // tightening `get_diff`'s own texts (ADR 0043). R2.16's `query_changes`
+    // answers "who touched this" in one call instead of paging
+    // `list_operations` and diffing each change, and took it to 21,191
+    // (ADR 0044). Raising it again needs the same argument in that
+    // ticket's brief.
+    assert!(bytes <= 21_250, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -225,7 +229,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 20);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 21);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -429,6 +433,7 @@ async fn a_restarted_server_takes_over() {
 
 // 9
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture, every read tool")]
 async fn reads() {
     let (daemon, repo) = fixture().await;
     let mut root = server(&daemon, &repo.root).await;
@@ -453,6 +458,29 @@ async fn reads() {
         change["change"]["change_id"], created["change_id"],
         "{change}"
     );
+
+    // R2.16: the change that touched the file, once its touches are in.
+    daemon
+        .handle
+        .state()
+        .history
+        .set_throttle(Duration::ZERO, Duration::ZERO);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let history = mcp
+            .ok("query_changes", json!({"paths": ["src/read.txt"]}))
+            .await;
+        assert!(history["coverage"].is_object(), "{history}");
+        if history["changes"][0]["change_id"] == created["change_id"] {
+            assert_eq!(
+                history["changes"][0]["matched_paths"],
+                json!(["src/read.txt"])
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{history}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     let hunks = mcp.ok("get_diff", json!({})).await;
     let file = &hunks["files"][0];

@@ -2134,3 +2134,157 @@ async fn diff_symbols_cli() {
         assert_eq!(usage.status.code(), Some(2), "{args:?}: {}", stderr(&usage));
     }
 }
+
+/// R2.16 test 22: `reef history`'s JSON and text, its filters and time
+/// forms, grouping, the limit, and paths from a subdirectory.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture, every form of the command"
+)]
+async fn history() {
+    let (daemon, repo) = fixture().await;
+    daemon
+        .handle
+        .state()
+        .history
+        .set_throttle(Duration::ZERO, Duration::ZERO);
+    let ws = create(&daemon, &repo).await;
+    write(&ws, "hist/parser.py", "def parse():\n    return 1\n");
+    ok(&daemon, &path(&ws), &["status", "-o", "json"]).await;
+    let other = create(&daemon, &repo).await;
+    write(&other, "hist/other.txt", "other\n");
+    ok(&daemon, &path(&other), &["status", "-o", "json"]).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let found = loop {
+        let found = ok(&daemon, &repo.root, &["history", "hist", "-o", "json"]).await;
+        let changes = found["changes"].as_array().unwrap();
+        if changes.len() == 2 && changes.iter().all(|c| c["touches_state"] == "current") {
+            break found;
+        }
+        assert!(std::time::Instant::now() < deadline, "{found}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let keys: Vec<&String> = found.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["changes", "coverage", "groups", "groups_truncated"]);
+    let first = &found["changes"][0];
+    assert_eq!(first["change_id"], other.change_id, "newest first: {found}");
+    assert_eq!(first["outcome"], "open");
+    assert_eq!(
+        first["matched_paths"],
+        serde_json::json!(["hist/other.txt"])
+    );
+    assert_eq!(first["landed_at"], Value::Null);
+
+    // A workspace by path, and `.` at the root is every path.
+    let ws_path = path(&ws).display().to_string();
+    let by_ws = ok(
+        &daemon,
+        &repo.root,
+        &["history", "--workspace", &ws_path, "-o", "json"],
+    )
+    .await;
+    let ids: Vec<&Value> = by_ws["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["change_id"])
+        .collect();
+    assert_eq!(ids, [&Value::from(ws.change_id.clone())], "{by_ws}");
+    let everything = ok(&daemon, &repo.root, &["history", ".", "-o", "json"]).await;
+    assert!(
+        everything["changes"].as_array().unwrap().len() >= 2,
+        "{everything}"
+    );
+
+    // Paths from a subdirectory are relative to it.
+    let sub = ok(
+        &daemon,
+        &path(&ws).join("hist"),
+        &["history", "parser.py", "-o", "json"],
+    )
+    .await;
+    assert_eq!(sub["changes"].as_array().unwrap().len(), 1, "{sub}");
+    assert_eq!(sub["changes"][0]["change_id"], ws.change_id);
+
+    // By symbol, and its text.
+    let by_symbol = ok(
+        &daemon,
+        &repo.root,
+        &["history", "--symbol", "parse", "-o", "json"],
+    )
+    .await;
+    assert_eq!(
+        by_symbol["changes"][0]["touches"][0]["change"], "added",
+        "{by_symbol}"
+    );
+    let text = stdout(
+        &run_in(
+            &daemon,
+            &repo.root,
+            &["history", "--symbol", "parse", "-o", "text"],
+        )
+        .await,
+    );
+    assert!(
+        text.contains("+ function parse()  hist/parser.py"),
+        "{text}"
+    );
+    assert!(
+        text.lines().last().unwrap().starts_with("1 change"),
+        "{text}"
+    );
+
+    // Time forms.
+    ok(
+        &daemon,
+        &repo.root,
+        &["history", "--since", "7d", "-o", "json"],
+    )
+    .await;
+    ok(
+        &daemon,
+        &repo.root,
+        &["history", "--since", "2020-01-01T00:00:00Z", "-o", "json"],
+    )
+    .await;
+    run_in(&daemon, &repo.root, &["history", "--since", "soon"])
+        .await
+        .assert()
+        .code(2);
+
+    // Grouping, and the limit's note.
+    let groups = ok(
+        &daemon,
+        &repo.root,
+        &["history", "hist", "--group-by", "outcome", "-o", "json"],
+    )
+    .await;
+    assert_eq!(groups["changes"], serde_json::json!([]));
+    assert_eq!(groups["groups"][0]["outcome"], "open", "{groups}");
+    assert_eq!(groups["groups"][0]["count"], 2);
+    let limited = run_in(
+        &daemon,
+        &repo.root,
+        &["history", "hist", "--limit", "1", "-o", "json"],
+    )
+    .await;
+    assert_eq!(json(&limited)["changes"].as_array().unwrap().len(), 1);
+    assert!(
+        stderr(&limited).contains("--limit 0 shows all"),
+        "{}",
+        stderr(&limited)
+    );
+
+    // The daemon's reasons come through with their advice.
+    let error = err(
+        &daemon,
+        &repo.root,
+        &["history", "--since", "1d", "--until", "7d", "-o", "json"],
+        2,
+        "INVALID_HISTORY_QUERY",
+    )
+    .await;
+    assert_eq!(next_of(&error), ["reef", "history", "--help"]);
+}

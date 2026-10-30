@@ -72,6 +72,10 @@ pub struct GcOutcome {
     /// collection of what was already unreachable still ran.
     /// `operations_abandoned` is 0 when set.
     pub abandon_blocked: Option<AbandonBlocked>,
+    /// Each operation the rewrite kept, its old id to its new one, sorted
+    /// by old id; empty when nothing was abandoned. Indexes that name
+    /// operations map their ids through it (R2.16).
+    pub rewritten: Vec<(OperationIdHex, OperationIdHex)>,
 }
 
 /// What [`Repo::gc`] did with one of the user's jj workspaces.
@@ -390,6 +394,12 @@ impl Repo {
             .backend_impl::<GitBackend>()
             .ok_or(GcError::NotGitBackend)?;
         git.gc(self.repo.readonly_index().as_index(), keep_newer)?;
+        let mut rewritten: Vec<(OperationIdHex, OperationIdHex)> = rewritten
+            .unwrap_or_default()
+            .iter()
+            .map(|(old, new)| (OperationIdHex::of(old), OperationIdHex::of(new)))
+            .collect();
+        rewritten.sort();
         Ok(GcOutcome {
             new_head: OperationIdHex::of(&new_head),
             operations_abandoned,
@@ -397,6 +407,7 @@ impl Repo {
             git_gc: git_gc_start.elapsed(),
             checkouts,
             abandon_blocked,
+            rewritten,
         })
     }
 

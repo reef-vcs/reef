@@ -25,6 +25,7 @@ use reef_api::v1::change_service_server::ChangeServiceServer;
 use reef_api::v1::daemon_service_server::DaemonServiceServer;
 use reef_api::v1::diff_service_server::DiffServiceServer;
 use reef_api::v1::file_service_server::FileServiceServer;
+use reef_api::v1::history_service_server::HistoryServiceServer;
 use reef_api::v1::maintenance_service_server::MaintenanceServiceServer;
 use reef_api::v1::operation_service_server::OperationServiceServer;
 use reef_api::v1::presence_service_server::PresenceServiceServer;
@@ -47,6 +48,7 @@ use crate::service::compat::V0DaemonService;
 use crate::service::daemon::DaemonStatusService;
 use crate::service::diff::DiffHandler;
 use crate::service::files::FilesHandler;
+use crate::service::history::HistoryHandler;
 use crate::service::maintenance::MaintenanceHandler;
 use crate::service::operations::OperationsHandler;
 use crate::service::presence::PresenceHandler;
@@ -57,11 +59,12 @@ use crate::service::symbols::SymbolsHandler;
 use crate::service::workspaces::WorkspacesService;
 
 /// Every service [`router`] registers, by full name.
-pub const SERVED: [&str; 13] = [
+pub const SERVED: [&str; 14] = [
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
     "reef.api.v1.FileService",
+    "reef.api.v1.HistoryService",
     "reef.api.v1.MaintenanceService",
     "reef.api.v1.OperationService",
     "reef.api.v1.PresenceService",
@@ -108,6 +111,9 @@ pub fn router(state: Arc<AppState>) -> ApiRouter {
             &state,
         ))))
         .add_service(StoreServiceServer::new(StoresService::new(Arc::clone(
+            &state,
+        ))))
+        .add_service(HistoryServiceServer::new(HistoryHandler::new(Arc::clone(
             &state,
         ))))
         .add_service(SymbolServiceServer::new(SymbolsHandler::new(Arc::clone(

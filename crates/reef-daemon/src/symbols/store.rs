@@ -221,6 +221,8 @@ pub(crate) fn now_ms() -> i64 {
 #[derive(Debug)]
 pub(crate) struct Store {
     path: PathBuf,
+    /// The current tags extractors, as a JSON array.
+    extractors: String,
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
     max_readers: usize,
@@ -230,6 +232,8 @@ fn opened(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // jj's path order, for `find_ordered`. Indexes keep the binary order.
+    conn.create_collation("reef_path", super::query::path_order)?;
     Ok(conn)
 }
 
@@ -280,8 +284,10 @@ impl Store {
                     .ok_or_else(|| sqlite(rusqlite::Error::InvalidQuery))?
             }
         };
+        let current: Vec<&str> = extractors.split(',').collect();
         Ok(Store {
             path: path.to_owned(),
+            extractors: serde_json::to_string(&current).unwrap_or_default(),
             writer: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
             max_readers,
@@ -520,6 +526,57 @@ impl Store {
             tx.finish()?;
             Ok(out)
         })
+    }
+
+    /// The occurrences of `key` that `scope` keeps, in jj's path order and
+    /// then by `seq`, each passed to `each` as it is read until `each`
+    /// returns `Ok(false)` or fails. One statement does the filtering: the
+    /// path range, roles, kinds, the current extractor, SCIP before tags
+    /// when no source is asked for, and the cursor. Only the check against
+    /// a tree is left to `each` (R2.16).
+    pub(crate) fn find_ordered<E: From<StoreError>>(
+        &self,
+        key: RefKey<'_>,
+        scope: &Ordered<'_>,
+        mut each: impl FnMut(Found) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        let (sql, text) = match key {
+            RefKey::Name(name) => (ORDERED_BY_NAME, name),
+            RefKey::Symbol(symbol) => (ORDERED_BY_SYMBOL, symbol),
+        };
+        let list = |values: Vec<u8>| {
+            (!values.is_empty()).then(|| serde_json::to_string(&values).unwrap_or_default())
+        };
+        let roles = list(scope.roles.iter().map(|&r| r as u8).collect());
+        let kinds = list(scope.kinds.iter().map(|&k| k as u8).collect());
+        let source = scope.source.map(|s| s as i64);
+        let (after, after_seq) = scope.after.unzip();
+        let mut failed = None;
+        self.read(|conn| {
+            let mut statement = conn.prepare_cached(sql)?;
+            let mut rows = statement.query(params![
+                text,
+                scope.dir,
+                roles,
+                kinds,
+                self.extractors,
+                source,
+                after,
+                after_seq
+            ])?;
+            while let Some(row) = rows.next()? {
+                match each(ordered_row(row)?) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        failed.map_or(Ok(()), Err)
     }
 
     /// A tree's row.
@@ -814,6 +871,21 @@ pub(crate) enum RefKey<'a> {
     Symbol(&'a str),
 }
 
+/// What [`Store::find_ordered`] keeps of a key's occurrences.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Ordered<'a> {
+    /// At or under this path, by whole components; empty: every path.
+    pub dir: &'a str,
+    /// Empty: both.
+    pub roles: &'a [Role],
+    /// Empty: all.
+    pub kinds: &'a [Kind],
+    /// `None`: SCIP where an upload covers the file version, else tags.
+    pub source: Option<Source>,
+    /// Only after this path's occurrence `seq`, in the same order.
+    pub after: Option<(&'a str, u32)>,
+}
+
 /// The columns [`found_row`] reads are the same in both lookups: each
 /// row's entry, sequence number, symbol and name, its own columns, and its
 /// enclosing definition's symbol by `(file, enclosing)`.
@@ -838,6 +910,75 @@ const FIND_BY_SYMBOL: &str = concat!(
       LEFT JOIN symbols es ON e.symbol = es.id
       WHERE s.symbol = ?1 AND (?2 IS NULL OR o.role = ?2) ORDER BY o.file DESC LIMIT ?3"
 );
+
+/// What follows `FROM` in both ordered lookups, after their key's own
+/// joins: the entry, the enclosing definition's symbol, and the filters of
+/// [`Ordered`] in order (`?2` the directory, `?3` and `?4` the roles' and
+/// kinds' JSON arrays, `?5` the current extractors', `?6` the source, `?7`
+/// and `?8` the cursor). A path is under the directory when it starts with
+/// it and a `/`: in binary order, from `dir/` up to `dir0`.
+macro_rules! ordered_rest {
+    () => {
+        " JOIN files f ON f.id = o.file
+          LEFT JOIN occurrences e ON e.file = o.file AND e.seq = o.enclosing
+          LEFT JOIN symbols es ON e.symbol = es.id
+          WHERE (?2 = '' OR f.path = ?2 OR (f.path >= ?2 || '/' AND f.path < ?2 || '0'))
+            AND (?3 IS NULL OR o.role IN (SELECT value FROM json_each(?3)))
+            AND (?4 IS NULL OR o.kind IN (SELECT value FROM json_each(?4)))
+            AND (f.source = 2 OR f.extractor IN (SELECT value FROM json_each(?5)))
+            AND (CASE WHEN ?6 IS NULL
+                      THEN f.source = 2 OR NOT EXISTS (
+                          SELECT 1 FROM files c
+                          WHERE c.path = f.path AND c.file_id = f.file_id AND c.source = 2)
+                      ELSE f.source = ?6 END)
+            AND (?7 IS NULL OR f.path COLLATE reef_path > ?7 OR (f.path = ?7 AND o.seq > ?8))
+          ORDER BY f.path COLLATE reef_path, o.seq"
+    };
+}
+
+/// The columns [`ordered_row`] reads: [`found_row`]'s, then the entry's.
+macro_rules! ordered_columns {
+    () => {
+        "SELECT o.file, o.seq, s.symbol, n.name, o.role, o.kind, o.flags,
+            o.line, o.col, o.end_line, o.end_col, o.def_line, o.def_col, o.def_end_line,
+            o.def_end_col, o.enclosing, o.digest, es.symbol,
+            f.path, f.file_id, f.source, f.extractor, f.language, f.skip, f.has_errors"
+    };
+}
+
+const ORDERED_BY_NAME: &str = concat!(
+    ordered_columns!(),
+    " FROM names n JOIN occurrences o ON o.name = n.id AND n.name = ?1
+      LEFT JOIN symbols s ON o.symbol = s.id",
+    ordered_rest!()
+);
+
+const ORDERED_BY_SYMBOL: &str = concat!(
+    ordered_columns!(),
+    " FROM symbols s JOIN occurrences o ON o.symbol = s.id AND s.symbol = ?1
+      JOIN names n ON o.name = n.id",
+    ordered_rest!()
+);
+
+/// One row of an ordered lookup, with its entry.
+fn ordered_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Found> {
+    let (file, seq, occurrence, enclosing_symbol) = found_row(row)?;
+    Ok(Found {
+        entry: EntryRow {
+            id: file,
+            path: row.get(18)?,
+            source: Source::from_i64(row.get(20)?),
+            extractor: row.get(21)?,
+            language: row.get(22)?,
+            skip: row.get(23)?,
+            has_errors: row.get(24)?,
+        },
+        file_id: row.get(19)?,
+        seq,
+        occurrence,
+        enclosing_symbol,
+    })
+}
 
 /// One row of a lookup: its entry's id, its sequence number, the
 /// occurrence, and its enclosing definition's symbol.
@@ -1202,6 +1343,105 @@ mod tests {
         let (_, over) = store.cap(1, marked, &["live".to_owned()], 50).unwrap();
         assert!(over);
         assert_eq!(store.entry_count().unwrap(), 40);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `find_ordered` reads by component, so `a/b.py` comes before
+    /// `a-b.py` and `a.py`, filters in SQL and starts after the cursor.
+    #[test]
+    fn ordered_lookups_follow_path_order() {
+        let (dir, store) = temp_store("ordered", "tags/1/python/0.25.0");
+        let paths = ["é.py", "a0.py", "a.py", "a.b/c.py", "a-b.py", "a/b.py"];
+        let mut entries: Vec<NewEntry> = paths.iter().map(|p| entry(p, 1, 2)).collect();
+        // An outdated extractor's tags, and an upload covering `a.py`.
+        entries.push(NewEntry {
+            extractor: "tags/0/python/0.24.0".into(),
+            ..entry("b.py", 1, 2)
+        });
+        entries.push(NewEntry {
+            source: Source::Scip,
+            extractor: "scip-python".into(),
+            ..entry("a.py", 1, 2)
+        });
+        store.put(&entries).unwrap();
+        let read = |scope: Ordered<'_>| {
+            let mut found = Vec::new();
+            store
+                .find_ordered::<StoreError>(RefKey::Name("f0"), &scope, |hit| {
+                    found.push((hit.entry.path, hit.entry.source));
+                    Ok(true)
+                })
+                .unwrap();
+            found
+        };
+        let tags = |paths: &[&str]| -> Vec<(String, Source)> {
+            paths
+                .iter()
+                .map(|p| ((*p).to_owned(), Source::Tags))
+                .collect()
+        };
+        let mut all = tags(&["a/b.py", "a-b.py", "a.b/c.py", "a.py", "a0.py", "é.py"]);
+        all[3].1 = Source::Scip;
+        assert_eq!(read(Ordered::default()), all);
+        assert_eq!(
+            read(Ordered {
+                source: Some(Source::Tags),
+                ..Ordered::default()
+            }),
+            tags(&["a/b.py", "a-b.py", "a.b/c.py", "a.py", "a0.py", "é.py"])
+        );
+        assert_eq!(
+            read(Ordered {
+                dir: "a",
+                ..Ordered::default()
+            }),
+            tags(&["a/b.py"])
+        );
+        assert_eq!(
+            read(Ordered {
+                after: Some(("a.b/c.py", 0)),
+                kinds: &[Kind::Function],
+                roles: &[Role::Definition],
+                ..Ordered::default()
+            }),
+            all[3..]
+        );
+        assert_eq!(
+            read(Ordered {
+                kinds: &[Kind::Class],
+                ..Ordered::default()
+            }),
+            []
+        );
+        // A stop ends the read.
+        let mut seen = 0;
+        store
+            .find_ordered::<StoreError>(RefKey::Name("f1"), &Ordered::default(), |_| {
+                seen += 1;
+                Ok(seen < 2)
+            })
+            .unwrap();
+        assert_eq!(seen, 2);
+        let plan: Vec<String> = store
+            .read(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {ORDERED_BY_NAME}"))?
+                    .query_map(
+                        params![
+                            "x",
+                            "",
+                            Option::<String>::None,
+                            Option::<String>::None,
+                            "[]",
+                            Option::<i64>::None,
+                            Option::<String>::None,
+                            Option::<i64>::None
+                        ],
+                        |row| row.get::<_, String>(3),
+                    )?
+                    .collect()
+            })
+            .unwrap();
+        assert!(plan.join("\n").contains("occurrences_by_name"), "{plan:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

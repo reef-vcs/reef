@@ -7,6 +7,8 @@
 //! to [`MAX_INLINE`] files. A name or symbol query needs the tree complete,
 //! and keeps a stored occurrence only when the tree holds that file id at
 //! that path, so older versions of a file never leak into a tree's results.
+//! The store reads its rows filtered and in path order, so that check runs
+//! only as far as the page (R2.16).
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -15,7 +17,7 @@ use reef_lib::jj::files::{self, Tree, TreeFile};
 use reef_symbols::{Kind, Language, Occurrence, Role};
 
 use super::index::extract_missing;
-use super::store::{EntryRow, Found, RefKey, Source, Store};
+use super::store::{EntryRow, Found, Ordered, RefKey, Source, Store};
 use super::{IndexStatus, State, SymbolError, SymbolIndex};
 
 /// Files a path query extracts inline at most.
@@ -225,6 +227,11 @@ pub(crate) enum Lookup<'a> {
 
 /// The occurrences of `lookup` in `tree`, under `dir`, after `after`, at
 /// most `limit`. Needs the tree complete (`status`).
+///
+/// The store filters the rows and reads them in path order, starting after
+/// the cursor; each is checked against the tree, and the read stops at the
+/// first kept row past the page. A page costs one statement and a tree
+/// lookup per path it meets, not one per stored hit.
 #[expect(clippy::too_many_arguments, reason = "one per request field")]
 pub(crate) fn by_lookup(
     store: &Store,
@@ -246,40 +253,40 @@ pub(crate) fn by_lookup(
         Lookup::Name(name) => RefKey::Name(name),
         Lookup::Symbol(symbol) => RefKey::Symbol(symbol),
     };
-    let found = store
-        .find_rows(&[key], None, None)?
-        .pop()
-        .unwrap_or_default();
+    #[cfg(any(test, feature = "testing"))]
+    if testing::REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return testing::by_lookup(store, tree, key, dir, filters, after, limit);
+    }
+    let scope = Ordered {
+        dir,
+        roles: &filters.roles,
+        kinds: &filters.kinds,
+        source: filters.source,
+        after,
+    };
     let mut current = Current::new(store, tree);
-    let mut items = Vec::new();
-    for hit in found {
-        let path = hit.entry.path.clone();
-        if !under(&path, dir) || !filters.keeps(&hit.occurrence) {
-            continue;
+    let mut page = Page::default();
+    store.find_ordered(key, &scope, |hit| {
+        // The store kept only rows of the file's own source and current
+        // extractor; the tree decides the rest.
+        if !current.holds(&hit)? {
+            return Ok::<_, SymbolError>(true);
         }
-        if after.is_some_and(|(cursor, seq)| match path_order(&path, cursor) {
-            Ordering::Less => true,
-            Ordering::Equal => hit.seq <= seq,
-            Ordering::Greater => false,
-        }) {
-            continue;
+        if page.items.len() == limit {
+            page.more = true;
+            return Ok(false);
         }
-        if !current.keeps(&hit, filters.source)? {
-            continue;
-        }
-        items.push(Listed {
-            path,
+        page.items.push(Listed {
+            path: hit.entry.path,
             seq: hit.seq,
             occurrence: hit.occurrence,
             enclosing_symbol: hit.enclosing_symbol,
             source: hit.entry.source,
             language: hit.entry.language,
         });
-    }
-    items.sort_by(|a, b| path_order(&a.path, &b.path).then(a.seq.cmp(&b.seq)));
-    let more = items.len() > limit;
-    items.truncate(limit);
-    Ok(Page { items, more })
+        Ok(true)
+    })?;
+    Ok(page)
 }
 
 /// Which stored occurrences belong to a tree: the file id at each path,
@@ -309,17 +316,10 @@ impl<'a> Current<'a> {
         hit: &Found,
         source: Option<Source>,
     ) -> Result<bool, SymbolError> {
-        let path = &hit.entry.path;
-        if !self.present.contains_key(path) {
-            let file = pollster::block_on(files::tree_file(self.tree, path))?;
-            self.present.insert(
-                path.clone(),
-                file.filter(TreeFile::is_file).map(|f| f.file_id),
-            );
-        }
-        if self.present[path].as_deref() != Some(hit.file_id.as_slice()) {
+        if !self.holds(hit)? {
             return Ok(false);
         }
+        let path = &hit.entry.path;
         match (source, hit.entry.source) {
             (Some(want), got) if want != got => return Ok(false),
             (None, Source::Tags) => {
@@ -338,6 +338,101 @@ impl<'a> Current<'a> {
         }
         Ok(hit.entry.source != Source::Tags
             || SymbolIndex::extractor_for(path).as_deref() == Some(hit.entry.extractor.as_str()))
+    }
+
+    /// Whether the tree holds `hit`'s file id at its path.
+    fn holds(&mut self, hit: &Found) -> Result<bool, SymbolError> {
+        let path = &hit.entry.path;
+        if !self.present.contains_key(path) {
+            #[cfg(any(test, feature = "testing"))]
+            testing::TREE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let file = pollster::block_on(files::tree_file(self.tree, path))?;
+            self.present.insert(
+                path.clone(),
+                file.filter(TreeFile::is_file).map(|f| f.file_id),
+            );
+        }
+        Ok(self.present[path].as_deref() == Some(hit.file_id.as_slice()))
+    }
+}
+
+/// Test hooks, for this process: integration tests run one per process.
+#[cfg(any(test, feature = "testing"))]
+mod testing {
+    use std::cmp::Ordering;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    use reef_lib::jj::files::Tree;
+
+    use super::{Current, Cursor, Filters, Listed, Page, path_order, under};
+    use crate::symbols::store::{RefKey, Store};
+    use crate::symbols::{SymbolError, SymbolIndex};
+
+    /// Name and symbol queries answer from [`by_lookup`].
+    pub(super) static REFERENCE: AtomicBool = AtomicBool::new(false);
+    /// Paths [`Current`] has looked up in a tree.
+    pub(super) static TREE_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+
+    impl SymbolIndex {
+        /// Paths name and symbol queries have looked up in a tree, in this
+        /// process.
+        pub fn tree_lookups() -> u64 {
+            TREE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Answers name and symbol queries in this process as R2.14 did,
+        /// reading and checking every stored row before sorting: the
+        /// reference the push-down is compared against.
+        pub fn answer_lookups_by_reference(on: bool) {
+            REFERENCE.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// R2.14's `by_lookup`: every stored row of the key, filtered and
+    /// tree-checked in Rust, then sorted by path and cut to the page.
+    pub(super) fn by_lookup(
+        store: &Store,
+        tree: &Tree,
+        key: RefKey<'_>,
+        dir: &str,
+        filters: &Filters,
+        after: Cursor<'_>,
+        limit: usize,
+    ) -> Result<Page, SymbolError> {
+        let found = store
+            .find_rows(&[key], None, None)?
+            .pop()
+            .unwrap_or_default();
+        let mut current = Current::new(store, tree);
+        let mut items = Vec::new();
+        for hit in found {
+            let path = hit.entry.path.clone();
+            if !under(&path, dir) || !filters.keeps(&hit.occurrence) {
+                continue;
+            }
+            if after.is_some_and(|(cursor, seq)| match path_order(&path, cursor) {
+                Ordering::Less => true,
+                Ordering::Equal => hit.seq <= seq,
+                Ordering::Greater => false,
+            }) {
+                continue;
+            }
+            if !current.keeps(&hit, filters.source)? {
+                continue;
+            }
+            items.push(Listed {
+                path,
+                seq: hit.seq,
+                occurrence: hit.occurrence,
+                enclosing_symbol: hit.enclosing_symbol,
+                source: hit.entry.source,
+                language: hit.entry.language,
+            });
+        }
+        items.sort_by(|a, b| path_order(&a.path, &b.path).then(a.seq.cmp(&b.seq)));
+        let more = items.len() > limit;
+        items.truncate(limit);
+        Ok(Page { items, more })
     }
 }
 

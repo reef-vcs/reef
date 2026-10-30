@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use reef_api::v1::DiffFormat;
 use reef_client::json::{
-    Change, ChangeSummary, Diff, FileChange, FileDiff, FileEntry, FileRead, LogEntry, Operation,
-    Presence, PresenceEvent, RepoStatus,
+    Change, ChangeSummary, Diff, FileChange, FileDiff, FileEntry, FileRead, History, LogEntry,
+    Operation, Presence, PresenceEvent, RepoStatus,
 };
 use serde::Serialize;
 
@@ -852,5 +852,124 @@ mod tests {
             }),
         ]);
         assert_eq!(render(&lines), "src/\na.rs\n");
+    }
+}
+
+/// `reef history` (R2.16): one line per change (its id, outcome, agents,
+/// last write and subject) with its matched touches and paths indented, or
+/// one line per group; then the count and what the history covers.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct HistoryText(pub(crate) History);
+
+fn touch_mark(change: Option<&str>) -> &'static str {
+    match change {
+        Some("added") => "+",
+        Some("removed") => "-",
+        Some("moved") => ">",
+        _ => "~",
+    }
+}
+
+impl TextRender for HistoryText {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let history = &self.0;
+        if !history.groups.is_empty() {
+            for group in &history.groups {
+                let mut keys = Vec::new();
+                for key in [&group.agent, &group.workspace_id, &group.outcome]
+                    .into_iter()
+                    .flatten()
+                {
+                    keys.push(key.as_str());
+                }
+                if keys.is_empty() {
+                    keys.push("-");
+                }
+                writeln!(w, "{}  {}", keys.join("  "), group.count)?;
+            }
+            if history.groups_truncated {
+                writeln!(w, "(more groups not shown)")?;
+            }
+            return Ok(());
+        }
+        for change in &history.changes {
+            let mut agents: Vec<&str> = Vec::new();
+            for activity in &change.activity {
+                let agent = activity.agent.as_deref().unwrap_or("-");
+                if !agents.contains(&agent) {
+                    agents.push(agent);
+                }
+            }
+            let mut who = agents
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if agents.len() > 3 {
+                let _ = write!(who, " +{}", agents.len() - 3);
+            }
+            if who.is_empty() {
+                who.push('-');
+            }
+            let mut outcome = change.outcome.clone().unwrap_or_else(|| "-".to_owned());
+            for (set, flag) in [
+                (change.divergent, "divergent"),
+                (change.empty, "empty"),
+                (change.touches_state.as_deref() == Some("stale"), "stale"),
+            ] {
+                if set {
+                    outcome.push(' ');
+                    outcome.push_str(flag);
+                }
+            }
+            writeln!(
+                w,
+                "{}  {outcome:<10} {who:<14} {}  {}",
+                change
+                    .change_id_reverse_hex
+                    .get(..ID_WIDTH)
+                    .unwrap_or(&change.change_id_reverse_hex),
+                change.last_at.as_deref().unwrap_or("-"),
+                change.subject
+            )?;
+            for touch in &change.touches {
+                writeln!(
+                    w,
+                    "    {} {} {}  {}",
+                    touch_mark(touch.change.as_deref()),
+                    touch.kind.as_deref().unwrap_or("symbol"),
+                    reef_client::symbol_text::short_symbol(&touch.symbol, &touch.path),
+                    touch.path
+                )?;
+            }
+            for path in &change.matched_paths {
+                writeln!(w, "    {path}")?;
+            }
+        }
+        let coverage = &history.coverage;
+        let mut tail = format!(
+            "{} change{}",
+            history.changes.len(),
+            if history.changes.len() == 1 { "" } else { "s" }
+        );
+        let mut notes = Vec::new();
+        if let Some(oldest) = &coverage.oldest_at {
+            notes.push(format!(
+                "history from {}",
+                oldest.get(..10).unwrap_or(oldest)
+            ));
+        }
+        if coverage.backfilling {
+            notes.push("history is still being indexed".to_owned());
+        }
+        if coverage.pending > 0 {
+            notes.push(format!("{} changes pending", coverage.pending));
+        }
+        if !notes.is_empty() {
+            let _ = write!(tail, " ({})", notes.join("; "));
+        }
+        writeln!(w, "{tail}")
     }
 }

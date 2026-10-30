@@ -456,9 +456,16 @@ Two benches measure the symbol index ([ADR 0042](adr/0042-symbol-index.md)). Bot
 | `symbols.sqlite3` after it | 12.7 MiB | 87.8 MiB | — |
 | `incremental_one_file`: a child commit changing one file | 3.9 ms | 4.2 ms | < 25 ms |
 | `list_file`: `ListSymbols` of one file | 1.09 ms | 0.39 ms | < 2 ms |
-| `list_name`: `ListSymbols` by name | 19 ms (529 occurrences) | 1.29 s (4,973 occurrences) | < 20 ms for 50 |
+| `list_name`: `ListSymbols` by name, every page | 2.3 ms (529 occurrences; 2.9 ms before R2.16) | 177 to 187 ms (4,973 occurrences; 387 ms before R2.16) | < 20 ms for 50; < 200 ms on `large` |
+| `list_name_deep`: one page of 10 of that name, 40 pages in (R2.16) | 0.68 ms (1.33 ms before) | 16 to 17 ms (118 ms before) | — |
 
-A name query loads every stored occurrence of the name, from every file version, and keeps those in the tree. Its cost grows with the hits across history, not with the page. Pushing the tree filter and the cursor into SQL is left to R2.16's query layer.
+The `list_name` rows were measured again on 2026-10-30, before and after R2.16 moved the filters and the cursor of a name or symbol query into SQL. The store now reads the name's rows in jj's path order (the `reef_path` collation), starting after the cursor, with the path range, roles, kinds, the current extractor and SCIP's precedence over tags applied in the statement. Each row is then checked against the tree, and the read stops after the page's last row. Before, every page read and checked every stored hit, then sorted them.
+
+On `large`, the listing is five pages of 1,000, and each costs two things:
+- **One statement, 9 to 16 ms.** It sorts the name's 4,973 rows in a temporary B-tree, fewer as the cursor advances. Its cost is reading each row's columns and the check for an upload, not the sort.
+- **A tree lookup per distinct path the page meets, about 25 µs each.** That is about 800 a page, and 4,064 in all. A path is looked up once per page, not once per hit.
+
+A later page costs no more than the first, and `list_name_deep` is the statement and 11 lookups. The listing still costs more than the brief's estimate of 20 ms, because the lookups alone add up to about 100 ms. Making them cheaper is a matter for the tree walk in `reef-lib`, not the store.
 
 **Binary sizes** come from the `dist` profile on the same Mac, before (`main` at `3a14316`) and after:
 
@@ -468,6 +475,21 @@ A name query loads every stored occurrence of the name, from every file version,
 | `reef` | 7.67 MB | 7.90 MB (+0.23 MB) |
 
 `reef`'s growth is the `reef symbols` commands and their JSON. It links neither tree-sitter nor `reef-symbols`, which `crate_graph` checks.
+
+## History (R2.16)
+
+`crates/reef-daemon/benches/history.rs` measures the history index ([ADR 0044](adr/0044-history-index-and-query-layer.md)) through the daemon. Release build on the M2 Max, run on 2026-10-30, on the `small` synthetic repository with 1,000 `EditFiles` changes by 50 agents, each adding a Python file of ten functions under one of 20 directories (10,000 symbol touches). The brief planned a generated fixture of 20,000 changes and 400,000 touches written straight into the store; the bench drives the real follower and worker instead, so its fixture is smaller.
+
+| Benchmark | Result | Target |
+| --- | ---: | --- |
+| `follow`: 1,000 edits (33.6 s), then the last edit to its row | 8.8 ms | < 1 s for 1,000 operations |
+| the same, to every change's touches computed | 10.0 ms | — |
+| `query_symbol`: one page by a name 5% of changes define | 0.36 ms | < 20 ms |
+| `query_path_dir`: one page by one of the 20 directories | 0.99 ms | < 20 ms |
+| `query_agent_week`: one page by one agent within seven days | 1.29 ms | < 20 ms |
+| `group_agent_outcome`: counts by agent and outcome over every change | 0.50 ms | < 100 ms |
+
+The worker kept up with the edits, one change at a time, so nothing was pending a few milliseconds after the last one. The queries read indexes only: test `history::query::tests::query_plans_use_indexes` checks each plan.
 
 ## Symbol-level diff (R2.15)
 
@@ -485,4 +507,4 @@ A name query loads every stored occurrence of the name, from every file version,
 
 A page re-matches the whole diff's definitions, and that costs less than the 200 ms over a plain page that would call for a cache between pages (the brief's open question 3), so there is none.
 
-`list_name` on `large` missed its target. Reading only the matching rows took it from 1.29 s to 402 ms. What remains is the tree check: each of the 4,973 hits' paths is looked up in the tree one at a time. Call-site lookups filter by kind and language family before that check, so they make far fewer lookups. Pushing the tree filter into SQL is R2.16's.
+`list_name` on `large` missed its target. Reading only the matching rows took it from 1.29 s to 402 ms. What remains is the tree check: each of the 4,973 hits' paths is looked up in the tree one at a time. Call-site lookups filter by kind and language family before that check, so they make far fewer lookups. R2.16 then moved the filters and the cursor into SQL, which took it to 177 to 187 ms (see "Symbols (R2.14)").

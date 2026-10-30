@@ -10,9 +10,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `reef diff --symbols` lists each file's symbol changes under it, nested, with up to three call sites each and the totals; `--stat` adds the line counts, `--call-sites N` sets how many are listed, and `--source` picks tags or SCIP. `reef diff --expand SYMBOL` shows only that symbol's lines. JSON gains `symbol_summary` and each file's `symbols` only with these flags.
 - The MCP server's `get_diff` takes `format: "symbols"` and `expand`. `tools/list` is held to 20,250 bytes.
 
+- A history index and `HistoryService.QueryChanges` ([ADR 0044](docs/adr/0044-history-index-and-query-layer.md), API revision 9): which changes touched files or symbols, who wrote them (activity per agent and workspace), when, and what became of them (open, landed on `trunk()`, abandoned, undone), filtered by symbol, path, agent, workspace, change, outcome and time window, paged or counted by agent, outcome or workspace, with the history each answer covers. The daemon follows the operation log into `repos/<id>/history.sqlite3`, backfills it, and keeps it through GC. `[history]` configures it. Two reasons: `HISTORY_DISABLED`, `INVALID_HISTORY_QUERY`.
+- `reef history [PATH]...` with `--symbol`, `--change-kind`, `--by`, `--workspace`, `--change`, `--outcome`, `--since`/`--until` (RFC 3339 or a duration ago), `--include-empty`, `--group-by` and `--limit`.
+- The MCP server's `query_changes` tool. `tools/list` is held to 21,250 bytes.
+
 ### Changed
 
-- `ListSymbols` by name or symbol reads only the matching rows of the index, not each matching file's whole entry.
+- `ListSymbols` by name or symbol reads only the matching rows of the index, not each matching file's whole entry, and (R2.16) reads them in path order with its filters and cursor in SQL, stopping at the end of the page.
 
 ### Fixed
 

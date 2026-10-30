@@ -4,7 +4,7 @@
 //! `reef_client::json`'s.
 
 use reef_client::json::{
-    Change, Diff, FileEntry, FileRead, LogEntry, Operation, Repository, Workspace,
+    Change, Diff, FileEntry, FileRead, History, LogEntry, Operation, Repository, Workspace,
 };
 use serde::Serialize;
 
@@ -34,6 +34,14 @@ pub(super) struct Changes {
 #[derive(Debug, Serialize)]
 pub(super) struct Operations {
     pub(super) operations: Vec<Operation>,
+    pub(super) next_page_token: Option<String>,
+}
+
+/// `query_changes`.
+#[derive(Debug, Serialize)]
+pub(super) struct HistoryPage {
+    #[serde(flatten)]
+    pub(super) history: History,
     pub(super) next_page_token: Option<String>,
 }
 

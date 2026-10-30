@@ -197,6 +197,38 @@ pub(super) struct ListOperations {
     pub(super) page_token: Option<String>,
 }
 
+/// `query_changes`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QueryChanges {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// Files or directories, repository-relative.
+    pub(super) paths: Option<Vec<String>>,
+    /// Symbol, `Class#method()` suffix, or name.
+    pub(super) symbols: Option<Vec<String>>,
+    /// Only changes these agents wrote.
+    pub(super) agents: Option<Vec<String>>,
+    /// Only these outcomes.
+    pub(super) outcomes: Option<Vec<Outcome>>,
+    /// Only changes written since (RFC 3339).
+    pub(super) since: Option<String>,
+    /// Changes per page [default: 20, at most 1000].
+    pub(super) page_size: Option<u32>,
+    /// From the last result.
+    pub(super) page_token: Option<String>,
+}
+
+/// What became of a change.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Outcome {
+    Open,
+    Landed,
+    Abandoned,
+    Undone,
+}
+
 /// An operation kind, by its `reef.kind` name.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]

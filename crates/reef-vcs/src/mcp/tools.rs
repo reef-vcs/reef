@@ -17,12 +17,14 @@ use reef_api::v1::{
     self, AbandonChangeRequest, CreateWorkspaceRequest, DescribeChangeRequest, EditFilesRequest,
     GetChangeRequest, GetDiffRequest, GetStatusRequest, GetWorkspaceRequest, ListChangesRequest,
     ListFilesRequest, ListOperationsRequest, ListRepositoriesRequest, ListWorkspacesRequest,
-    MoveWorkspaceRequest, OperationFilter, ReadFileRequest, UndoOperationRequest,
-    create_workspace_request, edit_files_request, file_edit, move_workspace_request,
+    MoveWorkspaceRequest, OperationFilter, QueryChangesRequest, ReadFileRequest,
+    UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
+    move_workspace_request,
 };
 use reef_client::json::{
-    self, Abandoned, Created, Described, Diff, Edited, ErrorObject, FileEntry, FileRead, Inspected,
-    LogEntry, Moved, Operation, Released, RepoStatus, Repository, Snapshotted, Undone, Workspace,
+    self, Abandoned, Created, Described, Diff, Edited, ErrorObject, FileEntry, FileRead, History,
+    Inspected, LogEntry, Moved, Operation, Released, RepoStatus, Repository, Snapshotted, Undone,
+    Workspace,
 };
 use rmcp::handler::server::common::{schema_for_empty_input, schema_for_input};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
@@ -30,7 +32,8 @@ use schemars::JsonSchema;
 use serde_json::{Map, Value};
 
 use super::results::{
-    ChangeAt, Changes, DiffPage, FileRange, Files, Operations, Repositories, Workspaces, token,
+    ChangeAt, Changes, DiffPage, FileRange, Files, HistoryPage, Operations, Repositories,
+    Workspaces, token,
 };
 use super::{Call, ToolError, args, parse, to_value, wait};
 use crate::cli::changes::workspace_after;
@@ -283,6 +286,16 @@ pub(super) const TOOLS: &[ToolDef] = &[
         idempotent: false,
         schema: schema::<args::ListOperations>,
         call: list_operations,
+    },
+    ToolDef {
+        name: "query_changes",
+        title: "Query changes",
+        rpc: "/reef.api.v1.HistoryService/QueryChanges",
+        description: "Which changes touched these files or symbols: who wrote them, when, and whether they landed. Newest first. Returns {changes, coverage, next_page_token}.",
+        destructive: false,
+        idempotent: false,
+        schema: schema::<args::QueryChanges>,
+        call: query_changes,
     },
     ToolDef {
         name: "get_operation",
@@ -705,6 +718,57 @@ tool!(list_operations, args::ListOperations, |call, args| {
         .await?;
     to_value(&Operations {
         operations: response.operations.iter().map(Operation::from).collect(),
+        next_page_token: token(response.next_page_token),
+    })
+});
+
+tool!(query_changes, args::QueryChanges, |call, args| {
+    let ctx = call.ctx;
+    let scope = call.scope(args.repo.as_ref(), None).await?;
+    let since = match args.since {
+        Some(since) => Some(humantime::parse_rfc3339_weak(&since).map_err(|_| {
+            ToolError::invalid(
+                "",
+                format!("since {since:?} is not an RFC 3339 time"),
+                "Pass since as an RFC 3339 time, such as 2026-10-01T00:00:00Z.",
+            )
+        })?),
+        None => None,
+    };
+    let response = ctx
+        .call(
+            ctx.client.query_changes(QueryChangesRequest {
+                repo: scope.repo_id.clone(),
+                paths: args
+                    .paths
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| repo_path(&scope, path))
+                    .collect(),
+                symbols: args.symbols.unwrap_or_default(),
+                agents: args.agents.unwrap_or_default(),
+                outcomes: args
+                    .outcomes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|outcome| {
+                        i32::from(match outcome {
+                            args::Outcome::Open => v1::ChangeOutcome::Open,
+                            args::Outcome::Landed => v1::ChangeOutcome::Landed,
+                            args::Outcome::Abandoned => v1::ChangeOutcome::Abandoned,
+                            args::Outcome::Undone => v1::ChangeOutcome::Undone,
+                        })
+                    })
+                    .collect(),
+                since: since.map(prost_types::Timestamp::from),
+                page_size: page(args.page_size, 20),
+                page_token: args.page_token.unwrap_or_default(),
+                ..QueryChangesRequest::default()
+            }),
+        )
+        .await?;
+    to_value(&HistoryPage {
+        history: History::from(&response),
         next_page_token: token(response.next_page_token),
     })
 });
@@ -1152,7 +1216,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 21);
     }
 
     #[test]

@@ -7,7 +7,9 @@
 //!   changes one file;
 //! - `symbols/<preset>/list_file`: `ListSymbols` of one indexed file;
 //! - `symbols/<preset>/list_name`: `ListSymbols` of a name across the tree
-//!   (the first in one of its Python files, its count printed);
+//!   (the first in one of its Python files, its count printed), every page;
+//! - `symbols/<preset>/list_name_deep`: one page of 10 of that name, 40
+//!   pages in (R2.16);
 //! - `symbols/<preset>/diff_one_file`, beside `diff_one_file_plain`:
 //!   `GetDiff` with symbols of a child that rewrites one Python file with
 //!   20 definitions, warm, call sites 10 (R2.15);
@@ -39,7 +41,7 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, criterion_group, criterion_main};
 use reef_api::v1::{
     DiffFormat, EditFilesRequest, FileEdit, GetDiffRequest, IndexSymbolsRequest, ListFilesRequest,
-    ListSymbolsRequest, SymbolIndexState, edit_files_request, file_edit,
+    ListSymbolsRequest, ListSymbolsResponse, SymbolIndexState, edit_files_request, file_edit,
 };
 use reef_daemon::testing::{SyntheticRepo, TestDaemon};
 use reef_testing::synth::Preset;
@@ -149,6 +151,16 @@ impl Bench {
             .unwrap()
             .files
             .len()
+    }
+
+    /// One page of `request`.
+    fn page(&self, request: ListSymbolsRequest) -> ListSymbolsResponse {
+        self.rt
+            .block_on(self.daemon.client.list_symbols_page(ListSymbolsRequest {
+                repo: self.repo.id.clone(),
+                ..request
+            }))
+            .unwrap()
     }
 
     fn list(&self, request: ListSymbolsRequest) -> usize {
@@ -268,7 +280,35 @@ fn symbols(c: &mut Criterion) {
         });
     });
     group.finish();
+    list_name_deep(c, &bench, main, &lookup);
     diffs(c, &bench, main, &listing.entries, &python, &lookup);
+}
+
+/// R2.16's later page: page 40 of `lookup`, by pages of 10, from the token
+/// the 39 pages before it end with.
+fn list_name_deep(c: &mut Criterion, bench: &Bench, main: &str, lookup: &str) {
+    let name = preset_name(preset());
+    let request = |token: String| ListSymbolsRequest {
+        revision: main.to_owned(),
+        name: lookup.to_owned(),
+        page_size: 10,
+        page_token: token,
+        ..ListSymbolsRequest::default()
+    };
+    let mut token = String::new();
+    for _ in 0..39 {
+        token = bench.page(request(token)).next_page_token;
+        if token.is_empty() {
+            println!("symbols/{name}/list_name_deep: skipped, `{lookup}` has under 40 pages");
+            return;
+        }
+    }
+    let mut group = c.benchmark_group(format!("symbols/{name}"));
+    group.sample_size(20);
+    group.bench_function("list_name_deep", |b| {
+        b.iter(|| bench.page(request(token.clone())).symbols.len());
+    });
+    group.finish();
 }
 
 /// R2.15's diffs: 20 definitions per file, each calling `lookup`.

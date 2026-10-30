@@ -55,3 +55,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0041](0041-gc-on-a-timer.md) | GC on a timer | accepted |
 | [0042](0042-symbol-index.md) | Symbol index | accepted |
 | [0043](0043-symbol-level-diff.md) | Symbol-level diff | accepted |
+| [0044](0044-history-index-and-query-layer.md) | History index and query layer | accepted |
