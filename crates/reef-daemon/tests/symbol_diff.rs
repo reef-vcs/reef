@@ -761,20 +761,22 @@ async fn call_site_bounds() {
     let diff = fx.diff(request(Some(500))).await.unwrap();
     assert_eq!(change(&diff, "lib/parse.py", "parse").call_sites.len(), 3);
 
-    // More candidates than are counted.
-    let mut calls = String::from("def caller():\n");
-    for _ in 0..10_001 {
-        calls.push_str("    common()\n");
-    }
-    let base = fx
-        .write(
-            &fx.main,
-            &[
-                ("common.py", b"def common():\n    return 1\n"),
-                ("calls.py", calls.as_bytes()),
-            ],
-        )
-        .await;
+    // More candidates than are counted, over files small enough that no
+    // parse nears the one-second budget on a slow runner.
+    let mut files: Vec<(String, Vec<u8>)> = (0..101)
+        .map(|i| {
+            let mut calls = String::from("def caller():\n");
+            for _ in 0..100 {
+                calls.push_str("    common()\n");
+            }
+            (format!("calls/c{i:03}.py"), calls.into_bytes())
+        })
+        .collect();
+    files.push((
+        "common.py".to_owned(),
+        b"def common():\n    return 1\n".to_vec(),
+    ));
+    let base = write_many(&fx, &fx.main, &files).await;
     let changed = fx
         .write(&base, &[("common.py", b"def common():\n    return 2\n")])
         .await;
@@ -1088,6 +1090,7 @@ async fn paging() {
 
 // 17
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture, every expansion case")]
 async fn expand() {
     let fx = start(|_| {}).await;
     let (before, after) = four_languages(&fx).await;

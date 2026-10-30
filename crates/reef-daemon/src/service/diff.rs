@@ -488,6 +488,6 @@ mod tests {
             changes[999].call_site_status(),
             v1::CallSiteStatus::PageLimit
         );
-        assert!(changes[999].call_sites.is_empty());
+        assert_eq!(changes[999].call_sites, []);
     }
 }
