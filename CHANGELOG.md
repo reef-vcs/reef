@@ -17,6 +17,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 ### Fixed
 
 - The MCP server's `get_diff` described `max_lines_per_file` as "[default: no cut]"; the default is 1,000.
+- Timestamps print with exactly three fraction digits (`2026-10-30T17:04:34.000Z`, `…34.100Z`), in the CLI's JSON and text, MCP results and backup manifests, so they sort as strings. `time`'s RFC 3339 formatting had trimmed trailing zeros and dropped a zero fraction, so a time on a whole second sorted after a later one in the same second.
 
 ## [0.2.0] - 2026-10-28
 

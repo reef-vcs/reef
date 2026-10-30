@@ -205,8 +205,8 @@ reef ws run -- npm run build
 ```text
 added 222 packages, and audited 223 packages in 2s
 built store node_modules 9571f160d298 at ~/Library/.../stores/node_modules/9571f160d298.../node_modules
-NAME          LOCKFILE      SIZE     IN_USE  BUILT                    PATH
-node_modules  9571f160d298  151 MiB  0       2026-10-23T20:09:01.14Z  ~/Library/.../node_modules
+NAME          LOCKFILE      SIZE     IN_USE  BUILT                     PATH
+node_modules  9571f160d298  151 MiB  0       2026-10-23T20:09:01.140Z  ~/Library/.../node_modules
 > path-to-regexp@9.0.0 build
 > Running "tsc --build"...
 ```

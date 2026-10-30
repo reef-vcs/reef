@@ -26,14 +26,28 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-/// A `google.protobuf.Timestamp` as RFC 3339 with millisecond precision,
-/// as the daemon's own timestamps print (a test in the daemon keeps the two
-/// equal); `<millis>ms` for an instant `time` cannot represent.
+/// A `google.protobuf.Timestamp` as [`rfc3339_millis`] prints it, as the
+/// daemon's `Timestamp::to_rfc3339` does (both call it; a daemon test
+/// checks the round trip through the message).
 pub fn rfc3339(time: &prost_types::Timestamp) -> String {
-    let millis = millis_of(time);
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+    rfc3339_millis(millis_of(time))
+}
+
+/// Unix milliseconds as RFC 3339 UTC with exactly three fraction digits,
+/// such as `2026-10-16T18:31:17.040Z`, so that timestamps sort as strings;
+/// `<millis>ms` for an instant RFC 3339 cannot write (outside the years 0
+/// to 9999).
+pub fn rfc3339_millis(millis: i64) -> String {
+    let (seconds, fraction) = (millis.div_euclid(1000), millis.rem_euclid(1000));
+    // `time` trims a fraction's trailing zeros, and drops a zero one, so
+    // the whole seconds are formatted and the fraction written here.
+    OffsetDateTime::from_unix_timestamp(seconds)
         .ok()
         .and_then(|time| time.format(&Rfc3339).ok())
+        .and_then(|text| {
+            text.strip_suffix('Z')
+                .map(|whole| format!("{whole}.{fraction:03}Z"))
+        })
         .unwrap_or_else(|| format!("{millis}ms"))
 }
 
@@ -1924,6 +1938,21 @@ pub struct RestoredRepo {
 mod tests {
     use super::*;
 
+    /// Fixed width at the edges RFC 3339 can write, `<millis>ms` past them.
+    #[test]
+    fn rfc3339_millis_edges() {
+        assert_eq!(rfc3339_millis(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339_millis(-1000), "1969-12-31T23:59:59.000Z");
+        assert_eq!(rfc3339_millis(-1), "1969-12-31T23:59:59.999Z");
+        let year_zero = -62_167_219_200_000;
+        assert_eq!(rfc3339_millis(year_zero), "0000-01-01T00:00:00.000Z");
+        assert_eq!(
+            rfc3339_millis(year_zero - 1),
+            format!("{}ms", year_zero - 1)
+        );
+        assert_eq!(rfc3339_millis(i64::MIN), format!("{}ms", i64::MIN));
+    }
+
     #[test]
     fn reverse_hex_matches_jj() {
         assert_eq!(
@@ -1962,7 +1991,7 @@ mod tests {
         assert_eq!(value["created_at"], "2026-10-16T18:31:17.042Z");
         assert_eq!(value["attention"], serde_json::Value::Null);
         assert_eq!(value["last_snapshot_at"], serde_json::Value::Null);
-        assert_eq!(value["lease"]["expires_at"], "2026-10-16T18:31:18Z");
+        assert_eq!(value["lease"]["expires_at"], "2026-10-16T18:31:18.000Z");
         assert!(value["lease"].get("expires_at_ms").is_none());
         assert_eq!(value["lease"]["state"], "active");
         assert_eq!(value["lease"]["end_reason"], serde_json::Value::Null);
