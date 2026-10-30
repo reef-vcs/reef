@@ -191,11 +191,19 @@ async fn write_is_snapshotted_within_debounce() {
 // 2
 #[tokio::test(flavor = "multi_thread")]
 async fn burst_coalesces() {
-    // At the shipped debounce, not the fixture's 100 ms: a slow runner can
-    // pause writing for more than 100 ms mid-burst, and each pause is
-    // rightly a snapshot (CI saw 4 and 5 for bursts of 0.7 and 1.2 s).
+    // At the shipped pacing. A workspace's snapshots start at least
+    // `min_interval` apart, and the notify debounce is per path, not a
+    // quiet time, so a burst of new files is snapshotted about once per
+    // `min_interval` for as long as it lasts: the fixture's 100 ms gave 4
+    // and 5 for bursts of 0.7 and 1.2 s on CI. At the shipped 1 s, a third
+    // snapshot starts no earlier than 3 s after create, by when the last
+    // path's event (at most the burst's 1.5 s plus `debounce`) is in, so
+    // three hold for any burst this test allows.
+    let shipped = reef_daemon::config::WatcherSection::default();
+    let (debounce, min_interval) = (shipped.debounce, shipped.min_interval);
     let (daemon, repo) = fixture_with(|config| {
-        config.file.watcher.debounce = reef_daemon::config::WatcherSection::default().debounce;
+        config.file.watcher.debounce = debounce;
+        config.file.watcher.min_interval = min_interval;
     })
     .await;
     let ws = create(&daemon, &repo, None).await;
@@ -208,15 +216,24 @@ async fn burst_coalesces() {
         burst < Duration::from_millis(1500),
         "the burst took {burst:?}"
     );
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (d, r, w) = (&daemon, &repo, &ws);
+    wait_for(
+        Duration::from_secs(20),
+        "the burst's last file",
+        || async move {
+            let row = inspect(d, r, w).await;
+            tree_has(&r.root, &row.commit_id, "burst/9/999.txt").await
+        },
+    )
+    .await;
+    // Long enough for another snapshot to have started, were one coming.
+    tokio::time::sleep(debounce + min_interval * 2).await;
     let ops = snapshot_ops(&repo.root, &ws).await;
     assert!(
         (1..=3).contains(&ops.len()),
         "{} snapshot operations for a burst written in {burst:?}",
         ops.len()
     );
-    let row = inspect(&daemon, &repo, &ws).await;
-    assert!(tree_has(&repo.root, &row.commit_id, "burst/9/999.txt").await);
 }
 
 // 3
