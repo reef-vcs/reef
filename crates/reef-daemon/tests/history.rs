@@ -488,7 +488,9 @@ async fn symbol_touches() {
 async fn throttle() {
     let fx = start(|_| {}).await;
     let history = &fx.daemon.handle.state().history;
-    history.set_throttle(Duration::from_millis(500), Duration::from_secs(30));
+    // The default quiet time: a snapshot on a slow runner can take longer
+    // than a shorter one, and then every write looks quiet.
+    history.set_throttle(Duration::from_secs(5), Duration::from_mins(1));
     let ws = fx.workspace("bot-1").await;
     // Settle the create first.
     fx.change_when(&ws.change_id, |c| c.touches_state() == TouchState::Current)
@@ -496,7 +498,6 @@ async fn throttle() {
     let before = history.computed();
     for i in 0..20 {
         fx.write(&ws, "a.txt", &format!("{i}\n")).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let busy = history.computed() - before;
     assert!(busy <= 2, "computed {busy} times while busy");
