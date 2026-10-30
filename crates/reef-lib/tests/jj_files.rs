@@ -755,6 +755,7 @@ async fn edits_apply_in_order() {
             paths: Vec::new(),
             after: None,
             limit: 100,
+            pairs: false,
         },
         &|| false,
     )

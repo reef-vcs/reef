@@ -108,10 +108,11 @@ These work from your checkout, or inside a workspace, where `@` is the workspace
 reef status
 reef log --limit 10
 reef show pursxlpq
+reef diff --symbols -r pursxlpq
 reef op log --limit 5
 ```
 
-`reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef op log` lists what agents did, newest first, with the agent that did it, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints JSON when piped, and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
+`reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints JSON when piped, and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
 ## Set up your agent
 

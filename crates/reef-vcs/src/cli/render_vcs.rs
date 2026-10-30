@@ -4,6 +4,7 @@
 //! not tables, so they print through wrappers that serialize as their one
 //! field.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use reef_api::v1::DiffFormat;
@@ -230,10 +231,16 @@ pub(crate) struct DiffText {
     pub(crate) diff: Diff,
     #[serde(skip)]
     pub(crate) format: DiffFormat,
+    /// `--symbols`: each file's symbol changes instead of its lines.
+    #[serde(skip)]
+    pub(crate) symbols: bool,
 }
 
 impl TextRender for DiffText {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        if self.symbols {
+            return symbol_diff(w, &self.diff, self.format == DiffFormat::Stat);
+        }
         match self.format {
             DiffFormat::Summary => {
                 for file in &self.diff.files {
@@ -265,6 +272,217 @@ impl TextRender for DiffText {
             }
         }
         Ok(())
+    }
+}
+
+/// `reef diff --symbols`: each file's summary line, then its symbol
+/// changes, nested under their enclosing ones, then the totals (R2.15).
+fn symbol_diff(w: &mut dyn Write, diff: &Diff, stat: bool) -> io::Result<()> {
+    for file in &diff.files {
+        let mut line = file_change_line(&file.change);
+        if stat {
+            let _ = write!(line, " | +{} -{}", file.lines_added, file.lines_removed);
+        }
+        let Some(symbols) = &file.symbols else {
+            writeln!(w, "{line}")?;
+            continue;
+        };
+        match symbols.coverage.as_deref() {
+            Some("covered") | None => writeln!(w, "{line}")?,
+            Some("skipped") => {
+                let why = symbols
+                    .skip_reason
+                    .as_deref()
+                    .map_or(String::new(), |r| format!(", {}", r.replace('_', " ")));
+                writeln!(w, "{line}  (no symbols: skipped{why})")?;
+            }
+            Some(other) => writeln!(w, "{line}  (no symbols: {})", other.replace('_', " "))?,
+        }
+        // Each change under the listed change that encloses it, so a
+        // removed method sits under its class, not under whatever was
+        // printed before it.
+        let changes = &symbols.changes;
+        let parent = |c: &reef_client::json::SymbolChange| {
+            c.enclosing_symbol.as_deref().and_then(|e| {
+                changes
+                    .iter()
+                    .position(|p| p.symbol == e && !std::ptr::eq(p, c))
+            })
+        };
+        let parents: Vec<Option<usize>> = changes.iter().map(parent).collect();
+        let mut stack: Vec<(usize, usize)> = (0..changes.len())
+            .rev()
+            .filter(|&i| parents[i].is_none())
+            .map(|i| (i, 0))
+            .collect();
+        let mut printed = vec![false; changes.len()];
+        let mut seeds = 0..changes.len();
+        // Anything a cycle of enclosing symbols kept out goes at the top.
+        let mut next = |stack: &mut Vec<(usize, usize)>, printed: &[bool]| {
+            stack
+                .pop()
+                .or_else(|| seeds.by_ref().find(|&i| !printed[i]).map(|i| (i, 0)))
+        };
+        while let Some((i, level)) = next(&mut stack, &printed) {
+            if std::mem::replace(&mut printed[i], true) {
+                continue;
+            }
+            let change = &changes[i];
+            let indent = "  ".repeat(level + 1);
+            writeln!(w, "{indent}{}", symbol_change_line(file, change))?;
+            if let Some(sites) = call_site_line(change) {
+                writeln!(w, "{indent}    {sites}")?;
+            }
+            stack.extend(
+                (0..changes.len())
+                    .rev()
+                    .filter(|&j| parents[j] == Some(i))
+                    .map(|j| (j, level + 1)),
+            );
+        }
+        if symbols.truncated {
+            writeln!(w, "  (more symbol changes than are listed)")?;
+        }
+    }
+    let total = diff.total_files;
+    let mut line = format!("{total} file{} changed", if total == 1 { "" } else { "s" });
+    if let Some(summary) = &diff.symbol_summary {
+        let counts: Vec<String> = [
+            (summary.changed, "changed"),
+            (summary.added, "added"),
+            (summary.removed, "removed"),
+            (summary.moved, "moved"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        line.push_str("; symbols: ");
+        line.push_str(&if counts.is_empty() {
+            "none".to_owned()
+        } else {
+            counts.join(", ")
+        });
+    }
+    writeln!(w, "{line}")
+}
+
+/// `~ method Parser#parse()  +8 -2`: a mark, the kind, the short symbol, and
+/// the lines or where it moved from.
+fn symbol_change_line(file: &FileDiff, change: &reef_client::json::SymbolChange) -> String {
+    let kind = change.kind.as_deref().unwrap_or("");
+    let mark = match kind {
+        "added" => '+',
+        "removed" => '-',
+        "moved" => '>',
+        _ => '~',
+    };
+    // A removed symbol spells its old file.
+    let path = match kind {
+        "removed" => change
+            .old_path
+            .as_deref()
+            .or(file.change.old_path.as_deref())
+            .unwrap_or(&file.change.path),
+        _ => &file.change.path,
+    };
+    let short = reef_client::symbol_text::short_symbol(&change.symbol, path);
+    let mut line = match &change.symbol_kind {
+        Some(what) => format!("{mark} {what} {short}"),
+        None => format!("{mark} {short}"),
+    };
+    match kind {
+        "moved" => {
+            // A move into a copied file comes from the copy's source.
+            let from = change
+                .old_path
+                .as_deref()
+                .or(file.change.old_path.as_deref());
+            if let Some(from) = from {
+                let _ = write!(line, "  moved from {from}");
+            }
+        }
+        "added" => {
+            let _ = write!(line, "  +{}", change.lines_added);
+        }
+        "removed" => {
+            let _ = write!(line, "  -{}", change.lines_removed);
+        }
+        _ => {
+            let _ = write!(line, "  +{} -{}", change.lines_added, change.lines_removed);
+            if change.nested_only {
+                line.push_str(", in members");
+            }
+        }
+    }
+    line
+}
+
+/// The line under a change about its call sites, if any.
+fn call_site_line(change: &reef_client::json::SymbolChange) -> Option<String> {
+    match change.call_site_status.as_deref()? {
+        "not_tracked" => Some(format!(
+            "call sites not tracked by tags for {}s",
+            change.symbol_kind.as_deref().unwrap_or("symbol")
+        )),
+        "index_incomplete" => Some("call sites pending: the index is being built".to_owned()),
+        "page_limit" => Some("call sites not looked up: page limit".to_owned()),
+        status => {
+            let count = change.call_site_count;
+            if count == 0 && status == "capped" {
+                return Some(format!(
+                    "call sites not counted: over 10,000 candidates; reef symbols list --name {} lists them",
+                    change.name
+                ));
+            }
+            if count == 0 {
+                return None;
+            }
+            let shown: Vec<String> = change
+                .call_sites
+                .iter()
+                .take(3)
+                .map(|site| {
+                    let line = site.range.map_or(0, |r| r[0] + 1);
+                    match &site.caller {
+                        Some(caller) => format!(
+                            "{}:{line} in {}",
+                            site.path,
+                            reef_client::symbol_text::short_symbol(caller, &site.path)
+                        ),
+                        None => format!("{}:{line}", site.path),
+                    }
+                })
+                .collect();
+            let shown_count = u32::try_from(shown.len()).unwrap_or(u32::MAX);
+            let mut text = format!(
+                "{}{count} call site{}: {}",
+                if status == "capped" { "at least " } else { "" },
+                if count == 1 { "" } else { "s" },
+                shown.join(", ")
+            );
+            if count > shown_count {
+                let _ = write!(text, ", and {} more", count - shown_count);
+            }
+            let exact = change
+                .call_sites
+                .iter()
+                .all(|s| s.source.as_deref() == Some("scip"));
+            if exact && !change.call_sites.is_empty() {
+                text.push_str(" (exact)");
+            } else {
+                match change.name_definitions {
+                    0 if change.kind.as_deref() == Some("removed") => {
+                        text.push_str(" (by name, no definition remains)");
+                    }
+                    0 | 1 => text.push_str(" (by name)"),
+                    n => {
+                        let _ = write!(text, " (by name, {n} definitions)");
+                    }
+                }
+            }
+            Some(text)
+        }
     }
 }
 
@@ -576,6 +794,7 @@ mod tests {
             render(&DiffText {
                 diff: Diff::from(&diff),
                 format,
+                symbols: false,
             })
         };
         assert_eq!(

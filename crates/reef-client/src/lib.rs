@@ -25,6 +25,7 @@ pub mod logging;
 pub mod paths;
 pub mod presence;
 pub mod scip;
+pub mod symbol_text;
 
 use std::collections::BTreeMap;
 use std::future::Future;

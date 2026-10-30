@@ -7,9 +7,18 @@
 //!   changes one file;
 //! - `symbols/<preset>/list_file`: `ListSymbols` of one indexed file;
 //! - `symbols/<preset>/list_name`: `ListSymbols` of a name across the tree
-//!   (the first in one of its Python files, its count printed).
+//!   (the first in one of its Python files, its count printed);
+//! - `symbols/<preset>/diff_one_file`, beside `diff_one_file_plain`:
+//!   `GetDiff` with symbols of a child that rewrites one Python file with
+//!   20 definitions, warm, call sites 10 (R2.15);
+//! - `symbols/<preset>/diff_100_files` and `diff_paged` (one page of 20 of
+//!   them): a child rewriting 100 Python files, warm; the same diff with no
+//!   entries on either side is timed once, `diff_100_files_cold`;
+//! - `symbols/<preset>/call_sites_common`: one changed function named as
+//!   `list_name`'s name, whose call sites are looked up by that name.
 //!
-//! Results are in `docs/benchmarks.md`, "Symbols (R2.14)".
+//! Results are in `docs/benchmarks.md`, "Symbols (R2.14)" and "Symbol-level
+//! diff (R2.15)".
 //!
 //! ```sh
 //! REEF_BENCH_PRESET=medium cargo bench -p reef-daemon --bench symbols
@@ -24,12 +33,13 @@
     reason = "a benchmark: a panic is the failure report, and it prints its one-shot figures"
 )]
 
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use reef_api::v1::{
-    EditFilesRequest, FileEdit, IndexSymbolsRequest, ListFilesRequest, ListSymbolsRequest,
-    SymbolIndexState, edit_files_request, file_edit,
+    DiffFormat, EditFilesRequest, FileEdit, GetDiffRequest, IndexSymbolsRequest, ListFilesRequest,
+    ListSymbolsRequest, SymbolIndexState, edit_files_request, file_edit,
 };
 use reef_daemon::testing::{SyntheticRepo, TestDaemon};
 use reef_testing::synth::Preset;
@@ -59,6 +69,11 @@ struct Bench {
 
 impl Bench {
     fn index(&self, revision: &str) -> u64 {
+        self.index_commit(revision).0
+    }
+
+    /// Indexes `revision`: its supported files, and the commit it names.
+    fn index_commit(&self, revision: &str) -> (u64, String) {
         let status = self
             .rt
             .block_on(self.daemon.client.index_symbols(IndexSymbolsRequest {
@@ -71,7 +86,7 @@ impl Bench {
             .status
             .unwrap();
         assert_eq!(status.state, SymbolIndexState::Complete as i32);
-        status.files
+        (status.files, status.commit_id)
     }
 
     /// A child of `on` with `path` rewritten; its commit id.
@@ -95,6 +110,47 @@ impl Bench {
             .commit_id
     }
 
+    /// A child of `on` writing `files`; its commit id.
+    fn write(&self, on: &str, files: &[(String, Vec<u8>)]) -> String {
+        self.rt
+            .block_on(
+                self.daemon.client.edit_files(EditFilesRequest {
+                    repo: self.repo.id.clone(),
+                    target: Some(edit_files_request::Target::NewOn(on.to_owned())),
+                    edits: files
+                        .iter()
+                        .map(|(path, bytes)| FileEdit {
+                            path: path.clone(),
+                            action: Some(file_edit::Action::Content(bytes.clone())),
+                            executable: None,
+                        })
+                        .collect(),
+                    ..EditFilesRequest::default()
+                }),
+            )
+            .unwrap()
+            .change
+            .unwrap()
+            .commit_id
+    }
+
+    /// One page of `to`'s diff against `from`, with symbols or without.
+    fn diff(&self, from: &str, to: &str, symbols: bool, page_size: i32) -> usize {
+        self.rt
+            .block_on(self.daemon.client.get_diff_page(GetDiffRequest {
+                repo: self.repo.id.clone(),
+                from_revision: from.to_owned(),
+                to_revision: to.to_owned(),
+                format: DiffFormat::Summary.into(),
+                symbols,
+                page_size,
+                ..GetDiffRequest::default()
+            }))
+            .unwrap()
+            .files
+            .len()
+    }
+
     fn list(&self, request: ListSymbolsRequest) -> usize {
         self.rt
             .block_on(self.daemon.client.list_symbols(ListSymbolsRequest {
@@ -116,11 +172,11 @@ fn symbols(c: &mut Criterion) {
         .unwrap();
     let (daemon, repo) = rt.block_on(TestDaemon::with_synthetic_repo(preset));
     let bench = Bench { rt, daemon, repo };
-    // The synthetic repository's one commit; it has no bookmark.
-    let main = "heads(all())";
-
     let started = Instant::now();
-    let files = bench.index(main);
+    // The synthetic repository's one commit, which has no bookmark, by id:
+    // the benches below add children beside it.
+    let (files, main) = bench.index_commit("heads(all())");
+    let main = main.as_str();
     let took = started.elapsed();
     let path = bench
         .daemon
@@ -210,6 +266,89 @@ fn symbols(c: &mut Criterion) {
                 ..ListSymbolsRequest::default()
             })
         });
+    });
+    group.finish();
+    diffs(c, &bench, main, &listing.entries, &python, &lookup);
+}
+
+/// R2.15's diffs: 20 definitions per file, each calling `lookup`.
+fn diffs(
+    c: &mut Criterion,
+    bench: &Bench,
+    main: &str,
+    entries: &[reef_api::v1::FileEntry],
+    python: &str,
+    lookup: &str,
+) {
+    let name = preset_name(preset());
+    let pythons: Vec<String> = entries
+        .iter()
+        .filter(|e| e.path.rsplit_once('.').is_some_and(|(_, ext)| ext == "py"))
+        .map(|e| e.path.clone())
+        .take(100)
+        .collect();
+    let source = |salt: &str| -> Vec<u8> {
+        let mut text = String::new();
+        for i in 0..20 {
+            let _ = write!(
+                text,
+                "def bench_{i}():\n    return {lookup}({salt:?})\n\n\n"
+            );
+        }
+        text.into_bytes()
+    };
+    let python = python.to_owned();
+    let one_before = bench.write(main, &[(python.clone(), source("a"))]);
+    let one_after = bench.write(&one_before, &[(python.clone(), source("b"))]);
+    let rewrite = |salt: &str| -> Vec<(String, Vec<u8>)> {
+        pythons.iter().map(|p| (p.clone(), source(salt))).collect()
+    };
+    let many_before = bench.write(main, &rewrite("c"));
+    let many_after = bench.write(&many_before, &rewrite("d"));
+    let cold_after = bench.write(&many_before, &rewrite("e"));
+    let common_before = bench.write(
+        main,
+        &[(
+            python.clone(),
+            format!("def {lookup}():\n    return 1\n").into_bytes(),
+        )],
+    );
+    let common_after = bench.write(
+        &common_before,
+        &[(
+            python.clone(),
+            format!("def {lookup}():\n    return 2\n").into_bytes(),
+        )],
+    );
+    for commit in [&one_after, &many_after, &common_after] {
+        bench.index(commit);
+    }
+    // Cold: neither side's new contents have entries yet, though the rest
+    // of the tree is indexed.
+    let started = Instant::now();
+    bench.diff(&many_after, &cold_after, true, 1000);
+    println!(
+        "symbols/{name}/diff_100_files_cold: {} files in {:.0} ms",
+        pythons.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+
+    let mut group = c.benchmark_group(format!("symbols/{name}"));
+    group.sample_size(20);
+    group.bench_function("diff_one_file_plain", |b| {
+        b.iter(|| bench.diff(&one_before, &one_after, false, 100));
+    });
+    group.bench_function("diff_one_file", |b| {
+        b.iter(|| bench.diff(&one_before, &one_after, true, 100));
+    });
+    group.bench_function("diff_100_files", |b| {
+        b.iter(|| bench.diff(&many_before, &many_after, true, 1000));
+    });
+    group.bench_function("diff_paged", |b| {
+        b.iter(|| bench.diff(&many_before, &many_after, true, 20));
+    });
+    group.bench_function("call_sites_common", |b| {
+        b.iter(|| bench.diff(&common_before, &common_after, true, 100));
     });
     group.finish();
 }

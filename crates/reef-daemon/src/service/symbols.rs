@@ -98,7 +98,7 @@ pub(crate) fn status_message(status: &IndexStatus) -> SymbolIndexStatus {
     }
 }
 
-fn range(r: reef_symbols::Range) -> v1::SourceRange {
+pub(super) fn range(r: reef_symbols::Range) -> v1::SourceRange {
     v1::SourceRange {
         start_line: r.start_line,
         start_column: r.start_col,
@@ -107,7 +107,7 @@ fn range(r: reef_symbols::Range) -> v1::SourceRange {
     }
 }
 
-fn occurrence(listed: &Listed) -> v1::SymbolOccurrence {
+pub(super) fn occurrence(listed: &Listed) -> v1::SymbolOccurrence {
     let o = &listed.occurrence;
     let flag = |bit| o.flags & bit != 0;
     v1::SymbolOccurrence {
@@ -136,7 +136,7 @@ fn occurrence(listed: &Listed) -> v1::SymbolOccurrence {
     }
 }
 
-fn invalid_query(field: &'static str, message: impl Into<String>) -> Status {
+pub(super) fn invalid_query(field: &'static str, message: impl Into<String>) -> Status {
     status(SymbolError::InvalidQuery {
         field,
         message: message.into(),

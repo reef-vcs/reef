@@ -1,0 +1,44 @@
+[
+  {
+    "kind": "Changed",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `lib.rs`/Point#norm()."
+  },
+  {
+    "kind": "Added",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `lib.rs`/Point#twice()."
+  },
+  {
+    "kind": "Changed",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `parser.py`/Parser#"
+  },
+  {
+    "kind": "Changed",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `parser.py`/Parser#parse()."
+  },
+  {
+    "kind": "Added",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `parser.py`/helper()."
+  },
+  {
+    "kind": "Removed",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `lib.rs`/origin()."
+  },
+  {
+    "kind": "Removed",
+    "old_path": null,
+    "old_symbol": null,
+    "symbol": "reef-tags . . . `parser.py`/Parser#legacy()."
+  }
+]

@@ -268,7 +268,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "get_diff",
         title: "Get diff",
         rpc: "/reef.api.v1.DiffService/GetDiff",
-        description: "Show what a change changes against its parents, or the difference between two revisions, a page of files at a time. Returns {from_commit_ids, to_commit_id, files, next_page_token}.",
+        description: "A change's diff against its parents, or two revisions' diff, a page of files at a time. Returns {from_commit_ids, to_commit_id, files, symbol_summary, next_page_token}.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetDiff>,
@@ -649,12 +649,15 @@ tool!(get_diff, args::GetDiff, |call, args| {
             to_revision: args.to_revision.unwrap_or_default(),
             paths,
             format: v1::DiffFormat::from(format).into(),
+            symbols: matches!(format, args::Format::Symbols),
+            expand_symbols: args.expand.unwrap_or_default(),
             context_lines: args.context_lines,
             max_lines_per_file: args.max_lines_per_file.unwrap_or(0),
             at_operation: args.at_operation.unwrap_or_default(),
             skip_snapshot: args.skip_snapshot.unwrap_or(false),
             page_size: page(args.page_size, 20),
             page_token: args.page_token.unwrap_or_default(),
+            ..GetDiffRequest::default()
         }))
         .await?;
     to_value(&DiffPage {
@@ -1222,7 +1225,7 @@ mod tests {
         let diff = schema::<args::GetDiff>();
         assert_eq!(
             diff["properties"]["format"]["enum"],
-            serde_json::json!(["summary", "stat", "hunks"]),
+            serde_json::json!(["summary", "stat", "hunks", "symbols"]),
             "{diff:?}"
         );
         assert!(diff["properties"]["page_size"].get("format").is_none());

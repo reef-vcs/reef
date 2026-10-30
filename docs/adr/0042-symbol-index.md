@@ -20,7 +20,7 @@ The [design](../design.md) gives Reef symbol-level diffs and history queries (Qu
 6. **A per-repository cache file, outside backup and migrations.** `repos/<id>/symbols.sqlite3` has its own writer and readers in WAL mode. Unlike the rest of the metadata, it is not in `reef.sqlite3`, which amends 0003 for the symbol index. The index can reach gigabytes, it is rebuilt rather than restored, and it must not share the metadata connection's mutex with lease heartbeats. It has no migrations: a file of another format, or one that is not a database, is recreated with a warning. Backup does not copy it, and forgetting the repository deletes it.
 7. **`UploadScipDocuments` is a write that records no operation.** It is `ACCESS_WRITE`, because a read-only token (R2.08) must not plant data other agents read. What it stores is derived and outside jj, so it joins decision 12's exceptions, which this ADR amends. `IndexSymbols` is a read: what it writes is derived and rebuilt on demand.
 8. **GC's fifth step.** Mark every entry the working-copy trees in the view use. Then sweep tree rows and entries not used since `keep_newer`, and tags entries of outdated extractors. Last, while the file passes `[symbols] max_size` (2 GiB by default), evict unmarked entries, least recently used first. Use times are milliseconds: GC marks unconditionally, and reads refresh them at most once a day. A failure is logged, and GC goes on.
-9. **No MCP tool yet.** `tools/list` is at its 20,000-byte budget. R2.15 decides whether the diff tool gains a symbols flag.
+9. **No MCP tool yet.** `tools/list` is at its 20,000-byte budget. R2.15 decides whether the diff tool gains a symbols flag. (It did: see [0043](0043-symbol-level-diff.md).)
 
 ## Consequences
 

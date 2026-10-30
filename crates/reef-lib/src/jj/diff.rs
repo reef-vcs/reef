@@ -12,18 +12,20 @@ use jj_lib::conflicts::{
     ConflictMarkerStyle, ConflictMaterializeOptions, MaterializedTreeValue,
     materialize_merge_result_to_bytes, materialize_tree_value,
 };
-use jj_lib::copies::{CopyOperation, CopyRecords};
+use jj_lib::copies::{CopiesTreeDiffEntry, CopiesTreeDiffEntryPath, CopyOperation, CopyRecords};
 use jj_lib::diff::DiffHunkKind;
 use jj_lib::diff_presentation::unified::{DiffLineType, unified_diff_hunks};
 use jj_lib::diff_presentation::{LineCompareMode, diff_by_line};
 use jj_lib::matchers::{EverythingMatcher, Matcher, PrefixMatcher};
 use jj_lib::merge::Diff;
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf};
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::tree_merge::MergeOptions;
 
+use super::files::TreeFile;
 use super::repo::CommitIdHex;
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
@@ -159,6 +161,22 @@ pub struct DiffOptions {
     pub after: Option<RepoPathBuf>,
     /// Files per page at most.
     pub limit: usize,
+    /// List every differing file's [`DiffPair`] in [`DiffPage::pairs`],
+    /// when at most [`RENAME_LIMIT`] differ (R2.15's symbol diff).
+    pub pairs: bool,
+}
+
+/// One differing file's two sides, without their content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffPair {
+    /// The path after (the new path of a rename or copy).
+    pub path: String,
+    /// How it differs.
+    pub kind: ChangeKind,
+    /// The old side, at its own path; `None` when absent.
+    pub old: Option<TreeFile>,
+    /// The new side; `None` when absent.
+    pub new: Option<TreeFile>,
 }
 
 /// A page of a diff.
@@ -174,6 +192,9 @@ pub struct DiffPage {
     pub from: Vec<CommitIdHex>,
     /// The new side's commit.
     pub to: CommitIdHex,
+    /// Every differing file over every page, in path order, with
+    /// [`DiffOptions::pairs`] and at most [`RENAME_LIMIT`] differing files.
+    pub pairs: Option<Vec<DiffPair>>,
 }
 
 /// A request path that is not a repository-relative `/`-separated path.
@@ -438,6 +459,95 @@ fn compare(diff: &mut FileDiffInfo, old: &[u8], new: &[u8], options: &DiffOption
     }
 }
 
+/// One definition's lines against another's (R2.15's symbol diff).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RangeDiff {
+    /// The hunks, numbered in file lines, context clipped to the ranges.
+    pub hunks: Vec<HunkInfo>,
+    /// Lines added.
+    pub added: u32,
+    /// Lines removed.
+    pub removed: u32,
+    /// `hunks` was cut, as a file's hunks are.
+    pub truncated: bool,
+    /// The old side's changed lines, 0-based file lines.
+    pub changed_old: Vec<u32>,
+    /// The new side's changed lines, 0-based file lines.
+    pub changed_new: Vec<u32>,
+    /// The old range's last line, in a hunk, is the file's and has no
+    /// newline.
+    pub old_no_final_newline: bool,
+    /// The new range's last line, in a hunk, is the file's and has no
+    /// newline.
+    pub new_no_final_newline: bool,
+}
+
+/// The bytes of lines `lines` (0-based, end exclusive) of `bytes`, with
+/// their newlines.
+fn line_slice<'a>(bytes: &'a [u8], lines: &std::ops::Range<u32>) -> &'a [u8] {
+    let start_of = |line: u32| -> usize {
+        if line == 0 {
+            return 0;
+        }
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'\n')
+            .nth(line as usize - 1)
+            .map_or(bytes.len(), |(i, _)| i + 1)
+    };
+    let start = start_of(lines.start);
+    let end = start_of(lines.end.max(lines.start)).max(start);
+    &bytes[start..end]
+}
+
+/// Lines `old_lines` of `old` against lines `new_lines` of `new` (0-based,
+/// end exclusive; an empty range is an absent side), with `options`'
+/// context and per-file cuts. The hunks number file lines, so they agree
+/// with the file's own diff over the same lines.
+pub fn range_diff(
+    old: &[u8],
+    old_lines: std::ops::Range<u32>,
+    new: &[u8],
+    new_lines: std::ops::Range<u32>,
+    options: &DiffOptions,
+) -> RangeDiff {
+    let (old_slice, new_slice) = (line_slice(old, &old_lines), line_slice(new, &new_lines));
+    let mut out = RangeDiff::default();
+    let (mut old_at, mut new_at) = (old_lines.start, new_lines.start);
+    for hunk in diff_by_line([old_slice, new_slice], &LineCompareMode::Exact).hunks() {
+        let (o, n) = (lines_of(hunk.contents[0]), lines_of(hunk.contents[1]));
+        if hunk.kind == DiffHunkKind::Different {
+            out.removed += o;
+            out.added += n;
+            out.changed_old.extend(old_at..old_at + o);
+            out.changed_new.extend(new_at..new_at + n);
+        }
+        old_at += o;
+        new_at += n;
+    }
+    let mut file = FileDiffInfo::default();
+    let options = DiffOptions {
+        format: DiffFormat::Hunks,
+        ..options.clone()
+    };
+    compare(&mut file, old_slice, new_slice, &options);
+    out.truncated = file.truncated;
+    // A slice ends without a newline only at the file's end.
+    out.old_no_final_newline = file.old_no_final_newline;
+    out.new_no_final_newline = file.new_no_final_newline;
+    out.hunks = file
+        .hunks
+        .into_iter()
+        .map(|hunk| HunkInfo {
+            old_start: hunk.old_start + old_lines.start,
+            new_start: hunk.new_start + new_lines.start,
+            ..hunk
+        })
+        .collect();
+    out
+}
+
 /// What [`file_diff`] reads each side with.
 struct Sides<'a> {
     from: &'a MergedTree,
@@ -446,35 +556,76 @@ struct Sides<'a> {
     materialize: &'a ConflictMaterializeOptions,
 }
 
+/// How the entry at `path` differs, given what each side holds.
+fn change_kind(
+    path: &CopiesTreeDiffEntryPath,
+    old: Option<EntryKind>,
+    new: Option<EntryKind>,
+) -> ChangeKind {
+    match path.copy_operation() {
+        Some(CopyOperation::Rename) => ChangeKind::Renamed,
+        Some(CopyOperation::Copy) => ChangeKind::Copied,
+        None if old.is_none() => ChangeKind::Added,
+        None if new.is_none() => ChangeKind::Deleted,
+        None => ChangeKind::Modified,
+    }
+}
+
+/// One side of a pair: its path, what it holds, and a file's content id.
+fn pair_side(path: &RepoPath, value: &MergedTreeValue) -> Option<TreeFile> {
+    let kind = entry_kind(value)?;
+    let file_id = match value.as_resolved() {
+        Some(Some(TreeValue::File { id, .. })) => id.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    Some(TreeFile {
+        path: path.as_internal_file_string().to_owned(),
+        kind,
+        file_id,
+    })
+}
+
+/// One entry of the diff stream as a [`DiffPair`].
+fn pair(path: &CopiesTreeDiffEntryPath, values: &Diff<MergedTreeValue>) -> DiffPair {
+    let (old, new) = (
+        pair_side(path.source(), &values.before),
+        pair_side(path.target(), &values.after),
+    );
+    DiffPair {
+        path: path.target().as_internal_file_string().to_owned(),
+        kind: change_kind(
+            path,
+            old.as_ref().map(|f| f.kind),
+            new.as_ref().map(|f| f.kind),
+        ),
+        old,
+        new,
+    }
+}
+
 /// One entry of the diff stream as a [`FileDiffInfo`].
 async fn file_diff(
-    entry: jj_lib::copies::CopiesTreeDiffEntry,
+    entry: &CopiesTreeDiffEntryPath,
+    values: Diff<MergedTreeValue>,
     path: String,
     sides: &Sides<'_>,
     options: &DiffOptions,
 ) -> Result<FileDiffInfo, DiffError> {
-    let values = entry.values?;
     let mut diff = FileDiffInfo {
         path,
         old_type: entry_kind(&values.before),
         new_type: entry_kind(&values.after),
         ..FileDiffInfo::default()
     };
-    diff.kind = Some(match entry.path.copy_operation() {
-        Some(CopyOperation::Rename) => ChangeKind::Renamed,
-        Some(CopyOperation::Copy) => ChangeKind::Copied,
-        None if diff.old_type.is_none() => ChangeKind::Added,
-        None if diff.new_type.is_none() => ChangeKind::Deleted,
-        None => ChangeKind::Modified,
-    });
-    if entry.path.copy_operation().is_some() {
-        diff.old_path = Some(entry.path.source().as_internal_file_string().to_owned());
+    diff.kind = Some(change_kind(entry, diff.old_type, diff.new_type));
+    if entry.copy_operation().is_some() {
+        diff.old_path = Some(entry.source().as_internal_file_string().to_owned());
     }
     diff.conflict =
         diff.old_type == Some(EntryKind::Conflict) || diff.new_type == Some(EntryKind::Conflict);
     let old = read_side(
         sides.from,
-        entry.path.source(),
+        entry.source(),
         values.before,
         sides.read,
         sides.materialize,
@@ -482,7 +633,7 @@ async fn file_diff(
     .await?;
     let new = read_side(
         sides.to,
-        entry.path.target(),
+        entry.target(),
         values.after,
         sides.read,
         sides.materialize,
@@ -574,6 +725,7 @@ pub async fn diff_page(
             .map(|c| CommitIdHex::of(c.id()))
             .collect(),
         to: to.clone(),
+        pairs: (options.pairs && differ <= RENAME_LIMIT).then(Vec::new),
     };
     let mut stream = from_tree.diff_stream_with_copies(&to_tree, &*matcher, &copies);
     while let Some(entry) = stream.next().await {
@@ -583,10 +735,22 @@ pub async fn diff_page(
             break;
         }
         page.total += 1;
+        let CopiesTreeDiffEntry {
+            path: entry_path,
+            values,
+        } = entry;
+        let values = match page.pairs.as_mut() {
+            Some(pairs) => {
+                let values = values?;
+                pairs.push(pair(&entry_path, &values));
+                Ok(values)
+            }
+            None => values,
+        };
         if options
             .after
             .as_ref()
-            .is_some_and(|after| entry.path.target() <= after.as_ref())
+            .is_some_and(|after| entry_path.target() <= after.as_ref())
         {
             continue;
         }
@@ -597,7 +761,7 @@ pub async fn diff_page(
             page.more = true;
             continue;
         }
-        let path = entry.path.target().as_internal_file_string().to_owned();
+        let path = entry_path.target().as_internal_file_string().to_owned();
         let sides = Sides {
             from: &from_tree,
             to: &to_tree,
@@ -605,7 +769,7 @@ pub async fn diff_page(
             materialize: &materialize,
         };
         page.files
-            .push(file_diff(entry, path, &sides, options).await?);
+            .push(file_diff(&entry_path, values?, path, &sides, options).await?);
     }
     Ok(page)
 }
@@ -647,4 +811,78 @@ pub fn conflicted_paths(
         total += 1;
     }
     Ok((paths, total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(context: usize) -> DiffOptions {
+        DiffOptions {
+            format: DiffFormat::Hunks,
+            context,
+            max_lines: 1000,
+            max_hunk_bytes: 1 << 20,
+            max_file_bytes: 16 << 20,
+            paths: Vec::new(),
+            after: None,
+            limit: 100,
+            pairs: false,
+        }
+    }
+
+    fn whole(old: &[u8], new: &[u8], context: usize) -> Vec<HunkInfo> {
+        let mut file = FileDiffInfo::default();
+        compare(&mut file, old, new, &options(context));
+        file.hunks
+    }
+
+    /// Test 6 of R2.15: a definition's hunks are the file's own over its
+    /// lines, numbered in file lines, with context clipped to the ranges.
+    #[test]
+    fn range_diff_numbers_file_lines() {
+        let old = b"a\nb\ndef f():\n    x = 1\n    return x\nz\n";
+        let new = b"a\nb\nc\ndef f():\n    x = 2\n    return x\nz\n";
+        // `f` is lines 2..5 before and 3..6 after.
+        let got = range_diff(old, 2..5, new, 3..6, &options(3));
+        assert_eq!(got.removed, 1);
+        assert_eq!(got.added, 1);
+        assert_eq!(got.changed_old, [3]);
+        assert_eq!(got.changed_new, [4]);
+        assert_eq!(got.hunks.len(), 1);
+        let hunk = &got.hunks[0];
+        assert_eq!((hunk.old_start, hunk.old_lines), (3, 3));
+        assert_eq!((hunk.new_start, hunk.new_lines), (4, 3));
+        assert_eq!(
+            hunk.lines,
+            " def f():\n-    x = 1\n+    x = 2\n     return x\n"
+        );
+        // With no context the file's own hunk for that line is the same.
+        let file = whole(old, new, 0);
+        let mine = range_diff(old, 2..5, new, 3..6, &options(0));
+        assert!(file.contains(&mine.hunks[0]), "{file:?} {mine:?}");
+    }
+
+    #[test]
+    fn range_diff_of_an_absent_side_is_all_one_way() {
+        let new = b"x\ndef g():\n    pass\n";
+        let got = range_diff(b"", 0..0, new, 1..3, &options(3));
+        assert_eq!((got.added, got.removed), (2, 0));
+        assert_eq!(got.changed_new, [1, 2]);
+        assert_eq!(got.hunks.len(), 1);
+        assert_eq!(got.hunks[0].new_start, 2);
+        assert_eq!(got.hunks[0].lines, "+def g():\n+    pass\n");
+        let got = range_diff(new, 1..3, b"", 0..0, &options(3));
+        assert_eq!((got.added, got.removed), (0, 2));
+        assert_eq!(got.hunks[0].lines, "-def g():\n-    pass\n");
+    }
+
+    #[test]
+    fn line_slices_keep_their_newlines() {
+        let bytes = b"a\nb\nc";
+        assert_eq!(line_slice(bytes, &(0..1)), b"a\n");
+        assert_eq!(line_slice(bytes, &(1..3)), b"b\nc");
+        assert_eq!(line_slice(bytes, &(3..3)), b"");
+        assert_eq!(line_slice(bytes, &(5..9)), b"");
+    }
 }

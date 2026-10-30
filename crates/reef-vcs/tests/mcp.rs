@@ -174,12 +174,16 @@ async fn handshake_and_tools() {
     let diff = tools.iter().find(|t| t["name"] == "get_diff").unwrap();
     assert_eq!(
         diff["inputSchema"]["properties"]["format"]["enum"],
-        json!(["summary", "stat", "hunks"]),
+        json!(["summary", "stat", "hunks", "symbols"]),
         "{diff}"
     );
     let bytes = serde_json::to_vec(&listed["result"]).unwrap().len();
     eprintln!("tools/list: {bytes} bytes");
-    assert!(bytes <= 20_000, "tools/list is {bytes} bytes");
+    // 20,000 until R2.15, whose symbol view of `get_diff` (the one input
+    // whose purpose is fewer tokens per answer) took it to 20,048 after
+    // tightening `get_diff`'s own texts (ADR 0043). Raising it again needs
+    // the same argument in that ticket's brief.
+    assert!(bytes <= 20_250, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -465,6 +469,36 @@ async fn reads() {
     let paged = mcp.ok("get_diff", json!({"page_size": 1})).await;
     assert_eq!(paged["files"].as_array().unwrap().len(), 1, "{paged}");
     assert!(paged["next_page_token"].is_string(), "{paged}");
+
+    // The symbol view, and one symbol's lines (R2.15).
+    write(
+        &created,
+        "src/p.py",
+        "def parse():\n    return 1\n\n\ndef other():\n    return 2\n",
+    );
+    let symbols = mcp
+        .ok(
+            "get_diff",
+            json!({"format": "symbols", "paths": ["src/p.py"]}),
+        )
+        .await;
+    let symbol_changes = &symbols["files"][0]["symbols"]["changes"];
+    let names: Vec<&str> = symbol_changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["parse", "other"], "{symbols}");
+    assert_eq!(symbol_changes[0]["kind"], "added", "{symbols}");
+    assert_eq!(symbols["symbol_summary"]["added"], 2, "{symbols}");
+    let expanded = mcp.ok("get_diff", json!({"expand": ["parse"]})).await;
+    let files = expanded["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{expanded}");
+    assert_eq!(
+        files[0]["hunks"][0]["lines"], "+def parse():\n+    return 1\n",
+        "{expanded}"
+    );
 
     let snapshots = mcp
         .ok(

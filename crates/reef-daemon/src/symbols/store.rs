@@ -118,6 +118,8 @@ pub(crate) struct EntryRow {
     pub extractor: String,
     pub language: String,
     pub skip: Option<u8>,
+    /// The parse recovered from syntax errors (tags only).
+    pub has_errors: bool,
 }
 
 /// One stored occurrence found by name or symbol, with its entry.
@@ -469,57 +471,54 @@ impl Store {
         })
     }
 
-    /// Every occurrence of `name` (or of `symbol`, when set), with its
-    /// entry, from any source and any file version.
-    pub(crate) fn find(
+    /// The occurrences of each of `keys`, with their entries, from any
+    /// source and any file version, newest entries first (a tree's files are
+    /// usually the newest versions): `role` only when set, and at most
+    /// `limit` per key. Reads only the matching rows and each one's
+    /// enclosing definition's symbol, never a whole file's occurrences
+    /// (R2.15), in one transaction.
+    pub(crate) fn find_rows(
         &self,
-        name: Option<&str>,
-        symbol: Option<&str>,
-    ) -> Result<Vec<Found>, StoreError> {
+        keys: &[RefKey<'_>],
+        role: Option<Role>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Vec<Found>>, StoreError> {
+        // SQLite reads a negative LIMIT as none.
+        let limit = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        let role = role.map(|r| r as i64);
         self.read(|conn| {
-            let (sql, key) = match (symbol, name) {
-                (Some(symbol), _) => (
-                    "SELECT o.file, o.seq FROM occurrences o JOIN symbols s ON o.symbol = s.id
-                     WHERE s.symbol = ?1",
-                    symbol,
-                ),
-                (None, Some(name)) => (
-                    "SELECT o.file, o.seq FROM occurrences o JOIN names n ON o.name = n.id
-                     WHERE n.name = ?1",
-                    name,
-                ),
-                (None, None) => return Ok(Vec::new()),
-            };
-            let hits: Vec<(i64, u32)> = conn
-                .prepare_cached(sql)?
-                .query_map([key], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut by_entry: HashMap<i64, (EntryRow, Vec<u8>, Vec<Occurrence>)> = HashMap::new();
-            let mut found = Vec::with_capacity(hits.len());
-            for (file, seq) in hits {
-                if let std::collections::hash_map::Entry::Vacant(slot) = by_entry.entry(file) {
-                    let Some((row, file_id)) = entry_by_id(conn, file)? else {
+            let tx = conn.unchecked_transaction()?;
+            let mut entries: HashMap<i64, Option<(EntryRow, Vec<u8>)>> = HashMap::new();
+            let mut out = Vec::with_capacity(keys.len());
+            for key in keys {
+                let (sql, text) = match key {
+                    RefKey::Name(name) => (FIND_BY_NAME, *name),
+                    RefKey::Symbol(symbol) => (FIND_BY_SYMBOL, *symbol),
+                };
+                let rows: Vec<(i64, u32, Occurrence, Option<String>)> = tx
+                    .prepare_cached(sql)?
+                    .query_map(params![text, role, limit], found_row)?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut found = Vec::with_capacity(rows.len());
+                for (file, seq, occurrence, enclosing_symbol) in rows {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = entries.entry(file) {
+                        slot.insert(entry_by_id(&tx, file)?);
+                    }
+                    let Some((entry, file_id)) = &entries[&file] else {
                         continue;
                     };
-                    slot.insert((row, file_id, occurrences_of(conn, file)?));
+                    found.push(Found {
+                        entry: entry.clone(),
+                        file_id: file_id.clone(),
+                        seq,
+                        occurrence,
+                        enclosing_symbol,
+                    });
                 }
-                let (row, file_id, occurrences) = &by_entry[&file];
-                let Some(occurrence) = occurrences.get(seq as usize) else {
-                    continue;
-                };
-                let enclosing_symbol = occurrence
-                    .enclosing
-                    .and_then(|e| occurrences.get(e as usize))
-                    .and_then(|e| e.symbol.clone());
-                found.push(Found {
-                    entry: row.clone(),
-                    file_id: file_id.clone(),
-                    seq,
-                    occurrence: occurrence.clone(),
-                    enclosing_symbol,
-                });
+                out.push(found);
             }
-            Ok(found)
+            tx.finish()?;
+            Ok(out)
         })
     }
 
@@ -806,6 +805,47 @@ impl Store {
     }
 }
 
+/// What [`Store::find_rows`] looks up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefKey<'a> {
+    /// A display name.
+    Name(&'a str),
+    /// A symbol string.
+    Symbol(&'a str),
+}
+
+/// The columns [`found_row`] reads are the same in both lookups: each
+/// row's entry, sequence number, symbol and name, its own columns, and its
+/// enclosing definition's symbol by `(file, enclosing)`.
+const FIND_BY_NAME: &str = concat!(
+    "SELECT o.file, o.seq, s.symbol, n.name, o.role, o.kind, o.flags,
+        o.line, o.col, o.end_line, o.end_col, o.def_line, o.def_col, o.def_end_line,
+        o.def_end_col, o.enclosing, o.digest, es.symbol",
+    " FROM names n JOIN occurrences o ON o.name = n.id
+      LEFT JOIN symbols s ON o.symbol = s.id
+      LEFT JOIN occurrences e ON e.file = o.file AND e.seq = o.enclosing
+      LEFT JOIN symbols es ON e.symbol = es.id
+      WHERE n.name = ?1 AND (?2 IS NULL OR o.role = ?2) ORDER BY o.file DESC LIMIT ?3"
+);
+
+const FIND_BY_SYMBOL: &str = concat!(
+    "SELECT o.file, o.seq, s.symbol, n.name, o.role, o.kind, o.flags,
+        o.line, o.col, o.end_line, o.end_col, o.def_line, o.def_col, o.def_end_line,
+        o.def_end_col, o.enclosing, o.digest, es.symbol",
+    " FROM symbols s JOIN occurrences o ON o.symbol = s.id
+      JOIN names n ON o.name = n.id
+      LEFT JOIN occurrences e ON e.file = o.file AND e.seq = o.enclosing
+      LEFT JOIN symbols es ON e.symbol = es.id
+      WHERE s.symbol = ?1 AND (?2 IS NULL OR o.role = ?2) ORDER BY o.file DESC LIMIT ?3"
+);
+
+/// One row of a lookup: its entry's id, its sequence number, the
+/// occurrence, and its enclosing definition's symbol.
+fn found_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, u32, Occurrence, Option<String>)> {
+    let occurrence = occurrence_at(row, 2)?;
+    Ok((row.get(0)?, row.get(1)?, occurrence, row.get(17)?))
+}
+
 fn entry_in(
     conn: &Connection,
     path: &str,
@@ -814,7 +854,7 @@ fn entry_in(
     extractor: Option<&str>,
 ) -> rusqlite::Result<Option<EntryRow>> {
     conn.prepare_cached(
-        "SELECT id, extractor, language, skip FROM files
+        "SELECT id, extractor, language, skip, has_errors FROM files
          WHERE path = ?1 AND file_id = ?2 AND source = ?3",
     )?
     .query_row(params![path, file_id, source as i64], |row| {
@@ -823,26 +863,29 @@ fn entry_in(
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<u8>>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })
     .optional()
     .map(|found| {
         found
             .filter(|(_, stored, ..)| extractor.is_none_or(|want| want == stored))
-            .map(|(id, extractor, language, skip)| EntryRow {
+            .map(|(id, extractor, language, skip, has_errors)| EntryRow {
                 id,
                 path: path.to_owned(),
                 source,
                 extractor,
                 language,
                 skip,
+                has_errors,
             })
     })
 }
 
 fn entry_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<(EntryRow, Vec<u8>)>> {
     conn.prepare_cached(
-        "SELECT path, file_id, source, language, skip, extractor FROM files WHERE id = ?1",
+        "SELECT path, file_id, source, language, skip, extractor, has_errors FROM files
+         WHERE id = ?1",
     )?
     .query_row([id], |row| {
         Ok((
@@ -853,6 +896,7 @@ fn entry_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<(EntryRow,
                 extractor: row.get(5)?,
                 language: row.get(3)?,
                 skip: row.get(4)?,
+                has_errors: row.get(6)?,
             },
             row.get(1)?,
         ))
@@ -1011,46 +1055,76 @@ fn occurrences_of(conn: &Connection, entry: i64) -> rusqlite::Result<Vec<Occurre
          FROM occurrences o JOIN names n ON o.name = n.id LEFT JOIN symbols s ON o.symbol = s.id
          WHERE o.file = ?1 ORDER BY o.seq",
     )?
-    .query_map([entry], |row| {
-        let definition_range = match (
-            row.get::<_, Option<u32>>(9)?,
-            row.get::<_, Option<u32>>(10)?,
-            row.get::<_, Option<u32>>(11)?,
-            row.get::<_, Option<u32>>(12)?,
-        ) {
-            (Some(start_line), Some(start_col), Some(end_line), Some(end_col)) => Some(Range {
-                start_line,
-                start_col,
-                end_line,
-                end_col,
-            }),
-            _ => None,
-        };
-        Ok(Occurrence {
-            symbol: row.get(0)?,
-            name: row.get(1)?,
-            role: Role::from_u8(row.get(2)?).unwrap_or(Role::Reference),
-            kind: Kind::from_u8(row.get(3)?).unwrap_or(Kind::Unspecified),
-            flags: row.get(4)?,
-            range: Range {
-                start_line: row.get(5)?,
-                start_col: row.get(6)?,
-                end_line: row.get(7)?,
-                end_col: row.get(8)?,
-            },
-            definition_range,
-            enclosing: row.get(13)?,
-            digest: row
-                .get::<_, Option<i64>>(14)?
-                .map(|v| u64::from_le_bytes(v.to_le_bytes())),
-        })
-    })?
+    .query_map([entry], |row| occurrence_at(row, 0))?
     .collect()
+}
+
+/// The occurrence in `row`'s columns from `base`: symbol, name, role, kind,
+/// flags, range, definition range, enclosing and digest.
+fn occurrence_at(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Occurrence> {
+    let at = |i: usize| base + i;
+    let definition_range = match (
+        row.get::<_, Option<u32>>(at(9))?,
+        row.get::<_, Option<u32>>(at(10))?,
+        row.get::<_, Option<u32>>(at(11))?,
+        row.get::<_, Option<u32>>(at(12))?,
+    ) {
+        (Some(start_line), Some(start_col), Some(end_line), Some(end_col)) => Some(Range {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+        }),
+        _ => None,
+    };
+    Ok(Occurrence {
+        symbol: row.get(at(0))?,
+        name: row.get(at(1))?,
+        role: Role::from_u8(row.get(at(2))?).unwrap_or(Role::Reference),
+        kind: Kind::from_u8(row.get(at(3))?).unwrap_or(Kind::Unspecified),
+        flags: row.get(at(4))?,
+        range: Range {
+            start_line: row.get(at(5))?,
+            start_col: row.get(at(6))?,
+            end_line: row.get(at(7))?,
+            end_col: row.get(at(8))?,
+        },
+        definition_range,
+        enclosing: row.get(at(13))?,
+        digest: row
+            .get::<_, Option<i64>>(at(14))?
+            .map(|v| u64::from_le_bytes(v.to_le_bytes())),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `find_rows` reads the name and symbol indexes newest first, without
+    /// sorting in a temporary table (R2.15).
+    #[test]
+    fn lookups_use_their_indexes() {
+        let (dir, store) = temp_store("plan", "tags/1/python/0.25.0");
+        for sql in [FIND_BY_NAME, FIND_BY_SYMBOL] {
+            let plan: Vec<String> = store
+                .read(|conn| {
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+                        .query_map(params!["x", Option::<i64>::None, 10], |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect()
+                })
+                .unwrap();
+            let plan = plan.join("\n");
+            assert!(
+                plan.contains("occurrences_by_name") || plan.contains("occurrences_by_symbol"),
+                "{plan}"
+            );
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn temp_store(name: &str, extractors: &str) -> (PathBuf, Store) {
         let dir = std::env::temp_dir().join(format!(
