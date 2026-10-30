@@ -493,7 +493,9 @@ impl History {
             effects: READ_OPERATIONS,
             behind: MAX_BEHIND,
         };
-        let read = feed::read(
+        // Under the read pool's permit, never a subscriber's.
+        let permit = state.reads.permit().await?;
+        let read = feed::read_holding(
             state,
             repo,
             Arc::clone(&tip),
@@ -501,6 +503,7 @@ impl History {
             None,
             &keep_all(),
             budget,
+            permit,
         )
         .await;
         let more;
@@ -509,14 +512,18 @@ impl History {
                 more = batch.more;
                 if !batch.operations.is_empty() || batch.frontier != frontier {
                     let old_trunk = store.read(|conn| store::meta(conn, META_TRUNK))?;
-                    // At head: the tip the log was read through can trail
-                    // the operations read.
-                    let current = state.reads.current(&handle).await?;
+                    // At the batch's last operation, loaded on the read
+                    // pool: the tip the log was read through can trail the
+                    // operations read, and reloading on the repository's
+                    // thread would hold up the writes it serves.
+                    let last = batch.operations.last().map(|op| op.id.clone());
                     let operations = batch.operations;
+                    let tip = Arc::clone(&tip);
                     let (operations, tip_read) = state
                         .reads
                         .run(&handle, move || async move {
-                            read_tip(&current, operations, old_trunk.as_deref(), true).await
+                            let at = at_operation(&tip, last.as_deref()).await?;
+                            read_tip(&at, operations, old_trunk.as_deref(), true).await
                         })
                         .await??;
                     let cutoff = ms(SystemTime::now()) - ms_of(self.config.retention);
@@ -657,7 +664,6 @@ impl History {
                 .await??
         };
         let walked_count = walked.len();
-        let current = state.reads.current(&handle).await?;
         let (operations, tip_read) = {
             let (state2, tip) = (Arc::clone(state), Arc::clone(tip));
             state
@@ -672,7 +678,11 @@ impl History {
                             feed::deliver(&state2, repo, &tip, &records, operation, entry).await;
                         operations.push(delivered.message);
                     }
-                    Ok::<_, HistoryError>(read_tip(&current, operations, None, false).await?)
+                    // Outcomes as of the current head, loaded on this pool.
+                    let heads = oplog::op_heads(&tip).await?;
+                    let head = heads.last().map(ToString::to_string);
+                    let at = at_operation(&tip, head.as_deref()).await?;
+                    Ok::<_, HistoryError>(read_tip(&at, operations, None, false).await?)
                 })
                 .await??
         };
@@ -777,6 +787,21 @@ impl History {
             tx.execute_batch("DROP TABLE temp.op_map;")
         })?;
         Ok(())
+    }
+}
+
+/// `tip`'s repository loaded at operation `id`, or `tip` itself when it
+/// is `None`, is `tip`'s own operation, or cannot be found.
+async fn at_operation(
+    tip: &Arc<ReadonlyRepo>,
+    id: Option<&str>,
+) -> Result<Arc<ReadonlyRepo>, oplog::OpLogError> {
+    let Some(id) = id.filter(|id| *id != oplog::op_id_of(tip).as_str()) else {
+        return Ok(Arc::clone(tip));
+    };
+    match oplog::resolve_operation(tip, id).await {
+        Ok(operation) => oplog::load_at(tip, &operation).await,
+        Err(_) => Ok(Arc::clone(tip)),
     }
 }
 

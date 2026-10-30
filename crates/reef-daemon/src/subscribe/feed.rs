@@ -73,14 +73,30 @@ pub(crate) async fn read(
     matcher: &Arc<OpMatcher>,
     budget: Budget,
 ) -> Result<Batch, ReadFailure> {
-    let handle = state
-        .repos
-        .get(repo)
-        .ok_or_else(|| ReadFailure::Failed(Status::unavailable("repository closed")))?;
     let permit = Arc::clone(&state.subscriptions.permits)
         .acquire_owned()
         .await
         .map_err(|_| ReadFailure::Failed(Status::unavailable("shutting down")))?;
+    read_holding(state, repo, tip, after, upto, matcher, budget, permit).await
+}
+
+/// [`read`] under `permit`, one of another pool's: the history index
+/// (R2.16) reads under the read pool's, so it never takes a subscriber's.
+#[expect(clippy::too_many_arguments, reason = "read's, and the permit")]
+pub(crate) async fn read_holding(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    tip: Arc<ReadonlyRepo>,
+    after: &Frontier,
+    upto: Option<&[OperationIdHex]>,
+    matcher: &Arc<OpMatcher>,
+    budget: Budget,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Batch, ReadFailure> {
+    let handle = state
+        .repos
+        .get(repo)
+        .ok_or_else(|| ReadFailure::Failed(Status::unavailable("repository closed")))?;
     let (state2, after, upto, matcher) = (
         Arc::clone(state),
         after.clone(),

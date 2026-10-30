@@ -43,6 +43,10 @@ pub const HISTORY_FILE: &str = "history.sqlite3";
 /// [`crate::subscribe::OpEvents`]' wake-ups.
 const FOLLOW_EVERY: Duration = Duration::from_secs(5);
 
+/// How long the follower lets operations gather after a wake-up, so a
+/// burst is read in a few batches rather than one per operation.
+const FOLLOW_GATHER: Duration = Duration::from_millis(200);
+
 /// Failure of the history index.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -333,7 +337,15 @@ impl History {
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                woken = changes.changed() => if woken.is_err() { return },
+                woken = changes.changed() => {
+                    if woken.is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        () = tokio::time::sleep(FOLLOW_GATHER) => {}
+                    }
+                }
                 () = tokio::time::sleep(FOLLOW_EVERY) => {}
             }
         }

@@ -411,9 +411,13 @@ async fn symbol_touches() {
     let ws = fx.workspace("bot-1").await;
     fx.write(&ws, "src/parser.py", PARSER).await;
     fx.write(&ws, "README.md", "# changed\n").await;
+    // Both snapshots followed: the first one's touches may be current
+    // before the second is read.
     let row = fx
         .change_when(&ws.change_id, |c| {
-            c.touches_state() == TouchState::Current && c.symbols_changed > 0
+            c.touches_state() == TouchState::Current
+                && c.symbols_changed > 0
+                && c.paths_changed == 2
         })
         .await;
     assert_eq!(row.paths_changed, 2, "{row:#?}");
@@ -733,8 +737,11 @@ async fn symbols_disabled() {
     let fx = start(|config| config.file.symbols.enabled = false).await;
     let ws = fx.workspace("bot-1").await;
     fx.write(&ws, "src/parser.py", PARSER).await;
+    // The snapshot followed: the create's empty change may be current first.
     let row = fx
-        .change_when(&ws.change_id, |c| c.touches_state() == TouchState::Current)
+        .change_when(&ws.change_id, |c| {
+            c.touches_state() == TouchState::Current && c.paths_changed == 1
+        })
         .await;
     assert_eq!(row.symbols_coverage(), v1::HistorySymbolCoverage::Disabled);
     assert_eq!(row.paths_changed, 1);
