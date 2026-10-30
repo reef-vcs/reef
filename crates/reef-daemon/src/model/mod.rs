@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 pub use ids::{LeaseId, ParseIdError, PresenceId, RepoId, WorkspaceId};
 
@@ -379,14 +378,11 @@ impl Timestamp {
         Self::from(SystemTime::now())
     }
 
-    /// The time as RFC 3339 UTC with millisecond precision, such as
-    /// `2026-10-16T18:31:17.042Z`. A value outside the years 1 to 9999
-    /// cannot be written that way and prints as `<millis>ms` instead.
+    /// The time as RFC 3339 UTC with exactly three fraction digits, such as
+    /// `2026-10-16T18:31:17.040Z`, so that timestamps sort as strings. A
+    /// value RFC 3339 cannot write prints as `<millis>ms` instead.
     pub fn to_rfc3339(self) -> String {
-        OffsetDateTime::from_unix_timestamp_nanos(i128::from(self.0) * 1_000_000)
-            .ok()
-            .and_then(|time| time.format(&Rfc3339).ok())
-            .unwrap_or_else(|| format!("{}ms", self.0))
+        reef_client::json::rfc3339_millis(self.0)
     }
 }
 
@@ -538,6 +534,16 @@ mod tests {
         assert_eq!(stamp, Timestamp(1_792_175_477_042));
         assert_eq!(stamp.to_rfc3339(), "2026-10-16T18:31:17.042Z");
         assert_eq!(Timestamp(i64::MAX).to_rfc3339(), format!("{}ms", i64::MAX));
+        // Fixed width, so the strings sort as the times do: a whole second
+        // and a fraction with trailing zeros keep three digits.
+        let whole = Timestamp(1_792_175_477_000);
+        let tenth = Timestamp(1_792_175_477_100);
+        let later = Timestamp(1_792_175_477_120);
+        assert_eq!(whole.to_rfc3339(), "2026-10-16T18:31:17.000Z");
+        assert_eq!(tenth.to_rfc3339(), "2026-10-16T18:31:17.100Z");
+        assert!(whole.to_rfc3339() < Timestamp(1_792_175_477_042).to_rfc3339());
+        assert!(tenth.to_rfc3339() < later.to_rfc3339());
+        assert_eq!(Timestamp(-1).to_rfc3339(), "1969-12-31T23:59:59.999Z");
         assert!(Timestamp::now() > stamp);
     }
 }
