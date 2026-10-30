@@ -19,6 +19,7 @@
 //!   GC removed heals itself.
 //! - **GC** (`gc.rs`): a fifth step per repository.
 
+pub(crate) mod diff;
 pub(crate) mod gc;
 pub(crate) mod index;
 pub(crate) mod query;
@@ -56,6 +57,10 @@ const MAX_PASSES: usize = 2;
 
 /// The longest an `IndexSymbols` call waits.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
+
+/// How long a symbol diff waits for the new tree's pass before its call
+/// sites are `INDEX_INCOMPLETE`.
+pub const CALL_SITE_WAIT: Duration = Duration::from_secs(10);
 
 /// How far a tree's indexing has come. The values are the API's
 /// `SymbolIndexState`.
@@ -232,6 +237,10 @@ pub struct SymbolIndex {
     extracted: AtomicU64,
     /// Passes run since start, for tests.
     passes_run: AtomicU64,
+    /// Call-site lookups since start, for tests.
+    lookups: AtomicU64,
+    /// [`CALL_SITE_WAIT`], or a test's.
+    call_site_wait: Mutex<Duration>,
 }
 
 impl std::fmt::Debug for SymbolIndex {
@@ -302,6 +311,8 @@ impl SymbolIndex {
             stopping: CancellationToken::new(),
             extracted: AtomicU64::new(0),
             passes_run: AtomicU64::new(0),
+            lookups: AtomicU64::new(0),
+            call_site_wait: Mutex::new(CALL_SITE_WAIT),
         })
     }
 
@@ -326,6 +337,34 @@ impl SymbolIndex {
     /// Passes run since the daemon started.
     pub fn passes_run(&self) -> u64 {
         self.passes_run.load(Ordering::Relaxed)
+    }
+
+    /// Call-site lookups (pages of a symbol diff that read references)
+    /// since the daemon started.
+    pub fn lookups(&self) -> u64 {
+        self.lookups.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn count_lookup(&self) {
+        self.lookups.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How long a symbol diff waits for the new tree's pass.
+    pub(crate) fn call_site_wait(&self) -> Duration {
+        *self
+            .call_site_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sets how long a symbol diff waits for the new tree's pass, so a test
+    /// can see `INDEX_INCOMPLETE`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_call_site_wait(&self, wait: Duration) {
+        *self
+            .call_site_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = wait;
     }
 
     /// The bounds of one file's extraction.

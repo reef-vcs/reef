@@ -4,6 +4,20 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Added
+
+- Symbol-level diffs ([ADR 0043](docs/adr/0043-symbol-level-diff.md), API revision 8). `GetDiff` with `symbols` reports each file's added, removed, changed and moved definitions, matched across the whole diff (renamed files and moves included), with each file's coverage, and the call sites in the new tree of the changed, removed and moved ones: exact through uploaded SCIP, by name through tags, with how many definitions share the name. `expand_symbols` returns only the named symbols' lines. `max_call_sites` and `symbol_source` tune it. Symbols are computed when at most 1,000 files differ.
+- `reef diff --symbols` lists each file's symbol changes under it, nested, with up to three call sites each and the totals; `--stat` adds the line counts, `--call-sites N` sets how many are listed, and `--source` picks tags or SCIP. `reef diff --expand SYMBOL` shows only that symbol's lines. JSON gains `symbol_summary` and each file's `symbols` only with these flags.
+- The MCP server's `get_diff` takes `format: "symbols"` and `expand`. `tools/list` is held to 20,250 bytes.
+
+### Changed
+
+- `ListSymbols` by name or symbol reads only the matching rows of the index, not each matching file's whole entry.
+
+### Fixed
+
+- The MCP server's `get_diff` described `max_lines_per_file` as "[default: no cut]"; the default is 1,000.
+
 ## [0.2.0] - 2026-10-28
 
 The first release of Phase 2: a typed API, `reef.api.v1`, with the CLI as a thin client of it, so `reef` now needs `reef-daemon` beside it or on `PATH`; commands that look at and revert what agents did without jj; an MCP server; live operation and presence streams; a symbol index; and garbage collection on a timer. Coming from 0.1, read [Upgrading from 0.1](#upgrading-from-01) first.

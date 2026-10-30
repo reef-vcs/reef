@@ -789,6 +789,7 @@ fn options(format: diff::DiffFormat) -> diff::DiffOptions {
         paths: Vec::new(),
         after: None,
         limit: 1000,
+        pairs: false,
     }
 }
 
@@ -891,6 +892,45 @@ async fn diff_summary_and_copies() {
     );
     assert_eq!(page.files[4].new_type, Some(EntryKind::Symlink));
     assert_eq!(page.files[0].old_type, None);
+
+    // With `pairs`, every differing file's sides, over every page (R2.15).
+    let mut with_pairs = options(DiffFormat::Summary);
+    with_pairs.pairs = true;
+    with_pairs.limit = 2;
+    let page = diff_of(&fx, &DiffBase::Parents, &second, &with_pairs).await;
+    assert_eq!(page.files.len(), 2);
+    let pairs = page.pairs.expect("pairs at or under the rename limit");
+    assert_eq!(pairs.len(), 10);
+    let pair = |path: &str| pairs.iter().find(|p| p.path == path).unwrap();
+    let renamed = pair("new/name");
+    assert_eq!(renamed.kind, ChangeKind::Renamed);
+    let (old, new) = (renamed.old.as_ref().unwrap(), renamed.new.as_ref().unwrap());
+    assert_eq!(
+        (old.path.as_str(), new.path.as_str()),
+        ("old/name", "new/name")
+    );
+    assert_ne!(old.file_id, [] as [u8; 0]);
+    assert_eq!(old.file_id, new.file_id, "the same content");
+    assert_eq!(pair("copy").old.as_ref().unwrap().path, "source");
+    assert!(pair("added").old.is_none());
+    assert!(pair("delete").new.is_none());
+    let link = pair("link").new.as_ref().unwrap();
+    assert_eq!(
+        (link.kind, link.file_id.is_empty()),
+        (EntryKind::Symlink, true)
+    );
+    assert!(
+        diff_of(
+            &fx,
+            &DiffBase::Parents,
+            &second,
+            &options(DiffFormat::Summary)
+        )
+        .await
+        .pairs
+        .is_none(),
+        "only when asked"
+    );
 
     // Path prefixes match whole components.
     let mut only_src = options(DiffFormat::Summary);

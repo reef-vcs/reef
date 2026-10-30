@@ -2054,3 +2054,83 @@ async fn symbols_commands() {
     .await;
     failed(&output, 2, "INVALID_UPLOAD");
 }
+
+// 20 (R2.15)
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_symbols_cli() {
+    let (daemon, repo) = fixture().await;
+    let base = create(&daemon, &repo).await;
+    write(&base, "lib/parse.py", "def parse(x):\n    return 1\n");
+    write(&base, "app/use.py", "def main():\n    return parse(1)\n");
+    ok(&daemon, &path(&base), &["status"]).await;
+    let ws = create_on(&daemon, &repo, &base).await;
+    write(&ws, "lib/parse.py", "def parse(x):\n    return 2\n");
+    let dir = path(&ws);
+    ok(&daemon, &dir, &["symbols", "index", "--wait", "5m"]).await;
+
+    let text = run_in(&daemon, &dir, &["diff", "--symbols", "-o", "text"]).await;
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert_eq!(
+        stdout(&text),
+        "M lib/parse.py\n  ~ function parse()  +1 -1\n      1 call site: app/use.py:2 in main() (by name)\n1 file changed; symbols: 1 changed\n"
+    );
+    let stat = run_in(
+        &daemon,
+        &dir,
+        &["diff", "--symbols", "--stat", "-o", "text"],
+    )
+    .await;
+    assert!(
+        stdout(&stat).starts_with("M lib/parse.py | +1 -1\n"),
+        "{}",
+        stdout(&stat)
+    );
+
+    let diff = ok(&daemon, &dir, &["diff", "--symbols"]).await;
+    assert_eq!(diff["symbol_summary"]["changed"], 1, "{diff}");
+    let file = &diff["files"][0];
+    assert_eq!(file["symbols"]["coverage"], "covered", "{diff}");
+    let change = &file["symbols"]["changes"][0];
+    assert_eq!(change["kind"], "changed");
+    assert_eq!(change["call_site_status"], "found");
+    let site = change["call_sites"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = site.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["caller", "path", "range", "source"], "{diff}");
+
+    // Without the flag, the JSON is R2.27's.
+    let plain = ok(&daemon, &dir, &["diff"]).await;
+    assert!(plain.get("symbol_summary").is_none(), "{plain}");
+    assert!(plain["files"][0].get("symbols").is_none(), "{plain}");
+
+    let none = ok(&daemon, &dir, &["diff", "--symbols", "--call-sites", "0"]).await;
+    let change = &none["files"][0]["symbols"]["changes"][0];
+    assert_eq!(change["call_sites"], serde_json::json!([]));
+    assert!(change["call_site_status"].is_null(), "{none}");
+    let scip = ok(&daemon, &dir, &["diff", "--symbols", "--source", "scip"]).await;
+    assert_eq!(scip["files"][0]["symbols"]["coverage"], "no_scip");
+
+    let expanded = run_in(&daemon, &dir, &["diff", "--expand", "parse", "-o", "text"]).await;
+    assert_eq!(
+        stdout(&expanded),
+        "diff --git a/lib/parse.py b/lib/parse.py\n--- a/lib/parse.py\n+++ b/lib/parse.py\n@@ -1,2 +1,2 @@\n def parse(x):\n-    return 1\n+    return 2\n"
+    );
+    let missing = run_in(&daemon, &dir, &["diff", "--expand", "nothing"]).await;
+    assert!(missing.status.success());
+    assert!(
+        stderr(&missing).contains("reef: no changed symbol matches nothing"),
+        "{}",
+        stderr(&missing)
+    );
+    let quiet = run_in(&daemon, &dir, &["-q", "diff", "--expand", "nothing"]).await;
+    assert!(!stderr(&quiet).contains("no changed symbol"));
+
+    for args in [
+        &["diff", "--expand", "x", "--stat"][..],
+        &["diff", "--call-sites", "3"][..],
+        &["diff", "--source", "tags"][..],
+    ] {
+        let usage = run_in(&daemon, &dir, args).await;
+        assert_eq!(usage.status.code(), Some(2), "{args:?}: {}", stderr(&usage));
+    }
+}

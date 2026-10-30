@@ -1,12 +1,14 @@
 // Diffs between revisions. `revision`, `at_operation` and `skip_snapshot`
-// are as in changes.proto. R2.15 adds symbol-level fields at the next free
-// numbers.
+// are as in changes.proto. With `symbols`, a diff also reports each file's
+// added, removed, changed and moved definitions and their call sites, from
+// the symbol index (symbols.proto; R2.15, ADR 0043).
 syntax = "proto3";
 
 package reef.api.v1;
 
 import "reef/api/v1/files.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/symbols.proto";
 
 // Diffs.
 service DiffService {
@@ -16,9 +18,21 @@ service DiffService {
   // that, files are added and deleted. A page stops before its response
   // passes 3 MiB, so it may hold fewer than `page_size` files.
   //
-  // Errors: as in changes.proto, and INVALID_ARGUMENT with reason
-  // INVALID_PATH (metadata `path`) for a `paths` value that is not a
-  // repository-relative `/`-separated path.
+  // With `symbols`, each file also carries its symbol changes, matched
+  // across the whole diff by symbol string, when at most 1,000 files
+  // differ: every file says whether the index could answer for it
+  // (`FileSymbolDiff.coverage`), and the diff never fails for a missing
+  // index. Call sites are references in the new tree. With
+  // `expand_symbols`, only the named symbols' lines are returned.
+  //
+  // Errors: as in changes.proto; INVALID_ARGUMENT with reason INVALID_PATH
+  // (metadata `path`) for a `paths` value that is not a
+  // repository-relative `/`-separated path, or INVALID_SYMBOL_QUERY
+  // (metadata `field`) for `expand_symbols` without DIFF_FORMAT_HUNKS, with
+  // an empty entry or with more than 100, or for `max_call_sites` or
+  // `symbol_source` without `symbols` or `expand_symbols`; and
+  // FAILED_PRECONDITION with reason SYMBOLS_DISABLED for `symbols` or
+  // `expand_symbols` when the symbol index is disabled.
   rpc GetDiff(GetDiffRequest) returns (GetDiffResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -69,6 +83,23 @@ message GetDiffRequest {
   // token sent with different fields is INVALID_ARGUMENT, reason
   // INVALID_PAGE_TOKEN.
   string page_token = 12;
+  // Report each file's symbol changes in `FileDiff.symbols`, and the totals
+  // in `GetDiffResponse.symbol_summary`.
+  bool symbols = 13;
+  // Call sites listed per changed, removed or moved symbol: unset means 10,
+  // 0 looks none up, and more than 100 is 100. Needs `symbols` or
+  // `expand_symbols`.
+  optional uint32 max_call_sites = 14;
+  // With DIFF_FORMAT_HUNKS: return only the files with a change to one of
+  // these symbols, and as their hunks only those symbols' lines. Each entry
+  // is a symbol string, a suffix of one beginning after a descriptor
+  // boundary (the final `.` may be left off), or a display name; at most
+  // 100. Implies `symbols`.
+  repeated string expand_symbols = 15;
+  // The source every file pair answers from; unspecified: SCIP when both
+  // sides have an uploaded document, else tags. Needs `symbols` or
+  // `expand_symbols`.
+  SymbolSource symbol_source = 16;
 }
 
 // A page of a diff.
@@ -85,6 +116,9 @@ message GetDiffResponse {
   string at_operation = 5;
   // Files that differ, over every page.
   uint32 total_files = 6;
+  // The symbol changes over every page (`to_index` is this page's); unset
+  // without `symbols`.
+  SymbolDiffSummary symbol_summary = 7;
 }
 
 // One file's diff.
@@ -114,6 +148,8 @@ message FileDiff {
   // A side is not valid UTF-8: `hunks` show U+FFFD for the bytes that are
   // not; the line counts are exact.
   bool invalid_utf8 = 11;
+  // The file's symbol changes; unset without `symbols`.
+  FileSymbolDiff symbols = 12;
 }
 
 // One hunk of a unified diff.
@@ -129,4 +165,153 @@ message Hunk {
   // The unified-diff body: each line prefixed with ' ', '-' or '+', and
   // newline-terminated.
   string lines = 5;
+}
+
+// How a definition differs.
+enum SymbolChangeKind {
+  // Not set.
+  SYMBOL_CHANGE_KIND_UNSPECIFIED = 0;
+  // Only in the new tree.
+  SYMBOL_CHANGE_KIND_ADDED = 1;
+  // Only in the old tree.
+  SYMBOL_CHANGE_KIND_REMOVED = 2;
+  // In both, with other bytes.
+  SYMBOL_CHANGE_KIND_CHANGED = 3;
+  // In both with the same bytes, in another file than its own (a renamed
+  // file's definitions are not moved), or under another symbol with the
+  // same name, kind and bytes. A definition the index has no range for is
+  // moved when its file differs, whatever its bytes.
+  SYMBOL_CHANGE_KIND_MOVED = 4;
+}
+
+// Whether the symbol index could answer for a file.
+enum SymbolCoverage {
+  // Symbols were not asked for.
+  SYMBOL_COVERAGE_UNSPECIFIED = 0;
+  // Each side that exists has an entry from the pair's source; a side in
+  // an unsupported language without SCIP has no definitions. `changes` is
+  // complete.
+  SYMBOL_COVERAGE_COVERED = 1;
+  // No source reads the file: neither side is a supported file type and
+  // neither has SCIP, `symbol_source` is TAGS for a file only SCIP reads,
+  // or a conflicted side is not a supported file type. No changes.
+  SYMBOL_COVERAGE_UNSUPPORTED = 2;
+  // A side was skipped, for `skip_reason`: no changes.
+  SYMBOL_COVERAGE_SKIPPED = 3;
+  // `symbol_source` is SCIP and a side has no uploaded document: no
+  // changes.
+  SYMBOL_COVERAGE_NO_SCIP = 4;
+  // More than 1,000 files differ, so no file's symbols were computed;
+  // naming `paths` narrows the diff.
+  SYMBOL_COVERAGE_DIFF_TOO_LARGE = 5;
+}
+
+// Whether a change's call sites were looked up.
+enum CallSiteStatus {
+  // Not looked up: not asked for, an added symbol, or one changed only
+  // inside its nested definitions.
+  CALL_SITE_STATUS_UNSPECIFIED = 0;
+  // Every call site was counted; up to `max_call_sites` are listed.
+  CALL_SITE_STATUS_FOUND = 1;
+  // More than 10,000 candidates: `call_site_count` is a lower bound.
+  CALL_SITE_STATUS_CAPPED = 2;
+  // Tags record no references to this kind of symbol (fields, variables,
+  // constants, modules).
+  CALL_SITE_STATUS_NOT_TRACKED = 3;
+  // The new tree was still being indexed after the request's wait, or the
+  // lookup failed; index it with IndexSymbols and ask again.
+  CALL_SITE_STATUS_INDEX_INCOMPLETE = 4;
+  // Not looked up to keep the page within its bounds; ListSymbols lists
+  // them.
+  CALL_SITE_STATUS_PAGE_LIMIT = 5;
+}
+
+// One definition that differs.
+message SymbolChange {
+  // How.
+  SymbolChangeKind kind = 1;
+  // Its symbol string: the new side's, or the old side's when removed.
+  string symbol = 2;
+  // The old side's symbol when it differs from `symbol`: in a renamed
+  // file, or for a move found by name, kind and bytes.
+  string old_symbol = 3;
+  // Its display name.
+  string name = 4;
+  // What it is.
+  SymbolKind symbol_kind = 5;
+  // The innermost definition containing it, on the side `symbol` is from;
+  // empty at the top level.
+  string enclosing_symbol = 6;
+  // The old definition's file, when it is neither this file nor this
+  // file's own old path.
+  string old_path = 7;
+  // The old definition's range, from any decorator to its end; unset when
+  // added or when the index has none.
+  SourceRange old_range = 8;
+  // The new definition's range; unset when removed or when the index has
+  // none.
+  SourceRange new_range = 9;
+  // Lines added within the definition, nested ones included.
+  uint32 lines_added = 10;
+  // Lines removed within the definition, nested ones included.
+  uint32 lines_removed = 11;
+  // Changed only inside definitions nested in it, on both sides: a class
+  // whose methods changed. Its own call sites are not looked up.
+  bool nested_only = 12;
+  // Whether its call sites were looked up.
+  CallSiteStatus call_site_status = 13;
+  // Call sites found, counted up to 10,000 candidates.
+  uint32 call_site_count = 14;
+  // Up to `max_call_sites` of them, in path order and then by position:
+  // references in the new tree, other than inside the definition itself.
+  // `enclosing_symbol` is the caller; `source` says whether it was found by
+  // exact symbol (SCIP) or by name (tags).
+  repeated SymbolOccurrence call_sites = 15;
+  // With call sites found by name: the definitions in the new tree with
+  // that name and a compatible kind, in the same language family. More
+  // than one means some call sites may be another definition's; zero, for
+  // a removed symbol, means none remains.
+  uint32 name_definitions = 16;
+}
+
+// One file's symbol changes.
+message FileSymbolDiff {
+  // Whether the index could answer for the file.
+  SymbolCoverage coverage = 1;
+  // Why a side was skipped, with SYMBOL_COVERAGE_SKIPPED.
+  SymbolSkipReason skip_reason = 2;
+  // The source the pair answered from, with SYMBOL_COVERAGE_COVERED.
+  SymbolSource source = 3;
+  // A side parsed with syntax errors: definitions in the damaged part may
+  // be missing.
+  bool parse_errors = 4;
+  // The changes: those with a new side in new-file order, then removed
+  // ones in old-file order.
+  repeated SymbolChange changes = 5;
+  // More than 1,000 changes: the rest are counted in the summary only.
+  bool truncated = 6;
+}
+
+// The symbol changes of a whole diff: the counts are over every page and
+// the same on each; `to_index` is the page's own.
+message SymbolDiffSummary {
+  // Definitions added.
+  uint32 added = 1;
+  // Definitions removed.
+  uint32 removed = 2;
+  // Definitions changed.
+  uint32 changed = 3;
+  // Definitions moved.
+  uint32 moved = 4;
+  // Files with SYMBOL_COVERAGE_COVERED.
+  uint32 files_covered = 5;
+  // Files with SYMBOL_COVERAGE_UNSUPPORTED.
+  uint32 files_unsupported = 6;
+  // Files with SYMBOL_COVERAGE_SKIPPED or SYMBOL_COVERAGE_NO_SCIP.
+  uint32 files_skipped = 7;
+  // More than 1,000 files differ: nothing was computed.
+  bool diff_too_large = 8;
+  // The new tree's indexing as this page's call sites saw it; unset when
+  // the page looked none up, so it can differ between pages.
+  SymbolIndexStatus to_index = 9;
 }

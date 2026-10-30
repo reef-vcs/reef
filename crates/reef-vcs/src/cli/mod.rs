@@ -215,7 +215,9 @@ enum Command {
     /// Show a change and the paths it changes.
     Show(changes::ShowArgs),
     /// Show the lines a change changes, or the difference between two revisions.
-    #[command(after_help = "Example: reef diff --from 'trunk()' --stat")]
+    #[command(
+        after_help = "Example: reef diff --from 'trunk()' --stat   # or --symbols, or --expand Parser#parse"
+    )]
     Diff(diff::Args),
     /// Set a change's description.
     #[command(after_help = "Example: reef describe -m 'fix the parser'")]

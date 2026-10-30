@@ -137,11 +137,13 @@ pub(super) struct GetDiff {
     pub(super) to_revision: Option<String>,
     /// Only these paths, repository-relative or absolute inside the scope.
     pub(super) paths: Option<Vec<String>>,
-    /// `hunks` (the lines), `stat` (counts per file) or `summary` (paths only) [default: hunks].
+    /// `hunks`, `stat` (line counts), `summary` (paths) or `symbols` (changed symbols, call sites) [default: hunks].
     pub(super) format: Option<Format>,
-    /// Lines of context around each change [default: 3].
+    /// Only these symbols' lines.
+    pub(super) expand: Option<Vec<String>>,
+    /// Context lines [default: 3].
     pub(super) context_lines: Option<u32>,
-    /// Cut each file's hunks after this many lines [default: no cut].
+    /// Hunk lines per file [default: 1000].
     pub(super) max_lines_per_file: Option<u32>,
     /// Read as of this operation (id or prefix).
     pub(super) at_operation: Option<String>,
@@ -160,12 +162,13 @@ pub(super) enum Format {
     Summary,
     Stat,
     Hunks,
+    Symbols,
 }
 
 impl From<Format> for v1::DiffFormat {
     fn from(format: Format) -> Self {
         match format {
-            Format::Summary => Self::Summary,
+            Format::Summary | Format::Symbols => Self::Summary,
             Format::Stat => Self::Stat,
             Format::Hunks => Self::Hunks,
         }

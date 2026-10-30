@@ -468,3 +468,21 @@ A name query loads every stored occurrence of the name, from every file version,
 | `reef` | 7.67 MB | 7.90 MB (+0.23 MB) |
 
 `reef`'s growth is the `reef symbols` commands and their JSON. It links neither tree-sitter nor `reef-symbols`, which `crate_graph` checks.
+
+## Symbol-level diff (R2.15)
+
+`crates/reef-daemon/benches/symbols.rs` gained the symbol diffs of `GetDiff` ([ADR 0043](adr/0043-symbol-level-diff.md)). These are release builds on the M2 Max, run on 2026-10-30, on the synthetic repositories above. The diffs rewrite the trees' own Python files with 20 definitions each, and every definition calls the bench's common name. Call sites are listed up to 10 per change.
+
+| Benchmark | `medium` | `large` | Target |
+| --- | ---: | ---: | --- |
+| `diff_one_file_plain`: one rewritten file, no symbols | 0.28 ms | 0.36 ms | — |
+| `diff_one_file`: the same with symbols, warm | 6.7 ms | 7.3 ms | < 15 ms above plain |
+| `diff_100_files`: 100 rewritten files, warm | 72 ms | — | < 250 ms |
+| `diff_100_files_cold`: the same, the new side's 100 files without entries and its tree not indexed (extraction and the wait for its pass included), timed once | 147 ms | 634 ms | < 1.5 s |
+| `diff_paged`: one page of 20 of those 100 | 37 ms | — | < 300 ms |
+| `call_sites_common`: one changed function named as `list_name`'s name | 9.3 ms | 25 ms | < 100 ms on `large` |
+| `list_name` (R2.14's bench, after `find_rows`) | 2.7 ms (was 19 ms) | 402 ms (was 1.29 s) | < 200 ms on `large` |
+
+A page re-matches the whole diff's definitions, and that costs less than the 200 ms over a plain page that would call for a cache between pages (the brief's open question 3), so there is none.
+
+`list_name` on `large` missed its target. Reading only the matching rows took it from 1.29 s to 402 ms. What remains is the tree check: each of the 4,973 hits' paths is looked up in the tree one at a time. Call-site lookups filter by kind and language family before that check, so they make far fewer lookups. Pushing the tree filter into SQL is R2.16's.

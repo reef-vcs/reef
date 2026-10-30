@@ -15,7 +15,7 @@ use reef_lib::jj::files::{self, Tree, TreeFile};
 use reef_symbols::{Kind, Language, Occurrence, Role};
 
 use super::index::extract_missing;
-use super::store::{EntryRow, Source, Store};
+use super::store::{EntryRow, Found, RefKey, Source, Store};
 use super::{IndexStatus, State, SymbolError, SymbolIndex};
 
 /// Files a path query extracts inline at most.
@@ -242,12 +242,15 @@ pub(crate) fn by_lookup(
             missing: missing(store, tree)?,
         });
     }
-    let found = match lookup {
-        Lookup::Name(name) => store.find(Some(name), None)?,
-        Lookup::Symbol(symbol) => store.find(None, Some(symbol))?,
+    let key = match lookup {
+        Lookup::Name(name) => RefKey::Name(name),
+        Lookup::Symbol(symbol) => RefKey::Symbol(symbol),
     };
-    let mut present: HashMap<String, Option<Vec<u8>>> = HashMap::new();
-    let mut covered: HashMap<String, bool> = HashMap::new();
+    let found = store
+        .find_rows(&[key], None, None)?
+        .pop()
+        .unwrap_or_default();
+    let mut current = Current::new(store, tree);
     let mut items = Vec::new();
     for hit in found {
         let path = hit.entry.path.clone();
@@ -261,37 +264,7 @@ pub(crate) fn by_lookup(
         }) {
             continue;
         }
-        if !present.contains_key(&path) {
-            let file = pollster::block_on(files::tree_file(tree, &path))?;
-            present.insert(
-                path.clone(),
-                file.filter(TreeFile::is_file).map(|f| f.file_id),
-            );
-        }
-        if present[&path].as_deref() != Some(hit.file_id.as_slice()) {
-            continue;
-        }
-        match (filters.source, hit.entry.source) {
-            (Some(want), got) if want != got => continue,
-            (None, Source::Tags) => {
-                let scip = if let Some(&scip) = covered.get(&path) {
-                    scip
-                } else {
-                    let scip = store
-                        .entry(&path, &hit.file_id, Source::Scip, None)?
-                        .is_some();
-                    covered.insert(path.clone(), scip);
-                    scip
-                };
-                if scip {
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        if hit.entry.source == Source::Tags
-            && SymbolIndex::extractor_for(&path).as_deref() != Some(hit.entry.extractor.as_str())
-        {
+        if !current.keeps(&hit, filters.source)? {
             continue;
         }
         items.push(Listed {
@@ -307,6 +280,65 @@ pub(crate) fn by_lookup(
     let more = items.len() > limit;
     items.truncate(limit);
     Ok(Page { items, more })
+}
+
+/// Which stored occurrences belong to a tree: the file id at each path,
+/// and whether an upload covers it, read once per path per request.
+pub(crate) struct Current<'a> {
+    store: &'a Store,
+    tree: &'a Tree,
+    present: HashMap<String, Option<Vec<u8>>>,
+    covered: HashMap<String, bool>,
+}
+
+impl<'a> Current<'a> {
+    pub(crate) fn new(store: &'a Store, tree: &'a Tree) -> Self {
+        Current {
+            store,
+            tree,
+            present: HashMap::new(),
+            covered: HashMap::new(),
+        }
+    }
+
+    /// Whether the tree holds `hit`'s file id at its path, and the file
+    /// answers from `hit`'s source: `source` when set, else SCIP when an
+    /// upload covers the file and tags otherwise, by the current extractor.
+    pub(crate) fn keeps(
+        &mut self,
+        hit: &Found,
+        source: Option<Source>,
+    ) -> Result<bool, SymbolError> {
+        let path = &hit.entry.path;
+        if !self.present.contains_key(path) {
+            let file = pollster::block_on(files::tree_file(self.tree, path))?;
+            self.present.insert(
+                path.clone(),
+                file.filter(TreeFile::is_file).map(|f| f.file_id),
+            );
+        }
+        if self.present[path].as_deref() != Some(hit.file_id.as_slice()) {
+            return Ok(false);
+        }
+        match (source, hit.entry.source) {
+            (Some(want), got) if want != got => return Ok(false),
+            (None, Source::Tags) => {
+                if !self.covered.contains_key(path) {
+                    let scip = self
+                        .store
+                        .entry(path, &hit.file_id, Source::Scip, None)?
+                        .is_some();
+                    self.covered.insert(path.clone(), scip);
+                }
+                if self.covered[path] {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+        Ok(hit.entry.source != Source::Tags
+            || SymbolIndex::extractor_for(path).as_deref() == Some(hit.entry.extractor.as_str()))
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@
 
 use std::time::Duration;
 
+pub mod diff;
 pub mod scip;
 pub mod symbol;
 mod tags;

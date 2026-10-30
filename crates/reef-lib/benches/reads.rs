@@ -34,6 +34,7 @@ fn options(format: DiffFormat) -> DiffOptions {
         paths: Vec::new(),
         after: None,
         limit: PAGE,
+        pairs: false,
     }
 }
 

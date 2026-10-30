@@ -1276,6 +1276,9 @@ pub struct FileDiff {
     pub too_large: bool,
     /// A side is not UTF-8; its lines are lossy.
     pub invalid_utf8: bool,
+    /// Its symbol changes, with `--symbols` (R2.15); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<FileSymbolDiff>,
 }
 
 impl From<&v1::FileDiff> for FileDiff {
@@ -1302,6 +1305,210 @@ impl From<&v1::FileDiff> for FileDiff {
             new_no_final_newline: diff.new_no_final_newline,
             too_large: diff.too_large,
             invalid_utf8: diff.invalid_utf8,
+            symbols: diff.symbols.as_ref().map(FileSymbolDiff::from),
+        }
+    }
+}
+
+/// One call site of a changed symbol (R2.15): compact, since the change
+/// names the symbol, its kind and the role.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CallSite {
+    /// The file.
+    pub path: String,
+    /// The reference's range.
+    pub range: Option<SourceRange>,
+    /// The definition containing it: the caller.
+    pub caller: Option<String>,
+    /// `scip` (by exact symbol) or `tags` (by name).
+    pub source: Option<String>,
+    /// SCIP's roles beyond the reference, as in `reef symbols list`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<&'static str>,
+}
+
+impl From<&v1::SymbolOccurrence> for CallSite {
+    fn from(o: &v1::SymbolOccurrence) -> Self {
+        let full = SymbolOccurrence::from(o);
+        Self {
+            path: full.path,
+            range: full.range,
+            caller: full.enclosing_symbol,
+            source: full.source,
+            flags: full.flags,
+        }
+    }
+}
+
+/// One definition that differs (R2.15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolChange {
+    /// `added`, `removed`, `changed` or `moved`.
+    pub kind: Option<String>,
+    /// Its symbol: the new side's, or the old side's when removed.
+    pub symbol: String,
+    /// The old side's symbol, when it differs.
+    pub old_symbol: Option<String>,
+    /// Its display name.
+    pub name: String,
+    /// What it is.
+    pub symbol_kind: Option<String>,
+    /// The definition containing it.
+    pub enclosing_symbol: Option<String>,
+    /// The old definition's file, when another than this file's.
+    pub old_path: Option<String>,
+    /// The old definition's range.
+    pub old_range: Option<SourceRange>,
+    /// The new definition's range.
+    pub new_range: Option<SourceRange>,
+    /// Lines added within it.
+    pub lines_added: u32,
+    /// Lines removed within it.
+    pub lines_removed: u32,
+    /// Changed only inside its nested definitions.
+    pub nested_only: bool,
+    /// `found`, `capped`, `not_tracked`, `index_incomplete` or
+    /// `page_limit`; `null` when not looked up.
+    pub call_site_status: Option<String>,
+    /// Call sites found.
+    pub call_site_count: u32,
+    /// Some of them.
+    pub call_sites: Vec<CallSite>,
+    /// Definitions of its name in the new tree, with call sites by name.
+    pub name_definitions: u32,
+}
+
+fn symbol_change_kind_name(kind: i32) -> Option<&'static str> {
+    use v1::SymbolChangeKind as K;
+    let name = match K::try_from(kind) {
+        Ok(K::Unspecified) => return None,
+        Ok(K::Added) => "added",
+        Ok(K::Removed) => "removed",
+        Ok(K::Changed) => "changed",
+        Ok(K::Moved) => "moved",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+fn call_site_status_name(status: i32) -> Option<&'static str> {
+    use v1::CallSiteStatus as S;
+    let name = match S::try_from(status) {
+        Ok(S::Unspecified) => return None,
+        Ok(S::Found) => "found",
+        Ok(S::Capped) => "capped",
+        Ok(S::NotTracked) => "not_tracked",
+        Ok(S::IndexIncomplete) => "index_incomplete",
+        Ok(S::PageLimit) => "page_limit",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A file's symbol coverage as JSON names it.
+pub fn symbol_coverage_name(coverage: i32) -> Option<&'static str> {
+    use v1::SymbolCoverage as C;
+    let name = match C::try_from(coverage) {
+        Ok(C::Unspecified) => return None,
+        Ok(C::Covered) => "covered",
+        Ok(C::Unsupported) => "unsupported",
+        Ok(C::Skipped) => "skipped",
+        Ok(C::NoScip) => "no_scip",
+        Ok(C::DiffTooLarge) => "diff_too_large",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+impl From<&v1::SymbolChange> for SymbolChange {
+    fn from(c: &v1::SymbolChange) -> Self {
+        Self {
+            kind: name(symbol_change_kind_name(c.kind)),
+            symbol: c.symbol.clone(),
+            old_symbol: text(&c.old_symbol),
+            name: c.name.clone(),
+            symbol_kind: name(symbol_kind_name(c.symbol_kind)),
+            enclosing_symbol: text(&c.enclosing_symbol),
+            old_path: text(&c.old_path),
+            old_range: source_range(c.old_range.as_ref()),
+            new_range: source_range(c.new_range.as_ref()),
+            lines_added: c.lines_added,
+            lines_removed: c.lines_removed,
+            nested_only: c.nested_only,
+            call_site_status: name(call_site_status_name(c.call_site_status)),
+            call_site_count: c.call_site_count,
+            call_sites: c.call_sites.iter().map(CallSite::from).collect(),
+            name_definitions: c.name_definitions,
+        }
+    }
+}
+
+/// One file's symbol changes (R2.15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileSymbolDiff {
+    /// `covered`, `unsupported`, `skipped`, `no_scip` or `diff_too_large`.
+    pub coverage: Option<String>,
+    /// Why a side was skipped.
+    pub skip_reason: Option<String>,
+    /// `tags` or `scip`, when covered.
+    pub source: Option<String>,
+    /// A side parsed with syntax errors.
+    pub parse_errors: bool,
+    /// The changes.
+    pub changes: Vec<SymbolChange>,
+    /// More than 1,000 changes; the summary counts them all.
+    pub truncated: bool,
+}
+
+impl From<&v1::FileSymbolDiff> for FileSymbolDiff {
+    fn from(f: &v1::FileSymbolDiff) -> Self {
+        Self {
+            coverage: name(symbol_coverage_name(f.coverage)),
+            skip_reason: (f.skip_reason != 0)
+                .then(|| symbol_skip_reason_name(f.skip_reason).to_owned()),
+            source: name(symbol_source_name(f.source)),
+            parse_errors: f.parse_errors,
+            changes: f.changes.iter().map(SymbolChange::from).collect(),
+            truncated: f.truncated,
+        }
+    }
+}
+
+/// A diff's symbol changes over every page (R2.15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SymbolDiffSummary {
+    /// Definitions added.
+    pub added: u32,
+    /// Definitions removed.
+    pub removed: u32,
+    /// Definitions changed.
+    pub changed: u32,
+    /// Definitions moved.
+    pub moved: u32,
+    /// Files covered.
+    pub files_covered: u32,
+    /// Files no source reads.
+    pub files_unsupported: u32,
+    /// Files skipped, or without SCIP when it was asked for.
+    pub files_skipped: u32,
+    /// More than 1,000 files differ: nothing was computed.
+    pub diff_too_large: bool,
+    /// The new tree's indexing, when call sites were looked up.
+    pub to_index: Option<SymbolStatus>,
+}
+
+impl From<&v1::SymbolDiffSummary> for SymbolDiffSummary {
+    fn from(s: &v1::SymbolDiffSummary) -> Self {
+        Self {
+            added: s.added,
+            removed: s.removed,
+            changed: s.changed,
+            moved: s.moved,
+            files_covered: s.files_covered,
+            files_unsupported: s.files_unsupported,
+            files_skipped: s.files_skipped,
+            diff_too_large: s.diff_too_large,
+            to_index: s.to_index.as_ref().map(SymbolStatus::from),
         }
     }
 }
@@ -1319,6 +1526,9 @@ pub struct Diff {
     pub total_files: u32,
     /// Each of them.
     pub files: Vec<FileDiff>,
+    /// The symbol changes, with `--symbols` (R2.15); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_summary: Option<SymbolDiffSummary>,
 }
 
 impl From<&v1::GetDiffResponse> for Diff {
@@ -1329,6 +1539,7 @@ impl From<&v1::GetDiffResponse> for Diff {
             at_operation: diff.at_operation.clone(),
             total_files: diff.total_files,
             files: diff.files.iter().map(FileDiff::from).collect(),
+            symbol_summary: diff.symbol_summary.as_ref().map(SymbolDiffSummary::from),
         }
     }
 }

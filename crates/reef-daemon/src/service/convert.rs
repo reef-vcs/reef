@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorKind};
 use reef_lib::jj::CommitIdHex;
-use reef_lib::jj::diff::{ChangeKind, EntryKind, FileDiffInfo};
+use reef_lib::jj::diff::{ChangeKind, EntryKind, FileDiffInfo, HunkInfo};
 use reef_lib::jj::effects::{ChangeEffectKind, OpEffects};
 use reef_lib::jj::log::{ChangeInfo, EdgeKind, LogNode, SignatureInfo};
 use reef_lib::jj::oplog::{ATTR_AGENT, ATTR_SNAPSHOT_KIND, OpClass, OpEntry, OpKind};
@@ -512,22 +512,24 @@ pub(super) fn file_diff(diff: &FileDiffInfo) -> v1::FileDiff {
         conflict: diff.conflict,
         lines_added: diff.lines_added,
         lines_removed: diff.lines_removed,
-        hunks: diff
-            .hunks
-            .iter()
-            .map(|hunk| v1::Hunk {
-                old_start: hunk.old_start,
-                old_lines: hunk.old_lines,
-                new_start: hunk.new_start,
-                new_lines: hunk.new_lines,
-                lines: hunk.lines.clone(),
-            })
-            .collect(),
+        hunks: diff.hunks.iter().map(hunk).collect(),
         truncated: diff.truncated,
         old_no_final_newline: diff.old_no_final_newline,
         new_no_final_newline: diff.new_no_final_newline,
         too_large: diff.too_large,
         invalid_utf8: diff.invalid_utf8,
+        symbols: None,
+    }
+}
+
+/// A hunk as a message.
+pub(super) fn hunk(hunk: &HunkInfo) -> v1::Hunk {
+    v1::Hunk {
+        old_start: hunk.old_start,
+        old_lines: hunk.old_lines,
+        new_start: hunk.new_start,
+        new_lines: hunk.new_lines,
+        lines: hunk.lines.clone(),
     }
 }
 

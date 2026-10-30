@@ -178,6 +178,7 @@ impl StatusService for StatusHandler {
                         paths: Vec::new(),
                         after: None,
                         limit: max_files,
+                        pairs: false,
                     };
                     let changed =
                         diff::diff_page(repo, &DiffBase::Parents, &wc.commit_id, &options, &|| {
