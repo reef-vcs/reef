@@ -191,7 +191,13 @@ async fn write_is_snapshotted_within_debounce() {
 // 2
 #[tokio::test(flavor = "multi_thread")]
 async fn burst_coalesces() {
-    let (daemon, repo) = fixture().await;
+    // At the shipped debounce, not the fixture's 100 ms: a slow runner can
+    // pause writing for more than 100 ms mid-burst, and each pause is
+    // rightly a snapshot (CI saw 4 and 5 for bursts of 0.7 and 1.2 s).
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.watcher.debounce = reef_daemon::config::WatcherSection::default().debounce;
+    })
+    .await;
     let ws = create(&daemon, &repo, None).await;
     let begun = Instant::now();
     for i in 0..1000 {
