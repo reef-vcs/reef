@@ -164,7 +164,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R2.18 | Web UI scaffold | React and TypeScript app, served by the daemon, gRPC-web or WebSocket bridge for streams, state-color system from the design doc. | M | R2.09 |
+| R2.18 | Web UI scaffold | React and TypeScript app in `web/`, built in CI and once per release into assets a `reef-web` crate embeds in every target's daemon; a Node-free `cargo build` embeds a placeholder, which `reef ui` refuses. Served by the daemon on a loopback listener bound by the first `reef ui`, which opens a browser on a per-session token passed through a private launch file: only READ RPCs, over gRPC-web (`tonic-web`, Connect-ES), with Host, Origin and fetch-metadata checks and no CORS; threat model rows for it. A stream layer sharing one operation and one presence stream across a browser's tabs, the state-color system from the design doc as contrast-tested tokens, and one live view: registered repositories with each one's latest operation and active agents. ADR. | L | R2.09, R2.10 |
 | R2.19 | Smartlog view | Stacks and changes as a live graph. | M | R2.18 |
 | R2.20 | Workspaces and fleet panel | Workspaces with owner, lease, disk, and presence. Agents and their current change. | M | R2.18, R2.10 |
 | R2.21 | Activity feed with scrubber | Coalesced operation feed, counts always correct, replay via the scrubber. | M | R2.12, R2.18 |
