@@ -1,0 +1,106 @@
+/*
+ * Theme and state tokens (R2.18, ADR 0047).
+ *
+ * One token per object state, used for every object that has the state, and
+ * for nothing else: connection status, errors and chrome use the neutral
+ * tokens. `--state-<name>` is the foreground (text, icon, border) and
+ * `--state-<name>-tint` a background at 12% of it over `--surface`.
+ * tokens.test.ts holds every foreground to 4.5:1 on `--surface` and on its
+ * tint, in both themes, so these values can be tuned but not broken.
+ *
+ * The dark block appears twice, for `prefers-color-scheme` and for
+ * `data-theme="dark"`; the test checks that the two are the same.
+ */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --surface: #ffffff;
+  --surface-raised: #f5f6f8;
+  --text: #1b1f24;
+  --text-secondary: #5b616b;
+  --border: #d5d9df;
+  --focus: #1f5fbf;
+  --link: #1f5fbf;
+
+  --state-draft: #4b5a6e;
+  --state-draft-tint: #e9ebee;
+  --state-proposed: #1f5fbf;
+  --state-proposed-tint: #e4ecf7;
+  --state-queued: #6a3fb5;
+  --state-queued-tint: #ede8f6;
+  --state-testing: #8a5a00;
+  --state-testing-tint: #f1ebe0;
+  --state-landed: #1e7a3c;
+  --state-landed-tint: #e4efe8;
+  --state-failed: #b42318;
+  --state-failed-tint: #f6e5e3;
+  --state-conflicted: #a3207a;
+  --state-conflicted-tint: #f4e4ef;
+  --state-ended: #676b72;
+  --state-ended-tint: #ededee;
+  --state-none: #5b616b;
+  --state-none-tint: #f5f6f8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface: #14161a;
+    --surface-raised: #1d2025;
+    --text: #e6e8eb;
+    --text-secondary: #a3a9b3;
+    --border: #353a42;
+    --focus: #7fb0ff;
+    --link: #7fb0ff;
+
+    --state-draft: #a9b8cc;
+    --state-draft-tint: #26292f;
+    --state-proposed: #7fb0ff;
+    --state-proposed-tint: #212835;
+    --state-queued: #b79cff;
+    --state-queued-tint: #282635;
+    --state-testing: #f0b84a;
+    --state-testing-tint: #2e2920;
+    --state-landed: #5fd28a;
+    --state-landed-tint: #1d2d27;
+    --state-failed: #ff8a80;
+    --state-failed-tint: #302426;
+    --state-conflicted: #f08ad0;
+    --state-conflicted-tint: #2e2430;
+    --state-ended: #9a9ea6;
+    --state-ended-tint: #24262b;
+    --state-none: #a3a9b3;
+    --state-none-tint: #1d2025;
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #14161a;
+  --surface-raised: #1d2025;
+  --text: #e6e8eb;
+  --text-secondary: #a3a9b3;
+  --border: #353a42;
+  --focus: #7fb0ff;
+  --link: #7fb0ff;
+
+  --state-draft: #a9b8cc;
+  --state-draft-tint: #26292f;
+  --state-proposed: #7fb0ff;
+  --state-proposed-tint: #212835;
+  --state-queued: #b79cff;
+  --state-queued-tint: #282635;
+  --state-testing: #f0b84a;
+  --state-testing-tint: #2e2920;
+  --state-landed: #5fd28a;
+  --state-landed-tint: #1d2d27;
+  --state-failed: #ff8a80;
+  --state-failed-tint: #302426;
+  --state-conflicted: #f08ad0;
+  --state-conflicted-tint: #2e2430;
+  --state-ended: #9a9ea6;
+  --state-ended-tint: #24262b;
+  --state-none: #a3a9b3;
+  --state-none-tint: #1d2025;
+}

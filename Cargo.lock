@@ -3004,6 +3004,8 @@ dependencies = [
  "etcetera",
  "futures 0.3.34",
  "gix",
+ "http-body",
+ "http-body-util",
  "humantime-serde",
  "hyper-util",
  "jj-lib",
@@ -3024,6 +3026,7 @@ dependencies = [
  "reef-lib",
  "reef-symbols",
  "reef-testing",
+ "reef-web",
  "reflink-copy",
  "rusqlite",
  "serde",
@@ -3038,6 +3041,7 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-prost",
+ "tonic-web",
  "tower",
  "tracing",
  "tracing-appender",
@@ -3152,6 +3156,10 @@ dependencies = [
  "tonic",
  "tracing",
 ]
+
+[[package]]
+name = "reef-web"
+version = "0.2.0"
 
 [[package]]
 name = "ref-cast"
@@ -3909,6 +3917,24 @@ dependencies = [
  "prost",
  "prost-types",
  "tonic",
+]
+
+[[package]]
+name = "tonic-web"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e6a1b6319ca4b61a4c0f0c94d439c8f3ed344cca56fe0df40e1fe4be11380b"
+dependencies = [
+ "base64",
+ "bytes",
+ "http",
+ "http-body",
+ "pin-project",
+ "tokio-stream",
+ "tonic",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]

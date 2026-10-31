@@ -47,6 +47,7 @@ use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::subscribe::SubscribeError;
 use crate::symbols::SymbolError;
+use crate::web::WebError;
 use crate::workspace::ManagerError;
 
 pub use reef_client::error::{
@@ -110,6 +111,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<WebError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
@@ -357,6 +360,24 @@ fn history_reason(error: &HistoryError) -> Option<(&'static str, BTreeMap<String
     })
 }
 
+fn web_reason(error: &WebError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        WebError::Disabled => (reason::WEB_UI_DISABLED, BTreeMap::new()),
+        WebError::NotBuilt => (reason::WEB_UI_NOT_BUILT, BTreeMap::new()),
+        WebError::Unavailable { address, source } => (
+            reason::WEB_UI_UNAVAILABLE,
+            meta(&[("address", address.clone()), ("error", source.to_string())]),
+        ),
+        WebError::SessionInvalid => (reason::WEB_SESSION_INVALID, BTreeMap::new()),
+        WebError::AccessDenied { method, access } => (
+            reason::WEB_ACCESS_DENIED,
+            meta(&[("method", method.clone()), ("access", (*access).to_owned())]),
+        ),
+        _ => return None,
+    })
+}
+
 fn rewrite_reason(error: &RewriteError) -> Option<(&'static str, BTreeMap<String, String>)> {
     use reef_api::error as reason;
     let commit = |id: &dyn std::fmt::Display| meta(&[("commit_id", id.to_string())]);
@@ -586,6 +607,8 @@ fn reason_and_metadata(
             history_reason(error)
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)
+        } else if let Some(error) = error.downcast_ref::<WebError>() {
+            web_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

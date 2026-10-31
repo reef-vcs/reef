@@ -53,6 +53,34 @@ api-breaking against=".git#branch=main":
 deny-advisories:
     cargo deny check advisories
 
+# The web UI (R2.18, ADR 0047) needs Node (web/.node-version); nothing else here does. Nothing
+# built or generated is committed: a plain `cargo build` embeds a placeholder page, which `reef ui`
+# refuses. `web-install` once, then `web-build` before `cargo build` for a daemon with the app.
+web-install:
+    cd web && npm ci && npm run gen
+
+# The TypeScript generated from the protos, for an editor's types; every npm script regenerates it.
+web-gen:
+    cd web && npm run gen
+
+# Builds the app into crates/reef-web/assets, which the next `cargo build` embeds.
+web-build:
+    cd web && npm ci && npm run build
+
+# What CI's `web` job runs: lint, typecheck, Vitest, the build, then reef-web's tests against it.
+web-check:
+    cd web && npm run lint && npm run typecheck && npm test && npm run build
+    REEF_WEB_EXPECT_BUILT=1 cargo nextest run -p reef-web
+
+# Vite's dev server on http://127.0.0.1:5173, proxying the API to REEF_UI_URL (the `url` from
+# `reef ui --print`); open it with that command's `#session=<token>`.
+web-dev:
+    cd web && npm run dev
+
+# Back to the placeholder: removes the built assets and the generated TypeScript.
+web-clean:
+    rm -rf crates/reef-web/assets web/src/gen
+
 # Benchmarks on the REEF_BENCH_PRESET synthetic repo (default medium). See docs/benchmarks.md.
 bench *ARGS:
     cargo bench --workspace --bench '*' "$@"

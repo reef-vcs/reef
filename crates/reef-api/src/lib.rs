@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 11;
+pub const API_REVISION: u32 = 12;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -77,6 +77,8 @@ pub const API_DIGESTS: &[&str] = &[
     // R2.12: reads at an operation for status, workspaces and the operation
     // log; operations by time.
     "878a9ac94ce40a3b8294c9ea5a9f92db1bb7e78ff8dd72936015bd7ea58269be",
+    // R2.18: `DaemonService.CreateWebSession`.
+    "a13bfa9b18ec1b87145a00a82988333ef967477ff448f17d0d894f7b356cc7b0",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -297,6 +299,19 @@ pub mod error {
     /// A `QueryChanges` request over a bound or with a value it refuses,
     /// or `group_by` with a `page_token` (R2.16). Metadata: `field`.
     pub const INVALID_HISTORY_QUERY: &str = "INVALID_HISTORY_QUERY";
+    /// The web UI is off: `[ui] enabled = false` (R2.18).
+    pub const WEB_UI_DISABLED: &str = "WEB_UI_DISABLED";
+    /// The daemon was built without the web UI's assets, only the
+    /// placeholder (R2.18).
+    pub const WEB_UI_NOT_BUILT: &str = "WEB_UI_NOT_BUILT";
+    /// The web listener could not be bound (R2.18). Metadata: `address`,
+    /// `error`.
+    pub const WEB_UI_UNAVAILABLE: &str = "WEB_UI_UNAVAILABLE";
+    /// A web listener request without a live session's token (R2.18).
+    pub const WEB_SESSION_INVALID: &str = "WEB_SESSION_INVALID";
+    /// A web listener request for a method that is not `ACCESS_READ` (R2.18).
+    /// Metadata: `method`, `access` (`write`, `admin` or `unknown`).
+    pub const WEB_ACCESS_DENIED: &str = "WEB_ACCESS_DENIED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

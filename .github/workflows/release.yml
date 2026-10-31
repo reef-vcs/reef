@@ -6,7 +6,8 @@ name: Release
 # the formula to the Homebrew tap. A dry run, `workflow_dispatch` with `dry_run` or a pull
 # request that touches the release machinery, does everything but publish, and the tarballs stay
 # on the run as artifacts. Unsigned until R4.17; the publish job attests the tarballs' build
-# provenance (RX.01, S-06), which `gh attestation verify` checks.
+# provenance (RX.01, S-06), which `gh attestation verify` checks. The web UI (R2.18) is built once,
+# by the `web` job, and every target embeds the same bytes.
 
 on:
   push:
@@ -18,6 +19,8 @@ on:
       - packaging/**
       - scripts/**
       - crates/reef-vcs/build.rs
+      - crates/reef-web/build.rs
+      - crates/reef-web/placeholder/**
   workflow_dispatch:
     inputs:
       dry_run:
@@ -73,10 +76,43 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "publish=$publish" >>"$GITHUB_OUTPUT"
 
+  # The web UI's assets (R2.18, ADR 0047), built once for all four targets so they cannot differ.
+  # A release builds without the npm and Rust caches; dry runs use them.
+  web:
+    name: web
+    needs: check-version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+          cache: ${{ needs.check-version.outputs.publish != 'true' && 'npm' || '' }}
+          cache-dependency-path: web/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: ${{ needs.check-version.outputs.publish != 'true' }}
+      - name: Build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Test
+        run: REEF_WEB_EXPECT_BUILT=1 cargo test -p reef-web --locked
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-assets
+          path: crates/reef-web/assets
+          if-no-files-found: error
+          retention-days: 14
+
   # Every target builds on a native runner, so each binary runs its own smoke test.
   build:
     name: build ${{ matrix.target }}
-    needs: check-version
+    needs: [check-version, web]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -103,6 +139,11 @@ jobs:
       - name: Install musl tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # The `web` job's assets, where reef-web's build script embeds them.
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-assets
+          path: crates/reef-web/assets
       - name: Build
         run: |
           if [[ "$TARGET" == *-linux-musl ]]; then
@@ -119,6 +160,16 @@ jobs:
           "$bin/reef-daemon" --version
           "$bin/reef" guide >guide.txt
           head -1 guide.txt
+          # The daemon embeds the `web` job's app, not the placeholder (R2.18): the hashed script
+          # its index.html names is in the binary, and the placeholder page's sentence is not.
+          script="$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' crates/reef-web/assets/index.html | head -1)"
+          [[ -n "$script" ]]
+          grep -aqF "$script" "$bin/reef-daemon"
+          # `if`, not `!`: bash -e ignores a negated command's failure.
+          if grep -aqF "Released binaries include it" "$bin/reef-daemon"; then
+            echo "::error::reef-daemon for $TARGET embeds the placeholder page, not the web UI"
+            exit 1
+          fi
           if [[ "$TARGET" == *-linux-musl ]]; then
             # Static (`file` says "statically linked" on arm64, "static-pie linked" on x86_64), so it
             # runs where there is no glibc at all.
@@ -174,11 +225,37 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The tarballs and SHA256SUMS only: `web-assets` is not shipped.
       - uses: actions/download-artifact@v8
         with:
+          pattern: reef-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+          path: dist
       - run: scripts/test-install.sh --dist dist
+      # A released daemon serves the real app (R2.18): install it, open a session with the
+      # installed `reef ui --print`, fetch `/`, and find the `web` job's hashed script in it.
+      - uses: actions/download-artifact@v8
+        if: matrix.os == 'ubuntu-24.04'
+        with:
+          name: web-assets
+          path: web-assets
+      - name: Web UI
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          home="$RUNNER_TEMP/web-home" state="$RUNNER_TEMP/web-state"
+          env HOME="$home" PATH=/usr/bin:/bin REEF_INSTALL_URL="file://$PWD/dist" sh install.sh </dev/null
+          reef="$home/.local/bin/reef"
+          script="$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' web-assets/index.html | head -1)"
+          [[ -n "$script" ]]
+          url="$("$reef" --state-dir "$state" ui --print -o json | jq -r .url)"
+          echo "$url"
+          curl -fsS "$url" | tee index.html
+          grep -qF "$script" index.html
+          "$reef" --state-dir "$state" daemon stop
       - name: Alpine
         if: runner.os == 'Linux'
         run: docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 sh -c 'apk add -q --no-cache bash curl && scripts/test-install.sh --dist dist'
@@ -196,9 +273,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The tarballs and SHA256SUMS only: `web-assets` is not shipped.
       - uses: actions/download-artifact@v8
         with:
+          pattern: reef-*
           merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
           path: dist
       - run: |
           scripts/update-tap.sh "$VERSION" dist/SHA256SUMS --base-url "file://$PWD/dist" --out reef.rb
@@ -223,8 +306,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The tarballs only: `web-assets` is not shipped.
       - uses: actions/download-artifact@v8
         with:
+          pattern: reef-*
           merge-multiple: true
           path: dist
       - uses: taiki-e/install-action@v2
@@ -262,9 +347,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The tarballs and SHA256SUMS only: `web-assets` is not shipped.
       - uses: actions/download-artifact@v8
         with:
+          pattern: reef-*
           merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
           path: dist
       # Before the release exists, so a release never goes out without its attestation.
       - uses: actions/attest-build-provenance@v4

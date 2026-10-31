@@ -14,6 +14,42 @@ service DaemonService {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // A session for the web UI (R2.18). Binds the daemon's loopback web
+  // listener (`[ui] listen`) if it is not bound yet, and returns its address
+  // and a new session. The session's token authorizes the web listener's
+  // gRPC-web calls to ACCESS_READ methods until the daemon stops, or for 24
+  // hours without use; it is never persisted. ADMIN: it mints a credential,
+  // so it is served only where ADMIN is.
+  //
+  // Errors: FAILED_PRECONDITION with reason WEB_UI_DISABLED (`[ui] enabled
+  // = false`) or WEB_UI_NOT_BUILT (the daemon embeds the placeholder, not
+  // the app); UNAVAILABLE with reason WEB_UI_UNAVAILABLE (metadata
+  // `address`, `error`) when the listener cannot be bound.
+  rpc CreateWebSession(CreateWebSessionRequest) returns (CreateWebSessionResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+}
+
+// Ask for a web UI session.
+message CreateWebSessionRequest {
+  // Also write a launch file: a page only the daemon's user can read that
+  // sends a browser on to `session_url`, so the token need not appear on a
+  // command line. Deleted at the session's first request or after 60
+  // seconds. False: `launch_path` is empty.
+  bool launch_file = 1;
+}
+
+// A web UI session.
+message CreateWebSessionResponse {
+  // The web UI's address, such as `http://127.0.0.1:52817/`. No token.
+  string url = 1;
+  // `url` with the session's token in its fragment (`#session=<token>`).
+  // A credential: whoever holds it can read every registered repository
+  // through the web listener while the session lives.
+  string session_url = 2;
+  // The launch file's absolute path; empty unless `launch_file`.
+  string launch_path = 3;
 }
 
 // Ask for the daemon's status.

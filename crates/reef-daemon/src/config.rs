@@ -130,6 +130,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         "history",
         &["enabled", "retention", "max_size", "backfill_operations"],
     ),
+    ("ui", &["enabled", "listen"]),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -157,6 +158,8 @@ pub struct Paths {
     pub logs: PathBuf,
     /// Per-repository state, `<state>/repos`.
     pub repos: PathBuf,
+    /// The web UI's launch files, `<state>/ui` (R2.18).
+    pub ui: PathBuf,
 }
 
 /// `config.toml` as written, every absent key at its default. The `Option`
@@ -193,6 +196,8 @@ pub struct FileConfig {
     pub symbols: SymbolsSection,
     /// `[history]`.
     pub history: HistorySection,
+    /// `[ui]`.
+    pub ui: UiSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -628,6 +633,38 @@ impl Default for HistorySection {
     }
 }
 
+/// `[ui]`: the web UI's loopback listener (R2.18, ADR 0047).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UiSection {
+    /// `reef ui` works. False: `CreateWebSession` fails with
+    /// `WEB_UI_DISABLED` and nothing is ever bound. Default true.
+    pub enabled: bool,
+    /// The address the listener binds at the first `reef ui`: a loopback IP
+    /// and a port, 0 for one the kernel picks at every start. Default
+    /// `127.0.0.1:0`.
+    pub listen: String,
+}
+
+impl Default for UiSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: "127.0.0.1:0".to_owned(),
+        }
+    }
+}
+
+impl UiSection {
+    /// `listen` as an address, if it is a loopback IP with a port.
+    pub fn listen_addr(&self) -> Option<std::net::SocketAddr> {
+        self.listen
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .filter(|addr| addr.ip().is_loopback())
+    }
+}
+
 /// A size in bytes. Read from an integer or a string such as `"1MiB"`
 /// ([`parse_byte_size`]); written as a string in the largest exact unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -780,6 +817,9 @@ pub struct Config {
     /// The GC timer's delays (#95). Not a configuration-file key and not in
     /// `config show`: set here by tests only.
     pub gc_timer: crate::maintenance::timer::Limits,
+    /// The web listener's limits (R2.18). Not a configuration-file key and
+    /// not in `config show`: set here by tests only.
+    pub web: crate::web::Limits,
 }
 
 /// Failure to resolve the configuration.
@@ -921,6 +961,7 @@ fn paths_from(
         pid: settled.pid,
         logs: state_dir.join("logs"),
         repos: state_dir.join("repos"),
+        ui: state_dir.join("ui"),
         socket: settled.socket,
         state_dir,
     };
@@ -1049,6 +1090,7 @@ impl Config {
             subscribe: crate::subscribe::Limits::default(),
             presence: crate::presence::Limits::default(),
             gc_timer: crate::maintenance::timer::Limits::default(),
+            web: crate::web::Limits::default(),
         }
     }
 
@@ -1309,6 +1351,13 @@ impl Config {
                     ),
                 ],
             ),
+            (
+                "ui",
+                vec![
+                    ("enabled", f.ui.enabled.to_string()),
+                    ("listen", s(&f.ui.listen)),
+                ],
+            ),
         ]
     }
 }
@@ -1566,6 +1615,14 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.history.max_size.0 >= 16 << 20,
             "history.max_size",
             "must be at least 16MiB".to_owned(),
+        ),
+        (
+            file.ui.listen_addr().is_some(),
+            "ui.listen",
+            format!(
+                "{:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and a remote listener is R2.08's",
+                file.ui.listen
+            ),
         ),
         (
             file.backup.sqlite_pages_per_step >= 1,

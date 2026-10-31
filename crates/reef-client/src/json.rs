@@ -595,6 +595,21 @@ impl From<&v1::ReleaseWorkspaceResponse> for Released {
     }
 }
 
+/// `reef ui`'s answer (R2.18). `session_url`, a credential, only with
+/// `--print`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WebSession {
+    /// The web UI's address, without a token.
+    pub url: String,
+    /// The launch file `reef ui` opens, if it asked for one.
+    pub launch_path: Option<String>,
+    /// Whether a browser was opened.
+    pub opened: bool,
+    /// The session URL, `url` with the token in its fragment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_url: Option<String>,
+}
+
 /// One materialization backend's probe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BackendProbe {

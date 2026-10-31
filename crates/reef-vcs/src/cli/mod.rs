@@ -42,6 +42,7 @@ mod status;
 mod store;
 mod stream;
 mod symbols;
+mod ui;
 mod ws;
 mod ws_move;
 mod ws_run;
@@ -238,6 +239,9 @@ enum Command {
     /// Show what agents are doing now: activity, editing, leases, progress.
     #[command(infer_subcommands = true)]
     Presence(presence::Args),
+    /// Open the web UI in a browser.
+    #[command(after_help = "Example: reef ui --print")]
+    Ui(ui::Args),
     /// Read files and list directories at any revision.
     #[command(infer_subcommands = true)]
     File(file::Args),
@@ -553,6 +557,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,
         Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
+        Command::Ui(args) => ui::run(&connect(&global, out).await?, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
