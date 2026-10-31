@@ -14,7 +14,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `reef history [PATH]...` with `--symbol`, `--change-kind`, `--by`, `--workspace`, `--change`, `--outcome`, `--since`/`--until` (RFC 3339 or a duration ago), `--include-empty`, `--group-by` and `--limit`.
 - The MCP server's `query_changes` tool. `tools/list` is held to 21,250 bytes.
 
+- `ListWorkspacesRequest.changed_file_counts` fills `Workspace.changed_file_count`, how many files each active workspace's change changes as of its last snapshot (API revision 10). `reef ws list` asks for it, in JSON and in a new `FILES` column, and so does the MCP server's `list_workspaces`.
+- `-o brief`: compact JSON with only the keys an agent acts on ([ADR 0045](docs/adr/0045-brief-json-by-default.md)).
+
 ### Changed
+
+- **Piped output is brief JSON** ([ADR 0045](docs/adr/0045-brief-json-by-default.md)): compact, a list one element per line, and for `reef ws list`, `status` and `diff` only the keys an agent acts on, with zero values left out. This breaks scripts that read piped `reef ws list`, `status` or `diff` without `-o json`; `-o json` or `REEF_OUTPUT=json` restores the full JSON. On R2.17's `state-repo` question, `reef ws list` alone is 215 bytes, against 2,893 for git.
+- The MCP server's `list_workspaces`, `get_status` and `get_diff` return the same brief objects, without `next_page_token` on a last page.
 
 - `ListSymbols` by name or symbol reads only the matching rows of the index, not each matching file's whole entry, and (R2.16) reads them in path order with its filters and cursor in SQL, stopping at the end of the page.
 

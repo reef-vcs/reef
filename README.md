@@ -85,7 +85,7 @@ The installer checks the tarball against the release's `SHA256SUMS` and never pr
 
 To build from source, with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. It builds `main`, which can be ahead of the release; `reef --version` names the commit. From a checkout, `cargo build --release` builds both into `target/release`. Coming from 0.1, read [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) first.
 
-Once installed, in a git or jj repository, `reef ws run -- <your agent command>` runs an agent in a fresh workspace. `reef` alone prints the [agent guide](docs/agent-guide.md), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init --check` in CI keeps the files `reef init` wrote current. Output is JSON when stdout is not a terminal, and an error with a known fix carries it as `hint` and `next`, a command to run.
+Once installed, in a git or jj repository, `reef ws run -- <your agent command>` runs an agent in a fresh workspace. `reef` alone prints the [agent guide](docs/agent-guide.md), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init --check` in CI keeps the files `reef init` wrote current. Output is brief JSON when stdout is not a terminal (`-o json` for every field), and an error with a known fix carries it as `hint` and `next`, a command to run.
 
 ## Roadmap
 

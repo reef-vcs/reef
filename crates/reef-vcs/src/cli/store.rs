@@ -143,7 +143,7 @@ async fn build(
         return Ok(ExitCode::SUCCESS);
     }
     match ctx.out.mode() {
-        Output::Json => ctx.out.json_only(&built)?,
+        Output::Json | Output::Brief => ctx.out.json_only(&built)?,
         Output::Text => ctx.out.error_line(&format!(
             "error: store {} {short} build exited with {}; nothing sealed; what it wrote is kept at {}",
             built.name, built.exit_code, built.path

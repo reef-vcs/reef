@@ -16,25 +16,25 @@ Output is JSON when piped; errors carry `hint` and `next`, a command to run.
 ## Commands
 
 - `reef ws create` prints a new workspace's path; `reef ws release <id>`
-  ends it. `reef ws list`, `reef ws inspect <id>`. Ids take 4+ characters.
-- `cd "$(reef ws move -o text <id> --new-on main)"` snapshots, then starts the next
-  task in the same directory and lease; `cd` again, as an overlay is remounted.
-- `--repo <path|id>` names the repository; default: the current directory's.
+  ends it. `reef ws list` counts each one's changed files;
+  `reef ws inspect <id>` has the rest. Ids take 4+ characters.
+- `cd "$(reef ws move -o text <id> --new-on main)"` snapshots and starts the next task
+  in the same directory and lease (`cd` again: overlays remount).
+- `--workspace <id>` or `--repo <path|id>` picks what to read (default: here).
 
 ## Inside ws run
 
-The command runs in the workspace directory with `REEF_WORKSPACE`,
-`REEF_WORKSPACE_PATH`, `REEF_REPO`, and `REEF_SOCKET` set; its lease is
-renewed until it exits.
+It runs in the workspace with `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`,
+`REEF_REPO` and `REEF_SOCKET` set, its lease renewed until it exits.
 
 ## Output
 
-`-o json` or `REEF_OUTPUT=json` forces JSON: one object or array, or
-`{"error": {"kind", "reason", "message", "hint", "next", "metadata"}}`. Exit 0 ok,
+Piped output is brief JSON; `-o json` or `REEF_OUTPUT=json` has every field.
+Errors: `{"error": {kind, reason, message, hint, next, metadata}}`. Exit 0 ok,
 2 usage, 3 not found, 4 exists, 5 conflict, 6 unavailable, 7 denied,
 8 I/O, 9 unsupported, 1 other; `ws run` exits with its command's code.
 
 ## Changes
 
-`reef status`, `reef log`, `reef show`, `reef diff`, `reef describe -m <text>`,
-`reef undo <op>` (`reef op log`). Revisions are jj revsets.
+`reef status`, `log`, `show`, `diff`, `describe -m <text>`, `undo <op>` (`op log`).
+Revisions are jj revsets.

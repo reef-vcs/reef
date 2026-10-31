@@ -193,12 +193,60 @@ fn help_lists_every_command() {
 
 // 2
 #[tokio::test(flavor = "multi_thread")]
-async fn json_when_piped() {
+async fn brief_json_when_piped() {
     let (daemon, repo) = with_repo().await;
-    let value = json(&run(reef(&daemon), &["repo", "list"]).await);
+    let output = run(reef(&daemon), &["repo", "list"]).await;
+    let value = json(&output);
     let list = value.as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["id"], repo.id.as_str());
+    // A command without a view: its full JSON, compact (ADR 0045).
+    assert_eq!(stdout(&output).lines().count(), 3, "{}", stdout(&output));
+    assert!(list[0]["root"].is_string(), "{value}");
+
+    // `ws list`: one compact element per line, with only the keys an agent
+    // acts on.
+    let created = create(&daemon, &repo).await;
+    let output = run(reef(&daemon), &["ws", "list"]).await;
+    let text = stdout(&output);
+    assert_eq!(text.lines().collect::<Vec<_>>().len(), 3, "{text}");
+    let listed = json(&output);
+    let keys: Vec<&String> = listed[0].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["changed_file_count", "id", "owner"], "{listed}");
+    assert_eq!(listed[0]["id"], created["id"]);
+    let full = run(reef(&daemon), &["-o", "json", "ws", "list"]).await;
+    let full_value = json(&full);
+    for key in ["path", "lease", "changed_file_count"] {
+        assert!(full_value[0].get(key).is_some(), "{key}: {full_value}");
+    }
+    assert!(stdout(&full).contains("\n    \"path\": "), "pretty");
+    // The same full JSON, but for what the watcher changes in between.
+    let mut env = reef(&daemon);
+    env.env("REEF_OUTPUT", "json");
+    let steady = |mut value: Value| {
+        for ws in value.as_array_mut().unwrap() {
+            let ws = ws.as_object_mut().unwrap();
+            for key in [
+                "watch_state",
+                "last_snapshot_at",
+                "last_snapshot_op",
+                "commit_id",
+            ] {
+                ws.remove(key);
+            }
+        }
+        value
+    };
+    assert_eq!(
+        steady(json(&run(env, &["ws", "list"]).await)),
+        steady(full_value.clone())
+    );
+    let mut env = reef(&daemon);
+    env.env("REEF_OUTPUT", "json");
+    assert_eq!(
+        stdout(&run(env, &["-o", "brief", "ws", "list"]).await),
+        text
+    );
 
     let output = run(reef(&daemon), &["-o", "text", "repo", "list"]).await;
     output.clone().assert().success();
@@ -283,7 +331,7 @@ async fn ws_list_and_inspect() {
     let created = create(&daemon, &repo).await;
     let id = created["id"].as_str().unwrap().to_owned();
 
-    let listed = json(&run(reef(&daemon), &["ws", "list"]).await);
+    let listed = json(&run(reef(&daemon), &["-o", "json", "ws", "list"]).await);
     let listed = listed.as_array().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["state"], "active");
@@ -298,6 +346,7 @@ async fn ws_list_and_inspect() {
             "ID",
             "STATE",
             "CHANGE",
+            "FILES",
             "OWNER",
             "LEASE",
             "BACKEND",
@@ -384,7 +433,7 @@ async fn ws_release() {
         json(&run(reef(&daemon), &["ws", "list"]).await),
         Value::Array(vec![])
     );
-    let all = json(&run(reef(&daemon), &["ws", "list", "--all"]).await);
+    let all = json(&run(reef(&daemon), &["-o", "json", "ws", "list", "--all"]).await);
     assert_eq!(all[0]["id"], id);
     assert_eq!(all[0]["state"], "released");
     assert_eq!(all[0]["lease"]["state"], "ended");
@@ -1987,6 +2036,13 @@ fn reef_output_env_sets_the_default() {
     // -o beats REEF_OUTPUT.
     let output = with("text", &["-o", "json", "daemon", "status"]);
     failed(&output, 6, "unavailable");
+    // Brief errors are the same object, compact; `-o json` beats it.
+    let output = with("brief", &["daemon", "status"]);
+    failed(&output, 6, "unavailable");
+    assert_eq!(stdout(&output).lines().count(), 1, "{}", stdout(&output));
+    let output = with("brief", &["-o", "json", "daemon", "status"]);
+    failed(&output, 6, "unavailable");
+    assert!(stdout(&output).lines().count() > 1, "{}", stdout(&output));
     // The guide is text unless JSON is asked for, by either.
     let value = json(&with("json", &["guide"]));
     assert!(value["guide"].is_string(), "{value}");
@@ -2181,4 +2237,100 @@ async fn ws_create_takes_a_revset() {
         "{value}"
     );
     daemon.stop().await;
+}
+
+/// The files at the top of `root`, by name, not hidden.
+fn top_files(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The one listed workspace with `id`.
+fn listed<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|ws| ws["id"] == id)
+        .unwrap_or_else(|| panic!("{id} not in {list}"))
+}
+
+// #114 test 13
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_list_counts_changed_files() {
+    let (daemon, repo) = with_repo().await;
+    let busy = create(&daemon, &repo).await;
+    let busy_id = busy["id"].as_str().unwrap();
+    let fresh = create(&daemon, &repo).await;
+    let fresh_id = fresh["id"].as_str().unwrap();
+    let root = PathBuf::from(busy["path"].as_str().unwrap());
+    let files = top_files(&root);
+    std::fs::write(root.join(&files[0]), "modified\n").unwrap();
+    std::fs::remove_file(root.join(&files[1])).unwrap();
+    std::fs::write(root.join("added.txt"), "added\n").unwrap();
+    json(&run(reef(&daemon), &["ws", "snapshot", busy_id]).await);
+
+    let list = json(&run(reef(&daemon), &["ws", "list"]).await);
+    assert_eq!(listed(&list, busy_id)["changed_file_count"], 3, "{list}");
+    assert_eq!(listed(&list, fresh_id)["changed_file_count"], 0, "{list}");
+    let full = json(&run(reef(&daemon), &["-o", "json", "ws", "list"]).await);
+    assert_eq!(listed(&full, busy_id)["changed_file_count"], 3, "{full}");
+    let output = run(reef(&daemon), &["-o", "text", "ws", "list"]).await;
+    let text = stdout(&output);
+    let row = text.lines().find(|line| line.starts_with(busy_id)).unwrap();
+    assert_eq!(row.split_whitespace().nth(3), Some("3"), "{text}");
+
+    json(&run(reef(&daemon), &["ws", "release", fresh_id]).await);
+    let all = json(&run(reef(&daemon), &["ws", "list", "--all"]).await);
+    assert!(
+        listed(&all, fresh_id).get("changed_file_count").is_none(),
+        "{all}"
+    );
+    assert_eq!(listed(&all, fresh_id)["state"], "released", "{all}");
+    let all = json(&run(reef(&daemon), &["-o", "json", "ws", "list", "--all"]).await);
+    assert_eq!(listed(&all, fresh_id)["changed_file_count"], Value::Null);
+    let output = run(reef(&daemon), &["-o", "text", "ws", "list", "--all"]).await;
+    let text = stdout(&output);
+    let row = text
+        .lines()
+        .find(|line| line.starts_with(fresh_id))
+        .unwrap();
+    assert_eq!(row.split_whitespace().nth(3), Some("-"), "{text}");
+}
+
+// #114 test 14
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_list_brief_names_the_repository_when_several() {
+    let (daemon, repo) = with_repo().await;
+    let root = daemon.tmp.path().join("second");
+    let at = root.clone();
+    tokio::task::spawn_blocking(move || init_synthetic_repo(&at, Preset::Small))
+        .await
+        .unwrap();
+    let registered = json(&run(reef(&daemon), &["repo", "register", root.to_str().unwrap()]).await);
+    let second = registered["id"].as_str().unwrap();
+    create(&daemon, &repo).await;
+    json(&run(reef(&daemon), &["ws", "create", "--repo", second]).await);
+
+    let list = json(&run(reef(&daemon), &["ws", "list"]).await);
+    let repos: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ws| ws["repo_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(repos.len(), 2, "{list}");
+    assert!(
+        repos.contains(&repo.id.as_str()) && repos.contains(&second),
+        "{list}"
+    );
+    let one = json(&run(reef(&daemon), &["ws", "list", "--repo", second]).await);
+    assert_eq!(one.as_array().unwrap().len(), 1, "{one}");
+    assert!(one[0].get("repo_id").is_none(), "{one}");
 }

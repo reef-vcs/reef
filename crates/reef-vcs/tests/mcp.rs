@@ -283,8 +283,13 @@ async fn scope_defaults() {
             .contains("list_repositories"),
         "{error}"
     );
+    // Brief (ADR 0045): the repository's state, without the repository.
     let status = outside.ok("get_status", json!({"repo": root_path})).await;
-    assert_eq!(status["repository"]["id"], repo.id.as_str());
+    assert_eq!(
+        status["repository_status"]["active_workspace_count"], 1,
+        "{status}"
+    );
+    assert!(status.get("workspace_status").is_none(), "{status}");
     // A tool that takes only a workspace asks for one, not for `repo`
     // (review finding 2).
     let error = outside.err("snapshot_workspace", json!({})).await;
@@ -488,7 +493,8 @@ async fn reads() {
     for format in ["stat", "summary"] {
         let diff = mcp.ok("get_diff", json!({"format": format})).await;
         assert_eq!(diff["files"].as_array().unwrap().len(), 1, "{diff}");
-        assert!(diff.get("next_page_token").is_some());
+        // One page: no token (brief, ADR 0045).
+        assert!(diff.get("next_page_token").is_none(), "{diff}");
     }
     let absolute = path(&created).join("src/read.txt").display().to_string();
     let only = mcp.ok("get_diff", json!({"paths": [absolute]})).await;
@@ -1149,4 +1155,42 @@ fn millis(value: &Value) -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis()
+}
+
+// #114 test 19
+#[tokio::test(flavor = "multi_thread")]
+async fn list_workspaces_is_brief_with_counts() {
+    let (daemon, repo) = fixture().await;
+    let mut root = server(&daemon, &repo.root).await;
+    let created = create(&mut root).await;
+    write(&created, "src/brief.txt", "one\n");
+    let mut mcp = server(&daemon, &path(&created)).await;
+    // Snapshots first, so the count below sees the write.
+    let status = mcp.ok("get_status", json!({})).await;
+    assert!(
+        status["repository_status"].get("heads").is_none(),
+        "{status}"
+    );
+    assert!(status.get("repository").is_none(), "{status}");
+
+    let listed = mcp.ok("list_workspaces", json!({})).await;
+    assert!(listed.get("next_page_token").is_none(), "{listed}");
+    let workspaces = listed["workspaces"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 1, "{listed}");
+    let keys: Vec<&String> = workspaces[0].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["changed_file_count", "id", "owner"], "{listed}");
+    assert_eq!(workspaces[0]["id"], created["id"]);
+    assert_eq!(workspaces[0]["changed_file_count"], 1, "{listed}");
+
+    // The full workspace is one call away.
+    let full = mcp.ok("get_workspace", json!({})).await;
+    assert!(full["path"].is_string(), "{full}");
+    assert!(full["lease"].is_object(), "{full}");
+
+    let diff = mcp.ok("get_diff", json!({"format": "summary"})).await;
+    let file = &diff["files"][0];
+    for (key, value) in file.as_object().unwrap() {
+        assert_ne!(value, &json!(false), "{key}: {diff}");
+    }
+    assert!(diff.get("at_operation").is_none(), "{diff}");
 }

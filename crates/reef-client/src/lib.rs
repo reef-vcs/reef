@@ -8,7 +8,8 @@
 //! else depends on their shape. [`WorkspacesApi`] is the same surface, less
 //! maintenance, as a trait, for code that wants to run against a fake
 //! daemon (R1.21's heartbeater); [`json`] is the stable JSON form of the
-//! responses that `reef -o json` prints (R1.22). [`paths`] finds the
+//! responses that `reef -o json` prints (R1.22), and [`brief`] the views of
+//! it that `reef` prints on a pipe (ADR 0045). [`paths`] finds the
 //! daemon's socket as the daemon does, [`error`] reads the API's error
 //! details, [`logging`] sets up stderr logging from `REEF_LOG*`, and
 //! [`backup`] reads a backup's manifest.
@@ -19,6 +20,7 @@
 //! returns [`ClientError::Incompatible`], which the CLI acts on (R2.01).
 
 pub mod backup;
+pub mod brief;
 pub mod error;
 pub mod json;
 pub mod logging;

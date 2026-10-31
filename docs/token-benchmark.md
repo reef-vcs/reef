@@ -28,7 +28,7 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 | `who-file` | Which agents changed `crates/reef-client/src/json.rs`, and is each change landed or open? | `bot-2 landed; bot-4 open; bot-5 open` |
 | `who-symbol` | The same for `by_lookup` in `crates/reef-daemon/src/symbols/query.rs` | `bot-2 landed; bot-5 open` |
 
-`state-repo` is the exit criterion's question: in a repository with several agents, "the state of this repo" is who has work in flight and how much.
+`state-repo` is the exit criterion's question: in a repository with several agents, "the state of this repo" is who has work in flight and how much. Since #114 it has one-call candidates: `reef ws list` and `list_workspaces` count each workspace's changed files.
 
 **Grading.** The last line starting `ANSWER:` is compared with the truth as an exact set, after normalizing case, Markdown, a leading `./`, a symbol's module or type and `()`, `main` for landed and `in progress` for open, and a subject's trailing `(#NNN)`. For the `changed-*` questions the union of names must match; whether each is in the right category is reported, not required. Medians are over correct trials only, and a cell with fewer than two correct out of three shows `–` and "not answered reliably".
 
@@ -40,7 +40,7 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 | `reef` | a shell and a file reader in `bot-0`'s workspace, `reef` on `PATH` | "Answer with the `reef` command." |
 | `mcp` | only the Reef MCP server's tools, started in `bot-0`'s workspace | "Answer with the reef tools." |
 
-Symbol-level diff and the history queries are not separate arms: an agent picks its commands. In the `reef` arm a shell call that runs `git` is counted as an escape, and in the `mcp` arm any shell call is.
+`reef (default)` counts what a shell gets on a pipe: brief JSON since #114 ([ADR 0045](adr/0045-brief-json-by-default.md)), every field before. Symbol-level diff and the history queries are not separate arms: an agent picks its commands. In the `reef` arm a shell call that runs `git` is counted as an escape, and in the `mcp` arm any shell call is.
 
 ## What is measured
 
@@ -48,7 +48,7 @@ Symbol-level diff and the history queries are not separate arms: an agent picks 
 - **Fixed cost**: the MCP server's tool definitions and instructions, which every session that loads the server pays whether it calls a tool or not, reported apart, with the **break-even**: how many questions a session must answer through MCP rather than the CLI's default output to repay it (the fixed cost over the median saving per question; "never" when MCP saves nothing).
 - **Billed usage**: input, cache reads, output and cost, as the harness reports them. It grows with turns, because each turn rereads the context.
 
-**Two parts.** The **scripted** part runs, per question and arm, fixed command sequences or MCP calls ("candidates", in `scenario.toml`) and counts each one's calls and output. Each arm's number is its cheapest candidate whose output names everything the truth does: the steelman, git's included. `reef (default)` is the cheapest without `-o text`, which is what an agent's shell gets, since the CLI writes JSON when stdout is not a terminal; `reef (text)` is shown beside it. The **live** part runs real agents, three trials per question and arm, and counts what they actually read. Neither alone would do: the scripted part can't see that agents miss the cheap command, and the live part can't separate Reef's output from an agent's habits.
+**Two parts.** The **scripted** part runs, per question and arm, fixed command sequences or MCP calls ("candidates", in `scenario.toml`) and counts each one's calls and output. Each arm's number is its cheapest candidate whose output names everything the truth does: the steelman, git's included. `reef (default)` is the cheapest without `-o text`, which is what an agent's shell gets, since the CLI writes brief JSON when stdout is not a terminal; `reef (text)` is shown beside it. The **live** part runs real agents, three trials per question and arm, and counts what they actually read. Neither alone would do: the scripted part can't see that agents miss the cheap command, and the live part can't separate Reef's output from an agent's habits.
 
 **Three counters.** `bytes` (UTF-8, vendor-neutral); `anthropic`, Anthropic's token counting endpoint for the pinned model (tool definitions counted as the model sees tools); and `o200k`, OpenAI's published `o200k_base` encoding through `tiktoken-rs`, offline. The ratio between two outputs depends on the tokenizer, so no single vendor's decides anything. Live answer tokens are in the harness vendor's counter, with bytes beside.
 
@@ -61,7 +61,7 @@ Symbol-level diff and the history queries are not separate arms: an agent picks 
 1. **scripted**: its cost is at most a fifth of git's under all three counters, and
 2. **live**: in every harness measured, its median answer tokens are at most a fifth of the `git` arm's, both cells with at least two correct trials out of three.
 
-`reef (text)` is reported but never gated: agents get JSON unless they ask. The user decided on both halves (2026-10-30). If agents miss the cheap command, the verdict is "not met" and the follow-up is about discoverability.
+`reef (text)` is reported but never gated: agents get JSON (brief since #114) unless they ask. The user decided on both halves (2026-10-30). If agents miss the cheap command, the verdict is "not met" and the follow-up is about discoverability.
 
 **Verdict at the first baseline (2026-10-31): not met.** On `state-repo`, git ÷ Reef was 0.09× by bytes, 0.12× by `anthropic` and 0.10× by `o200k` for `reef (default)`, and 0.09×, 0.13× and 0.12× for `mcp` with its fixed cost. Live answer tokens: 0.18× for the CLI and 0.68× for MCP, in Claude Code only (one harness: a gap, not a proof). Reef's text output alone is 1.8× cheaper than git's; its default JSON is about eleven times dearer. The default output's size is tracked by [#114](https://github.com/reef-vcs/reef/issues/114); every later run's verdict is in its results pull request.
 

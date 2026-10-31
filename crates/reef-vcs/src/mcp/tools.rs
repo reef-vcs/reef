@@ -21,6 +21,7 @@ use reef_api::v1::{
     UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
     move_workspace_request,
 };
+use reef_client::brief;
 use reef_client::json::{
     self, Abandoned, Created, Described, Diff, Edited, ErrorObject, FileEntry, FileRead, History,
     Inspected, LogEntry, Moved, Operation, Released, RepoStatus, Repository, Snapshotted, Undone,
@@ -221,7 +222,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "list_workspaces",
         title: "List workspaces",
         rpc: "/reef.api.v1.WorkspaceService/ListWorkspaces",
-        description: "List a repository's workspaces, newest first: each is a directory leased to one agent, editing one change. Returns {workspaces, next_page_token}.",
+        description: "List a repository's workspaces, newest first: each is a directory leased to one agent, editing one change, with how many files it changed. Returns {workspaces, next_page_token}.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListWorkspaces>,
@@ -241,7 +242,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "get_status",
         title: "Get status",
         rpc: "/reef.api.v1.StatusService/GetStatus",
-        description: "Show what the workspace changes, after a snapshot, and the repository's state. Returns {repository, repository_status, workspace_status}.",
+        description: "Show what the workspace changes, after a snapshot, and the repository's state. Returns {repository_status, workspace_status}.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetStatus>,
@@ -544,7 +545,8 @@ tool!(list_repositories, args::ListRepositories, |call, args| {
 
 tool!(list_workspaces, args::ListWorkspaces, |call, args| {
     let ctx = call.ctx;
-    let repo = if args.all_repositories.unwrap_or(false) {
+    let all_repositories = args.all_repositories.unwrap_or(false);
+    let repo = if all_repositories {
         String::new()
     } else {
         call.scope(args.repo.as_ref(), None).await?.repo_id
@@ -562,10 +564,18 @@ tool!(list_workspaces, args::ListWorkspaces, |call, args| {
             owner: args.owner.unwrap_or_default(),
             page_size: page(args.page_size, 50),
             page_token: args.page_token.unwrap_or_default(),
+            changed_file_counts: true,
         }))
         .await?;
+    let workspaces: Vec<Workspace> = response.workspaces.iter().map(Workspace::from).collect();
     to_value(&Workspaces {
-        workspaces: response.workspaces.iter().map(Workspace::from).collect(),
+        // A page across repositories names each one's: other pages may hold
+        // the others.
+        workspaces: if all_repositories {
+            brief::workspaces_with_repo(&workspaces)
+        } else {
+            brief::workspaces(&workspaces)
+        },
         next_page_token: token(response.next_page_token),
     })
 });
@@ -596,7 +606,7 @@ tool!(get_status, args::GetStatus, |call, args| {
         max_files: page(args.max_files, 100),
     };
     let response = ctx.call(Box::pin(ctx.client.get_status(request))).await?;
-    to_value(&RepoStatus::from(&response))
+    to_value(&brief::RepoStatus::from(&RepoStatus::from(&response)))
 });
 
 tool!(list_changes, args::ListChanges, |call, args| {
@@ -673,8 +683,9 @@ tool!(get_diff, args::GetDiff, |call, args| {
             ..GetDiffRequest::default()
         }))
         .await?;
+    let diff = Diff::from(&response);
     to_value(&DiffPage {
-        diff: Diff::from(&response),
+        diff: brief::Diff::from(&diff),
         next_page_token: token(response.next_page_token),
     })
 });

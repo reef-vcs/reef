@@ -349,7 +349,7 @@ That run's results PR, not this one, records the verdict. It updates `dev-phases
   - no harness detection;
   - the numbers above.
 
-  Add "Amended by: [0045](0045-brief-json-by-default.md)" to ADRs 0025, 0034 and 0035.
+  Add `- Amended by: [0045](0045-brief-json-by-default.md)` to ADRs 0025, 0034 and 0035.
 - **`docs/agent-guide.md`** as above, and the regenerated skill.
 - **`docs/token-benchmark.md`**:
   - "The arms" and "What is measured" say `reef (default)` is what a shell gets on a pipe, brief JSON (ADR 0045);
@@ -357,7 +357,7 @@ That run's results PR, not this one, records the verdict. It updates `dev-phases
   - the verdict paragraph is left to the results PR.
 - **`README.md:88`**: "Output is brief JSON when stdout is not a terminal (`-o json` for every field)".
 - **`docs/quickstart.md:116`**: "Each command prints brief JSON when piped (`-o json` for every field)".
-- **`docs/design.md:293`**: "Emits brief JSON by default when stdout is not a terminal ([ADR 0045](adr/0045-brief-json-by-default.md))."
+- **`docs/design.md:293`**: `Emits brief JSON by default when stdout is not a terminal ([ADR 0045](adr/0045-brief-json-by-default.md)).`
 - **`CHANGELOG.md`**, under Unreleased:
   - **Added**: `ListWorkspaces` counts with `changed_file_counts` (API revision 10); `reef ws list`'s `changed_file_count` and `FILES` column; `-o brief`.
   - **Changed**: piped output is brief JSON (ADR 0045), "breaks scripts that read piped `reef ws list`, `status` or `diff` without `-o json`; `-o json` or `REEF_OUTPUT=json` restores the full JSON"; the MCP `list_workspaces`, `get_status` and `get_diff` results are brief.

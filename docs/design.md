@@ -290,7 +290,7 @@ Rust end to end for the core, reusing existing open source components for the he
 | Remote store | Rust service, Postgres for metadata, S3-compatible object storage for blobs, the same gRPC protocol as the daemon | Mononoke's shape. Postgres suffices for an open ecosystem store; FoundationDB only if one store must serve a Google-scale monorepo. |
 | Web UI | React and TypeScript, one codebase served by the daemon and by remote stores | The same application renders local and shared views, so the two cannot drift. Generated gRPC-web client from the protobuf schemas. |
 | Desktop app | [Tauri 2](https://tauri.app) | Rust backend links or supervises the daemon, binaries around 10 MB, native webview. Electron is the fallback if webview inconsistencies across platforms bite; the shell is cheap to swap because the UI is a web app. |
-| CLI | clap | Emits JSON by default when stdout is not a terminal. |
+| CLI | clap | Emits brief JSON by default when stdout is not a terminal ([ADR 0045](adr/0045-brief-json-by-default.md)). |
 
 **Build on jj-lib, not a fork of the jj binary.** The library is designed to be embedded and its maintainers want it used that way. Forking the CLI would carry UX decisions aimed at humans. Generic improvements such as the gitoxide migration and Watchman support go upstream; workspaces, leases, evidence, and the daemon stay in this project.
 

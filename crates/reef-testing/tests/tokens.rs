@@ -1,4 +1,5 @@
-//! The token benchmark's fixture and truth, end to end (R2.17, test 11).
+//! The token benchmark's fixture and truth, end to end (R2.17, test 11),
+//! and the guard on Phase 2's exit criterion (#114, test 22).
 //! Ignored by default: it needs the checkout's full history, `git`, and the
 //! built `reef` and `reef-daemon` (`cargo build -p reef-vcs -p
 //! reef-daemon`), and takes about a minute. `just tokens-check` and the
@@ -96,10 +97,12 @@ fn check(scenario: &Scenario, fixture: &Fixture) {
     }
 
     // The same changed paths per agent in both copies, and the git copy's
-    // counts are the truth's.
+    // counts are the truth's, and `ws list`'s (#114).
     let Answer::Counts(counts) = truth("state-repo") else {
         panic!()
     };
+    let listed: serde_json::Value =
+        serde_json::from_str(&fixture.reef(&fixture.reef_root, &["ws", "list"]).unwrap()).unwrap();
     for (agent, worktree) in &fixture.worktrees {
         let status = fixture
             .git(worktree, &["status", "--porcelain=v1", "-uall"])
@@ -128,6 +131,17 @@ fn check(scenario: &Scenario, fixture: &Fixture) {
         if let Some((_, n)) = counts.iter().find(|(a, _)| a == agent) {
             assert_eq!(git_paths.len() as u64, *n, "{agent}'s count");
         }
+        let listed = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ws| ws["id"] == workspace.id.as_str())
+            .unwrap_or_else(|| panic!("{agent} is not in {listed}"));
+        assert_eq!(
+            listed["changed_file_count"],
+            git_paths.len(),
+            "{agent}'s count in `ws list`"
+        );
     }
 
     // `state-own` from git: statuses and the base subject.
@@ -315,6 +329,8 @@ fn check(scenario: &Scenario, fixture: &Fixture) {
     let before = fixture.fingerprint().unwrap();
     let out = tempfile::tempdir().unwrap();
     let mut counters: Vec<Box<dyn Counter>> = vec![Box::new(Bytes)];
+    #[cfg(feature = "tokenizers")]
+    counters.push(Box::new(reef_testing::tokens::count::O200k::new().unwrap()));
     let mut run = Scripted {
         scenario,
         fixture,
@@ -340,4 +356,19 @@ fn check(scenario: &Scenario, fixture: &Fixture) {
         before,
         "the scripted run changed the fixture"
     );
+
+    // Phase 2's exit criterion, scripted (#114): what an agent's shell gets
+    // unasked answers `state-repo` in at most a fifth of git's count.
+    for counter in counters.iter().map(|c| c.name()) {
+        let best = |arm| {
+            cheapest(&results, "state-repo", arm, counter, |c| !c.text_output)
+                .unwrap()
+                .counts[counter]
+        };
+        let (git, reef) = (best(Arm::Git), best(Arm::Reef));
+        assert!(
+            reef * 5 <= git,
+            "state-repo {counter}: reef {reef} is more than a fifth of git {git}"
+        );
+    }
 }

@@ -142,6 +142,23 @@ calls = [
   { tool = "list_workspaces", args = {} },
   { tool = "get_diff", args = { workspace = "{ws:*}", format = "summary" } },
 ]
+# One call since #114: `ws list` counts each workspace's changed files.
+[[question.candidate]]
+arm = "reef"
+name = "list"
+steps = ["reef ws list"]
+[[question.candidate]]
+arm = "reef"
+name = "list full"
+steps = ["reef ws list -o json"]
+[[question.candidate]]
+arm = "reef"
+name = "list text"
+steps = ["reef ws list -o text"]
+[[question.candidate]]
+arm = "mcp"
+name = "list"
+calls = [{ tool = "list_workspaces", args = {} }]
 
 [[question]]
 id = "changed-small"

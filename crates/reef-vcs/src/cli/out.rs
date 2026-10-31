@@ -1,8 +1,13 @@
-//! Output rules (README, CLI). JSON (`-o json`, or stdout not a terminal):
-//! exactly one JSON value on stdout per command, an object or, for lists,
-//! an array, and on failure `{"error": {"kind", "reason"?, "message",
-//! "hint"?, "next"?, "metadata"?}}`. Text (`-o text`, or a terminal): `key: value` blocks and
-//! aligned columns. Errors always go to stderr as `error: <chain>`,
+//! Output rules (README, CLI). JSON (`-o json`): exactly one JSON value on
+//! stdout per command, an object or, for lists, an array, and on failure
+//! `{"error": {"kind", "reason"?, "message", "hint"?, "next"?,
+//! "metadata"?}}`. Brief (`-o brief`, or stdout not a terminal; ADR 0045):
+//! the same value, compact, a top-level array one element per line, and
+//! for the commands with a view in `reef_client::brief` (`ws list`,
+//! `status`, `diff`) only the keys an agent acts on: keys are only left out,
+//! never renamed or changed; zero values are left out; and each view drops
+//! the keys its type lists. Text (`-o text`, or a
+//! terminal): `key: value` blocks and aligned columns. Errors always go to stderr as `error: <chain>`,
 //! followed by `hint: <sentence>` and `next: <command>` when the error has
 //! advice (ADR 0025); notes such as `released <id>` go to stderr in text
 //! mode only, and `-q` silences them.
@@ -25,8 +30,11 @@ pub(crate) enum Output {
     // would list the values in every subcommand's `--help`.)
     #[value(alias = "toml")]
     Text,
-    // One JSON value per command.
+    // One JSON value per command, every field.
     Json,
+    // The JSON, compact, and for some commands only the keys an agent
+    // acts on (ADR 0045).
+    Brief,
 }
 
 /// Where a command's results go, and in what form.
@@ -48,13 +56,13 @@ pub(crate) trait TextRow {
 }
 
 impl Out {
-    /// `flag` if given, else JSON unless stdout is a terminal.
+    /// `flag` if given, else brief JSON unless stdout is a terminal.
     pub(crate) fn detect(flag: Option<Output>, quiet: bool) -> Self {
         let mode = flag.unwrap_or_else(|| {
             if io::stdout().is_terminal() {
                 Output::Text
             } else {
-                Output::Json
+                Output::Brief
             }
         });
         Self { mode, quiet }
@@ -65,11 +73,30 @@ impl Out {
         self.mode
     }
 
+    /// Whether results are JSON, full or brief.
+    pub(crate) fn is_json(&self) -> bool {
+        self.mode != Output::Text
+    }
+
     /// A single result.
     pub(crate) fn object<T: Serialize + TextRender>(&self, value: &T) -> Result<(), CliError> {
+        self.object_with(value, |value| value)
+    }
+
+    /// A single result, as `brief(value)` in brief mode.
+    pub(crate) fn object_with<'a, T, B>(
+        &self,
+        value: &'a T,
+        brief: impl FnOnce(&'a T) -> B,
+    ) -> Result<(), CliError>
+    where
+        T: Serialize + TextRender,
+        B: Serialize,
+    {
         let mut buffer = Vec::new();
         match self.mode {
             Output::Json => json_into(&mut buffer, value),
+            Output::Brief => compact_into(&mut buffer, &brief(value)),
             Output::Text => value.render(&mut buffer).map_err(CliError::Stdout)?,
         }
         self.raw(&buffer)
@@ -77,9 +104,24 @@ impl Out {
 
     /// A list: a JSON array, or a header line and one aligned row per value.
     pub(crate) fn list<T: Serialize + TextRow>(&self, values: &[T]) -> Result<(), CliError> {
+        self.list_with(values, <[T]>::iter)
+    }
+
+    /// A list, as the values `brief(values)` yields in brief mode.
+    pub(crate) fn list_with<'a, T, B, I>(
+        &self,
+        values: &'a [T],
+        brief: impl FnOnce(&'a [T]) -> I,
+    ) -> Result<(), CliError>
+    where
+        T: Serialize + TextRow,
+        B: Serialize,
+        I: IntoIterator<Item = B>,
+    {
         let mut buffer = Vec::new();
         match self.mode {
             Output::Json => json_into(&mut buffer, &values),
+            Output::Brief => lines_into(&mut buffer, brief(values)),
             Output::Text => {
                 let rows: Vec<Vec<String>> = values.iter().map(TextRow::row).collect();
                 table(&mut buffer, T::HEADER, &rows);
@@ -97,11 +139,7 @@ impl Out {
     ) -> Result<bool, CliError> {
         let mut buffer = Vec::new();
         match self.mode {
-            Output::Json => {
-                if serde_json::to_writer(&mut buffer, value).is_ok() {
-                    buffer.push(b'\n');
-                }
-            }
+            Output::Json | Output::Brief => compact_into(&mut buffer, value),
             Output::Text => value.render(&mut buffer).map_err(CliError::Stdout)?,
         }
         self.raw_open(&buffer)
@@ -110,16 +148,11 @@ impl Out {
     /// A result that has no text form beyond a note: `value` on stdout in
     /// JSON mode, `note` on stderr in text mode.
     pub(crate) fn done<T: Serialize>(&self, value: &T, note: &str) -> Result<(), CliError> {
-        match self.mode {
-            Output::Json => {
-                let mut buffer = Vec::new();
-                json_into(&mut buffer, value);
-                self.raw(&buffer)
-            }
-            Output::Text => {
-                self.note(note);
-                Ok(())
-            }
+        if self.is_json() {
+            self.json_only(value)
+        } else {
+            self.note(note);
+            Ok(())
         }
     }
 
@@ -155,11 +188,11 @@ impl Out {
     /// A JSON value on stdout in JSON mode; nothing in text mode, where
     /// stdout belongs to something else (`ws run`'s command).
     pub(crate) fn json_only<T: Serialize>(&self, value: &T) -> Result<(), CliError> {
-        if self.mode != Output::Json {
+        if !self.is_json() {
             return Ok(());
         }
         let mut buffer = Vec::new();
-        json_into(&mut buffer, value);
+        self.json_into(&mut buffer, value);
         self.raw(&buffer)
     }
 
@@ -171,7 +204,7 @@ impl Out {
         if self.quiet {
             return;
         }
-        if stderr || self.mode == Output::Json {
+        if stderr || self.is_json() {
             eprintln!("{line}");
         } else {
             let mut text = line.to_owned();
@@ -207,7 +240,7 @@ impl Out {
                 self.error_line(&format!("next: {}", shell_line(&advice.next)));
             }
         }
-        if self.mode == Output::Json {
+        if self.is_json() {
             self.print_error(error_object(error));
         }
     }
@@ -229,7 +262,7 @@ impl Out {
             self.error_line(&format!("hint: {}", fix.hint));
             self.error_line(&format!("next: {}", shell_line(&fix.next)));
         }
-        if self.mode == Output::Json {
+        if self.is_json() {
             let advice = fix.cloned().or_else(|| usage.map(Advice::hint));
             self.print_error(object(
                 "invalid_argument",
@@ -241,9 +274,18 @@ impl Out {
         }
     }
 
+    /// `value` as this mode writes JSON: pretty, or compact when brief.
+    fn json_into<T: Serialize + ?Sized>(&self, buffer: &mut Vec<u8>, value: &T) {
+        if self.mode == Output::Brief {
+            compact_into(buffer, value);
+        } else {
+            json_into(buffer, value);
+        }
+    }
+
     fn print_error(&self, error: ErrorObject) {
         let mut buffer = Vec::new();
-        json_into(&mut buffer, &ErrorDocument { error });
+        self.json_into(&mut buffer, &ErrorDocument { error });
         // Already failing; a closed stdout changes nothing.
         let _ = self.raw(&buffer);
     }
@@ -285,6 +327,32 @@ fn json_into<T: Serialize + ?Sized>(buffer: &mut Vec<u8>, value: &T) {
     if serde_json::to_writer_pretty(&mut *buffer, value).is_ok() {
         buffer.push(b'\n');
     }
+}
+
+fn compact_into<T: Serialize + ?Sized>(buffer: &mut Vec<u8>, value: &T) {
+    if serde_json::to_writer(&mut *buffer, value).is_ok() {
+        buffer.push(b'\n');
+    }
+}
+
+/// A brief list: `[`, one compact element per line, `]`; `[]` when empty.
+fn lines_into<B: Serialize>(buffer: &mut Vec<u8>, values: impl IntoIterator<Item = B>) {
+    let mut values = values.into_iter().peekable();
+    if values.peek().is_none() {
+        buffer.extend_from_slice(b"[]\n");
+        return;
+    }
+    buffer.extend_from_slice(b"[\n");
+    while let Some(value) = values.next() {
+        // As in `json_into`: output types always serialize.
+        let _ = serde_json::to_writer(&mut *buffer, &value);
+        buffer.extend_from_slice(if values.peek().is_some() {
+            b",\n"
+        } else {
+            b"\n"
+        });
+    }
+    buffer.extend_from_slice(b"]\n");
 }
 
 /// `rows` under `header`, each column padded to its widest cell with
@@ -345,6 +413,8 @@ pub(crate) fn block(w: &mut dyn Write, pairs: &[(&str, String)]) -> io::Result<(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -362,6 +432,27 @@ mod tests {
             String::from_utf8(buffer).unwrap(),
             "ID    STATE   PATH\nabcd  active  /ws/1\nef            /ws/22\n"
         );
+    }
+
+    #[test]
+    fn brief_lists_one_compact_element_per_line() {
+        let mut buffer = Vec::new();
+        lines_into(&mut buffer, [json!({"a": 1}), json!({"b": [1, 2]})]);
+        assert_eq!(
+            String::from_utf8(buffer).unwrap(),
+            "[\n{\"a\":1},\n{\"b\":[1,2]}\n]\n"
+        );
+        let mut buffer = Vec::new();
+        lines_into(&mut buffer, Vec::<serde_json::Value>::new());
+        assert_eq!(String::from_utf8(buffer).unwrap(), "[]\n");
+        let mut buffer = Vec::new();
+        compact_into(&mut buffer, &json!({"a": {"b": 1}}));
+        assert_eq!(String::from_utf8(buffer).unwrap(), "{\"a\":{\"b\":1}}\n");
+        // What a full list parses as, a brief one does too.
+        let mut buffer = Vec::new();
+        lines_into(&mut buffer, [1, 2, 3]);
+        let parsed: Vec<u32> = serde_json::from_slice(&buffer).unwrap();
+        assert_eq!(parsed, [1, 2, 3]);
     }
 
     #[test]

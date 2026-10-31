@@ -106,6 +106,7 @@ impl TextRow for Workspace {
         "ID",
         "STATE",
         "CHANGE",
+        "FILES",
         "OWNER",
         "LEASE",
         "BACKEND",
@@ -118,6 +119,8 @@ impl TextRow for Workspace {
             self.id.clone(),
             self.state.clone(),
             short_change(self),
+            self.changed_file_count
+                .map_or_else(|| "-".to_owned(), |count| count.to_string()),
             truncate(&self.owner, NAME_WIDTH),
             lease_text(self.lease.as_ref(), now_ms()),
             self.backend.clone(),

@@ -261,6 +261,7 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             local_snapshot_count: view.local_snapshot_count,
             stores: view.stores.iter().map(v1::MountedStore::from).collect(),
             watch_state: watch_state.into(),
+            changed_file_count: None,
         }
     }
 }

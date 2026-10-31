@@ -9,6 +9,7 @@ use reef_api::v1::{
     CreateWorkspaceRequest, ListWorkspacesRequest, WorkspaceState, create_workspace_request,
 };
 use reef_client::ROOT_CHECKOUT;
+use reef_client::brief;
 use reef_client::default_owner;
 use reef_client::json::{Created, GcReport, Inspected, Lease, Released, Snapshotted, Workspace};
 use reef_error::{Advice, ErrorKind};
@@ -34,7 +35,7 @@ enum WsCommand {
         after_help = "Example: cd \"$(reef ws create -o text --purpose 'fix the parser')\""
     )]
     Create(CreateArgs),
-    /// List active workspaces, newest first.
+    /// List active workspaces, newest first, with how many files each changed.
     #[command(visible_alias = "ls")]
     List {
         /// Only this repository's (id, id prefix, or path).
@@ -212,6 +213,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                 ctx.client.list_workspaces(ListWorkspacesRequest {
                     repo,
                     states: states.clone(),
+                    changed_file_counts: true,
                     ..ListWorkspacesRequest::default()
                 })
             };
@@ -228,7 +230,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                 ));
             }
             let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
-            ctx.out.list(&listed)
+            ctx.out.list_with(&listed, brief::workspaces)
         }
         WsCommand::Inspect {
             workspace,

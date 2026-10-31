@@ -36,9 +36,15 @@ impl Args {
 
 fn show(global: &Global, out: &Out) -> Result<(), CliError> {
     let mut args = vec!["config".into(), "show".into()];
-    if out.mode() == Output::Json {
+    if out.is_json() {
         args.push("--json".into());
     }
     let text = helper::run(global, &args)?;
+    if out.mode() == Output::Brief {
+        // The helper prints its JSON pretty; brief is compact.
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&text) {
+            return out.json_only(&value);
+        }
+    }
     out.raw(&text)
 }
