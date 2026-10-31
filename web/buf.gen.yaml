@@ -1,0 +1,14 @@
+# TypeScript for the v1 schema, generated at every build and never committed (R2.18,
+# ADR 0047). `npm run gen` runs it with the pinned @bufbuild/buf and the local
+# protoc-gen-es, so it needs no network.
+version: v2
+inputs:
+  # The repository's buf.yaml module: the v1 files (the frozen v0 files are excluded there).
+  - directory: ..
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+      - import_extension=none
+clean: true

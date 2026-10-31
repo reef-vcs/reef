@@ -42,6 +42,10 @@
 //!    later; after the bind, so a failed start leaves no loop running.
 //! 9. Start the GC timer (#95) unless `gc.interval` is `0s`; its first run
 //!    is 10 minutes later at the earliest.
+//! 10. Nothing is bound for the web UI until the first `CreateWebSession`
+//!     (R2.18), which binds `[ui] listen` and registers a shutdown hook
+//!     joining its server. Launch files an earlier run left in `<state>/ui`
+//!     are deleted in step 1, after the lock.
 //!
 //! # Shutdown
 //!
@@ -132,6 +136,8 @@ pub struct AppState {
     pub symbols: Arc<crate::symbols::SymbolIndex>,
     /// The history index (R2.16).
     pub history: Arc<crate::history::History>,
+    /// The web UI's sessions and listener (R2.18).
+    pub web: crate::web::WebUi,
 }
 
 impl fmt::Debug for AppState {
@@ -312,6 +318,7 @@ impl Daemon {
         private_socket_dir(&paths.socket)?;
         warn_if_root();
         let lock = InstanceLock::acquire(&paths.lock)?;
+        crate::web::WebUi::sweep(&paths.ui);
         let db = Arc::new(Db::open(&paths.db)?);
         std::fs::write(&paths.pid, format!("{}\n", std::process::id())).map_err(|source| {
             StartError::PidFile {
@@ -348,6 +355,7 @@ impl Daemon {
         let broker = Arc::new(crate::subscribe::broker::OpBroker::new(&config.subscribe));
         let symbols = crate::symbols::SymbolIndex::new(&config.file.symbols, &config.paths);
         let history = crate::history::History::new(&config.file.history, &config.paths);
+        let config_web = config.web;
         let state = Arc::new(AppState {
             config,
             db,
@@ -367,6 +375,7 @@ impl Daemon {
             quiesce: crate::maintenance::quiesce::Quiescer::default(),
             symbols,
             history,
+            web: crate::web::WebUi::new(config_web),
         });
 
         // Before any snapshot can run (R2.10).
@@ -391,7 +400,7 @@ impl Daemon {
         Arc::clone(&state.events).poll(state.config.subscribe.outside_poll, state.shutdown.clone());
         crate::subscribe::broker::supervise(&state);
         state.presence.start(state.shutdown.clone());
-        let router = server::router(Arc::clone(&state));
+        let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),
             state.shutdown.clone().cancelled_owned(),

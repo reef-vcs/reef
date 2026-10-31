@@ -36,8 +36,10 @@ use reef_api::v1::symbol_service_server::SymbolServiceServer;
 use reef_api::v1::workspace_service_server::WorkspaceServiceServer;
 use tonic::body::Body;
 use tonic::codegen::http;
+use tonic::service::Routes;
 use tonic::transport::Server;
 use tonic::transport::server::Router;
+use tonic_web::GrpcWebLayer;
 use tower::layer::util::{Identity, Stack};
 use tower::{Layer, Service};
 
@@ -57,8 +59,9 @@ use crate::service::status::StatusHandler;
 use crate::service::stores::StoresService;
 use crate::service::symbols::SymbolsHandler;
 use crate::service::workspaces::WorkspacesService;
+use crate::web::gate::{Gate, WebGateLayer};
 
-/// Every service [`router`] registers, by full name.
+/// Every service [`routes`] registers, by full name.
 pub const SERVED: [&str; 14] = [
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
@@ -76,53 +79,72 @@ pub const SERVED: [&str; 14] = [
     "reef.daemon.v0.Daemon",
 ];
 
-/// The daemon's router type.
+/// The socket's router type.
 pub type ApiRouter = Router<Stack<CompatLayer, Identity>>;
 
-/// The router over `state`, one `add_service` per entry of [`SERVED`].
-/// Built here, not generically, so `Daemon::start` stays non-generic over
-/// tonic's layers.
-pub fn router(state: Arc<AppState>) -> ApiRouter {
+/// The web listener's router type (R2.18): the gate, then gRPC-web, then
+/// [`CompatLayer`].
+pub(crate) type WebRouter =
+    Router<Stack<CompatLayer, Stack<GrpcWebLayer, Stack<WebGateLayer, Identity>>>>;
+
+/// Every service over `state`, one `add_service` per entry of [`SERVED`],
+/// for both listeners. Built here, not generically, so `Daemon::start`
+/// stays non-generic over tonic's layers.
+pub fn routes(state: &Arc<AppState>) -> Routes {
+    Routes::new(ChangeServiceServer::new(ChangesHandler::new(Arc::clone(
+        state,
+    ))))
+    .add_service(DaemonServiceServer::new(DaemonStatusService::new(
+        Arc::clone(state),
+    )))
+    .add_service(DiffServiceServer::new(DiffHandler::new(Arc::clone(state))))
+    .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(state))))
+    .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
+        Arc::clone(state),
+    )))
+    .add_service(OperationServiceServer::new(OperationsHandler::new(
+        Arc::clone(state),
+    )))
+    .add_service(PresenceServiceServer::new(PresenceHandler::new(
+        Arc::clone(state),
+    )))
+    .add_service(RepositoryServiceServer::new(RepositoriesService::new(
+        Arc::clone(state),
+    )))
+    .add_service(StatusServiceServer::new(StatusHandler::new(Arc::clone(
+        state,
+    ))))
+    .add_service(StoreServiceServer::new(StoresService::new(Arc::clone(
+        state,
+    ))))
+    .add_service(HistoryServiceServer::new(HistoryHandler::new(Arc::clone(
+        state,
+    ))))
+    .add_service(SymbolServiceServer::new(SymbolsHandler::new(Arc::clone(
+        state,
+    ))))
+    .add_service(WorkspaceServiceServer::new(WorkspacesService::new(
+        Arc::clone(state),
+    )))
+    .add_service(V0DaemonServer::new(V0DaemonService::new(Arc::clone(state))))
+}
+
+/// The socket's router over `state`.
+pub fn router(state: &Arc<AppState>) -> ApiRouter {
     Server::builder()
         .layer(CompatLayer)
-        .add_service(ChangeServiceServer::new(ChangesHandler::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(DaemonServiceServer::new(DaemonStatusService::new(
-            Arc::clone(&state),
-        )))
-        .add_service(DiffServiceServer::new(DiffHandler::new(Arc::clone(&state))))
-        .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
-            Arc::clone(&state),
-        )))
-        .add_service(OperationServiceServer::new(OperationsHandler::new(
-            Arc::clone(&state),
-        )))
-        .add_service(PresenceServiceServer::new(PresenceHandler::new(
-            Arc::clone(&state),
-        )))
-        .add_service(RepositoryServiceServer::new(RepositoriesService::new(
-            Arc::clone(&state),
-        )))
-        .add_service(StatusServiceServer::new(StatusHandler::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(StoreServiceServer::new(StoresService::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(HistoryServiceServer::new(HistoryHandler::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(SymbolServiceServer::new(SymbolsHandler::new(Arc::clone(
-            &state,
-        ))))
-        .add_service(WorkspaceServiceServer::new(WorkspacesService::new(
-            Arc::clone(&state),
-        )))
-        .add_service(V0DaemonServer::new(V0DaemonService::new(state)))
+        .add_routes(routes(state))
+}
+
+/// The web listener's router over `state` (R2.18, ADR 0047): HTTP/1.1 and
+/// HTTP/2, gRPC-web only, behind `gate`.
+pub(crate) fn web_router(state: &Arc<AppState>, gate: Arc<Gate>) -> WebRouter {
+    Server::builder()
+        .accept_http1(true)
+        .layer(WebGateLayer(gate))
+        .layer(GrpcWebLayer::new())
+        .layer(CompatLayer)
+        .add_routes(routes(state))
 }
 
 /// Rewrites a bare `UNIMPLEMENTED` into an answer that names the version

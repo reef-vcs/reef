@@ -58,15 +58,16 @@ use reef_api::v1::{
 };
 use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
-    CollectGarbageResponse, CreateWorkspaceRequest, CreateWorkspaceResponse,
-    ForgetRepositoryRequest, ForgetRepositoryResponse, GetDaemonStatusRequest,
-    GetDaemonStatusResponse, GetRepositoryRequest, GetRepositoryResponse, GetWorkspaceRequest,
-    GetWorkspaceResponse, IfNotJj, ListRepositoriesRequest, ListRepositoriesResponse,
-    ListStoresRequest, ListStoresResponse, ListWorkspacesRequest, ListWorkspacesResponse,
-    MoveWorkspaceRequest, MoveWorkspaceResponse, QuiesceRequest, QuiesceResponse,
-    RegisterRepositoryRequest, RegisterRepositoryResponse, ReleaseWorkspaceRequest,
-    ReleaseWorkspaceResponse, RenewLeaseRequest, RenewLeaseResponse, Repository, ResumeRequest,
-    ResumeResponse, SnapshotWorkspaceRequest, SnapshotWorkspaceResponse, StoreInfo, Workspace,
+    CollectGarbageResponse, CreateWebSessionRequest, CreateWebSessionResponse,
+    CreateWorkspaceRequest, CreateWorkspaceResponse, ForgetRepositoryRequest,
+    ForgetRepositoryResponse, GetDaemonStatusRequest, GetDaemonStatusResponse,
+    GetRepositoryRequest, GetRepositoryResponse, GetWorkspaceRequest, GetWorkspaceResponse,
+    IfNotJj, ListRepositoriesRequest, ListRepositoriesResponse, ListStoresRequest,
+    ListStoresResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveWorkspaceRequest,
+    MoveWorkspaceResponse, QuiesceRequest, QuiesceResponse, RegisterRepositoryRequest,
+    RegisterRepositoryResponse, ReleaseWorkspaceRequest, ReleaseWorkspaceResponse,
+    RenewLeaseRequest, RenewLeaseResponse, Repository, ResumeRequest, ResumeResponse,
+    SnapshotWorkspaceRequest, SnapshotWorkspaceResponse, StoreInfo, Workspace,
 };
 use reef_api::v1::{
     ClearPresenceRequest, ReportPresenceRequest, ReportPresenceResponse, SubscribePresenceRequest,
@@ -407,6 +408,18 @@ impl Client {
         let mut client = DaemonServiceClient::new(self.channel.clone());
         let request = GetDaemonStatusRequest { skip_backends };
         self.call("GetDaemonStatus", client.get_daemon_status(request))
+            .await
+    }
+
+    /// `DaemonService.CreateWebSession` (R2.18): a web UI session, and a
+    /// launch file for a browser if `launch_file`.
+    pub async fn create_web_session(
+        &self,
+        launch_file: bool,
+    ) -> Result<CreateWebSessionResponse, ClientError> {
+        let mut client = DaemonServiceClient::new(self.channel.clone());
+        let request = CreateWebSessionRequest { launch_file };
+        self.call("CreateWebSession", client.create_web_session(request))
             .await
     }
 

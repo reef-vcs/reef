@@ -2506,3 +2506,110 @@ async fn replay_cli() {
     );
     daemon.stop().await;
 }
+
+/// A `BROWSER` that records its arguments, one per line, in `log`.
+fn browser_recorder(dir: &Path, log: &Path) -> PathBuf {
+    let script = dir.join("browser");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> '{}'; done\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+// R2.18 18: `reef ui` opens nothing unless asked, never puts the token on a
+// command line, and reports a disabled or placeholder web UI.
+#[tokio::test(flavor = "multi_thread")]
+async fn ui_command() {
+    let daemon = TestDaemon::start().await;
+    let dir = daemon.state_dir().to_owned();
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("opened");
+    let browser = browser_recorder(tmp.path(), &log);
+
+    // Piped: nothing opened and no credential, but a launch file the
+    // caller can hand to the user.
+    let output = run_in(&daemon, &dir, &["ui", "-o", "json"]).await;
+    assert!(
+        !stdout(&output).contains("#session="),
+        "{}",
+        stdout(&output)
+    );
+    let value = json(&output);
+    let url = value["url"].as_str().unwrap().to_owned();
+    assert!(url.starts_with("http://127.0.0.1:"), "{value}");
+    let launch_path = Path::new(value["launch_path"].as_str().unwrap());
+    assert!(
+        launch_path.starts_with(daemon.state_dir().join("ui")),
+        "{value}"
+    );
+    assert!(launch_path.is_file(), "{value}");
+    assert_eq!(value["opened"], false, "{value}");
+    assert!(value.get("session_url").is_none(), "{value}");
+    // The same small object in every JSON mode.
+    let brief = json(&run_in(&daemon, &dir, &["ui"]).await);
+    assert_eq!(
+        brief.as_object().unwrap().keys().collect::<Vec<_>>(),
+        value.as_object().unwrap().keys().collect::<Vec<_>>()
+    );
+
+    // `--print`: the session URL.
+    let value = ok(&daemon, &dir, &["ui", "--print"]).await;
+    let session_url = value["session_url"].as_str().unwrap();
+    assert!(
+        session_url.starts_with(&format!("{url}#session=")),
+        "{value}"
+    );
+    assert_eq!(value["opened"], false, "{value}");
+    assert!(value["launch_path"].is_null(), "no launch file: {value}");
+
+    // `--open`: the launch file's path, and no URL, on the opener's
+    // command line.
+    let mut command = reef(&daemon, &dir);
+    command.env("BROWSER", &browser);
+    let value = json(&run(command, &["ui", "--open"]).await);
+    assert_eq!(value["opened"], true, "{value}");
+    let launch_path = value["launch_path"].as_str().unwrap();
+    assert!(
+        Path::new(launch_path).starts_with(daemon.state_dir().join("ui")),
+        "{value}"
+    );
+    assert!(value.get("session_url").is_none(), "{value}");
+    let args = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(args, format!("{launch_path}\n"));
+    assert!(!args.contains("http"), "{args}");
+    daemon.stop().await;
+
+    // `[ui] enabled = false`.
+    let daemon = TestDaemon::start_with(|config| config.file.ui.enabled = false).await;
+    let dir = daemon.state_dir().to_owned();
+    let error = err(&daemon, &dir, &["ui"], 5, "WEB_UI_DISABLED").await;
+    assert!(
+        error["hint"].as_str().unwrap().contains("[ui] enabled"),
+        "{error}"
+    );
+    daemon.stop().await;
+
+    // A daemon that embeds only the placeholder: refused, and nothing is
+    // opened even with `--open`.
+    std::fs::remove_file(&log).unwrap();
+    let daemon = TestDaemon::start_with(|config| config.web.assets_built = false).await;
+    let dir = daemon.state_dir().to_owned();
+    let mut command = reef(&daemon, &dir);
+    command.env("BROWSER", &browser);
+    let error = failed(
+        &run(command, &["ui", "--open"]).await,
+        5,
+        "WEB_UI_NOT_BUILT",
+    );
+    let hint = error["hint"].as_str().unwrap();
+    assert!(hint.contains("just web-build"), "{hint}");
+    assert!(hint.contains("releases"), "{hint}");
+    assert!(!log.exists(), "the browser was run");
+    daemon.stop().await;
+}

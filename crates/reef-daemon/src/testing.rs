@@ -59,6 +59,9 @@ impl TestDaemon {
         // No background indexing unless a test asks: timing tests must not
         // share the CPU with a first index (R2.14).
         config.file.symbols.background = false;
+        // Serve the placeholder through the full gate: the web listener's
+        // tests run on builds without the app (R2.18).
+        config.web.assets_built = true;
         configure(&mut config);
         let handle = Daemon::start(config.clone())
             .await

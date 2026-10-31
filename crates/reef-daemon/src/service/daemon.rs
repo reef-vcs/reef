@@ -1,9 +1,13 @@
-//! `reef.api.v1.DaemonService`: the daemon's own status.
+//! `reef.api.v1.DaemonService`: the daemon's own status, and web UI
+//! sessions (R2.18).
 
 use std::sync::Arc;
 
 use reef_api::v1::daemon_service_server::DaemonService;
-use reef_api::v1::{BackendProbe, GetDaemonStatusRequest, GetDaemonStatusResponse};
+use reef_api::v1::{
+    BackendProbe, CreateWebSessionRequest, CreateWebSessionResponse, GetDaemonStatusRequest,
+    GetDaemonStatusResponse,
+};
 use tonic::{Request, Response, Status};
 
 use super::convert::backend;
@@ -96,6 +100,17 @@ impl DaemonService for DaemonStatusService {
         Ok(Response::new(
             daemon_status(&self.state, skip_backends).await?,
         ))
+    }
+
+    async fn create_web_session(
+        &self,
+        request: Request<CreateWebSessionRequest>,
+    ) -> Result<Response<CreateWebSessionResponse>, Status> {
+        let launch_file = request.into_inner().launch_file;
+        crate::web::WebUi::create_session(&self.state, launch_file)
+            .await
+            .map(Response::new)
+            .map_err(status)
     }
 }
 

@@ -58,3 +58,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0044](0044-history-index-and-query-layer.md) | History index and query layer | accepted |
 | [0045](0045-brief-json-by-default.md) | Brief JSON by default | accepted |
 | [0046](0046-replay.md) | Replay | accepted |
+| [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted |

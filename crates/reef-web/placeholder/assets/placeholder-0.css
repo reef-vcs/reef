@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; --text: #1d2026; --surface: #ffffff; }
+@media (prefers-color-scheme: dark) { :root { --text: #e6e8ec; --surface: #14161a; } }
+body { margin: 0; background: var(--surface); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 40rem; margin: 3rem auto; padding: 0 16px; }
+code { font-family: ui-monospace, monospace; }

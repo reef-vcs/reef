@@ -6,7 +6,8 @@
 //! dev-depend on it, `reef-api`, the API schema, depends on no Reef crate
 //! (ADR 0029), and `reef-broker`, the subscription broker the store reuses,
 //! depends on none either and links neither jj-lib nor gRPC (R2.22, ADR
-//! 0038).
+//! 0038). `reef-web`, the web UI's embedded assets, depends on nothing, and
+//! only the daemon links it, so the `reef` binary does not carry them (R2.18).
 
 #![allow(
     clippy::expect_used,
@@ -19,7 +20,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 9] = [
+const MEMBERS: [&str; 10] = [
     "reef-api",
     "reef-broker",
     "reef-client",
@@ -29,11 +30,13 @@ const MEMBERS: [&str; 9] = [
     "reef-symbols",
     "reef-testing",
     "reef-vcs",
+    "reef-web",
 ];
 
 /// What the `reef` binary and the thin client must never link: the daemon,
-/// the jj layer, and what only they need (R2.05).
-const NOT_IN_THE_CLIENT: [&str; 9] = [
+/// the jj layer, and what only they need (R2.05), including the web UI's
+/// assets (R2.18).
+const NOT_IN_THE_CLIENT: [&str; 10] = [
     "jj-lib",
     "reef-lib",
     "reef-daemon",
@@ -43,6 +46,7 @@ const NOT_IN_THE_CLIENT: [&str; 9] = [
     "watchman_client",
     "reef-symbols",
     "tree-sitter",
+    "reef-web",
 ];
 
 fn metadata() -> Value {
@@ -117,7 +121,7 @@ const NOT_IN_THE_BROKER: [&str; 6] = ["jj-lib", "tonic", "prost", "rusqlite", "g
 const NOT_IN_SYMBOLS: [&str; 6] = ["jj-lib", "tonic", "rusqlite", "gix", "hyper", "tokio"];
 
 #[test]
-fn workspace_members_are_the_nine_crates() {
+fn workspace_members_are_the_ten_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -177,6 +181,13 @@ fn crate_edges() {
     assert!(
         reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-symbols".to_owned()),
         "the daemon extracts symbols"
+    );
+    // R2.18: the assets crate depends on nothing at all, and the daemon
+    // embeds it.
+    assert_eq!(dependencies(&metadata, "reef-web"), Vec::new());
+    assert!(
+        reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-web".to_owned()),
+        "the daemon serves the web UI's assets"
     );
 }
 

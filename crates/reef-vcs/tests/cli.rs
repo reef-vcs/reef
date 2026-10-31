@@ -1677,6 +1677,11 @@ async fn every_command_completes_with_stdin_closed() {
         if command == ["op", "watch"] || command == ["presence", "watch"] {
             command.extend(["--for".to_owned(), "1".to_owned()]);
         }
+        // `ui` never opens a browser here (stdout is not a terminal), and
+        // `--print` asks for no launch file either.
+        if command == ["ui"] {
+            command.push("--print".to_owned());
+        }
         if command.first().is_some_and(|noun| noun == "daemon")
             && command.get(1).is_some_and(|verb| verb != "status")
         {
