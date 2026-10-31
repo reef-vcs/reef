@@ -89,7 +89,7 @@ protox = "0.10"
 prost-reflect = "0.16"
 tonic-types = "0.14"
 # Page tokens (R2.01): opaque base64url strings.
-base64 = "0.22"
+base64 = "0.23"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"                 # CancellationToken for shutdown
 hyper-util = { version = "0.1", features = ["tokio"] }
