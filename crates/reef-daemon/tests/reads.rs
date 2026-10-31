@@ -150,7 +150,12 @@ async fn status_snapshots_first() {
 
     let status = client.get_status(status_request(&ws)).await.unwrap();
     let found = status.workspace_status.as_ref().unwrap();
-    assert_eq!(found.source(), StatusSource::Snapshot);
+    // The index (R2.23); on Linux a walk until the create's background
+    // attach is up.
+    assert!(
+        matches!(found.source(), StatusSource::Index | StatusSource::Walk),
+        "{found:?}"
+    );
     let snapshot = found.snapshot.as_ref().expect("a snapshot was recorded");
     assert_eq!(snapshot.kind(), OperationKind::Snapshot);
     assert_eq!(snapshot.snapshot_kind(), SnapshotKind::Explicit);

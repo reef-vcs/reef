@@ -9,8 +9,10 @@
 //! - **notify** ([`notify::NotifyWatcher`]): one debounced watcher for every
 //!   notify workspace. Its events are mapped back to workspaces by root
 //!   (`Demux`): workspace roots never nest, so the root a path falls under
-//!   is unambiguous. The scheduler keeps the paths, and a watcher snapshot
-//!   scans only them and everything under them (R1.30, ADR 0026).
+//!   is unambiguous. A tap on notify's own thread journals the paths before
+//!   the debouncer ([`crate::snapshot::journal`], R2.23), and a watcher
+//!   snapshot or a read scans only them and everything under them (R1.30,
+//!   ADR 0026). Each workspace's sync directory is watched with its root.
 //! - **watchman** (`watchman::WatchmanWatcher`, with the `watchman`
 //!   feature): a Watchman subscription per workspace, and scans narrowed by
 //!   jj's own Watchman query (ADR 0023). For repositories at or above
@@ -49,6 +51,7 @@ use tokio::sync::mpsc;
 use crate::config::{WatcherBackend, WatcherSection};
 pub use crate::model::WatcherKind;
 use crate::model::WorkspaceId;
+use crate::snapshot::Journals;
 
 /// Changes under one workspace, after debouncing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -360,6 +363,7 @@ pub fn new_watcher(
     health: HealthHook,
     creates: Arc<CreateClock>,
     gate: Arc<AttachGate>,
+    journals: Arc<Journals>,
 ) -> Result<Box<dyn Watcher>, WatchError> {
     match kind {
         WatcherKind::Notify => {
@@ -370,11 +374,12 @@ pub fn new_watcher(
                 health,
                 config.notify_attach_background && cfg!(target_os = "linux"),
                 gate,
+                journals,
             )?))
         }
         #[cfg(feature = "watchman")]
         WatcherKind::Watchman => {
-            drop(gate);
+            drop((gate, journals));
             Ok(Box::new(watchman::WatchmanWatcher::new(
                 config.debounce,
                 events,
@@ -388,7 +393,7 @@ pub fn new_watcher(
         }
         #[cfg(not(feature = "watchman"))]
         WatcherKind::Watchman => {
-            drop((events, health, creates, gate));
+            drop((events, health, creates, gate, journals));
             Err(WatchError::FeatureDisabled("watchman"))
         }
     }
@@ -432,25 +437,53 @@ pub fn skip_prefixes(root: &Path, excludes: &[String], mounts: &[String]) -> Vec
         .collect()
 }
 
-/// Maps paths to the workspace whose root they fall under.
+/// Maps paths to the workspace whose root they fall under, and cookies
+/// to the workspace whose sync directory holds them (R2.23).
 #[derive(Debug, Default)]
 pub(crate) struct Demux {
     /// Root → (workspace, skipped prefixes).
     roots: BTreeMap<PathBuf, (WorkspaceId, Vec<PathBuf>)>,
+    /// Sync directory → workspace.
+    syncs: BTreeMap<PathBuf, WorkspaceId>,
 }
 
 impl Demux {
-    /// Routes paths under `root` to `workspace`, replacing any root the
-    /// workspace had. Returns the replaced root.
+    /// Routes paths under `root` to `workspace`, and cookies in `sync` to
+    /// it, replacing any root the workspace had. Returns the replaced root.
     pub(crate) fn insert(
         &mut self,
         workspace: WorkspaceId,
         root: PathBuf,
         skip: Vec<PathBuf>,
+        sync: Option<PathBuf>,
     ) -> Option<PathBuf> {
         let old = self.remove(workspace);
         self.roots.insert(root, (workspace, skip));
+        if let Some(sync) = sync {
+            self.syncs.insert(sync, workspace);
+        }
         old
+    }
+
+    /// The workspace whose sync directory `path` is directly in, with the
+    /// cookie's name.
+    pub(crate) fn route_cookie<'a>(&self, path: &'a Path) -> Option<(WorkspaceId, &'a str)> {
+        let workspace = self.syncs.get(path.parent()?)?;
+        Some((*workspace, path.file_name()?.to_str()?))
+    }
+
+    /// The sync directory routed with `root`, if any.
+    pub(crate) fn sync_of(&self, root: &Path) -> Option<PathBuf> {
+        let (workspace, _) = self.roots.get(root)?;
+        self.syncs
+            .iter()
+            .find(|(_, id)| *id == workspace)
+            .map(|(sync, _)| sync.clone())
+    }
+
+    /// Whether `path` is a sync directory itself.
+    pub(crate) fn is_sync_dir(&self, path: &Path) -> bool {
+        self.syncs.contains_key(path)
     }
 
     /// Whether `workspace` is routed.
@@ -460,6 +493,7 @@ impl Demux {
 
     /// Stops routing to `workspace`; returns its root.
     pub(crate) fn remove(&mut self, workspace: WorkspaceId) -> Option<PathBuf> {
+        self.syncs.retain(|_, id| *id != workspace);
         let root = self
             .roots
             .iter()
@@ -467,6 +501,15 @@ impl Demux {
             .map(|(root, _)| root.clone())?;
         self.roots.remove(&root);
         Some(root)
+    }
+
+    /// The workspace whose root holds `path`, skipped prefixes included.
+    pub(crate) fn route_root(&self, path: &Path) -> Option<WorkspaceId> {
+        let (root, (workspace, _)) = self
+            .roots
+            .range::<Path, _>((Bound::Unbounded, Bound::Included(path)))
+            .next_back()?;
+        path.starts_with(root).then_some(*workspace)
     }
 
     /// The workspace `path` belongs to, or `None` if it is under no root or
@@ -521,13 +564,20 @@ mod tests {
     #[test]
     fn routes_to_the_containing_root() {
         let mut demux = Demux::default();
-        demux.insert(id(1), PathBuf::from("/s/ws/a1"), vec![]);
-        demux.insert(id(2), PathBuf::from("/s/ws/a10"), vec![]);
+        demux.insert(id(1), PathBuf::from("/s/ws/a1"), vec![], None);
+        demux.insert(id(2), PathBuf::from("/s/ws/a10"), vec![], None);
         demux.insert(
             id(3),
             PathBuf::from("/s/ws/b"),
             vec![PathBuf::from("/s/ws/b/target")],
+            Some(PathBuf::from("/s/sync/b")),
         );
+        assert_eq!(
+            demux.route_cookie(Path::new("/s/sync/b/1-2")),
+            Some((id(3), "1-2"))
+        );
+        assert_eq!(demux.route_cookie(Path::new("/s/sync/b/x/1-2")), None);
+        assert!(demux.is_sync_dir(Path::new("/s/sync/b")));
         assert_eq!(demux.route(Path::new("/s/ws/a1/x/y.rs")), Some(id(1)));
         assert_eq!(demux.route(Path::new("/s/ws/a1")), Some(id(1)));
         assert_eq!(demux.route(Path::new("/s/ws/a10/z")), Some(id(2)));
@@ -546,9 +596,9 @@ mod tests {
     #[test]
     fn insert_replaces_and_remove_forgets() {
         let mut demux = Demux::default();
-        demux.insert(id(1), PathBuf::from("/a"), vec![]);
+        demux.insert(id(1), PathBuf::from("/a"), vec![], None);
         assert_eq!(
-            demux.insert(id(1), PathBuf::from("/b"), vec![]),
+            demux.insert(id(1), PathBuf::from("/b"), vec![], None),
             Some(PathBuf::from("/a"))
         );
         assert_eq!(demux.len(), 1);
@@ -561,8 +611,8 @@ mod tests {
     #[test]
     fn group_by_workspace() {
         let mut demux = Demux::default();
-        demux.insert(id(1), PathBuf::from("/a"), vec![]);
-        demux.insert(id(2), PathBuf::from("/b"), vec![]);
+        demux.insert(id(1), PathBuf::from("/a"), vec![], None);
+        demux.insert(id(2), PathBuf::from("/b"), vec![], None);
         let paths = [
             Path::new("/a/1"),
             Path::new("/b/1"),

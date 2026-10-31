@@ -528,3 +528,25 @@ The worker kept up with the edits, one change at a time, so nothing was pending 
 A page re-matches the whole diff's definitions, and that costs less than the 200 ms over a plain page that would call for a cache between pages (the brief's open question 3), so there is none.
 
 `list_name` on `large` missed its target. Reading only the matching rows took it from 1.29 s to 402 ms. What remains is the tree check: each of the 4,973 hits' paths is looked up in the tree one at a time. Call-site lookups filter by kind and language family before that check, so they make far fewer lookups. R2.16 then moved the filters and the cursor into SQL, which took it to 177 to 187 ms (see "Symbols (R2.14)").
+
+## Status index (R2.23)
+
+`crates/reef-daemon/benches/status.rs` measures a workspace's `GetStatus` through the daemon, from the incremental status index and from a walk ([ADR 0048](adr/0048-status-from-the-watchers-journal.md)), one notify workspace on the synthetic preset. Release build on the M2 Max, run on 2026-10-31. The `walk` rows mark the journal `events-lost` before each call, so the read's snapshot scans every tracked file; an `index_*` call that answers other than `index` panics. Before R2.23 every status walked: 182 ms on `large` through `reef status -o json`, process start included.
+
+| `status/<preset>/…` | `medium` (10,014 files) | `large` (100,014 files) | Target, `large` |
+| --- | ---: | ---: | --- |
+| `walk`: unchanged tree | 18.4 ms | 161.4 ms | recorded |
+| `walk_one_edit`: after one file appended | 55.7 ms | 206.9 ms | recorded |
+| `index_clean`: unchanged, no snapshot | 12.2 ms | **12.2 ms** | < 15 ms, ≥ 10× `walk` (13.2×) |
+| `index_one_edit`: one file appended just before the call | 60.9 ms | **87.5 ms** | < 100 ms, ≥ 2× `walk_one_edit` (2.4×) |
+| `index_100_edits`: 100 files appended before the call | 73.6 ms | **91.9 ms** | < 250 ms |
+| `skip_snapshot`: the floor | 5.9 ms | 5.3 ms | recorded |
+
+- **Clean costs the same at both sizes**: the sync's cookie round trip and the read, about 7 ms over the floor, whatever the tree.
+- **An edit costs its snapshot**: recording the commit, the operation and the working-copy state. On `medium` a walk is cheap enough that the index answer with one edit is no faster; on `large` it is 2.4 times faster, and the gap grows with the tree and with load (below).
+- Under the load test's 200 `large` workspaces, every status after a write answered from the index, at p95 446 ms ([load tests](load-tests.md), R2.23), where a loaded full scan took 11.3 s (R1.30).
+
+```sh
+REEF_BENCH_PRESET=large cargo bench -p reef-daemon --features testing --bench status
+```
+

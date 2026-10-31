@@ -611,7 +611,8 @@ async fn unwatched_workspace_is_not_narrowed() {
     assert!(!outcome.narrowed, "{outcome:?}");
 }
 
-// 14
+// 14; since R2.23 `Inspect` with `snapshot_first` snapshots as a read
+// does, narrowed to the journal.
 #[tokio::test(flavor = "multi_thread")]
 async fn explicit_and_final_snapshots_are_full() {
     let (daemon, repo) = fixture().await;
@@ -648,7 +649,14 @@ async fn explicit_and_final_snapshots_are_full() {
         .unwrap();
     let all = outcomes.all();
     assert_eq!(all.len(), 3, "{all:#?}");
-    assert!(all.iter().all(|outcome| !outcome.narrowed), "{all:#?}");
+    assert!(!all[0].narrowed && !all[2].narrowed, "{all:#?}");
     assert!(all.iter().all(|outcome| outcome.changed), "{all:#?}");
     assert_eq!(all[2].kind, SnapshotKind::Final, "{all:#?}");
+    if cfg!(target_os = "macos") {
+        // On Linux the create's attach may still be pending: a walk.
+        assert!(
+            all[1].narrowed,
+            "the inspect's read is the index's: {all:#?}"
+        );
+    }
 }

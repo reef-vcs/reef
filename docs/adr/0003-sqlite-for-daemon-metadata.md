@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-15
 - Ticket: R0.07
-- Amended by: [0042](0042-symbol-index.md), [0044](0044-history-index-and-query-layer.md)
+- Amended by: [0042](0042-symbol-index.md), [0044](0044-history-index-and-query-layer.md), [0048](0048-status-from-the-watchers-journal.md)
 
 Backfilled from design.md; decision predates this record.
 

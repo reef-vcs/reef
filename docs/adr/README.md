@@ -59,3 +59,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0045](0045-brief-json-by-default.md) | Brief JSON by default | accepted |
 | [0046](0046-replay.md) | Replay | accepted |
 | [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted |
+| [0048](0048-status-from-the-watchers-journal.md) | Status from the watcher's journal | accepted |

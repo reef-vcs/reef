@@ -131,6 +131,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["enabled", "retention", "max_size", "backfill_operations"],
     ),
     ("ui", &["enabled", "listen"]),
+    ("status_index", &["enabled", "sync_timeout"]),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -198,6 +199,8 @@ pub struct FileConfig {
     pub history: HistorySection,
     /// `[ui]`.
     pub ui: UiSection,
+    /// `[status_index]`.
+    pub status_index: StatusIndexSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -334,15 +337,17 @@ pub struct WatcherSection {
     /// restart, an aborted release, or a move). Default 60 s.
     #[serde(with = "duration")]
     pub fallback_interval: Duration,
-    /// The same for a workspace whose watch is working, which reports every
-    /// change (an overflow marks every workspace changed): a full scan, the
-    /// backstop for a change a narrowed snapshot missed
-    /// ([`WatcherSection::narrowed_max_paths`], R1.30) and for events
-    /// dropped while the scheduler was behind. The scheduler
-    /// raises it to [`WatcherSection::fallback_interval`] when it is
-    /// shorter, so a long `fallback_interval` alone turns both timers down.
-    /// Default 10 minutes; at 60 s, the scans of 200 idle 100,000-file
-    /// workspaces outran the scan pool (R1.23).
+    /// The longest a watched workspace goes without a full scan, busy or
+    /// idle (R2.23): the backstop for a change no event named, which a
+    /// narrowed snapshot or a read from the status index would not see
+    /// ([`WatcherSection::narrowed_max_paths`], R1.30), and where such
+    /// misses are found and counted. A notify workspace with events gets
+    /// its next scheduled snapshot full once its last full scan is older
+    /// than this. The scheduler raises it to
+    /// [`WatcherSection::fallback_interval`] when it is shorter, so a long
+    /// `fallback_interval` alone turns both timers down. Default 10
+    /// minutes; at 60 s, the scans of 200 idle 100,000-file workspaces
+    /// outran the scan pool (R1.23).
     #[serde(with = "duration")]
     pub watched_fallback_interval: Duration,
     /// A watcher snapshot of a notify workspace scans only the paths
@@ -629,6 +634,32 @@ impl Default for HistorySection {
             retention: Duration::from_hours(90 * 24),
             max_size: ByteSize(512 << 20),
             backfill_operations: 100_000,
+        }
+    }
+}
+
+/// `[status_index]`: the incremental status index (R2.23, ADR 0048).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StatusIndexSection {
+    /// Reads that snapshot a workspace first answer from the index: no
+    /// snapshot when nothing changed, a snapshot of the changed paths
+    /// otherwise. False: they snapshot with a full scan, as before R2.23
+    /// (source `snapshot`); the journal still narrows watcher snapshots.
+    /// Default true.
+    pub enabled: bool,
+    /// How long a read waits for the watcher to confirm it has seen every
+    /// earlier write before it walks the tree instead. Default 1 s; from
+    /// 10 ms to 60 s.
+    #[serde(with = "duration")]
+    pub sync_timeout: Duration,
+}
+
+impl Default for StatusIndexSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sync_timeout: Duration::from_secs(1),
         }
     }
 }
@@ -1358,6 +1389,13 @@ impl Config {
                     ("listen", s(&f.ui.listen)),
                 ],
             ),
+            (
+                "status_index",
+                vec![
+                    ("enabled", f.status_index.enabled.to_string()),
+                    ("sync_timeout", d(f.status_index.sync_timeout)),
+                ],
+            ),
         ]
     }
 }
@@ -1623,6 +1661,12 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
                 "{:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and a remote listener is R2.08's",
                 file.ui.listen
             ),
+        ),
+        (
+            (Duration::from_millis(10)..=Duration::from_mins(1))
+                .contains(&file.status_index.sync_timeout),
+            "status_index.sync_timeout",
+            "must be from 10ms to 60s".to_owned(),
         ),
         (
             file.backup.sqlite_pages_per_step >= 1,

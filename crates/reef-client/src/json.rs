@@ -891,6 +891,27 @@ pub fn status_source_name(source: i32) -> Option<&'static str> {
     Some(name)
 }
 
+/// Why a status walked the tree instead of reading the index (R2.23):
+/// `not-watched`, `watch-restarted`, `events-lost`, `too-broad`,
+/// `snapshot-failed`, `not-synced`, `stale-working-copy`,
+/// `path-not-narrowable`, or `covered-by-full-scan`; `None` when unset.
+pub fn status_walk_reason_name(reason: i32) -> Option<&'static str> {
+    let name = match v1::StatusWalkReason::try_from(reason) {
+        Ok(v1::StatusWalkReason::Unspecified) => return None,
+        Ok(v1::StatusWalkReason::NotWatched) => "not-watched",
+        Ok(v1::StatusWalkReason::WatchRestarted) => "watch-restarted",
+        Ok(v1::StatusWalkReason::EventsLost) => "events-lost",
+        Ok(v1::StatusWalkReason::TooBroad) => "too-broad",
+        Ok(v1::StatusWalkReason::SnapshotFailed) => "snapshot-failed",
+        Ok(v1::StatusWalkReason::NotSynced) => "not-synced",
+        Ok(v1::StatusWalkReason::StaleWorkingCopy) => "stale-working-copy",
+        Ok(v1::StatusWalkReason::PathNotNarrowable) => "path-not-narrowable",
+        Ok(v1::StatusWalkReason::CoveredByFullScan) => "covered-by-full-scan",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
 /// A log graph edge's name: `direct`, `indirect`, or `missing`; `None`
 /// when unset.
 pub fn graph_edge_kind_name(kind: i32) -> Option<&'static str> {
@@ -1664,6 +1685,9 @@ pub struct WorkspaceStatus {
     pub conflicted_path_count: u32,
     /// `snapshot`, `index`, `walk`, or `last-snapshot`.
     pub source: Option<String>,
+    /// Why the tree was walked, with `walk` (R2.23); left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub walk_reason: Option<String>,
     /// The snapshot the status took, if it recorded one.
     pub snapshot: Option<Operation>,
 }
@@ -1696,6 +1720,7 @@ impl From<&v1::GetStatusResponse> for RepoStatus {
                 conflicted_paths: ws.conflicted_paths.clone(),
                 conflicted_path_count: ws.conflicted_path_count,
                 source: name(status_source_name(ws.source)),
+                walk_reason: name(status_walk_reason_name(ws.walk_reason)),
                 snapshot: operation(ws.snapshot.as_ref()),
             }),
         }
@@ -2088,7 +2113,7 @@ mod tests {
     #[test]
     fn vcs_enums_print_their_names() {
         type Name = fn(i32) -> Option<&'static str>;
-        let tables: [(Name, &[&str]); 7] = [
+        let tables: [(Name, &[&str]); 8] = [
             (
                 entry_type_name,
                 &[
@@ -2107,6 +2132,20 @@ mod tests {
             (
                 status_source_name,
                 &["snapshot", "index", "walk", "last-snapshot"],
+            ),
+            (
+                status_walk_reason_name,
+                &[
+                    "not-watched",
+                    "watch-restarted",
+                    "events-lost",
+                    "too-broad",
+                    "snapshot-failed",
+                    "not-synced",
+                    "stale-working-copy",
+                    "path-not-narrowable",
+                    "covered-by-full-scan",
+                ],
             ),
             (graph_edge_kind_name, &["direct", "indirect", "missing"]),
             (

@@ -121,7 +121,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - Symbol-level diffs work for Python, TypeScript, Go, and Rust.
 - A local web UI shows the smartlog, workspaces, and fleet panel live.
 - Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output (R2.17 measures it on its repository-state question, under every counter and harness it reports). **Not met** at the first baseline (2026-10-31, `docs/token-benchmark.md`): git ÷ Reef was 0.09× by bytes, 0.12× by Anthropic's count and 0.10× by `o200k` for the CLI's default JSON (0.09×, 0.13×, 0.12× for MCP with its fixed cost), and 0.18× (CLI) and 0.68× (MCP) in live answer tokens, Claude Code only; the text output alone is 1.8× cheaper than git. Tracked by #114.
-- Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk.
+- Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk: no snapshot when nothing changed, a snapshot of the changed paths alone otherwise, checked by `status/large/index_*`, which fails if any iteration walks. Met by R2.23 (2026-10-31, M2 Max, `docs/benchmarks.md`): 12.2 ms unchanged against a 161 ms walk, 87.5 ms after one edit against 207 ms; under 200 loaded `large` workspaces every status came from the index, p95 446 ms.
 - A daemon in a VM is reachable from another machine over TLS with a token, serving the same API and web UI.
 
 ### Workstream: API

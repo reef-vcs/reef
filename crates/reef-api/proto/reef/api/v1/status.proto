@@ -14,7 +14,13 @@ import "reef/api/v1/workspaces.proto";
 service StatusService {
   // What the repository looks like now, and, when a workspace is named,
   // what that workspace has changed. Snapshots the workspace first unless
-  // `skip_snapshot`. R2.23 changes how it is answered, not its shape.
+  // `skip_snapshot`.
+  //
+  // Since R2.23 the workspace's files are read from the incremental index:
+  // the watcher's journal of paths changed since the last scan, synced to
+  // the request's arrival. Nothing changed means no snapshot; otherwise a
+  // snapshot of those paths alone. When the index cannot answer, the
+  // snapshot walks the tree, and `walk_reason` says why.
   //
   // With `at_operation` (R2.12), what the repository looked like at that
   // operation instead: its view's trunk, heads and conflicts, the
@@ -41,11 +47,15 @@ service StatusService {
 enum StatusSource {
   // Not set.
   STATUS_SOURCE_UNSPECIFIED = 0;
-  // A snapshot this request took, or found nothing new to record.
+  // A snapshot this request took, or found nothing new to record. Since
+  // R2.23 only with `[status_index] enabled = false`.
   STATUS_SOURCE_SNAPSHOT = 1;
-  // The incremental index (R2.23).
+  // The incremental index (R2.23): no snapshot when nothing changed since
+  // the last scan, else a snapshot of the changed paths alone, in
+  // `snapshot`.
   STATUS_SOURCE_INDEX = 2;
-  // A walk of the tree, the index's fallback (R2.23).
+  // A snapshot that walked every tracked file because the index could not
+  // answer; `walk_reason` says why (R2.23).
   STATUS_SOURCE_WALK = 3;
   // The last recorded snapshot, with `skip_snapshot`: edits since then may
   // be missing.
@@ -53,6 +63,38 @@ enum StatusSource {
   // The view at `at_operation`: the working copy as that operation
   // recorded it (R2.12).
   STATUS_SOURCE_OPERATION = 5;
+}
+
+// Why a status walked the tree instead of reading the index (R2.23).
+enum StatusWalkReason {
+  // Not set: the source is not STATUS_SOURCE_WALK.
+  STATUS_WALK_REASON_UNSPECIFIED = 0;
+  // The workspace's watch is not up: it failed, is still attaching, hit
+  // the watch limit, or its Watchman subscription is down.
+  STATUS_WALK_REASON_NOT_WATCHED = 1;
+  // It was watched again after a time unwatched (a daemon start, a
+  // restore, a move): writes in between were never reported.
+  STATUS_WALK_REASON_WATCH_RESTARTED = 2;
+  // The watcher lost events: an inotify overflow, an FSEvents rescan, or a
+  // Watchman fresh instance.
+  STATUS_WALK_REASON_EVENTS_LOST = 3;
+  // More paths changed than `watcher.narrowed_max_paths`, or the root or
+  // `.reefignore` changed.
+  STATUS_WALK_REASON_TOO_BROAD = 4;
+  // The workspace's last snapshot failed after taking the changed paths.
+  STATUS_WALK_REASON_SNAPSHOT_FAILED = 5;
+  // The watcher did not confirm within `[status_index] sync_timeout` that
+  // it had seen every write made before the request.
+  STATUS_WALK_REASON_NOT_SYNCED = 6;
+  // The working copy is stale against the view, or has no working-copy
+  // commit in it: the snapshot adopts, diverges or recovers (ADR 0018).
+  STATUS_WALK_REASON_STALE_WORKING_COPY = 7;
+  // A changed path cannot be scanned alone (not UTF-8, `..`, or a macOS
+  // spelling that cannot be resolved).
+  STATUS_WALK_REASON_PATH_NOT_NARROWABLE = 8;
+  // A full scan that another request or the daemon started after this one
+  // arrived answered it.
+  STATUS_WALK_REASON_COVERED_BY_FULL_SCAN = 9;
 }
 
 // Status of a repository, and optionally of one workspace.
@@ -131,4 +173,7 @@ message WorkspaceStatus {
   Operation snapshot = 8;
   // Conflicted paths, in all.
   uint32 conflicted_path_count = 9;
+  // Why the tree was walked; set only when `source` is STATUS_SOURCE_WALK
+  // (R2.23).
+  StatusWalkReason walk_reason = 10;
 }

@@ -22,8 +22,8 @@ use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use reef_api::v1::{
-    Attention, CreateWorkspaceRequest, IfNotJj, ListWorkspacesRequest, WatchState, WatcherKind,
-    Workspace,
+    Attention, CreateWorkspaceRequest, GetStatusRequest, IfNotJj, ListWorkspacesRequest,
+    StatusSource, StatusWalkReason, WatchState, WatcherKind, Workspace,
 };
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::{Config, WatcherBackend};
@@ -657,4 +657,64 @@ async fn watchman_waits_for_a_quiet_window() {
         others.len()
     );
     assert!(waited >= Duration::from_millis(4500), "{waited:?}");
+}
+
+/// A Watchman workspace's status (R2.23).
+async fn status_source(daemon: &TestDaemon, ws: &Workspace) -> (StatusSource, StatusWalkReason) {
+    let status = daemon
+        .client
+        .get_status(GetStatusRequest {
+            workspace: ws.id.clone(),
+            ..GetStatusRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace_status
+        .unwrap();
+    (status.source(), status.walk_reason())
+}
+
+/// R2.23, 22: a Watchman workspace's status is the index's, jj narrowing
+/// its scan, and a walk with `events-lost` after its view starts over.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchman_status_source() {
+    require_watchman!();
+    let _serial = SERIAL.lock().await;
+    let (daemon, repo) = fixture(Preset::Small, |_| {}).await;
+    let ws = create(&daemon, &repo).await;
+    subscribed(&ws, 1).await;
+    let index = (StatusSource::Index, StatusWalkReason::Unspecified);
+    wait_for(Duration::from_secs(20), "an index status", || async {
+        status_source(&daemon, &ws).await == index
+    })
+    .await;
+    daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .inject_event(id_of(&ws), Vec::new(), true);
+    assert_eq!(
+        status_source(&daemon, &ws).await,
+        (StatusSource::Walk, StatusWalkReason::EventsLost)
+    );
+    assert_eq!(status_source(&daemon, &ws).await, index);
+}
+
+/// R2.23, 21: jj keeps a Watchman workspace's clock, so a restart is not a
+/// walk.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchman_restart_is_not_a_walk() {
+    require_watchman!();
+    let _serial = SERIAL.lock().await;
+    let (daemon, repo) = fixture(Preset::Small, |_| {}).await;
+    let ws = create(&daemon, &repo).await;
+    subscribed(&ws, 1).await;
+    let daemon = daemon.restart().await;
+    let (_, reason) = status_source(&daemon, &ws).await;
+    assert_ne!(reason, StatusWalkReason::WatchRestarted);
+    wait_for(Duration::from_secs(20), "an index status", || async {
+        status_source(&daemon, &ws).await == (StatusSource::Index, StatusWalkReason::Unspecified)
+    })
+    .await;
 }

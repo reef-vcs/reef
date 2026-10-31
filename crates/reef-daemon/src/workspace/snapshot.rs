@@ -4,9 +4,9 @@
 //!
 //! 1. (async) Take a scan permit; ask the repository thread for its head,
 //!    reloaded first if an operation was written outside the daemon. Take
-//!    the paths reported since the last scan, which a watcher snapshot of a
-//!    notify workspace narrows its scan to (R1.30, see
-//!    [`crate::snapshot`]).
+//!    the journal of paths reported since the last scan, which a watcher
+//!    snapshot or a synced read of a notify workspace narrows its scan to
+//!    (R1.30, R2.23, see [`crate::snapshot`]).
 //! 2. (blocking) Lock the jj handle, point it at that head, and
 //!    `begin_snapshot`: lock the working copy, check freshness, scan. If the
 //!    working copy is ahead of the head (the `jj` CLI ran on the registered
@@ -26,9 +26,22 @@
 //! Both rows are written before the working-copy state, as R1.16 requires
 //! of its index row, so a crash between the two leaves rows naming an
 //! operation that exists.
+//!
+//! # Reads from the status index (R2.23, ADR 0048)
+//!
+//! [`Manager::snapshot_for_read`] answers every read that snapshots first.
+//! A notify workspace syncs with its watcher, then: a scan that took the
+//! journal after that sync covers the read; a stale journal, or a sync that
+//! timed out, walks the tree; nothing dirty, and the row at the view's
+//! working-copy commit, takes no snapshot at all; otherwise a snapshot
+//! narrowed to the journal's paths. A Watchman workspace snapshots as
+//! before, narrowed by jj's own synced query. A full scan of a notify
+//! workspace whose journal was fresh reports any change the journal did not
+//! name, as a miss.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
@@ -36,8 +49,8 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
-    Carry, ChangeIdHex, CommitIdHex, IgnoreSources, OpKind, OpMeta, OperationIdHex, ReadonlyRepo,
-    Repo, ScannedTree, SnapshotCommit, SnapshotError, commit_snapshot,
+    Carry, ChangeIdHex, CommitIdHex, FullScanReason, IgnoreSources, OpKind, OpMeta, OperationIdHex,
+    ReadonlyRepo, Repo, ScannedTree, SnapshotCommit, SnapshotError, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
@@ -47,16 +60,56 @@ use super::{Manager, ManagerError, SnapshotSpec, WorkspaceEntry};
 /// What [`Manager::snapshot_for_read`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadSnapshot {
+    /// Nothing changed since the last scan (R2.23): nothing was scanned or
+    /// recorded.
+    Clean,
     /// It snapshotted; the outcome says whether anything was recorded.
     Taken(SnapshotOutcome),
-    /// A scan that began after the read arrived covers it.
+    /// A scan since the read arrived covers it.
     Covered,
+}
+
+/// Where a read's view of the files came from (R2.23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    /// A full scan, with `[status_index] enabled = false`.
+    Snapshot,
+    /// The index: no snapshot, or one of the journal's paths alone.
+    Index,
+    /// A walk of the tree, and why.
+    Walk(WalkReason),
+}
+
+impl ReadSource {
+    fn of(walk_reason: Option<WalkReason>) -> Self {
+        walk_reason.map_or(Self::Index, Self::Walk)
+    }
+}
+
+/// [`Manager::snapshot_for_read`]'s answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadAnswer {
+    /// What it did.
+    pub snapshot: ReadSnapshot,
+    /// Where the files came from.
+    pub source: ReadSource,
 }
 use crate::backend::BackendError;
 use crate::db::Db;
 use crate::model::{Attention, Timestamp, WorkspaceId, WorkspaceState};
 use crate::snapshot::index::{self, SnapshotEntry};
-use crate::snapshot::{ScanPermit, Scheduled, SnapshotKind, SnapshotOutcome, Trigger, description};
+use crate::snapshot::journal::covered;
+use crate::snapshot::{
+    ScanPermit, Scheduled, SnapshotKind, SnapshotOutcome, Trigger, WalkReason, description,
+};
+use crate::workspace::ScanMark;
+
+/// Changed paths a full scan compares with its journal; past this many the
+/// rest are not checked for misses.
+const MISS_CHECK_LIMIT: usize = 10_000;
+
+/// Missed paths a warning names.
+const MISSES_LOGGED: usize = 10;
 
 /// The per-workspace ignore file, in gitignore syntax, at the workspace root.
 pub const REEFIGNORE: &str = ".reefignore";
@@ -80,6 +133,8 @@ struct Ran {
     walk_ms: u64,
     /// It covered only the reported paths.
     narrowed: bool,
+    /// Why it did not, when it did not.
+    full_reason: Option<FullScanReason>,
     /// It was carried onto a write's commit; `conflict`: with a conflict.
     carried: bool,
     conflict: bool,
@@ -170,47 +225,115 @@ impl Manager {
         self.snapshot_locked(&entry, kind, description, agent).await
     }
 
-    /// The snapshot a read of `id` takes first (R2.02): an explicit one
-    /// with the default description, unless a scan that began after the
-    /// read `arrived` already covers every write the client finished
-    /// before sending it. Concurrent reads of one workspace therefore cost
-    /// at most two scans. Runs as its own task, as [`Manager::snapshot`].
+    /// The snapshot a read of `id` takes first (R2.02), from the status
+    /// index (R2.23, see the module docs): none when nothing changed, else
+    /// an explicit one with the default description, narrowed to the
+    /// journal's paths unless the index cannot answer. A scan since the
+    /// read `arrived` that covers every write the client finished before
+    /// sending it is enough, so concurrent reads of one workspace cost at
+    /// most two scans. With `[status_index] enabled = false`, a full scan.
+    /// Runs as its own task, as [`Manager::snapshot`].
     pub async fn snapshot_for_read(
         &self,
         id: WorkspaceId,
         arrived: Instant,
         agent: Option<String>,
-    ) -> Result<ReadSnapshot, ManagerError> {
+    ) -> Result<ReadAnswer, ManagerError> {
         let manager = self
             .scheduler
             .manager()
             .ok_or(ManagerError::NotLoaded(id))?;
-        let task = async move {
-            let entry = manager.loaded_entry(id, false)?;
-            let _scan = entry.scan_lock.lock().await;
-            let covered = entry
-                .scan_started
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_some_and(|started| started > arrived);
-            if covered {
-                return Ok(ReadSnapshot::Covered);
-            }
-            let record = entry.record();
-            if record.state != WorkspaceState::Active {
-                return Err(ManagerError::NotActive {
-                    id,
-                    repo: record.repo_id,
-                    state: record.state,
+        let task = async move { manager.read_snapshot(id, arrived, agent).await };
+        tokio::spawn(task.instrument(tracing::Span::current())).await?
+    }
+
+    async fn read_snapshot(
+        &self,
+        id: WorkspaceId,
+        arrived: Instant,
+        agent: Option<String>,
+    ) -> Result<ReadAnswer, ManagerError> {
+        let index = &self.config.file.status_index;
+        let entry = self.loaded_entry(id, false)?;
+        let notify = index.enabled && self.scheduler.is_notify(id);
+        let journals = Arc::clone(self.scheduler.journals());
+        // Outside the scan lock: a scan in flight need not end first. A
+        // stale journal walks anyway, and says why.
+        let synced = if notify && journals.peek(id).stale.is_none() {
+            journals.sync(id, arrived, index.sync_timeout).await
+        } else {
+            None
+        };
+        let _scan = entry.scan_lock.lock().await;
+        let mark = *entry
+            .last_scan
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(mark) = mark {
+            // Synced: a scan that took the journal after the cookie. Not:
+            // a full scan that began after the read arrived.
+            let covered = match synced {
+                Some(sync) => (mark.sync >= sync).then_some(None),
+                None => mark
+                    .last_full
+                    .filter(|(began, _)| *began > arrived)
+                    .map(|(_, reason)| reason),
+            };
+            if let Some(walk_reason) = covered {
+                let source = if !index.enabled {
+                    ReadSource::Snapshot
+                } else if synced.is_some() {
+                    ReadSource::Index
+                } else {
+                    ReadSource::of(walk_reason)
+                };
+                return Ok(ReadAnswer {
+                    snapshot: ReadSnapshot::Covered,
+                    source,
                 });
             }
-            let kind = SnapshotKind::Explicit;
-            let outcome = manager
-                .snapshot_locked(&entry, kind, description(kind, id, None), agent)
-                .await?;
-            Ok(ReadSnapshot::Taken(outcome))
+        }
+        let record = entry.record();
+        if record.state != WorkspaceState::Active {
+            return Err(ManagerError::NotActive {
+                id,
+                repo: record.repo_id,
+                state: record.state,
+            });
+        }
+        let peek = journals.peek(id);
+        let walk = if notify && synced.is_none() {
+            Some(peek.stale.unwrap_or(WalkReason::NotSynced))
+        } else {
+            None
         };
-        tokio::spawn(task.instrument(tracing::Span::current())).await?
+        if notify && walk.is_none() && peek.stale.is_none() && peek.empty && !entry.carry.is_set() {
+            let head = self.workspace_head(&entry, true).await?;
+            let at_view = reef_lib::jj::view_wc_commit(&head, &id.jj_workspace_name())
+                .is_some_and(|wc| wc.as_str() == record.commit_id);
+            if at_view {
+                return Ok(ReadAnswer {
+                    snapshot: ReadSnapshot::Clean,
+                    source: ReadSource::Index,
+                });
+            }
+        }
+        let kind = SnapshotKind::Explicit;
+        let mut trigger = self.scheduler.take_trigger(id);
+        trigger.from_events = notify && walk.is_none();
+        trigger.walk = walk;
+        let outcome = self
+            .snapshot_triggered(&entry, kind, description(kind, id, None), agent, trigger)
+            .await?;
+        let source = if index.enabled {
+            ReadSource::of(outcome.walk_reason)
+        } else {
+            ReadSource::Snapshot
+        };
+        Ok(ReadAnswer {
+            snapshot: ReadSnapshot::Taken(outcome),
+            source,
+        })
     }
 
     /// While the daemon shuts down, after the scheduler and the lease
@@ -257,8 +380,21 @@ impl Manager {
         description: String,
         agent: Option<String>,
     ) -> Result<SnapshotOutcome, ManagerError> {
+        let trigger = self.scheduler.take_trigger(entry.paths.id);
+        self.snapshot_triggered(entry, kind, description, agent, trigger)
+            .await
+    }
+
+    /// [`Manager::snapshot_locked`] with its trigger taken.
+    async fn snapshot_triggered(
+        &self,
+        entry: &Arc<WorkspaceEntry>,
+        kind: SnapshotKind,
+        description: String,
+        agent: Option<String>,
+        trigger: Trigger,
+    ) -> Result<SnapshotOutcome, ManagerError> {
         let id = entry.paths.id;
-        let trigger = self.scheduler.take_trigger(id);
         let outcome = self
             .run_snapshot(entry, kind, description, agent, trigger)
             .await;
@@ -286,6 +422,14 @@ impl Manager {
             // An explicit snapshot covered the events while this waited.
             return Scheduled::Skipped;
         }
+        if !fallback && self.scheduler.is_notify(id) {
+            let peek = self.scheduler.journals().peek(id);
+            if peek.stale.is_none() && peek.empty && !entry.carry.is_set() {
+                // A read's snapshot took the journal ahead of this event,
+                // which the debouncer held back (R2.23).
+                return Scheduled::Taken;
+            }
+        }
         let kind = SnapshotKind::Watcher;
         let ran = self
             .run_snapshot(&entry, kind, description(kind, id, None), None, trigger)
@@ -312,18 +456,38 @@ impl Manager {
         Scheduled::Failed
     }
 
-    /// The pipeline; see the module docs.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one snapshot's steps in order; the full-scan turn (R1.32) tipped it over"
-    )]
+    /// The pipeline; see the module docs. A failure marks the journal it
+    /// took `snapshot-failed`, since its paths are gone (R2.23).
     async fn run_snapshot(
         &self,
         entry: &Arc<WorkspaceEntry>,
         kind: SnapshotKind,
         description: String,
         agent: Option<String>,
+        trigger: Trigger,
+    ) -> Result<SnapshotOutcome, ManagerError> {
+        let taken = AtomicBool::new(false);
+        let ran = self
+            .run_pipeline(entry, kind, description, agent, trigger, &taken)
+            .await;
+        if ran.is_err() && taken.load(Ordering::Relaxed) {
+            self.scheduler.journals().failed(entry.paths.id);
+        }
+        ran
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one snapshot's steps in order; the full-scan turn (R1.32) tipped it over"
+    )]
+    async fn run_pipeline(
+        &self,
+        entry: &Arc<WorkspaceEntry>,
+        kind: SnapshotKind,
+        description: String,
+        agent: Option<String>,
         mut trigger: Trigger,
+        taken: &AtomicBool,
     ) -> Result<SnapshotOutcome, ManagerError> {
         let begun = Instant::now();
         let started = trigger.first_event.unwrap_or(begun);
@@ -341,6 +505,7 @@ impl Manager {
         let scan_failure = self.scheduler.scan_failure();
         let fail_check_out = self.scheduler.check_outs_fail();
         self.scheduler.take_reported(id, &mut trigger);
+        taken.store(true, Ordering::Relaxed);
         let full = trigger.prefixes().is_none();
         let permit = self
             .scheduler
@@ -451,25 +616,110 @@ impl Manager {
             scan_ms: ran.scan_ms,
             load_ms: ran.load_ms,
             walk_ms: ran.walk_ms,
+            walk_reason: walk_reason(&trigger, &ran),
         };
         log_outcome(
             &outcome,
             record.repo_id,
             (ran.updated_files, ran.conflict),
-            trigger.everything,
+            trigger.stale,
             begun,
         );
+        let full = !ran.narrowed;
+        // Not after a read that could not sync: its journal is known to lag.
+        if full && trigger.notify && trigger.stale.is_none() && trigger.walk.is_none() {
+            self.check_misses(entry, &trigger, &outcome, ran.carried)
+                .await;
+        }
         self.verify_stores(entry, &outcome, &record.commit_id).await;
         self.scheduler.run_hooks(&outcome);
-        // Only a full scan that succeeded saw every write made before it
-        // began; a narrowed one saw the paths reported by then (R2.02).
-        if full {
-            *entry
-                .scan_started
+        // A full scan that succeeded saw every write made before it began;
+        // a narrowed one, every path journaled when it took the journal
+        // (R2.02, R2.23).
+        {
+            let mut mark = entry
+                .last_scan
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(begun);
+                .unwrap_or_else(PoisonError::into_inner);
+            let last_full = match (*mark, full) {
+                (_, true) => Some((begun, outcome.walk_reason)),
+                (Some(mark), false) => mark.last_full,
+                (None, false) => None,
+            };
+            *mark = Some(ScanMark {
+                sync: trigger.sync,
+                last_full,
+            });
+        }
+        if full {
+            self.scheduler.full_completed(id);
         }
         Ok(outcome)
+    }
+
+    /// After a full scan of a notify workspace that took a fresh journal:
+    /// counts and logs each change it recorded that no journaled path
+    /// covers, neither one it took nor one reported since, after a sync
+    /// for events still in flight (see the module docs).
+    async fn check_misses(
+        &self,
+        entry: &Arc<WorkspaceEntry>,
+        trigger: &Trigger,
+        outcome: &SnapshotOutcome,
+        carried: bool,
+    ) {
+        let (Some(from), false, false) = (&outcome.rewrote, outcome.recovered, carried) else {
+            return;
+        };
+        let id = entry.paths.id;
+        let Ok(head) = self.workspace_head(entry, false).await else {
+            return;
+        };
+        let to = outcome.commit_id.clone();
+        let from = from.clone();
+        let changed = tokio::task::spawn_blocking(move || {
+            pollster::block_on(reef_lib::jj::diff::changed_paths(
+                &head,
+                &from,
+                &to,
+                MISS_CHECK_LIMIT,
+            ))
+        })
+        .await;
+        let Ok(Ok(changed)) = changed else {
+            return;
+        };
+        let journals = self.scheduler.journals();
+        let uncovered = |paths: Vec<String>| -> Vec<String> {
+            paths
+                .into_iter()
+                .filter(|path| {
+                    let path = Path::new(path);
+                    !covered(trigger.paths.iter(), path) && !journals.covers(id, path)
+                })
+                .collect()
+        };
+        let mut missed = uncovered(changed);
+        if missed.is_empty() {
+            return;
+        }
+        // Events of writes made during the scan may still be on their way;
+        // without a sync, or once the journal went stale, nothing is known.
+        let timeout = self.config.file.status_index.sync_timeout;
+        if journals.sync(id, Instant::now(), timeout).await.is_none() {
+            return;
+        }
+        missed = uncovered(missed);
+        if missed.is_empty() || journals.peek(id).stale.is_some() {
+            return;
+        }
+        journals.add_misses(u64::try_from(missed.len()).unwrap_or(u64::MAX));
+        tracing::warn!(
+            workspace_id = %id,
+            missed_count = missed.len(),
+            paths = ?missed.iter().take(MISSES_LOGGED).collect::<Vec<_>>(),
+            "status index missed changes"
+        );
     }
 }
 
@@ -610,6 +860,7 @@ impl Pipeline<'_> {
         let load_ms = millis(pending.load_time());
         let walk_ms = millis(pending.walk_time());
         let narrowed = pending.narrowed();
+        let full_reason = pending.full_reason();
         let untracked = pending.untracked().to_vec();
         if !pending.changed() {
             let head_op = pending.head_op().clone();
@@ -636,6 +887,7 @@ impl Pipeline<'_> {
                     load_ms,
                     walk_ms,
                     narrowed,
+                    full_reason,
                     carried: false,
                     conflict: false,
                 })
@@ -688,6 +940,7 @@ impl Pipeline<'_> {
             load_ms,
             walk_ms,
             narrowed,
+            full_reason,
             carried: carried.is_some(),
             conflict,
         });
@@ -793,18 +1046,47 @@ fn record_commit(
     Ok(())
 }
 
+/// Why a snapshot walked, for its outcome (R2.23): for a Watchman
+/// workspace, its journal's stale reason (jj narrows its scans); for a
+/// notify one, nothing when it was narrowed, else the read's own reason,
+/// the journal's, jj's, or else a full scan nobody asked the index for.
+fn walk_reason(trigger: &Trigger, ran: &Ran) -> Option<WalkReason> {
+    if !trigger.notify {
+        return trigger.stale;
+    }
+    if ran.narrowed {
+        return None;
+    }
+    let jj = ran.full_reason.and_then(|reason| match reason {
+        FullScanReason::NotAsked => None,
+        FullScanReason::NotNarrowable => Some(WalkReason::PathNotNarrowable),
+        FullScanReason::Stale | FullScanReason::NoWorkingCopyCommit => {
+            Some(WalkReason::StaleWorkingCopy)
+        }
+    });
+    Some(
+        trigger
+            .walk
+            .or(trigger.stale)
+            .or(jj)
+            .unwrap_or(WalkReason::CoveredByFullScan),
+    )
+}
+
 /// The snapshot's log event: `info` when it wrote an operation, carried
 /// edits onto a write's commit, or adopted a rewrite; `warn` when it
 /// diverged, recovered, or carried with a conflict; `debug` otherwise.
-/// `everything`: an event since the previous snapshot said anything may
-/// have changed. `conflict`: the carried commit has one.
+/// `stale`: why the journal it took could not be trusted. `conflict`: the
+/// carried commit has one.
 fn log_outcome(
     outcome: &SnapshotOutcome,
     repo: crate::model::RepoId,
     (updated_files, conflict): (u32, bool),
-    everything: bool,
+    stale: Option<WalkReason>,
     begun: Instant,
 ) {
+    let everything = stale.is_some();
+    let walk_reason = outcome.walk_reason.map(WalkReason::as_str);
     let kind = outcome.kind.as_str();
     if outcome.carried && conflict {
         tracing::warn!(
@@ -857,6 +1139,7 @@ fn log_outcome(
             paths_count = outcome.paths_count,
             everything,
             narrowed = outcome.narrowed,
+            walk_reason,
             "{kind} snapshot taken"
         );
     } else if outcome.adopted {
@@ -876,6 +1159,7 @@ fn log_outcome(
             paths_count = outcome.paths_count,
             everything,
             narrowed = outcome.narrowed,
+            walk_reason,
             "{kind} snapshot found no changes"
         );
     }

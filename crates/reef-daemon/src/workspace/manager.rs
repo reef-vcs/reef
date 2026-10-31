@@ -16,7 +16,7 @@ use reef_lib::jj::{
     CommitIdHex, ForgetWorkspaceError, OpKind, OperationIdHex, ReadonlyRepo, UserSettings,
 };
 
-use super::{CarrySlot, Inspected, ManagerError, WorkspaceEntry, op_meta};
+use super::{CarrySlot, Inspected, ManagerError, ReadSnapshot, WorkspaceEntry, op_meta};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
@@ -29,7 +29,7 @@ use crate::model::{
 use crate::presence::PresenceHub;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
 use crate::snapshot::index;
-use crate::snapshot::{Scheduler, SnapshotKind, TrackReason};
+use crate::snapshot::{Scheduler, TrackReason};
 use crate::store::StoreManager;
 use crate::watcher::{WatchError, select_watcher};
 
@@ -39,7 +39,7 @@ pub(super) const DIRECTORY_MISSING: &str = "directory missing at start";
 /// Owns every loaded workspace and runs the workspace operations. One per
 /// daemon, in [`crate::AppState::manager`].
 pub struct Manager {
-    pub(super) config: Config,
+    pub(crate) config: Config,
     pub(super) db: Arc<Db>,
     pub(super) repos: Arc<RepoRegistry>,
     pub(super) settings: UserSettings,
@@ -483,8 +483,9 @@ impl Manager {
     /// One workspace from the database, with its disk usage from its
     /// backend, the other active workspaces on its change, and its indexed
     /// snapshots (R1.16). With
-    /// `snapshot_first`, takes an explicit snapshot before reading if the
-    /// workspace is active (a released one has nothing to snapshot).
+    /// `snapshot_first`, snapshots first as a read does
+    /// ([`Manager::snapshot_for_read`]) if the workspace is active (a
+    /// released one has nothing to snapshot).
     /// Without `measure_disk`, leaves the disk usage out rather than walk
     /// the directory (`reef here`, R1.26). `agent` is the snapshot's, as
     /// [`Manager::snapshot`]'s.
@@ -497,8 +498,17 @@ impl Manager {
     ) -> Result<Inspected, ManagerError> {
         let active = self.db.workspace(id)?.state == WorkspaceState::Active;
         let op_id = if snapshot_first && active {
-            let snapshot = self.snapshot(id, SnapshotKind::Explicit, "", agent).await?;
-            snapshot.changed.then(|| snapshot.op_id.to_string())
+            // From the status index, as every read that snapshots first
+            // (R2.23).
+            let answer = self
+                .snapshot_for_read(id, std::time::Instant::now(), agent)
+                .await?;
+            match answer.snapshot {
+                ReadSnapshot::Taken(snapshot) => {
+                    snapshot.changed.then(|| snapshot.op_id.to_string())
+                }
+                ReadSnapshot::Clean | ReadSnapshot::Covered => None,
+            }
         } else {
             None
         };
@@ -665,7 +675,7 @@ impl Manager {
                 jj_generation: AtomicU64::new(generation),
                 repo: handle,
                 scan_lock: tokio::sync::Mutex::new(()),
-                scan_started: Mutex::new(None),
+                last_scan: Mutex::new(None),
                 spec: Mutex::new(spec),
                 stores: Mutex::new(stores),
                 carry: CarrySlot::default(),
