@@ -62,7 +62,7 @@ rand_chacha = "0.10"
 tempfile = "3"
 camino = "1"
 # Daemon metadata (ADR 0003): bundled so every platform runs the same SQLite; `backup` for R1.18.
-rusqlite = { version = "0.40", features = ["bundled", "backup", "collation"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup", "collation"] }
 # Materialization backends (R1.02): stat-only walks for disk usage, and statfs/statvfs for the
 # backend probe. Later backend tickets add nix features (mount, signal, process).
 walkdir = "2"
