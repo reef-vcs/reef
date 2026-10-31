@@ -7,6 +7,9 @@ use std::fmt::Write as _;
 
 use super::run::{DEFAULT_REPOSITORY, DEFAULT_REVISION};
 use super::{Outcome, Scenario, TrialResult};
+use crate::agent::table::{
+    cell, lossy, median, median_failures_last, number, opt, table_line, thousands,
+};
 
 /// The trials of one scenario that share a date and every pin: one row of
 /// the results table.
@@ -170,42 +173,6 @@ fn calls_to_success(trial: &TrialResult) -> Option<f64> {
     Some(f64::from(calls.unwrap_or(metrics.tool_calls)))
 }
 
-#[allow(clippy::cast_precision_loss, reason = "counts far below 2^52")]
-fn lossy(n: u64) -> f64 {
-    n as f64
-}
-
-/// The median, the mean of the middle two for an even count.
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    values.sort_by(f64::total_cmp);
-    let n = values.len();
-    match n {
-        0 => None,
-        _ if n % 2 == 1 => Some(values[n / 2]),
-        _ => Some(f64::midpoint(values[n / 2 - 1], values[n / 2])),
-    }
-}
-
-/// The median with `None` as larger than every number; `None` if the
-/// median falls on one.
-fn median_failures_last(mut values: Vec<Option<f64>>) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|a, b| match (a, b) {
-        (Some(a), Some(b)) => a.total_cmp(b),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-    let n = values.len();
-    if n % 2 == 1 {
-        values[n / 2]
-    } else {
-        Some(f64::midpoint(values[n / 2 - 1]?, values[n / 2]?))
-    }
-}
-
 /// The header of a scenario's table in `docs/onboarding-benchmark.md`.
 pub const TABLE_HEADER: &str = "\
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
@@ -280,36 +247,6 @@ impl Row {
     }
 }
 
-fn table_line(cells: &[String]) -> String {
-    format!("| {} |", cells.join(" | "))
-}
-
-fn opt(value: Option<f64>, format: impl Fn(f64) -> String) -> String {
-    value.map_or_else(|| "–".to_owned(), format)
-}
-
-/// An integer as itself, a half (an even count's median) with one decimal.
-fn number(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
-}
-
-/// Rounded, with thousands separators: `12,345`.
-fn thousands(value: f64) -> String {
-    let digits = format!("{:.0}", value.round());
-    let mut out = String::new();
-    for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(digit);
-    }
-    out
-}
-
 /// `results/latest.md`: a row per scenario, the Phase 1 criterion lines,
 /// and a line per trial.
 pub fn summary(trials: &[TrialResult]) -> String {
@@ -366,11 +303,6 @@ pub fn summary(trials: &[TrialResult]) -> String {
         );
     }
     out
-}
-
-/// Text fit for a table cell: one line, no pipes.
-fn cell(text: &str) -> String {
-    text.replace('|', "/").replace('\n', " ")
 }
 
 /// The marker under each scenario's table in `docs/onboarding-benchmark.md`;
@@ -564,13 +496,5 @@ mod tests {
             );
             assert!(page[heading..].starts_with(&format!("### Scenario {scenario}: ")));
         }
-    }
-
-    #[test]
-    fn numbers_read_well() {
-        assert_eq!(thousands(1_234_567.4), "1,234,567");
-        assert_eq!(thousands(999.0), "999");
-        assert_eq!(number(3.0), "3");
-        assert_eq!(number(3.5), "3.5");
     }
 }

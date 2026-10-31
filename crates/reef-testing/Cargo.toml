@@ -24,6 +24,17 @@ gix = { workspace = true, features = ["sha1"] }
 # The onboarding benchmark (RX.07): trial directories and the dates results are filed under.
 tempfile.workspace = true
 time.workspace = true
+# The token-efficiency benchmark (R2.17): its scenario file, and digests for the fixture's version
+# and the token-count cache.
+sha2.workspace = true
+toml.workspace = true
+# R2.17's `o200k` counter, built only by the benchmark (`just tokens`): ordinary builds, tests and
+# the crates that dev-depend on reef-testing never compile it; `just lint` (`--all-features`)
+# type-checks it.
+tiktoken-rs = { version = "0.12.1", optional = true }
+
+[features]
+tokenizers = ["dep:tiktoken-rs"]
 
 [[bin]]
 name = "reef-synth"
@@ -32,3 +43,7 @@ path = "src/bin/reef_synth.rs"   # exception to the one-main rule: reef-testing 
 [[bin]]
 name = "reef-onboarding"
 path = "src/bin/onboarding.rs"   # the agent onboarding benchmark (RX.07)
+
+[[bin]]
+name = "reef-tokens"
+path = "src/bin/tokens.rs"       # the token-efficiency benchmark (R2.17)

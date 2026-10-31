@@ -1,0 +1,4 @@
+Which functions and methods (test functions included) did `bot-5`'s work in progress add, remove or change in `crates/reef-daemon/src/symbols/`? Ignore everything outside that directory.
+
+End your reply with one line in this form, names without their module, type or arguments, separated by commas, and `-` for none:
+ANSWER: added <names>; removed <names>; changed <names>

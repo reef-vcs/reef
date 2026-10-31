@@ -1,0 +1,4 @@
+Which functions and methods (test functions included) did `bot-4`'s work in progress add, remove or change? Ignore files that are not code.
+
+End your reply with one line in this form, names without their module, type or arguments, separated by commas, and `-` for none:
+ANSWER: added <names>; removed <names>; changed <names>

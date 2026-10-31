@@ -6,7 +6,7 @@ It must not depend on any other Reef crate, so that `reef-lib` and the others ca
 
 Only dev-dependencies and benchmarks reach this crate. It is excluded from the workspace's `default-members`, so build it with `--workspace` or `-p reef-testing`.
 
-Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool: `reef-synth` and `reef-onboarding`.
+Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool: `reef-synth`, `reef-onboarding` and `reef-tokens`.
 
 ## Synthetic repositories
 
@@ -78,9 +78,25 @@ The same spec and seed produce byte-identical trees, symlinks included, on every
 
 `reef_testing::onboarding` and `reef-onboarding` (RX.07) run a real Claude Code agent against a build of Reef in four scenarios and report what it spent to reach a working `reef ws run`. `just onboarding scenario=A trials=3` runs it, with `ANTHROPIC_API_KEY` set. [docs/onboarding-benchmark.md](../../docs/onboarding-benchmark.md) describes the scenarios, the metrics, and the results.
 
-- `stream`: parses `claude -p --output-format stream-json --verbose` and counts tool calls, `reef` calls, and escapes to git.
+- `stream`: counts tool calls, `reef` calls, and escapes to git in a trial's transcript.
 - `judge`: decides success from `reef ws list --all` and the snapshot's `README.md`, never from the agent's words.
 - `report`: medians per scenario, `latest.md`, and the dated rows of the results page.
-- `run`: each trial's fresh home, state directory, and clone; the cleared environment; the timeout; the scrubbed stream; cleanup.
+- `run`: each trial's fresh home, state directory, and clone; the timeout; the scrubbed stream; cleanup.
 
 The prompts are in `onboarding/prompts/`, and changing one starts a new baseline. `onboarding/fixtures/` holds recorded streams for the parser's tests, with local paths replaced. Since this crate cannot depend on the Reef crates, the harness drives the `reef` binary under test and reads its JSON output.
+
+## Agent harness
+
+`reef_testing::agent` is what both agent benchmarks share (moved out of `onboarding` by R2.17): the cleared environment and the `PATH` with no other `reef` on it (`env`), the agent's process group and timeout (`process`), credential scrubbing (`scrub`), reading shell commands (`shell`), medians and Markdown tables (`table`), and the harness-neutral `Transcript` (`transcript`). Everything harness-specific lives in one adapter per harness under `harness/`: its arguments, its MCP configuration, and its stream's format. `harness/claude.rs` is the only one so far; a second harness is an adapter and a recorded stream.
+
+## Token benchmark
+
+`reef_testing::tokens` and `reef-tokens` (R2.17) measure what an agent that knows Reef spends answering six questions about a repository where several agents work, with git, the `reef` CLI, and the MCP server. `just tokens scripted` runs the scripted part (free; `ANTHROPIC_API_KEY` adds the `anthropic` counter) and `just tokens live question=state-repo trials=1` a live trial per arm. [docs/token-benchmark.md](../../docs/token-benchmark.md) describes the fixture, the questions, the counters, and the results.
+
+- `scenario`: `tokens/scenario.toml` (the fixture's commits, the questions and their truth, the scripted candidates) and the prompts.
+- `fixture`: both copies of the fixture from the checkout's history, the settle wait, and the fingerprint around each trial.
+- `scripted`, `mcp`: the candidates run as an agent's shell or MCP client would, the fixed cost, the diff sweep.
+- `live`: trials through a harness adapter. `grade`: answer lines against the truth. `count`: bytes, Anthropic's token counting, and `o200k`.
+- `report`: the tables, the break-even, and the exit criterion's verdict.
+
+The `o200k` counter needs the `tokenizers` feature, which brings `tiktoken-rs`; nothing but `just tokens` builds it. `tokens/fixtures/` holds a recorded stream with a shell and an MCP call. `just tokens-check` runs the ignored end-to-end test of the fixture and its truth, which needs a full clone.

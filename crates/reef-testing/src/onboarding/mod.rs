@@ -2,10 +2,11 @@
 //! never seen Reef to reach a working `reef ws run`.
 //!
 //! Each trial sets up a fresh home, state directory, and clone, runs
-//! Claude Code headless (`claude -p`) with a fixed prompt, parses its
-//! `stream-json` output ([`stream`]), judges the result from the daemon's
-//! records ([`judge`]), and writes one JSON file per trial and a Markdown
-//! summary ([`report`]). [`run`] does the setup and the running.
+//! Claude Code headless (`claude -p`) with a fixed prompt through
+//! [`crate::agent`], reads its metrics from the transcript ([`stream`]),
+//! judges the result from the daemon's records ([`judge`]), and writes one
+//! JSON file per trial and a Markdown summary ([`report`]). [`run`] does
+//! the setup and the running.
 //!
 //! The scenarios:
 //!
@@ -128,24 +129,7 @@ pub struct Pins {
     pub prompt: String,
 }
 
-/// How a trial ended, before judging.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum Outcome {
-    /// Setup failed before the agent started (clone, `reef init`, the
-    /// installer mirror): not the agent's failure, reported apart.
-    SetupFailed {
-        /// What failed.
-        error: String,
-    },
-    /// The agent exited by itself.
-    Exited {
-        /// Its exit status; `None` if it died by a signal.
-        code: Option<i32>,
-    },
-    /// The agent ran past the timeout and was stopped.
-    TimedOut,
-}
+pub use crate::agent::process::Outcome;
 
 /// One trial, as written to `results/<date>-<scenario>-<trial>.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

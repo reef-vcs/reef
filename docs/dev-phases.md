@@ -120,7 +120,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 - A client can subscribe to the operation log and presence channel and receive events within 100 ms, and that holds with 500 subscribers on one daemon at 1,000 operations per minute (measured by R2.22 at p99: 53 ms for operations, 57 ms for presence, on a 12-core Mac; `docs/load-tests.md`).
 - Symbol-level diffs work for Python, TypeScript, Go, and Rust.
 - A local web UI shows the smartlog, workspaces, and fleet panel live.
-- Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output (R2.17 measures it on its repository-state question, under every counter and harness it reports).
+- Token cost to answer "what is the state of this repo" is measured and at least five times lower than parsing git output (R2.17 measures it on its repository-state question, under every counter and harness it reports). **Not met** at the first baseline (2026-10-31, `docs/token-benchmark.md`): git ÷ Reef was 0.09× by bytes, 0.12× by Anthropic's count and 0.10× by `o200k` for the CLI's default JSON (0.09×, 0.13×, 0.12× for MCP with its fixed cost), and 0.18× (CLI) and 0.68× (MCP) in live answer tokens, Claude Code only; the text output alone is 1.8× cheaper than git. Tracked by #114.
 - Status on the 100k-file synthetic repository is answered from the incremental index without a tree walk.
 - A daemon in a VM is reachable from another machine over TLS with a token, serving the same API and web UI.
 
