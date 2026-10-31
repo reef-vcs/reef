@@ -13,6 +13,7 @@ use reef_client::ClientError;
 use reef_client::json::reverse_hex;
 use reef_error::{Advice, ErrorKind};
 
+use super::advice::AdviceCtx;
 use super::repo::missing;
 use super::{CliError, Ctx, RepoArg};
 
@@ -28,21 +29,67 @@ pub(crate) struct ScopeArgs {
     pub(crate) repo: Option<String>,
 }
 
-/// `--at-op` and `--no-snapshot`, for the commands that read.
+/// `--at-op` and `--at`: the point a read is at (R2.12).
 #[derive(Clone, Debug, Default, clap::Args)]
-pub(crate) struct ReadArgs {
+pub(crate) struct AtArgs {
     /// Read at this operation (id or unique prefix) instead of now.
     #[arg(long = "at-op", visible_alias = "at-operation", value_name = "OP")]
     pub(crate) at_op: Option<String>,
+    /// Read as of then: an RFC 3339 time, or a duration ago (10m, 2h).
+    #[arg(long, value_name = "WHEN", value_parser = super::history::when, conflicts_with = "at_op")]
+    pub(crate) at: Option<std::time::SystemTime>,
+}
+
+impl AtArgs {
+    /// Whether either flag was given.
+    pub(crate) fn given(&self) -> bool {
+        self.at_op.is_some() || self.at.is_some()
+    }
+
+    /// The request's `at_operation`: `--at-op` as given, or the operation
+    /// of `scope`'s repository that `--at` names, looked up and noted on
+    /// stderr; empty for now.
+    pub(crate) async fn at_operation(&self, ctx: &Ctx, scope: &Scope) -> Result<String, CliError> {
+        let (Some(at), None) = (self.at, &self.at_op) else {
+            return Ok(self.at_op.clone().unwrap_or_default());
+        };
+        let advice = AdviceCtx {
+            operation_given: true,
+            ..AdviceCtx::new(scope)
+        };
+        let operation = ctx
+            .call(ctx.client.operation_at(&scope.repo_id, at))
+            .await
+            .map_err(|error| advice.refine(error))?
+            .operation
+            .ok_or_else(|| missing("operation"))?;
+        let ended = operation
+            .ended_at
+            .map(|at| at.seconds.saturating_mul(1000) + i64::from(at.nanos / 1_000_000))
+            .unwrap_or_default();
+        ctx.out.note(&format!(
+            "reef: at operation {} ({})",
+            operation.id.get(..12).unwrap_or(&operation.id),
+            reef_client::json::rfc3339_millis(ended)
+        ));
+        Ok(operation.id)
+    }
+}
+
+/// `--at-op`, `--at` and `--no-snapshot`, for the commands that read.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub(crate) struct ReadArgs {
+    #[command(flatten)]
+    pub(crate) at: AtArgs,
     /// Read the last snapshot instead of snapshotting the workspace first.
     #[arg(long)]
     pub(crate) no_snapshot: bool,
 }
 
 impl ReadArgs {
-    /// The request's `at_operation`.
-    pub(crate) fn at_operation(&self) -> String {
-        self.at_op.clone().unwrap_or_default()
+    /// The request's `at_operation` ([`AtArgs::at_operation`]).
+    pub(crate) async fn at_operation(&self, ctx: &Ctx, scope: &Scope) -> Result<String, CliError> {
+        self.at.at_operation(ctx, scope).await
     }
 }
 
@@ -172,6 +219,7 @@ async fn lookup(ctx: &Ctx, repo: String, workspace: String) -> Result<v1::Worksp
             workspace,
             snapshot_first: false,
             skip_disk_usage: true,
+            at_operation: String::new(),
         }))
         .await?;
     response.workspace.ok_or_else(|| missing("workspace"))

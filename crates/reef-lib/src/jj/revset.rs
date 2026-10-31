@@ -28,6 +28,7 @@ use jj_lib::revset::{
 };
 use jj_lib::ui_path::RepoPathUiConverter;
 
+use super::oplog;
 use super::repo::{ChangeIdHex, CommitIdHex};
 use super::workspace::Resolved;
 use crate::error::{Classify, ErrorKind, classify_by_source};
@@ -464,11 +465,57 @@ fn resolution(revision: &str, error: RevsetResolutionError) -> RevisionError {
     }
 }
 
-/// Resolves and evaluates `parsed` against `repo`'s view.
+/// Resolves and evaluates `parsed` against `repo`'s view. A repository
+/// that borrows a later head's index (R2.12, [`oplog::is_shared`]) would
+/// count that index's later commits in a few lookups ([`counts_the_index`]);
+/// those are resolved against jj's own index for its operation instead.
+/// When jj cannot build that index (a GC-kept copy of an operation from
+/// before GC), the shared answer stands.
 pub(crate) fn evaluate<'a>(
     repo: &'a ReadonlyRepo,
     parsed: &ParsedRevset,
 ) -> Result<Box<dyn Revset + 'a>, RevisionError> {
+    if oplog::is_shared(repo)
+        && counts_the_index(parsed)
+        && let Ok(exact) = pollster::block_on(repo.loader().load_at(repo.operation()))
+    {
+        return evaluate_in(&exact, parsed);
+    }
+    evaluate_in(repo, parsed)
+}
+
+/// Whether resolving `parsed` looks past the visible commits into every
+/// commit the index holds: a change offset (`<id>/<n>`, so any `/`),
+/// `change_id()` or `commit_id()`, or a symbol the user typed that could be
+/// an id prefix shorter than a change id (hex, or jj's reverse hex). A
+/// prefix's uniqueness, and whether it names a commit or a change, depends
+/// on every commit indexed.
+fn counts_the_index(parsed: &ParsedRevset) -> bool {
+    if parsed.text.contains('/') {
+        return true;
+    }
+    let expression = format!("{:?}", parsed.expression);
+    if expression.contains("ChangeId(") || expression.contains("CommitId(") {
+        return true;
+    }
+    let id_like = |token: &str| {
+        (1..32).contains(&token.len())
+            && (token
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                || token.bytes().all(|b| matches!(b, b'k'..=b'z')))
+    };
+    parsed
+        .text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| id_like(token))
+        .any(|token| expression.contains(&format!("Symbol({token:?})")))
+}
+
+fn evaluate_in(
+    repo: &ReadonlyRepo,
+    parsed: &ParsedRevset,
+) -> Result<Box<dyn Revset>, RevisionError> {
     let symbols = SymbolResolver::new(repo, EXTENSIONS.symbol_resolvers());
     let resolved = parsed
         .expression

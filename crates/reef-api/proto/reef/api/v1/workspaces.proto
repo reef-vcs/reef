@@ -23,13 +23,27 @@ service WorkspaceService {
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
-  // Workspaces newest first, from the metadata database only.
+  // Workspaces newest first, from the metadata database only; with
+  // `at_operation` (R2.12), the workspaces active at that operation, from
+  // its view joined to the database.
+  //
+  // Errors: INVALID_ARGUMENT for `at_operation` without `repo`, or with
+  // reason INVALID_OPERATION_ID or AMBIGUOUS_OPERATION_ID (metadata
+  // `operation_id`); NOT_FOUND with reason OPERATION_NOT_FOUND (metadata
+  // `operation_id`).
   rpc ListWorkspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   // One workspace, with its disk usage, its recent snapshots, and the other
-  // workspaces on its change.
+  // workspaces on its change; with `at_operation` (R2.12), as it was at
+  // that operation.
+  //
+  // Errors: INVALID_ARGUMENT for `at_operation` with `snapshot_first`, or
+  // with reason INVALID_OPERATION_ID or AMBIGUOUS_OPERATION_ID (metadata
+  // `operation_id`); NOT_FOUND with reason OPERATION_NOT_FOUND (metadata
+  // `operation_id`), or WORKING_COPY_NOT_FOUND (metadata `workspace_id`,
+  // `at_operation`) when that operation's view has no working copy for it.
   rpc GetWorkspace(GetWorkspaceRequest) returns (GetWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -241,7 +255,8 @@ message Workspace {
   WorkspaceState state = 9;
   // Its change has more than one visible commit.
   bool divergent = 10;
-  // Why it needs attention; unspecified when it needs none.
+  // Why it needs attention; unspecified when it needs none. Unset read at
+  // an operation (R2.12).
   Attention attention = 11;
   // When it was created.
   google.protobuf.Timestamp created_at = 12;
@@ -250,7 +265,9 @@ message Workspace {
   // That operation; empty until one did.
   string last_snapshot_operation_id = 14;
   // Its lease: the unended one while active, the one it ended with once
-  // released or reclaimed.
+  // released or reclaimed. Read at an operation (R2.12), the lease issued
+  // by then and not yet ended, without `expires_at`, `last_heartbeat_at`,
+  // `state` or `end_reason`: renewals overwrite the first two.
   Lease lease = 15;
   // What triggers its snapshots. Fixed at create.
   WatcherKind watcher = 16;
@@ -258,10 +275,12 @@ message Workspace {
   // until publishing exists. Filled in by ListWorkspaces, GetWorkspace and
   // MoveWorkspace; 0 in CreateWorkspace.
   uint64 local_snapshot_count = 17;
-  // The shared stores mounted in it (R1.20). Empty for a workspace that is
+  // The shared stores mounted in it (R1.20). Empty read at an operation
+  // (R2.12), and for a workspace that is
   // not active or not loaded.
   repeated MountedStore stores = 18;
   // Why its watch is not up yet; WATCH_STATE_ATTACHED once it is.
+  // Unset read at an operation (R2.12).
   WatchState watch_state = 19;
   // How many paths its working-copy commit changes against its parents,
   // merged, as GetStatus counts them, as of the last snapshot (issue #114).
@@ -407,6 +426,12 @@ message ListWorkspacesRequest {
   // #114). Costs one tree diff per such workspace on its repository's read
   // thread; no snapshot is taken. Not part of the page token's binding.
   bool changed_file_counts = 6;
+  // The workspaces active at this operation (R2.12): those whose working
+  // copy its view holds, each on its change and commit then, with its row's
+  // owner, purpose and lease as issued. Requires `repo`. Fields the
+  // operation log does not record are unset (see `Workspace`). An operation
+  // id or unique prefix; empty for now.
+  string at_operation = 7;
 }
 
 // A page of workspaces, newest first.
@@ -415,6 +440,8 @@ message ListWorkspacesResponse {
   repeated Workspace workspaces = 1;
   // The token for the next page; empty on the last page.
   string next_page_token = 2;
+  // The full id of `at_operation`; empty for now.
+  string at_operation = 3;
 }
 
 // One workspace.
@@ -429,6 +456,11 @@ message GetWorkspaceRequest {
   // Leave `disk_usage` unset instead of walking the directory to measure
   // it, for a caller that must be cheap (`reef here`).
   bool skip_disk_usage = 4;
+  // The workspace as it was at this operation (R2.12), as ListWorkspaces
+  // lists it then; NOT_FOUND with reason WORKING_COPY_NOT_FOUND when that
+  // operation's view has no working copy for it. Cannot be combined with
+  // `snapshot_first`. An operation id or unique prefix; empty for now.
+  string at_operation = 5;
 }
 
 // One workspace.
@@ -436,9 +468,10 @@ message GetWorkspaceResponse {
   // The workspace, after the snapshot if one was taken.
   Workspace workspace = 1;
   // Unset for a workspace whose directory is gone, or with
-  // `skip_disk_usage`.
+  // `skip_disk_usage`, or read at an operation.
   DiskUsage disk_usage = 2;
-  // Ids of the other active workspaces on the same change.
+  // Ids of the other active workspaces on the same change; at an
+  // operation, those whose working copy its view holds on that change.
   repeated string other_workspaces_on_change = 3;
   // The operation `snapshot_first` recorded, if it recorded one.
   Operation snapshot = 4;
@@ -446,6 +479,8 @@ message GetWorkspaceResponse {
   uint64 snapshot_count = 5;
   // The newest 10 of them, newest first.
   repeated SnapshotEntry recent_snapshots = 6;
+  // The full id of `at_operation`; empty for now.
+  string at_operation = 7;
 }
 
 // Release a workspace.

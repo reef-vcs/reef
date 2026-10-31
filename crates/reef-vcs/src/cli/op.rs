@@ -24,7 +24,7 @@ use super::changes::{note_divergence, short, workspace_after};
 use super::log::LOG_LIMIT;
 use super::render_vcs::{OpLine, OpLines, OpShow};
 use super::repo::missing;
-use super::scope::{self, ScopeArgs, workspace_arg};
+use super::scope::{self, AtArgs, ScopeArgs, workspace_arg};
 use super::stream::{Backoff, Stopped, run_until_stopped, until};
 use super::{CliError, Ctx};
 
@@ -68,6 +68,8 @@ struct LogArgs {
     /// The repository (id, id prefix, or path) [default: the one you are in].
     #[arg(long, value_name = "REPO")]
     repo: Option<String>,
+    #[command(flatten)]
+    at: AtArgs,
 }
 
 /// `reef op watch`.
@@ -203,6 +205,7 @@ async fn log(ctx: &Ctx, args: LogArgs) -> Result<(), CliError> {
         repo: scope.repo_id.clone(),
         filter: Some(filter),
         include_effects: args.effects,
+        at_operation: args.at.at_operation(ctx, &scope).await?,
         ..ListOperationsRequest::default()
     };
     let limited = ctx

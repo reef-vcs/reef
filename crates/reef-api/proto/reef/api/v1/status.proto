@@ -16,7 +16,17 @@ service StatusService {
   // what that workspace has changed. Snapshots the workspace first unless
   // `skip_snapshot`. R2.23 changes how it is answered, not its shape.
   //
-  // Errors: FAILED_PRECONDITION for a workspace that is not active;
+  // With `at_operation` (R2.12), what the repository looked like at that
+  // operation instead: its view's trunk, heads and conflicts, the
+  // workspaces whose working copy it holds, and, for a named workspace in
+  // any state now, its working copy then. Never snapshots, and leaves out
+  // what the operation log does not record (see each field).
+  //
+  // Errors: FAILED_PRECONDITION for a workspace that is not active, unless
+  // `at_operation` is set; INVALID_ARGUMENT with reason
+  // INVALID_OPERATION_ID or AMBIGUOUS_OPERATION_ID (metadata
+  // `operation_id`), or NOT_FOUND with reason OPERATION_NOT_FOUND (metadata
+  // `operation_id`), for `at_operation`;
   // INVALID_ARGUMENT for a negative `max_files`; NOT_FOUND with reason
   // WORKING_COPY_NOT_FOUND (metadata `workspace_id`, `at_operation`) for a
   // workspace released while the status was read; and a failed snapshot's
@@ -40,6 +50,9 @@ enum StatusSource {
   // The last recorded snapshot, with `skip_snapshot`: edits since then may
   // be missing.
   STATUS_SOURCE_LAST_SNAPSHOT = 4;
+  // The view at `at_operation`: the working copy as that operation
+  // recorded it (R2.12).
+  STATUS_SOURCE_OPERATION = 5;
 }
 
 // Status of a repository, and optionally of one workspace.
@@ -54,6 +67,10 @@ message GetStatusRequest {
   // 1,000 means 1,000, and a negative value is INVALID_ARGUMENT. Caps
   // `changed_files`, never `changed_file_count`.
   int32 max_files = 4;
+  // Read at this operation's view instead of now (R2.12): an operation id
+  // or unique prefix of lowercase hex; empty for now. Never snapshots,
+  // whatever `skip_snapshot` says.
+  string at_operation = 5;
 }
 
 // Status.
@@ -75,7 +92,8 @@ message RepositoryStatus {
   Change trunk = 1;
   // The default start's bookmark; empty when none exists.
   string trunk_bookmark = 2;
-  // Active workspaces, newest 100.
+  // Active workspaces, newest 100. With `at_operation`, those whose working
+  // copy the operation's view holds, as ListWorkspaces lists them then.
   repeated Workspace active_workspaces = 3;
   // Active workspaces, in all.
   uint32 active_workspace_count = 4;
@@ -87,7 +105,7 @@ message RepositoryStatus {
   repeated string conflicted_change_ids = 7;
   // Divergent changes, at most 100.
   repeated string divergent_change_ids = 8;
-  // The head operation.
+  // The head operation, or `at_operation`.
   Operation last_operation = 9;
 }
 
@@ -108,7 +126,8 @@ message WorkspaceStatus {
   repeated string conflicted_paths = 6;
   // Where the answer came from.
   StatusSource source = 7;
-  // The snapshot this request recorded, if it recorded one.
+  // The snapshot this request recorded, if it recorded one. Unset with
+  // `at_operation`.
   Operation snapshot = 8;
   // Conflicted paths, in all.
   uint32 conflicted_path_count = 9;

@@ -82,7 +82,7 @@ enum GroupArg {
 }
 
 /// An RFC 3339 time, or a humantime duration before now.
-fn when(text: &str) -> Result<SystemTime, String> {
+pub(crate) fn when(text: &str) -> Result<SystemTime, String> {
     if let Ok(at) = humantime::parse_rfc3339_weak(text) {
         return Ok(at);
     }

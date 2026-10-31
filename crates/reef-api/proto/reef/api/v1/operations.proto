@@ -25,22 +25,39 @@ service OperationService {
   // them, filtered. Never writes: concurrent operation heads are walked,
   // not merged. A page examines at most 10,000 operations and stops before
   // its response passes 3 MiB, so it may hold fewer than `page_size`
-  // operations, or none, with a `next_page_token`.
+  // operations, or none, with a `next_page_token`. With `at_operation`
+  // (R2.12), the walk starts at that operation instead: it and its
+  // ancestors, the feed as it ended there.
   //
   // Errors: INVALID_ARGUMENT with reason INVALID_PAGE_TOKEN, or
   // INVALID_CHANGE_ID (metadata `change`) for a `filter.changes` value that
   // is not a hex or reverse-hex prefix; NOT_FOUND for an unknown
   // `filter.workspaces` value, or with reason OPERATION_NOT_FOUND
-  // (metadata `operation_id`) when a page token's operation is gone.
+  // (metadata `operation_id`) when a page token's operation is gone;
+  // INVALID_OPERATION_ID, AMBIGUOUS_OPERATION_ID or OPERATION_NOT_FOUND
+  // (metadata `operation_id`) for `at_operation`; and FAILED_PRECONDITION
+  // with reason OPERATION_LOG_REWRITTEN (metadata `repo_id`) when a walk
+  // from `at_operation` reaches operations garbage collection removed.
   rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-  // One operation, with its effects.
+  // One operation, with its effects: the one `operation_id` names, or,
+  // with `ended_at_or_before` (R2.12), the newest that ended at or before
+  // that time, found by walking the log back from `operation_id` or the
+  // operation heads. The lookup costs the operations that ended after the
+  // time, at most 100,000.
   //
   // Errors: INVALID_ARGUMENT with reason INVALID_OPERATION_ID (not lowercase
-  // hex, or empty) or AMBIGUOUS_OPERATION_ID (metadata `operation_id`);
-  // NOT_FOUND with reason OPERATION_NOT_FOUND (metadata `operation_id`).
+  // hex, or empty with no `ended_at_or_before`) or AMBIGUOUS_OPERATION_ID
+  // (metadata `operation_id`); NOT_FOUND with reason OPERATION_NOT_FOUND
+  // (metadata `operation_id`); FAILED_PRECONDITION with reason
+  // OPERATION_NOT_RETAINED (metadata `oldest_at`) for a time before the
+  // oldest operation garbage collection kept, TOO_FAR_BACK (metadata
+  // `repo_id`, `examined_to`) when the lookup examined 100,000 operations
+  // without reaching the time, or OPERATION_LOG_REWRITTEN (metadata
+  // `repo_id`) when a walk from `operation_id` reaches operations garbage
+  // collection removed.
   rpc GetOperation(GetOperationRequest) returns (GetOperationResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -306,6 +323,10 @@ message ListOperationsRequest {
   // token sent with different filters is INVALID_ARGUMENT, reason
   // INVALID_PAGE_TOKEN.
   string page_token = 7;
+  // Walk from this operation instead of the operation heads (R2.12): an
+  // operation id or unique prefix; empty for the heads. Later pages walk
+  // from the same operation.
+  string at_operation = 8;
 }
 
 // A page of the operation log, newest first.
@@ -314,14 +335,22 @@ message ListOperationsResponse {
   repeated Operation operations = 1;
   // The token for the next page; empty on the last page.
   string next_page_token = 2;
+  // The full id of `at_operation`; empty when the walk started at the
+  // heads.
+  string at_operation = 3;
 }
 
 // One operation.
 message GetOperationRequest {
   // The repository.
   string repo = 1;
-  // An operation id or unique prefix.
+  // An operation id or unique prefix. With `ended_at_or_before`, where the
+  // lookup starts; empty to start at the operation heads.
   string operation_id = 2;
+  // Find the newest operation that ended at or before this time (R2.12),
+  // newest end first as ListOperations orders them; a time after the
+  // newest operation finds it.
+  google.protobuf.Timestamp ended_at_or_before = 3;
 }
 
 // One operation.

@@ -80,7 +80,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 return Err(root_is_a_directory(&scope, &revision));
             }
             let advice = AdviceCtx {
-                operation_given: read.at_op.is_some(),
+                operation_given: read.at.given(),
                 snapshots_first: !read.no_snapshot,
                 ..AdviceCtx::new(&scope)
             };
@@ -89,7 +89,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 workspace: scope.workspace_id(),
                 revision,
                 path: paths.pop().unwrap_or_default(),
-                at_operation: read.at_operation(),
+                at_operation: read.at_operation(ctx, &scope).await?,
                 skip_snapshot: read.no_snapshot,
                 ..ReadFileRequest::default()
             };
@@ -112,7 +112,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 None => scope::default_list_path(&scope)?,
             };
             let advice = AdviceCtx {
-                operation_given: read.at_op.is_some(),
+                operation_given: read.at.given(),
                 snapshots_first: !read.no_snapshot,
                 ..AdviceCtx::new(&scope)
             };
@@ -122,7 +122,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 revision,
                 path,
                 recursive,
-                at_operation: read.at_operation(),
+                at_operation: read.at_operation(ctx, &scope).await?,
                 skip_snapshot: read.no_snapshot,
                 ..ListFilesRequest::default()
             };

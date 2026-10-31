@@ -2416,3 +2416,93 @@ async fn diff_brief_matches_full() {
         assert_brief_of(&brief, &full, "diff");
     }
 }
+
+// R2.12 13: `--at-op` and `--at` on status, `ws list`, `ws inspect` and
+// `op log`.
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_cli() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    write(&ws, "one.txt", "1\n");
+    ok(&daemon, &dir, &["ws", "snapshot"]).await;
+    let then = ok(&daemon, &dir, &["ws", "inspect", "--no-snapshot", &ws.id]).await;
+    let x = head_op(&daemon, &dir).await;
+    create(&daemon, &repo).await;
+    write(&ws, "two.txt", "2\n");
+    ok(&daemon, &dir, &["ws", "snapshot"]).await;
+
+    let status = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "status", "--at-op", &x[..12]],
+    )
+    .await;
+    assert_eq!(status["at_operation"], x.as_str());
+    assert_eq!(status["workspace_status"]["source"], "operation");
+    assert_eq!(
+        status["workspace_status"]["working_copy"]["commit_id"],
+        then["commit_id"]
+    );
+    assert_eq!(status["repository_status"]["active_workspace_count"], 1);
+
+    let listed = ok(&daemon, &dir, &["-o", "json", "ws", "list", "--at-op", &x]).await;
+    let ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ws| ws["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [ws.id.as_str()]);
+    assert_eq!(
+        ok(&daemon, &dir, &["ws", "list"])
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let inspected = ok(&daemon, &dir, &["ws", "inspect", &ws.id, "--at-op", &x]).await;
+    assert_eq!(inspected["commit_id"], then["commit_id"]);
+    let ops = ok(&daemon, &dir, &["op", "log", "--at-op", &x]).await;
+    assert_eq!(ops[0]["id"], x.as_str());
+
+    // `--at` resolves a time to the operation then, noted on stderr.
+    let now = ok(&daemon, &dir, &["-o", "json", "status", "--at", "0s"]).await;
+    assert_eq!(now["at_operation"], head_op(&daemon, &dir).await.as_str());
+    let output = run_in(&daemon, &dir, &["ws", "list", "--at", "1s"]).await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with("reef: at operation "),
+        "{}",
+        stderr(&output)
+    );
+    let rfc3339 = humantime::format_rfc3339(std::time::SystemTime::now()).to_string();
+    ok(&daemon, &dir, &["op", "log", "--at", &rfc3339]).await;
+
+    // Usage errors.
+    for args in [
+        &["status", "--at", "soon"][..],
+        &["status", "--at", "1m", "--at-op", &x],
+        &["ws", "list", "--all", "--at-op", &x],
+    ] {
+        run_in(&daemon, &dir, args).await.assert().code(2);
+    }
+    // Before the repository's first operation.
+    let error = err(
+        &daemon,
+        &dir,
+        &["status", "--at", "3650d"],
+        5,
+        "OPERATION_NOT_RETAINED",
+    )
+    .await;
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("operation log starts at"),
+        "{error}"
+    );
+    daemon.stop().await;
+}

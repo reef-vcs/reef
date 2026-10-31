@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use reef_api::v1::MissingStores;
 use reef_api::v1::{
-    CreateWorkspaceRequest, ListWorkspacesRequest, WorkspaceState, create_workspace_request,
+    CreateWorkspaceRequest, GetWorkspaceRequest, GetWorkspaceResponse, ListWorkspacesRequest,
+    WorkspaceState, create_workspace_request,
 };
 use reef_client::ROOT_CHECKOUT;
 use reef_client::brief;
@@ -15,6 +16,7 @@ use reef_client::json::{Created, GcReport, Inspected, Lease, Released, Snapshott
 use reef_error::{Advice, ErrorKind};
 use serde::Serialize;
 
+use super::advice::AdviceCtx;
 use super::changes::{note_divergence, short, workspace_after};
 use super::render::{GcReports, lease_text, now_ms, span};
 use super::repo::missing;
@@ -42,12 +44,14 @@ enum WsCommand {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
         /// Include released and reclaimed workspaces.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["at_op", "at"])]
         all: bool,
         /// Show at most this many, the newest; 0 for all. A cut is noted on
         /// stderr, so exactly N may mean there are more.
         #[arg(long, value_name = "N", default_value_t = LIST_LIMIT)]
         limit: usize,
+        #[command(flatten)]
+        at: scope::AtArgs,
     },
     /// Show one workspace, after a snapshot of its files.
     Inspect {
@@ -56,6 +60,8 @@ enum WsCommand {
         /// Report the last snapshot instead of taking one.
         #[arg(long)]
         no_snapshot: bool,
+        #[command(flatten)]
+        at: scope::AtArgs,
     },
     /// Snapshot a workspace's files now, as an operation of its own.
     Snapshot {
@@ -200,7 +206,12 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Run(args) => return ws_run::run(ctx, args).await,
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, args).await,
-        WsCommand::List { repo, all, limit } => {
+        WsCommand::List {
+            repo,
+            all,
+            limit,
+            at,
+        } => {
             let states: Vec<i32> = if all {
                 Vec::new()
             } else {
@@ -217,9 +228,26 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
                     ..ListWorkspacesRequest::default()
                 })
             };
-            let listed = match repo {
-                Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
-                None => ctx.call(list(String::new())).await?,
+            let listed = if at.given() {
+                // One repository's, at one of its operations (R2.12).
+                let scope = scope::resolve_repo_only(ctx, repo.as_deref()).await?;
+                let at_operation = at.at_operation(ctx, &scope).await?;
+                let advice = AdviceCtx {
+                    operation_given: true,
+                    ..AdviceCtx::new(&scope)
+                };
+                ctx.call(ctx.client.list_workspaces(ListWorkspacesRequest {
+                    repo: scope.repo_id.clone(),
+                    at_operation,
+                    ..ListWorkspacesRequest::default()
+                }))
+                .await
+                .map_err(|error| advice.refine(error))?
+            } else {
+                match repo {
+                    Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
+                    None => ctx.call(list(String::new())).await?,
+                }
             };
             let total = listed.len();
             let listed = newest(listed, limit);
@@ -235,10 +263,14 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Inspect {
             workspace,
             no_snapshot,
+            at,
         } => {
-            let response = ctx
-                .call(ctx.client.inspect_workspace("", &workspace, !no_snapshot))
-                .await?;
+            let response = if at.given() {
+                inspect_at(ctx, &workspace, &at).await?
+            } else {
+                ctx.call(ctx.client.inspect_workspace("", &workspace, !no_snapshot))
+                    .await?
+            };
             let inspected =
                 Inspected::from_response(&response).ok_or_else(|| missing("workspace"))?;
             ctx.out.object(&inspected)
@@ -267,6 +299,40 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Move(args) => ws_move::run(ctx, args).await,
     };
     done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `ws inspect` at an operation (R2.12): never snapshots.
+async fn inspect_at(
+    ctx: &Ctx,
+    workspace: &str,
+    at: &scope::AtArgs,
+) -> Result<GetWorkspaceResponse, CliError> {
+    let request = GetWorkspaceRequest {
+        repo: String::new(),
+        workspace: workspace.to_owned(),
+        snapshot_first: false,
+        skip_disk_usage: true,
+        at_operation: String::new(),
+    };
+    let (repo_id, at_operation) = if at.at.is_some() {
+        let now = ctx.call(ctx.client.get_workspace(request.clone())).await?;
+        let ws = now.workspace.ok_or_else(|| missing("workspace"))?;
+        let scope = scope::Scope {
+            repo_id: ws.repo_id.clone(),
+            dir: PathBuf::from(&ws.path),
+            workspace: Some(ws),
+            from_flags: true,
+        };
+        (scope.repo_id.clone(), at.at_operation(ctx, &scope).await?)
+    } else {
+        (String::new(), at.at_op.clone().unwrap_or_default())
+    };
+    ctx.call(ctx.client.get_workspace(GetWorkspaceRequest {
+        repo: repo_id,
+        at_operation,
+        ..request
+    }))
+    .await
 }
 
 /// The workspace `workspace` names, else the one you are in, as the

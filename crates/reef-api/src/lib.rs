@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 10;
+pub const API_REVISION: u32 = 11;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -74,6 +74,9 @@ pub const API_DIGESTS: &[&str] = &[
     // #114: `ListWorkspacesRequest.changed_file_counts`,
     // `Workspace.changed_file_count`.
     "9d7ad1ec6a7e734cc9b1c899743201c6fd4b65de235b6908ada5e1cc348b3a40",
+    // R2.12: reads at an operation for status, workspaces and the operation
+    // log; operations by time.
+    "878a9ac94ce40a3b8294c9ea5a9f92db1bb7e78ff8dd72936015bd7ea58269be",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -247,6 +250,14 @@ pub mod error {
     /// after a subscription's position, so it cannot continue from there
     /// (R2.09). Metadata: `repo_id`.
     pub const OPERATION_LOG_REWRITTEN: &str = "OPERATION_LOG_REWRITTEN";
+    /// A time before the oldest operation garbage collection kept, looked
+    /// up with `ended_at_or_before` (R2.12). Metadata: `oldest_at`, that
+    /// operation's end (RFC 3339).
+    pub const OPERATION_NOT_RETAINED: &str = "OPERATION_NOT_RETAINED";
+    /// A lookup by time that examined 100,000 operations without reaching
+    /// the time (R2.12). Metadata: `repo_id`, `examined_to` (RFC 3339, the
+    /// end of the last operation examined).
+    pub const TOO_FAR_BACK: &str = "TOO_FAR_BACK";
     /// The daemon is serving its limit of subscriptions (R2.09).
     pub const TOO_MANY_SUBSCRIPTIONS: &str = "TOO_MANY_SUBSCRIPTIONS";
     /// A `presence_id` that names no live presence entry: cleared,

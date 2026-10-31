@@ -13,6 +13,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - A history index and `HistoryService.QueryChanges` ([ADR 0044](docs/adr/0044-history-index-and-query-layer.md), API revision 9): which changes touched files or symbols, who wrote them (activity per agent and workspace), when, and what became of them (open, landed on `trunk()`, abandoned, undone), filtered by symbol, path, agent, workspace, change, outcome and time window, paged or counted by agent, outcome or workspace, with the history each answer covers. The daemon follows the operation log into `repos/<id>/history.sqlite3`, backfills it, and keeps it through GC. `[history]` configures it. Two reasons: `HISTORY_DISABLED`, `INVALID_HISTORY_QUERY`.
 - `reef history [PATH]...` with `--symbol`, `--change-kind`, `--by`, `--workspace`, `--change`, `--outcome`, `--since`/`--until` (RFC 3339 or a duration ago), `--include-empty`, `--group-by` and `--limit`.
 - The MCP server's `query_changes` tool. `tools/list` is held to 21,250 bytes.
+- Replay ([ADR 0046](docs/adr/0046-replay.md), API revision 11): `GetStatus`, `ListWorkspaces`, `GetWorkspace` and `ListOperations` take `at_operation` and answer as of that operation: the workspaces whose working copy its view holds, each on its change then, with what the log does not record (presence, attention, stores, the watch, lease liveness) left unset. `GetOperation` finds an operation by time with `ended_at_or_before`. Two reasons: `OPERATION_NOT_RETAINED`, `TOO_FAR_BACK`; `STATUS_SOURCE_OPERATION`.
+- `--at-op` on `reef status`, `ws list`, `ws inspect` and `op log`, and `--at WHEN` (an RFC 3339 time or a duration ago) on every command that takes `--at-op`.
 
 - `ListWorkspacesRequest.changed_file_counts` fills `Workspace.changed_file_count`, how many files each active workspace's change changes as of its last snapshot (API revision 10). `reef ws list` asks for it, in JSON and in a new `FILES` column, and so does the MCP server's `list_workspaces`.
 - `-o brief`: compact JSON with only the keys an agent acts on ([ADR 0045](docs/adr/0045-brief-json-by-default.md)).
@@ -22,10 +24,12 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - **Piped output is brief JSON** ([ADR 0045](docs/adr/0045-brief-json-by-default.md)): compact, a list one element per line, and for `reef ws list`, `status` and `diff` only the keys an agent acts on, with zero values left out. This breaks scripts that read piped `reef ws list`, `status` or `diff` without `-o json`; `-o json` or `REEF_OUTPUT=json` restores the full JSON. On R2.17's `state-repo` question, `reef ws list` alone is 215 bytes, against 2,893 for git.
 - The MCP server's `list_workspaces`, `get_status` and `get_diff` return the same brief objects, without `next_page_token` on a last page.
 
+- Reads at an operation share the head's commit index when it covers the operation's view: after GC they no longer rebuild and save a full index for each older operation read, and the daemon keeps 64 of them loaded instead of 8. A commit created after the operation, named by its full id in a read at it, now resolves (hidden) instead of not found; change offsets and short prefixes still resolve as of the operation.
 - `ListSymbols` by name or symbol reads only the matching rows of the index, not each matching file's whole entry, and (R2.16) reads them in path order with its filters and cursor in SQL, stopping at the end of the page.
 
 ### Fixed
 
+- A read at a GC-kept copy of an operation from before the last GC failed: jj could not build an index for it once GC had removed its ancestors. It answers through the head's index now (R2.12).
 - The MCP server's `get_diff` described `max_lines_per_file` as "[default: no cut]"; the default is 1,000.
 - Timestamps print with exactly three fraction digits (`2026-10-30T17:04:34.000Z`, `…34.100Z`), in the CLI's JSON and text, MCP results and backup manifests, so they sort as strings. `time`'s RFC 3339 formatting had trimmed trailing zeros and dropped a zero fraction, so a time on a whole second sorted after a later one in the same second.
 

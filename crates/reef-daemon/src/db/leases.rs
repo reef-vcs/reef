@@ -244,6 +244,18 @@ impl Db {
         })
     }
 
+    /// Every lease the workspace was issued, oldest first (R2.12).
+    pub fn leases_of(&self, workspace: WorkspaceId) -> Result<Vec<LeaseRecord>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM leases WHERE workspace_id = ?1
+                 ORDER BY issued_at, rowid"
+            ))?;
+            let rows = stmt.query_map([workspace], from_row)?;
+            rows.collect()
+        })
+    }
+
     /// The workspace's most recently issued lease, ended or not.
     pub fn last_lease(&self, workspace: WorkspaceId) -> Result<Option<LeaseRecord>, DbError> {
         self.with(|conn| {

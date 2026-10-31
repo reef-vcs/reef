@@ -40,6 +40,7 @@ use crate::maintenance::restore::RestoreError;
 use crate::presence::PresenceError;
 use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
+use crate::service::at_operation::ReplayError;
 use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
@@ -107,6 +108,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
                 error => error.advice(),
             }
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
@@ -315,6 +318,30 @@ fn symbol_reason(error: &SymbolError) -> Option<(&'static str, BTreeMap<String, 
         // Transparent: their sources are the inner error's sources.
         SymbolError::File(error) => return file_reason(error),
         _ => return None,
+    })
+}
+
+fn replay_reason(error: &ReplayError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        ReplayError::Rewritten { repo } => (
+            reason::OPERATION_LOG_REWRITTEN,
+            meta(&[("repo_id", repo.as_hex())]),
+        ),
+        ReplayError::NotRetained { oldest_at } => (
+            reason::OPERATION_NOT_RETAINED,
+            meta(&[("oldest_at", oldest_at.to_rfc3339())]),
+        ),
+        ReplayError::TooFarBack {
+            repo, examined_to, ..
+        } => (
+            reason::TOO_FAR_BACK,
+            meta(&[
+                ("repo_id", repo.as_hex()),
+                ("examined_to", examined_to.to_rfc3339()),
+            ]),
+        ),
+        ReplayError::NeedsRepo | ReplayError::SnapshotFirst => return None,
     })
 }
 
@@ -557,6 +584,8 @@ fn reason_and_metadata(
             symbol_reason(error)
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             history_reason(error)
+        } else if let Some(error) = error.downcast_ref::<ReplayError>() {
+            replay_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (
@@ -888,6 +917,60 @@ mod tests {
             ),
             (ErrorKind::Unsupported, Box::new(|| status(NotServed))),
         ]
+    }
+
+    /// R2.12: the replay reasons, with their metadata and hints.
+    #[test]
+    fn replay_reasons_carry_their_metadata() {
+        let repo: RepoId = "00112233445566ff".parse().unwrap();
+        let cases = [
+            (
+                ReplayError::Rewritten { repo },
+                Code::FailedPrecondition,
+                reef_api::error::OPERATION_LOG_REWRITTEN,
+                vec![("repo_id", repo.as_hex())],
+            ),
+            (
+                ReplayError::NotRetained {
+                    oldest_at: crate::model::Timestamp(1_000),
+                },
+                Code::FailedPrecondition,
+                reef_api::error::OPERATION_NOT_RETAINED,
+                vec![("oldest_at", "1970-01-01T00:00:01.000Z".to_owned())],
+            ),
+            (
+                ReplayError::TooFarBack {
+                    repo,
+                    examined_to: crate::model::Timestamp(2_000),
+                    examined: 100_000,
+                },
+                Code::FailedPrecondition,
+                reef_api::error::TOO_FAR_BACK,
+                vec![
+                    ("examined_to", "1970-01-01T00:00:02.000Z".to_owned()),
+                    ("repo_id", repo.as_hex()),
+                ],
+            ),
+        ];
+        for (error, code, reason, metadata) in cases {
+            let status = status(error);
+            assert_eq!(status.code(), code);
+            let detail = detail_of(&status).unwrap();
+            assert_eq!(detail.reason, reason);
+            let expected: Vec<(String, String)> = metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
+            assert_eq!(detail.metadata.into_iter().collect::<Vec<_>>(), expected);
+            assert_ne!(detail.hint, "", "{reason}");
+        }
+        for error in [ReplayError::NeedsRepo, ReplayError::SnapshotFirst] {
+            let status = status(error);
+            assert_eq!(status.code(), Code::InvalidArgument);
+            let detail = detail_of(&status).unwrap();
+            assert_eq!(detail.reason, "");
+            assert_ne!(detail.hint, "");
+        }
     }
 
     /// R2.05 test 12: the three not-found reasons, with their metadata,

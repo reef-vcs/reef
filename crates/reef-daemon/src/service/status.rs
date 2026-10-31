@@ -2,6 +2,11 @@
 //! state and, when a workspace is named, what it has changed against its
 //! parents, read from one view after the workspace's snapshot. R2.23
 //! answers the workspace part from an index instead; the shape stays.
+//!
+//! With `at_operation` (R2.12) both parts are read from that operation's
+//! view, and its active workspaces are the working copies the view holds
+//! (`at_operation::copies_at`), not the rows active now. Nothing is
+//! snapshotted.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,12 +21,13 @@ use reef_lib::jj::oplog::{self, OpEntry};
 use reef_lib::jj::revset;
 use tonic::{Request, Response, Status};
 
+use super::at_operation::{CopyAt, copies_at, created_at, rows_at, workspaces_at};
 use super::convert;
 use super::reading::{Records, op_id, snapshot_first, target};
 use super::workspaces::listed;
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::model::WorkspaceState;
+use crate::model::{Timestamp, WorkspaceState};
 use crate::workspace::ManagerError;
 
 /// Changed files when the request says 0.
@@ -67,6 +73,9 @@ struct Read {
     divergent: (Vec<String>, usize),
     last: (OpEntry, Option<OpEffects>),
     workspace: Option<WorkspaceRead>,
+    /// The working copies in the view read at an operation; `None` at
+    /// head.
+    copies: Option<Vec<CopyAt>>,
 }
 
 struct WorkspaceRead {
@@ -99,8 +108,11 @@ impl StatusService for StatusHandler {
         };
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
+        let at_operation = request.at_operation.trim().to_owned();
+        let at = !at_operation.is_empty();
         if let Some(record) = &target.workspace
             && record.state != WorkspaceState::Active
+            && !at
         {
             return Err(status(ManagerError::NotActive {
                 id: record.id,
@@ -108,7 +120,7 @@ impl StatusService for StatusHandler {
                 state: record.state,
             }));
         }
-        let snapshot = if request.skip_snapshot {
+        let snapshot = if request.skip_snapshot || at {
             None
         } else {
             Some(snapshot_first(state, &target, target.workspace.is_some(), arrived, agent).await?)
@@ -121,7 +133,19 @@ impl StatusService for StatusHandler {
             .reads
             .run(&target.handle, move || async move {
                 let target = read_target;
-                let repo = &head;
+                let repo = &if at {
+                    reads
+                        .at(target.repo.id, &head, &at_operation)
+                        .await
+                        .map_err(status)?
+                } else {
+                    Arc::clone(&head)
+                };
+                let copies = if at {
+                    Some(copies_at(repo).await.map_err(status)?)
+                } else {
+                    None
+                };
                 let scope = target.scope();
                 let describer = Describer::new(repo, &scope).map_err(status)?;
                 let trunk = match revset::trunk(repo) {
@@ -157,7 +181,7 @@ impl StatusService for StatusHandler {
                 let operation = repo.operation();
                 let last = (
                     oplog::entry(operation),
-                    reads.effects(target.repo.id, repo, operation).await,
+                    reads.effects(target.repo.id, &head, operation).await,
                 );
                 let workspace = if target.jj_workspace.is_some() {
                     let wc = revset::resolve_revision(repo, "@", &scope)
@@ -209,23 +233,44 @@ impl StatusService for StatusHandler {
                     divergent,
                     last,
                     workspace,
+                    copies,
                 })
             })
             .await
             .map_err(status)??;
 
-        let rows = state
-            .manager
-            .list(Some(target.repo.id), &[WorkspaceState::Active], None)
-            .map_err(status)?;
-        let active_count = rows.len();
-        let mut rows = rows;
-        rows.sort_by(|(a, _), (b, _)| {
-            (b.created_at.0, b.id.as_hex()).cmp(&(a.created_at.0, a.id.as_hex()))
-        });
-        rows.truncate(MAX_LISTED);
-        let active_workspaces = listed(state, Some(target.repo.id), &rows)?;
         let (last_entry, last_effects) = read.last;
+        let end = Timestamp::from(last_entry.end);
+        let (active_workspaces, active_count, workspace_then) = if let Some(copies) = read.copies {
+            let mut rows = rows_at(state, copies)?;
+            let then = target.workspace.as_ref().and_then(|record| {
+                rows.iter()
+                    .find(|(copy, _)| copy.id == record.id)
+                    .map(|(copy, _)| (copy.clone(), Some(record.clone())))
+            });
+            let count = rows.len();
+            rows.sort_by(|a, b| {
+                (created_at(b), b.0.id.as_hex()).cmp(&(created_at(a), a.0.id.as_hex()))
+            });
+            rows.truncate(MAX_LISTED);
+            let workspaces = workspaces_at(state, target.repo.id, &rows, end)?;
+            let then = match then {
+                Some(row) => workspaces_at(state, target.repo.id, &[row], end)?.pop(),
+                None => None,
+            };
+            (workspaces, count, then)
+        } else {
+            let mut rows = state
+                .manager
+                .list(Some(target.repo.id), &[WorkspaceState::Active], None)
+                .map_err(status)?;
+            let count = rows.len();
+            rows.sort_by(|(a, _), (b, _)| {
+                (b.created_at.0, b.id.as_hex()).cmp(&(a.created_at.0, a.id.as_hex()))
+            });
+            rows.truncate(MAX_LISTED);
+            (listed(state, Some(target.repo.id), &rows)?, count, None)
+        };
         let records = Records::of(state, std::slice::from_ref(&last_entry))?;
         let mut last_operation = records.operation(&last_entry, target.repo.id);
         last_operation.effects = last_effects.as_ref().map(convert::effects);
@@ -246,6 +291,17 @@ impl StatusService for StatusHandler {
             last_operation: Some(last_operation),
         };
         let workspace_status = match (target.workspace.as_ref(), read.workspace) {
+            (Some(_), Some(found)) if at => Some(v1::WorkspaceStatus {
+                workspace: workspace_then,
+                working_copy: Some(found.working_copy),
+                parents: found.parents,
+                changed_files: found.changed,
+                changed_file_count: to_u32(found.changed_count),
+                conflicted_paths: found.conflicted,
+                source: v1::StatusSource::Operation.into(),
+                snapshot: None,
+                conflicted_path_count: to_u32(found.conflicted_count),
+            }),
             (Some(record), Some(found)) => {
                 let inspected = state
                     .manager

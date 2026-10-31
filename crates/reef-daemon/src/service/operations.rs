@@ -5,8 +5,8 @@
 //! [`crate::subscribe`] session.
 //!
 //! Operation reads never reload the repository and never merge concurrent
-//! operation heads: they walk from the heads the op heads store lists. A
-//! page token pins those heads, and its cursor is `<examined>:<id>`: how
+//! operation heads: they walk from the heads the op heads store lists, or
+//! from `at_operation` (R2.12). A page token pins those heads, and its cursor is `<examined>:<id>`: how
 //! many operations the walk has taken so far and the last one's id, which
 //! the next page checks after skipping as many.
 
@@ -113,6 +113,50 @@ fn system_time(timestamp: Option<&prost_types::Timestamp>) -> Option<SystemTime>
         SystemTime::UNIX_EPOCH.checked_sub(seconds)?
     };
     whole.checked_add(nanos)
+}
+
+/// An `ended_at_or_before` that is not a time.
+#[derive(Debug, thiserror::Error)]
+#[error("ended_at_or_before is not a valid time: nanos out of range, or too far from 1970")]
+pub struct TimeOutOfRange;
+
+impl Classify for TimeOutOfRange {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::InvalidArgument
+    }
+}
+
+/// The newest operation of `repo` that ended at or before `at`, walking
+/// from the operation `from` names, or from the op heads when it is empty
+/// (R2.12). Runs on the blocking pool.
+async fn locate(
+    head: &Arc<ReadonlyRepo>,
+    repo: RepoId,
+    from: &str,
+    at: SystemTime,
+) -> Result<reef_lib::jj::Operation, Status> {
+    use super::at_operation::{ReplayError, locate_budget, walk_status};
+    let start = if from.trim().is_empty() {
+        Vec::new()
+    } else {
+        let operation = oplog::resolve_operation(head, from).await.map_err(status)?;
+        vec![oplog::entry(&operation).id]
+    };
+    let budget = locate_budget();
+    match oplog::locate(head, &start, at, budget)
+        .await
+        .map_err(|error| walk_status(repo, error))?
+    {
+        oplog::Located::Found(operation) => Ok(operation),
+        oplog::Located::BeforeRetained { oldest_end } => Err(status(ReplayError::NotRetained {
+            oldest_at: oldest_end.into(),
+        })),
+        oplog::Located::Exhausted { examined_to } => Err(status(ReplayError::TooFarBack {
+            repo,
+            examined_to: examined_to.into(),
+            examined: budget,
+        })),
+    }
 }
 
 /// One operation a page returns.
@@ -277,10 +321,18 @@ impl OperationService for OperationsHandler {
             Start::of_token(pinned, cursor)?
         } else {
             let walk_head = Arc::clone(&head);
+            let at_operation = request.at_operation.clone();
             let heads = state
                 .reads
                 .run(&target.handle, move || async move {
-                    oplog::op_heads(&walk_head).await
+                    if at_operation.trim().is_empty() {
+                        oplog::op_heads(&walk_head)
+                            .await
+                            .map_err(OpLookupError::from)
+                    } else {
+                        let operation = oplog::resolve_operation(&walk_head, &at_operation).await?;
+                        Ok(vec![oplog::entry(&operation).id])
+                    }
                 })
                 .await
                 .map_err(status)?
@@ -319,7 +371,7 @@ impl OperationService for OperationsHandler {
             .map_err(status)?
             .map_err(|error| match error {
                 OpLookupError::NotFound(_) => status(PinnedGone(error)),
-                error => status(error),
+                error => super::at_operation::walk_status(target.repo.id, error),
             })?;
         let skipped = found.last_skipped.as_ref().map(OperationIdHex::as_str);
         if start.skip > 0 && skipped != Some(start.expected.as_str()) {
@@ -360,9 +412,15 @@ impl OperationService for OperationsHandler {
             Some((examined, last)) => page.token_at(&format!("{examined}:{last}"), &pinned),
             None => page.token_at(&format!("{}:", start.skip), &pinned),
         };
+        let at_operation = if request.at_operation.trim().is_empty() {
+            String::new()
+        } else {
+            pinned
+        };
         Ok(Response::new(ListOperationsResponse {
             operations,
             next_page_token,
+            at_operation,
         }))
     }
 
@@ -378,16 +436,24 @@ impl OperationService for OperationsHandler {
         let reads = Arc::clone(&state.reads);
         let repo = target.repo.id;
         let text = request.operation_id;
+        let at = request.ended_at_or_before;
+        if at.is_some() && system_time(at.as_ref()).is_none() {
+            return Err(status(TimeOutOfRange));
+        }
         let (entry, effects) = state
             .reads
             .run(&target.handle, move || async move {
-                let operation = oplog::resolve_operation(&head, &text).await?;
+                let operation = match system_time(at.as_ref()) {
+                    None => oplog::resolve_operation(&head, &text)
+                        .await
+                        .map_err(status)?,
+                    Some(at) => locate(&head, repo, &text, at).await?,
+                };
                 let effects = reads.effects(repo, &head, &operation).await;
-                Ok::<_, OpLookupError>((oplog::entry(&operation), effects))
+                Ok::<_, Status>((oplog::entry(&operation), effects))
             })
             .await
-            .map_err(status)?
-            .map_err(status)?;
+            .map_err(status)??;
         let records = Records::of(state, std::slice::from_ref(&entry))?;
         let mut operation = records.operation(&entry, repo);
         operation.effects = effects.as_ref().map(convert::effects);
