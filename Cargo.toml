@@ -101,7 +101,7 @@ toml = "1"
 humantime-serde = "1"
 # Filesystem notifications that trigger snapshots (R1.13). One debounced watcher per daemon; 9.0
 # and 0.8 are release candidates.
-notify = "=8.2.0"
+notify = "=8.2.1"
 notify-debouncer-full = "=0.7.0"
 # jj-lib's scan runs on rayon's current pool; the daemon gives each scan slot its own (R1.13).
 # Same major as jj-lib's.
