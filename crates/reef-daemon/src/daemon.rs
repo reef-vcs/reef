@@ -130,6 +130,8 @@ pub struct AppState {
     pub quiesce: crate::maintenance::quiesce::Quiescer,
     /// The symbol index (R2.14).
     pub symbols: Arc<crate::symbols::SymbolIndex>,
+    /// The history index (R2.16).
+    pub history: Arc<crate::history::History>,
 }
 
 impl fmt::Debug for AppState {
@@ -300,6 +302,7 @@ pub struct DaemonHandle {
 
 impl Daemon {
     /// Runs the start sequence and returns once the socket is bound.
+    #[expect(clippy::too_many_lines, reason = "the start sequence, in its order")]
     pub async fn start(config: Config) -> Result<DaemonHandle, StartError> {
         let paths = config.paths.clone();
         // Before the lock, which creates a file in it.
@@ -344,6 +347,7 @@ impl Daemon {
         let shutdown = CancellationToken::new();
         let broker = Arc::new(crate::subscribe::broker::OpBroker::new(&config.subscribe));
         let symbols = crate::symbols::SymbolIndex::new(&config.file.symbols, &config.paths);
+        let history = crate::history::History::new(&config.file.history, &config.paths);
         let state = Arc::new(AppState {
             config,
             db,
@@ -362,6 +366,7 @@ impl Daemon {
             maintenance: crate::maintenance::Lock::new(),
             quiesce: crate::maintenance::quiesce::Quiescer::default(),
             symbols,
+            history,
         });
 
         // Before any snapshot can run (R2.10).
@@ -372,6 +377,7 @@ impl Daemon {
                 &state,
             )));
         crate::symbols::SymbolIndex::attach(&state);
+        crate::history::History::attach(&state);
         let listener = match bring_up(&state).await {
             Ok(listener) => listener,
             Err(error) => {

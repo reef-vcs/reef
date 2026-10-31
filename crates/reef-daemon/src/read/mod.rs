@@ -246,6 +246,16 @@ impl Reads {
         self.blocking(handle, Some(permit), read).await
     }
 
+    /// One of the read pool's permits, for a read made through another
+    /// pool's code path (the history index reads the operation log as
+    /// subscriptions do, under this pool's permits).
+    pub async fn permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ReadError> {
+        Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| ReadError::Cancelled)
+    }
+
     /// [`Reads::run`] holding `permit`, one of another pool's (R2.09's
     /// subscriptions have their own).
     pub async fn run_holding<T, F, Fut>(

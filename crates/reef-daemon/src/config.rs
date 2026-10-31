@@ -126,6 +126,10 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "max_size",
         ],
     ),
+    (
+        "history",
+        &["enabled", "retention", "max_size", "backfill_operations"],
+    ),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -187,6 +191,8 @@ pub struct FileConfig {
     pub store: StoreSection,
     /// `[symbols]`.
     pub symbols: SymbolsSection,
+    /// `[history]`.
+    pub history: HistorySection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -587,6 +593,37 @@ impl SymbolsSection {
             (cores / 4).clamp(1, 4)
         } else {
             self.workers
+        }
+    }
+}
+
+/// `[history]`: the history index (R2.16, ADR 0044).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HistorySection {
+    /// The index runs. False: no background work, no database file, and
+    /// `QueryChanges` fails with `HISTORY_DISABLED`. Default true.
+    pub enabled: bool,
+    /// Changes whose last activity, landing and end are all older than
+    /// this are deleted by GC, unless still open with recent activity.
+    /// Default 90 days; from 1 day to 10 years.
+    #[serde(with = "duration")]
+    pub retention: Duration,
+    /// The index's size per repository that GC deletes the oldest changes
+    /// down to. Default 512 MiB; at least 16 MiB.
+    pub max_size: ByteSize,
+    /// Operations a new or recreated index reads back through the log;
+    /// 0 for none. Default 100,000.
+    pub backfill_operations: u64,
+}
+
+impl Default for HistorySection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention: Duration::from_hours(90 * 24),
+            max_size: ByteSize(512 << 20),
+            backfill_operations: 100_000,
         }
     }
 }
@@ -1260,6 +1297,18 @@ impl Config {
                     ("max_size", s(&f.symbols.max_size.to_string())),
                 ],
             ),
+            (
+                "history",
+                vec![
+                    ("enabled", f.history.enabled.to_string()),
+                    ("retention", d(f.history.retention)),
+                    ("max_size", s(&f.history.max_size.to_string())),
+                    (
+                        "backfill_operations",
+                        f.history.backfill_operations.to_string(),
+                    ),
+                ],
+            ),
         ]
     }
 }
@@ -1435,6 +1484,7 @@ fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 8] {
 }
 
 /// The rules values must keep beyond their types.
+#[expect(clippy::too_many_lines, reason = "one row per bound")]
 fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
     let fd = |value: Duration| format_duration(value);
     let (lease, watcher) = (&file.lease, &file.watcher);
@@ -1505,6 +1555,17 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.symbols.workers <= 64,
             "symbols.workers",
             "must be at most 64".to_owned(),
+        ),
+        (
+            (Duration::from_hours(24)..=Duration::from_hours(10 * 365 * 24))
+                .contains(&file.history.retention),
+            "history.retention",
+            "must be from 1d to 10 years".to_owned(),
+        ),
+        (
+            file.history.max_size.0 >= 16 << 20,
+            "history.max_size",
+            "must be at least 16MiB".to_owned(),
         ),
         (
             file.backup.sqlite_pages_per_step >= 1,

@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-30
 - Ticket: R2.15
+- Amended by: [0044](0044-history-index-and-query-layer.md)
 
 ## Context
 

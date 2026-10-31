@@ -2,7 +2,7 @@
 //! and every `gc.interval` from the daemon's timer
 //! ([`super::timer`], #95, ADR 0041).
 //!
-//! Five steps per repository, in order, with creates of the repository held
+//! Six steps per repository, in order, with creates of the repository held
 //! off throughout (its create lock, exclusively):
 //!
 //! 1. **jj**: abandon the operations older than `keep_newer`, collect the
@@ -33,6 +33,11 @@
 //!    then the least recently used down to `symbols.max_size`
 //!    (`symbols/gc.rs`). A failure is logged and the run goes on:
 //!    the index is a cache.
+//! 6. **History** (R2.16): the history index's changes past
+//!    `history.retention`, then the oldest down to `history.max_size`
+//!    (`history/gc.rs`). Logged on failure, as step 5. Its follower waits
+//!    from before step 1 until the operation ids step 1 rewrote are mapped
+//!    in the index.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -52,6 +57,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
@@ -345,6 +351,7 @@ pub async fn run_timed(state: &AppState) -> TimedRun {
 }
 
 #[tracing::instrument(skip_all, fields(repo = %record.id, dry_run = dry_run, trigger = trigger.as_str()))]
+#[expect(clippy::too_many_lines, reason = "the six steps, in their order")]
 async fn run_repo(
     state: &AppState,
     record: &RepositoryRecord,
@@ -366,7 +373,13 @@ async fn run_repo(
     let create_lock = manager.repo_lock(id);
     let _no_creates = create_lock.write().await;
 
-    // 1.
+    // 1. The history index's follower waits until the ids the jj step
+    // rewrites are mapped (R2.16).
+    let paused = if dry_run {
+        None
+    } else {
+        state.history.pause(id).await
+    };
     let handle = state.repos.get(id);
     let jj = match &handle {
         None => JjStep {
@@ -399,11 +412,37 @@ async fn run_repo(
         ),
     }
 
+    if paused.is_some() && !jj.rewritten.is_empty() {
+        let (history, rewritten) = (Arc::clone(&state.history), jj.rewritten.clone());
+        let mapped = tokio::task::spawn_blocking(move || history.rewrite(id, &rewritten)).await;
+        match mapped {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                error = %ErrorChain(&error),
+                "mapping the history index's operation ids failed; it catches up"
+            ),
+            Err(error) => {
+                tracing::warn!(error = %error, "mapping the history index's operation ids panicked");
+            }
+        }
+    }
+    drop(paused);
+
     let rest = clean_up(state, id, keep_newer, dry_run, store_leftovers).await;
 
     // 5.
     if let Err(error) = crate::symbols::gc::run(state, id, keep_newer, dry_run).await {
         tracing::warn!(error = %ErrorChain(&error), "the symbols step of GC failed");
+    }
+
+    // 6.
+    let history = Arc::clone(&state.history);
+    match tokio::task::spawn_blocking(move || history.gc(id, dry_run)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %ErrorChain(&error), "the history step of GC failed");
+        }
+        Err(error) => tracing::warn!(error = %error, "the history step of GC panicked"),
     }
 
     // Whatever steps 2 to 5 came to: the jj step has rewritten the

@@ -2,7 +2,8 @@
 //! indexing on demand and in the background, sharing entries across trees,
 //! SCIP uploads checked against the tree, listings by path, name and
 //! symbol, skips, GC, the cache file's lifecycle, the disabled index, and
-//! one pass per tree.
+//! one pass per tree; and R2.16's test 21, name and symbol listings read in
+//! path order from SQL.
 
 #![allow(
     clippy::unwrap_used,
@@ -20,6 +21,7 @@ use reef_api::v1::{
     UploadScipDocumentsRequest, edit_files_request, file_edit,
 };
 use reef_daemon::client::{Client, ClientError};
+use reef_daemon::symbols::SymbolIndex;
 use reef_daemon::testing::TestDaemon;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_symbols::scip::proto as scip;
@@ -56,6 +58,9 @@ async fn start(configure: impl FnOnce(&mut reef_daemon::config::Config)) -> Fixt
     let daemon = TestDaemon::start_with(|config| {
         config.file.watcher.debounce = Duration::from_hours(1);
         config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        // The history index's worker extracts entries inline too (R2.16),
+        // which would make the counts here race it.
+        config.file.history.enabled = false;
         configure(config);
     })
     .await;
@@ -1035,4 +1040,284 @@ async fn single_flight() {
         "eight calls, one pass"
     );
     assert_eq!(fx.extracted(), 7);
+}
+
+/// A Python file with a function and a method named `hit` and `refs` calls.
+fn hits(refs: usize) -> Vec<u8> {
+    let mut text = "def hit():\n    pass\n\n\nclass Box:\n    def hit(self):\n".to_owned();
+    text.push_str(&"        hit()\n".repeat(refs));
+    text.into_bytes()
+}
+
+/// A SCIP document for [`hits`]'s file at `path`: the function, and each
+/// call as a reference to it.
+fn scip_hits(path: &str, symbol: &str, refs: i32) -> Vec<u8> {
+    let at = |line, start_character, end_character| {
+        Some(scip::occurrence::TypedRange::SingleLineRange(
+            scip::SingleLineRange {
+                line,
+                start_character,
+                end_character,
+            },
+        ))
+    };
+    let mut occurrences = vec![scip::Occurrence {
+        symbol: symbol.into(),
+        symbol_roles: scip::SymbolRole::Definition as i32,
+        typed_range: at(0, 4, 7),
+        ..scip::Occurrence::default()
+    }];
+    occurrences.extend((0..refs).map(|i| scip::Occurrence {
+        symbol: symbol.into(),
+        typed_range: at(6 + i, 8, 11),
+        ..scip::Occurrence::default()
+    }));
+    scip::Document {
+        relative_path: path.into(),
+        position_encoding: scip::PositionEncoding::Utf8CodeUnitOffsetFromLineStart as i32,
+        occurrences,
+        ..scip::Document::default()
+    }
+    .encode_to_vec()
+}
+
+/// Every page of `request` by pages of `size`, each with the paths it
+/// looked up in a tree.
+async fn pages(
+    fx: &Fixture,
+    request: &ListSymbolsRequest,
+    size: i32,
+) -> Vec<(v1::ListSymbolsResponse, u64)> {
+    let mut pages = Vec::new();
+    let mut token = String::new();
+    loop {
+        let before = SymbolIndex::tree_lookups();
+        let page = fx
+            .client()
+            .list_symbols_page(ListSymbolsRequest {
+                page_size: size,
+                page_token: std::mem::take(&mut token),
+                ..request.clone()
+            })
+            .await
+            .unwrap();
+        token.clone_from(&page.next_page_token);
+        pages.push((page, SymbolIndex::tree_lookups() - before));
+        if token.is_empty() {
+            return pages;
+        }
+    }
+}
+
+// R2.16, 21
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture, one case per query form"
+)]
+async fn list_name_in_path_order() {
+    let fx = start(|_| {}).await;
+    // Paths whose byte order is not jj's: `-`, `.` and `0` sort around `/`,
+    // and non-ASCII after all of them.
+    let paths = [
+        "a.py",
+        "a/b.py",
+        "a-b.py",
+        "a.b/c.py",
+        "a/b/c.py",
+        "a0.py",
+        "a_b.py",
+        "A.py",
+        "é.py",
+        "z/é-ü.py",
+        "gone.py",
+        "x/scip.py",
+    ];
+    let first: Vec<(&str, Vec<u8>)> = paths
+        .iter()
+        .map(|p| (*p, hits(24)))
+        .chain(
+            ["g/a.go", "g/a-b.go", "g/é.go", "g/a/b.go"]
+                .map(|p| (p, b"package g\n\nfunc Hit() {}\n".to_vec())),
+        )
+        .collect();
+    let refs: Vec<(&str, &[u8])> = first.iter().map(|(p, b)| (*p, b.as_slice())).collect();
+    let v1 = fx.commit(&fx.main, &refs).await;
+    // A second version of `a.py` and `g/a.go`, and `gone.py` removed: the
+    // first versions' rows stay in the store.
+    let v2 = fx
+        .commit(
+            &v1,
+            &[
+                ("a.py", &hits(7)),
+                ("g/a.go", b"package g\n\n// Hit again.\nfunc Hit() {}\n"),
+                ("gone.py", b""),
+            ],
+        )
+        .await;
+    fx.index(&v1).await;
+    fx.index(&v2).await;
+    let scip_symbol = "scip-python python fixture 0.1 `x.scip`/hit().";
+    let uploaded = fx
+        .client()
+        .upload_scip_documents(upload_request(
+            &fx,
+            &v2,
+            vec![document(
+                "x/scip.py",
+                &hits(24),
+                scip_hits("x/scip.py", scip_symbol, 24),
+            )],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(uploaded.accepted, 1, "{uploaded:?}");
+    let named = fx.named(&v2, "Hit").await;
+    assert_eq!(named.len(), 4, "{named:?}");
+    let go_symbol = named
+        .iter()
+        .find(|o| o.path == "g/a.go")
+        .unwrap()
+        .symbol
+        .clone();
+
+    let request = |revision: &str| ListSymbolsRequest {
+        name: "hit".into(),
+        ..fx.list_request(revision)
+    };
+    let all = fx.named(&v2, "hit").await;
+    assert!(all.len() > 250, "{}", all.len());
+    let order: Vec<&str> = all.iter().map(|o| o.path.as_str()).collect();
+    let mut sorted = order.clone();
+    sorted.sort_by(|a, b| a.split('/').cmp(b.split('/')));
+    assert_eq!(order, sorted, "jj's path order");
+    assert!(order.iter().position(|p| *p == "a/b.py") < order.iter().position(|p| *p == "a-b.py"));
+    assert!(!order.contains(&"gone.py"));
+    let scip_rows = all.iter().filter(|o| o.path == "x/scip.py");
+    assert!(scip_rows.clone().count() > 0);
+    assert!(
+        scip_rows
+            .clone()
+            .all(|o| o.source == SymbolSource::Scip as i32)
+    );
+
+    let cases = [
+        (request(&v2), 7),
+        (request(&v2), 50),
+        (request(&v1), 7),
+        (
+            ListSymbolsRequest {
+                path: "a".into(),
+                ..request(&v2)
+            },
+            7,
+        ),
+        (
+            ListSymbolsRequest {
+                path: "a.b".into(),
+                ..request(&v2)
+            },
+            7,
+        ),
+        (
+            ListSymbolsRequest {
+                path: "z/é-ü.py".into(),
+                ..request(&v2)
+            },
+            7,
+        ),
+        (
+            ListSymbolsRequest {
+                roles: vec![SymbolRole::Definition as i32],
+                ..request(&v2)
+            },
+            3,
+        ),
+        (
+            ListSymbolsRequest {
+                kinds: vec![v1::SymbolKind::Method as i32],
+                ..request(&v2)
+            },
+            3,
+        ),
+        (
+            ListSymbolsRequest {
+                source: SymbolSource::Tags as i32,
+                ..request(&v2)
+            },
+            7,
+        ),
+        (
+            ListSymbolsRequest {
+                source: SymbolSource::Scip as i32,
+                ..request(&v2)
+            },
+            7,
+        ),
+        (
+            ListSymbolsRequest {
+                symbol: go_symbol.clone(),
+                ..fx.list_request(&v2)
+            },
+            1,
+        ),
+        (
+            ListSymbolsRequest {
+                symbol: go_symbol,
+                ..fx.list_request(&v1)
+            },
+            1,
+        ),
+        (
+            ListSymbolsRequest {
+                symbol: scip_symbol.into(),
+                ..fx.list_request(&v2)
+            },
+            7,
+        ),
+    ];
+    for (request, size) in &cases {
+        SymbolIndex::answer_lookups_by_reference(true);
+        let want = pages(&fx, request, *size).await;
+        SymbolIndex::answer_lookups_by_reference(false);
+        let got = pages(&fx, request, *size).await;
+        let responses = |pages: &[(v1::ListSymbolsResponse, u64)]| -> Vec<v1::ListSymbolsResponse> {
+            pages.iter().map(|(page, _)| page.clone()).collect()
+        };
+        assert_eq!(responses(&got), responses(&want), "{request:?}");
+        // Each page looks up its own paths, and at most `gone.py` besides.
+        let size = u64::try_from(*size).unwrap();
+        for (page, lookups) in &got {
+            assert!(*lookups <= size + 2, "{lookups} for {page:?}");
+        }
+        let lookups = |pages: &[(v1::ListSymbolsResponse, u64)]| -> u64 {
+            pages.iter().map(|(_, n)| n).sum()
+        };
+        // The reference looks up every path on every page.
+        let mut paths: Vec<&str> = want
+            .iter()
+            .flat_map(|(page, _)| page.symbols.iter().map(|o| o.path.as_str()))
+            .collect();
+        paths.dedup();
+        if want.len() > 2 && paths.len() > 1 {
+            assert!(lookups(&got) < lookups(&want), "{request:?}");
+        }
+    }
+
+    // A token the reference issued resumes where it left off.
+    SymbolIndex::answer_lookups_by_reference(true);
+    let want = pages(&fx, &request(&v2), 7).await;
+    SymbolIndex::answer_lookups_by_reference(false);
+    for pair in want.windows(2) {
+        let resumed = fx
+            .client()
+            .list_symbols_page(ListSymbolsRequest {
+                page_size: 7,
+                page_token: pair[0].0.next_page_token.clone(),
+                ..request(&v2)
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed, pair[1].0);
+    }
 }

@@ -303,13 +303,18 @@ async fn gc_now_prunes_hidden_commits_and_keeps_the_view() {
         [CheckoutMove {
             workspace: "default".into(),
             path: root.clone(),
-            from: Some(op_before),
+            from: Some(op_before.clone()),
             outcome: CheckoutOutcome::Rewritten {
                 to: outcome.new_head.clone()
             },
         }]
     );
     assert_eq!(repo.working_copy_op_id(), outcome.new_head);
+    // R2.16: the kept operation, the head, maps to its rewrite.
+    assert_eq!(
+        outcome.rewritten,
+        [(op_before.clone(), outcome.new_head.clone())]
+    );
     assert!(repo.working_copy_matches_view().unwrap());
     write(&root, "b.txt", "after gc\n");
     let snapshot = repo.snapshot("three").await.unwrap();
@@ -325,6 +330,7 @@ async fn gc_keeps_what_is_newer_than_keep_newer() {
     let hour_ago = SystemTime::now() - Duration::from_secs(3600);
     let outcome = repo.gc(hour_ago).await.unwrap();
     assert_eq!(outcome.operations_abandoned, 0);
+    assert!(outcome.rewritten.is_empty(), "nothing rewritten");
     assert!(has_commit(&repo, &c1).await, "inside the window");
     assert!(has_commit(&repo, &c2).await);
     assert_eq!(repo.op_log(100).await.unwrap().len(), ops_before);

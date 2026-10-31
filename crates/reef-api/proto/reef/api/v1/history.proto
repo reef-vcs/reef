@@ -1,0 +1,264 @@
+// The history index (R2.16, ADR 0044): one row per change the repository's
+// operation log has shown, with what became of it, which agents and
+// workspaces wrote it and when, and the paths and symbols its net diff
+// touches. The daemon builds it in the background by following the log, so
+// an answer can trail the log by a moment and says how much history it
+// covers. It is a cache: rebuilt from the log, which garbage collection
+// trims to the undo window, when lost. Change, commit and operation ids are
+// full lowercase hex, and paths are repository-relative and `/`-separated.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/diff.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/symbols.proto";
+
+// Querying the history index.
+service HistoryService {
+  // Changes from the history index, newest activity first, filtered. Every
+  // filter field is ORed within itself and the fields are ANDed. Without
+  // `group_by` the answer is a page of changes; with it, counts per group
+  // and no changes, in one response. A page holds at most `page_size`
+  // changes and stops before its response passes 3 MiB. A history still
+  // being built answers with what it has, and `coverage` says so.
+  //
+  // Errors: FAILED_PRECONDITION with reason HISTORY_DISABLED, or
+  // SYMBOLS_DISABLED for `symbols` or `symbol_changes` with the symbol
+  // index off; INVALID_ARGUMENT with reason INVALID_HISTORY_QUERY
+  // (metadata `field`) for a bound or value below that is broken, or
+  // `group_by` with a `page_token`, INVALID_CHANGE_ID (metadata `change`)
+  // for a `changes` value that is not a hex or reverse-hex prefix, or
+  // INVALID_PAGE_TOKEN.
+  rpc QueryChanges(QueryChangesRequest) returns (QueryChangesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// What became of a change, from the repository's state as the index last
+// saw it. Outcomes are recomputed from that state, so an undo that brings a
+// change back makes it open or landed again.
+enum ChangeOutcome {
+  // Not set; in a filter, never valid.
+  CHANGE_OUTCOME_UNSPECIFIED = 0;
+  // Visible, and not an ancestor of `trunk()`.
+  CHANGE_OUTCOME_OPEN = 1;
+  // Visible, and in `::trunk()`. A change squash-merged elsewhere and then
+  // fetched lands as a new change; its own change stays open.
+  CHANGE_OUTCOME_LANDED = 2;
+  // No longer visible, hidden by an operation other than an undo.
+  CHANGE_OUTCOME_ABANDONED = 3;
+  // No longer visible, hidden by an undo: its creation was reverted.
+  CHANGE_OUTCOME_UNDONE = 4;
+}
+
+// A field `QueryChanges` can count changes by.
+enum ChangeDimension {
+  // Not set; never valid.
+  CHANGE_DIMENSION_UNSPECIFIED = 0;
+  // `ChangeActivity.agent`. A change counts once per agent that wrote it.
+  CHANGE_DIMENSION_AGENT = 1;
+  // `HistoryChange.outcome`.
+  CHANGE_DIMENSION_OUTCOME = 2;
+  // `ChangeActivity.workspace_id`. A change counts once per workspace it
+  // was written in.
+  CHANGE_DIMENSION_WORKSPACE = 3;
+}
+
+// Whether a change's paths and symbol touches describe its latest commit.
+enum TouchState {
+  // Not set.
+  TOUCH_STATE_UNSPECIFIED = 0;
+  // Not computed yet; the change may yet be empty.
+  TOUCH_STATE_PENDING = 1;
+  // Computed for the change's latest commit.
+  TOUCH_STATE_CURRENT = 2;
+  // Computed for an earlier commit of the change; recomputed soon.
+  TOUCH_STATE_STALE = 3;
+}
+
+// How completely a change's symbol touches were computed.
+enum HistorySymbolCoverage {
+  // Not computed yet.
+  HISTORY_SYMBOL_COVERAGE_UNSPECIFIED = 0;
+  // Every differing file was indexed, or has no supported language.
+  HISTORY_SYMBOL_COVERAGE_COVERED = 1;
+  // Some differing files were skipped (too large, binary, or a parse that
+  // failed), so their symbols are missing.
+  HISTORY_SYMBOL_COVERAGE_PARTIAL = 2;
+  // More than 1,000 files differ, so no symbols were computed.
+  HISTORY_SYMBOL_COVERAGE_TOO_LARGE = 3;
+  // The symbol index is off, so no symbols were computed.
+  HISTORY_SYMBOL_COVERAGE_DISABLED = 4;
+}
+
+// Which changes to return, and how.
+message QueryChangesRequest {
+  // The repository, as in operations.proto.
+  string repo = 1;
+  // Changes whose net diff added, removed, changed or moved a definition
+  // matching one of these: a full symbol string (matched against the
+  // symbol and the moved definition's old symbol), a suffix of one from a
+  // descriptor boundary (`Parser#parse().`), or a display name (`parse`).
+  // At most 100, none empty. Needs the symbol index.
+  repeated string symbols = 2;
+  // Changes whose net diff touches one of these files, or a file under one
+  // of these directories (matched by whole components). At most 100, none
+  // empty. With `symbols`, one touched symbol must be in one of these.
+  repeated string paths = 3;
+  // Only symbol touches of these kinds. Needs `symbols`.
+  repeated SymbolChangeKind symbol_changes = 4;
+  // Agents, matched exactly against `ChangeActivity.agent`. At most 100.
+  repeated string agents = 5;
+  // Workspace ids, or prefixes of four or more hex characters, matched
+  // against the ids the index recorded, including workspaces since
+  // released and removed. One that matches none matches no change. At
+  // most 100.
+  repeated string workspaces = 6;
+  // Change id prefixes, in hex or jj's reverse hex. At most 100.
+  repeated string changes = 7;
+  // Outcomes.
+  repeated ChangeOutcome outcomes = 8;
+  // Only changes written at or after this. With `until`, `agents` and
+  // `workspaces`, it applies to one activity row: a change matches when
+  // one agent, in one workspace, wrote it within the window.
+  google.protobuf.Timestamp since = 9;
+  // Only changes written before this; not before `since`.
+  google.protobuf.Timestamp until = 10;
+  // Include changes whose net diff is empty, as every released
+  // workspace's last change is. A change not yet computed is included.
+  bool include_empty = 11;
+  // Count the matching changes by these fields instead of returning them.
+  // At most 1,000 groups.
+  repeated ChangeDimension group_by = 12;
+  // Changes per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT, as in every list.
+  int32 page_size = 13;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different filters is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 14;
+}
+
+// A page of changes, or the counts per group.
+message QueryChangesResponse {
+  // The changes, newest activity first; empty with `group_by`.
+  repeated HistoryChange changes = 1;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 2;
+  // The counts, largest first, then by key; empty without `group_by`.
+  repeated ChangeGroup groups = 3;
+  // More than 1,000 groups matched; the smallest were left out.
+  bool groups_truncated = 4;
+  // How much history the answer covers.
+  HistoryCoverage coverage = 5;
+}
+
+// One change, as the history index knows it.
+message HistoryChange {
+  // The change id.
+  string change_id = 1;
+  // The change's latest commit the index saw.
+  string commit_id = 2;
+  // What became of it.
+  ChangeOutcome outcome = 3;
+  // The change has more than one visible commit.
+  bool divergent = 4;
+  // Its net diff is empty; false while not computed.
+  bool empty = 5;
+  // The first line of its description, at most 200 bytes.
+  string subject = 6;
+  // The email of its latest commit's author.
+  string author_email = 7;
+  // The first time an operation wrote it.
+  google.protobuf.Timestamp first_at = 8;
+  // The last time an operation wrote it; the order of the answer.
+  google.protobuf.Timestamp last_at = 9;
+  // When the index saw `trunk()` reach it; unset for a change already
+  // landed when the index first saw it.
+  google.protobuf.Timestamp landed_at = 10;
+  // When it was abandoned or undone; unset while visible.
+  google.protobuf.Timestamp ended_at = 11;
+  // Who wrote it, the latest first; at most 16.
+  repeated ChangeActivity activity = 12;
+  // How many activity rows the change has.
+  uint32 activity_count = 13;
+  // The symbol touches that matched `symbols` and `paths`, when either is
+  // set; at most 20.
+  repeated SymbolTouch touches = 14;
+  // How many symbol touches matched.
+  uint32 touch_count = 15;
+  // The touched paths that matched `paths`, when only `paths` is set; at
+  // most 20.
+  repeated string matched_paths = 16;
+  // How many paths its net diff touches.
+  uint32 paths_changed = 17;
+  // More than 10,000 paths differ, and only the first 10,000 are indexed.
+  bool paths_truncated = 18;
+  // How many symbols its net diff touches.
+  uint32 symbols_changed = 19;
+  // Whether the touches describe its latest commit.
+  TouchState touches_state = 20;
+  // How completely its symbol touches were computed.
+  HistorySymbolCoverage symbols_coverage = 21;
+}
+
+// One agent's writes to a change in one workspace.
+message ChangeActivity {
+  // `Operation.agent`; empty for another jj client's writes and imports.
+  string agent = 1;
+  // The workspace the operations were recorded for; empty for none.
+  string workspace_id = 2;
+  // The first such write.
+  google.protobuf.Timestamp first_at = 3;
+  // The last such write.
+  google.protobuf.Timestamp last_at = 4;
+  // How many operations wrote it.
+  uint32 operations = 5;
+  // The last one; empty once garbage collection abandoned it.
+  string last_operation_id = 6;
+}
+
+// A definition a change's net diff added, removed, changed or moved.
+message SymbolTouch {
+  // Its symbol in the new tree, or in the old one when removed.
+  string symbol = 1;
+  // Its symbol in the old tree when moved under another; else empty.
+  string old_symbol = 2;
+  // Its display name.
+  string name = 3;
+  // What it is.
+  SymbolKind kind = 4;
+  // How it changed.
+  SymbolChangeKind change = 5;
+  // Its file in the new tree, or in the old one when removed.
+  string path = 6;
+}
+
+// The number of matching changes with one value of each grouped field.
+message ChangeGroup {
+  // The agent, when grouped by agent; empty for changes no agent wrote.
+  string agent = 1;
+  // The workspace, when grouped by workspace; empty for none.
+  string workspace_id = 2;
+  // The outcome, when grouped by outcome; else unspecified.
+  ChangeOutcome outcome = 3;
+  // How many.
+  uint32 count = 4;
+}
+
+// How much of the repository's history an answer covers.
+message HistoryCoverage {
+  // The earliest write the index holds; unset when it holds none.
+  google.protobuf.Timestamp oldest_at = 1;
+  // The index is still reading older operations, or catching up.
+  bool backfilling = 2;
+  // Operations recorded after the last one the index read, up to 10,000.
+  uint32 behind = 3;
+  // Changes whose touches are not yet computed for their latest commit.
+  uint32 pending = 4;
+  // Symbol touches are computed: the symbol index is on.
+  bool symbols = 5;
+}

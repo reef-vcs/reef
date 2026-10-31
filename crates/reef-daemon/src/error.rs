@@ -31,6 +31,7 @@ use tonic::{Code, Status};
 
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
+use crate::history::HistoryError;
 use crate::lease::LeaseError;
 use crate::maintenance::backup::{BackupError, ManifestError};
 use crate::maintenance::gc::GcRunError;
@@ -105,6 +106,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
                 SymbolError::File(error) => file_advice(error),
                 error => error.advice(),
             }
+        } else if let Some(error) = error.downcast_ref::<HistoryError>() {
+            error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
         } else if let Some(error) = error.downcast_ref::<RewriteError>() {
@@ -311,6 +314,18 @@ fn symbol_reason(error: &SymbolError) -> Option<(&'static str, BTreeMap<String, 
         ),
         // Transparent: their sources are the inner error's sources.
         SymbolError::File(error) => return file_reason(error),
+        _ => return None,
+    })
+}
+
+fn history_reason(error: &HistoryError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        HistoryError::Disabled => (reason::HISTORY_DISABLED, BTreeMap::new()),
+        HistoryError::InvalidQuery { field, .. } => (
+            reason::INVALID_HISTORY_QUERY,
+            meta(&[("field", (*field).to_owned())]),
+        ),
         _ => return None,
     })
 }
@@ -540,6 +555,8 @@ fn reason_and_metadata(
             presence_reason(error)
         } else if let Some(error) = error.downcast_ref::<SymbolError>() {
             symbol_reason(error)
+        } else if let Some(error) = error.downcast_ref::<HistoryError>() {
+            history_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

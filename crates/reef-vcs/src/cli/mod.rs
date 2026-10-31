@@ -27,6 +27,7 @@ mod guide;
 pub(crate) mod heartbeat;
 mod helper;
 mod here;
+mod history;
 mod init;
 mod log;
 mod op;
@@ -229,6 +230,11 @@ enum Command {
     /// List the operation log, or show one operation.
     #[command(visible_alias = "operation", infer_subcommands = true)]
     Op(op::Args),
+    /// Show which changes touched files or symbols, who wrote them, and what became of them.
+    #[command(
+        after_help = "Example: reef history src/parser.py --since 7d   # or --symbol Parser#parse --group-by agent"
+    )]
+    History(history::Args),
     /// Show what agents are doing now: activity, editing, leases, progress.
     #[command(infer_subcommands = true)]
     Presence(presence::Args),
@@ -545,6 +551,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
+        Command::History(args) => history::run(&connect(&global, out).await?, args).await,
         Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,

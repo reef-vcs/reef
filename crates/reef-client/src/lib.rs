@@ -39,6 +39,7 @@ use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
+use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
@@ -76,7 +77,8 @@ use reef_api::v1::{
 };
 use reef_api::v1::{
     IndexSymbolsRequest, IndexSymbolsResponse, ListSymbolsRequest, ListSymbolsResponse,
-    UploadScipDocumentsRequest, UploadScipDocumentsResponse,
+    QueryChangesRequest, QueryChangesResponse, UploadScipDocumentsRequest,
+    UploadScipDocumentsResponse,
 };
 use reef_error::{Advice, Classify, ErrorKind};
 use tokio::net::UnixStream;
@@ -1128,6 +1130,17 @@ impl Client {
         let mut client =
             SymbolServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("UploadScipDocuments", client.upload_scip_documents(request))
+            .await
+    }
+
+    /// One page of `HistoryService.QueryChanges` (R2.16).
+    pub async fn query_changes(
+        &self,
+        request: QueryChangesRequest,
+    ) -> Result<QueryChangesResponse, ClientError> {
+        let mut client =
+            HistoryServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("QueryChanges", client.query_changes(request))
             .await
     }
 

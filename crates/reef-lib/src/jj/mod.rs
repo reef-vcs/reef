@@ -19,6 +19,7 @@ pub mod effects;
 pub mod files;
 pub mod gc;
 pub mod git;
+pub mod history;
 pub mod ignore;
 pub mod log;
 pub mod materialize;

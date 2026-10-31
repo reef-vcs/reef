@@ -110,6 +110,12 @@ harness = false
 name = "symbols"
 harness = false
 
+# The history index through the daemon (R2.16). See docs/benchmarks.md.
+[[bench]]
+name = "history"
+harness = false
+required-features = ["testing"]
+
 [dev-dependencies]
 # Without default features, so `--no-default-features` test builds really leave `watchman` off.
 reef-daemon = { path = ".", version = "0.2.0", default-features = false, features = ["testing"] }
