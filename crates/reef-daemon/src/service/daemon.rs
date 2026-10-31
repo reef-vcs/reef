@@ -87,6 +87,7 @@ pub(crate) async fn daemon_status(
         repository_count: saturate(repositories),
         active_workspace_count: saturate(active_workspaces),
         backends,
+        remote: Some(state.remote.status(&state.config)),
     })
 }
 

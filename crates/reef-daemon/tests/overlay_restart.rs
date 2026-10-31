@@ -228,7 +228,7 @@ async fn survives_restart(kind: BackendKind) {
 #[tokio::test(flavor = "multi_thread")]
 async fn fuse_overlayfs_workspaces_survive_a_restart() {
     if available(BackendKind::FuseOverlayfs) {
-        survives_restart(BackendKind::FuseOverlayfs).await;
+        Box::pin(survives_restart(BackendKind::FuseOverlayfs)).await;
     }
 }
 
@@ -239,6 +239,6 @@ async fn kernel_overlayfs_workspaces_survive_a_restart() {
         return;
     }
     if available(BackendKind::Overlayfs) {
-        survives_restart(BackendKind::Overlayfs).await;
+        Box::pin(survives_restart(BackendKind::Overlayfs)).await;
     }
 }

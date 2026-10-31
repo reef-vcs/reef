@@ -124,6 +124,12 @@ impl Manager {
         if spec.owner.trim().is_empty() {
             return Err(ManagerError::EmptyOwner);
         }
+        // The owner is the operations' agent when a request names none, and
+        // an agent marked with a remote token is how a remote call reaches
+        // them: no owner may carry the mark (R2.08).
+        if spec.owner.chars().any(char::is_control) {
+            return Err(ManagerError::InvalidOwner);
+        }
         // Checked before any work; the length is settled at step 2.
         self.leases.length_for(spec.lease)?;
         // Held until the row is written, so the repository is not forgotten
@@ -227,6 +233,7 @@ impl Manager {
             last_snapshot_at: None,
             last_snapshot_op: None,
             watcher,
+            remote_token_id: spec.remote.as_ref().map(|remote| remote.id.clone()),
         };
         if let Err(error) = self.leases.issue_with_workspace(&record, &lease) {
             drop(ws);

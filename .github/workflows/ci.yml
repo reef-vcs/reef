@@ -130,6 +130,11 @@ jobs:
         run: just installer-lint
       - name: Installer
         run: scripts/test-install.sh --build-dir target/debug
+      # Phase 2's exit criterion for remote access (R2.08): a daemon in one container reached
+      # from another, over TLS with a token, through the CLI and curl.
+      - name: Remote listener across containers
+        if: runner.os == 'Linux'
+        run: scripts/test-remote.sh target/debug/reef target/debug/reef-daemon
       # The daemon builds without Watchman too, and its unit tests (and
       # reef-lib's) pass that way.
       - name: Check without default features

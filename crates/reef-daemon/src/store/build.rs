@@ -398,6 +398,7 @@ async fn build_in_scratch(
             missing_stores: MissingStores::Skip,
             skip_store: Some(store.name.clone()),
             agent: request.agent.clone(),
+            remote: None,
         })
         .await?;
     let ws = created.record.id;

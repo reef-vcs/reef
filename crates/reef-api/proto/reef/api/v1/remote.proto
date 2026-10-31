@@ -1,0 +1,217 @@
+// Remote access (R2.08, ADR 0049): tokens for the daemon's remote listener,
+// a TLS port that serves the READ and WRITE methods to callers holding a
+// token. Every RPC here is ADMIN, so it is served only on the socket.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Issuing and ending remote tokens.
+service RemoteService {
+  // Issues a token. Its secret is in the response and nowhere else: the
+  // daemon keeps only a digest. Errors: INVALID_ARGUMENT with reason
+  // INVALID_REMOTE_TOKEN_NAME; ALREADY_EXISTS with reason
+  // REMOTE_TOKEN_EXISTS (a live token has the name); FAILED_PRECONDITION
+  // with reason TOO_MANY_REMOTE_TOKENS (256 live).
+  rpc CreateRemoteToken(CreateRemoteTokenRequest) returns (CreateRemoteTokenResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+
+  // Lists tokens, newest first; live ones unless `include_ended`.
+  rpc ListRemoteTokens(ListRemoteTokensRequest) returns (ListRemoteTokensResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Gives a live token a new secret; the old one stays valid for
+  // `overlap`. Errors: NOT_FOUND with reason REMOTE_TOKEN_NOT_FOUND.
+  rpc RotateRemoteToken(RotateRemoteTokenRequest) returns (RotateRemoteTokenResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+
+  // Ends a live token at once, open streams included (within a second).
+  // Errors: NOT_FOUND with reason REMOTE_TOKEN_NOT_FOUND.
+  rpc RevokeRemoteToken(RevokeRemoteTokenRequest) returns (RevokeRemoteTokenResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// What a token allows on the remote listener.
+enum RemoteScope {
+  // REMOTE_SCOPE_READ on create; never reported.
+  REMOTE_SCOPE_UNSPECIFIED = 0;
+  // ACCESS_READ methods.
+  REMOTE_SCOPE_READ = 1;
+  // ACCESS_READ and ACCESS_WRITE methods, with the rules ADR 0049 lists: no
+  // `path` on CreateWorkspace; release, move and renew only of workspaces
+  // this token created.
+  REMOTE_SCOPE_WRITE = 2;
+}
+
+// A token, without its secret.
+message RemoteToken {
+  // 16 hex characters, the second part of the token; never reused.
+  string id = 1;
+  // Unique among live tokens: `[a-z0-9][a-z0-9._-]{0,62}`.
+  string name = 2;
+  // What it allows.
+  RemoteScope scope = 3;
+  // When it was issued.
+  google.protobuf.Timestamp created_at = 4;
+  // When it stops working; unset: never.
+  google.protobuf.Timestamp expires_at = 5;
+  // When it was last rotated; unset until rotated.
+  google.protobuf.Timestamp rotated_at = 6;
+  // When the secret before the last rotation stops working; unset when it
+  // already has.
+  google.protobuf.Timestamp previous_valid_until = 7;
+  // When it was revoked; unset unless revoked.
+  google.protobuf.Timestamp revoked_at = 8;
+  // When it was last used, to the minute; unset until used.
+  google.protobuf.Timestamp last_used_at = 9;
+  // The peer address of that use, such as `203.0.113.7:51522`.
+  string last_used_from = 10;
+}
+
+// Ask for a new token.
+message CreateRemoteTokenRequest {
+  // `[a-z0-9][a-z0-9._-]{0,62}`, such as `laptop` or `ci-runner-3`.
+  string name = 1;
+  // What it allows; unspecified: REMOTE_SCOPE_READ.
+  RemoteScope scope = 2;
+  // How long it lives; unset: 30 days. Ignored with `never_expires`.
+  google.protobuf.Duration expires_in = 3;
+  // It lives until revoked.
+  bool never_expires = 4;
+}
+
+// A new token.
+message CreateRemoteTokenResponse {
+  // The token, without its secret.
+  RemoteToken token = 1;
+  // The bearer token, `reef_<id>_<secret>`: a credential, shown once.
+  string secret = 2;
+}
+
+// Ask for tokens.
+message ListRemoteTokensRequest {
+  // Also revoked and expired tokens.
+  bool include_ended = 1;
+  // Tokens per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 2;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 3;
+}
+
+// A page of tokens.
+message ListRemoteTokensResponse {
+  // Newest first.
+  repeated RemoteToken tokens = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// Ask for a token's new secret.
+message RotateRemoteTokenRequest {
+  // The live token's name.
+  string name = 1;
+  // How long the old secret keeps working; unset or zero: not at all. At
+  // most 7 days.
+  google.protobuf.Duration overlap = 2;
+}
+
+// A rotated token.
+message RotateRemoteTokenResponse {
+  // The token, without its secret.
+  RemoteToken token = 1;
+  // The new bearer token: a credential, shown once.
+  string secret = 2;
+}
+
+// Ask to end a token.
+message RevokeRemoteTokenRequest {
+  // The live token's name.
+  string name = 1;
+}
+
+// A revoked token.
+message RevokeRemoteTokenResponse {
+  // The token, with `revoked_at` set.
+  RemoteToken token = 1;
+}
+
+// Who called through the remote listener.
+message RemoteCaller {
+  // The token's id.
+  string token_id = 1;
+  // Its name when the call was made.
+  string token_name = 2;
+}
+
+// The remote listener (R2.08), as GetDaemonStatus reports it.
+message RemoteListener {
+  // Whether it serves.
+  RemoteListenerState state = 1;
+  // What turned it on; unspecified when off.
+  RemoteEnabledBy enabled_by = 2;
+  // The bound address, such as `0.0.0.0:7470`; `[remote] listen` until bound.
+  string address = 3;
+  // `[remote] names`, or the host name when empty.
+  repeated string names = 4;
+  // The certificate it presents; unset when off or before one is loaded.
+  RemoteCertificate certificate = 5;
+  // Why it is FAILED, or why the last certificate reload failed.
+  string error = 6;
+  // Tokens neither revoked nor expired.
+  uint32 live_token_count = 7;
+}
+
+// Whether the remote listener serves.
+enum RemoteListenerState {
+  // Not reported.
+  REMOTE_LISTENER_STATE_UNSPECIFIED = 0;
+  // Not enabled.
+  REMOTE_LISTENER_STATE_OFF = 1;
+  // Bound and serving.
+  REMOTE_LISTENER_STATE_LISTENING = 2;
+  // Enabled, not listening: the bind or the certificate failed. It retries.
+  REMOTE_LISTENER_STATE_FAILED = 3;
+}
+
+// What turned the remote listener on.
+enum RemoteEnabledBy {
+  // Off.
+  REMOTE_ENABLED_BY_UNSPECIFIED = 0;
+  // `[remote] enabled = true`.
+  REMOTE_ENABLED_BY_CONFIG = 1;
+  // `--remote` for this run.
+  REMOTE_ENABLED_BY_FLAG = 2;
+}
+
+// The certificate the remote listener presents.
+message RemoteCertificate {
+  // Where it comes from.
+  RemoteCertificateSource source = 1;
+  // `sha256:` and the hex SHA-256 of the leaf's SubjectPublicKeyInfo:
+  // what clients pin.
+  string fingerprint = 2;
+  // When the leaf expires.
+  google.protobuf.Timestamp not_after = 3;
+  // The leaf's subject alternative names.
+  repeated string subject_names = 4;
+}
+
+// Where the remote listener's certificate comes from.
+enum RemoteCertificateSource {
+  // Not reported.
+  REMOTE_CERTIFICATE_SOURCE_UNSPECIFIED = 0;
+  // Generated by the daemon and self-signed; clients pin its key.
+  REMOTE_CERTIFICATE_SOURCE_GENERATED = 1;
+  // `[remote] tls_cert` and `tls_key`, reloaded when they change.
+  REMOTE_CERTIFICATE_SOURCE_FILE = 2;
+}

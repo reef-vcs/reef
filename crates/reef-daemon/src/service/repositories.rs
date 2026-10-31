@@ -36,7 +36,7 @@ impl RepositoryService for RepositoriesService {
         &self,
         request: Request<RegisterRepositoryRequest>,
     ) -> Result<Response<RegisterRepositoryResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let if_not_jj = known("if_not_jj", request.if_not_jj).map_err(status)?;
         let registered = self

@@ -467,7 +467,7 @@ impl OperationService for OperationsHandler {
         &self,
         request: Request<UndoOperationRequest>,
     ) -> Result<Response<UndoOperationResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;

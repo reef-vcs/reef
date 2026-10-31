@@ -274,6 +274,8 @@ pub struct WorkspaceRecord {
     pub last_snapshot_op: Option<String>,
     /// What triggers its snapshots.
     pub watcher: WatcherKind,
+    /// The remote token that created it (R2.08); `None` over the socket.
+    pub remote_token_id: Option<String>,
 }
 
 /// One lease on a workspace.
@@ -477,6 +479,10 @@ mod tests {
             (
                 "watcher".to_owned(),
                 names(WatcherKind::ALL, WatcherKind::as_str),
+            ),
+            (
+                "scope".to_owned(),
+                names(&crate::db::TokenScope::ALL, crate::db::TokenScope::as_str),
             ),
             (
                 "kind".to_owned(),

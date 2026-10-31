@@ -286,6 +286,53 @@ pub const ATTR_SNAPSHOT_KIND: &str = "reef.snapshot-kind";
 pub const ATTR_WORKSPACE: &str = "reef.workspace";
 /// The attribute naming the agent that caused an operation.
 pub const ATTR_AGENT: &str = "reef.agent";
+/// The attribute naming the remote token whose call caused an operation:
+/// its id (R2.08).
+pub const ATTR_REMOTE_TOKEN: &str = "reef.remote-token";
+/// The name the remote token in [`ATTR_REMOTE_TOKEN`] had then (R2.08).
+pub const ATTR_REMOTE_TOKEN_NAME: &str = "reef.remote-token-name";
+
+/// Separates an agent from the remote token it carries; see
+/// [`RemoteToken::mark`].
+const REMOTE_MARK: char = '\u{1}';
+
+/// The remote token a call through the daemon's remote listener presented
+/// (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteToken {
+    /// Its id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+}
+
+impl RemoteToken {
+    /// `agent` carrying this token, for [`OpMeta::agent`]: how a remote
+    /// caller reaches every operation its call records, the snapshots it
+    /// takes first included, through the paths that already carry the
+    /// agent. `OpMeta` splits it back into [`ATTR_AGENT`] and the
+    /// token's attributes. A `reef-agent` value is visible ASCII, so none
+    /// can carry the mark: a client cannot forge a token this way.
+    pub fn mark(&self, agent: &str) -> String {
+        format!("{agent}{REMOTE_MARK}{}{REMOTE_MARK}{}", self.id, self.name)
+    }
+
+    /// The agent `marked` names, and the token it carries if any.
+    pub fn unmark(marked: &str) -> (&str, Option<RemoteToken>) {
+        let mut parts = marked.splitn(3, REMOTE_MARK);
+        let agent = parts.next().unwrap_or_default();
+        match (parts.next(), parts.next()) {
+            (Some(id), Some(name)) => (
+                agent,
+                Some(RemoteToken {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                }),
+            ),
+            _ => (agent, None),
+        }
+    }
+}
 
 /// What an operation did, as Reef classifies it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,7 +414,8 @@ pub struct OpMeta {
     pub snapshot_kind: Option<String>,
     /// [`ATTR_WORKSPACE`]: the Reef workspace id the operation was for.
     pub workspace: Option<String>,
-    /// [`ATTR_AGENT`]: who caused it.
+    /// [`ATTR_AGENT`]: who caused it; it may carry a remote token
+    /// ([`RemoteToken::mark`]).
     pub agent: Option<String>,
 }
 
@@ -413,13 +461,25 @@ impl OpMeta {
         if self.kind != OpKind::External {
             tx.set_attribute(ATTR_KIND.to_owned(), self.kind.as_str().to_owned());
         }
+        let (agent, remote) = match self.agent.as_deref() {
+            Some(marked) => {
+                let (agent, remote) = RemoteToken::unmark(marked);
+                (Some(agent), remote)
+            }
+            None => (None, None),
+        };
         let optional = [
-            (ATTR_SNAPSHOT_KIND, &self.snapshot_kind),
-            (ATTR_WORKSPACE, &self.workspace),
-            (ATTR_AGENT, &self.agent),
+            (ATTR_SNAPSHOT_KIND, self.snapshot_kind.as_deref()),
+            (ATTR_WORKSPACE, self.workspace.as_deref()),
+            (ATTR_AGENT, agent),
+            (ATTR_REMOTE_TOKEN, remote.as_ref().map(|r| r.id.as_str())),
+            (
+                ATTR_REMOTE_TOKEN_NAME,
+                remote.as_ref().map(|r| r.name.as_str()),
+            ),
         ];
         for (key, value) in optional {
-            if let Some(value) = value.as_deref().filter(|value| !value.is_empty()) {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
                 tx.set_attribute(key.to_owned(), value.to_owned());
             }
         }

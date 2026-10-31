@@ -237,6 +237,30 @@ reef: started daemon (pid 14602)
 
 A backup is the daemon's database and each repository's jj store, taken while agents keep writing. On a new machine, `reef restore` needs no `--force`; on this one, `--force` replaces the current state and goes back in time. After a restore, leases get a grace period before anything is reclaimed.
 
+## Reach the daemon from another machine
+
+A daemon in a cloud VM, or on your desktop, can serve the CLI and the web UI to another machine over TLS with a token ([ADR 0049](adr/0049-remote-listener.md)). On the daemon's machine, start it with the remote listener and issue a token:
+
+```sh
+reef daemon start --serve-remote     # or [remote] enabled = true in config.toml
+reef remote token create laptop --scope write
+```
+
+`token create` prints the token once, the key's fingerprint, and the line to run on the other machine, with the token on stdin so it never sits in your shell history:
+
+```sh
+reef remote add vm https://vm.example:7470 --fingerprint sha256:9f2c… --token-file - < token.txt
+reef --remote vm ws list --repo <id>
+reef --remote vm status --workspace <id>
+```
+
+Compare the fingerprint with `reef remote show` on the daemon's machine, over a channel you trust: that is what tells your client the daemon is the real one. The listener speaks only TLS; by default the daemon generates its own certificate and clients pin its key. `[remote] tls_cert` and `tls_key` use a certificate from a CA instead (a domain with an ACME client, or your VPN's certificate service), which needs no pin and is what a phone's browser needs. `[remote] listen` is `0.0.0.0:7470` by default and `[remote] names` the host name.
+
+- A token is `read` by default and expires in 30 days: `--scope write` lets it describe, abandon, undo, edit and create workspaces; `--expires never` keeps it until `reef remote token revoke`. `remote token list` shows when each was last used and from where; `rotate --overlap 1d` gives a new secret while the old one still works.
+- In remote mode a command needs `--workspace` or `--repo`: this machine's directory is not on the daemon's. `here`, `ws run`, `ui`, `init`, `mcp`, `daemon` (except `status`), `config`, `backup`, `ws gc`, `store build`, `repo register` and `remote token` run only on the daemon's machine.
+- The web UI is at the URL `token create` prints (the link holds the token). With the generated certificate, the browser warns once; compare the fingerprint in its details before accepting.
+- Until Reef has had an external security review, serve the listener on a private network (a VPN or a cloud VPC), not the open internet. A `read` token sees presence and workspace purposes, which carry agents' command lines.
+
 ## Configuration
 
 `reef config show` prints the effective configuration and where each value came from. The settings you are most likely to change, in `config.toml` in the state directory:
@@ -270,6 +294,7 @@ The daemon collects garbage daily: old snapshots, unused bases, and unused store
 - Reef registers only repositories you own (their `.jj` or `.git`), as git's `safe.directory` does; `[repo] allow_foreign_owner = true` lifts that, for a daemon serving another user's checkout on purpose.
 - Reef is built on jj-lib 0.46. A newer `jj` may upgrade the repository's on-disk formats when you run it there ([ADR 0008](adr/0008-jj-lib-embedding-findings.md)).
 - Tools that do not read `.git/info/exclude` see the `.jj/` directory.
+- The remote listener's generated certificate is self-signed: browsers warn once per origin, and a phone's browser needs a supplied certificate. A restored state directory has a new key, so clients re-add the remote with its new fingerprint, and a backup older than a revocation brings the revoked token back: revoke it again after a restore.
 - The binaries are not signed or notarized. Windows is not supported.
 
 ## Where next

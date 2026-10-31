@@ -18,6 +18,7 @@ package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/remote.proto";
 
 // Reading, undoing, and following the operation log.
 service OperationService {
@@ -212,6 +213,10 @@ message Operation {
   // What it changed in the repository's view; unset when not computed. Each
   // RPC says whether it computes them.
   OperationEffects effects = 16;
+  // Who caused it through the remote listener (R2.08): the operation
+  // attributes `reef.remote-token` and `reef.remote-token-name`; unset for
+  // calls over the socket and for operations Reef records on its own.
+  RemoteCaller remote = 17;
 }
 
 // What an operation changed, from the difference between its view and its

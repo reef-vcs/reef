@@ -386,6 +386,7 @@ mod tests {
             local_snapshot_count: 2,
             stores: Vec::new(),
             changed_file_count: Some(3),
+            remote_token_id: None,
         }
     }
 

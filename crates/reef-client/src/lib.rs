@@ -26,6 +26,7 @@ pub mod json;
 pub mod logging;
 pub mod paths;
 pub mod presence;
+pub mod remote;
 pub mod scip;
 pub mod symbol_text;
 
@@ -45,6 +46,7 @@ use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
+use reef_api::v1::remote_service_client::RemoteServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
 use reef_api::v1::status_service_client::StatusServiceClient;
 use reef_api::v1::store_service_client::StoreServiceClient;
@@ -72,6 +74,11 @@ use reef_api::v1::{
 use reef_api::v1::{
     ClearPresenceRequest, ReportPresenceRequest, ReportPresenceResponse, SubscribePresenceRequest,
     SubscribePresenceResponse,
+};
+use reef_api::v1::{
+    CreateRemoteTokenRequest, CreateRemoteTokenResponse, ListRemoteTokensRequest, RemoteScope,
+    RemoteToken, RevokeRemoteTokenRequest, RevokeRemoteTokenResponse, RotateRemoteTokenRequest,
+    RotateRemoteTokenResponse,
 };
 use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
@@ -121,25 +128,36 @@ pub fn any_call_answered() -> bool {
 #[derive(Clone, Debug)]
 pub struct Client {
     channel: Channel,
+    /// The socket; for a remote daemon, its URL, which errors print.
     socket: PathBuf,
-    /// Sent as `reef-agent` on every call.
+    /// The remote daemon, when connected to one (R2.08).
+    remote: Option<remote::RemoteTarget>,
+    /// Sent as `reef-agent`, and the bearer token, on every call.
     agent: AgentInterceptor,
 }
 
 /// Adds the `reef-agent` request metadata (R2.03) to every call, when the
-/// client has one.
+/// client has one, and a remote daemon's bearer token (R2.08).
 #[derive(Clone, Debug, Default)]
-struct AgentInterceptor(Option<tonic::metadata::AsciiMetadataValue>);
+struct AgentInterceptor {
+    agent: Option<tonic::metadata::AsciiMetadataValue>,
+    bearer: Option<tonic::metadata::AsciiMetadataValue>,
+}
 
 impl tonic::service::Interceptor for AgentInterceptor {
     fn call(
         &mut self,
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
-        if let Some(agent) = &self.0 {
+        if let Some(agent) = &self.agent {
             request
                 .metadata_mut()
                 .insert(reef_api::AGENT_METADATA, agent.clone());
+        }
+        if let Some(bearer) = &self.bearer {
+            request
+                .metadata_mut()
+                .insert("authorization", bearer.clone());
         }
         Ok(request)
     }
@@ -190,6 +208,38 @@ pub enum ClientError {
         /// The limit.
         max: usize,
     },
+    /// Nothing answered at a remote daemon's URL, or the connection failed
+    /// before TLS (R2.08).
+    #[error("connect to the daemon at {url}")]
+    RemoteConnect {
+        /// The URL.
+        url: String,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// The remote daemon's certificate was refused, before anything was
+    /// sent (R2.08).
+    #[error("refused the daemon at {url}")]
+    RemoteTls {
+        /// The URL.
+        url: String,
+        /// Why.
+        #[source]
+        failure: remote::TlsFailure,
+    },
+    /// The remote daemon answered that this host name is not one of its
+    /// `[remote] names` (HTTP 421, R2.08).
+    #[error("the daemon at {url} does not serve the name {host}")]
+    RemoteMisdirected {
+        /// The URL.
+        url: String,
+        /// The host the URL names.
+        host: String,
+    },
+    /// A token that cannot be sent as a header.
+    #[error("the remote token is not a valid header value")]
+    InvalidToken,
     /// [`Client::with_agent`] was given a value the daemon would refuse.
     #[error("an agent must be visible ASCII of at most {max} bytes: {0:?}", max = reef_api::AGENT_MAX_BYTES)]
     InvalidAgent(String),
@@ -234,6 +284,16 @@ impl ClientError {
     pub fn advice(&self) -> Option<Advice> {
         match self {
             Self::Connect { .. } | Self::Incompatible { .. } | Self::InvalidAgent(_) => None,
+            Self::RemoteConnect { .. } => Some(Advice::hint(
+                "Nothing answered there: is the daemon running with its remote listener (`reef daemon status` on that machine says `remote: listening`), and is the port open to this machine?",
+            )),
+            Self::RemoteTls { failure, .. } => Some(remote_tls_advice(failure)),
+            Self::RemoteMisdirected { host, .. } => Some(Advice::hint(format!(
+                "Add `{host}` to `[remote] names` in the daemon's config.toml and restart it, or connect by a name or IP address it serves (`reef remote show` on that machine lists them)."
+            ))),
+            Self::InvalidToken => Some(Advice::hint(
+                "The token must be the one line `reef remote token create` printed.",
+            )),
             Self::TooLarge { .. } => Some(Advice::hint(
                 "Edit large files in a workspace, or split the edits across requests.",
             )),
@@ -255,7 +315,12 @@ impl ClientError {
     /// `API_VERSION_MISMATCH`.
     pub fn reason(&self) -> &str {
         match self {
-            Self::Connect { .. } | Self::TooLarge { .. } => "",
+            Self::Connect { .. }
+            | Self::TooLarge { .. }
+            | Self::RemoteConnect { .. }
+            | Self::RemoteTls { .. }
+            | Self::RemoteMisdirected { .. }
+            | Self::InvalidToken => "",
             Self::InvalidAgent(_) => reef_api::error::INVALID_AGENT,
             Self::Rpc { reason, .. } => reason,
             Self::Incompatible { .. } => reef_api::error::API_VERSION_MISMATCH,
@@ -266,8 +331,12 @@ impl ClientError {
 impl Classify for ClientError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::Connect { .. } => ErrorKind::Unavailable,
-            Self::InvalidAgent(_) | Self::TooLarge { .. } => ErrorKind::InvalidArgument,
+            Self::Connect { .. } | Self::RemoteConnect { .. } => ErrorKind::Unavailable,
+            Self::RemoteTls { .. } => ErrorKind::PermissionDenied,
+            Self::RemoteMisdirected { .. } => ErrorKind::NotFound,
+            Self::InvalidToken | Self::InvalidAgent(_) | Self::TooLarge { .. } => {
+                ErrorKind::InvalidArgument
+            }
             Self::Rpc { kind, .. } => *kind,
             Self::Incompatible { .. } => ErrorKind::Unsupported,
         }
@@ -288,6 +357,35 @@ fn is_unserved(status: &tonic::Status) -> bool {
     })
 }
 
+/// A failed remote connection as a [`ClientError`].
+fn remote_error(url: &str, error: Result<remote::TlsFailure, io::Error>) -> ClientError {
+    match error {
+        Ok(failure) => ClientError::RemoteTls {
+            url: url.to_owned(),
+            failure,
+        },
+        Err(source) => ClientError::RemoteConnect {
+            url: url.to_owned(),
+            source,
+        },
+    }
+}
+
+/// How to fix a refused certificate.
+fn remote_tls_advice(failure: &remote::TlsFailure) -> Advice {
+    match failure {
+        remote::TlsFailure::PinMismatch { presented, .. } => Advice::hint(format!(
+            "The daemon presented {presented}, not the pinned key. If `reef remote show` on the daemon's machine prints {presented} (its key changes after a restore), add the remote again with --fingerprint {presented}; otherwise something else answered at that address."
+        )),
+        remote::TlsFailure::Untrusted { presented, .. } => Advice::hint(format!(
+            "The daemon's certificate is not one this machine trusts. If `reef remote show` on the daemon's machine prints {presented}, pin it: add the remote with --fingerprint {presented}."
+        )),
+        remote::TlsFailure::Handshake { .. } => Advice::hint(
+            "The TLS handshake failed: check that the URL names the daemon's remote listener.",
+        ),
+    }
+}
+
 impl Client {
     /// Connects to the daemon listening on `socket`.
     pub async fn connect(socket: &Path) -> Result<Client, ClientError> {
@@ -306,8 +404,78 @@ impl Client {
         Ok(Client {
             channel,
             socket: socket.to_owned(),
+            remote: None,
             agent: AgentInterceptor::default(),
         })
+    }
+
+    /// Connects to a daemon's remote listener (R2.08): TCP, then TLS
+    /// verified by `target`'s pin or the OS's roots, then HTTP/2 with the
+    /// bearer token on every call. The daemon is verified before anything
+    /// is sent. Never starts a daemon.
+    pub async fn connect_remote(target: &remote::RemoteTarget) -> Result<Client, ClientError> {
+        let url = target.url.clone();
+        let origin = url.origin();
+        let bearer = target
+            .token
+            .as_ref()
+            .map(|token| format!("Bearer {}", token.expose()).parse())
+            .transpose()
+            .map_err(|_| ClientError::InvalidToken)?;
+        // Connect once here, so a refused certificate or a closed port is
+        // its own error rather than a transport error from the first call.
+        let first = remote::tls_connect(&url, target.fingerprint.as_deref())
+            .await
+            .map_err(|error| remote_error(&origin, error))?;
+        let first = std::sync::Arc::new(std::sync::Mutex::new(Some(first)));
+        let pin = target.fingerprint.clone();
+        let reconnect_url = url.clone();
+        let channel = Endpoint::from_shared(origin.clone())
+            .map_err(|source| ClientError::RemoteConnect {
+                url: origin.clone(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, source),
+            })?
+            .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+            .keep_alive_while_idle(true)
+            .connect_with_connector(tower::service_fn(move |_: Uri| {
+                let first = first
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                let (url, pin) = (reconnect_url.clone(), pin.clone());
+                async move {
+                    let stream =
+                        match first {
+                            Some(stream) => stream,
+                            None => remote::tls_connect(&url, pin.as_deref()).await.map_err(
+                                |error| match error {
+                                    Ok(failure) => io::Error::other(failure),
+                                    Err(error) => error,
+                                },
+                            )?,
+                        };
+                    Ok::<_, io::Error>(TokioIo::new(stream))
+                }
+            }))
+            .await
+            .map_err(|source| ClientError::RemoteConnect {
+                url: origin.clone(),
+                source: io::Error::other(source),
+            })?;
+        Ok(Client {
+            channel,
+            socket: PathBuf::from(&origin),
+            remote: Some(target.clone()),
+            agent: AgentInterceptor {
+                agent: None,
+                bearer,
+            },
+        })
+    }
+
+    /// The remote daemon this client is connected to, if not a socket.
+    pub fn remote(&self) -> Option<&remote::RemoteTarget> {
+        self.remote.as_ref()
     }
 
     /// This client, sending `agent` as the `reef-agent` request metadata on
@@ -319,13 +487,13 @@ impl Client {
     pub fn with_agent(mut self, agent: impl Into<String>) -> Result<Client, ClientError> {
         let agent = agent.into();
         let Some(text) = check_agent(&agent)? else {
-            self.agent = AgentInterceptor::default();
+            self.agent.agent = None;
             return Ok(self);
         };
         let value = text
             .parse()
             .map_err(|_| ClientError::InvalidAgent(agent.clone()))?;
-        self.agent = AgentInterceptor(Some(value));
+        self.agent.agent = Some(value);
         Ok(self)
     }
 
@@ -353,8 +521,23 @@ impl Client {
             Err(status) if is_unserved(&status) => {
                 Err(Box::pin(self.incompatible(method, status)).await)
             }
-            Err(status) => Err(status.into()),
+            Err(status) => Err(self.error_of(status)),
         }
+    }
+
+    /// `status` as a [`ClientError`]: a remote daemon's HTTP 421 (a host
+    /// name it does not serve) is [`ClientError::RemoteMisdirected`].
+    fn error_of(&self, status: tonic::Status) -> ClientError {
+        if let Some(target) = &self.remote
+            && status.code() == tonic::Code::Unknown
+            && status.message().ends_with("HTTP status code 421")
+        {
+            return ClientError::RemoteMisdirected {
+                url: target.url.origin(),
+                host: target.url.host.clone(),
+            };
+        }
+        status.into()
     }
 
     /// What the daemon is, for an [`ClientError::Incompatible`]; the
@@ -370,7 +553,8 @@ impl Client {
                 active_workspaces,
             }
         };
-        let mut v1 = DaemonServiceClient::new(self.channel.clone());
+        let mut v1 =
+            DaemonServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         let request = GetDaemonStatusRequest {
             skip_backends: true,
         };
@@ -384,7 +568,7 @@ impl Client {
             }
             return incompatible(response.version, "v1", response.active_workspace_count);
         }
-        let mut v0 = V0DaemonClient::new(self.channel.clone());
+        let mut v0 = V0DaemonClient::with_interceptor(self.channel.clone(), self.agent.clone());
         match v0.status(reef_api::v0::StatusRequest {}).await {
             Ok(response) => {
                 let response = response.into_inner();
@@ -405,7 +589,8 @@ impl Client {
         &self,
         skip_backends: bool,
     ) -> Result<GetDaemonStatusResponse, ClientError> {
-        let mut client = DaemonServiceClient::new(self.channel.clone());
+        let mut client =
+            DaemonServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         let request = GetDaemonStatusRequest { skip_backends };
         self.call("GetDaemonStatus", client.get_daemon_status(request))
             .await
@@ -417,17 +602,102 @@ impl Client {
         &self,
         launch_file: bool,
     ) -> Result<CreateWebSessionResponse, ClientError> {
-        let mut client = DaemonServiceClient::new(self.channel.clone());
+        let mut client =
+            DaemonServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         let request = CreateWebSessionRequest { launch_file };
         self.call("CreateWebSession", client.create_web_session(request))
             .await
+    }
+
+    fn remote_tokens(&self) -> RemoteServiceClient<Svc> {
+        RemoteServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `RemoteService.CreateRemoteToken` (R2.08): a token for the remote
+    /// listener; `expires_in` `None` is never.
+    pub async fn create_remote_token(
+        &self,
+        name: &str,
+        scope: RemoteScope,
+        expires_in: Option<std::time::Duration>,
+    ) -> Result<CreateRemoteTokenResponse, ClientError> {
+        let request = CreateRemoteTokenRequest {
+            name: name.to_owned(),
+            scope: scope.into(),
+            never_expires: expires_in.is_none(),
+            expires_in: expires_in.map(proto_duration),
+        };
+        self.call(
+            "CreateRemoteToken",
+            self.remote_tokens().create_remote_token(request),
+        )
+        .await
+    }
+
+    /// `RemoteService.ListRemoteTokens`, every page.
+    pub async fn list_remote_tokens_all(
+        &self,
+        include_ended: bool,
+    ) -> Result<Vec<RemoteToken>, ClientError> {
+        let mut tokens = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = ListRemoteTokensRequest {
+                include_ended,
+                page_size: 0,
+                page_token: page_token.clone(),
+            };
+            let page = self
+                .call(
+                    "ListRemoteTokens",
+                    self.remote_tokens().list_remote_tokens(request),
+                )
+                .await?;
+            tokens.extend(page.tokens);
+            if page.next_page_token.is_empty() {
+                return Ok(tokens);
+            }
+            page_token = page.next_page_token;
+        }
+    }
+
+    /// `RemoteService.RotateRemoteToken`.
+    pub async fn rotate_remote_token(
+        &self,
+        name: &str,
+        overlap: std::time::Duration,
+    ) -> Result<RotateRemoteTokenResponse, ClientError> {
+        let request = RotateRemoteTokenRequest {
+            name: name.to_owned(),
+            overlap: (!overlap.is_zero()).then(|| proto_duration(overlap)),
+        };
+        self.call(
+            "RotateRemoteToken",
+            self.remote_tokens().rotate_remote_token(request),
+        )
+        .await
+    }
+
+    /// `RemoteService.RevokeRemoteToken`.
+    pub async fn revoke_remote_token(
+        &self,
+        name: &str,
+    ) -> Result<RevokeRemoteTokenResponse, ClientError> {
+        let request = RevokeRemoteTokenRequest {
+            name: name.to_owned(),
+        };
+        self.call(
+            "RevokeRemoteToken",
+            self.remote_tokens().revoke_remote_token(request),
+        )
+        .await
     }
 
     /// 0.1's `reef.daemon.v0.Daemon/Status`, which a 0.1 daemon answers and
     /// so does this one: how `reef daemon status` and `stop` work against a
     /// daemon of either API (R2.01).
     pub async fn v0_status(&self) -> Result<reef_api::v0::StatusResponse, ClientError> {
-        let mut client = V0DaemonClient::new(self.channel.clone());
+        let mut client = V0DaemonClient::with_interceptor(self.channel.clone(), self.agent.clone());
         Ok(client
             .status(reef_api::v0::StatusRequest {})
             .await?

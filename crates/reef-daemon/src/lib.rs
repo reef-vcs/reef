@@ -25,6 +25,7 @@ pub mod model;
 pub mod offline;
 pub mod presence;
 pub mod read;
+pub mod remote;
 pub mod repo;
 mod run;
 pub mod server;

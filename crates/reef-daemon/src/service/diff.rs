@@ -209,7 +209,7 @@ impl DiffService for DiffHandler {
         request: Request<GetDiffRequest>,
     ) -> Result<Response<GetDiffResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let page = PageRequest::new(
             GET_DIFF,

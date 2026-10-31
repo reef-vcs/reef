@@ -80,6 +80,11 @@ prost-types.workspace = true     # google.protobuf.Timestamp in the API
 base64.workspace = true          # page tokens (R2.01)
 hyper-util.workspace = true
 tower.workspace = true
+rustls.workspace = true          # the remote listener's TLS (R2.08)
+tokio-rustls.workspace = true
+webpki.workspace = true
+ring.workspace = true
+rcgen.workspace = true
 clap.workspace = true
 pollster.workspace = true
 futures.workspace = true
@@ -142,3 +147,5 @@ criterion.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 http-body-util.workspace = true
 tonic-web.workspace = true
+# The remote listener's tests (R2.08): raw HTTP/1.1 and HTTP/2 over TLS.
+hyper = { workspace = true, features = ["client", "http1", "http2"] }

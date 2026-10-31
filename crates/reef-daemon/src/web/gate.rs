@@ -57,7 +57,7 @@ pub(crate) const SECURITY_HEADERS: &[(&str, &str)] = &[
 ];
 
 /// The binary gRPC-web content types; text mode is refused.
-const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grpc-web+proto"];
+pub(crate) const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grpc-web+proto"];
 
 /// What the gate checks against.
 #[derive(Debug)]
@@ -92,7 +92,7 @@ pub(crate) struct WebGate<S> {
 }
 
 /// An empty response with `status`.
-fn plain(status: StatusCode) -> http::Response<Body> {
+pub(crate) fn plain(status: StatusCode) -> http::Response<Body> {
     let mut response = http::Response::new(Body::empty());
     *response.status_mut() = status;
     response
@@ -109,13 +109,13 @@ fn refusal(error: WebError) -> http::Response<Body> {
 }
 
 /// Whether `path` names an RPC: `/reef.<rest>/<Rpc>`, with no other `/`.
-fn is_api_path(path: &str) -> bool {
+pub(crate) fn is_api_path(path: &str) -> bool {
     path.strip_prefix("/reef.")
         .is_some_and(|rest| rest.matches('/').count() == 1 && !rest.ends_with('/'))
 }
 
 /// The request's authority: `Host`, else HTTP/2's `:authority`.
-fn authority<B>(request: &http::Request<B>) -> Option<&str> {
+pub(crate) fn authority<B>(request: &http::Request<B>) -> Option<&str> {
     match request.headers().get(header::HOST) {
         Some(host) => host.to_str().ok(),
         None => request.uri().authority().map(http::uri::Authority::as_str),
@@ -123,7 +123,7 @@ fn authority<B>(request: &http::Request<B>) -> Option<&str> {
 }
 
 /// The token of `authorization: Bearer <token>`.
-fn bearer(headers: &http::HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &http::HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     scheme
@@ -182,7 +182,7 @@ impl Gate {
 
 /// Adds [`SECURITY_HEADERS`], and `Cache-Control: no-store` unless the
 /// response set its own.
-fn secure(mut response: http::Response<Body>) -> http::Response<Body> {
+pub(crate) fn secure(mut response: http::Response<Body>) -> http::Response<Body> {
     let headers = response.headers_mut();
     for (name, value) in SECURITY_HEADERS {
         headers.insert(*name, HeaderValue::from_static(value));

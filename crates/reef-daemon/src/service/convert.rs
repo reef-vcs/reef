@@ -10,7 +10,10 @@ use reef_lib::jj::CommitIdHex;
 use reef_lib::jj::diff::{ChangeKind, EntryKind, FileDiffInfo, HunkInfo};
 use reef_lib::jj::effects::{ChangeEffectKind, OpEffects};
 use reef_lib::jj::log::{ChangeInfo, EdgeKind, LogNode, SignatureInfo};
-use reef_lib::jj::oplog::{ATTR_AGENT, ATTR_SNAPSHOT_KIND, OpClass, OpEntry, OpKind};
+use reef_lib::jj::oplog::{
+    ATTR_AGENT, ATTR_REMOTE_TOKEN, ATTR_REMOTE_TOKEN_NAME, ATTR_SNAPSHOT_KIND, OpClass, OpEntry,
+    OpKind, RemoteToken,
+};
 
 use crate::backend::{BackendChoice, BackendKind, DiskUsage};
 use crate::lease::{LeaseManager, LeaseState};
@@ -262,6 +265,7 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             stores: view.stores.iter().map(v1::MountedStore::from).collect(),
             watch_state: watch_state.into(),
             changed_file_count: None,
+            remote_token_id: record.remote_token_id.clone().unwrap_or_default(),
         }
     }
 }
@@ -336,6 +340,20 @@ pub(super) struct Written<'a> {
     pub(super) agent: &'a str,
 }
 
+/// The remote token an operation's attributes name (R2.08).
+fn remote_caller(
+    attributes: &std::collections::BTreeMap<String, String>,
+) -> Option<v1::RemoteCaller> {
+    let token_id = attributes.get(ATTR_REMOTE_TOKEN)?;
+    Some(v1::RemoteCaller {
+        token_id: token_id.clone(),
+        token_name: attributes
+            .get(ATTR_REMOTE_TOKEN_NAME)
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
+
 /// An operation the daemon just wrote, as a message. Effects are left unset
 /// (R2.02 computes them).
 pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> v1::Operation {
@@ -352,7 +370,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
     let agent = entry
         .attributes
         .get(ATTR_AGENT)
-        .map_or(written.agent, String::as_str);
+        .map_or(RemoteToken::unmark(written.agent).0, String::as_str);
     v1::Operation {
         id: entry.id.to_string(),
         repo_id: repo.as_hex(),
@@ -371,6 +389,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
         workspace_id,
         jj_workspace,
         agent: agent.to_owned(),
+        remote: remote_caller(&entry.attributes),
         attributes: entry.attributes.clone(),
         effects: None,
     }
@@ -389,7 +408,13 @@ pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> 
             .into(),
         is_snapshot: written.kind == v1::OperationKind::Snapshot,
         workspace_id: written.workspace.unwrap_or_default().to_owned(),
-        agent: written.agent.to_owned(),
+        agent: RemoteToken::unmark(written.agent).0.to_owned(),
+        remote: RemoteToken::unmark(written.agent)
+            .1
+            .map(|token| v1::RemoteCaller {
+                token_id: token.id,
+                token_name: token.name,
+            }),
         ..v1::Operation::default()
     }
 }
@@ -669,6 +694,7 @@ pub(super) fn listed_operation(
         workspace_id: class.workspace_id.clone().unwrap_or_default(),
         jj_workspace,
         agent: agent.to_owned(),
+        remote: remote_caller(&entry.attributes),
         attributes: entry.attributes.clone(),
         effects: None,
     }

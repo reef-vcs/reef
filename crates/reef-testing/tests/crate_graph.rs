@@ -35,8 +35,9 @@ const MEMBERS: [&str; 10] = [
 
 /// What the `reef` binary and the thin client must never link: the daemon,
 /// the jj layer, and what only they need (R2.05), including the web UI's
-/// assets (R2.18).
-const NOT_IN_THE_CLIENT: [&str; 10] = [
+/// assets (R2.18), and the remote listener's certificate generator
+/// (R2.08).
+const NOT_IN_THE_CLIENT: [&str; 11] = [
     "jj-lib",
     "reef-lib",
     "reef-daemon",
@@ -47,7 +48,13 @@ const NOT_IN_THE_CLIENT: [&str; 10] = [
     "reef-symbols",
     "tree-sitter",
     "reef-web",
+    "rcgen",
 ];
+
+/// TLS backends no shipped binary may link (R2.08, ADR 0049): rustls runs on
+/// ring; `aws-lc-sys` needs `CMake` and is heavier on musl, and `OpenSSL` is a
+/// system dependency.
+const NO_TLS_BACKEND: [&str; 4] = ["aws-lc-rs", "aws-lc-sys", "openssl", "openssl-sys"];
 
 fn metadata() -> Value {
     run_metadata(&["--no-deps"])
@@ -200,6 +207,16 @@ fn reef_binary_has_no_jj_lib() {
     for root in ["reef-vcs", "reef-client"] {
         let reached = assert_unreachable(&metadata, root, &NOT_IN_THE_CLIENT, false);
         assert!(reached > 20, "{root}: only {reached} packages reached");
+    }
+}
+
+/// R2.08: `reef` and `reef-daemon` reach rustls through ring only, whatever
+/// features are on.
+#[test]
+fn tls_is_ring_only() {
+    let metadata = resolved_metadata();
+    for root in ["reef-vcs", "reef-daemon", "reef-client"] {
+        assert_unreachable(&metadata, root, &NO_TLS_BACKEND, false);
     }
 }
 

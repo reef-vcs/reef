@@ -76,7 +76,7 @@ impl FileService for FilesHandler {
         request: Request<ReadFileRequest>,
     ) -> Result<Response<ReadFileResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         if request.revision.trim().is_empty() {
             return Err(status(RevisionError::Required));
@@ -128,7 +128,7 @@ impl FileService for FilesHandler {
         request: Request<ListFilesRequest>,
     ) -> Result<Response<ListFilesResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let page = PageRequest::new(
             LIST_FILES,
@@ -226,7 +226,7 @@ impl FileService for FilesHandler {
         &self,
         request: Request<EditFilesRequest>,
     ) -> Result<Response<EditFilesResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
         let edit_target = match request.target {

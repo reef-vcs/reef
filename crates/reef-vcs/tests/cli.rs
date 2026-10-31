@@ -2126,8 +2126,13 @@ fn quickstart_commands_exist() {
             if *token != "reef" && !token.ends_with("(reef") {
                 continue;
             }
-            // Its arguments, up to the end of the command.
-            let args: Vec<&str> = tokens[at + 1..]
+            // Its arguments, up to the end of the command; `--remote NAME`
+            // before the command chooses a daemon (R2.08), not a flag of it.
+            let rest = match tokens.get(at + 1) {
+                Some(&"--remote") => &tokens[(at + 3).min(tokens.len())..],
+                _ => &tokens[at + 1..],
+            };
+            let args: Vec<&str> = rest
                 .iter()
                 .copied()
                 .take_while(|arg| {
@@ -2137,8 +2142,8 @@ fn quickstart_commands_exist() {
             let words: Vec<&str> = args
                 .iter()
                 .copied()
-                .take_while(|arg| !arg.starts_with('-'))
-                .take(2)
+                .take_while(|arg| !arg.starts_with('-') && !arg.starts_with('<'))
+                .take(3)
                 .collect();
             let mut help = reef_in(Path::new("/nonexistent"));
             help.args(&words).arg("--help");

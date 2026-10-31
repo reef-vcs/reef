@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 13;
+pub const API_REVISION: u32 = 14;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -81,6 +81,9 @@ pub const API_DIGESTS: &[&str] = &[
     "a13bfa9b18ec1b87145a00a82988333ef967477ff448f17d0d894f7b356cc7b0",
     // R2.23: `StatusWalkReason`, `WorkspaceStatus.walk_reason`.
     "a7215fef2979bc7724b4ec36925367694ad373dc32f7845cb8d11db6c919fa35",
+    // R2.08: `RemoteService`, `GetDaemonStatusResponse.remote`,
+    // `Operation.remote`, `Workspace.remote_token_id`.
+    "127d60b512f656ba88cf67963472e0e0ffe65cc918c48bd2dda77a8ba375233a",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -314,6 +317,31 @@ pub mod error {
     /// A web listener request for a method that is not `ACCESS_READ` (R2.18).
     /// Metadata: `method`, `access` (`write`, `admin` or `unknown`).
     pub const WEB_ACCESS_DENIED: &str = "WEB_ACCESS_DENIED";
+    /// A remote listener request without a live token: none, malformed,
+    /// unknown, expired or revoked (R2.08). Metadata: `state` (`unknown`,
+    /// `expired` or `revoked`; the last two only to a caller holding the
+    /// token's secret).
+    pub const REMOTE_TOKEN_INVALID: &str = "REMOTE_TOKEN_INVALID";
+    /// A remote listener request its token's scope does not allow, or a
+    /// field remote callers cannot set (R2.08). Metadata: `method`, and
+    /// `access` (`write`, `admin` or `unknown`) with `scope`, or `field`.
+    pub const REMOTE_ACCESS_DENIED: &str = "REMOTE_ACCESS_DENIED";
+    /// A remote release, move or renewal of a workspace another token, or
+    /// the socket, created (R2.08). Metadata: `workspace`.
+    pub const REMOTE_WORKSPACE_NOT_OWNED: &str = "REMOTE_WORKSPACE_NOT_OWNED";
+    /// A remote token with its limit of calls or streams open (R2.08).
+    /// Metadata: `limit` (`requests` or `streams`).
+    pub const REMOTE_BUSY: &str = "REMOTE_BUSY";
+    /// No live remote token has the name (R2.08). Metadata: `name`.
+    pub const REMOTE_TOKEN_NOT_FOUND: &str = "REMOTE_TOKEN_NOT_FOUND";
+    /// A live remote token already has the name (R2.08). Metadata: `name`.
+    pub const REMOTE_TOKEN_EXISTS: &str = "REMOTE_TOKEN_EXISTS";
+    /// The daemon holds its limit of live remote tokens (R2.08). Metadata:
+    /// `limit`.
+    pub const TOO_MANY_REMOTE_TOKENS: &str = "TOO_MANY_REMOTE_TOKENS";
+    /// A remote token name that is not `[a-z0-9][a-z0-9._-]{0,62}` (R2.08).
+    /// Metadata: `name`.
+    pub const INVALID_REMOTE_TOKEN_NAME: &str = "INVALID_REMOTE_TOKEN_NAME";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

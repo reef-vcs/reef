@@ -41,7 +41,13 @@ base64.workspace = true          # `file read -o json` of bytes that are not UTF
 blake3.workspace = true          # the content digest a SCIP upload names (R2.14)
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rustls.workspace = true          # the remote listener's TLS (R2.08)
+tokio-rustls.workspace = true
+webpki.workspace = true          # a leaf's SubjectPublicKeyInfo, for fingerprints
+ring.workspace = true            # SHA-256 of a pinned key
+rustls-native-certs.workspace = true   # the OS's roots, for a CA-issued certificate
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen.workspace = true           # certificates for the pin verifier's tests (R2.08)
 tokio = { workspace = true, features = ["test-util"] }   # paused clocks in the reporter's tests (R2.11)

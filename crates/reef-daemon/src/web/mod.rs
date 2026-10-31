@@ -11,8 +11,8 @@
 //! ends them all. Launch files (`launch`) hand a token to a browser
 //! without a command line.
 
-mod assets;
-mod body;
+pub(crate) mod assets;
+pub(crate) mod body;
 pub(crate) mod gate;
 mod launch;
 pub(crate) mod session;

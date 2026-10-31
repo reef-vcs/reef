@@ -99,7 +99,7 @@ impl StatusService for StatusHandler {
         request: Request<GetStatusRequest>,
     ) -> Result<Response<GetStatusResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let max_files = match usize::try_from(request.max_files) {
             Err(_) => return Err(status(NegativeMaxFiles(request.max_files))),

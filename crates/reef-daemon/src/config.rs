@@ -131,6 +131,10 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["enabled", "retention", "max_size", "backfill_operations"],
     ),
     ("ui", &["enabled", "listen"]),
+    (
+        "remote",
+        &["enabled", "listen", "names", "tls_cert", "tls_key"],
+    ),
     ("status_index", &["enabled", "sync_timeout"]),
 ];
 
@@ -161,6 +165,9 @@ pub struct Paths {
     pub repos: PathBuf,
     /// The web UI's launch files, `<state>/ui` (R2.18).
     pub ui: PathBuf,
+    /// The remote listener's generated key and certificate, `<state>/remote`
+    /// (R2.08).
+    pub remote: PathBuf,
 }
 
 /// `config.toml` as written, every absent key at its default. The `Option`
@@ -199,6 +206,8 @@ pub struct FileConfig {
     pub history: HistorySection,
     /// `[ui]`.
     pub ui: UiSection,
+    /// `[remote]`.
+    pub remote: RemoteSection,
     /// `[status_index]`.
     pub status_index: StatusIndexSection,
 }
@@ -696,6 +705,106 @@ impl UiSection {
     }
 }
 
+/// `[remote]`: the remote listener (R2.08, ADR 0049), a TLS port serving
+/// the API and the web UI to callers holding a token.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RemoteSection {
+    /// Serve it; `--remote` turns it on for one run. Default false.
+    pub enabled: bool,
+    /// The address it binds: an IP and a port, 0 for one the kernel picks.
+    /// Default `0.0.0.0:7470`.
+    pub listen: String,
+    /// The DNS names or IP literals clients use: what the `Host` check
+    /// accepts besides IP literals, and the generated certificate's subject
+    /// alternative names. Empty: the machine's host name.
+    pub names: Vec<String>,
+    /// A PEM certificate chain, leaf first; with `tls_key`, replaces the
+    /// generated certificate. Empty: generated.
+    pub tls_cert: String,
+    /// `tls_cert`'s private key (PKCS#8, SEC1 or PKCS#1 PEM).
+    pub tls_key: String,
+}
+
+impl Default for RemoteSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "0.0.0.0:7470".to_owned(),
+            names: Vec::new(),
+            tls_cert: String::new(),
+            tls_key: String::new(),
+        }
+    }
+}
+
+impl RemoteSection {
+    /// `listen` as an address, if it parses.
+    pub fn listen_addr(&self) -> Option<std::net::SocketAddr> {
+        self.listen.parse().ok()
+    }
+
+    /// Why `[remote]` is invalid, as `(key, reason)`; `None` when valid.
+    fn invalid(&self) -> Option<(&'static str, String)> {
+        if self.listen_addr().is_none() {
+            return Some((
+                "remote.listen",
+                format!(
+                    "{:?} must be an IP address with a port, such as 0.0.0.0:7470 or [::]:7470",
+                    self.listen
+                ),
+            ));
+        }
+        if let Some(name) = self.names.iter().find(|name| !valid_remote_name(name)) {
+            return Some((
+                "remote.names",
+                format!("{name:?} is not a DNS name or an IP address"),
+            ));
+        }
+        if self.tls_cert.is_empty() != self.tls_key.is_empty() {
+            let key = if self.tls_cert.is_empty() {
+                "remote.tls_cert"
+            } else {
+                "remote.tls_key"
+            };
+            return Some((
+                key,
+                "must be set with remote.tls_cert and remote.tls_key both, or neither".to_owned(),
+            ));
+        }
+        for (key, value) in [
+            ("remote.tls_cert", &self.tls_cert),
+            ("remote.tls_key", &self.tls_key),
+        ] {
+            if !value.is_empty() && !Path::new(value).is_absolute() {
+                return Some((key, format!("{value:?} must be an absolute path")));
+            }
+        }
+        None
+    }
+}
+
+/// Whether `name` is an IP address, or a DNS name: dot-separated labels of
+/// ASCII letters, digits and `-`, not starting or ending with `-`, at most
+/// 63 bytes each and 253 in all.
+pub(crate) fn valid_remote_name(name: &str) -> bool {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let name = name.strip_suffix('.').unwrap_or(name);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 /// A size in bytes. Read from an integer or a string such as `"1MiB"`
 /// ([`parse_byte_size`]); written as a string in the largest exact unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -851,6 +960,12 @@ pub struct Config {
     /// The web listener's limits (R2.18). Not a configuration-file key and
     /// not in `config show`: set here by tests only.
     pub web: crate::web::Limits,
+    /// The remote listener's limits (R2.08). Not a configuration-file key
+    /// and not in `config show`: set here by tests only.
+    pub remote_limits: crate::remote::Limits,
+    /// `--remote`: serve the remote listener for this run, whatever
+    /// `[remote] enabled` says (R2.08).
+    pub remote_flag: bool,
 }
 
 /// Failure to resolve the configuration.
@@ -993,6 +1108,7 @@ fn paths_from(
         logs: state_dir.join("logs"),
         repos: state_dir.join("repos"),
         ui: state_dir.join("ui"),
+        remote: state_dir.join("remote"),
         socket: settled.socket,
         state_dir,
     };
@@ -1122,6 +1238,8 @@ impl Config {
             presence: crate::presence::Limits::default(),
             gc_timer: crate::maintenance::timer::Limits::default(),
             web: crate::web::Limits::default(),
+            remote_limits: crate::remote::Limits::default(),
+            remote_flag: false,
         }
     }
 
@@ -1387,6 +1505,26 @@ impl Config {
                 vec![
                     ("enabled", f.ui.enabled.to_string()),
                     ("listen", s(&f.ui.listen)),
+                ],
+            ),
+            (
+                "remote",
+                vec![
+                    ("enabled", f.remote.enabled.to_string()),
+                    ("listen", s(&f.remote.listen)),
+                    (
+                        "names",
+                        toml::Value::Array(
+                            f.remote
+                                .names
+                                .iter()
+                                .map(|name| toml::Value::String(name.clone()))
+                                .collect(),
+                        )
+                        .to_string(),
+                    ),
+                    ("tls_cert", s(&f.remote.tls_cert)),
+                    ("tls_key", s(&f.remote.tls_key)),
                 ],
             ),
             (
@@ -1658,7 +1796,7 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.ui.listen_addr().is_some(),
             "ui.listen",
             format!(
-                "{:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and a remote listener is R2.08's",
+                "{:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and `[remote]` serves other hosts",
                 file.ui.listen
             ),
         ),
@@ -1682,6 +1820,13 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             ),
         ),
     ]);
+    if let Some((key, reason)) = file.remote.invalid() {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            key: key.to_owned(),
+            reason,
+        });
+    }
     match rules.into_iter().find(|(ok, _, _)| !ok) {
         Some((_, key, reason)) => Err(ConfigError::Invalid {
             path: path.to_owned(),
