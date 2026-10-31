@@ -100,7 +100,7 @@ pub(crate) struct Cli {
 /// Flags every command takes.
 #[derive(Clone, Debug, clap::Args)]
 pub(crate) struct Global {
-    /// Output format: `json` when stdout is not a terminal, `text` when it is.
+    /// Output format: `brief` JSON when stdout is not a terminal, `text` when it is; `json` has every field.
     #[arg(
         short,
         long,
@@ -624,6 +624,7 @@ fn output_mode(args: &[OsString]) -> Option<Output> {
 fn output_flag(args: &[OsString]) -> Option<Output> {
     let parse = |value: &str| match value {
         "json" => Some(Output::Json),
+        "brief" => Some(Output::Brief),
         "text" | "toml" => Some(Output::Text),
         _ => None,
     };
@@ -865,6 +866,14 @@ mod tests {
             output_flag(&args(&["reef", "-o", "text"])),
             Some(Output::Text)
         );
+        for line in [
+            &["reef", "-o", "brief", "ws"][..],
+            &["reef", "ws", "--output", "brief"],
+            &["reef", "--output=brief"],
+            &["reef", "-obrief"],
+        ] {
+            assert_eq!(output_flag(&args(line)), Some(Output::Brief), "{line:?}");
+        }
         assert_eq!(output_flag(&args(&["reef", "ws", "list"])), None);
         assert_eq!(output_flag(&args(&["reef", "--", "-o", "json"])), None);
     }

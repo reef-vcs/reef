@@ -12,7 +12,7 @@ use reef_client::json::Status;
 use reef_client::{Client, ClientError};
 use reef_error::ErrorKind;
 
-use super::{CliError, DEFAULT_TIMEOUT, Global, Out, Output, absolute, autostart};
+use super::{CliError, DEFAULT_TIMEOUT, Global, Out, absolute, autostart};
 
 /// How long `stop` waits for the daemon to exit after SIGTERM.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -178,7 +178,7 @@ async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
         }
         Err(error) => return Err(CliError::Daemon(error)),
     };
-    if out.mode() == Output::Json {
+    if out.is_json() {
         out.object(&status)?;
     }
     Ok(())

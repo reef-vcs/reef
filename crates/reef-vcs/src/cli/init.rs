@@ -115,7 +115,7 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         let section = agents::render(Harness::AgentsMd, &guide, version);
         return match out.mode() {
             Output::Text => out.raw(format!("{section}\n").as_bytes()),
-            Output::Json => out.json_only(&PrintJson { section }),
+            Output::Json | Output::Brief => out.json_only(&PrintJson { section }),
         };
     }
     let harnesses = harnesses(&args)?;

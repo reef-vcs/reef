@@ -4,6 +4,7 @@
 //! lists what changed.
 
 use reef_api::v1::GetStatusRequest;
+use reef_client::brief;
 use reef_client::json::RepoStatus;
 
 use super::advice::AdviceCtx;
@@ -41,5 +42,6 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         .call(Box::pin(ctx.client.get_status(request)))
         .await
         .map_err(|error| advice.refine(error))?;
-    ctx.out.object(&RepoStatus::from(&response))
+    ctx.out
+        .object_with(&RepoStatus::from(&response), brief::RepoStatus::from)
 }

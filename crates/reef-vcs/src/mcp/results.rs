@@ -1,11 +1,12 @@
 //! The server's own result shapes: lists wrapped in an object (structured
 //! content is an object), with the page token beside them, and the reads
 //! whose CLI form is not one message. Every value inside is
-//! `reef_client::json`'s.
+//! `reef_client::json`'s, except `list_workspaces`', `get_status`' and
+//! `get_diff`'s, which are `reef_client::brief`'s, as `reef` prints them on
+//! a pipe (ADR 0045).
 
-use reef_client::json::{
-    Change, Diff, FileEntry, FileRead, History, LogEntry, Operation, Repository, Workspace,
-};
+use reef_client::brief;
+use reef_client::json::{Change, FileEntry, FileRead, History, LogEntry, Operation, Repository};
 use serde::Serialize;
 
 /// `list_repositories`.
@@ -15,10 +16,12 @@ pub(super) struct Repositories {
     pub(super) next_page_token: Option<String>,
 }
 
-/// `list_workspaces`.
+/// `list_workspaces`: brief workspaces, with their changed-file counts;
+/// no `next_page_token` on the last page.
 #[derive(Debug, Serialize)]
-pub(super) struct Workspaces {
-    pub(super) workspaces: Vec<Workspace>,
+pub(super) struct Workspaces<'a> {
+    pub(super) workspaces: Vec<brief::Workspace<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) next_page_token: Option<String>,
 }
 
@@ -61,11 +64,13 @@ pub(super) struct ChangeAt {
     pub(super) at_operation: String,
 }
 
-/// `get_diff`: one page of files.
+/// `get_diff`: one page of files, brief; no `next_page_token` on the last
+/// page.
 #[derive(Debug, Serialize)]
-pub(super) struct DiffPage {
+pub(super) struct DiffPage<'a> {
     #[serde(flatten)]
-    pub(super) diff: Diff,
+    pub(super) diff: brief::Diff<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) next_page_token: Option<String>,
 }
 

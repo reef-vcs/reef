@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-26
 - Ticket: R2.27
+- Amended by: [0045](0045-brief-json-by-default.md)
 
 ## Context
 

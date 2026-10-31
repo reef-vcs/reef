@@ -404,6 +404,26 @@ mod tests {
         assert_eq!(Scenario::version().len(), 12);
     }
 
+    /// #114 test 21: `state-repo` has the one-call candidates, and only
+    /// `-o text` makes one a text candidate.
+    #[test]
+    fn state_repo_has_one_call_candidates() {
+        let scenario = Scenario::load().unwrap();
+        let question = scenario.question("state-repo").unwrap();
+        let named = |arm: Arm, name: &str| {
+            question
+                .candidates
+                .iter()
+                .find(|c| c.arm == arm && c.name == name)
+                .unwrap_or_else(|| panic!("no {arm} {name}"))
+        };
+        assert_eq!(named(Arm::Reef, "list").steps, ["reef ws list"]);
+        assert!(!named(Arm::Reef, "list").is_text());
+        assert!(!named(Arm::Reef, "list full").is_text());
+        assert!(named(Arm::Reef, "list text").is_text());
+        assert_eq!(named(Arm::Mcp, "list").calls.len(), 1);
+    }
+
     /// Test 5, the scenario's half: an unknown placeholder fails validation.
     #[test]
     fn unknown_placeholders_fail() {

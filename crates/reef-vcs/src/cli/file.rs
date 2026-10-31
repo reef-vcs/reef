@@ -8,7 +8,6 @@ use reef_api::v1::{ListFilesRequest, ReadFileRequest};
 use reef_client::json::{FileEntry, FileRead};
 use reef_error::{Advice, ErrorKind};
 
-use super::Output;
 use super::advice::AdviceCtx;
 use super::render_vcs::FileLines;
 use super::scope::{self, ReadArgs, Scope, ScopeArgs};
@@ -158,7 +157,7 @@ fn root_is_a_directory(scope: &Scope, revision: &str) -> CliError {
 /// the commit the first one read, so a write in between cannot mix two
 /// versions.
 async fn read_file(ctx: &Ctx, request: ReadFileRequest) -> Result<(), CliError> {
-    if ctx.out.mode() == Output::Json {
+    if ctx.out.is_json() {
         let whole = ctx.call(ctx.client.read_file_to_end(request)).await?;
         return ctx.out.object(&FileRead::from(&whole));
     }

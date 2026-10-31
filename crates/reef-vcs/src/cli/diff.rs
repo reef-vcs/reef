@@ -5,6 +5,7 @@
 //! and their call sites, and `--expand` shows one symbol's lines (R2.15).
 
 use reef_api::v1::{DiffFormat, GetDiffRequest, SymbolSource};
+use reef_client::brief;
 use reef_client::json::Diff;
 
 use super::advice::AdviceCtx;
@@ -108,11 +109,14 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     if symbols {
         notes(ctx, &diff, &args.expand);
     }
-    ctx.out.object(&DiffText {
-        diff,
-        format,
-        symbols: args.symbols,
-    })
+    ctx.out.object_with(
+        &DiffText {
+            diff,
+            format,
+            symbols: args.symbols,
+        },
+        |text| brief::Diff::from(&text.diff),
+    )
 }
 
 /// The notes a symbol diff leaves on stderr: call sites still pending, a

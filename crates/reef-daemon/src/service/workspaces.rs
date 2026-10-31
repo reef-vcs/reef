@@ -1,8 +1,10 @@
 //! `reef.api.v1.WorkspaceService`: create, list, get, release, snapshot,
 //! renew, move.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reef_api::v1::workspace_service_server::WorkspaceService;
 use reef_api::v1::{
@@ -12,6 +14,8 @@ use reef_api::v1::{
     RenewLeaseRequest, RenewLeaseResponse, SnapshotWorkspaceRequest, SnapshotWorkspaceResponse,
     Workspace, create_workspace_request, move_workspace_request,
 };
+use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
+use reef_lib::jj::revset::{self, RevsetScope};
 use tonic::{Request, Response, Status};
 
 use super::convert::{
@@ -23,7 +27,7 @@ use super::written_operation;
 use crate::daemon::AppState;
 use crate::error::status;
 use crate::model::{
-    LeaseId, LeaseRecord, ReclaimReason, Timestamp, WorkspaceRecord, WorkspaceState,
+    LeaseId, LeaseRecord, ReclaimReason, RepoId, Timestamp, WorkspaceRecord, WorkspaceState,
 };
 use crate::snapshot::{SnapshotKind, index};
 use crate::workspace::{CreateSpec, ReleaseSpec, Start};
@@ -50,7 +54,7 @@ impl WorkspacesService {
 /// them; `repo` scopes the local snapshot counts read.
 pub(super) fn listed(
     state: &AppState,
-    repo: Option<crate::model::RepoId>,
+    repo: Option<RepoId>,
     rows: &[(WorkspaceRecord, Option<LeaseRecord>)],
 ) -> Result<Vec<Workspace>, Status> {
     let manager = &state.manager;
@@ -77,6 +81,116 @@ pub(super) fn listed(
             })
         })
         .collect())
+}
+
+/// How long `ListWorkspaces` waits for one repository's changed-file
+/// counts before listing its workspaces without them.
+const COUNT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fills each active or releasing workspace's `changed_file_count` from
+/// `rows`, which `workspaces` was built from in order (`ListWorkspaces` with
+/// `changed_file_counts`, issue #114): one job per repository on its read
+/// thread, at its head, counting what `@` changes against its parents as
+/// `GetStatus` does; repositories at once. Best effort: `ws list` is a
+/// recovery tool, so a repository whose job fails, or takes longer than
+/// [`COUNT_TIMEOUT`] (behind a long snapshot or GC on its thread), leaves
+/// its counts unset and the list stands.
+async fn count_changed_files(
+    state: &AppState,
+    rows: &[(WorkspaceRecord, Option<LeaseRecord>)],
+    workspaces: &mut [Workspace],
+) {
+    let mut by_repo: BTreeMap<RepoId, Vec<usize>> = BTreeMap::new();
+    for (index, (record, _)) in rows.iter().enumerate() {
+        if matches!(
+            record.state,
+            WorkspaceState::Active | WorkspaceState::Releasing
+        ) {
+            by_repo.entry(record.repo_id).or_default().push(index);
+        }
+    }
+    let jobs = by_repo.into_iter().map(|(repo, indexes)| async move {
+        let names = indexes
+            .iter()
+            .map(|&index| rows[index].0.id.jj_workspace_name())
+            .collect();
+        let counted = tokio::time::timeout(COUNT_TIMEOUT, changed_counts(state, repo, names)).await;
+        (repo, indexes, counted)
+    });
+    for (repo, indexes, counted) in futures::future::join_all(jobs).await {
+        match counted {
+            Ok(Ok(counts)) => {
+                for (index, count) in indexes.into_iter().zip(counts) {
+                    workspaces[index].changed_file_count = count;
+                }
+            }
+            Ok(Err(error)) => tracing::warn!(
+                repo = %repo,
+                error = %error.message(),
+                "could not count workspaces' changed files"
+            ),
+            Err(_) => tracing::warn!(
+                repo = %repo,
+                timeout_ms = COUNT_TIMEOUT.as_millis(),
+                "counting workspaces' changed files timed out; listed without counts"
+            ),
+        }
+    }
+}
+
+/// How many paths `@` changes in each of the jj workspaces `names` of
+/// `repo`, in order; `None` for one whose `@` does not resolve.
+async fn changed_counts(
+    state: &AppState,
+    repo: RepoId,
+    names: Vec<String>,
+) -> Result<Vec<Option<u32>>, Status> {
+    let root = state.db.repository(repo).map_err(status)?.root;
+    let handle = state.manager.handle(repo).map_err(status)?;
+    let head = state.reads.current(&handle).await.map_err(status)?;
+    let user_email = state.settings.user_email().to_owned();
+    // Dropped with this future, at the timeout too, which stops the diffs.
+    let (stop, _guard) = state.reads.stop();
+    state
+        .reads
+        .run(&handle, move || async move {
+            let repo = &head;
+            let options = DiffOptions {
+                format: DiffFormat::Summary,
+                context: 0,
+                max_lines: 0,
+                max_hunk_bytes: 0,
+                max_file_bytes: 0,
+                paths: Vec::new(),
+                after: None,
+                // `total` counts every file whatever the limit.
+                limit: 1,
+                pairs: false,
+            };
+            let mut counts = Vec::with_capacity(names.len());
+            for name in &names {
+                let scope = RevsetScope {
+                    workspace: Some(name),
+                    user_email: &user_email,
+                    root: &root,
+                };
+                let count = match revset::resolve_revision(repo, "@", &scope).await {
+                    Ok(wc) => {
+                        diff::diff_page(repo, &DiffBase::Parents, &wc.commit_id, &options, &|| {
+                            stop.requested()
+                        })
+                        .await
+                        .ok()
+                        .map(|page| u32::try_from(page.total).unwrap_or(u32::MAX))
+                    }
+                    Err(_) => None,
+                };
+                counts.push(count);
+            }
+            counts
+        })
+        .await
+        .map_err(status)
 }
 
 fn record_ids(repo: impl std::fmt::Display, workspace: impl std::fmt::Display) {
@@ -167,6 +281,7 @@ impl WorkspaceService for WorkspacesService {
             &ListWorkspacesRequest {
                 page_size: 0,
                 page_token: String::new(),
+                changed_file_counts: false,
                 ..request.clone()
             },
         )
@@ -195,7 +310,10 @@ impl WorkspaceService for WorkspacesService {
                 .map_err(status)?,
             |(record, _)| newest_first(record.created_at.0, &record.id.as_hex()),
         );
-        let workspaces = listed(&self.state, repo, &rows)?;
+        let mut workspaces = listed(&self.state, repo, &rows)?;
+        if request.changed_file_counts {
+            count_changed_files(&self.state, &rows, &mut workspaces).await;
+        }
         Ok(Response::new(ListWorkspacesResponse {
             workspaces,
             next_page_token,

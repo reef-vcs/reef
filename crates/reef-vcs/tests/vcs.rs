@@ -211,7 +211,12 @@ async fn scope_rules() {
     .await;
     assert_eq!(in_status(&status), ws.id.as_str());
     // `--repo .` inside the workspace: its repository, and no workspace.
-    let status = ok(&daemon, &path(&ws), &["status", "--repo", "."]).await;
+    let status = ok(
+        &daemon,
+        &path(&ws),
+        &["-o", "json", "status", "--repo", "."],
+    )
+    .await;
     assert_eq!(status["workspace_status"], Value::Null);
     assert_eq!(status["repository"]["id"], repo.id.as_str());
 
@@ -248,7 +253,7 @@ async fn status_in_a_workspace_and_outside() {
     let existing = first_file(&path(&ws));
     write(&ws, &existing, "changed\n");
     write(&ws, "b-new.txt", "b\n");
-    let status = ok(&daemon, &path(&ws), &["status"]).await;
+    let status = ok(&daemon, &path(&ws), &["-o", "json", "status"]).await;
     let ws_status = &status["workspace_status"];
     assert_eq!(
         ws_status["working_copy"]["change_id"],
@@ -307,7 +312,7 @@ fn first_file(root: &Path) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn status_is_a_command() {
     let (daemon, repo) = fixture().await;
-    let status = ok(&daemon, &repo.root, &["status"]).await;
+    let status = ok(&daemon, &repo.root, &["-o", "json", "status"]).await;
     assert_eq!(status["repository"]["id"], repo.id.as_str());
     for guess in ["info", "whoami"] {
         let output = run_in(&daemon, &repo.root, &[guess]).await;
@@ -482,7 +487,7 @@ async fn diff_forms_and_paths() {
         stdout(&output)
     );
 
-    let diff = ok(&daemon, &path(&ws), &["diff"]).await;
+    let diff = ok(&daemon, &path(&ws), &["-o", "json", "diff"]).await;
     for key in [
         "from_commit_ids",
         "to_commit_id",
@@ -505,8 +510,9 @@ async fn diff_forms_and_paths() {
         .find(|file| file["path"] == "bin.dat")
         .unwrap();
     assert_eq!(binary["binary"], true);
+    // Brief (ADR 0045): a summary's files have no hunks, so no key.
     let summary = ok(&daemon, &path(&ws), &["diff", "--summary"]).await;
-    assert_eq!(summary["files"][0]["hunks"], serde_json::json!([]));
+    assert!(summary["files"][0].get("hunks").is_none(), "{summary}");
     let from = ok(&daemon, &path(&ws), &["diff", "--from", "@-"]).await;
     assert_eq!(from["total_files"], diff["total_files"]);
 
@@ -1005,7 +1011,7 @@ async fn agents_on_new_writes() {
     write(&ws, "edit2.txt", "edit\n");
     let mut command = reef(&daemon, &dir);
     command.env("REEF_AGENT", "bot-5");
-    let status = json(&run(command, &["status"]).await);
+    let status = json(&run(command, &["-o", "json", "status"]).await);
     assert_eq!(status["workspace_status"]["snapshot"]["agent"], "bot-5");
 }
 
@@ -1097,7 +1103,7 @@ async fn divergence_is_shown() {
         strings(&here["next"]),
         ["reef", "ws", "release", b.id.as_str()]
     );
-    let status = ok(&daemon, &repo.root, &["status"]).await;
+    let status = ok(&daemon, &repo.root, &["-o", "json", "status"]).await;
     assert_eq!(
         status["repository_status"]["divergent_change_ids"],
         serde_json::json!([])
@@ -2287,4 +2293,126 @@ async fn history() {
     )
     .await;
     assert_eq!(next_of(&error), ["reef", "history", "--help"]);
+}
+
+/// Whether `value` is a zero value a brief view leaves out (ADR 0045).
+fn is_zero(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(set) => !set,
+        Value::Number(n) => n.as_u64() == Some(0),
+        Value::String(text) => text.is_empty(),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(_) => false,
+    }
+}
+
+/// Every key of `full` is in `brief` with the same value, or is left out
+/// with a zero value, or is a side's type `file` (ADR 0045's rules).
+fn assert_brief_of(brief: &Value, full: &Value, at: &str) {
+    match (brief, full) {
+        (Value::Object(brief), Value::Object(full)) => {
+            for key in brief.keys() {
+                assert!(
+                    full.contains_key(key),
+                    "{at}.{key} is not in the full document"
+                );
+            }
+            for (key, value) in full {
+                match brief.get(key) {
+                    Some(kept) => assert_brief_of(kept, value, &format!("{at}.{key}")),
+                    None => assert!(
+                        is_zero(value)
+                            || (["old_type", "new_type"].contains(&key.as_str())
+                                && value == "file"),
+                        "{at}.{key} = {value} was left out"
+                    ),
+                }
+            }
+        }
+        (Value::Array(brief), Value::Array(full)) => {
+            assert_eq!(brief.len(), full.len(), "{at}");
+            for (index, (brief, full)) in brief.iter().zip(full).enumerate() {
+                assert_brief_of(brief, full, &format!("{at}[{index}]"));
+            }
+        }
+        _ => assert_eq!(brief, full, "{at}"),
+    }
+}
+
+// #114 test 16
+#[tokio::test(flavor = "multi_thread")]
+async fn status_brief_and_full() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let existing = first_file(&path(&ws));
+    write(&ws, &existing, "changed\n");
+    write(&ws, "b-new.txt", "b\n");
+    write(&ws, "c-new.txt", "c\n");
+    let brief = ok(&daemon, &path(&ws), &["status"]).await;
+    let ws_status = &brief["workspace_status"];
+    assert_eq!(ws_status["changed_file_count"], 3, "{brief}");
+    for file in ws_status["changed_files"].as_array().unwrap() {
+        let keys: Vec<&String> = file.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["kind", "path"], "{file}");
+    }
+    assert!(ws_status["parents"][0]["change_id_reverse_hex"].is_string());
+    assert_eq!(ws_status["workspace"]["id"], ws.id.as_str());
+    assert!(brief["repository_status"]["active_workspace_count"].is_u64());
+    let text = stdout(&run_in(&daemon, &path(&ws), &["status", "--no-snapshot"]).await);
+    assert_eq!(text.lines().count(), 1, "one compact object: {text}");
+    for key in [
+        "heads",
+        "last_operation",
+        "at_operation",
+        "repository",
+        "snapshot",
+    ] {
+        assert!(!text.contains(&format!("\"{key}\":")), "{key}: {text}");
+    }
+    let full = ok(
+        &daemon,
+        &path(&ws),
+        &["-o", "json", "status", "--no-snapshot"],
+    )
+    .await;
+    for key in ["repository", "at_operation"] {
+        assert!(full.get(key).is_some(), "{key}: {full}");
+    }
+    for key in ["heads", "last_operation", "active_workspaces"] {
+        assert!(
+            full["repository_status"].get(key).is_some(),
+            "{key}: {full}"
+        );
+    }
+    let repository = ok(&daemon, &repo.root, &["status", "--repo", &repo.id]).await;
+    assert!(repository.get("workspace_status").is_none(), "{repository}");
+}
+
+// #114 test 17
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_brief_matches_full() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let existing = first_file(&path(&ws));
+    write(&ws, "a", "one\n");
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    ok(&daemon, &path(&ws), &["describe", "-m", "base"]).await;
+    let child = create_on(&daemon, &repo, &ws).await;
+    write(&child, &existing, "changed\n");
+    write(&child, "added.txt", "new\nno newline");
+    std::fs::rename(path(&child).join("a"), path(&child).join("renamed")).unwrap();
+    let dir = path(&child);
+    for args in [&["diff", "--summary"][..], &["diff"]] {
+        let brief = ok(&daemon, &dir, args).await;
+        let full_args: Vec<&str> = ["-o", "json"].iter().chain(args).copied().collect();
+        let mut full = ok(&daemon, &dir, &full_args).await;
+        assert_eq!(brief["total_files"], 3, "{brief}");
+        full.as_object_mut().unwrap().remove("at_operation");
+        assert_brief_of(&brief, &full, "diff");
+    }
 }

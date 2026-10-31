@@ -76,7 +76,7 @@ pub(crate) fn print(out: &Out, args: &Args) -> Result<(), CliError> {
     };
     match out.mode() {
         Output::Text => out.raw(text.as_bytes()),
-        Output::Json => out.json_only(&GuideJson {
+        Output::Json | Output::Brief => out.json_only(&GuideJson {
             guide: text,
             commands: leaf_commands(),
         }),

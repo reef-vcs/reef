@@ -263,6 +263,12 @@ message Workspace {
   repeated MountedStore stores = 18;
   // Why its watch is not up yet; WATCH_STATE_ATTACHED once it is.
   WatchState watch_state = 19;
+  // How many paths its working-copy commit changes against its parents,
+  // merged, as GetStatus counts them, as of the last snapshot (issue #114).
+  // Set only by ListWorkspaces with `changed_file_counts`, for active and
+  // releasing workspaces; unset otherwise, and when the count could not be
+  // read.
+  optional uint32 changed_file_count = 20;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).
@@ -397,6 +403,10 @@ message ListWorkspacesRequest {
   // token sent with different filters is INVALID_ARGUMENT, reason
   // INVALID_PAGE_TOKEN.
   string page_token = 5;
+  // Fill each active or releasing workspace's `changed_file_count` (issue
+  // #114). Costs one tree diff per such workspace on its repository's read
+  // thread; no snapshot is taken. Not part of the page token's binding.
+  bool changed_file_counts = 6;
 }
 
 // A page of workspaces, newest first.

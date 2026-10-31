@@ -311,6 +311,9 @@ pub struct Workspace {
     pub local_snapshot_count: u64,
     /// The shared stores mounted in it (R1.20).
     pub stores: Vec<MountedStore>,
+    /// How many paths its change changes as of its last snapshot; only
+    /// `ws list` fills it (issue #114).
+    pub changed_file_count: Option<u32>,
 }
 
 /// A shared store mounted in a workspace (R1.20).
@@ -368,6 +371,7 @@ impl From<&v1::Workspace> for Workspace {
             watch_state: watch_state_name(ws.watch_state).map(str::to_owned),
             local_snapshot_count: ws.local_snapshot_count,
             stores: ws.stores.iter().map(MountedStore::from).collect(),
+            changed_file_count: ws.changed_file_count,
         }
     }
 }
@@ -2000,6 +2004,16 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(value["stores"], serde_json::json!([]));
+        assert_eq!(value["changed_file_count"], serde_json::Value::Null);
+        // The last key: added after every other (ADR 0029).
+        let text = serde_json::to_string(&Workspace::from(&ws)).unwrap();
+        assert!(text.ends_with(r#","changed_file_count":null}"#), "{text}");
+        let counted = v1::Workspace {
+            changed_file_count: Some(3),
+            ..ws
+        };
+        let value = serde_json::to_value(Workspace::from(&counted)).unwrap();
+        assert_eq!(value["changed_file_count"], 3);
     }
 
     #[test]

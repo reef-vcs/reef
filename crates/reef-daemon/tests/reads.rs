@@ -1439,3 +1439,81 @@ async fn build_error(
         }
     }
 }
+
+// #114 test 18
+#[tokio::test(flavor = "multi_thread")]
+async fn list_workspaces_counts_changed_files() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let busy = create(client, &repo, "busy@test").await;
+    let fresh = create(client, &repo, "fresh@test").await;
+    let gone = create(client, &repo, "gone@test").await;
+    write(&busy, "one.txt", "1\n");
+    write(&busy, "two.txt", "2\n");
+    client
+        .snapshot_workspace(&repo.id, &busy.id, "")
+        .await
+        .unwrap();
+    client
+        .release_workspace(&repo.id, &gone.id, false, false)
+        .await
+        .unwrap();
+    let request = |counts: bool| ListWorkspacesRequest {
+        repo: repo.id.clone(),
+        changed_file_counts: counts,
+        ..ListWorkspacesRequest::default()
+    };
+
+    let counted = client
+        .list_workspaces_page(request(true))
+        .await
+        .unwrap()
+        .workspaces;
+    assert_eq!(counted.len(), 3);
+    for ws in &counted {
+        if ws.id == gone.id {
+            assert_eq!(ws.changed_file_count, None, "released");
+            continue;
+        }
+        let status = client
+            .get_status(GetStatusRequest {
+                skip_snapshot: true,
+                ..status_request(ws)
+            })
+            .await
+            .unwrap();
+        let expected = status.workspace_status.unwrap().changed_file_count;
+        assert_eq!(ws.changed_file_count, Some(expected), "{}", ws.id);
+    }
+    let by_id = |id: &str| counted.iter().find(|ws| ws.id == id).unwrap();
+    assert_eq!(by_id(&busy.id).changed_file_count, Some(2));
+    assert_eq!(by_id(&fresh.id).changed_file_count, Some(0));
+
+    let plain = client.list_workspaces_page(request(false)).await.unwrap();
+    assert!(
+        plain
+            .workspaces
+            .iter()
+            .all(|ws| ws.changed_file_count.is_none()),
+        "{plain:?}"
+    );
+
+    // The flag is not part of the page token's binding.
+    let first = client
+        .list_workspaces_page(ListWorkspacesRequest {
+            page_size: 1,
+            ..request(true)
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.workspaces.len(), 1);
+    let rest = client
+        .list_workspaces_page(ListWorkspacesRequest {
+            page_size: 1,
+            page_token: first.next_page_token,
+            ..request(false)
+        })
+        .await
+        .unwrap();
+    assert_eq!(rest.workspaces.len(), 1);
+}
