@@ -1,0 +1,198 @@
+/*
+ * Layout and type for every view (R2.18). The system font stack, no web
+ * fonts, a 16 px gutter at phone width, and no horizontal page scroll: wide
+ * tables scroll inside their own box.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  font:
+    15px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    sans-serif;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+code,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+a {
+  color: var(--link);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.page {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.header .daemon {
+  color: var(--text-secondary);
+}
+
+.header .connection {
+  margin-left: auto;
+}
+
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 16px 0 32px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+main {
+  padding: 16px 0;
+}
+
+main h2 {
+  font-size: 1.1rem;
+  margin: 0 0 12px;
+}
+
+.table-box {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.secondary {
+  color: var(--text-secondary);
+}
+
+.error {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  padding: 12px 16px;
+  background: var(--surface-raised);
+}
+
+.error p {
+  margin: 0 0 8px;
+}
+
+.error .next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+/* One background transition when a row's state changes, and none when the
+   reader asks for less motion. */
+.changed {
+  animation: changed 300ms ease-out;
+}
+
+@keyframes changed {
+  from {
+    background: var(--surface-raised);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .changed {
+    animation: none;
+  }
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.state-badge svg {
+  flex: none;
+}
+
+.themes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 16px;
+}
+
+.themes > section {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 16px;
+}
+
+.themes h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}

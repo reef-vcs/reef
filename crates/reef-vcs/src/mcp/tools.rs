@@ -428,6 +428,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "for a person running the CLI",
     ),
     (
+        "/reef.api.v1.DaemonService/CreateWebSession",
+        "ADMIN; a person runs reef ui",
+    ),
+    (
         "/reef.api.v1.RepositoryService/GetRepository",
         "get_status names the repository",
     ),

@@ -37,6 +37,7 @@ pub mod symbols;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod watcher;
+pub mod web;
 pub mod workspace;
 
 pub use reef_client as client;

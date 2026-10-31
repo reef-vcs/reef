@@ -18,6 +18,11 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 - `ListWorkspacesRequest.changed_file_counts` fills `Workspace.changed_file_count`, how many files each active workspace's change changes as of its last snapshot (API revision 10). `reef ws list` asks for it, in JSON and in a new `FILES` column, and so does the MCP server's `list_workspaces`.
 - `-o brief`: compact JSON with only the keys an agent acts on ([ADR 0045](docs/adr/0045-brief-json-by-default.md)).
+- A web UI ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md)): a React and TypeScript app the daemon serves on a loopback listener, read-only, over gRPC-web. It lists every registered repository with its latest operation and its active agents, live from the operation and presence streams, and has a reference page for the state colors (`/states`). The first `reef ui` binds the listener, which stays until the daemon stops; a daemon whose user never runs `reef ui` opens no port.
+- `reef ui` opens the web UI in a browser on a new session, through a launch file, so the session's token is on no command line. `--print` prints the session URL instead; `--open` opens a browser even when stdout is not a terminal, where it otherwise opens nothing.
+- `DaemonService.CreateWebSession` (API revision 12): binds the web listener if needed and mints a session; ADMIN. Five reasons: `WEB_UI_DISABLED`, `WEB_UI_NOT_BUILT`, `WEB_UI_UNAVAILABLE`, `WEB_SESSION_INVALID`, `WEB_ACCESS_DENIED`.
+- `[ui]` in the daemon's `config.toml`: `enabled` (true) and `listen` (`"127.0.0.1:0"`; a loopback address only).
+- Released binaries embed the web UI. A build from source embeds a placeholder page instead, which `reef ui` refuses with `WEB_UI_NOT_BUILT`, unless `just web-build` (Node 24) ran before `cargo build`.
 
 ### Changed
 

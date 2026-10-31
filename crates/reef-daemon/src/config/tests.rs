@@ -417,6 +417,32 @@ fn gc_interval_is_off_or_at_least_an_hour() {
     assert_eq!(reason, "must be 0s (off) or at least 1h");
 }
 
+// R2.18 12: the web UI listens on a loopback IP with a port, nowhere else.
+#[test]
+fn listen_must_be_loopback() {
+    for listen in [
+        "0.0.0.0:0",
+        "[::]:0",
+        "localhost:0",
+        "192.168.1.2:0",
+        "127.0.0.1",
+    ] {
+        let err = load_file(&format!("[ui]\nlisten = \"{listen}\"\n")).unwrap_err();
+        let ConfigError::Invalid { key, reason, .. } = &err else {
+            panic!("{listen}: {err:?}");
+        };
+        assert_eq!(key, "ui.listen", "{listen}");
+        assert!(reason.contains("R2.08"), "{listen}: {reason}");
+        assert!(reason.contains(listen), "{listen}: {reason}");
+    }
+    for listen in ["127.0.0.2:0", "[::1]:0", "127.0.0.1:7878"] {
+        let config = load_file(&format!("[ui]\nlisten = \"{listen}\"\n")).unwrap();
+        assert_eq!(config.file.ui.listen, listen);
+        assert!(config.file.ui.listen_addr().is_some(), "{listen}");
+    }
+    assert_eq!(load_file("").unwrap().file.ui, UiSection::default());
+}
+
 #[test]
 fn heartbeat_near_the_default_warns() {
     assert_eq!(load_file("").unwrap().warnings(), Vec::<String>::new());

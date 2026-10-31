@@ -33,7 +33,7 @@ just ci      # everything CI runs, in CI order
 - PR titles lead with the ticket ID and its name, for example `R0.04 jj-lib embedding spike`.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - PRs are squash merged, so each ticket lands as one commit on `main` with the PR description as its body. Push fixes as new commits on the branch; there is no need to rewrite history during review.
-- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, and `synth determinism` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
+- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, `synth determinism`, and `web` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
 - If a ticket brief and `docs/dev-phases.md` disagree on scope, the brief wins for the implementation; fix `dev-phases.md` in the same PR.
 
 ## Commit messages
@@ -87,6 +87,34 @@ The schema in `crates/reef-api/proto/reef/api/v1` is the API of record ([ADR 002
 2. `buf format -w`, then `just api` (lint and format) and `just api-breaking` (against `main`; from a Reef workspace, pass the registered root's `.git`).
 3. Bump `API_REVISION` in `crates/reef-api/src/lib.rs` by one, and append the digest `cargo nextest run -p reef-api` prints to `API_DIGESTS`.
 4. Review the change against ADR 0029's API review checklist, and list the addition in the CHANGELOG.
+
+## Working on the web UI
+
+The web UI is a React and TypeScript app in `web/`, which the daemon embeds and serves on a loopback listener ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md)). It needs Node at the version in `web/.node-version` (24); nothing else in the repository does.
+
+```sh
+just web-install   # npm ci in web/, then generate the TypeScript client from the protos
+just web-gen       # regenerate it, for an editor's types after pulling a schema change
+just web-dev       # Vite's dev server on http://127.0.0.1:5173
+just web-build     # build the app into crates/reef-web/assets for the next cargo build
+just web-check     # lint, typecheck, Vitest, build, then reef-web's tests against the build
+just web-clean     # remove the build and the generated code: back to the placeholder
+```
+
+Nothing built or generated is committed: `web/src/gen/` (the client, written by `buf generate` and `protoc-gen-es` from `crates/reef-api/proto`) and `crates/reef-web/assets/` (the build) are ignored. The npm scripts that need the generated code (`build`, `typecheck`, `lint`, `test`, `dev`) regenerate it first, so it always matches the protos in the checkout; an editor shows whatever `just web-gen` last wrote.
+
+Without a build, `reef-web` embeds a placeholder page, so a plain `cargo build`, `cargo install` and `just ci` need no Node. A daemon built that way refuses `reef ui` with `WEB_UI_NOT_BUILT`. Run `just web-build`, then `cargo build`, for a daemon that serves the app; `just web-clean` and another `cargo build` go back. Released binaries always embed the app: the release workflow builds it once and every target embeds the same bytes.
+
+CI's `web` job runs `just web-check` on every pull request. It is where a schema change that breaks the app's generated types fails, so a pull request that changes the protos may need app changes too. The daemon's own web tests (`crates/reef-daemon/tests/web_ui.rs`) run in the `check` jobs against the placeholder.
+
+To work on the app against a real daemon, run `reef ui --print` with a daemon built after `just web-build` (or any daemon whose `CreateWebSession` works), then start the dev server with `REEF_UI_URL` set to the printed `url`: Vite proxies `/reef.api.v1.` paths to the daemon's listener and rewrites `Host` and `Origin` to its own, so the daemon has no dev mode. Open `http://127.0.0.1:5173/#session=<token>` with the token from the printed session URL. That URL is a credential until the daemon stops; keep it out of issues and logs.
+
+The app follows a few rules that keep it live and safe; ESLint rejects `setInterval` and `dangerouslySetInnerHTML`:
+
+- No `setInterval`, and `setTimeout` only in `live/backoff.ts`: views update from the streams, never on a timer.
+- No `dangerouslySetInnerHTML`, and no API text rendered as HTML or Markdown: repository content may be hostile, and script in the page would run with the session's token.
+- State colors (`--state-<name>`) are for object states only, always with the state's shape and word.
+- Every runtime dependency runs with the token, so adding one needs a reason in the pull request.
 
 ## ADRs
 

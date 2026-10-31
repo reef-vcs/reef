@@ -8,6 +8,7 @@ default-members = [
     "crates/reef-client",
     "crates/reef-broker",
     "crates/reef-symbols",
+    "crates/reef-web",
     "crates/reef-daemon",
     "crates/reef-vcs",
 ]
@@ -29,6 +30,7 @@ reef-api = { path = "crates/reef-api", version = "0.2.0" }
 reef-client = { path = "crates/reef-client", version = "0.2.0" }
 reef-broker = { path = "crates/reef-broker", version = "0.2.0" }
 reef-symbols = { path = "crates/reef-symbols", version = "0.2.0" }
+reef-web = { path = "crates/reef-web", version = "0.2.0" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.2.0" }
 reef-testing = { path = "crates/reef-testing", version = "0.2.0" }   # unpublished; see reef-daemon's `testing` feature
 
@@ -88,6 +90,12 @@ protox = "0.10"
 # script, and google.rpc.Status for the error envelope. Same versions tonic and protox pull in.
 prost-reflect = "0.16"
 tonic-types = "0.14"
+# The web UI's gRPC-web (R2.18, ADR 0047): tonic's own crate at tonic's version.
+tonic-web = "0.14"
+# Response bodies on the web listener (R2.18); the version tonic uses.
+http-body = "1"
+# The web listener's tests (R2.18): an HTTP/1.1 client and whole bodies.
+http-body-util = "0.1"
 # Page tokens (R2.01): opaque base64url strings.
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["net"] }

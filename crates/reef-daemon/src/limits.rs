@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use futures::Stream;
 use nix::errno::Errno;
 use nix::sys::resource::{Resource, getrlimit, setrlimit};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
 /// The soft open-file limit [`raise_open_file_limit`] asks for, within the
 /// hard limit. macOS refuses a soft limit above `OPEN_MAX`.
@@ -47,21 +47,52 @@ pub fn raise_open_file_limit() -> Result<(u64, u64), Errno> {
     Ok((soft, wanted))
 }
 
-/// The daemon's listener as the server's incoming connections. When
+/// A listener [`Accepting`] accepts from: the socket, or the web UI's TCP
+/// listener (R2.18).
+pub(crate) trait Listen {
+    /// An accepted connection.
+    type Stream;
+
+    /// Polls for the next connection.
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Stream>>;
+}
+
+impl Listen for UnixListener {
+    type Stream = UnixStream;
+
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<UnixStream>> {
+        UnixListener::poll_accept(self, cx).map_ok(|(stream, _)| stream)
+    }
+}
+
+impl Listen for TcpListener {
+    type Stream = TcpStream;
+
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<TcpStream>> {
+        // Small streaming frames go out at once rather than waiting on
+        // Nagle and a delayed ACK, as tonic's own `TcpIncoming` does.
+        TcpListener::poll_accept(self, cx).map_ok(|(stream, _)| {
+            stream.set_nodelay(true).ok();
+            stream
+        })
+    }
+}
+
+/// A listener as the server's incoming connections. When
 /// `accept` fails for want of descriptors or memory, it waits
 /// [`ACCEPT_BACKOFF`] before accepting again and warns at most every
 /// [`WARN_EVERY`]; other errors pass through, which the server skips.
 #[derive(Debug)]
-pub(crate) struct Accepting {
-    listener: UnixListener,
+pub(crate) struct Accepting<L> {
+    listener: L,
     backoff: Option<Pin<Box<tokio::time::Sleep>>>,
     /// Failures since the last warning.
     failures: u64,
     warned_at: Option<Instant>,
 }
 
-impl Accepting {
-    pub(crate) fn new(listener: UnixListener) -> Accepting {
+impl<L> Accepting<L> {
+    pub(crate) fn new(listener: L) -> Accepting<L> {
         Accepting {
             listener,
             backoff: None,
@@ -95,8 +126,8 @@ impl Accepting {
     }
 }
 
-impl Stream for Accepting {
-    type Item = io::Result<UnixStream>;
+impl<L: Listen + Unpin> Stream for Accepting<L> {
+    type Item = io::Result<L::Stream>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -105,7 +136,7 @@ impl Stream for Accepting {
                 self.backoff = None;
             }
             match ready!(self.listener.poll_accept(cx)) {
-                Ok((stream, _)) => return Poll::Ready(Some(Ok(stream))),
+                Ok(stream) => return Poll::Ready(Some(Ok(stream))),
                 Err(error) if Self::out_of_resources(&error) => self.failed(&error),
                 Err(error) => return Poll::Ready(Some(Err(error))),
             }
