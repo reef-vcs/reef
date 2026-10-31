@@ -1,0 +1,4 @@
+Which agents have changed the function `by_lookup` in `crates/reef-daemon/src/symbols/query.rs`, in commits on `main` or in work in progress, not counting the initial import? For each, is its change on `main` (landed) or not yet (open)?
+
+End your reply with one line in this form:
+ANSWER: <agent> <landed|open>; <agent> <landed|open>

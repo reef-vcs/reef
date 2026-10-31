@@ -1,0 +1,1 @@
+Several agents work in this repository at the same time, each in its own checkout, and agents are named like `bot-1`. You are `bot-0`, in yours.

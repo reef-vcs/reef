@@ -1,8 +1,10 @@
 # Rust
 target/
 
-# Onboarding benchmark output (RX.07): uploaded by CI, summarized in docs/onboarding-benchmark.md
+# Agent benchmark output (RX.07, R2.17): uploaded by CI, summarized in docs/onboarding-benchmark.md
+# and docs/token-benchmark.md
 crates/reef-testing/onboarding/results/
+crates/reef-testing/tokens/results/
 
 # OS
 .DS_Store

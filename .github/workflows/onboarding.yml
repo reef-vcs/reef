@@ -26,15 +26,17 @@ on:
 permissions:
   contents: read
 
-# One run at a time: two would share the API key's rate limit and both measure slower agents.
+# One agent benchmark at a time, this one or tokens.yml (R2.17): two would share the API key's
+# rate limit and both measure slower agents.
 concurrency:
-  group: onboarding
+  group: agent-benchmarks
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # The pins every row reports. Changing either starts a new baseline.
+  # The pins every row reports. Changing either starts a new baseline. tokens.yml pins the same
+  # Claude Code; move them together.
   CLAUDE_CODE_VERSION: 2.1.310
   REEF_ONBOARDING_MODEL: claude-sonnet-5-5
 

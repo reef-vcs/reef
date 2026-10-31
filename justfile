@@ -112,6 +112,32 @@ onboarding *ARGS:
     done; \
     "${CARGO_TARGET_DIR:-target}/debug/reef-onboarding" "${args[@]}"
 
+# Token-efficiency benchmark (R2.17): `just tokens scripted` is free (ANTHROPIC_API_KEY adds the
+# `anthropic` counter); `just tokens live` runs a real agent per trial, up to $1 each. Takes
+# `question=`, `arm=` and `trials=` after the subcommand, or the binary's flags; results in
+# crates/reef-testing/tokens/results. Run from a full clone: the fixture is built from its
+# history. See docs/token-benchmark.md.
+tokens COMMAND *ARGS:
+    cargo build -p reef-vcs -p reef-daemon
+    cargo build -p reef-testing --bin reef-tokens --features tokenizers
+    args=("$1"); shift; \
+    if [ "${args[0]}" != report ]; then args+=(--reef-bin-dir "${CARGO_TARGET_DIR:-target}/debug"); fi; \
+    for arg in "$@"; do \
+        case "$arg" in \
+            question=*) args+=(--question "${arg#question=}") ;; \
+            arm=*) args+=(--arm "${arg#arm=}") ;; \
+            trials=*) args+=(--trials "${arg#trials=}") ;; \
+            *) args+=("$arg") ;; \
+        esac; \
+    done; \
+    "${CARGO_TARGET_DIR:-target}/debug/reef-tokens" "${args[@]}"
+
+# The token benchmark's fixture and truth, end to end (R2.17's ignored test). Needs the checkout's
+# full history; about a minute.
+tokens-check:
+    cargo build -p reef-vcs -p reef-daemon
+    cargo nextest run -p reef-testing --features tokenizers --test tokens --run-ignored all
+
 # Every relative link in the repository's Markdown resolves (R1.24).
 doc-links:
     scripts/doc-links.sh

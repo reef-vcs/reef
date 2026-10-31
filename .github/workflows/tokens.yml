@@ -1,0 +1,190 @@
+name: Token benchmark
+
+# R2.17: the tokens an agent needs to answer six standard questions with git porcelain, the reef
+# CLI and the reef MCP server, on a fixture replayed from this repository's history. A scripted
+# part counts fixed command sequences (free but for Anthropic's token counting); a live part runs
+# a real agent, three trials per question and arm, each capped at $1. On demand only, never on
+# pull requests: live trials spend real money, and the ANTHROPIC_API_KEY secret is not available
+# to pull requests from forks. Dispatch it after a change to what agents read (JSON shapes,
+# `reef guide`, MCP texts, `reef diff` or `reef history` output), before a release, and when a pin
+# moves. Each run opens a pull request adding its rows to docs/token-benchmark.md.
+on:
+  workflow_dispatch:
+    inputs:
+      questions:
+        description: Questions, comma-separated (empty for all)
+        default: ""
+        type: string
+      arms:
+        description: Live arms, comma-separated
+        default: git,reef,mcp
+        type: string
+      trials:
+        description: Live trials per question and arm (0 for scripted only)
+        default: "3"
+        type: string
+      note:
+        description: Notes column for the new rows (what changed since the last run)
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# One agent benchmark at a time, this one or onboarding.yml: two would share the API key's rate
+# limit.
+concurrency:
+  group: agent-benchmarks
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The pins every row reports; Claude Code moves with onboarding.yml's. Changing either starts a
+  # new baseline.
+  CLAUDE_CODE_VERSION: 2.1.310
+  REEF_TOKENS_MODEL: claude-sonnet-5-5
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      arms: ${{ steps.plan.outputs.arms }}
+    steps:
+      - id: plan
+        env:
+          ARMS: ${{ inputs.arms || 'git,reef,mcp' }}
+          TRIALS: ${{ inputs.trials || '3' }}
+        run: |
+          if [ "$TRIALS" = 0 ]; then ARMS=""; fi
+          echo "arms=$(jq -Rc 'split(",") | map(gsub("\\s"; "")) | map(select(. != ""))' <<<"$ARMS")" >>"$GITHUB_OUTPUT"
+
+  scripted:
+    name: scripted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # The fixture is built from this repository's history.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - name: Install fuse-overlayfs
+        run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
+      - name: Build
+        run: |
+          cargo build -p reef-vcs -p reef-daemon
+          cargo build -p reef-testing --bin reef-tokens --features tokenizers
+      - name: Fixture and truth
+        run: cargo test -p reef-testing --features tokenizers --test tokens -- --ignored
+      - name: Scripted part
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          QUESTIONS: ${{ inputs.questions }}
+        run: |
+          args=()
+          if [ -n "$QUESTIONS" ]; then args+=(--question "$QUESTIONS"); fi
+          target/debug/reef-tokens scripted --reef-bin-dir target/debug --out results/scripted "${args[@]}"
+          cat results/scripted/latest.md >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: tokens-scripted-${{ github.run_id }}
+          path: results/
+          retention-days: 90
+          overwrite: true
+
+  live:
+    name: live ${{ matrix.arm }}
+    needs: plan
+    if: ${{ needs.plan.outputs.arms != '[]' }}
+    runs-on: ubuntu-24.04
+    # Up to 18 trials of at most 5 minutes each, plus the build; most take under a minute.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: ${{ fromJSON(needs.plan.outputs.arms) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - name: Install fuse-overlayfs
+        run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
+      - name: Install Claude Code ${{ env.CLAUDE_CODE_VERSION }}
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/claude" "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+          echo "$RUNNER_TEMP/claude/bin" >>"$GITHUB_PATH"
+      - run: claude --version
+      - name: Build
+        run: cargo build -p reef-vcs -p reef-daemon -p reef-testing --bins
+      # A failed trial is a result, not a failed step; the step fails only when the harness does.
+      - name: Live trials
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ARM: ${{ matrix.arm }}
+          QUESTIONS: ${{ inputs.questions }}
+          TRIALS: ${{ inputs.trials || '3' }}
+        run: |
+          args=()
+          if [ -n "$QUESTIONS" ]; then args+=(--question "$QUESTIONS"); fi
+          target/debug/reef-tokens live --arm "$ARM" --trials "$TRIALS" \
+            --reef-bin-dir target/debug --out "results/live-$ARM" "${args[@]}"
+          cat "results/live-$ARM/latest.md" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: tokens-live-${{ matrix.arm }}-${{ github.run_id }}
+          path: results/
+          retention-days: 90
+          overwrite: true
+
+  publish:
+    name: publish
+    needs: [scripted, live]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - run: cargo build -p reef-testing --bin reef-tokens
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: tokens-*-${{ github.run_id }}
+          path: results
+      - name: Summary
+        run: target/debug/reef-tokens report --results results | tee summary.md >>"$GITHUB_STEP_SUMMARY"
+      # The pull request is opened with the workflow's token, so GitHub does not run CI on it:
+      # close and reopen it to start the checks. The commit is signed off for the DCO check.
+      - name: Open the results pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTE: ${{ inputs.note }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          target/debug/reef-tokens report --results results --docs docs/token-benchmark.md --note "$NOTE" >/dev/null
+          date=$(date -u +%F)
+          branch="tokens/$date-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add docs/token-benchmark.md
+          git commit -s -m "Token benchmark results, $date" -m "From $RUN_URL."
+          git push origin "$branch"
+          { echo "Rows from [this run]($RUN_URL); every trial's stream and every scripted output is in its artifacts."; echo; cat summary.md; } >body.md
+          gh pr create --base main --head "$branch" --title "Token benchmark results, $date" --body-file body.md

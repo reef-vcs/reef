@@ -1,0 +1,49 @@
+diff --git a/.editorconfig b/.editorconfig
+deleted file mode 100644
+index b26d246..0000000
+--- a/.editorconfig
++++ /dev/null
+@@ -1,18 +0,0 @@
+-root = true
+-
+-[*]
+-charset = utf-8
+-end_of_line = lf
+-insert_final_newline = true
+-trim_trailing_whitespace = true
+-indent_style = space
+-indent_size = 2
+-
+-[*.rs]
+-indent_size = 4
+-
+-[*.md]
+-trim_trailing_whitespace = false
+-
+-[justfile]
+-indent_size = 4
+diff --git a/crates/reef-testing/src/git.rs b/crates/reef-testing/src/git.rs
+index 7e7c1c6..3580bf1 100644
+--- a/crates/reef-testing/src/git.rs
++++ b/crates/reef-testing/src/git.rs
+@@ -11,6 +11,9 @@ use std::path::Path;
+ use gix::bstr::BString;
+ use gix::objs::tree::{Entry, EntryKind};
+ 
++/// The branch [`init_repo`] commits to and points HEAD at.
++pub const BRANCH: &str = "main";
++
+ /// Makes `root` (which must exist) a git repository with `files` (path,
+ /// contents; top-level names only) written to disk and committed once (see
+ /// [`commit`]), on `main`, with HEAD on `main`. The index is not written, so
+diff --git a/docs/fixture-notes.md b/docs/fixture-notes.md
+new file mode 100644
+index 0000000..ebb36d8
+--- /dev/null
++++ b/docs/fixture-notes.md
+@@ -0,0 +1,5 @@
++# Fixture notes
++
++`reef_testing::git::init_repo` commits to `main` and points HEAD there,
++whatever `init.defaultBranch` says. Tests that need another branch call
++`reef_testing::git::commit` with the full ref name.

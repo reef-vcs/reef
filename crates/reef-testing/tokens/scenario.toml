@@ -1,0 +1,385 @@
+# The token-efficiency benchmark's scenario (R2.17): the fixture, the
+# questions with their truth, and the scripted candidates. See
+# docs/token-benchmark.md. Changing anything here (or a prompt, or the self
+# patch) starts a new baseline: rows record this file's digest.
+
+[fixture]
+# Release 0.2.0 (#105), tagged v0.2.0. Its tree is the initial import.
+base = "b5741e8f71728f9362f8ebe59ec2ebe8427e77cf"
+# Agent and harness configuration, removed from the import and from every
+# session's diff, so no arm starts with project instructions.
+strip = ["AGENTS.md", "CLAUDE.md", ".claude", ".cursor", ".codex", ".mcp.json"]
+# The agent whose checkout a trial runs in.
+trial_agent = "bot-0"
+
+# Landed on `main` in this order, one commit each, authored by the agent.
+[[fixture.landed]]
+agent = "bot-1"
+commit = "a4fb5b5ab9e69b6eff26b2ae43332094c433bc9b" # CI: macOS job cap 40 to 50 minutes (#106)
+[[fixture.landed]]
+agent = "bot-2"
+commit = "74ebfcb4c8413c3ee9ba4d1316376682043d5c8c" # R2.15: symbol-level diff (#110)
+[[fixture.landed]]
+agent = "bot-3"
+commit = "b68578b741db5e64deecddaccc8698f57778cb8c" # burst_coalesces at the shipped watcher pacing (#112)
+
+# Work in progress on `main` after the landed sessions, uncommitted in a git
+# worktree or snapshotted in a Reef workspace.
+[[fixture.open]]
+agent = "bot-4"
+commit = "f4e34d3d063cfb98163eea40ea3c6b56db62cf3b" # Fixed-width RFC 3339 timestamps (#111)
+[[fixture.open]]
+agent = "bot-5"
+commit = "79ad454805b82700d264951754ee351cf264a03d" # R2.16: query layer (#113)
+[[fixture.open]]
+agent = "bot-0"
+patch = "patches/self.patch" # one file modified, one added, one deleted
+
+# The sentence each arm's prompt names its tool with. They differ only in
+# the tool.
+[arms]
+git = "Answer with git."
+reef = "Answer with the `reef` command."
+mcp = "Answer with the reef tools."
+
+# The diff sweep: this many commits of `main` up to the base, each diffed
+# by git and by Reef's views.
+[sweep]
+commits = 20
+
+# Placeholders in steps and call arguments: {wt:bot-4} is bot-4's worktree
+# (git), {ws:bot-4} its workspace id and {change:bot-4} its change id
+# (Reef). {wt:*}, {ws:*} and {change:*} repeat the step once per open
+# session other than the trial agent's, in agent order. Pipes and loops are
+# not allowed: an agent cannot filter output it has not seen.
+
+[[question]]
+id = "state-own"
+kind = "files"
+truth = "ANSWER: D .editorconfig; M crates/reef-testing/src/git.rs; A docs/fixture-notes.md | base: burst_coalesces at the shipped watcher pacing (#112)"
+
+[[question.candidate]]
+arm = "git"
+name = "porcelain"
+steps = ["git status --porcelain=v1 -uall", "git log -1 --format=%s"]
+[[question.candidate]]
+arm = "git"
+name = "status"
+steps = ["git status", "git log -1"]
+[[question.candidate]]
+arm = "reef"
+name = "status"
+steps = ["reef status"]
+[[question.candidate]]
+arm = "reef"
+name = "status text"
+steps = ["reef status -o text"]
+[[question.candidate]]
+arm = "mcp"
+name = "get_status"
+calls = [{ tool = "get_status", args = {} }]
+
+[[question]]
+id = "state-repo"
+kind = "counts"
+truth = "ANSWER: bot-4 4; bot-5 59"
+
+[[question.candidate]]
+arm = "git"
+name = "worktrees, porcelain"
+steps = ["git worktree list", "git -C {wt:*} status --porcelain=v1 -uall"]
+[[question.candidate]]
+arm = "git"
+name = "worktrees, short"
+steps = ["git worktree list", "git -C {wt:*} status --short -uall"]
+[[question.candidate]]
+arm = "reef"
+name = "list, status"
+steps = ["reef ws list", "reef status --workspace {ws:*}"]
+[[question.candidate]]
+arm = "reef"
+name = "list, status max 1"
+steps = ["reef ws list", "reef status --workspace {ws:*} --max-files 1"]
+[[question.candidate]]
+arm = "reef"
+name = "list, diff summary"
+steps = ["reef ws list", "reef diff -r {change:*} --summary"]
+[[question.candidate]]
+arm = "reef"
+name = "repository status"
+steps = ["reef status --repo ."]
+insufficient = "shows the repository's heads and workspaces, not which agent changed how many files"
+[[question.candidate]]
+arm = "reef"
+name = "list, status text"
+steps = ["reef ws list -o text", "reef status --workspace {ws:*} -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "list, status max 1 text"
+steps = ["reef ws list -o text", "reef status --workspace {ws:*} --max-files 1 -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "list, diff summary text"
+steps = ["reef ws list -o text", "reef diff -r {change:*} --summary -o text"]
+[[question.candidate]]
+arm = "mcp"
+name = "list, status"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_status", args = { workspace = "{ws:*}" } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "list, status max 1"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_status", args = { workspace = "{ws:*}", max_files = 1, skip_snapshot = true } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "list, diff summary"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:*}", format = "summary" } },
+]
+
+[[question]]
+id = "changed-small"
+kind = "symbols"
+truth = "ANSWER: added rfc3339_millis, rfc3339_millis_edges; removed -; changed rfc3339, workspace_json_has_stable_names_and_nulls, to_rfc3339, timestamps_convert_at_the_edges"
+
+[[question.candidate]]
+arm = "git"
+name = "diff"
+steps = ["git worktree list", "git -C {wt:bot-4} diff"]
+[[question.candidate]]
+arm = "git"
+name = "diff -U0"
+steps = ["git worktree list", "git -C {wt:bot-4} diff -U0"]
+[[question.candidate]]
+arm = "git"
+name = "diff function context"
+steps = ["git worktree list", "git -C {wt:bot-4} diff --function-context"]
+[[question.candidate]]
+arm = "reef"
+name = "diff"
+steps = ["reef ws list", "reef diff -r {change:bot-4}"]
+[[question.candidate]]
+arm = "reef"
+name = "diff stat"
+steps = ["reef ws list", "reef diff -r {change:bot-4} --stat"]
+insufficient = "line counts per file, no names"
+[[question.candidate]]
+arm = "reef"
+name = "symbols"
+steps = ["reef ws list", "reef diff -r {change:bot-4} --symbols"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, 3 call sites"
+steps = ["reef ws list", "reef diff -r {change:bot-4} --symbols --call-sites 3"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, no call sites"
+steps = ["reef ws list", "reef diff -r {change:bot-4} --symbols --call-sites 0"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-4} --symbols -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, no call sites, text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-4} --symbols --call-sites 0 -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, 3 call sites, text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-4} --symbols --call-sites 3 -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "diff text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-4} -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "diff stat text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-4} --stat -o text"]
+insufficient = "line counts per file, no names"
+[[question.candidate]]
+arm = "mcp"
+name = "summary"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-4}", format = "summary" } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "hunks"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-4}", format = "hunks" } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "symbols"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-4}", format = "symbols" } },
+]
+
+[[question]]
+id = "changed-large"
+kind = "symbols"
+# Functions and methods only, so the truth stays under 15 names without
+# narrowing to one file; the directory's structs, fields, constants, macros
+# and modules are not asked about.
+truth = "ANSWER: added holds, tree_lookups, answer_lookups_by_reference, by_lookup, find_ordered, ordered_row, ordered_lookups_follow_path_order; removed -; changed by_lookup, keeps, opened, open"
+
+[[question.candidate]]
+arm = "git"
+name = "diff"
+steps = ["git worktree list", "git -C {wt:bot-5} diff -- crates/reef-daemon/src/symbols/"]
+insufficient = "names `Current::keeps` and `Store::open` only at call sites and inside `opened`; no hunk shows that they changed"
+[[question.candidate]]
+arm = "git"
+name = "diff -U0"
+steps = ["git worktree list", "git -C {wt:bot-5} diff -U0 -- crates/reef-daemon/src/symbols/"]
+insufficient = "names `Current::keeps` and `Store::open` only at call sites and inside `opened`; no hunk shows that they changed"
+[[question.candidate]]
+arm = "git"
+name = "diff function context"
+steps = ["git worktree list", "git -C {wt:bot-5} diff --function-context -- crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "diff"
+steps = ["reef ws list", "reef diff -r {change:bot-5} crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols"
+steps = ["reef ws list", "reef diff -r {change:bot-5} --symbols crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, 3 call sites"
+steps = ["reef ws list", "reef diff -r {change:bot-5} --symbols --call-sites 3 crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, no call sites"
+steps = ["reef ws list", "reef diff -r {change:bot-5} --symbols --call-sites 0 crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-5} --symbols -o text crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, no call sites, text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-5} --symbols --call-sites 0 -o text crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "symbols, 3 call sites, text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-5} --symbols --call-sites 3 -o text crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "diff text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-5} -o text crates/reef-daemon/src/symbols/"]
+[[question.candidate]]
+arm = "reef"
+name = "diff stat"
+steps = ["reef ws list", "reef diff -r {change:bot-5} --stat crates/reef-daemon/src/symbols/"]
+insufficient = "line counts per file, no names"
+[[question.candidate]]
+arm = "reef"
+name = "diff stat text"
+steps = ["reef ws list -o text", "reef diff -r {change:bot-5} --stat -o text crates/reef-daemon/src/symbols/"]
+insufficient = "line counts per file, no names"
+# The MCP server refuses a directory with a trailing `/` (INVALID_PATH),
+# which the CLI accepts.
+[[question.candidate]]
+arm = "mcp"
+name = "summary"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-5}", format = "summary", paths = ["crates/reef-daemon/src/symbols"] } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "hunks"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-5}", format = "hunks", paths = ["crates/reef-daemon/src/symbols"] } },
+]
+[[question.candidate]]
+arm = "mcp"
+name = "symbols"
+calls = [
+  { tool = "list_workspaces", args = {} },
+  { tool = "get_diff", args = { workspace = "{ws:bot-5}", format = "symbols", paths = ["crates/reef-daemon/src/symbols"] } },
+]
+
+[[question]]
+id = "who-file"
+kind = "agents"
+truth = "ANSWER: bot-2 landed; bot-4 open; bot-5 open"
+
+[[question.candidate]]
+arm = "git"
+name = "log, worktree status"
+steps = [
+  "git log --format='%an %s' main -- crates/reef-client/src/json.rs",
+  "git worktree list",
+  "git -C {wt:*} status --porcelain -- crates/reef-client/src/json.rs",
+]
+[[question.candidate]]
+arm = "reef"
+name = "history"
+steps = ["reef history crates/reef-client/src/json.rs"]
+[[question.candidate]]
+arm = "reef"
+name = "history text"
+steps = ["reef history crates/reef-client/src/json.rs -o text"]
+[[question.candidate]]
+arm = "mcp"
+name = "query_changes"
+calls = [{ tool = "query_changes", args = { paths = ["crates/reef-client/src/json.rs"] } }]
+
+[[question]]
+id = "who-symbol"
+kind = "agents"
+truth = "ANSWER: bot-2 landed; bot-5 open"
+
+[[question.candidate]]
+arm = "git"
+name = "log -L, worktree diff"
+steps = [
+  "git log -L :by_lookup:crates/reef-daemon/src/symbols/query.rs --format='%an %s' main",
+  "git worktree list",
+  "git -C {wt:*} diff --function-context -- crates/reef-daemon/src/symbols/query.rs",
+]
+[[question.candidate]]
+arm = "git"
+name = "log -L -s, worktree diff -U0"
+steps = [
+  "git log -L :by_lookup:crates/reef-daemon/src/symbols/query.rs -s --format='%an %s' main",
+  "git worktree list",
+  "git -C {wt:*} diff -U0 -- crates/reef-daemon/src/symbols/query.rs",
+]
+[[question.candidate]]
+arm = "reef"
+name = "history by name"
+steps = ["reef history --symbol by_lookup"]
+[[question.candidate]]
+arm = "reef"
+name = "history by name and path"
+steps = ["reef history --symbol by_lookup crates/reef-daemon/src/symbols/query.rs"]
+[[question.candidate]]
+arm = "reef"
+name = "history by name, text"
+steps = ["reef history --symbol by_lookup -o text"]
+[[question.candidate]]
+arm = "reef"
+name = "history by name and path, text"
+steps = ["reef history --symbol by_lookup crates/reef-daemon/src/symbols/query.rs -o text"]
+[[question.candidate]]
+arm = "mcp"
+name = "query_changes by name"
+calls = [{ tool = "query_changes", args = { symbols = ["by_lookup"] } }]
+[[question.candidate]]
+arm = "mcp"
+name = "query_changes by name and path"
+calls = [{ tool = "query_changes", args = { symbols = ["by_lookup"], paths = ["crates/reef-daemon/src/symbols/query.rs"] } }]

@@ -4,6 +4,8 @@
 
 The agent is Claude Code, headless (`claude -p`). Codex is the second harness, added once this one has a baseline.
 
+The [token-efficiency benchmark](token-benchmark.md) (R2.17) reuses this harness to measure what an agent that already knows Reef spends answering questions about a repository.
+
 ## Scenarios
 
 Each trial gets a fresh home directory, a fresh Reef state directory (`REEF_STATE_DIR`), and a fresh clone of [`BurntSushi/same-file`](https://github.com/BurntSushi/same-file), pinned at `e7d851bc8e88`. It's small, public, and has a `README.md` spelled exactly that way. `--offline` uses a synthetic repository instead, and rows from it say so.
