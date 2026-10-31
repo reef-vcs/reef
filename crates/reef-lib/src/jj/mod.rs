@@ -45,12 +45,12 @@ pub use materialize::{MaterializeError, MaterializeStats, TreeStateEntry, TreeSt
 pub use oplog::{OpKind, OpMeta};
 pub use repo::{
     ChangeIdHex, ChangeSummary, CommitIdHex, InitError, OpenError, OperationIdHex, ParseHexIdError,
-    Repo,
+    Repo, view_wc_commit,
 };
 pub use restore::RecreateWorkingCopyError;
 pub use snapshot::{
-    Behind, Carry, PendingSnapshot, ScannedTree, SnapshotCommit, SnapshotError, SnapshotPlan,
-    commit_snapshot,
+    Behind, Carry, FullScanReason, PendingSnapshot, ScannedTree, SnapshotCommit, SnapshotError,
+    SnapshotPlan, commit_snapshot,
 };
 pub use tree_names::{CheckedTrees, TreeNameError, check_git_head_tree_names};
 

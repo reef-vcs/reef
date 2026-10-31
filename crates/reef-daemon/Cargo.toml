@@ -119,6 +119,12 @@ name = "history"
 harness = false
 required-features = ["testing"]
 
+# Status from the incremental index against a walk (R2.23).
+[[bench]]
+name = "status"
+harness = false
+required-features = ["testing"]
+
 [dev-dependencies]
 # Without default features, so `--no-default-features` test builds really leave `watchman` off.
 reef-daemon = { path = ".", version = "0.2.0", default-features = false, features = ["testing"] }
@@ -130,7 +136,7 @@ gix = { workspace = true, features = ["excludes"] }   # tests/workspaces.rs asks
 pollster.workspace = true
 tokio = { workspace = true, features = ["test-util"] }   # paused clocks in subscription tests (R2.09)
 sha2.workspace = true            # the conformance suite's tree digest (R1.11)
-nix = { workspace = true, features = ["signal", "hostname", "resource"] }   # SIGTERM in the binary test; the hostname check; a spawned daemon's open-file limit (R2.22)
+nix = { workspace = true, features = ["signal", "hostname", "resource", "mman"] }   # SIGTERM in the binary test; the hostname check; a spawned daemon's open-file limit (R2.22); a mapped write (R2.23)
 criterion.workspace = true
 # The web listener's tests (R2.18): gRPC-web and plain HTTP/1.1 against it.
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }

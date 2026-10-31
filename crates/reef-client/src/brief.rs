@@ -520,7 +520,8 @@ mod tests {
                 changed_file_count: 0,
                 conflicted_paths: Vec::new(),
                 conflicted_path_count: 0,
-                source: Some("snapshot".into()),
+                source: Some("index".into()),
+                walk_reason: None,
                 snapshot: None,
             }),
         }
@@ -752,7 +753,7 @@ mod tests {
         assert_eq!(repo["trunk_bookmark"], "main");
         assert_eq!(repo["trunk"]["description"], "trunk");
         let ws = &brief["workspace_status"];
-        assert_eq!(ws["source"], "snapshot");
+        assert_eq!(ws["source"], "index");
         assert_eq!(ws["changed_file_count"], 0);
         assert_eq!(ws["parents"][0]["description"], "the parent");
         assert_eq!(

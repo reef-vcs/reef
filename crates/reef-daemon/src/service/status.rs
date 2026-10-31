@@ -301,6 +301,7 @@ impl StatusService for StatusHandler {
                 source: v1::StatusSource::Operation.into(),
                 snapshot: None,
                 conflicted_path_count: to_u32(found.conflicted_count),
+                walk_reason: v1::StatusWalkReason::Unspecified.into(),
             }),
             (Some(record), Some(found)) => {
                 let inspected = state
@@ -314,10 +315,12 @@ impl StatusService for StatusHandler {
                     &[(inspected.record.clone(), inspected.lease.clone())],
                 )?
                 .pop();
-                let source = if request.skip_snapshot {
-                    v1::StatusSource::LastSnapshot
-                } else {
-                    v1::StatusSource::Snapshot
+                let (source, walk_reason) = match &snapshot {
+                    Some(taken) => taken.status_source(),
+                    None => (
+                        v1::StatusSource::LastSnapshot,
+                        v1::StatusWalkReason::Unspecified,
+                    ),
                 };
                 Some(v1::WorkspaceStatus {
                     workspace,
@@ -329,6 +332,7 @@ impl StatusService for StatusHandler {
                     source: source.into(),
                     snapshot: snapshot.and_then(|taken| taken.operation),
                     conflicted_path_count: to_u32(found.conflicted_count),
+                    walk_reason: walk_reason.into(),
                 })
             }
             _ => None,

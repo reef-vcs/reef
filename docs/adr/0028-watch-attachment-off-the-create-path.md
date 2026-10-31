@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-24
 - Ticket: R1.32
+- Amended by: [0048](0048-status-from-the-watchers-journal.md)
 
 ## Context
 

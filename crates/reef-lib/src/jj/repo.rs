@@ -550,6 +550,15 @@ impl Repo {
     }
 }
 
+/// The working-copy commit `repo`'s view holds for `workspace` (a jj
+/// workspace name), if any: what a workspace's row should name when its
+/// working copy is current (R2.23).
+pub fn view_wc_commit(repo: &ReadonlyRepo, workspace: &str) -> Option<CommitIdHex> {
+    repo.view()
+        .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::new(workspace))
+        .map(CommitIdHex::of)
+}
+
 #[cfg(test)]
 mod tests {
     use jj_lib::backend::ChangeId;

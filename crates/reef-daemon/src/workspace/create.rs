@@ -317,7 +317,7 @@ impl Manager {
             jj_generation: AtomicU64::new(generation),
             repo: handle,
             scan_lock: tokio::sync::Mutex::new(()),
-            scan_started: Mutex::new(None),
+            last_scan: Mutex::new(None),
             spec: Mutex::new(spec),
             stores: Mutex::new(stores),
             carry: CarrySlot::default(),

@@ -23,9 +23,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `DaemonService.CreateWebSession` (API revision 12): binds the web listener if needed and mints a session; ADMIN. Five reasons: `WEB_UI_DISABLED`, `WEB_UI_NOT_BUILT`, `WEB_UI_UNAVAILABLE`, `WEB_SESSION_INVALID`, `WEB_ACCESS_DENIED`.
 - `[ui]` in the daemon's `config.toml`: `enabled` (true) and `listen` (`"127.0.0.1:0"`; a loopback address only).
 - Released binaries embed the web UI. A build from source embeds a placeholder page instead, which `reef ui` refuses with `WEB_UI_NOT_BUILT`, unless `just web-build` (Node 24) ran before `cargo build`.
+- An incremental status index ([ADR 0048](docs/adr/0048-status-from-the-watchers-journal.md), API revision 13): `StatusWalkReason` and `WorkspaceStatus.walk_reason` say why a status walked the tree; `source` is `index` or `walk`. `[status_index]` in the daemon's `config.toml`: `enabled` (true) and `sync_timeout` (`"1s"`). JSON from `reef status -o json` and the MCP `get_status` gains `walk_reason` when the source is `walk`.
 
 ### Changed
 
+- Reads that snapshot a workspace first (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ReadFile`, `ListFiles`, `ListSymbols`, `GetWorkspace` with `snapshot_first`) answer from the incremental status index: no snapshot when nothing changed since the last scan, and a snapshot of the changed paths alone otherwise, instead of a walk of every tracked file. Each read first syncs with the watcher through a cookie in a directory outside the workspace root, so a write made just before it is seen.
+- A watched workspace is now fully scanned at least every `watcher.watched_fallback_interval` (10 minutes), busy or idle; before, a workspace with events was never fully scanned until its release. A full scan that finds a change no event named logs "status index missed changes".
+- On Linux a close after writing (`IN_CLOSE_WRITE`) counts as a change, so a write through a memory mapping is snapshotted.
 - **Piped output is brief JSON** ([ADR 0045](docs/adr/0045-brief-json-by-default.md)): compact, a list one element per line, and for `reef ws list`, `status` and `diff` only the keys an agent acts on, with zero values left out. This breaks scripts that read piped `reef ws list`, `status` or `diff` without `-o json`; `-o json` or `REEF_OUTPUT=json` restores the full JSON. On R2.17's `state-repo` question, `reef ws list` alone is 215 bytes, against 2,893 for git.
 - The MCP server's `list_workspaces`, `get_status` and `get_diff` return the same brief objects, without `next_page_token` on a last page.
 
@@ -34,6 +38,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- On macOS, creating or releasing a workspace no longer drops other workspaces' filesystem events: each notify workspace has its own `FSEvents` stream.
 - A read at a GC-kept copy of an operation from before the last GC failed: jj could not build an index for it once GC had removed its ancestors. It answers through the head's index now (R2.12).
 - The MCP server's `get_diff` described `max_lines_per_file` as "[default: no cut]"; the default is 1,000.
 - Timestamps print with exactly three fraction digits (`2026-10-30T17:04:34.000Z`, `…34.100Z`), in the CLI's JSON and text, MCP results and backup manifests, so they sort as strings. `time`'s RFC 3339 formatting had trimmed trailing zeros and dropped a zero fraction, so a time on a whole second sorted after a later one in the same second.

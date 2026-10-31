@@ -292,11 +292,31 @@ pub struct PendingSnapshot<'a> {
     walk: Duration,
     updated_files: u32,
     narrowed: Option<Narrowed>,
+    /// Why the scan was not narrowed, when it was not.
+    full_reason: Option<FullScanReason>,
     /// [`PendingSnapshot::check_out_carried`] ran.
     checked_out: bool,
     /// For a carried scan, each file its check-out would overwrite or
     /// remove, as the scan left it.
     stamps: Vec<(PathBuf, Option<Stamp>)>,
+}
+
+/// Why a scan walked every tracked file rather than the paths given to
+/// [`Repo::begin_snapshot`] (R2.23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullScanReason {
+    /// No paths were given.
+    NotAsked,
+    /// A path cannot be narrowed to (the root, `..`, not UTF-8, a macOS
+    /// spelling that cannot be read), or the working copy is not jj's local
+    /// one.
+    NotNarrowable,
+    /// The working copy is stale against the view: ADR 0018's adopt,
+    /// divergent and carried arms scan everything.
+    Stale,
+    /// The view has no working-copy commit for the workspace: the recover
+    /// arm scans everything.
+    NoWorkingCopyCommit,
 }
 
 /// What a file on disk looked like, to tell whether it changed: a writer
@@ -417,6 +437,11 @@ impl PendingSnapshot<'_> {
     /// [`Repo::begin_snapshot`] (see the module docs).
     pub fn narrowed(&self) -> bool {
         self.narrowed.is_some()
+    }
+
+    /// Why the scan was not narrowed; `None` when it was.
+    pub fn full_reason(&self) -> Option<FullScanReason> {
+        self.full_reason
     }
 
     /// The part of [`PendingSnapshot::scan_time`] spent locking the working
@@ -840,7 +865,14 @@ impl Repo {
         };
         // Stale or forgotten working copies adopt, diverge, or recover from
         // a full scan.
-        let narrow = narrow.filter(|_| !stale && view_wc.is_some());
+        let full_reason = match (&prefixes, &narrow) {
+            (None, _) => Some(FullScanReason::NotAsked),
+            (Some(_), None) => Some(FullScanReason::NotNarrowable),
+            (Some(_), Some(_)) if stale => Some(FullScanReason::Stale),
+            (Some(_), Some(_)) if view_wc.is_none() => Some(FullScanReason::NoWorkingCopyCommit),
+            (Some(_), Some(_)) => None,
+        };
+        let narrow = narrow.filter(|_| full_reason.is_none());
         let (new_tree, stats, walk, narrowed) = scan(&mut locked, narrow, &repo, &options).await?;
         load += narrowed
             .as_ref()
@@ -924,6 +956,7 @@ impl Repo {
             walk,
             updated_files,
             narrowed,
+            full_reason,
             checked_out: false,
             stamps,
         })

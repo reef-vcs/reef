@@ -39,12 +39,21 @@ impl Manager {
     /// Undoes the creates of `repo` a crash interrupted (see the module
     /// docs): detaches any mount left inside the directory (Linux), removes
     /// the directory, forgets the jj workspace, and removes the
-    /// working-copy state directory. Runs at daemon start, after the
+    /// working-copy state directory; and removes every sync directory left
+    /// from before (R2.23). Runs at daemon start, after the
     /// repository is open and before active workspaces load, while no
     /// create can be in flight. Returns how many it undid; failures are
     /// logged, and a directory that cannot be cleared of mounts is left.
     /// After a restore, directories are moved aside instead (module docs).
     pub async fn sweep_abandoned_creates(&self, repo: RepoId) -> usize {
+        // Sync directories (R2.23) hold only a running daemon's cookies:
+        // each active workspace makes its own again when it is tracked.
+        let sync = self.config.paths.repo_dir(repo).join("sync");
+        if let Err(error) = std::fs::remove_dir_all(&sync)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %sync.display(), %error, "cannot remove the sync directories");
+        }
         let ws_root = self.config.workspace_root(repo);
         let state_root = self.config.paths.repo_dir(repo).join("wc");
         let ids: BTreeSet<WorkspaceId> = workspace_ids_in(&ws_root)

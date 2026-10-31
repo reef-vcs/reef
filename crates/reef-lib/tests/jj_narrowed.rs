@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use jj_lib::object_id::ObjectId as _;
 use reef_lib::jj::settings::{Identity, user_settings};
-use reef_lib::jj::{CommitIdHex, IgnoreSources, Repo, RepoPath, commit_snapshot};
+use reef_lib::jj::{CommitIdHex, FullScanReason, IgnoreSources, Repo, RepoPath, commit_snapshot};
 use reef_lib::jj::{OpKind, OpMeta};
 use tempfile::TempDir;
 
@@ -169,4 +169,38 @@ async fn another_spelling_is_resolved() {
         (true, true)
     );
     assert_eq!(file(&repo, "README.md").await.as_deref(), Some("two\n"));
+}
+
+/// R2.23: why a scan was not narrowed, which the daemon reports as a
+/// status's walk reason.
+#[tokio::test]
+async fn full_reason_says_why_a_scan_was_not_narrowed() {
+    let (_dir, mut repo) = init().await;
+    let root = repo.workspace_root().to_owned();
+    write(&root, "a.txt", "one\n");
+    let reason = async |repo: &mut Repo, prefixes: Option<Vec<PathBuf>>| {
+        let pending = repo
+            .begin_snapshot(None, None, &IgnoreSources::default(), prefixes.as_deref())
+            .await
+            .unwrap();
+        let reason = pending.full_reason();
+        assert_eq!(pending.narrowed(), reason.is_none());
+        let op_id = pending.head_op().clone();
+        if !pending.changed() {
+            pending.finish(&op_id).await.unwrap();
+        }
+        reason
+    };
+    assert_eq!(
+        reason(&mut repo, None).await,
+        Some(FullScanReason::NotAsked)
+    );
+    assert_eq!(
+        reason(&mut repo, Some(vec![PathBuf::from("../x")])).await,
+        Some(FullScanReason::NotNarrowable)
+    );
+    assert_eq!(
+        reason(&mut repo, Some(vec![PathBuf::from("a.txt")])).await,
+        None
+    );
 }

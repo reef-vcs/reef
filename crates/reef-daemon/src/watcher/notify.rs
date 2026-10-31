@@ -24,6 +24,17 @@
 //! (9 ms, R1.29) and attaches inline, so a create there takes no
 //! post-attach full scan.
 //!
+//! # The tap and sync directories (R2.23, ADR 0048)
+//!
+//! [`ChangesOnly`] journals every change's paths on notify's own thread,
+//! before the debouncer ([`crate::snapshot::journal`]), and recognises the
+//! sync cookies a read writes: each workspace's sync directory, outside its
+//! root, is watched with it, non-recursively, so a cookie's event orders
+//! after every earlier write's. On macOS each root is its own `FSEvents`
+//! stream, over the root and its sync directory: notify's one stream over
+//! every root restarted at each watch and unwatch with `since_when = now`,
+//! so a create or a release silently dropped other workspaces' events.
+//!
 //! The worker attaches under the debouncer's lock, as an inline watch and
 //! [`Watcher::unwatch`] do, and takes a root off the queue only while it
 //! holds that lock: an unwatch of a workspace being attached waits for that
@@ -32,13 +43,15 @@
 //! attach in flight (each create of a burst would otherwise wait for the
 //! previous one's).
 
-use std::collections::{HashSet, VecDeque};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventHandler, DebounceEventResult, DebouncedEvent, Debouncer, NoCache,
@@ -52,6 +65,13 @@ use super::{
     WatcherKind,
 };
 use crate::model::WorkspaceId;
+use crate::snapshot::Journals;
+use crate::snapshot::journal::Change;
+
+/// How long a new macOS stream may take to deliver its first cookie before
+/// its watch counts as failed.
+#[cfg(target_os = "macos")]
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often dropped events are reported.
 const DROP_REPORT_INTERVAL: Duration = Duration::from_mins(1);
@@ -85,6 +105,7 @@ struct Shared {
     events: mpsc::Sender<WatchEvent>,
     health: HealthHook,
     gate: Arc<AttachGate>,
+    journals: Arc<Journals>,
 }
 
 #[derive(Default)]
@@ -150,13 +171,15 @@ impl NotifyWatcher {
     /// directory cannot be watched is reported down to `health`. With
     /// `background`, deferred watches are attached on the attach thread
     /// (held while `gate` is) and reported to `health`. On Linux, logs the
-    /// inotify limits first.
+    /// inotify limits first. Every change is journaled in `journals` before
+    /// the debouncer (see the module docs).
     pub fn new(
         debounce: Duration,
         events: mpsc::Sender<WatchEvent>,
         health: HealthHook,
         background: bool,
         gate: Arc<AttachGate>,
+        journals: Arc<Journals>,
     ) -> Result<Self, WatchError> {
         #[cfg(target_os = "linux")]
         log_inotify_limits();
@@ -167,17 +190,25 @@ impl NotifyWatcher {
             health: Arc::clone(&health),
             dropped: 0,
             reported_at: Instant::now(),
-            lost: HashSet::new(),
         };
         // Store mounts (R1.20) are symlinks; following them would watch the
         // shared store from every workspace.
         let config = notify::Config::default().with_follow_symlinks(false);
+        // The debouncer builds the watcher itself, on this thread.
+        NEXT_TAP.with(|next| {
+            *next.borrow_mut() = Some(Tap {
+                demux: Arc::clone(&demux),
+                journals: Arc::clone(&journals),
+            });
+        });
         let debouncer =
             new_debouncer_opt::<_, ChangesOnly, NoCache>(debounce, None, handler, NoCache, config)
                 .map_err(|source| WatchError::Start {
                     kind: "notify",
                     source,
-                })?;
+                });
+        NEXT_TAP.with(|next| next.borrow_mut().take());
+        let debouncer = debouncer?;
         let shared = Arc::new(Shared {
             debouncer: Mutex::new(debouncer),
             queue: Mutex::new(Queue::default()),
@@ -187,6 +218,7 @@ impl NotifyWatcher {
             events,
             health,
             gate,
+            journals,
         });
         let worker = if background {
             let shared = Arc::clone(&shared);
@@ -265,7 +297,27 @@ impl Watcher for NotifyWatcher {
         let mut debouncer = lock(&self.shared.debouncer);
         lock(&self.shared.queue).cancel(workspace, &self.shared.gate);
         self.shared.wake.notify_one();
-        attach(&mut debouncer, &self.shared.demux, workspace, root, skip).map(|()| Attach::Attached)
+        attach(
+            &mut debouncer,
+            &self.shared.demux,
+            &self.shared.journals,
+            workspace,
+            root,
+            skip,
+        )?;
+        // A stream that failed to start says nothing (notify drops the
+        // error): see one cookie through it first.
+        #[cfg(target_os = "macos")]
+        if !self.shared.journals.confirm(workspace, CONFIRM_TIMEOUT) {
+            if let Some(root) = lock(&self.shared.demux).remove(workspace) {
+                let _ = debouncer.unwatch(&root);
+            }
+            return Err(WatchError::Watch {
+                path: root.to_owned(),
+                source: notify::Error::generic("the FSEvents stream delivered no event"),
+            });
+        }
+        Ok(Attach::Attached)
     }
 
     fn unwatch(&self, workspace: WorkspaceId) -> Result<(), WatchError> {
@@ -341,6 +393,7 @@ impl Shared {
             let outcome = attach(
                 &mut debouncer,
                 &self.demux,
+                &self.journals,
                 queued.workspace,
                 &queued.root,
                 std::mem::take(&mut queued.skip),
@@ -505,17 +558,19 @@ impl Shared {
     }
 }
 
-/// Watches `root` for `workspace`, for an inline watch and the attach
-/// thread alike, so the two cannot drift. Routes first, so nothing observed
-/// between the two is lost.
+/// Watches `root` for `workspace`, with its sync directory, for an inline
+/// watch and the attach thread alike, so the two cannot drift. Routes
+/// first, so nothing observed between the two is lost.
 fn attach(
     debouncer: &mut Debouncer<ChangesOnly, NoCache>,
     demux: &Mutex<Demux>,
+    journals: &Journals,
     workspace: WorkspaceId,
     root: &Path,
     skip: Vec<PathBuf>,
 ) -> Result<(), WatchError> {
-    let old = lock(demux).insert(workspace, root.to_owned(), skip);
+    let sync = journals.sync_dir(workspace);
+    let old = lock(demux).insert(workspace, root.to_owned(), skip, sync);
     if let Some(old) = old.filter(|old| old != root) {
         let _ = debouncer.unwatch(&old);
     }
@@ -538,7 +593,8 @@ fn millis(duration: Duration) -> u64 {
 }
 
 /// The platform's watcher with read events dropped on notify's own thread,
-/// before the debouncer sees them (R1.32). inotify reports every open of a
+/// before the debouncer sees them (R1.32), and every change journaled there
+/// (`Tap`, R2.23). inotify reports every open of a
 /// watched directory or file, so a full scan of the `large` preset is about
 /// 17,000 of them. The debouncer keeps each in a map under the lock notify's
 /// thread needs to hand it the next event, and rebuilds the map on every
@@ -546,39 +602,270 @@ fn millis(duration: Duration) -> u64 {
 /// queue overflowed, and every workspace was rescanned in full, which
 /// overflowed it again, in a loop that did not end while the workspaces
 /// lived. Reads are not changes (`route_batch` drops them too), and a
-/// dropped read costs only its parsing.
-pub struct ChangesOnly(RecommendedWatcher);
+/// dropped read costs only its parsing. A close after writing is kept, as a
+/// modify: it is the only event a write through a memory mapping produces
+/// on Linux.
+///
+/// Each watched root comes with its sync directory, watched non-recursively
+/// beside it: in the one inotify instance on Linux, and on macOS in the
+/// root's own `FSEvents` stream, one stream per root (see the module docs).
+pub struct ChangesOnly {
+    #[cfg(not(target_os = "macos"))]
+    watcher: RecommendedWatcher,
+    /// One stream per root.
+    #[cfg(target_os = "macos")]
+    streams: HashMap<PathBuf, notify::FsEventWatcher>,
+    /// What every stream calls.
+    #[cfg(target_os = "macos")]
+    handler: Arc<Mutex<dyn notify::EventHandler>>,
+    #[cfg(target_os = "macos")]
+    config: notify::Config,
+    tap: Option<Tap>,
+    /// Root → the sync directory watched with it.
+    syncs: HashMap<PathBuf, PathBuf>,
+}
 
-/// Forwards every event but reads; see [`ChangesOnly`].
-struct DropReads<F>(F);
+thread_local! {
+    /// The tap [`NotifyWatcher::new`] hands the [`ChangesOnly`] the
+    /// debouncer builds, on the same thread.
+    static NEXT_TAP: RefCell<Option<Tap>> = const { RefCell::new(None) };
+}
+
+/// What notify's thread tells the journal, before the debouncer (R2.23).
+#[derive(Clone)]
+struct Tap {
+    demux: Arc<Mutex<Demux>>,
+    journals: Arc<Journals>,
+}
+
+impl Tap {
+    /// Journals `event` and marks the cookies it names seen; whether to
+    /// forward it to the debouncer: not when it names only cookies, sync
+    /// directories, or paths a test hook drops.
+    fn see(&self, event: &notify::Event) -> bool {
+        if event.need_rescan() {
+            self.rescan(event);
+            return true;
+        }
+        let change = change_of(event);
+        let mut routed = Vec::with_capacity(event.paths.len());
+        let mut cookies = Vec::new();
+        let mut forward = false;
+        {
+            let demux = lock(&self.demux);
+            for path in &event.paths {
+                if let Some((workspace, name)) = demux.route_cookie(path) {
+                    cookies.push((workspace, name.to_owned()));
+                } else if !demux.is_sync_dir(path) && !self.journals.drops(path) {
+                    forward = true;
+                    routed.extend(demux.route(path).map(|workspace| (workspace, path)));
+                }
+            }
+        }
+        // Changes first: a cookie in the same event orders after them.
+        for (workspace, path) in routed {
+            let change = if change == Change::NewDir && !path.is_dir() {
+                Change::Any
+            } else {
+                change
+            };
+            self.journals.record(workspace, path, change);
+        }
+        for (workspace, name) in cookies {
+            self.journals.seen_cookie(workspace, &name);
+        }
+        forward
+    }
+
+    /// Lost events: on Linux every notify workspace's (one queue serves
+    /// them all); on macOS the workspace whose root or sync directory holds
+    /// the rescan's path, since each stream is one workspace's, or every
+    /// one's when it is under none.
+    fn rescan(&self, event: &notify::Event) {
+        let workspace = if cfg!(target_os = "macos") {
+            let demux = lock(&self.demux);
+            // By root, skipped prefixes included: a rescan in one
+            // workspace's build directory is that workspace's.
+            event.paths.first().and_then(|path| {
+                demux
+                    .route_root(path)
+                    .or_else(|| demux.route_cookie(path).map(|(workspace, _)| workspace))
+            })
+        } else {
+            None
+        };
+        match workspace {
+            Some(workspace) => self.journals.lost(workspace),
+            None => self.journals.lost_all_notify(),
+        }
+    }
+
+    /// The sync directory routed with `root`, if it has one.
+    fn sync_of(&self, root: &Path) -> Option<PathBuf> {
+        lock(&self.demux).sync_of(root)
+    }
+}
+
+/// What `event` changed, for the journal. A directory created or moved in
+/// matters on Linux only, where notify watches it after the fact; the
+/// caller checks it is one.
+fn change_of(event: &notify::Event) -> Change {
+    use notify::event::{CreateKind, RenameMode};
+    match event.kind {
+        EventKind::Modify(ModifyKind::Metadata(_)) => Change::Metadata,
+        EventKind::Create(CreateKind::Folder | CreateKind::Any)
+        | EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Both))
+            if cfg!(target_os = "linux") =>
+        {
+            Change::NewDir
+        }
+        _ => Change::Any,
+    }
+}
+
+/// Forwards every event but reads, after the tap; see [`ChangesOnly`].
+struct DropReads<F> {
+    handler: F,
+    tap: Option<Tap>,
+}
 
 impl<F: notify::EventHandler> notify::EventHandler for DropReads<F> {
-    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
-        if let Ok(event) = &event
-            && matches!(event.kind, EventKind::Access(_))
-            && !event.need_rescan()
+    fn handle_event(&mut self, mut event: notify::Result<notify::Event>) {
+        if let (Err(error), Some(tap)) = (&event, &self.tap)
+            && is_limit(error)
         {
-            return;
+            // notify stops adding the batch's new watches at the first
+            // limit error, whichever workspaces they were in.
+            tap.journals.lost_all_notify();
         }
-        self.0.handle_event(event);
+        if let Ok(event) = &mut event {
+            let close_write = matches!(
+                event.kind,
+                EventKind::Access(AccessKind::Close(AccessMode::Write))
+            );
+            if matches!(event.kind, EventKind::Access(_)) && !close_write && !event.need_rescan() {
+                return;
+            }
+            if let Some(tap) = &self.tap
+                && !tap.see(event)
+            {
+                return;
+            }
+            if close_write && !event.need_rescan() {
+                event.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+            }
+        }
+        self.handler.handle_event(event);
+    }
+}
+
+/// One handler behind every macOS stream.
+#[cfg(target_os = "macos")]
+struct SharedHandler(Arc<Mutex<dyn notify::EventHandler>>);
+
+#[cfg(target_os = "macos")]
+impl notify::EventHandler for SharedHandler {
+    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .handle_event(event);
+    }
+}
+
+impl ChangesOnly {
+    /// The sync directory to watch with `root`.
+    fn sync_of(&self, root: &Path) -> Option<PathBuf> {
+        self.tap.as_ref().and_then(|tap| tap.sync_of(root))
     }
 }
 
 impl notify::Watcher for ChangesOnly {
     fn new<F: notify::EventHandler>(handler: F, config: notify::Config) -> notify::Result<Self> {
-        RecommendedWatcher::new(DropReads(handler), config).map(Self)
+        let tap = NEXT_TAP.with(|next| next.borrow_mut().take());
+        let handler = DropReads {
+            handler,
+            tap: tap.clone(),
+        };
+        #[cfg(target_os = "macos")]
+        let watcher = Self {
+            streams: HashMap::new(),
+            handler: Arc::new(Mutex::new(handler)),
+            config,
+            tap,
+            syncs: HashMap::new(),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let watcher = Self {
+            watcher: RecommendedWatcher::new(handler, config)?,
+            tap,
+            syncs: HashMap::new(),
+        };
+        Ok(watcher)
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
-        self.0.watch(path, recursive_mode)
+        self.watcher.watch(path, recursive_mode)?;
+        if let Some(sync) = self.sync_of(path) {
+            self.watcher.watch(&sync, RecursiveMode::NonRecursive)?;
+            self.syncs.insert(path.to_owned(), sync);
+        }
+        Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
+        // A root watched again gets a new stream; the old one stops first.
+        self.streams.remove(path);
+        let handler = SharedHandler(Arc::clone(&self.handler));
+        let mut stream = notify::FsEventWatcher::new(handler, self.config)?;
+        let sync = self.sync_of(path);
+        {
+            // Both paths before the stream starts: it starts once.
+            let mut paths = stream.paths_mut();
+            paths.add(path, recursive_mode)?;
+            if let Some(sync) = &sync {
+                paths.add(sync, RecursiveMode::NonRecursive)?;
+            }
+            paths.commit()?;
+        }
+        self.streams.insert(path.to_owned(), stream);
+        if let Some(sync) = sync {
+            self.syncs.insert(path.to_owned(), sync);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
-        self.0.unwatch(path)
+        let unwatched = self.watcher.unwatch(path);
+        if let Some(sync) = self.syncs.remove(path) {
+            let _ = self.watcher.unwatch(&sync);
+        }
+        unwatched
     }
 
+    #[cfg(target_os = "macos")]
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        self.syncs.remove(path);
+        // Dropping a stream stops it.
+        self.streams
+            .remove(path)
+            .map(drop)
+            .ok_or_else(notify::Error::watch_not_found)
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn configure(&mut self, option: notify::Config) -> notify::Result<bool> {
-        self.0.configure(option)
+        self.watcher.configure(option)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn configure(&mut self, option: notify::Config) -> notify::Result<bool> {
+        // Applies to streams started from now on.
+        self.config = option;
+        Ok(false)
     }
 
     fn kind() -> notify::WatcherKind {
@@ -593,10 +880,6 @@ struct Handler {
     health: HealthHook,
     dropped: u64,
     reported_at: Instant,
-    /// Workspaces an event was dropped for: their next event says anything
-    /// may have changed, since a narrowed scan would miss the dropped paths
-    /// (R1.30).
-    lost: HashSet<WorkspaceId>,
 }
 
 impl DebounceEventHandler for Handler {
@@ -604,12 +887,11 @@ impl DebounceEventHandler for Handler {
         match result {
             Ok(batch) => {
                 let events = route_batch(&lock(&self.demux), &batch);
-                for mut event in events {
-                    let workspace = event.workspace;
-                    event.everything |= self.lost.remove(&workspace);
+                for event in events {
+                    // The journal has its paths already (the tap): only the
+                    // watcher snapshot waits for the next event or the timer.
                     if let Err(mpsc::error::TrySendError::Full(_)) = self.events.try_send(event) {
                         self.dropped += 1;
-                        self.lost.insert(workspace);
                     }
                 }
             }
@@ -775,6 +1057,7 @@ mod routing_tests {
     use notify::{Event, EventKind};
 
     use super::*;
+    use crate::snapshot::WalkReason;
 
     fn id(n: u8) -> WorkspaceId {
         format!("{n:016x}").parse().unwrap()
@@ -782,9 +1065,9 @@ mod routing_tests {
 
     fn demux() -> Demux {
         let mut demux = Demux::default();
-        demux.insert(id(1), PathBuf::from("/w/a"), vec![]);
-        demux.insert(id(2), PathBuf::from("/w/b"), vec![]);
-        demux.insert(id(3), PathBuf::from("/w/c"), vec![]);
+        demux.insert(id(1), PathBuf::from("/w/a"), vec![], None);
+        demux.insert(id(2), PathBuf::from("/w/b"), vec![], None);
+        demux.insert(id(3), PathBuf::from("/w/c"), vec![], None);
         demux
     }
 
@@ -810,9 +1093,12 @@ mod routing_tests {
 
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&seen);
-        let mut handler = DropReads(move |event: notify::Result<Event>| {
-            lock(&sink).push(event.unwrap().kind);
-        });
+        let mut handler = DropReads {
+            handler: move |event: notify::Result<Event>| {
+                lock(&sink).push(event.unwrap().kind);
+            },
+            tap: None,
+        };
         let event = |kind| Event::new(kind).add_path(PathBuf::from("/w/a/x"));
         handler.handle_event(Ok(event(EventKind::Access(AccessKind::Open(
             AccessMode::Any,
@@ -829,6 +1115,99 @@ mod routing_tests {
                 EventKind::Access(AccessKind::Any)
             ]
         );
+    }
+
+    /// R2.23, 20: a close after writing reaches the debouncer as a modify;
+    /// the tap journals changes, takes cookies for itself, and marks
+    /// rescans lost per platform.
+    #[test]
+    fn the_tap_journals_before_the_debouncer() {
+        use notify::EventHandler as _;
+        use notify::event::{AccessKind, AccessMode, ModifyKind};
+
+        let journals = Arc::new(Journals::new(100));
+        let mut demux = Demux::default();
+        demux.insert(
+            id(1),
+            PathBuf::from("/w/a"),
+            vec![],
+            Some(PathBuf::from("/s/a")),
+        );
+        demux.insert(
+            id(2),
+            PathBuf::from("/w/b"),
+            vec![],
+            Some(PathBuf::from("/s/b")),
+        );
+        for (n, root) in [(1, "/w/a"), (2, "/w/b")] {
+            let sync = root.replace("/w/", "/s/");
+            journals.track(
+                id(n),
+                PathBuf::from(root),
+                true,
+                Some(PathBuf::from(sync)),
+                None,
+            );
+            journals.set_watch(id(n), true);
+        }
+        let tap = Tap {
+            demux: Arc::new(Mutex::new(demux)),
+            journals: Arc::clone(&journals),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let mut handler = DropReads {
+            handler: move |event: notify::Result<Event>| {
+                lock(&sink).push(event.unwrap().kind);
+            },
+            tap: Some(tap),
+        };
+        let event = |kind, path: &str| Event::new(kind).add_path(PathBuf::from(path));
+        handler.handle_event(Ok(event(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            "/w/a/mapped.bin",
+        )));
+        handler.handle_event(Ok(event(
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            "/w/a/read.txt",
+        )));
+        let cookie = format!("/s/a/{}-1", std::process::id());
+        handler.handle_event(Ok(event(EventKind::Create(CreateKind::File), &cookie)));
+        handler.handle_event(Ok(event(
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            "/w/b",
+        )));
+        assert_eq!(
+            *lock(&seen),
+            [
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            ],
+            "the cookie and the read never reach the debouncer"
+        );
+        assert_eq!(
+            journals.journal_of(id(1)),
+            Some((vec![PathBuf::from("mapped.bin")], None))
+        );
+        assert_eq!(journals.take(id(1)).sync, 1, "the cookie was seen");
+        assert_eq!(
+            journals.journal_of(id(2)),
+            Some((vec![], None)),
+            "the root's metadata is not a change"
+        );
+
+        handler.handle_event(Ok(rescan(Some("/w/b/sub"), Instant::now()).event));
+        assert_eq!(journals.peek(id(2)).stale, Some(WalkReason::EventsLost));
+        let other = journals.peek(id(1)).stale;
+        if cfg!(target_os = "macos") {
+            assert_eq!(other, None, "a stream's rescan is its workspace's");
+        } else {
+            assert_eq!(
+                other,
+                Some(WalkReason::EventsLost),
+                "one queue serves them all"
+            );
+        }
     }
 
     /// R1.30, 2: a lost-events rescan in a batch makes every workspace's event
@@ -906,8 +1285,15 @@ mod attach_tests {
         });
         let gate = Arc::new(AttachGate::default());
         let watcher = Arc::new(
-            NotifyWatcher::new(Duration::from_millis(50), tx, hook, true, Arc::clone(&gate))
-                .unwrap(),
+            NotifyWatcher::new(
+                Duration::from_millis(50),
+                tx,
+                hook,
+                true,
+                Arc::clone(&gate),
+                Arc::new(Journals::new(1_000)),
+            )
+            .unwrap(),
         );
         let dir = tempfile::tempdir().unwrap();
         // Events carry real paths (`/private/var` on macOS).
@@ -1234,6 +1620,7 @@ mod tests {
                 Arc::new(|_, _| {}),
                 false,
                 Arc::default(),
+                Arc::new(Journals::new(1_000)),
             )
             .unwrap(),
             rx,

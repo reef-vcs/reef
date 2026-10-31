@@ -48,7 +48,7 @@ pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
 pub use rewrite::{EditTarget, Rewritten, Write, WriteRequest};
-pub use snapshot::{REEFIGNORE, ReadSnapshot};
+pub use snapshot::{REEFIGNORE, ReadAnswer, ReadSnapshot, ReadSource};
 pub(crate) use stores::StoreTarget;
 
 use crate::backend::{
@@ -96,10 +96,9 @@ pub struct WorkspaceEntry {
     pub repo: RepoHandle,
     /// Serializes snapshots and release of this workspace.
     pub scan_lock: tokio::sync::Mutex<()>,
-    /// When its last full snapshot that succeeded began, set with
-    /// `scan_lock` held: a read that arrived before it is covered by that
-    /// scan (R2.02). Narrowed scans do not set it.
-    pub scan_started: Mutex<Option<std::time::Instant>>,
+    /// Its last scan that succeeded, set with `scan_lock` held: the reads it
+    /// covers (R2.02, R2.23).
+    pub last_scan: Mutex<Option<ScanMark>>,
     /// What its snapshots exclude beyond git's ignore rules.
     pub spec: Mutex<SnapshotSpec>,
     /// The shared stores mounted in it (R1.20).
@@ -107,6 +106,21 @@ pub struct WorkspaceEntry {
     /// What a write that moved it within its change hands its next
     /// snapshot (issue #80, ADR 0039).
     pub carry: CarrySlot,
+}
+
+/// A workspace's last scans that succeeded ([`WorkspaceEntry::last_scan`]).
+/// A read that synced at cookie `s` is covered by a scan that took the
+/// journal at `sync >= s`, narrowed or not; one that did not sync, by a full
+/// scan that began after it arrived (R2.02's rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanMark {
+    /// The latest cookie the last scan's journal had seen when it took it;
+    /// 0 for none.
+    pub sync: u64,
+    /// When the last full scan began, and why it walked (for a notify
+    /// workspace; a stale journal's reason for a Watchman one; `None` when
+    /// the index answered).
+    pub last_full: Option<(std::time::Instant, Option<crate::snapshot::WalkReason>)>,
 }
 
 /// A workspace's [`Carry`], if a write left one. A leaf lock: never held
@@ -118,6 +132,14 @@ impl CarrySlot {
     /// Hands `carry` to the workspace's next snapshot, replacing any.
     pub(crate) fn set(&self, carry: Carry) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(carry);
+    }
+
+    /// Whether a write left a carry.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 
     /// The carry for this snapshot, emptying the slot.

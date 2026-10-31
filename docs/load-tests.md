@@ -207,6 +207,28 @@ Both pass the gate. Indexing costs about 30 ms at the steady state's p95 and not
 
 Both pass the gate. The index costs under 1% at the steady state's p95 (the brief allowed 10%), nothing in the burst, and about 56 MB of peak memory. It stays on by default. A run before the review fixes (follower writes still on the runtime, the worker looking only at the 64 newest pending changes) measured 704 / 718 / 726 ms.
 
+### R2.23: status from the index under load
+
+`REEF_LOAD_STATUS=1` has every workspace call `GetStatus` right after each steady-state write, and the report gains a `status` block: latency by source, walks by reason, and the daemon's "status index missed changes" lines. One run of 200 × `large` with notify on the M2 Max, release build, 2026-10-31, against R1.30's narrowed run:
+
+| Measurement | R1.30, narrowed | R2.23, with statuses |
+| --- | ---: | ---: |
+| whole run | 54 min | 58 min |
+| 20 × `large` create, max / mean | 1,274 / 1,041 ms | 1,199 / 990 ms |
+| N × `large` create, total (p95 each, 8 at once) | 226.0 s (8,243 ms) | 226.9 s (8,014 ms) |
+| steady-state write-to-snapshot p50 / p95 / max | 688 / **794** / 867 ms | 173 / **388** / 445 ms |
+| status after a write p50 / p95 / max | — | 213 / **446** / 528 ms |
+| statuses from the index, walks, misses | — | 1,000 of 1,000, 0, 0 |
+| burst p50 / p95 / max | 4.4 / 7.5 / 8.0 s | 4.5 / 7.6 / 8.0 s |
+| watcher scans from the steady state on (narrowed) | 1,200 (1,200) | 200 (200) |
+| daemon peak threads, RSS | 312, 3,688 MB | 519, 4,466 MB |
+| N releases, total (p50 / p95 each) | 2,377 s (77.4 / 348.0 s) | 2,639 s (77.3 / 267.1 s) |
+
+- **Every status answered from the index**, none walked, and no full scan found a change the journal had missed. The brief's targets (status p95 under 1 s, every steady-state status `index`, 0 misses) hold.
+- **Writes reach a snapshot sooner**, since the status after each one snapshots its path at once; the watcher's own snapshot of the same event then finds the journal empty and skips its scan, which is why only 200 watcher scans ran.
+- **One run-loop thread per macOS workspace** is the 200 extra threads ([ADR 0048](adr/0048-status-from-the-watchers-journal.md), decision 4). The RSS is 780 MB higher; not investigated further.
+- The gate and the creates are unchanged; `creates_under_1s` is false in both runs, by one create over a second.
+
 ## Subscriptions (R2.22)
 
 Phase 2's exit criterion: a subscriber receives operation log and presence events within 100 ms, "and that holds with 500 subscribers on one daemon at 1,000 operations per minute". `tests/subscription_load.rs` measures it against the release `reef-daemon` binary, and measured it before and after R2.22's broker ([ADR 0038](adr/0038-subscription-broker.md)). It shares `tests/common/load.rs` (process sampling, the machine, the report file) with `load.rs`.

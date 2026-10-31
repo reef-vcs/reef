@@ -12,41 +12,39 @@
 //! one snapshot in flight, and the queue behind it is never deeper than one.
 //!
 //! A workspace with no event since its last snapshot is snapshotted anyway
-//! once that has lasted `watcher.fallback_interval` (60 s) if it has no
-//! working watch (a watch that failed to attach, a Watchman subscription
-//! that is down) or may hold writes no event reported (its last automatic
-//! snapshot failed, or it was tracked again after a time unwatched: a daemon
-//! restart, an aborted release, a rewatch), and
-//! `watcher.watched_fallback_interval` (10 minutes) otherwise. A working
-//! watch reports every change: a queue overflow or `FSEvents` dropping
-//! events marks every workspace changed, and so does a workspace's next
-//! event after the scheduler's queue was full and one of its events was
-//! dropped. The long timer covers a workspace with no next event, and any
-//! change a narrowed scan missed. At 60 s for every
-//! workspace, the full scans of 200 idle 100,000-file workspaces outran the
-//! scan pool (R1.23, `docs/load-tests.md`).
+//! once that has lasted `watcher.fallback_interval` (60 s) if its journal
+//! is stale ([`journal`]: its watch is not up, its last snapshot failed, it
+//! was tracked again after a time unwatched, events were lost), and
+//! `watcher.watched_fallback_interval` (10 minutes) since its last full
+//! scan otherwise. A busy notify workspace gets a full scan on the same
+//! timer: its next scheduled snapshot once its last full scan is older than
+//! `watched_fallback_interval` is full (R2.23). That bounds how long a
+//! change no event names (a write through a hard link from outside the
+//! root) can hide from a read, and is where such misses are found. At 60 s
+//! for every workspace, the full scans of 200 idle 100,000-file workspaces
+//! outran the scan pool (R1.23, `docs/load-tests.md`).
 //!
 //! Explicit snapshots ([`Scheduler::snapshot_now`], the `Snapshot` RPC,
-//! `Inspect` with `snapshot_first`, release) wait for one in flight and then
-//! run, so they always see the files as they are when they start.
+//! release) wait for one in flight and then run, so they always see the
+//! files as they are when they start. A read's snapshot
+//! (`Manager::snapshot_for_read`) is narrowed to the journal once it has
+//! synced with the watcher (R2.23).
 //!
 //! # Narrowed scans
 //!
-//! Each entry keeps the paths reported since its last snapshot, relative to
-//! the workspace's canonical root (R1.30, ADR 0026). A watcher snapshot of
-//! a notify workspace scans only those paths and everything under them,
-//! not every tracked file. The set is taken once the snapshot holds its
-//! scan permit, so events that arrive while it waits for one join it, and
-//! events during the scan go to the next. It becomes *everything*, a full
-//! scan, on an event that says anything may have changed (an overflow),
-//! when it would grow past `watcher.narrowed_max_paths` (`0` turns
-//! narrowing off), and when `.reefignore` or the root itself is among the
-//! paths. Full scans also remain for explicit snapshots, fallback
-//! snapshots, a workspace whose watch is not working or that is `behind`,
-//! Watchman workspaces (jj narrows those itself, R1.14), and a working copy
-//! that is stale or has no working-copy commit in the view
-//! (`Repo::begin_snapshot`). The watched fallback is the backstop for a
-//! change a narrowed scan missed.
+//! Each workspace's [`journal`] keeps the paths reported since its last
+//! scan, relative to its canonical root (R1.30, ADR 0026, R2.23), fed on
+//! notify's own thread before the debouncer. A watcher snapshot of a notify
+//! workspace scans only those paths and everything under them, not every
+//! tracked file. Every snapshot takes the journal once it holds its scan
+//! permit, so events that arrive while it waits for one join it, and events
+//! during the scan go to the next. A stale journal (an overflow, more than
+//! `watcher.narrowed_max_paths` paths, `.reefignore` or the root among
+//! them) means a full scan. Full scans also remain for explicit snapshots,
+//! fallback and timer snapshots, Watchman workspaces (jj narrows those
+//! itself, R1.14), and a working copy that is stale or has no working-copy
+//! commit in the view (`Repo::begin_snapshot`). A watcher snapshot that
+//! takes an empty, fresh journal skips its scan: a read's covered it.
 //!
 //! # Concurrency
 //!
@@ -61,7 +59,7 @@
 //! daemon finishes only when the slowest one it touched does (a workspace
 //! hashing ten thousand new files would hold up all the others).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -82,9 +80,12 @@ use crate::watcher::{
     Attach, AttachGate, CreateClock, HealthHook, NoWatcher, PendingWatch, WatchError, WatchEvent,
     Watcher, new_watcher, skip_prefixes,
 };
-use crate::workspace::{Manager, ManagerError, REEFIGNORE};
+use crate::workspace::{Manager, ManagerError};
 
 pub mod index;
+pub mod journal;
+
+pub use journal::{Journals, WalkReason};
 
 /// Events waiting for the scheduler; more are dropped (and counted) by the
 /// watcher, and the fallback timer covers their workspaces.
@@ -237,6 +238,10 @@ pub struct SnapshotOutcome {
     pub load_ms: u64,
     /// The part of `scan_ms` spent walking the files (R1.30).
     pub walk_ms: u64,
+    /// Why it walked every tracked file of a notify workspace rather than
+    /// the journal's paths, or why a Watchman workspace's journal was stale
+    /// (R2.23); `None` when the index answered it.
+    pub walk_reason: Option<WalkReason>,
 }
 
 /// Why [`Scheduler::track`] is watching a workspace (R1.29). Only a create
@@ -291,6 +296,8 @@ struct Inner {
     /// Holds notify's background attaches (a test hook).
     attaches: Arc<AttachGate>,
     entries: Mutex<HashMap<WorkspaceId, Entry>>,
+    /// Every workspace's journal (R2.23).
+    journals: Arc<Journals>,
     scans: Arc<Semaphore>,
     hooks: RwLock<Vec<SnapshotHook>>,
     tasks: Mutex<JoinSet<()>>,
@@ -325,38 +332,22 @@ struct Inner {
     fail_check_outs: AtomicBool,
 }
 
-/// One tracked workspace.
+/// One tracked workspace. Its changed paths and whether they can be
+/// trusted are its journal's ([`Journals`]).
 #[derive(Debug)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "independent facts about the workspace, not states of one machine"
-)]
 struct Entry {
     /// Which watcher watches it.
     watcher: WatcherKind,
-    /// The workspace root, canonical as the watchers report paths.
-    root: PathBuf,
     /// When the first event since the last snapshot began arrived.
     dirty_since: Option<Instant>,
-    /// Paths reported since the last scan began, relative to `root`; empty
-    /// once `everything`.
-    paths: BTreeSet<PathBuf>,
-    /// Anything may have changed since the last scan began (see the module
-    /// docs).
-    everything: bool,
     /// A watcher or fallback snapshot has been started and has not ended.
     task: bool,
-    /// Its watch is working: attached, and for a watch set up in the
-    /// background, last reported up. Such a workspace waits
-    /// `watched_fallback_interval` for a fallback snapshot.
-    watched: bool,
-    /// It may hold writes no event reported: its last watcher or fallback
-    /// snapshot failed, or it was tracked for a reason other than a create,
-    /// or created with its watch pending (R1.32), and none has run since.
-    /// The next fallback waits only `fallback_interval`.
-    behind: bool,
     /// When the last snapshot ended (or tracking began).
     last_completed: Instant,
+    /// When the last successful full scan ended (or tracking began): a
+    /// notify workspace is fully scanned `watched_fallback_interval` after
+    /// it, busy or idle (R2.23).
+    last_full_completed: Instant,
     /// Open [`PauseGuard`]s.
     paused: usize,
     /// Untracked paths already warned about.
@@ -397,23 +388,27 @@ pub(crate) enum Scheduled {
 pub(crate) struct Trigger {
     /// The first event since the previous snapshot, if any.
     pub(crate) first_event: Option<Instant>,
-    /// Started by events, not by the fallback timer or a request: the scan
-    /// may be narrowed.
+    /// Started by events, or by a read that synced, not by a timer or a
+    /// request for a snapshot: the scan may be narrowed.
     pub(crate) from_events: bool,
-    /// Paths reported since the previous scan began, relative to the
-    /// workspace root; empty when `everything`.
+    /// Paths reported since the previous scan, relative to the workspace
+    /// root; empty when `stale`.
     pub(crate) paths: Vec<PathBuf>,
-    /// Anything may have changed since then.
-    pub(crate) everything: bool,
-    /// The workspace's watch reports every change: a notify watch that is
-    /// working, with no unreported writes behind it.
-    pub(crate) narrowable: bool,
+    /// Why the paths cannot be trusted, if they cannot ([`journal`]).
+    pub(crate) stale: Option<WalkReason>,
+    /// A notify workspace: Reef narrows its scans (jj narrows Watchman's).
+    pub(crate) notify: bool,
+    /// The latest cookie its journal had seen when taken.
+    pub(crate) sync: u64,
+    /// Why a read chose to walk although the journal was fresh (it could
+    /// not sync).
+    pub(crate) walk: Option<WalkReason>,
 }
 
 impl Trigger {
     /// The paths to narrow the scan to, if it may be (see the module docs).
     pub(crate) fn prefixes(&self) -> Option<&[PathBuf]> {
-        (self.from_events && self.narrowable && !self.everything).then_some(self.paths.as_slice())
+        (self.from_events && self.notify && self.stale.is_none()).then_some(self.paths.as_slice())
     }
 
     /// Distinct paths reported; 0 for *everything*.
@@ -448,6 +443,7 @@ impl Scheduler {
                 creates: Arc::new(CreateClock::default()),
                 attaches: Arc::new(AttachGate::default()),
                 entries: Mutex::new(HashMap::new()),
+                journals: Arc::new(Journals::new(config.narrowed_max_paths)),
                 scans: Arc::new(Semaphore::new(max_scans)),
                 hooks: RwLock::new(Vec::new()),
                 tasks: Mutex::new(JoinSet::new()),
@@ -549,6 +545,7 @@ impl Scheduler {
     /// the queue for it are ignored. A snapshot in flight finishes.
     pub fn untrack(&self, ws: WorkspaceId) {
         let removed = self.inner.lock_entries().remove(&ws);
+        let sync_dir = self.inner.journals.sync_dir(ws);
         let watchers: Vec<Arc<dyn Watcher>> = {
             let watchers = lock(&self.inner.watchers);
             match removed {
@@ -561,6 +558,18 @@ impl Scheduler {
                 tracing::warn!(workspace_id = %ws, error = %ErrorChain(&error), "cannot stop watching the workspace");
             }
         }
+        self.inner.journals.untrack(ws);
+        if let Some(dir) = sync_dir
+            && let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(workspace_id = %ws, path = %dir.display(), %error, "cannot remove the sync directory");
+        }
+    }
+
+    /// Every workspace's journal (R2.23).
+    pub fn journals(&self) -> &Arc<Journals> {
+        &self.inner.journals
     }
 
     /// Snapshots `ws` now, after any snapshot in flight, and returns what
@@ -670,10 +679,17 @@ impl Scheduler {
         self.inner.drop_events.store(false, Ordering::Relaxed);
     }
 
-    /// Test hook: delivers an event for `ws` as a watcher would, also while
-    /// [`Scheduler::pause_watcher`] drops the watchers' own.
+    /// Test hook: delivers an event for `ws` as a watcher would, journal
+    /// included, also while [`Scheduler::pause_watcher`] drops the
+    /// watchers' own.
     #[cfg(any(test, feature = "testing"))]
     pub fn inject_event(&self, ws: WorkspaceId, paths: Vec<PathBuf>, everything: bool) {
+        if everything {
+            self.inner.journals.lost(ws);
+        }
+        for path in &paths {
+            self.inner.journals.record(ws, path, journal::Change::Any);
+        }
         self.inner.record_event(&WatchEvent {
             workspace: ws,
             paths,
@@ -873,18 +889,23 @@ impl Scheduler {
         }
     }
 
-    /// Moves the paths reported for `ws` into `trigger`, just before its
-    /// scan: the scan covers every event so far, so its dirty mark is
-    /// cleared again.
+    /// Moves `ws`'s journal into `trigger`, just before its scan: the scan
+    /// covers every event so far, so its dirty mark is cleared again.
     pub(crate) fn take_reported(&self, ws: WorkspaceId, trigger: &mut Trigger) {
         let mut entries = self.inner.lock_entries();
-        let Some(entry) = entries.get_mut(&ws) else {
-            return;
+        let notify = match entries.get_mut(&ws) {
+            Some(entry) => {
+                entry.dirty_since = None;
+                entry.watcher == WatcherKind::Notify
+            }
+            None => false,
         };
-        entry.dirty_since = None;
-        trigger.paths = std::mem::take(&mut entry.paths).into_iter().collect();
-        trigger.everything = std::mem::take(&mut entry.everything);
-        trigger.narrowable = entry.watcher == WatcherKind::Notify && entry.watched && !entry.behind;
+        let taken = self.inner.journals.take(ws);
+        drop(entries);
+        trigger.paths = taken.paths;
+        trigger.stale = taken.stale;
+        trigger.sync = taken.sync;
+        trigger.notify = notify;
     }
 
     /// Records that a snapshot of `ws` ended.
@@ -892,6 +913,22 @@ impl Scheduler {
         if let Some(entry) = self.inner.lock_entries().get_mut(&ws) {
             entry.last_completed = Instant::now();
         }
+    }
+
+    /// Records that a full scan of `ws` succeeded: the timer's next one is
+    /// `watched_fallback_interval` away (R2.23).
+    pub(crate) fn full_completed(&self, ws: WorkspaceId) {
+        if let Some(entry) = self.inner.lock_entries().get_mut(&ws) {
+            entry.last_full_completed = Instant::now();
+        }
+    }
+
+    /// Whether `ws` is a notify workspace.
+    pub(crate) fn is_notify(&self, ws: WorkspaceId) -> bool {
+        self.inner
+            .lock_entries()
+            .get(&ws)
+            .is_some_and(|entry| entry.watcher == WatcherKind::Notify)
     }
 
     /// Warns once per path about new files a snapshot of `ws` left untracked.
@@ -1049,34 +1086,46 @@ impl Inner {
         let Some(entry) = manager.entry(ws) else {
             return;
         };
-        let kind = entry.record().watcher;
+        let record = entry.record();
+        let kind = record.watcher;
         let defer = reason == TrackReason::Created;
         // Events carry real paths (`/private/tmp` on macOS for `/tmp`).
         let root =
             std::fs::canonicalize(&entry.paths.root).unwrap_or_else(|_| entry.paths.root.clone());
+        let sync_dir = (kind == WatcherKind::Notify)
+            .then(|| sync_dir(&manager.config.paths.repo_dir(record.repo_id), ws))
+            .and_then(|dir| match prepare_sync_dir(&dir) {
+                Ok(dir) => Some(dir),
+                Err(error) => {
+                    // Reads of it walk (`not-synced`).
+                    tracing::warn!(workspace_id = %ws, path = %dir.display(), %error, "cannot prepare the sync directory");
+                    None
+                }
+            });
         {
             let mut entries = self.lock_entries();
-            let tracked = entries.entry(ws).or_insert_with(|| Entry {
+            entries.entry(ws).or_insert_with(|| Entry {
                 watcher: kind,
-                root: root.clone(),
                 dirty_since: None,
-                paths: BTreeSet::new(),
-                everything: false,
                 task: false,
-                watched: false,
-                behind: false,
                 last_completed: Instant::now(),
+                last_full_completed: Instant::now(),
                 paused: 0,
                 untracked_reported: HashSet::new(),
             });
-            tracked.root.clone_from(&root);
             // Writes made before a restart, between a release's untrack and
-            // its abort, or while a move rewatched were never reported.
-            if reason != TrackReason::Created {
-                tracked.behind = true;
-                tracked.paths.clear();
-                tracked.everything = true;
-            }
+            // its abort, or while a move rewatched were never reported. jj
+            // keeps a Watchman workspace's clock in its tree state, so its
+            // next scan is narrowed by jj anyway.
+            let stale = (reason != TrackReason::Created && kind == WatcherKind::Notify)
+                .then_some(WalkReason::WatchRestarted);
+            self.journals.track(
+                ws,
+                root.clone(),
+                kind == WatcherKind::Notify,
+                sync_dir,
+                stale,
+            );
         }
         let spec = entry.spec();
         let skip = skip_prefixes(&root, &spec.excludes, &spec.mounts);
@@ -1100,15 +1149,11 @@ impl Inner {
             }
             // The health hook reports the outcome, and a full scan follows.
             // Until it has run, writes made before the watch was up are
-            // unreported: every scan is full, on the short fallback.
-            // Marked after `watch` returns, before the attach and its scan
-            // (at least `min_interval` later) can have run; were it marked
-            // late, the cost is one extra full scan at the fallback.
-            Ok(Attach::Pending) => {
-                if let Some(entry) = self.lock_entries().get_mut(&ws) {
-                    entry.behind = true;
-                }
-            }
+            // unreported: the journal is `not-watched`, so every scan is
+            // full, on the short fallback.
+            // Not `set_watched(false)`: the attach may already have come up
+            // and said so.
+            Ok(Attach::Pending) => self.journals.pending(ws),
             Ok(Attach::Attached) => {
                 self.set_watched(ws, true);
                 manager.clear_watch_failed(&entry);
@@ -1118,9 +1163,7 @@ impl Inner {
 
     /// Records whether `ws`'s watch is working.
     fn set_watched(&self, ws: WorkspaceId, watched: bool) {
-        if let Some(entry) = self.lock_entries().get_mut(&ws) {
-            entry.watched = watched;
-        }
+        self.journals.set_watch(ws, watched);
     }
 
     fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<WorkspaceId, Entry>> {
@@ -1153,6 +1196,7 @@ impl Inner {
             Arc::clone(&self.health),
             Arc::clone(&self.creates),
             Arc::clone(&self.attaches),
+            Arc::clone(&self.journals),
         );
         let watcher: Arc<dyn Watcher> = match started {
             Ok(watcher) => Arc::from(watcher),
@@ -1230,8 +1274,10 @@ impl Inner {
         self.record_event(event);
     }
 
-    /// Marks the event's workspace dirty and adds its paths to the set
-    /// (see the module docs).
+    /// Marks the event's workspace dirty. notify's tap already journaled
+    /// its paths, ahead of the debouncer; a Watchman event's are journaled
+    /// here (jj narrows its scans, so they only count), and one that starts
+    /// over marks the journal `events-lost` (see the module docs).
     fn record_event(&self, event: &WatchEvent) {
         let mut entries = self.lock_entries();
         // Events for an untracked workspace (released, or racing its
@@ -1240,23 +1286,14 @@ impl Inner {
             return;
         };
         entry.dirty_since.get_or_insert(event.at);
-        entry.everything |= event.everything;
-        for path in &event.paths {
-            if entry.everything {
-                break;
+        if entry.watcher == WatcherKind::Watchman {
+            if event.everything {
+                self.journals.lost(event.workspace);
             }
-            let Ok(relative) = path.strip_prefix(&entry.root) else {
-                continue;
-            };
-            // jj rescans under a changed `.gitignore` itself, not under
-            // Reef's own ignore file.
-            entry.everything = relative.as_os_str().is_empty()
-                || relative == Path::new(REEFIGNORE)
-                || (entry.paths.insert(relative.to_owned())
-                    && entry.paths.len() > self.config.narrowed_max_paths);
-        }
-        if entry.everything {
-            entry.paths.clear();
+            for path in &event.paths {
+                self.journals
+                    .record(event.workspace, path, journal::Change::Any);
+            }
         }
     }
 
@@ -1272,20 +1309,26 @@ impl Inner {
             .config
             .watched_fallback_interval
             .max(self.config.fallback_interval);
+        let stale = self.journals.stale_set();
         let mut due = Vec::new();
         for (ws, entry) in self.lock_entries().iter_mut() {
             if entry.task || entry.paused > 0 {
                 continue;
             }
             let since = now.saturating_duration_since(entry.last_completed);
-            let fallback_after = if entry.watched && !entry.behind {
-                watched_fallback
+            let since_full = now.saturating_duration_since(entry.last_full_completed);
+            let fresh = !stale.contains(ws);
+            let idle_due = if fresh {
+                since_full >= watched_fallback && since >= self.config.min_interval
             } else {
-                self.config.fallback_interval
+                since >= self.config.fallback_interval
             };
             let fallback = match entry.dirty_since {
-                Some(_) if since >= self.config.min_interval => false,
-                None if since >= fallback_after => true,
+                // A busy notify workspace still gets the timer's full scan.
+                Some(_) if since >= self.config.min_interval => {
+                    entry.watcher == WatcherKind::Notify && since_full >= watched_fallback
+                }
+                None if idle_due => true,
                 _ => continue,
             };
             entry.task = true;
@@ -1319,7 +1362,6 @@ impl Inner {
             && let Some(entry) = self.lock_entries().get_mut(&ws)
         {
             entry.last_completed = Instant::now();
-            entry.behind = ran == Scheduled::Failed;
         }
     }
 
@@ -1355,10 +1397,10 @@ fn health_hook(inner: Weak<Inner>) -> HealthHook {
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        match inner.lock_entries().get_mut(&ws) {
-            Some(entry) => entry.watched = healthy,
-            None => return,
+        if !inner.lock_entries().contains_key(&ws) {
+            return;
         }
+        inner.journals.set_watch(ws, healthy);
         let Some(manager) = inner.manager.upgrade() else {
             return;
         };
@@ -1380,6 +1422,26 @@ fn health_hook(inner: Weak<Inner>) -> HealthHook {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A notify workspace's sync directory (R2.23): `<repo dir>/sync/<id>`,
+/// beside `wc/` and outside the root, so no cookie enters the agent's tree.
+pub(crate) fn sync_dir(repo_dir: &Path, ws: WorkspaceId) -> PathBuf {
+    repo_dir.join("sync").join(ws.as_hex())
+}
+
+/// Creates `dir` (`0700`) or empties it of a crash's cookies; returns it
+/// canonical, as the watchers report paths.
+fn prepare_sync_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    for entry in std::fs::read_dir(dir)? {
+        let _ = std::fs::remove_file(entry?.path());
+    }
+    std::fs::canonicalize(dir)
 }
 
 impl Manager {

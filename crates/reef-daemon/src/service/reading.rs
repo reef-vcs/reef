@@ -20,8 +20,9 @@ use crate::error::status;
 use crate::model::{RepoId, RepositoryRecord, WorkspaceId, WorkspaceRecord, WorkspaceState};
 use crate::read::{PinnedGone, ReadError, Reads};
 use crate::repo::RepoHandle;
+use crate::snapshot::WalkReason;
 use crate::snapshot::index;
-use crate::workspace::ReadSnapshot;
+use crate::workspace::{ReadSnapshot, ReadSource};
 
 /// The repository and workspace a read names.
 #[derive(Clone, Debug)]
@@ -85,9 +86,40 @@ pub(super) fn target(state: &AppState, repo: &str, workspace: &str) -> Result<Ta
 #[derive(Debug, Default)]
 pub(super) struct Snapshotted {
     /// The operation it recorded, with its effects; `None` when it found
-    /// nothing new, a scan begun since the request arrived covered it, or
-    /// it did not snapshot.
+    /// nothing new, a scan since the request arrived covered it, nothing
+    /// changed since the last scan, or it did not snapshot.
     pub(super) operation: Option<v1::Operation>,
+    /// Where the files came from; `None` when it did not snapshot.
+    pub(super) source: Option<ReadSource>,
+}
+
+impl Snapshotted {
+    /// `source` and `walk_reason` for a workspace's status (R2.23).
+    pub(super) fn status_source(&self) -> (v1::StatusSource, v1::StatusWalkReason) {
+        match self.source {
+            None | Some(ReadSource::Snapshot) => (
+                v1::StatusSource::Snapshot,
+                v1::StatusWalkReason::Unspecified,
+            ),
+            Some(ReadSource::Index) => (v1::StatusSource::Index, v1::StatusWalkReason::Unspecified),
+            Some(ReadSource::Walk(reason)) => (v1::StatusSource::Walk, walk_reason(reason)),
+        }
+    }
+}
+
+/// `reason` in the API.
+pub(super) fn walk_reason(reason: WalkReason) -> v1::StatusWalkReason {
+    match reason {
+        WalkReason::NotWatched => v1::StatusWalkReason::NotWatched,
+        WalkReason::WatchRestarted => v1::StatusWalkReason::WatchRestarted,
+        WalkReason::EventsLost => v1::StatusWalkReason::EventsLost,
+        WalkReason::TooBroad => v1::StatusWalkReason::TooBroad,
+        WalkReason::SnapshotFailed => v1::StatusWalkReason::SnapshotFailed,
+        WalkReason::NotSynced => v1::StatusWalkReason::NotSynced,
+        WalkReason::StaleWorkingCopy => v1::StatusWalkReason::StaleWorkingCopy,
+        WalkReason::PathNotNarrowable => v1::StatusWalkReason::PathNotNarrowable,
+        WalkReason::CoveredByFullScan => v1::StatusWalkReason::CoveredByFullScan,
+    }
 }
 
 /// Snapshots `target`'s workspace before a read when `needed` and the
@@ -113,8 +145,17 @@ pub(super) async fn snapshot_first(
                 source: Box::new(error),
             })
         })?;
-    let ReadSnapshot::Taken(outcome) = taken else {
-        return Ok(Snapshotted::default());
+    tracing::debug!(
+        workspace_id = %record.id,
+        source = ?taken.source,
+        "read answered"
+    );
+    let source = Some(taken.source);
+    let ReadSnapshot::Taken(outcome) = taken.snapshot else {
+        return Ok(Snapshotted {
+            operation: None,
+            source,
+        });
     };
     let op_id = outcome.op_id.to_string();
     let workspace_id = record.id.as_hex();
@@ -130,7 +171,7 @@ pub(super) async fn snapshot_first(
         },
     )
     .await?;
-    Ok(Snapshotted { operation })
+    Ok(Snapshotted { operation, source })
 }
 
 /// What the daemon's records say about listed operations: their snapshot

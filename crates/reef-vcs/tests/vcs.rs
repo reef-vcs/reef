@@ -268,7 +268,12 @@ async fn status_in_a_workspace_and_outside() {
     };
     assert_eq!(kind_of(&existing), Some("modified".into()), "{files:?}");
     assert_eq!(kind_of("b-new.txt"), Some("added".into()), "{files:?}");
-    assert_eq!(ws_status["source"], "snapshot");
+    // The index (R2.23); on Linux a walk until the create's background
+    // attach is up.
+    assert!(
+        ws_status["source"] == "index" || ws_status["source"] == "walk",
+        "{ws_status}"
+    );
     assert_eq!(ws_status["snapshot"]["kind"], "snapshot");
     assert_eq!(ws_status["snapshot"]["snapshot_kind"], "explicit");
 

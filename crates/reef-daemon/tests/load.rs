@@ -16,7 +16,9 @@
 //! tracked file on every snapshot, as before R1.30), `REEF_LOAD_SYMBOLS`
 //! (`0`; `1` indexes every snapshot's tree in the background, R2.14),
 //! `REEF_LOAD_HISTORY` (`1`, the daemon's default; `0` turns the history
-//! index off, R2.16). The report is
+//! index off, R2.16), `REEF_LOAD_STATUS` (`0`; `1` has every workspace
+//! call `GetStatus` right after each steady-state write, and the report
+//! gains a `status` block, R2.23). The report is
 //! `target/load/<os>-<preset>-<timestamp>.json`, and a Markdown summary is
 //! printed.
 
@@ -46,8 +48,8 @@ use common::spawned::{SpawnedDaemon, free_bytes, workspace_dirs};
 use common::{SyntheticRepo, watcher_name};
 use futures::StreamExt as _;
 use reef_api::v1::{
-    CreateTimings, CreateWorkspaceRequest, CreateWorkspaceResponse, ListWorkspacesRequest,
-    WatchState, Workspace, WorkspaceState,
+    CreateTimings, CreateWorkspaceRequest, CreateWorkspaceResponse, GetStatusRequest,
+    ListWorkspacesRequest, WatchState, Workspace, WorkspaceState,
 };
 use reef_daemon::client::Client;
 use reef_daemon::client::json::backend_name;
@@ -80,6 +82,8 @@ struct Params {
     narrowed_max_paths: Option<usize>,
     symbols: bool,
     history: bool,
+    /// `GetStatus` after every steady-state write (R2.23).
+    status: bool,
 }
 
 impl Params {
@@ -113,6 +117,7 @@ impl Params {
                 }),
             symbols: number("REEF_LOAD_SYMBOLS", 0) == 1,
             history: number("REEF_LOAD_HISTORY", 1) == 1,
+            status: number("REEF_LOAD_STATUS", 0) == 1,
         }
     }
 }
@@ -320,6 +325,11 @@ async fn load_profile() {
     report["burst"] = burst_stats.to_json();
     report["burst"]["samples"] = burst.samples_json();
     report["heartbeat_rpcs"] = json!(heartbeat_count);
+    if params.status {
+        report["status"] = load.statuses_json();
+        report["status"]["misses_logged"] =
+            json!(daemon.log_lines("status index missed changes").len());
+    }
     report["list_rpcs"] = json!(load.list_calls.load(Ordering::Relaxed));
 
     // Limits, then the watcher's own account.
@@ -619,6 +629,9 @@ struct Load {
     current: Arc<Mutex<Arc<Writes>>>,
     list_calls: Arc<AtomicU64>,
     stop: tokio_util::sync::CancellationToken,
+    /// Each status after a steady-state write: its latency in milliseconds,
+    /// its source, and its walk reason (R2.23).
+    statuses: Arc<Mutex<Vec<(u64, String, String)>>>,
 }
 
 impl Load {
@@ -638,6 +651,7 @@ impl Load {
             latest: Arc::new(Mutex::new(latest)),
             current: Arc::new(Mutex::new(Arc::default())),
             list_calls: Arc::new(AtomicU64::new(0)),
+            statuses: Arc::default(),
             stop: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -755,6 +769,72 @@ impl Load {
         });
     }
 
+    /// Workspace `index`'s status right after its write, recorded in
+    /// `statuses`.
+    async fn status(&self, index: usize) {
+        let begun = Instant::now();
+        let answer = self
+            .client
+            .get_status(GetStatusRequest {
+                workspace: self.ids[index].clone(),
+                max_files: 1,
+                ..GetStatusRequest::default()
+            })
+            .await;
+        let ms = millis(begun.elapsed());
+        let (source, reason) = match answer.ok().and_then(|status| status.workspace_status) {
+            Some(status) => (
+                format!("{:?}", status.source()).to_lowercase(),
+                format!("{:?}", status.walk_reason()).to_lowercase(),
+            ),
+            None => ("failed".to_owned(), String::new()),
+        };
+        self.statuses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((ms, source, reason));
+    }
+
+    /// The `status` block: latency by source, walks by reason.
+    fn statuses_json(&self) -> Value {
+        let statuses = self
+            .statuses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut by_source: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut walks: HashMap<String, u64> = HashMap::new();
+        for (ms, source, reason) in &statuses {
+            by_source.entry(source.clone()).or_default().push(*ms);
+            if source == "walk" {
+                *walks.entry(reason.clone()).or_default() += 1;
+            }
+        }
+        let mut all: Vec<u64> = statuses.iter().map(|(ms, _, _)| *ms).collect();
+        all.sort_unstable();
+        let sources: serde_json::Map<String, Value> = by_source
+            .into_iter()
+            .map(|(source, mut ms)| {
+                ms.sort_unstable();
+                let stats = json!({
+                    "count": ms.len(),
+                    "p50_ms": percentile(&ms, 50),
+                    "p95_ms": percentile(&ms, 95),
+                    "max_ms": ms.last(),
+                });
+                (source, stats)
+            })
+            .collect();
+        json!({
+            "count": all.len(),
+            "p50_ms": percentile(&all, 50),
+            "p95_ms": percentile(&all, 95),
+            "max_ms": all.last(),
+            "by_source": sources,
+            "walks_by_reason": walks,
+        })
+    }
+
     fn begin(&self) -> Arc<Writes> {
         let writes = Arc::new(Writes::default());
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&writes);
@@ -782,6 +862,7 @@ impl Load {
         for index in 0..n {
             let offset = params.period.mul_f64(index as f64 / n as f64);
             let (this, writes, period) = (Arc::clone(&this), Arc::clone(&writes), params.period);
+            let status = params.status;
             tasks.spawn(async move {
                 let mut every = tokio::time::interval_at(start + offset, period);
                 let mut seq = 0;
@@ -791,6 +872,9 @@ impl Load {
                         return;
                     }
                     this.write(&writes, index, seq);
+                    if status {
+                        this.status(index).await;
+                    }
                     seq += 1;
                 }
             });
