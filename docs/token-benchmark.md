@@ -124,6 +124,24 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | bytes | 7,933 | 4,925 | – | 3,672 | 23,610 | 1.61× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | anthropic | 3,543 | 2,237 | – | 1,881 | 9,431 | 1.58× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | o200k | 2,280 | 1,669 | – | 1,313 | 5,775 | 1.37× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | bytes | 185 | 15,574 | 399 | 11,201 | 31,139 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | anthropic | 88 | 7,347 | 228 | 6,194 | 13,744 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | o200k | 54 | 5,561 | 150 | 4,419 | 8,881 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 31,789 | 1,358 | 11,310 | 31,248 | 0.08× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | anthropic | 1,505 | 13,518 | 787 | 5,631 | 13,181 | 0.11× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | o200k | 842 | 9,848 | 542 | 3,822 | 8,284 | 0.10× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 13,132 | 1,196 | 9,423 | 29,361 | 1.70× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | anthropic | 9,318 | 5,420 | 658 | 4,800 | 12,350 | 1.72× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | o200k | 5,722 | 3,980 | 446 | 3,188 | 7,650 | 1.44× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 25,867 | 1,737 | 20,769 | 40,707 | 1.96× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | anthropic | 20,221 | 9,775 | 913 | 10,353 | 17,903 | 2.07× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | o200k | 12,491 | 6,989 | 626 | 6,586 | 11,048 | 1.79× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | bytes | 619 | 5,050 | – | 3,838 | 23,776 | 0.12× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | anthropic | 370 | 2,409 | – | 2,036 | 9,586 | 0.15× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | o200k | 235 | 1,845 | – | 1,478 | 5,940 | 0.13× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 4,914 | – | 3,661 | 23,599 | 1.55× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | anthropic | 3,375 | 2,259 | – | 1,903 | 9,453 | 1.49× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | o200k | 2,133 | 1,685 | – | 1,329 | 5,791 | 1.27× | Linux baseline at 505bfab (R2.17 merge), before #114 |
 <!-- tokens-rows:scripted -->
 
 ### Fixed cost
@@ -131,6 +149,7 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | Date | Reef | Tools | `tools/list` bytes | Instructions bytes | bytes | anthropic | o200k | Break-even (questions) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | 2026-10-31 | ? | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | Linux baseline at 505bfab (R2.17 merge), before #114 |
 <!-- tokens-rows:fixed -->
 
 ### Live: Claude Code
@@ -157,6 +176,24 @@ Answer tokens and bytes are medians over correct trials; the other columns are m
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | git | 3/3 | 5,676 | 12,035 | 1,597 | 14,235 | 8,027 | 960 | $0.026 | 4 | 5 | 13 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | reef | 3/3 | 4,679 | 11,502 | 1,627 | 16,809 | 11,947 | 622 | $0.020 | 3 | 4 | 10 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | mcp | 3/3 | 1,933 | 3,726 | 8,068 | 18,156 | 18,150 | 319 | $0.006 | 1 | 2 | 5 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | git | 3/3 | 437 | 812 | 1,537 | 3,562 | 3,066 | 288 | $0.005 | 1 | 2 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | reef | 3/3 | 9,223 | 20,016 | 1,566 | 15,015 | 5,682 | 283 | $0.027 | 2 | 3 | 6 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | mcp | 3/3 | 6,253 | 11,190 | 8,002 | 22,293 | 22,287 | 221 | $0.005 | 1 | 2 | 4 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | git | 3/3 | 1,914 | 3,296 | 1,511 | 10,676 | 8,507 | 788 | $0.013 | 4 | 5 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | reef | 3/3 | 12,512 | 27,677 | 1,540 | 40,506 | 25,301 | 650 | $0.034 | 5 | 6 | 13 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | mcp | 3/3 | 3,249 | 5,837 | 7,976 | 19,353 | 19,347 | 219 | $0.004 | 2 | 3 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | git | 3/3 | 4,322 | 8,710 | 1,543 | 15,037 | 10,463 | 849 | $0.021 | 3 | 4 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | reef | 3/3 | 5,939 | 14,463 | 1,572 | 24,123 | 19,077 | 351 | $0.018 | 4 | 5 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | mcp | 3/3 | 5,629 | 10,969 | 8,008 | 43,288 | 37,324 | 781 | $0.026 | 4 | 5 | 11 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | git | 3/3 | 10,504 | 23,367 | 1,564 | 27,573 | 16,662 | 1,025 | $0.040 | 3 | 4 | 11 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | reef | 3/3 | 7,223 | 18,570 | 1,593 | 34,983 | 31,144 | 1,190 | $0.030 | 6 | 7 | 16 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | mcp | 3/3 | 9,215 | 18,753 | 8,029 | 34,093 | 34,085 | 769 | $0.033 | 2 | 3 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | git | 3/3 | 1,942 | 3,406 | 1,549 | 10,548 | 8,150 | 720 | $0.014 | 3 | 4 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | reef | 3/3 | 4,689 | 10,650 | 1,578 | 21,159 | 16,871 | 770 | $0.018 | 4 | 5 | 12 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | mcp | 3/3 | 2,023 | 3,840 | 8,014 | 18,121 | 18,115 | 341 | $0.005 | 1 | 2 | 6 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | git | 3/3 | 4,765 | 10,136 | 1,565 | 10,428 | 5,439 | 773 | $0.020 | 2 | 3 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | reef | 2/3 | 4,375 | 10,902 | 1,594 | 14,186 | 14,176 | 617 | $0.019 | 3 | 4 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | mcp | 3/3 | 1,901 | 3,699 | 8,030 | 18,032 | 18,026 | 281 | $0.005 | 1 | 2 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
 <!-- tokens-rows:live-claude-code -->
 
 ### Diff sweep
@@ -166,6 +203,7 @@ Median bytes per view.
 | Date | Reef | Commits | `git show` | `git show --stat` | `reef diff` | `reef diff --stat` | `reef diff --symbols` | `--symbols -o text` | `--symbols` ÷ `reef diff` | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-31 | ? | 20 | 153,658 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 20 | 153,606 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | Linux baseline at 505bfab (R2.17 merge), before #114 |
 <!-- tokens-rows:sweep -->
 
 ### Where the bytes go
@@ -190,4 +228,20 @@ The state questions' `reef (default)` output, compact JSON bytes by field.
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.active_workspaces` | 3,030 | 27% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.heads` | 2,771 | 25% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.last_operation` | 1,286 | 11% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.workspace` | 1,014 | 9% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.parents` | 751 | 7% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.trunk` | 747 | 7% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.working_copy` | 707 | 6% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.changed_files` | 319 | 3% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].path` | 2,547 | 11% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].new_no_final_newline` | 1,764 | 8% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].old_no_final_newline` | 1,764 | 8% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].invalid_utf8` | 1,260 | 6% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files (structure)` | 1,089 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
 <!-- tokens-rows:breakdown -->
