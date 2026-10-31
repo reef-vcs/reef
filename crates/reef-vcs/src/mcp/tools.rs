@@ -565,6 +565,7 @@ tool!(list_workspaces, args::ListWorkspaces, |call, args| {
             page_size: page(args.page_size, 50),
             page_token: args.page_token.unwrap_or_default(),
             changed_file_counts: true,
+            at_operation: String::new(),
         }))
         .await?;
     let workspaces: Vec<Workspace> = response.workspaces.iter().map(Workspace::from).collect();
@@ -589,6 +590,7 @@ tool!(get_workspace, args::GetWorkspace, |call, args| {
             workspace: ws.id,
             snapshot_first: args.snapshot_first.unwrap_or(false),
             skip_disk_usage: !args.disk_usage.unwrap_or(false),
+            at_operation: String::new(),
         }))
         .await?;
     to_value(&Inspected::from_response(&response).ok_or_else(|| missing("workspace"))?)
@@ -604,6 +606,7 @@ tool!(get_status, args::GetStatus, |call, args| {
         workspace: scope.workspace_id(),
         skip_snapshot: args.skip_snapshot.unwrap_or(false),
         max_files: page(args.max_files, 100),
+        at_operation: String::new(),
     };
     let response = ctx.call(Box::pin(ctx.client.get_status(request))).await?;
     to_value(&brief::RepoStatus::from(&RepoStatus::from(&response)))

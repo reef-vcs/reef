@@ -862,7 +862,7 @@ pub fn file_change_kind_name(kind: i32) -> Option<&'static str> {
 }
 
 /// Where a status's changed files came from: `snapshot`, `index`, `walk`,
-/// or `last-snapshot`; `None` when unset.
+/// `last-snapshot`, or `operation` (R2.12); `None` when unset.
 pub fn status_source_name(source: i32) -> Option<&'static str> {
     let name = match v1::StatusSource::try_from(source) {
         Ok(v1::StatusSource::Unspecified) => return None,
@@ -870,6 +870,7 @@ pub fn status_source_name(source: i32) -> Option<&'static str> {
         Ok(v1::StatusSource::Index) => "index",
         Ok(v1::StatusSource::Walk) => "walk",
         Ok(v1::StatusSource::LastSnapshot) => "last-snapshot",
+        Ok(v1::StatusSource::Operation) => "operation",
         Err(_) => UNKNOWN,
     };
     Some(name)

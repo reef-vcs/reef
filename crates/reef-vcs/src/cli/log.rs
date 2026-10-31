@@ -35,7 +35,7 @@ pub(crate) struct Args {
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx {
-        operation_given: args.read.at_op.is_some(),
+        operation_given: args.read.at.given(),
         snapshots_first: !args.read.no_snapshot,
         ..AdviceCtx::new(&scope)
     };
@@ -43,7 +43,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         repo: scope.repo_id.clone(),
         workspace: scope.workspace_id(),
         revset: args.revisions.unwrap_or_default(),
-        at_operation: args.read.at_operation(),
+        at_operation: args.read.at_operation(ctx, &scope).await?,
         skip_snapshot: args.read.no_snapshot,
         ..ListChangesRequest::default()
     };

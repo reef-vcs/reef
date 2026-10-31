@@ -14,6 +14,8 @@
 // `::(immutable_heads() | root())`; and `mutable()` is `~immutable()`.
 // `at_operation` is an operation id or unique prefix of lowercase hex: the
 // read answers from that operation's view; empty means the current head.
+// A commit created after that operation, named by commit id, resolves as
+// hidden (R2.12).
 // Reads whose revision or revset involves `@` snapshot the workspace first
 // unless `skip_snapshot`; a read `at_operation` never snapshots.
 //

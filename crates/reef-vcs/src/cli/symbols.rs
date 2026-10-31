@@ -189,7 +189,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<(), CliError> {
         repo: scope.repo_id.clone(),
         workspace: scope.workspace_id(),
         revision,
-        at_operation: read.at_operation(),
+        at_operation: read.at_operation(ctx, &scope).await?,
         skip_snapshot: read.no_snapshot,
         path,
         name: name.unwrap_or_default(),
@@ -239,7 +239,7 @@ async fn index(
         repo: scope.repo_id.clone(),
         workspace: scope.workspace_id(),
         revision,
-        at_operation: read.at_operation(),
+        at_operation: read.at_operation(ctx, &scope).await?,
         skip_snapshot: read.no_snapshot,
         wait: Some(wait.try_into().unwrap_or_default()),
     };

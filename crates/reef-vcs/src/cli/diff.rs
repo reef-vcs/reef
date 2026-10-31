@@ -59,7 +59,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let paths = scope::given_paths(&scope, &args.paths)?;
     let advice = AdviceCtx {
-        operation_given: args.read.at_op.is_some(),
+        operation_given: args.read.at.given(),
         snapshots_first: !args.read.no_snapshot,
         ..AdviceCtx::new(&scope)
     };
@@ -88,7 +88,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         paths,
         format: format.into(),
         context_lines: args.context,
-        at_operation: args.read.at_operation(),
+        at_operation: args.read.at_operation(ctx, &scope).await?,
         skip_snapshot: args.read.no_snapshot,
         symbols: args.symbols,
         max_call_sites: args.call_sites,

@@ -164,6 +164,54 @@ pub fn recent(db: &Db, ws: WorkspaceId, limit: usize) -> Result<Vec<SnapshotEntr
     })
 }
 
+/// [`counts`] of the snapshots taken at or before `at` (R2.12).
+pub fn counts_at(db: &Db, ws: WorkspaceId, at: Timestamp) -> Result<(u64, u64), DbError> {
+    db.with(|conn| {
+        conn.query_row(
+            "SELECT count(*), coalesce(sum(local), 0) FROM snapshots
+             WHERE workspace_id = ?1 AND taken_at <= ?2",
+            params![ws, at],
+            |row| Ok((count(row, 0)?, count(row, 1)?)),
+        )
+    })
+}
+
+/// [`local_counts`] of the snapshots in `repo` taken at or before `at`
+/// (R2.12).
+pub fn local_counts_at(
+    db: &Db,
+    repo: RepoId,
+    at: Timestamp,
+) -> Result<HashMap<WorkspaceId, u64>, DbError> {
+    db.with(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT workspace_id, count(*) FROM snapshots
+             WHERE local = 1 AND repo_id = ?1 AND taken_at <= ?2
+             GROUP BY workspace_id",
+        )?;
+        let rows = stmt.query_map(params![repo, at], |row| Ok((row.get(0)?, count(row, 1)?)))?;
+        rows.collect()
+    })
+}
+
+/// [`recent`] among the snapshots taken at or before `at` (R2.12).
+pub fn recent_at(
+    db: &Db,
+    ws: WorkspaceId,
+    at: Timestamp,
+    limit: usize,
+) -> Result<Vec<SnapshotEntry>, DbError> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    db.with(|conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM snapshots WHERE workspace_id = ?1 AND taken_at <= ?2
+             ORDER BY taken_at DESC, op_id LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![ws, at, limit], from_row)?;
+        rows.collect()
+    })
+}
+
 /// Every workspace's snapshots of `change` in `repo`, oldest first: what
 /// R4's publish of the change flips.
 pub fn for_change(

@@ -366,6 +366,26 @@ Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration:
 
 Everything but `diff_summary_full` scales with what changed, not with the tree. `diff_summary_full` walks every path, and a page of a large diff pays that walk again to count `total_files`. Before R2.02 skipped rename and copy detection past 1,000 differing files (git's default `diff.renameLimit`), the git backend's detection took 764 ms of its 770 ms on `medium` and grew faster than the file count; the tree diff alone is 6 ms there.
 
+## Replay (R2.12)
+
+Two more groups in `crates/reef-lib/benches/reads.rs`, run after the operation benches on the same fixture: `cargo bench -p reef-lib --bench reads -- 'load_at|locate'`.
+
+| Benchmark | Timed |
+| --- | --- |
+| `load_at_shared` | after GC's `reinit` (only the head's index kept), the repository at an operation 500 back, borrowing the head's index, uncached: what every read at an operation pays to load it |
+| `load_at_rebuilt` | the same operation through jj's own load, which builds and saves an index for it; timed once and printed to stderr, since a second load finds the index it saved |
+| `locate_1000` | `GetOperation` by time to the operation 1,000 back, walked from the op heads |
+
+Apple M2 Max, 12 cores, 32 GB, macOS 27.0, APFS, median per iteration, `medium` (10,014 files, about 1,100 operations):
+
+| Benchmark | `medium` |
+| --- | ---: |
+| `load_at_shared` | 0.017 ms |
+| `load_at_rebuilt` | 42 ms |
+| `locate_1000` | 16.9 ms |
+
+A read at an old operation after GC cost a full reindex of that operation (42 ms here, 0.16 to 0.44 s measured on Reef's own repository through the CLI while writing the brief) and wrote an index segment; it now costs reading the view. A lookup by time costs about 17 µs per operation after the time, so the 100,000-operation bound is about 1.7 s. `large` was not run: the shared load does not depend on the tree, and the rebuild is the full reindex, which grows with the commits indexed.
+
 ## Broker (R2.22)
 
 `crates/reef-broker/benches/broker.rs` measures the subscription broker's in-memory cost per operation ([ADR 0038](adr/0038-subscription-broker.md)), on a ring at its default bound of 4,096 operations of about 1.5 KiB: `cargo bench -p reef-broker --bench broker`. `bench.yml`'s `cargo bench --workspace` runs it.

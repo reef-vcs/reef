@@ -139,8 +139,20 @@ impl AdviceCtx {
                 hint: "That operation is not in the current history; `reef op log` lists the ones that are.".to_owned(),
                 next: self.op_log(),
             },
-            reason::TOO_FAR_BEHIND | reason::OPERATION_LOG_REWRITTEN => Advice {
-                hint: "The stream's position is too far back, or the log was rewritten (garbage collection); read history with `reef op log`, then watch from now.".to_owned(),
+            reason::TOO_FAR_BEHIND => Advice {
+                hint: "The stream's position is too far back; read history with `reef op log`, then watch from now.".to_owned(),
+                next: self.op_log(),
+            },
+            reason::OPERATION_LOG_REWRITTEN => Advice {
+                hint: "Garbage collection rewrote the operation log since that point; look it up again with --at, or read history with `reef op log`.".to_owned(),
+                next: self.op_log(),
+            },
+            reason::OPERATION_NOT_RETAINED => Advice::hint(format!(
+                "The operation log starts at {}: older operations were garbage-collected, or the repository is newer; pick a time at or after it.",
+                get("oldest_at")
+            )),
+            reason::TOO_FAR_BACK => Advice {
+                hint: "More than 100,000 operations ended after that time; page back with `reef op log --at-op <OP>` from an older operation.".to_owned(),
                 next: self.op_log(),
             },
             reason::OPERATION_SUPERSEDED => Advice {

@@ -15,9 +15,10 @@ use reef_api::v1::{
     Workspace, create_workspace_request, move_workspace_request,
 };
 use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
-use reef_lib::jj::revset::{self, RevsetScope};
+use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
 use tonic::{Request, Response, Status};
 
+use super::at_operation::{self, ReplayError};
 use super::convert::{
     WorkspaceView, Written, backend_choice, known, lease, missing_stores, request_duration,
     state_of,
@@ -42,6 +43,134 @@ impl WorkspacesService {
     /// A service over `state`.
     pub fn new(state: Arc<AppState>) -> WorkspacesService {
         WorkspacesService { state }
+    }
+
+    /// `ListWorkspaces` at an operation (R2.12): the workspaces whose
+    /// working copy its view holds, as of then.
+    async fn list_workspaces_at(
+        &self,
+        request: ListWorkspacesRequest,
+    ) -> Result<Response<ListWorkspacesResponse>, Status> {
+        let page = PageRequest::new(
+            "/reef.api.v1.WorkspaceService/ListWorkspaces",
+            request.page_size,
+            &request.page_token,
+            &ListWorkspacesRequest {
+                page_size: 0,
+                page_token: String::new(),
+                changed_file_counts: false,
+                ..request.clone()
+            },
+        )
+        .map_err(status)?;
+        if request.repo.trim().is_empty() {
+            return Err(status(ReplayError::NeedsRepo));
+        }
+        let target = super::reading::target(&self.state, &request.repo, "")?;
+        let states: Vec<WorkspaceState> = request
+            .states
+            .iter()
+            .map(|state| known("states", *state))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(status)?
+            .into_iter()
+            .filter_map(state_of)
+            .collect();
+        // Only active workspaces have a working copy in a view.
+        let active = states.is_empty() || states.contains(&WorkspaceState::Active);
+        let owner = non_empty(request.owner);
+        let view = at_operation::view_at(
+            &self.state,
+            &target.handle,
+            target.repo.id,
+            &request.at_operation,
+        )
+        .await?;
+        let rows: Vec<_> = at_operation::rows_at(&self.state, view.copies)?
+            .into_iter()
+            .filter(|(_, record)| {
+                active
+                    && owner.as_ref().is_none_or(|owner| {
+                        record.as_ref().is_some_and(|record| record.owner == *owner)
+                    })
+            })
+            .collect();
+        let (rows, next_page_token) = page.page(rows, |row| {
+            newest_first(at_operation::created_at(row), &row.0.id.as_hex())
+        });
+        let mut workspaces =
+            at_operation::workspaces_at(&self.state, target.repo.id, &rows, view.end)?;
+        if request.changed_file_counts {
+            // Each working copy at the operation, against its parents.
+            let names = rows
+                .iter()
+                .map(|(copy, _)| copy.id.jj_workspace_name())
+                .collect();
+            let at = Some(view.id.clone());
+            match tokio::time::timeout(
+                COUNT_TIMEOUT,
+                changed_counts(&self.state, target.repo.id, names, at),
+            )
+            .await
+            {
+                Ok(Ok(counts)) => {
+                    for (workspace, count) in workspaces.iter_mut().zip(counts) {
+                        workspace.changed_file_count = count;
+                    }
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    error = %error.message(),
+                    "could not count workspaces' changed files"
+                ),
+                Err(_) => tracing::warn!(
+                    timeout_ms = COUNT_TIMEOUT.as_millis(),
+                    "counting workspaces' changed files timed out; listed without counts"
+                ),
+            }
+        }
+        Ok(Response::new(ListWorkspacesResponse {
+            workspaces,
+            next_page_token,
+            at_operation: view.id,
+        }))
+    }
+
+    /// `GetWorkspace` at an operation (R2.12): `record` as of then.
+    async fn get_workspace_at(
+        &self,
+        record: WorkspaceRecord,
+        text: &str,
+    ) -> Result<Response<GetWorkspaceResponse>, Status> {
+        let state = &self.state;
+        let handle = state.manager.handle(record.repo_id).map_err(status)?;
+        let view = at_operation::view_at(state, &handle, record.repo_id, text).await?;
+        let Some(copy) = view
+            .copies
+            .iter()
+            .find(|copy| copy.id == record.id)
+            .cloned()
+        else {
+            return Err(status(RevisionError::WorkingCopyNotFound {
+                workspace: record.id.jj_workspace_name(),
+                at_operation: view.id,
+            }));
+        };
+        let others = at_operation::others_on_change(&view.copies, record.id, &copy.change_id);
+        let (snapshot_count, _) =
+            index::counts_at(&state.db, record.id, view.end).map_err(status)?;
+        let recent = index::recent_at(&state.db, record.id, view.end, 10).map_err(status)?;
+        let repo = record.repo_id;
+        let workspace =
+            at_operation::workspaces_at(state, repo, &[(copy, Some(record))], view.end)?.pop();
+        Ok(Response::new(GetWorkspaceResponse {
+            workspace,
+            disk_usage: None,
+            other_workspaces_on_change: others,
+            snapshot: None,
+            snapshot_count,
+            recent_snapshots: recent.iter().map(v1::SnapshotEntry::from).collect(),
+            at_operation: view.id,
+        }))
     }
 
     /// `record` as a message, its lease state computed at `now`.
@@ -114,7 +243,8 @@ async fn count_changed_files(
             .iter()
             .map(|&index| rows[index].0.id.jj_workspace_name())
             .collect();
-        let counted = tokio::time::timeout(COUNT_TIMEOUT, changed_counts(state, repo, names)).await;
+        let counted =
+            tokio::time::timeout(COUNT_TIMEOUT, changed_counts(state, repo, names, None)).await;
         (repo, indexes, counted)
     });
     for (repo, indexes, counted) in futures::future::join_all(jobs).await {
@@ -139,12 +269,16 @@ async fn count_changed_files(
 }
 
 /// How many paths `@` changes in each of the jj workspaces `names` of
-/// `repo`, in order; `None` for one whose `@` does not resolve.
+/// `repo`, in order, at head or at the operation `at` names (R2.12); `None`
+/// for one whose `@` does not resolve.
 async fn changed_counts(
     state: &AppState,
     repo: RepoId,
     names: Vec<String>,
+    at: Option<String>,
 ) -> Result<Vec<Option<u32>>, Status> {
+    let repo_id = repo;
+    let reads = Arc::clone(&state.reads);
     let root = state.db.repository(repo).map_err(status)?.root;
     let handle = state.manager.handle(repo).map_err(status)?;
     let head = state.reads.current(&handle).await.map_err(status)?;
@@ -154,7 +288,10 @@ async fn changed_counts(
     state
         .reads
         .run(&handle, move || async move {
-            let repo = &head;
+            let repo = &match at {
+                Some(text) => reads.at(repo_id, &head, &text).await.map_err(status)?,
+                None => head,
+            };
             let options = DiffOptions {
                 format: DiffFormat::Summary,
                 context: 0,
@@ -187,10 +324,10 @@ async fn changed_counts(
                 };
                 counts.push(count);
             }
-            counts
+            Ok(counts)
         })
         .await
-        .map_err(status)
+        .map_err(status)?
 }
 
 fn record_ids(repo: impl std::fmt::Display, workspace: impl std::fmt::Display) {
@@ -274,6 +411,9 @@ impl WorkspaceService for WorkspacesService {
         request: Request<ListWorkspacesRequest>,
     ) -> Result<Response<ListWorkspacesResponse>, Status> {
         let request = request.into_inner();
+        if !request.at_operation.trim().is_empty() {
+            return self.list_workspaces_at(request).await;
+        }
         let page = PageRequest::new(
             "/reef.api.v1.WorkspaceService/ListWorkspaces",
             request.page_size,
@@ -317,6 +457,7 @@ impl WorkspaceService for WorkspacesService {
         Ok(Response::new(ListWorkspacesResponse {
             workspaces,
             next_page_token,
+            at_operation: String::new(),
         }))
     }
 
@@ -332,6 +473,12 @@ impl WorkspaceService for WorkspacesService {
             .resolve_workspace(&request.repo, &request.workspace)
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
+        if !request.at_operation.trim().is_empty() {
+            if request.snapshot_first {
+                return Err(status(ReplayError::SnapshotFirst));
+            }
+            return self.get_workspace_at(record, &request.at_operation).await;
+        }
         let workspace_id = record.id.as_hex();
         let inspected = manager
             .inspect(
@@ -376,6 +523,7 @@ impl WorkspaceService for WorkspacesService {
                 .iter()
                 .map(v1::SnapshotEntry::from)
                 .collect(),
+            at_operation: String::new(),
         }))
     }
 

@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use jj_lib::backend::{BackendError, Timestamp};
+use jj_lib::default_index::DefaultReadonlyIndex;
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::{OpStoreError, OperationId};
 use jj_lib::op_walk::walk_ancestors;
@@ -578,6 +579,11 @@ pub enum OpLookupError {
     /// Several operations share this prefix.
     #[error("operation id prefix {0} is ambiguous")]
     Ambiguous(String),
+    /// A walk from an operation reached ancestors garbage collection
+    /// removed: the operation is a copy GC kept from before its rewrite
+    /// (R2.12).
+    #[error("the walk reached operations garbage collection removed")]
+    Collected,
     /// The operation could not be read.
     #[error(transparent)]
     OpLog(#[from] OpLogError),
@@ -588,6 +594,7 @@ impl Classify for OpLookupError {
         match self {
             Self::Invalid(_) | Self::Ambiguous(_) => ErrorKind::InvalidArgument,
             Self::NotFound(_) => ErrorKind::NotFound,
+            Self::Collected => ErrorKind::Conflict,
             Self::OpLog(error) => error.kind(),
         }
     }
@@ -697,7 +704,7 @@ pub async fn walk_from(
         ended: true,
     };
     while let Some(op) = stream.next().await {
-        let op = op?;
+        let op = op.map_err(collected)?;
         walk.examined += 1;
         if walk.examined <= skip {
             walk.last_skipped = Some(OperationIdHex::of(op.id()));
@@ -709,6 +716,82 @@ pub async fn walk_from(
         }
     }
     Ok(walk)
+}
+
+/// A walk's failure to read an operation: [`OpLookupError::Collected`]
+/// when the operation is gone, which in a walk means GC removed an
+/// ancestor of an operation it kept.
+fn collected(error: OpStoreError) -> OpLookupError {
+    match error {
+        OpStoreError::ObjectNotFound { .. } => OpLookupError::Collected,
+        error => error.into(),
+    }
+}
+
+/// What [`locate`] found.
+#[derive(Clone, Debug)]
+pub enum Located {
+    /// The newest operation that ended at or before the time.
+    Found(Operation),
+    /// Only the root operation is that old: the time is before the oldest
+    /// operation the log keeps, which ended at `oldest_end`.
+    BeforeRetained {
+        /// When the oldest kept operation ended.
+        oldest_end: SystemTime,
+    },
+    /// `budget` operations were examined without reaching the time.
+    Exhausted {
+        /// When the last operation examined ended.
+        examined_to: SystemTime,
+    },
+}
+
+/// The newest operation that ended at or before `at`, walking from `from`
+/// (the op heads when empty) in [`walk_from`]'s order, examining at most
+/// `budget` operations (R2.12). The root operation, whose time is the
+/// epoch, is found only when the log holds nothing else.
+pub async fn locate(
+    repo: &ReadonlyRepo,
+    from: &[OperationIdHex],
+    at: SystemTime,
+    budget: usize,
+) -> Result<Located, OpLookupError> {
+    let heads = if from.is_empty() {
+        op_heads(repo).await?
+    } else {
+        from.to_vec()
+    };
+    let root = repo.op_store().root_operation_id().clone();
+    let mut examined = 0usize;
+    let mut last_end = None;
+    let mut found = None;
+    let mut exhausted = false;
+    walk_from(repo, &heads, 0, async |op| {
+        if *op.id() == root && last_end.is_some() {
+            return ControlFlow::Break(());
+        }
+        if examined == budget {
+            exhausted = true;
+            return ControlFlow::Break(());
+        }
+        examined += 1;
+        let end = system_time(op.metadata().time.end);
+        if end <= at {
+            found = Some(op.clone());
+            return ControlFlow::Break(());
+        }
+        last_end = Some(end);
+        ControlFlow::Continue(())
+    })
+    .await?;
+    Ok(match (found, last_end) {
+        (Some(op), _) => Located::Found(op),
+        (None, Some(end)) if exhausted => Located::Exhausted { examined_to: end },
+        (None, Some(oldest_end)) => Located::BeforeRetained { oldest_end },
+        (None, None) => Located::Exhausted {
+            examined_to: SystemTime::now(),
+        },
+    })
 }
 
 /// Where a reader of the operation log stands (R2.09): the operations up
@@ -1001,6 +1084,62 @@ pub async fn load_at(
     operation: &Operation,
 ) -> Result<Arc<ReadonlyRepo>, OpLogError> {
     Ok(repo.loader().load_at(operation).await?)
+}
+
+/// Repositories [`load_at_shared`] built over a borrowed index, while they
+/// live.
+static SHARED: std::sync::Mutex<Vec<std::sync::Weak<ReadonlyRepo>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Whether `repo` borrows a later head's commit index ([`load_at_shared`]).
+pub fn is_shared(repo: &ReadonlyRepo) -> bool {
+    SHARED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|weak| std::ptr::eq(weak.as_ptr(), repo))
+}
+
+/// `head`'s store loaded at `operation`, borrowing `head`'s commit index
+/// when that index holds every commit `operation`'s view references
+/// (R2.12): reads start from the view's heads and working copies, and the
+/// index is closed under ancestry, so a superset changes no visible set.
+/// Three lookups do see the later commits: one named by commit id resolves
+/// as hidden instead of not found, and change offsets (`<id>/<n>`) and the
+/// uniqueness of a prefix count them; [`super::revset`] resolves the last
+/// two against jj's own index ([`is_shared`]). Otherwise [`load_at`], which
+/// has jj build and save an index for that operation: after GC's `reinit`,
+/// a full one per operation.
+pub async fn load_at_shared(
+    head: &Arc<ReadonlyRepo>,
+    operation: &Operation,
+) -> Result<Arc<ReadonlyRepo>, OpLogError> {
+    if operation.id() == head.op_id() {
+        return Ok(Arc::clone(head));
+    }
+    let view = operation.view().await?;
+    let Some(index) = head.readonly_index().downcast_ref::<DefaultReadonlyIndex>() else {
+        return load_at(head, operation).await;
+    };
+    for id in view.all_referenced_commit_ids() {
+        let known = head
+            .index()
+            .has_id(id)
+            .await
+            .map_err(|error| OpLogError::Commit(BackendError::Other(error.into())))?;
+        if !known {
+            return load_at(head, operation).await;
+        }
+    }
+    let repo = head
+        .loader()
+        .create_from(operation.clone(), view, Box::new(index.clone()));
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    shared.retain(|weak| weak.strong_count() > 0);
+    shared.push(Arc::downgrade(&repo));
+    Ok(repo)
 }
 
 /// `operation` as an [`OpEntry`].

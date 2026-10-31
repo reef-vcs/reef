@@ -1,0 +1,41 @@
+# 0046. Replay
+
+- Status: accepted
+- Date: 2026-10-30
+- Ticket: R2.12
+
+## Context
+
+The [design](../design.md) says "because the log is complete, any live view can be replayed from any point in time" (Subscriptions), and the activity feed is "the coalesced log with a scrubber to replay any period" (Interface). No state the interface shows may be state the API cannot, so replay is an API feature. [0030](0030-reads-over-jj-state.md) gave six reads an `at_operation`; [0036](0036-operation-log-subscriptions.md) replays the log forward from an operation. Status, workspaces and the operation log ending at a past point had no past, nothing named a point by time, and every read at an operation from before the last GC had jj build a full commit index for that one operation and save it, because GC's `reinit` keeps only the head's ([0040](0040-gc-and-the-users-jj-workspaces.md)). A walk back from a GC-kept copy of a pre-GC operation fails, so that build failed outright for those ids.
+
+## Decision
+
+1. **Replay is `at_operation` on every read derived from the log, not a replay service.** `GetStatus`, `ListWorkspaces`, `GetWorkspace` and `ListOperations` gain it (API revision 11); the other six had it. Each view keeps one RPC for now and the past. `ListWorkspacesResponse`, `GetWorkspaceResponse` and `ListOperationsResponse` echo the full id read, and `StatusSource` gains `STATUS_SOURCE_OPERATION`. A read at an operation never snapshots.
+2. **What is not replayed is said, not faked.** Presence (never persisted, [0037](0037-presence-channel.md)), a workspace's live fields (attention, mounted stores, the watch, disk usage), the lease's liveness, and records outside the log (repositories, stores, backups, daemon status, the history index). An RPC without `at_operation` is not replayable, and each field left unset at an operation says so in its comment.
+3. **A workspace at an operation is its working copy in that operation's view, joined to its row.** Active at X means X's view holds `reef-<id>`'s working copy; released workspaces are not listed. Change, commit and divergence come from the view; owner, purpose, backend, path, creation and watcher from the row; the last snapshot and the local snapshot count from the snapshot index up to X's end. That index is by time, not by history: a snapshot on a concurrent branch, or one later undone, that ended by X's end is counted at X. Between a release's lease end and its forget operation, the workspace is listed active with no lease. A working copy whose row is gone is listed with the view's fields only. `GetStatus` at X takes its active workspaces from the view too, so its two paths are defined differently on purpose.
+4. **The lease at an operation has no liveness.** It is the newest lease issued by X's end and not ended by then, or the first lease when every one was issued after X (a create's lease is issued just after its operation), with `id`, `owner`, `issued_at`, `length`, `grace` and `heartbeat_every`. `expires_at`, `last_heartbeat_at`, `state` and `end_reason` are unset: renewals overwrite the first two, and recording each renewal would persist what 0037 made presence.
+5. **A read at an operation borrows the head's commit index** when that index holds every commit the operation's view references (`oplog::load_at_shared`), and falls back to jj's own load otherwise: an operation off the head's history, such as a concurrent head not yet merged. jj's index is closed under ancestry and every read at X starts from X's view, so a superset changes no visible set. Lookups that count every indexed commit would see the later ones: change offsets (`<id>/<n>`), and whether a short prefix is unique and names a commit or a change. A revset with a `/`, `change_id()` or `commit_id()`, or a typed symbol that could be an id prefix shorter than a change id, is therefore resolved against jj's own index for X (`revset::evaluate`, through `oplog::is_shared`); that is the slow path, and at a GC-kept pre-GC copy, where jj cannot build the index, the shared answer stands. What remains visible: a commit created after X, named by its full id at X, resolves (as hidden) instead of not found, and the shortest unique prefixes shown at X may be longer. Reads at an operation write nothing to jj's index, cost a view's load, and answer at GC-kept pre-GC ids, where jj's build cannot. The property rests on how jj-lib's revset engine reads the index, not on its API: re-check it on each jj-lib upgrade, as `load_at_shared_matches_load_at` does. The daemon's cache of repositories at an operation grows from 8 to 64, since an entry is a view, not an index.
+6. **A point is an operation id; a time is looked up once.** `GetOperation.ended_at_or_before` finds the newest operation that ended at or before a time, in `ListOperations` order, walking from `operation_id` or the op heads and examining at most 100,000 operations (`TOO_FAR_BACK`, metadata `repo_id`, `examined_to`). A time before the oldest operation the log keeps is `OPERATION_NOT_RETAINED` (metadata `oldest_at`), not the root's empty view. Clients keep each point's `ended_at` beside its id.
+7. **Across GC.** A GC-kept copy of a pre-GC operation still answers, the same, until a later GC ages it out of the undo window. A walk back from one (`ListOperations`, `GetOperation` by time) reaches what GC collected and fails with `OPERATION_LOG_REWRITTEN` (metadata `repo_id`); the hint says to look the point up again by time. An id GC removed is `OPERATION_NOT_FOUND`.
+8. **Concurrent op heads are shown as they are.** An operation on one branch, before the reconciling merge, has a view without the other branch's work, so a scrubber stepping by time through a fork shows each branch's state until the merge. Only other jj writers create forks.
+9. **A scrubber steps by effects and jumps by reads.** `OperationEffects` already is the difference between an operation's view and its parents'; a step applies it, or refetches only what it names. A jump, a capped effect or a merge reads the views again in full, which with the shared index costs about what a read at head costs. Playing forward is 0036's `after_operation`. Counting a period is the feed's work over complete `ListOperations` pages (`at_operation` plus `ended_after`).
+10. **The CLI adds flags only, and MCP nothing.** `--at-op` on `status`, `ws list`, `ws inspect` and `op log`, and `--at WHEN` beside every `--at-op` (an RFC 3339 time or a duration ago, resolved with one `GetOperation` and noted on stderr). `1d` is both a duration and a hex prefix, so the two stay separate flags. Agents act on the present, and the tool list is at its budget.
+
+## Consequences
+
+- R2.21's scrubber, R2.19 and R2.20 at a scrubbed point, and R3.38's time axis are calls an agent could make.
+- Reads at old operations no longer reindex or write after GC, and pre-GC ids GC kept stop failing.
+- A past fleet panel shows "held by `<owner>` since `<issued_at>`", thinner than now's.
+- A lookup by time costs the operations after the time: about 100 minutes back at the phase's peak rate before `TOO_FAR_BACK`, a week on Reef's own repository.
+- A jj-lib upgrade whose revsets enumerate the index directly would show later commits at X; the test against jj's own load catches it.
+
+## Alternatives considered
+
+- **A `ReplayService` returning a composite scene.** It would duplicate four responses and still need them.
+- **`at_time` on every read.** One time field on `GetOperation` replaces a field on each read, and an operation id is what the reads already take.
+- **R2.09's cursor as the point.** A cursor is opaque, multi-repository and a frontier, not a view.
+- **A server-side view diff (`DiffOperations`).** Effects already are the step's delta, and a full read is sub-millisecond with the shared index.
+- **A persistent operation-time index.** O(log n) lookups at any depth, for a schema and GC's id rewrite to handle; revisit when R2.21 measures real scrubbing.
+- **Recording lease renewals.** It persists presence and grows `reef.sqlite3` with every heartbeat.
+- **Mapping pre-GC ids through `GcOutcome.rewritten` in memory.** Ten million entries a week at the phase's peak rate.
+- **Leaving jj to build an index per operation.** A full reindex and a segment write per old operation read, and a failure at pre-GC ids.

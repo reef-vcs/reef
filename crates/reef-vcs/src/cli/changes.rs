@@ -61,7 +61,7 @@ pub(crate) struct AbandonArgs {
 pub(crate) async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx {
-        operation_given: args.read.at_op.is_some(),
+        operation_given: args.read.at.given(),
         snapshots_first: !args.read.no_snapshot,
         ..AdviceCtx::new(&scope)
     };
@@ -71,7 +71,7 @@ pub(crate) async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
                 repo: scope.repo_id.clone(),
                 workspace: scope.workspace_id(),
                 revision: args.revision.clone(),
-                at_operation: args.read.at_operation(),
+                at_operation: args.read.at_operation(ctx, &scope).await?,
                 skip_snapshot: args.read.no_snapshot,
             }))
             .await?;
@@ -190,6 +190,7 @@ pub(crate) async fn workspace_after(ctx: &Ctx, id: Option<&str>) -> Option<Works
             workspace: id.to_owned(),
             snapshot_first: false,
             skip_disk_usage: true,
+            at_operation: String::new(),
         }))
         .await;
     match read {

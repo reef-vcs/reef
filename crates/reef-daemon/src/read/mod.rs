@@ -13,14 +13,17 @@
 //! thread reopen its store, which the panic may have poisoned (#63).
 //!
 //! Two caches: repositories loaded at an operation other than the head (so
-//! later pages at a pinned operation do not reload its index), and
-//! computed operation effects. Operations are immutable, so neither entry
+//! later pages at a pinned operation, and a scrubber stepping back and
+//! forth, do not reload them), and computed operation effects. A
+//! repository at an operation borrows the head's commit index when it
+//! covers the operation's view (R2.12, `oplog::load_at_shared`), so an
+//! entry costs its view, not an index. Operations are immutable, so neither entry
 //! goes stale; GC rewrites operation ids, and `CollectGarbage` and
 //! `ForgetRepository` clear the repository's entries.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::FutureExt as _;
@@ -36,7 +39,7 @@ use crate::model::{RepoId, WorkspaceId};
 use crate::repo::{RepoHandle, RepoThreadError};
 
 /// Repositories at an operation kept loaded.
-const AT_CACHE: usize = 8;
+const AT_CACHE: usize = 64;
 /// Operations whose effects are kept.
 const EFFECTS_CACHE: usize = 4096;
 
@@ -183,6 +186,8 @@ impl Drop for StopGuard {
 pub struct Reads {
     permits: Arc<Semaphore>,
     at: Mutex<Fifo<(RepoId, String), Arc<ReadonlyRepo>>>,
+    /// Repositories loaded at an operation, cache misses only.
+    at_loads: AtomicU64,
     effects: Mutex<Fifo<(RepoId, String), OpEffects>>,
     shutdown: CancellationToken,
 }
@@ -195,6 +200,7 @@ impl Reads {
         Reads {
             permits: Arc::new(Semaphore::new(parallel.max(2))),
             at: Mutex::new(Fifo::new(AT_CACHE)),
+            at_loads: AtomicU64::new(0),
             effects: Mutex::new(Fifo::new(EFFECTS_CACHE)),
             shutdown,
         }
@@ -369,12 +375,19 @@ impl Reads {
         {
             return Ok(found);
         }
-        let loaded = oplog::load_at(head, operation).await?;
+        let loaded = oplog::load_at_shared(head, operation).await?;
+        self.at_loads.fetch_add(1, Ordering::Relaxed);
         self.at
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key, Arc::clone(&loaded));
         Ok(loaded)
+    }
+
+    /// How many repositories at an operation were loaded rather than taken
+    /// from the cache, since the daemon started.
+    pub fn at_loads(&self) -> u64 {
+        self.at_loads.load(Ordering::Relaxed)
     }
 
     /// The effects of `operation`, computed over `head`'s store and cached;

@@ -13,8 +13,10 @@
 mod common;
 
 use std::ops::ControlFlow;
+use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use jj_lib::default_index::DefaultIndexStore;
 use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
 use reef_lib::jj::log::{self, Describer};
 use reef_lib::jj::revset::{self, RevsetScope};
@@ -245,6 +247,40 @@ fn read_benches(c: &mut Criterion) {
             });
         });
     }
+
+    // R2.12: after GC's reinit, which keeps only the head's index, a read
+    // at an operation 500 back borrows the head's index; jj's own load of
+    // it builds and saves a full index for that operation, timed once and
+    // reported. And a lookup by time back to 1,000 operations ago.
+    let store = repo.readonly().index_store().clone();
+    if let Some(store) = store.downcast_ref::<DefaultIndexStore>() {
+        store.reinit().expect("reinit the index");
+    }
+    rt.block_on(repo.reload_at_head())
+        .expect("rebuild the head's index");
+    let head = repo.readonly();
+    let back = rt
+        .block_on(oplog::resolve_operation(&head, ids[500].as_str()))
+        .expect("an operation 500 back");
+    group.bench_function(BenchmarkId::new(name, "load_at_shared"), |b| {
+        b.iter(|| {
+            rt.block_on(oplog::load_at_shared(&head, &back))
+                .expect("load")
+        });
+    });
+    let started = Instant::now();
+    rt.block_on(oplog::load_at(&head, &back)).expect("load");
+    eprintln!("reads/{name}/load_at_rebuilt: {:?}", started.elapsed());
+    let oldest = rt
+        .block_on(oplog::resolve_operation(&head, ids[0].as_str()))
+        .expect("the operation 1,000 back");
+    let at = oplog::entry(&oldest).end;
+    group.bench_function(BenchmarkId::new(name, "locate_1000"), |b| {
+        b.iter(|| {
+            rt.block_on(oplog::locate(&head, &[], at, 100_000))
+                .expect("locate")
+        });
+    });
 
     group.finish();
 }

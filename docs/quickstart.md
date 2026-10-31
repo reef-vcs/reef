@@ -111,9 +111,10 @@ reef show pursxlpq
 reef diff --symbols -r pursxlpq
 reef op log --limit 5
 reef history src --since 7d
+reef status --at 1h
 ```
 
-`reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, `reef history <path>` (or `--symbol <name>`) lists the changes that touched it, who wrote them and whether they landed, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints brief JSON when piped (`-o json` for every field), and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
+`reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, `reef history <path>` (or `--symbol <name>`) lists the changes that touched it, who wrote them and whether they landed, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `--at 1h` (or `--at-op <op>`) reads as of then, from the operation log. `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints brief JSON when piped (`-o json` for every field), and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
 ## Set up your agent
 

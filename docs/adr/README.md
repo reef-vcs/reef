@@ -57,3 +57,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0043](0043-symbol-level-diff.md) | Symbol-level diff | accepted |
 | [0044](0044-history-index-and-query-layer.md) | History index and query layer | accepted |
 | [0045](0045-brief-json-by-default.md) | Brief JSON by default | accepted |
+| [0046](0046-replay.md) | Replay | accepted |

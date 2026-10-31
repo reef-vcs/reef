@@ -132,6 +132,7 @@ async fn inspect(daemon: &TestDaemon, ws: &str) -> v1::Workspace {
             workspace: ws.to_owned(),
             snapshot_first: false,
             skip_disk_usage: true,
+            at_operation: String::new(),
         })
         .await
         .unwrap()

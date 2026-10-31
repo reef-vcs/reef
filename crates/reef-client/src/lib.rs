@@ -580,6 +580,7 @@ impl Client {
             workspace: workspace.to_owned(),
             snapshot_first,
             skip_disk_usage: false,
+            at_operation: String::new(),
         })
         .await
     }
@@ -920,7 +921,35 @@ impl Client {
         let request = GetOperationRequest {
             repo: repo.to_owned(),
             operation_id: operation_id.to_owned(),
+            ended_at_or_before: None,
         };
+        self.call("GetOperation", client.get_operation(request))
+            .await
+    }
+
+    /// `OperationService.GetOperation` by time (R2.12): the newest operation
+    /// of `repo` that ended at or before `at`, walking back from the
+    /// operation heads.
+    pub async fn operation_at(
+        &self,
+        repo: &str,
+        at: std::time::SystemTime,
+    ) -> Result<GetOperationResponse, ClientError> {
+        self.get_operation_with(GetOperationRequest {
+            repo: repo.to_owned(),
+            operation_id: String::new(),
+            ended_at_or_before: Some(prost_types::Timestamp::from(at)),
+        })
+        .await
+    }
+
+    /// `OperationService.GetOperation` with every field of the request.
+    pub async fn get_operation_with(
+        &self,
+        request: GetOperationRequest,
+    ) -> Result<GetOperationResponse, ClientError> {
+        let mut client =
+            OperationServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("GetOperation", client.get_operation(request))
             .await
     }

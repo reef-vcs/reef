@@ -71,6 +71,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         workspace: target,
         snapshot_first: args.snapshot,
         skip_disk_usage: true,
+        at_operation: String::new(),
     };
     match ctx.call(ctx.client.get_workspace(request)).await {
         Ok(response) => {

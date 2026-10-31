@@ -11,6 +11,7 @@
 //! RPC is implemented; [`crate::error::not_implemented`] stays for RPCs
 //! later revisions declare ahead of their tickets.
 
+pub mod at_operation;
 pub mod changes;
 pub mod compat;
 pub mod daemon;
