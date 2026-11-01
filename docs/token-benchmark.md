@@ -44,7 +44,7 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 
 ## What is measured
 
-- **Answer tokens**: the text of every tool call and of every result the agent read. Not the harness's system prompt or built-in tool definitions, which every arm pays alike, and not the agent's own output.
+- **Answer tokens**: the text of every tool call and of every result the agent read: for each call, its input (the command line, or the input JSON) and its result as the harness delivered it, all joined and counted once. Help the agent runs counts in full. Not the prompt, the harness's system prompt or built-in tool definitions, which every arm pays alike, nor anything put into the session's context, nor the agent's own output, nor the context each turn rereads.
 - **Fixed cost**: the MCP server's tool definitions and instructions, which every session that loads the server pays whether it calls a tool or not, reported apart, with the **break-even**: how many questions a session must answer through MCP rather than the CLI's default output to repay it (the fixed cost over the median saving per question; "never" when MCP saves nothing).
 - **Billed usage**: input, cache reads, output and cost, as the harness reports them. It grows with turns, because each turn rereads the context.
 
@@ -59,11 +59,11 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 "Token cost to answer 'what is the state of this repo' is measured and at least five times lower than parsing git output" is evaluated on `state-repo`. It is met when, for one gated arm (`reef (default)`, or `mcp` with its fixed cost added once):
 
 1. **scripted**: its cost is at most a fifth of git's under all three counters, and
-2. **live**: in every harness measured, its median answer tokens are at most a fifth of the `git` arm's, both cells with at least two correct trials out of three.
+2. **live**: in every harness measured, its median answer tokens (for `mcp`, plus its fixed cost in the same counter, since #122) are at most a fifth of the `git` arm's, both cells with at least two correct trials out of three.
 
 `reef (text)` is reported but never gated: agents get JSON (brief since #114) unless they ask. The user decided on both halves (2026-10-30). If agents miss the cheap command, the verdict is "not met" and the follow-up is about discoverability.
 
-**Verdict at the first baseline (2026-10-31): not met.** On `state-repo`, git ÷ Reef was 0.09× by bytes, 0.12× by `anthropic` and 0.10× by `o200k` for `reef (default)`, and 0.09×, 0.13× and 0.12× for `mcp` with its fixed cost. Live answer tokens: 0.18× for the CLI and 0.68× for MCP, in Claude Code only (one harness: a gap, not a proof). Reef's text output alone is 1.8× cheaper than git's; its default JSON is about eleven times dearer. The default output's size is tracked by [#114](https://github.com/reef-vcs/reef/issues/114); every later run's verdict is in its results pull request.
+**Verdict at the first baseline (2026-10-31): not met.** On `state-repo`, git ÷ Reef was 0.09× by bytes, 0.12× by `anthropic` and 0.10× by `o200k` for `reef (default)`, and 0.09×, 0.13× and 0.12× for `mcp` with its fixed cost. Live answer tokens: 0.18× for the CLI and 0.68× for MCP, in Claude Code only (one harness: a gap, not a proof). Reef's text output alone is 1.8× cheaper than git's; its default JSON is about eleven times dearer. [#114](https://github.com/reef-vcs/reef/issues/114) made the default output brief JSON and met the scripted half: `reef ws list` answers in 215 bytes. The live half is [#122](https://github.com/reef-vcs/reef/issues/122): every live `reef` trial began with `reef --help`, which by #122 was 3,547 bytes and 1,196 Anthropic tokens, three times the live budget, so #122 made it a 509-byte task-first help ([ADR 0051](adr/0051-task-first-help.md)). Every later run's verdict is in its results pull request.
 
 **Decisions this baseline settled for earlier tickets.**
 

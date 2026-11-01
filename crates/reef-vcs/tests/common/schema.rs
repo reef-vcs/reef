@@ -199,7 +199,7 @@ pub(crate) fn check(args: &[&str], output: &Output) {
     let words = args.iter().take_while(|arg| **arg != "--");
     if words
         .clone()
-        .any(|arg| matches!(*arg, "--help" | "-h" | "--version" | "-V"))
+        .any(|arg| matches!(*arg, "--help" | "--help-all" | "-h" | "--version" | "-V"))
     {
         return;
     }

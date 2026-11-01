@@ -150,7 +150,7 @@ fn version_names_commit_and_target() {
 #[test]
 fn help_lists_every_command() {
     let tmp = tempfile::tempdir().unwrap();
-    let output = reef_in(tmp.path()).arg("--help").output().unwrap();
+    let output = reef_in(tmp.path()).arg("--help-all").output().unwrap();
     let text = stdout(&output);
     for command in [
         "ws",
@@ -1549,9 +1549,13 @@ fn leaf_commands(state: &Path) -> Vec<Vec<String>> {
     serde_json::from_value(value["commands"].clone()).unwrap()
 }
 
-/// The subcommands `--help` lists for `path`, without clap's `help`.
+/// The subcommands `--help-all` lists for `path`, without clap's `help`.
 fn help_commands(state: &Path, path: &[String]) -> Vec<String> {
-    let output = reef_in(state).args(path).arg("--help").output().unwrap();
+    let output = reef_in(state)
+        .args(path)
+        .arg("--help-all")
+        .output()
+        .unwrap();
     output.clone().assert().success();
     stdout(&output)
         .lines()
@@ -1662,6 +1666,179 @@ fn help_fits_sixty_lines() {
         let output = reef_in(&state).args(&path).arg("--help").output().unwrap();
         let lines = stdout(&output).lines().count();
         assert!(lines <= 60, "reef {} --help: {lines} lines", path.join(" "));
+    }
+}
+
+/// The root's help is the golden file, at most 512 bytes, `ws list` first
+/// (#122): every live agent in R2.17's benchmark read it first.
+#[test]
+fn root_help_fits_its_budget() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let golden = include_str!("../src/cli/help.txt");
+    assert!(golden.len() <= 512, "{} bytes", golden.len());
+    assert!(golden.lines().count() <= 15);
+    let first = golden.lines().find(|line| line.starts_with("  ")).unwrap();
+    assert!(first.trim_start().starts_with("ws list "), "{first}");
+    for args in [
+        &["--help"][..],
+        &["-h"],
+        &["help"],
+        &["-o", "json", "--help"],
+    ] {
+        let output = reef_in(&state).args(args).output().unwrap();
+        output.clone().assert().success();
+        assert_eq!(stdout(&output), golden, "{args:?}");
+    }
+    assert!(!state.exists(), "no daemon was started");
+}
+
+/// The root's help names every command, so a new one fails here until it
+/// is listed, and no agent harness.
+#[test]
+fn root_help_names_every_command() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let text = stdout(&reef_in(&state).arg("--help").output().unwrap());
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .collect();
+    for command in help_commands(&state, &[]) {
+        assert!(words.contains(&command.as_str()), "{command}: {text}");
+    }
+    let lower = text.to_lowercase();
+    for harness in [
+        "claude",
+        "codex",
+        "cursor",
+        "opencode",
+        "gemini",
+        "anthropic",
+        "openai",
+        "gpt",
+    ] {
+        assert!(!lower.contains(harness), "{harness}: {text}");
+    }
+}
+
+/// `--help-all` is clap's full help, global options included, at the
+/// root and on every command.
+#[test]
+fn help_all_is_the_full_help() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let output = reef_in(&state).arg("--help-all").output().unwrap();
+    output.clone().assert().success();
+    let text = stdout(&output);
+    for line in [
+        "version control built for a world where AI agents write most of the code",
+        "Create, list, inspect, and release workspaces",
+        "Print a shell completion script",
+    ]
+    .into_iter()
+    .chain(GLOBAL_OPTIONS)
+    {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    let text = stdout(
+        &reef_in(&state)
+            .args(["ws", "list", "--help-all"])
+            .output()
+            .unwrap(),
+    );
+    assert!(text.contains("--state-dir <DIR>"), "{text}");
+    assert!(text.contains("--repo <REPO>"), "{text}");
+}
+
+/// Every command's `--help` stays within a byte budget, and shows no
+/// global option but `-o`: they live in `--help-all` (#122, ADR 0051).
+#[test]
+fn short_help_fits_its_budget() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let mut paths: Vec<Vec<String>> = help_commands(&state, &[])
+        .into_iter()
+        .map(|noun| vec![noun])
+        .collect();
+    paths.extend(leaf_commands(&state));
+    for path in paths {
+        let output = reef_in(&state).args(&path).arg("--help").output().unwrap();
+        let text = stdout(&output);
+        let name = path.join(" ");
+        assert!(
+            text.len() <= SHORT_HELP_BYTES,
+            "reef {name} --help: {} bytes",
+            text.len()
+        );
+        for global in [
+            "--state-dir <DIR>",
+            "--socket <PATH>",
+            "--no-autostart",
+            "--timeout <DURATION>",
+            "--agent <NAME>",
+        ] {
+            assert!(!text.contains(global), "reef {name} --help: {global}");
+        }
+        assert!(text.contains("--help-all"), "reef {name} --help");
+    }
+}
+
+/// The byte budget of a command's `--help`: the largest at #122, rounded
+/// up to 128 (ADR 0051).
+const SHORT_HELP_BYTES: usize = 2_176;
+
+/// A noun without its verb prints its short help, as a usage error.
+#[test]
+fn missing_subcommand_is_short() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    for noun in ["ws", "presence", "op"] {
+        let output = reef_in(&state).arg(noun).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{noun}");
+        let text = format!(
+            "{}{}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.len() <= SHORT_HELP_BYTES,
+            "reef {noun}: {} bytes",
+            text.len()
+        );
+        assert!(!text.contains("--state-dir"), "reef {noun}: {text}");
+    }
+}
+
+/// The options `--help` hides and `--help-all` shows.
+const GLOBAL_OPTIONS: [&str; 10] = [
+    "--state-dir",
+    "--socket",
+    "--config",
+    "--no-autostart",
+    "--no-register",
+    "--timeout",
+    "--quiet",
+    "--verbose",
+    "--agent",
+    "--remote",
+];
+
+/// Completions still offer every global option, though `--help` hides them.
+#[test]
+fn completions_list_every_global_option() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let output = reef_in(&state)
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    output.clone().assert().success();
+    let text = stdout(&output);
+    for flag in GLOBAL_OPTIONS.into_iter().chain(["--help-all"]) {
+        assert!(text.contains(flag), "{flag}");
+    }
+    for command in help_commands(&state, &[]) {
+        assert!(text.contains(&command), "{command}");
     }
 }
 
@@ -2148,8 +2325,9 @@ fn quickstart_commands_exist() {
                 .take_while(|arg| !arg.starts_with('-') && !arg.starts_with('<'))
                 .take(3)
                 .collect();
+            // `--help-all`: global options are hidden from `--help` (#122).
             let mut help = reef_in(Path::new("/nonexistent"));
-            help.args(&words).arg("--help");
+            help.args(&words).arg("--help-all");
             let output = help.output().unwrap();
             let shown = stdout(&output);
             assert!(
