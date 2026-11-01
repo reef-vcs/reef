@@ -68,16 +68,18 @@ enum Agents {
 }
 
 /// The JSON result.
-#[derive(Serialize)]
-struct InitJson {
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.InitJson")]
+pub(crate) struct InitJson {
     /// The repository registration found or made; null when it was not
     /// asked for.
     registered: Option<Repository>,
     files: Vec<FileJson>,
 }
 
-#[derive(Serialize)]
-struct FileJson {
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.FileJson")]
+pub(crate) struct FileJson {
     path: String,
     action: &'static str,
     reason: Option<String>,
@@ -99,8 +101,9 @@ impl TextRender for InitJson {
 }
 
 /// `--print`'s JSON form.
-#[derive(Serialize)]
-struct PrintJson {
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.PrintJson")]
+pub(crate) struct PrintJson {
     section: String,
 }
 

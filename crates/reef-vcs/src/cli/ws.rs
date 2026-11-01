@@ -361,8 +361,9 @@ async fn named_or_current(ctx: &Ctx, workspace: Option<&str>) -> Result<String, 
 }
 
 /// What `ws renew` renewed.
-#[derive(Debug, Serialize)]
-struct Renewed {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Renewed")]
+pub(crate) struct Renewed {
     workspace_id: String,
     lease: Lease,
 }

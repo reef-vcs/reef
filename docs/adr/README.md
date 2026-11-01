@@ -61,3 +61,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted |
 | [0048](0048-status-from-the-watchers-journal.md) | Status from the watcher's journal | accepted |
 | [0049](0049-remote-listener.md) | Remote listener | accepted |
+| [0050](0050-published-schemas.md) | Published schemas | accepted |

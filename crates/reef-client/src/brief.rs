@@ -18,6 +18,7 @@
 
 use std::collections::BTreeSet;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::json::{self, FileSymbolDiff, Hunk, SymbolDiffSummary};
@@ -46,7 +47,8 @@ fn is_zero(value: &u32) -> bool {
 /// `created_at`, `last_snapshot_at`, `last_snapshot_op`, `lease`,
 /// `watcher`, `watch_state`, `local_snapshot_count`, `stores`; `ws inspect
 /// <id>` has them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Workspace")]
 pub struct Workspace<'a> {
     id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,7 +105,8 @@ pub fn workspaces_with_repo(list: &[json::Workspace]) -> Vec<Workspace<'_>> {
 /// description and flags when set. Dropped: `change_id`,
 /// `parent_commit_ids`, `parent_change_ids`, `author`, `committer`,
 /// `tree_id`, `jj_workspaces`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Change")]
 #[expect(clippy::struct_excessive_bools, reason = "the full type's flags")]
 #[expect(clippy::struct_field_names, reason = "the full type's keys")]
 pub struct Change<'a> {
@@ -152,7 +155,8 @@ impl<'a> From<&'a json::Change> for Change<'a> {
 /// type only when it is not `file`: a missing type is `file` when that side
 /// exists, and no side when it does not (`added` has no old side, `deleted`
 /// no new side).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.FileChange")]
 pub struct FileChange<'a> {
     path: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,7 +188,8 @@ impl<'a> From<&'a json::FileChange> for FileChange<'a> {
 
 /// One file of a diff: its [`FileChange`], and its flags, line counts,
 /// hunks and symbols when set. Nothing is dropped: the view is lossless.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.FileDiff")]
 #[expect(clippy::struct_excessive_bools, reason = "the full type's flags")]
 pub struct FileDiff<'a> {
     #[serde(flatten)]
@@ -234,7 +239,8 @@ impl<'a> From<&'a json::FileDiff> for FileDiff<'a> {
 
 /// `reef diff`: always the two sides, `total_files` and `files`; the symbol
 /// summary when present. Dropped: `at_operation`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Diff")]
 pub struct Diff<'a> {
     from_commit_ids: &'a [String],
     to_commit_id: &'a str,
@@ -257,7 +263,8 @@ impl<'a> From<&'a json::Diff> for Diff<'a> {
 }
 
 /// `reef status`. Dropped: `repository` and `at_operation`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.RepoStatus")]
 pub struct RepoStatus<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_status: Option<RepositoryStatus<'a>>,
@@ -281,7 +288,8 @@ impl<'a> From<&'a json::RepoStatus> for RepoStatus<'a> {
 /// the conflicted and divergent change ids when set. Dropped:
 /// `active_workspaces` (`reef ws list` has them, with counts), `heads`
 /// (`reef log -r 'heads(mutable())'`), `last_operation` (`reef op log`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.RepositoryStatus")]
 pub struct RepositoryStatus<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     trunk: Option<Change<'a>>,
@@ -310,7 +318,8 @@ impl<'a> From<&'a json::RepositoryStatus> for RepositoryStatus<'a> {
 
 /// A workspace's state. Always `changed_file_count`; the rest when set.
 /// Dropped: `snapshot`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.WorkspaceStatus")]
 pub struct WorkspaceStatus<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<Workspace<'a>>,

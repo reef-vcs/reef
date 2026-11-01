@@ -60,12 +60,15 @@ fn reef(daemon: &TestDaemon) -> Command {
 }
 
 /// Runs `command` with `args` off the runtime's worker threads, which the
-/// in-process daemon needs.
+/// in-process daemon needs, and checks its output against `reef schema`
+/// (R2.24).
 async fn run(mut command: Command, args: &[&str]) -> Output {
     command.args(args);
-    tokio::task::spawn_blocking(move || command.output().unwrap())
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
         .await
-        .unwrap()
+        .unwrap();
+    common::schema::check(args, &output);
+    output
 }
 
 fn stdout(output: &Output) -> String {
@@ -164,6 +167,7 @@ fn help_lists_every_command() {
         "guide",
         "init",
         "mcp",
+        "schema",
         "daemon",
         "config",
         "repo",
@@ -658,6 +662,7 @@ fn autostart_spawns_daemon() {
     assert_eq!(status["pid"], pid);
     assert_eq!(status["repositories"], 0);
     let output = reef().args(["daemon", "start"]).output().unwrap();
+    common::schema::check(&["daemon", "start"], &output);
     assert_eq!(json(&output)["pid"], pid);
     assert!(
         stderr(&output).contains("already running"),
@@ -667,11 +672,9 @@ fn autostart_spawns_daemon() {
 
     // A pid file that disagrees with the daemon: refused, nothing signalled.
     std::fs::write(&pid_file, "1\n").unwrap();
-    let text = failed(
-        &reef().args(["daemon", "stop"]).output().unwrap(),
-        5,
-        "conflict",
-    );
+    let output = reef().args(["daemon", "stop"]).output().unwrap();
+    common::schema::check(&["daemon", "stop"], &output);
+    let text = failed(&output, 5, "conflict");
     assert!(text.contains("not signalling"), "{text}");
     std::fs::write(&pid_file, format!("{pid}\n")).unwrap();
 

@@ -13,6 +13,8 @@
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -110,12 +112,15 @@ fn reef(daemon: &TestDaemon, dir: &Path) -> Command {
 }
 
 /// Runs `command` with `args` off the runtime's worker threads, which the
-/// in-process daemon needs.
+/// in-process daemon needs, and checks its output against `reef schema`
+/// (R2.24).
 async fn run(mut command: Command, args: &[&str]) -> Output {
     command.args(args);
-    tokio::task::spawn_blocking(move || command.output().unwrap())
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
         .await
-        .unwrap()
+        .unwrap();
+    common::schema::check(args, &output);
+    output
 }
 
 async fn run_in(daemon: &TestDaemon, dir: &Path, args: &[&str]) -> Output {

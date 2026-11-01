@@ -33,6 +33,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `reef remote add|list|remove|show` and `reef remote token create|list|rotate|revoke`; `reef --remote <name>` (or `REEF_REMOTE`, `REEF_REMOTE_TOKEN`, `REEF_REMOTE_FINGERPRINT`) runs a command on a remote daemon. `reef daemon status` shows the remote listener.
 - `[remote]` in the daemon's `config.toml`: `enabled` (false), `listen` (`"0.0.0.0:7470"`), `names` (the host name), `tls_cert` and `tls_key`.
 
+- `reef schema` prints the CLI's commands (each one's input schema, the `argv` that turns an input into words, and its output with `-o json`, `-o brief` and on a pipe), the MCP tools with output schemas, and the API's services and messages as canonical proto3 JSON, in one JSON Schema 2020-12 document; `reef schema cli <words>`, `mcp <tool>` and `api <name>` print one, and `reef schema --descriptor-set` prints the API's protobuf descriptor set ([ADR 0050](docs/adr/0050-published-schemas.md)). It runs offline. The MCP server's `tools/list` is unchanged.
+
 ### Changed
 
 - The web UI counts an agent once: the overview's "Active agents" and the smartlog's agent labels no longer count the daemon's lease and editing entries under the workspace's owner as a second agent beside the name the agent reports under. The web UI's JavaScript budget is 500 KiB (was 450 KiB).

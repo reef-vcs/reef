@@ -209,8 +209,9 @@ fn read_token(path: &std::path::Path) -> Result<Token, CliError> {
 }
 
 /// What `remote add` prints.
-#[derive(Debug, Serialize)]
-struct Added {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Added")]
+pub(crate) struct Added {
     name: String,
     url: String,
     fingerprint: Option<String>,
@@ -327,8 +328,9 @@ fn add_error(error: ClientError, name: &str, url: &str) -> CliError {
 }
 
 /// One profile as `remote list` prints it.
-#[derive(Debug, Serialize)]
-struct Listed {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Listed")]
+pub(crate) struct Listed {
     name: String,
     url: String,
     fingerprint: Option<String>,

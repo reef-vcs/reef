@@ -89,6 +89,7 @@ protox = "0.10"
 # The API schema (R2.01): each method's `(reef.api.v1.access)` option, read in reef-api's build
 # script, and google.rpc.Status for the error envelope. Same versions tonic and protox pull in.
 prost-reflect = "0.16"
+jsonschema = { version = "0.60", default-features = false }   # tests check output against `reef schema` (R2.24); no remote references
 tonic-types = "0.14"
 # The web UI's gRPC-web (R2.18, ADR 0047): tonic's own crate at tonic's version.
 tonic-web = "0.14"

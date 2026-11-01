@@ -131,8 +131,9 @@ impl ChildEnd {
 }
 
 /// The object `-o json` prints on exit.
-#[derive(Debug, Serialize)]
-struct Report {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Report")]
+pub(crate) struct Report {
     workspace_id: String,
     path: String,
     change_id: String,
@@ -152,8 +153,9 @@ struct Report {
     error: Option<ReportError>,
 }
 
-#[derive(Debug, Serialize)]
-struct ReportError {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.ReportError")]
+pub(crate) struct ReportError {
     kind: &'static str,
     message: String,
 }

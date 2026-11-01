@@ -9,7 +9,8 @@
 //! maintenance, as a trait, for code that wants to run against a fake
 //! daemon (R1.21's heartbeater); [`json`] is the stable JSON form of the
 //! responses that `reef -o json` prints (R1.22), and [`brief`] the views of
-//! it that `reef` prints on a pipe (ADR 0045). [`paths`] finds the
+//! it that `reef` prints on a pipe (ADR 0045), and [`schema`] their JSON
+//! Schemas (R2.24). [`paths`] finds the
 //! daemon's socket as the daemon does, [`error`] reads the API's error
 //! details, [`logging`] sets up stderr logging from `REEF_LOG*`, and
 //! [`backup`] reads a backup's manifest.
@@ -27,6 +28,7 @@ pub mod logging;
 pub mod paths;
 pub mod presence;
 pub mod remote;
+pub mod schema;
 pub mod scip;
 pub mod symbol_text;
 

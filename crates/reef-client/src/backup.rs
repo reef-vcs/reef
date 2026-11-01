@@ -7,6 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use reef_error::{Classify, ErrorKind, classify_by_source};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The manifest's `version`.
@@ -15,7 +16,7 @@ pub const MANIFEST_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";
 
 /// `manifest.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Manifest {
     /// [`MANIFEST_VERSION`].
     pub version: u32,
@@ -40,7 +41,7 @@ pub struct Manifest {
 }
 
 /// One repository in the manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RepoManifest {
     /// The repository's id, in hex.
     pub id: String,
@@ -61,7 +62,7 @@ pub struct RepoManifest {
 }
 
 /// The database copy in the manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SqliteManifest {
     /// Pages copied.
     pub pages: u64,
