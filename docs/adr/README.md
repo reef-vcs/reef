@@ -62,3 +62,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0048](0048-status-from-the-watchers-journal.md) | Status from the watcher's journal | accepted |
 | [0049](0049-remote-listener.md) | Remote listener | accepted |
 | [0050](0050-published-schemas.md) | Published schemas | accepted |
+| [0051](0051-task-first-help.md) | Task-first help | accepted |

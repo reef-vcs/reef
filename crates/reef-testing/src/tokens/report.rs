@@ -528,10 +528,10 @@ fn gate_inputs<'a>(
 }
 
 /// Evaluates the exit criterion on [`GATE_QUESTION`]: some gated Reef arm
-/// (`reef (default)`, or `mcp` with its fixed cost once) is at most a fifth
-/// of git under every counter, and in every harness measured its median
-/// live answer tokens are at most a fifth of git's, both cells with at
-/// least two correct trials.
+/// (`reef (default)`, or `mcp` with its fixed cost once, scripted and live)
+/// is at most a fifth of git under every counter, and in every harness
+/// measured its median live answer tokens are at most a fifth of git's,
+/// both cells with at least two correct trials.
 pub fn verdict(scripted: &ScriptedResult, live: &[LiveCell]) -> Verdict {
     let harnesses = match gate_inputs(scripted, live) {
         Ok(harnesses) => harnesses,
@@ -554,7 +554,17 @@ pub fn verdict(scripted: &ScriptedResult, live: &[LiveCell]) -> Verdict {
         for harness in &harnesses {
             let cell_of = |arm: Arm| newest(live, harness, arm);
             let git = cell_of(Arm::Git).and_then(|c| c.answer_tokens);
-            let reef = cell_of(arm).and_then(|c| c.answer_tokens);
+            // `mcp` pays its fixed cost live too, once per session, in the
+            // counter its answer tokens are in (#122).
+            let reef = cell_of(arm).and_then(|c| {
+                let tokens = c.answer_tokens?;
+                if arm == Arm::Mcp {
+                    let fixed = scripted.fixed.counts.get(&c.counter)?;
+                    Some(tokens + lossy(*fixed))
+                } else {
+                    Some(tokens)
+                }
+            });
             live_ratios.push((
                 *harness,
                 git.zip(reef).and_then(|(g, r)| (r > 0.0).then(|| g / r)),
@@ -926,6 +936,29 @@ mod tests {
         }
         assert!(matches!(verdict(&partial, &live), Verdict::NotEvaluated(_)));
         assert!(matches!(verdict(&good, &[]), Verdict::NotEvaluated(_)));
+
+        // Live, `mcp` carries its fixed cost too (#122): 150 alone is a
+        // fifth of git's 1,000 and less, but 150 + 100 is not; 90 + 100 is.
+        let cheap_mcp = scripted([9_000, 9_000, 9_000], [10, 10, 10]);
+        let mcp_live = |tokens: u64| {
+            let mut trials = Vec::new();
+            for (n, t) in (1..).zip([1_000, 1_200, 900]) {
+                trials.push(trial(Arm::Git, n, t, true));
+            }
+            for n in 1..=3 {
+                trials.push(trial(Arm::Reef, n, 5_000, true));
+                trials.push(trial(Arm::Mcp, n, tokens, true));
+            }
+            live_cells(&trials, &[GATE_QUESTION.to_owned()])
+        };
+        assert!(matches!(
+            verdict(&cheap_mcp, &mcp_live(150)),
+            Verdict::NotMet(_)
+        ));
+        assert!(matches!(
+            verdict(&cheap_mcp, &mcp_live(90)),
+            Verdict::Met { arm: Arm::Mcp, .. }
+        ));
 
         // The gate question not in the scripted run: not evaluated.
         let mut other = good.clone();

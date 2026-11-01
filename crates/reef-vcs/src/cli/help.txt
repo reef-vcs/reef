@@ -1,0 +1,12 @@
+Reef: a workspace per agent, snapshotted as it writes
+
+Usage: reef <command> [--help]
+
+  ws list   every agent's workspace and how many files it changed
+  here      where you are, and what to run next
+  ws run    run a command in a new workspace, then release it
+  history   who changed a file or symbol, landed or open
+
+Also: status log show diff describe abandon undo op presence file
+symbols guide init mcp schema ui remote repo store daemon config
+backup restore completions. `--help-all` describes each.

@@ -9,15 +9,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use clap::{Arg, ArgAction, CommandFactory as _};
+use clap::{Arg, ArgAction};
 use serde_json::{Map, Value, json};
-
-use crate::cli::Cli;
 
 /// The command tree, built, so every argument's action and value count
 /// are set.
 pub(crate) fn root() -> clap::Command {
-    let mut root = Cli::command();
+    let mut root = crate::cli::command_all();
     root.build();
     root
 }

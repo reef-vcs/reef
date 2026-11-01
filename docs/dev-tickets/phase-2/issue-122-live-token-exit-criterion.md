@@ -460,3 +460,11 @@ There is no `cfg(target_os = "linux")` code, no proto change and no API revision
 6. **The prompt's preamble.** R2.17's brief says every prompt starts "… You are in yours." `tokens/prompts/preamble.txt` and the page say "You are `bot-0`, in yours." The code and page agree; the brief is out of date.
 7. **Git's Anthropic count on `state-repo`, macOS**, is 1,673 on the page and in #114's brief, and 1,691 in PR #124. It is the same text, so the counting endpoint drifted. Live budgets come from the same run's git arm, so the gate is unaffected, but the ratios published from different runs are not exactly comparable.
 8. **#122's issue text** puts `reef --help` at "roughly 1,000–1,200 Anthropic". The fit over 18 trials gives 1.72 Anthropic tokens per `o200k` token for help text. That makes the 3,159-byte help about 1,160 to 1,270, and today's 3,547 bytes about 1,310 to 1,430 (estimates).
+
+## Departures in the implementation
+
+- **The root help is 509 bytes, 165 Anthropic tokens**, not the draft's 524 and 170: the draft was over its own 512-byte budget. `here` reads "where you are, and what to run next" and the last line "`--help-all` describes each."
+- **Every command's `--help` budget is 2,176 bytes**, not about 1,200: `ws run`'s help is 2,056 bytes once the global options leave it (its own options and `long_about` are long). The sum over every command fell from 112,609 to 55,898 bytes.
+- **`--help-all` is a visible global flag**, listed in every command's help, so an agent in any command's help sees how to get the rest.
+- **`missing_subcommand_is_short`** holds a noun without its verb (stdout and stderr together, as an agent's shell sees them) to the same 2,176 bytes; `reef ws` is 1,316, `reef presence` 853.
+- **`quickstart_commands_exist`** checks the quickstart's flags against `--help-all`, since `--version` and the global options no longer appear in `--help`.

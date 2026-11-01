@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{ArgAction, CommandFactory as _, Parser as _};
+use clap::{ArgAction, CommandFactory as _, FromArgMatches as _};
 use reef_api::v1::IfNotJj;
 use reef_client::logging::EnvLog;
 use reef_client::paths::{ClientConfig, PathOverrides};
@@ -100,7 +100,50 @@ pub(crate) struct Cli {
     command: Option<Command>,
 }
 
-/// Flags every command takes.
+/// `reef --help`, `-h` and `help`: the commands an agent needs first, then
+/// every other command by name, in at most 512 bytes. Every live agent in
+/// R2.17's benchmark ran `reef --help` first, and clap's 3.5 KB of it cost
+/// more than the answer it was looking for (#122, ADR 0051).
+const ROOT_HELP: &str = include_str!("help.txt");
+
+/// The command line as `reef` parses it: the root's help is [`ROOT_HELP`],
+/// and the global options but `-o` are hidden.
+pub(crate) fn command() -> clap::Command {
+    with_help_all(Cli::command()).help_template(ROOT_HELP)
+}
+
+/// The command line as `--help-all` prints it, and as completions and
+/// `reef schema` describe it: clap's own help, every option shown.
+pub(crate) fn command_all() -> clap::Command {
+    with_help_all(Cli::command()).mut_args(|arg| arg.hide(false))
+}
+
+fn with_help_all(command: clap::Command) -> clap::Command {
+    command.arg(
+        clap::Arg::new("help_all")
+            .long("help-all")
+            .global(true)
+            .action(ArgAction::HelpLong)
+            .help("Print help with the options every command takes"),
+    )
+}
+
+/// Parses a command line with [`command`], or with [`command_all`] when it
+/// asks for `--help-all`.
+fn parse(args: &[OsString]) -> Result<Cli, clap::Error> {
+    let help_all = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--help-all");
+    let mut command = if help_all { command_all() } else { command() };
+    let matches = command.try_get_matches_from_mut(args)?;
+    Cli::from_arg_matches(&matches).map_err(|error| error.format(&mut command))
+}
+
+/// Flags every command takes. All but `-o` are hidden from `--help` and
+/// shown by `--help-all`: they repeated 1 KB in every command's help,
+/// which an agent reads first (#122).
 #[derive(Clone, Debug, clap::Args)]
 pub(crate) struct Global {
     /// Output format: `brief` JSON when stdout is not a terminal, `text` when it is; `json` has every field.
@@ -114,35 +157,35 @@ pub(crate) struct Global {
     )]
     output: Option<Output>,
     /// The daemon's state directory; overrides `REEF_STATE_DIR`.
-    #[arg(long, global = true, value_name = "DIR")]
+    #[arg(long, global = true, value_name = "DIR", hide = true)]
     state_dir: Option<PathBuf>,
     /// The daemon's socket; overrides `REEF_SOCKET`.
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH", hide = true)]
     socket: Option<PathBuf>,
     /// The daemon's configuration file; overrides `REEF_CONFIG`.
-    #[arg(long, global = true, value_name = "FILE")]
+    #[arg(long, global = true, value_name = "FILE", hide = true)]
     config: Option<PathBuf>,
     /// Fail instead of starting the daemon when it is not running.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_autostart: bool,
     /// Fail instead of registering a repository that a path names (and
     /// initializing jj alongside git there) when it is not registered;
     /// overrides `[repo] auto_register`.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_register: bool,
     /// How long to wait for the daemon's answer [default: 30s; 1h for `ws
     /// gc`; for `store build`, how long its command may run, 30m].
-    #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration)]
+    #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration, hide = true)]
     timeout: Option<Duration>,
     /// Print nothing on stderr but errors.
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, hide = true)]
     quiet: bool,
     /// Log the CLI's own debug events on stderr (`-vv` for trace).
-    #[arg(short, long, global = true, action = ArgAction::Count)]
+    #[arg(short, long, global = true, action = ArgAction::Count, hide = true)]
     verbose: u8,
     /// The agent named on the operations this command causes; overrides `REEF_AGENT`.
     // `ws run` passes it on to its command as `REEF_AGENT` (R2.05).
-    #[arg(long, global = true, value_name = "NAME", env = AGENT_ENV, hide_env = true)]
+    #[arg(long, global = true, value_name = "NAME", env = AGENT_ENV, hide_env = true, hide = true)]
     agent: Option<String>,
     /// Run on a daemon on another machine: a `reef remote add` name, or an https:// URL; overrides `REEF_REMOTE`.
     // Before the command, as `git -C` is: every command's long help is near
@@ -152,6 +195,7 @@ pub(crate) struct Global {
         value_name = "NAME",
         env = reef_client::remote::REMOTE_ENV,
         hide_env = true,
+        hide = true,
         conflicts_with = "socket"
     )]
     remote: Option<String>,
@@ -436,7 +480,7 @@ fn is_unregistered_path(error: &CliError) -> bool {
 /// exit code. Never panics on a daemon error.
 pub(crate) fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let cli = match parse(&args) {
         Ok(cli) => cli,
         Err(error) => return usage_error(&error, &args),
     };
@@ -544,7 +588,7 @@ async fn rerun(
 ) -> Result<ExitCode, CliError> {
     daemon::restart(global, out, incompatible).await?;
     let Cli { global, command } =
-        Cli::try_parse_from(args).map_err(|error| CliError::Usage(error.to_string()))?;
+        parse(args).map_err(|error| CliError::Usage(error.to_string()))?;
     let Some(command) = command else {
         return Ok(ExitCode::SUCCESS);
     };
@@ -670,7 +714,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global, out),
         Command::Completions { shell } => {
-            let mut command = Cli::command();
+            let mut command = command_all();
             let mut buffer = Vec::new();
             clap_complete::generate(shell, &mut command, "reef", &mut buffer);
             out.raw(&buffer)
@@ -881,7 +925,7 @@ fn orientation_guess<'a>(error: &'a clap::Error, usage: Option<&str>) -> Option<
     let Some(ContextValue::String(name)) = error.get(ContextKind::InvalidSubcommand) else {
         return None;
     };
-    let root = Cli::command().render_usage().to_string();
+    let root = command().render_usage().to_string();
     (ORIENTATION_GUESSES.contains(&name.as_str()) && usage == Some(root.trim()))
         .then_some(name.as_str())
 }
@@ -965,7 +1009,8 @@ mod tests {
 
     #[test]
     fn the_command_is_well_formed() {
-        Cli::command().debug_assert();
+        command().debug_assert();
+        command_all().debug_assert();
     }
 
     /// Help written for a model (ADR 0025): one line of `about`, at most
@@ -1028,7 +1073,7 @@ mod tests {
     #[test]
     fn orientation_guesses_at_the_root_only() {
         let guess = |list: &[&str]| {
-            let error = Cli::try_parse_from(args(list)).unwrap_err();
+            let error = parse(&args(list)).unwrap_err();
             let rendered = error.render().to_string();
             orientation_guess(&error, usage_line(&rendered)).map(str::to_owned)
         };
@@ -1044,9 +1089,9 @@ mod tests {
         assert_eq!(guess(&["reef", "ws", "create", "--change"]), None);
         // `status` is a command (R2.27), so `st` is no longer `store`'s
         // unique prefix; `sto` is.
-        assert!(Cli::try_parse_from(args(&["reef", "status"])).is_ok());
-        assert!(Cli::try_parse_from(args(&["reef", "sto", "ls"])).is_ok());
-        assert!(Cli::try_parse_from(args(&["reef", "st", "ls"])).is_err());
+        assert!(parse(&args(&["reef", "status"])).is_ok());
+        assert!(parse(&args(&["reef", "sto", "ls"])).is_ok());
+        assert!(parse(&args(&["reef", "st", "ls"])).is_err());
     }
 
     #[test]

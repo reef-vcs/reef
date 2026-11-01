@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn guide_fits_its_budget() {
-        // About 400 tokens at four bytes a token (ADR 0025).
+        // Bytes, not tokens (ADR 0051): 1,566 bytes was 434 `o200k` and 648
+        // Anthropic tokens at #122.
         assert!(GUIDE.len() <= 1600, "{} bytes", GUIDE.len());
         assert!(long().len() <= 1600);
         assert!(GUIDE.contains(LONG_MARKER));
