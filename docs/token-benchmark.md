@@ -124,6 +124,24 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | bytes | 7,933 | 4,925 | – | 3,672 | 23,610 | 1.61× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | anthropic | 3,543 | 2,237 | – | 1,881 | 9,431 | 1.58× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | o200k | 2,280 | 1,669 | – | 1,313 | 5,775 | 1.37× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | bytes | 185 | 858 | 399 | 859 | 20,817 | 0.22× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | anthropic | 88 | 443 | 217 | 444 | 7,999 | 0.20× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | o200k | 54 | 250 | 144 | 250 | 4,717 | 0.22× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 215 | 584 | 231 | 20,189 | 12.06× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | anthropic | 1,497 | 117 | 338 | 130 | 7,685 | 12.79× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | o200k | 840 | 82 | 240 | 83 | 4,550 | 10.24× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 4,646 | 1,224 | 5,442 | 25,400 | 4.80× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | anthropic | 9,310 | 2,236 | 670 | 2,661 | 10,216 | 4.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | o200k | 5,721 | 1,393 | 455 | 1,642 | 6,109 | 4.11× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 12,218 | 1,765 | 17,276 | 37,234 | 4.14× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | anthropic | 20,213 | 5,858 | 921 | 8,426 | 15,981 | 3.45× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | o200k | 12,490 | 3,605 | 635 | 5,177 | 9,644 | 3.46× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | bytes | 619 | 3,801 | – | 3,838 | 23,796 | 0.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | anthropic | 362 | 2,016 | – | 2,030 | 9,585 | 0.18× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | o200k | 233 | 1,456 | – | 1,466 | 5,933 | 0.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | – | 3,661 | 23,619 | 2.10× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | anthropic | 3,367 | 1,892 | – | 1,903 | 9,458 | 1.78× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | o200k | 2,131 | 1,319 | – | 1,326 | 5,793 | 1.62× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 <!-- tokens-rows:scripted -->
 
 ### Fixed cost
@@ -131,6 +149,7 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | Date | Reef | Tools | `tools/list` bytes | Instructions bytes | bytes | anthropic | o200k | Break-even (questions) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | 2026-10-31 | ? | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-01 | b5aa37e57133 | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 <!-- tokens-rows:fixed -->
 
 R2.24 publishes every tool's output schema through `reef schema mcp` and does not declare them in `tools/list` ([ADR 0050](adr/0050-published-schemas.md)), so the fixed cost and break-even above are unchanged; declaring them all would make `tools/list` 141,756 bytes instead of 21,211.
@@ -159,6 +178,24 @@ Answer tokens and bytes are medians over correct trials; the other columns are m
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | git | 3/3 | 5,676 | 12,035 | 1,597 | 14,235 | 8,027 | 960 | $0.026 | 4 | 5 | 13 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | reef | 3/3 | 4,679 | 11,502 | 1,627 | 16,809 | 11,947 | 622 | $0.020 | 3 | 4 | 10 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | mcp | 3/3 | 1,933 | 3,726 | 8,068 | 18,156 | 18,150 | 319 | $0.006 | 1 | 2 | 5 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | git | 3/3 | 428 | 803 | 1,538 | 3,555 | 3,068 | 293 | $0.005 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | reef | 3/3 | 1,455 | 3,782 | 1,570 | 7,209 | 6,590 | 283 | $0.011 | 2 | 3 | 7 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | mcp | 3/3 | 432 | 848 | 8,009 | 16,486 | 16,480 | 130 | $0.004 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | git | 3/3 | 1,796 | 3,052 | 1,512 | 10,336 | 8,772 | 681 | $0.012 | 3 | 4 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | reef | 3/3 | 4,699 | 10,231 | 1,544 | 14,275 | 9,063 | 459 | $0.014 | 4 | 5 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | mcp | 3/3 | 1,687 | 3,033 | 7,983 | 26,040 | 24,263 | 342 | $0.011 | 3 | 4 | 7 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | git | 2/3 | 4,825 | 9,829 | 1,544 | 14,693 | 10,789 | 1,000 | $0.021 | 4 | 5 | 11 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | reef | 3/3 | 8,278 | 19,708 | 1,576 | 26,611 | 21,158 | 821 | $0.027 | 5 | 6 | 13 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | mcp | 3/3 | 2,649 | 5,417 | 8,015 | 26,960 | 26,952 | 529 | $0.008 | 2 | 3 | 9 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | git | 3/3 | 12,092 | 27,641 | 1,565 | 31,704 | 18,667 | 1,116 | $0.042 | 4 | 5 | 12 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | reef | 3/3 | 10,011 | 26,256 | 1,597 | 42,696 | 36,074 | 1,164 | $0.033 | 7 | 8 | 17 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | mcp | 3/3 | 9,212 | 18,779 | 8,036 | 43,859 | 35,472 | 1,018 | $0.036 | 4 | 5 | 13 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | git | 3/3 | 2,375 | 4,249 | 1,550 | 11,057 | 8,392 | 811 | $0.017 | 3 | 4 | 11 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | reef | 3/3 | 4,277 | 10,168 | 1,582 | 10,385 | 10,377 | 435 | $0.005 | 2 | 3 | 8 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | mcp | 3/3 | 2,013 | 3,840 | 8,021 | 18,125 | 18,119 | 303 | $0.005 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | git | 3/3 | 4,778 | 10,183 | 1,566 | 10,901 | 5,086 | 806 | $0.022 | 3 | 4 | 9 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | reef | 3/3 | 4,540 | 11,337 | 1,598 | 15,026 | 9,971 | 573 | $0.018 | 3 | 4 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | mcp | 3/3 | 1,893 | 3,699 | 8,037 | 18,038 | 18,032 | 266 | $0.004 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 <!-- tokens-rows:live-claude-code -->
 
 ### Diff sweep
@@ -168,6 +205,7 @@ Median bytes per view.
 | Date | Reef | Commits | `git show` | `git show --stat` | `reef diff` | `reef diff --stat` | `reef diff --symbols` | `--symbols -o text` | `--symbols` ÷ `reef diff` | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-31 | ? | 20 | 153,658 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-01 | b5aa37e57133 | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 <!-- tokens-rows:sweep -->
 
 ### Where the bytes go
@@ -192,4 +230,16 @@ The state questions' `reef (default)` output, compact JSON bytes by field.
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.parents` | 181 | 21% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status.trunk` | 177 | 21% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.changed_files` | 167 | 20% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.working_copy` | 112 | 13% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.workspace` | 53 | 6% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status.active_workspace_count` | 26 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status (structure)` | 26 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status (structure)` | 25 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].id` | 69 | 35% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].changed_file_count` | 67 | 34% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].owner` | 45 | 23% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `(structure)` | 16 | 8% |
 <!-- tokens-rows:breakdown -->
