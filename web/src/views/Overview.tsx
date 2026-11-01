@@ -1,43 +1,19 @@
 // `/`: every registered repository with its latest operation and the number
-// of agents active in it now, live from both streams. R2.19 to R2.21 make
-// its cells links into their views; until then ids are shown as text.
+// of agents active in it now, live from both streams. The repository links to
+// its smartlog (R2.19); R2.20 and R2.21 make the other cells links into
+// their views, and until then those are shown as text.
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { Connection } from "../api/connection";
-import { OperationKind, SnapshotKind, type Operation } from "../gen/reef/api/v1/operations_pb";
+import type { Operation } from "../gen/reef/api/v1/operations_pb";
 import type { Repository } from "../gen/reef/api/v1/repositories_pb";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { ErrorView } from "../ui/ErrorView";
+import { operationLabel } from "../ui/operation";
+import { Link } from "../ui/router";
 import { clock } from "../ui/time";
 import { OverviewModel } from "./overview-model";
-
-const KINDS: Partial<Record<OperationKind, string>> = {
-  [OperationKind.SNAPSHOT]: "snapshot",
-  [OperationKind.CREATE_WORKSPACE]: "create workspace",
-  [OperationKind.RELEASE_WORKSPACE]: "release workspace",
-  [OperationKind.MOVE_WORKSPACE]: "move workspace",
-  [OperationKind.DESCRIBE]: "describe",
-  [OperationKind.ABANDON]: "abandon",
-  [OperationKind.UNDO]: "undo",
-  [OperationKind.EDIT]: "edit",
-  [OperationKind.IMPORT_REFS]: "import refs",
-  [OperationKind.EXTERNAL]: "external",
-  [OperationKind.OTHER]: "other",
-};
-
-const SNAPSHOTS: Partial<Record<SnapshotKind, string>> = {
-  [SnapshotKind.WATCHER]: "watcher",
-  [SnapshotKind.EXPLICIT]: "explicit",
-  [SnapshotKind.FINAL]: "final",
-  [SnapshotKind.MOVE]: "move",
-  [SnapshotKind.SHUTDOWN]: "shutdown",
-};
-
-export function operationLabel(operation: Operation): string {
-  const kind = KINDS[operation.kind] ?? "unknown";
-  const snapshot = SNAPSHOTS[operation.snapshotKind];
-  return operation.kind === OperationKind.SNAPSHOT && snapshot ? `${kind} (${snapshot})` : kind;
-}
+import { smartlogHref } from "./Smartlog";
 
 function lastComponent(root: string): string {
   return root.replace(/\/+$/, "").split("/").pop() || root;
@@ -75,7 +51,11 @@ function Row({
 }) {
   return (
     <tr>
-      <td title={repository.root}>{lastComponent(repository.root)}</td>
+      <td>
+        <Link to={smartlogHref({ repo: repository.id })} title={repository.root}>
+          {lastComponent(repository.root)}
+        </Link>
+      </td>
       <td className="mono">{repository.id.slice(0, 8)}</td>
       <td>
         <LatestOperation operation={operation} />

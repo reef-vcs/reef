@@ -119,7 +119,14 @@ export function operationsFrame(
 }
 
 export function presenceFrame(
-  entries: { id: string; agent?: string; repoId?: string; ended?: boolean }[],
+  entries: {
+    id: string;
+    agent?: string;
+    repoId?: string;
+    workspaceId?: string;
+    changeId?: string;
+    ended?: boolean;
+  }[],
   synced = false,
 ): SubscribePresenceResponse {
   return create(SubscribePresenceResponseSchema, {

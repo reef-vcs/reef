@@ -10,10 +10,11 @@ import { Live, type LiveEnvironment } from "./live/share";
 import { endSession } from "./session";
 import { ConnectionIndicator } from "./ui/ConnectionIndicator";
 import { ErrorView } from "./ui/ErrorView";
-import { Link, usePath } from "./ui/router";
+import { Link, match, usePath, useSearch } from "./ui/router";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
+import { Smartlog, smartlogParams } from "./views/Smartlog";
 import { States } from "./views/States";
 
 function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
@@ -51,7 +52,10 @@ function Shell({
   onSessionInvalid: () => void;
 }) {
   const path = usePath();
+  const search = useSearch();
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
+  const smartlog = match("/repos/:repo/smartlog", path);
+  const smartlogQuery = smartlog && smartlogParams(smartlog.repo ?? "", search);
   return (
     <div className="page">
       <header className="header">
@@ -73,6 +77,17 @@ function Shell({
             live={live}
             frame={frame}
             onSessionInvalid={onSessionInvalid}
+          />
+        ) : smartlogQuery ? (
+          // A new operation or repository is a new view; a new revset, limit
+          // or selection is not, so a bad revset keeps the last good graph.
+          <Smartlog
+            key={`${smartlogQuery.repo}\n${smartlogQuery.at}`}
+            connection={connection}
+            live={live}
+            frame={frame}
+            onSessionInvalid={onSessionInvalid}
+            params={smartlogQuery}
           />
         ) : path === "/states" ? (
           <States />

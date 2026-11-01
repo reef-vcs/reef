@@ -4,16 +4,24 @@
 // the API is same-origin.
 import { createClient, type Client, type Interceptor, type Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { ChangeService } from "../gen/reef/api/v1/changes_pb";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import { DiffService } from "../gen/reef/api/v1/diff_pb";
+import { HistoryService } from "../gen/reef/api/v1/history_pb";
 import { OperationService } from "../gen/reef/api/v1/operations_pb";
 import { PresenceService } from "../gen/reef/api/v1/presence_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
+import { StatusService } from "../gen/reef/api/v1/status_pb";
 
 export interface Clients {
   daemon: Client<typeof DaemonService>;
   repositories: Client<typeof RepositoryService>;
   operations: Client<typeof OperationService>;
   presence: Client<typeof PresenceService>;
+  changes: Client<typeof ChangeService>;
+  status: Client<typeof StatusService>;
+  diff: Client<typeof DiffService>;
+  history: Client<typeof HistoryService>;
 }
 
 export interface Connection {
@@ -40,6 +48,10 @@ export function connectionOver(transport: Transport, label: string): Connection 
       repositories: createClient(RepositoryService, transport),
       operations: createClient(OperationService, transport),
       presence: createClient(PresenceService, transport),
+      changes: createClient(ChangeService, transport),
+      status: createClient(StatusService, transport),
+      diff: createClient(DiffService, transport),
+      history: createClient(HistoryService, transport),
     },
   };
 }
