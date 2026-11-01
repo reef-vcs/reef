@@ -292,9 +292,33 @@ export class Reef {
 
   async dispose() {
     try {
+      // Released while the daemon runs: on Linux each workspace is a
+      // fuse-overlayfs mount, which outlives a stop (workspaces survive restarts).
+      if (this.daemon) {
+        for (const ws of this.workspaces) {
+          await this.reef(["ws", "release", ws.id], { quiet: true }).catch(() => undefined);
+        }
+      }
       await this.stop();
     } finally {
-      await rm(this.root, { recursive: true, force: true });
+      await rm(this.root, { recursive: true, force: true }).catch(async () => {
+        await this.unmount();
+        await rm(this.root, { recursive: true, force: true });
+      });
+    }
+  }
+
+  /** Lazily unmounts what a daemon that did not release its workspaces left mounted. */
+  private async unmount() {
+    if (process.platform !== "linux") return;
+    const repos = join(this.state, "repos");
+    for (const repo of await readdir(repos).catch(() => [])) {
+      for (const ws of await readdir(join(repos, repo, "ws")).catch(() => [])) {
+        const path = join(repos, repo, "ws", ws);
+        await run("fusermount3", ["-u", "-z", path])
+          .catch(() => run("fusermount", ["-u", "-z", path]))
+          .catch(() => undefined);
+      }
     }
   }
 }
