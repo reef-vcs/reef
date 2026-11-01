@@ -16,8 +16,9 @@ Each trial gets a fresh home directory, a fresh Reef state directory (`REEF_STAT
 | B | After `reef init` | A's checkout after `reef init --agents claude` | not bare, so `CLAUDE.md` and the skill load | `a.txt` |
 | C | From nothing | no `reef` anywhere on `PATH` | `--bare` | [`c.txt`](../crates/reef-testing/onboarding/prompts/c.txt) |
 | D | Oriented | the agent is started by `reef ws run` | `--bare` | [`d.txt`](../crates/reef-testing/onboarding/prompts/d.txt) |
+| E | After the plugin | A's checkout, and Reef's Claude Code plugin installed into the trial's home from the checkout under test ([R2.25](dev-tickets/phase-2/R2.25-harness-packages.md)) | not bare, so the plugin's skill and MCP server load; their tools are allowed | `a.txt` |
 
-A and B ask the agent to append a line to `README.md` in an isolated workspace and to print the workspace id on its last line. C asks the same and adds where to install Reef from. D asks which workspace and change the agent is in.
+A, B and E ask the agent to append a line to `README.md` in an isolated workspace and to print the workspace id on its last line. C asks the same and adds where to install Reef from. D asks which workspace and change the agent is in.
 
 Every trial runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Edit --permission-prompts none --max-budget-usd 2 --no-session-persistence`, so the agent never waits on a prompt. Anything that would still prompt is denied and counted. The prompts are deliberately plain: a prompt that taught Reef would measure the prompt.
 
@@ -40,9 +41,9 @@ Every trial runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Ed
 
 Each number is the median over a row's trials. A `Bash` call "runs `reef`" when one of its simple commands (split at `;`, `&`, `|`, `$(`, and backquotes) has `reef`, by name or path, as its program. Variable assignments, `sudo`, `env`, `timeout N`, and `sh -c` are looked through. `reef ws run` is `reef` followed by `ws run` or `workspace run`, after any global options.
 
-**The judge** uses the daemon's records, not the agent's account of what it did. For A to C, the last line of the agent's answer must name a workspace that `reef ws list --all` reports (other words on the line are fine). `README.md` in that workspace's commit, which is its final snapshot once released, must be the original with something appended. The judge reads it with `git cat-file` from the clone, where jj keeps its commits. For D, the answer must name the workspace `reef ws run` started the agent in and its change, by hex or jj id, at least eight characters.
+**The judge** uses the daemon's records, not the agent's account of what it did. For A to C and E, the last line of the agent's answer must name a workspace that `reef ws list --all` reports (other words on the line are fine). `README.md` in that workspace's commit, which is its final snapshot once released, must be the original with something appended. The judge reads it with `git cat-file` from the clone, where jj keeps its commits. For D, the answer must name the workspace `reef ws run` started the agent in and its change, by hex or jj id, at least eight characters.
 
-**Setup failures are not the agent's.** A trial whose clone, `reef init`, or installer mirror failed is reported as a setup failure, kept out of the medians, and noted in the row. So is one where Claude Code exited non-zero without a tool call or any spend: no credential, an API error, or a crash at startup. So is a B trial whose stream's `init` event doesn't list the `reef` skill that `reef init` wrote: Claude Code didn't load the project's files, and the trial would measure A.
+**Setup failures are not the agent's.** A trial whose clone, `reef init`, or installer mirror failed is reported as a setup failure, kept out of the medians, and noted in the row. So is one where Claude Code exited non-zero without a tool call or any spend: no credential, an API error, or a crash at startup. So is a B trial whose stream's `init` event doesn't list the `reef` skill that `reef init` wrote: Claude Code didn't load the project's files, and the trial would measure A. An E trial whose `init` event lists neither the plugin's skill nor its MCP server's tools is one too, for the same reason. E's MCP calls count as tool calls; a workspace it made with `create_workspace` and released with `release_workspace` is judged as A's are, from the daemon's records. E is held to B's targets. Like every scenario here it runs Claude Code only: one harness is a gap, not a proof.
 
 ## Pins and baselines
 
@@ -123,3 +124,9 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 9b5583f5a3c0 | linux | 3/3 | 3 | 3 | 0 | 4 | 13,129 | 504 | $0.01 | 9 s | 0/3 | First Linux baseline (ubuntu-24.04, fuse-overlayfs) |
 | 2026-10-24 | claude-sonnet-5-5 | 2.1.310 | 4c966c7ba4e6 | linux | 3/3 | 3 | 3 | 0 | 4 | 12,814 | 499 | $0.01 | 9 s | 0/3 | pre-0.1.0 check, after RX.01 (#65) and #67 |
 <!-- onboarding-rows:D -->
+
+### Scenario E: after the plugin
+
+| Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+<!-- onboarding-rows:E -->

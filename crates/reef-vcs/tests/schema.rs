@@ -144,6 +144,14 @@ const NOT_RUN: &[(&[&str], &str)] = &[
     (&["store", "build"], "needs a store spec and a build"),
     (&["symbols", "upload"], "needs a SCIP index"),
     (
+        &["presence", "hook", "edit"],
+        "reads a hook event on stdin; tests/presence.rs runs it, checked against its row",
+    ),
+    (
+        &["presence", "hook", "end"],
+        "reads a hook event on stdin; tests/presence.rs runs it, checked against its row",
+    ),
+    (
         &["remote", "add"],
         "needs a client profile directory and a token on stdin",
     ),

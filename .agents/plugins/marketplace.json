@@ -1,0 +1,22 @@
+{
+  "name": "reef",
+  "interface": {
+    "displayName": "Reef"
+  },
+  "plugins": [
+    {
+      "name": "reef",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/reef-vcs/reef.git",
+        "path": "plugins/agent-plugins",
+        "ref": "v0.2.0"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Coding"
+    }
+  ]
+}

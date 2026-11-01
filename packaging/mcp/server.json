@@ -1,0 +1,13 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.reef-vcs/reef",
+  "title": "Reef",
+  "description": "Version control for fleets of coding agents: isolated workspaces, status, diff and history.",
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/reef-vcs/reef",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/reef-vcs/reef",
+  "packages": []
+}

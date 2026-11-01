@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: Scenarios, comma-separated
+        description: Scenarios, comma-separated (A to E; E is after the plugin, R2.25)
         default: A,B,C,D
         type: string
       trials:

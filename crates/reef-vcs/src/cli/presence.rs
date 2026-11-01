@@ -11,6 +11,8 @@
 //! entry of its own. The entry outlives the process until its TTL runs
 //! out; its id, printed by the report, is what a later process passes to
 //! replace or clear it, directly (`--id`) or through a file (`--id-file`).
+//!
+//! `reef presence hook` (R2.25) is in [`super::hook`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
@@ -55,6 +57,27 @@ enum PresenceCommand {
     /// End presence entries you reported.
     #[command(after_help = "Example: reef presence clear --id-file .reef-presence")]
     Clear(ClearArgs),
+    /// Declare edits from a harness's hook event on stdin; never fails.
+    #[command(
+        after_help = "Example: reef presence hook edit --path-at /tool_input/file_path < event.json"
+    )]
+    Hook(super::hook::Args),
+}
+
+impl Args {
+    /// Whether this is `presence hook`, which connects by itself, without
+    /// starting a daemon.
+    pub(crate) fn is_hook(&self) -> bool {
+        matches!(self.command, PresenceCommand::Hook(_))
+    }
+
+    /// The hook's arguments, if this is `presence hook`.
+    pub(crate) fn into_hook(self) -> Option<super::hook::Args> {
+        match self.command {
+            PresenceCommand::Hook(args) => Some(args),
+            _ => None,
+        }
+    }
 }
 
 /// `reef presence report`. Exactly one of TEXT, `--path`, or `--phase` and
@@ -156,6 +179,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         PresenceCommand::Watch(args) => watch(ctx, args).await,
         PresenceCommand::Report(args) => report(ctx, args).await,
         PresenceCommand::Clear(args) => clear(ctx, args).await,
+        PresenceCommand::Hook(_) => Ok(()),
     }
 }
 
@@ -300,7 +324,7 @@ async fn clear(ctx: &Ctx, args: ClearArgs) -> Result<(), CliError> {
 }
 
 /// The id `file` holds; `None` when it is missing or blank.
-fn read_id_file(file: &Path) -> Result<Option<String>, CliError> {
+pub(super) fn read_id_file(file: &Path) -> Result<Option<String>, CliError> {
     match std::fs::read_to_string(file) {
         Ok(text) => Ok(Some(text.trim().to_owned()).filter(|id| !id.is_empty())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -315,7 +339,7 @@ fn read_id_file(file: &Path) -> Result<Option<String>, CliError> {
 /// Writes `id` and a newline to `file` through a new temporary file beside
 /// it, created exclusively under a random name, so a reader never sees
 /// half an id and nothing planted at a predictable name is written through.
-fn write_id_file(file: &Path, id: &str) -> Result<(), CliError> {
+pub(super) fn write_id_file(file: &Path, id: &str) -> Result<(), CliError> {
     let io_error = |source| CliError::Io {
         op: "write",
         path: file.to_owned(),
@@ -335,7 +359,7 @@ fn write_id_file(file: &Path, id: &str) -> Result<(), CliError> {
         .map_err(|error| io_error(error.error))
 }
 
-fn remove_id_file(file: &Path) -> Result<(), CliError> {
+pub(super) fn remove_id_file(file: &Path) -> Result<(), CliError> {
     match std::fs::remove_file(file) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

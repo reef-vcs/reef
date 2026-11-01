@@ -1,0 +1,18 @@
+{
+  "name": "reef",
+  "version": "0.2.0",
+  "description": "Reef workspaces for coding agents: the skill that starts work in an isolated workspace, and Reef's MCP server.",
+  "author": {
+    "name": "Reef contributors",
+    "url": "https://github.com/reef-vcs/reef"
+  },
+  "homepage": "https://github.com/reef-vcs/reef",
+  "repository": "https://github.com/reef-vcs/reef",
+  "license": "Apache-2.0",
+  "keywords": [
+    "version-control",
+    "workspaces",
+    "jj",
+    "mcp"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v reef >/dev/null 2>&1 && reef presence hook edit --path-at /tool_input/file_path --path-at /tool_input/notebook_path --session-at /session_id >/dev/null 2>&1 || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v reef >/dev/null 2>&1 && reef presence hook end --session-at /session_id >/dev/null 2>&1 || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

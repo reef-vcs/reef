@@ -38,7 +38,8 @@ pub(crate) struct Args {
         value_name = "AGENTS"
     )]
     agents: Vec<Agents>,
-    /// Also write the user-level Claude Code skill, ~/.claude/skills/reef.
+    /// Also write each selected agent's user-level files (its skill, its
+    /// MCP entry) in the home directory.
     #[arg(long)]
     user: bool,
     /// Write nothing; exit 3 if a file is missing or stale.
@@ -65,6 +66,8 @@ enum Agents {
     Claude,
     Cursor,
     Mcp,
+    Codex,
+    Opencode,
 }
 
 /// The JSON result.
@@ -135,9 +138,7 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         path: root.clone(),
         source,
     })?;
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from);
+    let home = agents::Home::from_env(|name| std::env::var_os(name));
     if args.user && home.is_none() {
         return Err(CliError::Usage(
             "--user writes under the home directory, and HOME is not set".to_owned(),
@@ -150,8 +151,9 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
     } else {
         agents::running(|name| std::env::var_os(name))
     };
-    let harnesses = harnesses.unwrap_or_else(|| agents::detect(&root, args.user, &running));
-    let plan = agents::plan(&root, home.as_deref(), &harnesses, &guide, version)?;
+    let user = home.as_ref().filter(|_| args.user);
+    let harnesses = harnesses.unwrap_or_else(|| agents::detect(&root, user, &running));
+    let plan = agents::plan(&root, home.as_ref(), &harnesses, &guide, version)?;
     if args.check {
         check(&plan, &root, &args, global)?;
     } else {
@@ -176,6 +178,11 @@ fn harnesses(args: &Args) -> Result<Option<Vec<Harness>>, CliError> {
         ))
     };
     let mut list = Vec::new();
+    let mut user = Vec::new();
+    let add = |agent: Agent, list: &mut Vec<Harness>, user: &mut Vec<Harness>| {
+        list.extend_from_slice(agents::harnesses(agent));
+        user.extend_from_slice(agents::user_harnesses(agent));
+    };
     for &agents in &args.agents {
         let single = matches!(agents, Agents::Auto | Agents::All | Agents::None);
         if single && args.agents.len() > 1 {
@@ -188,9 +195,16 @@ fn harnesses(args: &Args) -> Result<Option<Vec<Harness>>, CliError> {
         match agents {
             Agents::Auto => return Ok(None),
             Agents::None => {}
-            Agents::All => list.extend(agents::all()),
-            Agents::Claude => list.extend_from_slice(agents::harnesses(Agent::ClaudeCode)),
-            Agents::Cursor => list.extend_from_slice(agents::harnesses(Agent::Cursor)),
+            Agents::All => {
+                list.extend(agents::all());
+                for sign in agents::SIGNS {
+                    user.extend_from_slice(agents::user_harnesses(sign.agent));
+                }
+            }
+            Agents::Claude => add(Agent::ClaudeCode, &mut list, &mut user),
+            Agents::Cursor => add(Agent::Cursor, &mut list, &mut user),
+            Agents::Codex => add(Agent::Codex, &mut list, &mut user),
+            Agents::Opencode => add(Agent::Opencode, &mut list, &mut user),
             Agents::Mcp => list.push(Harness::McpJson),
         }
     }
@@ -198,7 +212,7 @@ fn harnesses(args: &Args) -> Result<Option<Vec<Harness>>, CliError> {
         list.insert(0, Harness::AgentsMd);
     }
     if args.user {
-        list.push(Harness::ClaudeSkill { user: true });
+        list.extend(user);
     }
     let mut unique = Vec::new();
     for harness in list {

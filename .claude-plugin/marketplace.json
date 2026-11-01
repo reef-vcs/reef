@@ -1,0 +1,21 @@
+{
+  "name": "reef",
+  "description": "Reef, version control for fleets of coding agents.",
+  "owner": {
+    "name": "Reef contributors",
+    "url": "https://github.com/reef-vcs/reef"
+  },
+  "plugins": [
+    {
+      "name": "reef",
+      "source": {
+        "source": "git-subdir",
+        "url": "reef-vcs/reef",
+        "path": "plugins/claude-code",
+        "ref": "v0.2.0"
+      },
+      "description": "Reef workspaces for coding agents: the skill that starts work in an isolated workspace, and Reef's MCP server.",
+      "category": "development"
+    }
+  ]
+}

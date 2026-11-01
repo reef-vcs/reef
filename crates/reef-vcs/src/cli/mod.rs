@@ -23,11 +23,12 @@ mod diff;
 mod env;
 mod error;
 mod file;
-mod guide;
+pub(crate) mod guide;
 pub(crate) mod heartbeat;
 mod helper;
 mod here;
 mod history;
+mod hook;
 mod init;
 mod log;
 mod op;
@@ -703,6 +704,10 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,
+        Command::Presence(args) if args.is_hook() => match args.into_hook() {
+            Some(hook) => hook::run(&global, hook).await,
+            None => Ok(()),
+        },
         Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
         Command::Ui(args) => ui::run(&connect(&global, out).await?, args).await,
         Command::Remote(args) => remote::run(&global, out, args).await,

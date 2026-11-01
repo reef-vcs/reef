@@ -3,13 +3,18 @@
 //! Claude Code skill, repository and user level, and the Cursor rule), all
 //! from the agent guide (`docs/agent-guide.md`, R1.26), so there is one
 //! guide and it cannot drift; and Reef's entry in `.mcp.json` (R2.13),
-//! which starts `reef mcp`.
+//! which starts `reef mcp`. Since R2.25 also Codex's and opencode's: the
+//! shared Agent Skills file and their MCP entries, in the repository and
+//! in the home directory; and `packages` (compiled for its tests), the plugins built from the
+//! same renderers.
 //!
 //! Everything here but [`apply`] is a pure function of the guide and what
 //! is on disk. Reef never overwrites text it did not write: a section lives
 //! between [`BEGIN`] and [`END`] marker lines and the bytes around it are
 //! kept as they are; a whole file is replaced only when its frontmatter has
-//! [`GENERATED_BY`]; in `.mcp.json`, Reef owns only `mcpServers.reef`.
+//! [`GENERATED_BY`]; in `.mcp.json`, Reef owns only `mcpServers.reef`, and
+//! likewise `mcp.reef` in `opencode.json` and `[mcp_servers.reef]` in
+//! Codex's `config.toml`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -18,6 +23,24 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+
+// Rendered and checked by its tests, and written by `just packages`; the
+// binary never writes them.
+#[cfg(test)]
+mod packages;
+
+/// A plugin format a harness installs, and the tree Reef ships in it
+/// (R2.25, rendered by the `packages` tests).
+#[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Package {
+    /// Claude Code's own format: the skill, the MCP entry, and the hooks
+    /// that report declared edits.
+    ClaudeCode,
+    /// The vendor-neutral Agent Plugins 1.0.0 format, which Codex installs:
+    /// the skill and the MCP entry.
+    AgentPlugins,
+}
 
 /// The section format version. A section of an older version is replaced;
 /// one of a newer version is left to the newer `reef` that wrote it.
@@ -64,31 +87,131 @@ pub(crate) enum Harness {
     /// Reef's entry in `.mcp.json`, the project's MCP servers (Claude Code
     /// reads it; R2.13).
     McpJson,
+    /// The skill in the Agent Skills standard's shared directory, which
+    /// Codex and opencode read: `.agents/skills/reef/SKILL.md`, or in the
+    /// home directory when `user` (R2.25).
+    AgentSkill {
+        /// `~/.agents/skills/reef/SKILL.md` rather than the repository's.
+        user: bool,
+    },
+    /// Reef's `[mcp_servers.reef]` in Codex's `config.toml`: the project's
+    /// `.codex/config.toml`, or `$CODEX_HOME/config.toml` when `user`.
+    CodexConfig {
+        /// The user's file rather than the project's.
+        user: bool,
+    },
+    /// Reef's `mcp.reef` in opencode's `opencode.json`: the project's, or
+    /// `$XDG_CONFIG_HOME/opencode/opencode.json` when `user`.
+    OpencodeJson {
+        /// The user's file rather than the project's.
+        user: bool,
+    },
 }
 
 impl Harness {
-    /// Where the file is: under `root`, or `home` for the user-level skill.
+    /// Where the file is: under `root`, or `home` for a user-level file.
     /// None when that needs a home directory and there is none.
-    pub(crate) fn path(self, root: &Path, home: Option<&Path>) -> Option<PathBuf> {
-        let skill = Path::new(".claude/skills/reef/SKILL.md");
+    pub(crate) fn path(self, root: &Path, home: Option<&Home>) -> Option<PathBuf> {
+        let claude_skill = Path::new(".claude/skills/reef/SKILL.md");
+        let agent_skill = Path::new(".agents/skills/reef/SKILL.md");
         Some(match self {
             Harness::AgentsMd => root.join("AGENTS.md"),
             Harness::ClaudeMd => root.join("CLAUDE.md"),
-            Harness::ClaudeSkill { user: false } => root.join(skill),
-            Harness::ClaudeSkill { user: true } => home?.join(skill),
+            Harness::ClaudeSkill { user: false } => root.join(claude_skill),
+            Harness::ClaudeSkill { user: true } => home?.dir.join(claude_skill),
             Harness::CursorRule => root.join(".cursor/rules/reef.mdc"),
             Harness::McpJson => root.join(".mcp.json"),
+            Harness::AgentSkill { user: false } => root.join(agent_skill),
+            Harness::AgentSkill { user: true } => home?.dir.join(agent_skill),
+            Harness::CodexConfig { user: false } => root.join(".codex/config.toml"),
+            Harness::CodexConfig { user: true } => home?.codex.join("config.toml"),
+            Harness::OpencodeJson { user: false } => root.join("opencode.json"),
+            Harness::OpencodeJson { user: true } => home?.config.join("opencode/opencode.json"),
         })
+    }
+
+    /// The path to report when there is no home directory to put it in.
+    fn home_path(self) -> &'static str {
+        match self {
+            Harness::AgentSkill { .. } => "~/.agents/skills/reef/SKILL.md",
+            Harness::CodexConfig { .. } => "~/.codex/config.toml",
+            Harness::OpencodeJson { .. } => "~/.config/opencode/opencode.json",
+            _ => "~/.claude/skills/reef/SKILL.md",
+        }
+    }
+
+    /// Whether the file is outside the repository, in the home directory.
+    fn is_user(self) -> bool {
+        matches!(
+            self,
+            Harness::ClaudeSkill { user: true }
+                | Harness::AgentSkill { user: true }
+                | Harness::CodexConfig { user: true }
+                | Harness::OpencodeJson { user: true }
+        )
     }
 
     /// Whether Reef owns the whole file, rather than a section of it.
     fn is_whole_file(self) -> bool {
-        matches!(self, Harness::ClaudeSkill { .. } | Harness::CursorRule)
+        matches!(
+            self,
+            Harness::ClaudeSkill { .. } | Harness::CursorRule | Harness::AgentSkill { .. }
+        )
     }
 }
 
-/// The one harness whose file is outside the repository.
-const USER_SKILL: Harness = Harness::ClaudeSkill { user: true };
+/// The home directory and the agents' directories in it, which their
+/// variables can move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Home {
+    /// `$HOME`.
+    dir: PathBuf,
+    /// `$CODEX_HOME`, else `~/.codex`.
+    codex: PathBuf,
+    /// `$XDG_CONFIG_HOME`, else `~/.config`.
+    config: PathBuf,
+}
+
+impl Home {
+    /// From the environment (`var` is `std::env::var_os`); None without a
+    /// `HOME`. An empty or relative variable counts as unset.
+    pub(crate) fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Option<Home> {
+        let path = |name: &str| {
+            var(name)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let dir = var("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)?;
+        Some(Home {
+            codex: path("CODEX_HOME").unwrap_or_else(|| dir.join(".codex")),
+            config: path("XDG_CONFIG_HOME").unwrap_or_else(|| dir.join(".config")),
+            dir,
+        })
+    }
+
+    /// Whether `place` exists as a directory.
+    fn has(&self, place: Place) -> bool {
+        match place {
+            Place::Dot(name) => self.dir.join(name).is_dir(),
+            Place::CodexHome => self.codex.is_dir(),
+            Place::Config(name) => self.config.join(name).is_dir(),
+        }
+    }
+}
+
+/// A directory in the home directory that an agent creates when it runs,
+/// so its presence means the agent is used on this machine.
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    /// A directory directly under `$HOME`, such as `.claude`.
+    Dot(&'static str),
+    /// `$CODEX_HOME`, else `~/.codex`.
+    CodexHome,
+    /// A directory under `$XDG_CONFIG_HOME`, else `~/.config`.
+    Config(&'static str),
+}
 
 /// A coding agent that reads files of its own besides `AGENTS.md`, which
 /// every agent gets.
@@ -98,30 +221,45 @@ pub(crate) enum Agent {
     ClaudeCode,
     /// The Cursor rule.
     Cursor,
+    /// The shared skill and `.codex/config.toml`.
+    Codex,
+    /// The shared skill and `opencode.json`.
+    Opencode,
 }
 
 /// How `auto` recognizes an agent, and what it writes for it.
-struct Sign {
+pub(crate) struct Sign {
     /// The agent this row is for.
-    agent: Agent,
+    pub(crate) agent: Agent,
     /// Names at the root whose presence means the repository uses it; one
     /// ending in `/` counts only as a directory.
     names: &'static [&'static str],
     /// A variable the agent sets, to this value, in the processes it
     /// starts, so `reef init` run by the agent writes its files though the
-    /// repository has none yet. Only a variable the agent documents.
+    /// repository has none yet. Only a variable the agent documents or
+    /// its pinned release's source sets.
     env: Option<(&'static str, &'static str)>,
     /// What Reef writes for it in the repository.
     harnesses: &'static [Harness],
+    /// Directories in the home directory that show the agent is used on
+    /// this machine, so `auto --user` writes its user-level files.
+    home: &'static [Place],
     /// What `--user` adds outside the repository, which also turns the
     /// agent's files on.
-    user: Option<Harness>,
+    user: &'static [Harness],
+    /// The plugin a harness installs Reef with, if it has one (R2.25).
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+    package: Option<Package>,
+    /// The one line that sets the harness up for Reef, as the quickstart
+    /// documents it.
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+    install: &'static str,
 }
 
 /// Every agent Reef writes files for besides `AGENTS.md`. Recognizing
 /// another agent is a row here; writing for a new one also needs its
 /// [`Harness`] variants and an `--agents` value.
-const SIGNS: &[Sign] = &[
+pub(crate) const SIGNS: &[Sign] = &[
     Sign {
         agent: Agent::ClaudeCode,
         names: &["CLAUDE.md", ".claude/"],
@@ -133,21 +271,67 @@ const SIGNS: &[Sign] = &[
             Harness::ClaudeSkill { user: false },
             Harness::McpJson,
         ],
-        user: Some(USER_SKILL),
+        home: &[Place::Dot(".claude")],
+        // Its user MCP configuration is `~/.claude.json`, a state file
+        // Reef does not edit; the plugin is the user-level route.
+        user: &[Harness::ClaudeSkill { user: true }],
+        package: Some(Package::ClaudeCode),
+        install: "claude plugin install reef --marketplace reef-vcs/reef",
     },
     Sign {
         agent: Agent::Cursor,
         names: &[".cursor/"],
         env: None,
         harnesses: &[Harness::CursorRule],
-        user: None,
+        home: &[],
+        user: &[],
+        package: None,
+        install: "reef init --agents cursor",
+    },
+    Sign {
+        agent: Agent::Codex,
+        names: &[".codex/"],
+        // None documented.
+        env: None,
+        harnesses: &[
+            Harness::AgentSkill { user: false },
+            Harness::CodexConfig { user: false },
+        ],
+        home: &[Place::CodexHome],
+        user: &[
+            Harness::AgentSkill { user: true },
+            Harness::CodexConfig { user: true },
+        ],
+        package: Some(Package::AgentPlugins),
+        install: "codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef",
+    },
+    Sign {
+        agent: Agent::Opencode,
+        names: &["opencode.json", "opencode.jsonc", ".opencode/"],
+        // Set on its own process at startup, so its shells inherit it
+        // (opencode-ai 1.19.5); undocumented.
+        env: Some(("OPENCODE", "1")),
+        harnesses: &[
+            Harness::AgentSkill { user: false },
+            Harness::OpencodeJson { user: false },
+        ],
+        home: &[Place::Config("opencode")],
+        user: &[
+            Harness::AgentSkill { user: true },
+            Harness::OpencodeJson { user: true },
+        ],
+        // Its plugins are npm modules that cannot be shown to declare an
+        // MCP server; `reef init` writes both files instead.
+        package: None,
+        install: "reef init --agents opencode --user",
     },
 ];
 
 /// The harnesses `auto` writes: `AGENTS.md` always, then each agent's when
-/// the repository has its files at `root`, `user` asks for the agent's
-/// user-level file, or the agent is `running` `reef init`.
-pub(crate) fn detect(root: &Path, user: bool, running: &[Agent]) -> Vec<Harness> {
+/// the repository has its files at `root` or the agent is `running` `reef
+/// init`; with `user`, also each agent's user-level files when `home` shows
+/// it is used on this machine, which turns its repository files on too.
+pub(crate) fn detect(root: &Path, user: Option<&Home>, running: &[Agent]) -> Vec<Harness> {
     let mut found = vec![Harness::AgentsMd];
     for sign in SIGNS {
         let mut present = false;
@@ -164,30 +348,51 @@ pub(crate) fn detect(root: &Path, user: bool, running: &[Agent]) -> Vec<Harness>
                 None => present |= exists,
             }
         }
-        let user = sign.user.filter(|_| user);
         let running = !blocked && running.contains(&sign.agent);
-        if present || user.is_some() || running {
-            found.extend_from_slice(sign.harnesses);
+        let user = user.is_some_and(|home| {
+            !sign.user.is_empty()
+                && (present || running || sign.home.iter().any(|&place| home.has(place)))
+        });
+        if present || user || running {
+            push_unique(&mut found, sign.harnesses);
         }
-        found.extend(user);
+        if user {
+            push_unique(&mut found, sign.user);
+        }
     }
     found
+}
+
+/// Appends each of `harnesses` that `list` does not have yet: the shared
+/// skill is two agents'.
+fn push_unique(list: &mut Vec<Harness>, harnesses: &[Harness]) {
+    for &harness in harnesses {
+        if !list.contains(&harness) {
+            list.push(harness);
+        }
+    }
 }
 
 /// What Reef writes for `agent` in the repository. Every [`Agent`] has a
 /// row in [`SIGNS`] (a test checks), so none is ever empty.
 pub(crate) fn harnesses(agent: Agent) -> &'static [Harness] {
-    SIGNS
-        .iter()
-        .find(|sign| sign.agent == agent)
-        .map_or(&[], |sign| sign.harnesses)
+    sign(agent).map_or(&[], |sign| sign.harnesses)
+}
+
+/// What `--user` adds for `agent`.
+pub(crate) fn user_harnesses(agent: Agent) -> &'static [Harness] {
+    sign(agent).map_or(&[], |sign| sign.user)
+}
+
+fn sign(agent: Agent) -> Option<&'static Sign> {
+    SIGNS.iter().find(|sign| sign.agent == agent)
 }
 
 /// Every harness in the repository: `AGENTS.md`, then each agent's.
 pub(crate) fn all() -> Vec<Harness> {
     let mut all = vec![Harness::AgentsMd];
     for sign in SIGNS {
-        all.extend_from_slice(sign.harnesses);
+        push_unique(&mut all, sign.harnesses);
     }
     all
 }
@@ -211,6 +416,11 @@ pub(crate) fn running(var: impl Fn(&str) -> Option<OsString>) -> Vec<Agent> {
 pub(crate) fn render(harness: Harness, guide: &Guide<'_>, version: &str) -> String {
     let preface =
         format!("Written by `reef init` (reef {version}); `reef guide` prints the current guide.");
+    render_with(harness, guide, &preface)
+}
+
+/// [`render`] with another first line, such as a plugin's.
+pub(crate) fn render_with(harness: Harness, guide: &Guide<'_>, preface: &str) -> String {
     let frontmatter = match harness {
         Harness::AgentsMd | Harness::ClaudeMd => {
             return format!(
@@ -218,12 +428,22 @@ pub(crate) fn render(harness: Harness, guide: &Guide<'_>, version: &str) -> Stri
                 guide.short.trim_end()
             );
         }
-        Harness::ClaudeSkill { .. } => format!("name: reef\ndescription: {DESCRIPTION}"),
-        Harness::CursorRule => format!("description: {DESCRIPTION}\nalwaysApply: false"),
-        Harness::McpJson => return mcp_json(None),
+        Harness::ClaudeSkill { .. } => {
+            format!("name: reef\ndescription: {DESCRIPTION}\n{GENERATED_BY}")
+        }
+        Harness::CursorRule => {
+            format!("description: {DESCRIPTION}\nalwaysApply: false\n{GENERATED_BY}")
+        }
+        // The standard's keys only; others go under `metadata`.
+        Harness::AgentSkill { .. } => {
+            format!("name: reef\ndescription: {DESCRIPTION}\nmetadata:\n  {GENERATED_BY}")
+        }
+        Harness::McpJson => return JsonTarget::MCP_JSON.render(None),
+        Harness::OpencodeJson { .. } => return JsonTarget::OPENCODE.render(None),
+        Harness::CodexConfig { .. } => return codex_toml(toml_edit::DocumentMut::new()),
     };
     format!(
-        "---\n{frontmatter}\n{GENERATED_BY}\n---\n\n{preface}\n\n{}\n",
+        "---\n{frontmatter}\n---\n\n{preface}\n\n{}\n",
         guide.long.trim_end()
     )
 }
@@ -374,10 +594,10 @@ pub(crate) struct FileError {
 
 /// What writing `harnesses` under `root` (canonical) does to each file,
 /// in the order given. Reads files and writes nothing. `home` is where the
-/// user-level skill goes; a harness that needs it is skipped without one.
+/// user-level files go; a harness that needs it is skipped without one.
 pub(crate) fn plan(
     root: &Path,
-    home: Option<&Path>,
+    home: Option<&Home>,
     harnesses: &[Harness],
     guide: &Guide<'_>,
     version: &str,
@@ -386,7 +606,7 @@ pub(crate) fn plan(
     for &harness in harnesses {
         let Some(path) = harness.path(root, home) else {
             plan.push(FileAction {
-                path: PathBuf::from("~/.claude/skills/reef/SKILL.md"),
+                path: PathBuf::from(harness.home_path()),
                 target: PathBuf::new(),
                 action: Action::Skip("HOME is not set".to_owned()),
                 contents: None,
@@ -403,7 +623,7 @@ pub(crate) fn plan(
             // A link (the file's or a directory's) may point anywhere; a
             // repository's files stay in it. The home directory's links are
             // the user's own.
-            Ok(target) if harness != USER_SKILL && !target.starts_with(root) => {
+            Ok(target) if !harness.is_user() && !target.starts_with(root) => {
                 plan.push(skip(path, "symbolic link out of the repository".to_owned()));
                 continue;
             }
@@ -417,6 +637,27 @@ pub(crate) fn plan(
             let why = format!("same file as {}", display(&same.path, root));
             plan.push(skip(path, why));
             continue;
+        }
+        if let Harness::OpencodeJson { .. } = harness {
+            // opencode reads `opencode.jsonc` first, and Reef does not
+            // rewrite a file with comments in it.
+            let jsonc = path.with_extension("jsonc");
+            if fs::symlink_metadata(&jsonc).is_ok() {
+                let entry = Json::Object(IndexMap::from([(
+                    "mcp".to_owned(),
+                    Json::Object(IndexMap::from([(
+                        MCP_SERVER.to_owned(),
+                        mcp_entry(McpShape::Opencode),
+                    )])),
+                )]));
+                let entry = serde_json::to_string(&entry).unwrap_or_default();
+                let why = format!(
+                    "{}: comments are not rewritten; add {entry} by hand",
+                    display(&jsonc, root)
+                );
+                plan.push(skip(path, why));
+                continue;
+            }
         }
         let existing = match fs::read(&target) {
             Ok(bytes) => {
@@ -438,6 +679,10 @@ pub(crate) fn plan(
         let rendered = render(harness, guide, version);
         let (action, contents) = if harness == Harness::McpJson {
             merge_mcp_json(existing.as_deref())
+        } else if let Harness::OpencodeJson { .. } = harness {
+            JsonTarget::OPENCODE.merge(existing.as_deref())
+        } else if let Harness::CodexConfig { .. } = harness {
+            merge_codex_toml(existing.as_deref())
         } else if harness.is_whole_file() {
             whole_file(existing.as_deref(), &rendered)
         } else {
@@ -485,15 +730,65 @@ fn whole_file(existing: Option<&str>, rendered: &str) -> (Action, Option<String>
     }
 }
 
-/// The key of Reef's server under `mcpServers`.
+/// The key of Reef's server among a harness's servers.
 const MCP_SERVER: &str = "reef";
 
-/// Reef's server entry: `reef mcp` from `PATH`, as every installer puts it
-/// there. No absolute path, which would bake one machine's layout into a
-/// committed file; no `env`, since `REEF_AGENT` is the harness's to set;
-/// and no version, so a new `reef` does not make the file stale.
-pub(crate) fn render_mcp_entry() -> serde_json::Value {
-    serde_json::json!({"type": "stdio", "command": "reef", "args": ["mcp"]})
+/// The forms a harness's configuration gives an MCP server in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum McpShape {
+    /// `.mcp.json`'s `mcpServers` entry, which the Claude Code plugin and
+    /// the Agent Plugins `mcp.json` use too.
+    McpJson,
+    /// opencode's `mcp` entry: the command and its arguments in one array.
+    Opencode,
+    /// Codex's `[mcp_servers.reef]` table.
+    CodexToml,
+    /// An MCPB bundle manifest's `mcp_config`: the `reef` beside it.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "rendered by the packages' tests")
+    )]
+    Mcpb,
+}
+
+/// Reef's server entry in `shape`: `reef mcp` from `PATH`, as every
+/// installer puts it there (a bundle's own `reef` for MCPB). No absolute
+/// path, which would bake one machine's layout into a committed file; no
+/// `env`, since `REEF_AGENT` is the harness's to set; and no version, so a
+/// new `reef` does not make the file stale.
+pub(crate) fn render_mcp_entry(shape: McpShape) -> serde_json::Value {
+    serde_json::to_value(mcp_entry(shape)).unwrap_or_default()
+}
+
+/// [`render_mcp_entry`] in the order a person writes it.
+fn mcp_entry(shape: McpShape) -> Json {
+    let text = |text: &str| Json::String(text.to_owned());
+    let object = |pairs: Vec<(&str, Json)>| {
+        Json::Object(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        )
+    };
+    let args = || Json::Array(vec![text("mcp")]);
+    match shape {
+        McpShape::McpJson => object(vec![
+            ("type", text("stdio")),
+            ("command", text("reef")),
+            ("args", args()),
+        ]),
+        McpShape::Opencode => object(vec![
+            ("type", text("local")),
+            ("command", Json::Array(vec![text("reef"), text("mcp")])),
+            ("enabled", Json::Bool(true)),
+        ]),
+        McpShape::CodexToml => object(vec![("command", text("reef")), ("args", args())]),
+        McpShape::Mcpb => object(vec![
+            ("command", text("${__dirname}/reef")),
+            ("args", args()),
+        ]),
+    }
 }
 
 /// A JSON value whose objects keep their keys' order, so a merge changes
@@ -512,80 +807,240 @@ enum Json {
     Object(IndexMap<String, Json>),
 }
 
-/// `.mcp.json` as Reef writes it: `existing` with Reef's entry added, two-
-/// space JSON with a final newline; a new file with only the entry when
-/// `existing` is `None`.
-fn mcp_json(existing: Option<IndexMap<String, Json>>) -> String {
-    let mut file = existing.unwrap_or_default();
-    // In the order a person writes it; `render_mcp_entry` is for comparing.
-    let text = |text: &str| Json::String(text.to_owned());
-    let entry = Json::Object(IndexMap::from([
-        ("type".to_owned(), text("stdio")),
-        ("command".to_owned(), text("reef")),
-        ("args".to_owned(), Json::Array(vec![text("mcp")])),
-    ]));
-    match file
-        .entry("mcpServers".to_owned())
-        .or_insert_with(|| Json::Object(IndexMap::new()))
-    {
-        Json::Object(servers) => {
-            servers.insert(MCP_SERVER.to_owned(), entry);
-        }
-        other => *other = Json::Object(IndexMap::from([(MCP_SERVER.to_owned(), entry)])),
-    }
-    let mut text = serde_json::to_string_pretty(&file).unwrap_or_default();
-    text.push('\n');
-    text
+/// A JSON file whose one key Reef owns: an MCP server among the file's
+/// servers.
+#[derive(Clone, Copy, Debug)]
+struct JsonTarget {
+    /// The key that holds the servers.
+    servers: &'static str,
+    /// The shape of Reef's entry there.
+    shape: McpShape,
+    /// The `$schema` a new file starts with.
+    schema: Option<&'static str>,
 }
 
-/// The action for `.mcp.json`: Reef owns `mcpServers.reef` and nothing
-/// else. A missing (or blank) file is written with only Reef's entry; a
-/// file without it gets it added after the other servers, everything else
-/// kept in order; an entry that differs from Reef's was changed by someone
-/// (an `--agent`, an `env`) and is kept, as is a file that is not a JSON
-/// object. A CRLF file stays CRLF.
+impl JsonTarget {
+    /// `.mcp.json`'s `mcpServers.reef`.
+    const MCP_JSON: JsonTarget = JsonTarget {
+        servers: "mcpServers",
+        shape: McpShape::McpJson,
+        schema: None,
+    };
+
+    /// `opencode.json`'s `mcp.reef`.
+    const OPENCODE: JsonTarget = JsonTarget {
+        servers: "mcp",
+        shape: McpShape::Opencode,
+        schema: Some("https://opencode.ai/config.json"),
+    };
+
+    /// The file as Reef writes it: `existing` with Reef's entry added, two-
+    /// space JSON with a final newline; a new file with only the entry
+    /// (after `$schema`) when `existing` is `None`.
+    fn render(self, existing: Option<IndexMap<String, Json>>) -> String {
+        let mut file = existing.unwrap_or_else(|| {
+            self.schema
+                .map(|schema| ("$schema".to_owned(), Json::String(schema.to_owned())))
+                .into_iter()
+                .collect()
+        });
+        let entry = mcp_entry(self.shape);
+        match file
+            .entry(self.servers.to_owned())
+            .or_insert_with(|| Json::Object(IndexMap::new()))
+        {
+            Json::Object(servers) => {
+                servers.insert(MCP_SERVER.to_owned(), entry);
+            }
+            other => *other = Json::Object(IndexMap::from([(MCP_SERVER.to_owned(), entry)])),
+        }
+        let mut text = serde_json::to_string_pretty(&file).unwrap_or_default();
+        text.push('\n');
+        text
+    }
+
+    /// The action for the file: Reef owns `<servers>.reef` and nothing
+    /// else. A missing (or blank) file is written with only Reef's entry; a
+    /// file without it gets it added after the other servers, everything
+    /// else kept in order; an entry that differs from Reef's was changed by
+    /// someone (an `--agent`, an `env`) and is kept, as is a file that is
+    /// not a JSON object. A CRLF file stays CRLF.
+    fn merge(self, existing: Option<&str>) -> (Action, Option<String>) {
+        let Some(text) = existing.filter(|text| !text.trim().is_empty()) else {
+            return (Action::Write, Some(self.render(None)));
+        };
+        let not_object = || (Action::Skip("not a JSON object".to_owned()), None);
+        let Ok(Json::Object(file)) = serde_json::from_str::<Json>(text) else {
+            return not_object();
+        };
+        match file.get(self.servers) {
+            None => {}
+            Some(Json::Object(servers)) => {
+                if let Some(entry) = servers.get(MCP_SERVER) {
+                    let entry = serde_json::to_value(entry).unwrap_or_default();
+                    return if entry == render_mcp_entry(self.shape) {
+                        (Action::Unchanged, None)
+                    } else {
+                        let why = format!("{}.{MCP_SERVER} is not reef init's", self.servers);
+                        (Action::Skip(why), None)
+                    };
+                }
+            }
+            Some(_) => return not_object(),
+        }
+        (
+            Action::Update,
+            Some(keep_crlf(text, self.render(Some(file)))),
+        )
+    }
+}
+
+/// `written` with CRLF line endings if `existing` has any.
+fn keep_crlf(existing: &str, written: String) -> String {
+    if existing.contains("\r\n") {
+        written.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        written
+    }
+}
+
+/// `.mcp.json`'s action ([`JsonTarget::merge`]).
 fn merge_mcp_json(existing: Option<&str>) -> (Action, Option<String>) {
+    JsonTarget::MCP_JSON.merge(existing)
+}
+
+/// Codex's `config.toml` with Reef's `[mcp_servers.reef]` added to `doc`.
+fn codex_toml(mut doc: toml_edit::DocumentMut) -> String {
+    let Json::Object(entry) = mcp_entry(McpShape::CodexToml) else {
+        return doc.to_string();
+    };
+    let mut table = toml_edit::Table::new();
+    for (key, value) in entry {
+        let value = match value {
+            Json::String(text) => toml_edit::value(text),
+            Json::Array(items) => {
+                let array: toml_edit::Array = items
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        Json::String(text) => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                toml_edit::value(array)
+            }
+            _ => continue,
+        };
+        table.insert(&key, value);
+    }
+    if let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        // Under `[mcp_servers.x]` headers the parent is implicit, and
+        // stays so.
+        servers.insert(MCP_SERVER, toml_edit::Item::Table(table));
+    } else if let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(toml_edit::Item::as_inline_table_mut)
+    {
+        // `mcp_servers = { ... }`: an inline table cannot be extended by a
+        // header, so the entry goes inside it, inline too.
+        servers.insert(
+            MCP_SERVER,
+            toml_edit::Value::InlineTable(table.into_inline_table()),
+        );
+    } else {
+        let mut servers = toml_edit::Table::new();
+        servers.set_implicit(true);
+        servers.insert(MCP_SERVER, toml_edit::Item::Table(table));
+        doc.insert("mcp_servers", toml_edit::Item::Table(servers));
+    }
+    doc.to_string()
+}
+
+/// The action for Codex's `config.toml`: as [`JsonTarget::merge`], for
+/// `[mcp_servers.reef]`, with the file's comments, order and formatting
+/// outside that table kept by `toml_edit`.
+fn merge_codex_toml(existing: Option<&str>) -> (Action, Option<String>) {
     let Some(text) = existing.filter(|text| !text.trim().is_empty()) else {
-        return (Action::Write, Some(mcp_json(None)));
+        return (
+            Action::Write,
+            Some(codex_toml(toml_edit::DocumentMut::new())),
+        );
     };
-    let not_object = || (Action::Skip("not a JSON object".to_owned()), None);
-    let Ok(Json::Object(file)) = serde_json::from_str::<Json>(text) else {
-        return not_object();
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return (Action::Skip("not TOML".to_owned()), None);
     };
-    match file.get("mcpServers") {
+    match doc.get("mcp_servers") {
         None => {}
-        Some(Json::Object(servers)) => {
+        Some(servers) if servers.is_table_like() => {
             if let Some(entry) = servers.get(MCP_SERVER) {
-                let entry = serde_json::to_value(entry).unwrap_or_default();
-                return if entry == render_mcp_entry() {
+                return if codex_entry(entry) == Some(render_mcp_entry(McpShape::CodexToml)) {
                     (Action::Unchanged, None)
                 } else {
-                    (
-                        Action::Skip(format!("mcpServers.{MCP_SERVER} is not reef init's")),
-                        None,
-                    )
+                    let why = format!("mcp_servers.{MCP_SERVER} is not reef init's");
+                    (Action::Skip(why), None)
                 };
             }
         }
-        Some(_) => return not_object(),
+        Some(_) => return (Action::Skip("mcp_servers is not a table".to_owned()), None),
     }
-    let merged = mcp_json(Some(file));
-    let merged = if existing.is_some_and(|text| text.contains("\r\n")) {
-        merged.replace('\n', "\r\n")
-    } else {
-        merged
+    // Appended at the end, so the file's text before it is kept byte for
+    // byte; a file that defines `mcp_servers` inline or by dotted keys
+    // cannot take a `[mcp_servers.reef]` header, and `toml_edit` places
+    // the entry instead.
+    let mut appended = text.to_owned();
+    if !appended.ends_with('\n') {
+        appended.push('\n');
+    }
+    appended.push('\n');
+    appended.push_str(&codex_toml(toml_edit::DocumentMut::new()));
+    let added = |text: &str| {
+        text.parse::<toml_edit::DocumentMut>().is_ok_and(|doc| {
+            doc.get("mcp_servers")
+                .and_then(|servers| servers.get(MCP_SERVER))
+                .and_then(codex_entry)
+                == Some(render_mcp_entry(McpShape::CodexToml))
+        })
     };
-    (Action::Update, Some(merged))
+    let written = if added(&appended) {
+        appended
+    } else {
+        codex_toml(doc)
+    };
+    (Action::Update, Some(keep_crlf(text, written)))
+}
+
+/// A `config.toml` server entry as JSON, to compare with Reef's; None when
+/// it holds something JSON cannot say the same way.
+fn codex_entry(item: &toml_edit::Item) -> Option<serde_json::Value> {
+    let table = item.as_table_like()?;
+    let mut object = serde_json::Map::new();
+    for (key, value) in table.iter() {
+        let value = match value.as_value()? {
+            toml_edit::Value::String(text) => serde_json::Value::from(text.value().as_str()),
+            toml_edit::Value::Array(items) => items
+                .iter()
+                .map(|item| item.as_str().map(serde_json::Value::from))
+                .collect::<Option<Vec<_>>>()?
+                .into(),
+            toml_edit::Value::Boolean(flag) => serde_json::Value::from(*flag.value()),
+            _ => return None,
+        };
+        object.insert(key.to_owned(), value);
+    }
+    Some(object.into())
 }
 
 /// Whether `text` opens with YAML frontmatter that has the
-/// [`GENERATED_BY`] line.
+/// [`GENERATED_BY`] line, at the top level or (in an Agent Skills file)
+/// under `metadata`.
 fn generated_by_reef(text: &str) -> bool {
     let mut lines = text.lines().map(str::trim_end);
     lines.next() == Some("---")
         && lines
             .take_while(|line| *line != "---")
-            .any(|line| line == GENERATED_BY)
+            .any(|line| line.trim_start() == GENERATED_BY)
 }
 
 /// The file to write for `path`, canonical: what it links to if it is a
@@ -888,25 +1343,349 @@ mod tests {
         );
     }
 
+    /// A fake home directory: `HOME` only, no agent variables.
+    fn home(dir: &Path) -> Home {
+        Home::from_env(|name| (name == "HOME").then(|| dir.as_os_str().to_owned())).unwrap()
+    }
+
     #[test]
     fn detection_is_by_files_at_the_root() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        let root = dir.path().join("repo");
+        let root = root.as_path();
+        fs::create_dir(root).unwrap();
+        let home = home(&dir.path().join("home"));
+        assert_eq!(detect(root, None, &[]), [Harness::AgentsMd]);
+        // No agent's directory in the home: `--user` adds nothing.
+        assert_eq!(detect(root, Some(&home), &[]), [Harness::AgentsMd]);
         let claude = [&[Harness::AgentsMd], harnesses(Agent::ClaudeCode)].concat();
-        assert_eq!(detect(root, true, &[])[..4], claude);
-        assert_eq!(detect(root, true, &[]).len(), 5);
-        assert_eq!(
-            detect(root, true, &[])[4],
-            Harness::ClaudeSkill { user: true }
-        );
         fs::write(root.join("CLAUDE.md"), "").unwrap();
-        assert_eq!(detect(root, false, &[]), claude);
+        assert_eq!(detect(root, None, &[]), claude);
+        // The repository shows Claude Code, so `--user` writes its skill.
+        assert_eq!(
+            detect(root, Some(&home), &[]),
+            [&claude[..], &[Harness::ClaudeSkill { user: true }]].concat()
+        );
         fs::remove_file(root.join("CLAUDE.md")).unwrap();
         fs::create_dir(root.join(".claude")).unwrap();
         fs::create_dir(root.join(".cursor")).unwrap();
-        assert_eq!(detect(root, false, &[]).last(), Some(&Harness::CursorRule));
-        assert_eq!(detect(root, false, &[]).len(), 5);
+        assert_eq!(detect(root, None, &[]).last(), Some(&Harness::CursorRule));
+        assert_eq!(detect(root, None, &[]).len(), 5);
+    }
+
+    /// Test 1: Codex by `.codex/`, opencode by any of its three names, and
+    /// the skill they share written once.
+    #[test]
+    fn codex_and_opencode_are_detected_by_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let codex = [&[Harness::AgentsMd], harnesses(Agent::Codex)].concat();
+        fs::create_dir(root.join(".codex")).unwrap();
+        assert_eq!(detect(root, None, &[]), codex);
+        for name in ["opencode.json", "opencode.jsonc", ".opencode"] {
+            let other = tempfile::tempdir().unwrap();
+            if name.starts_with('.') {
+                fs::create_dir(other.path().join(name)).unwrap();
+            } else {
+                fs::write(other.path().join(name), "{}").unwrap();
+            }
+            assert_eq!(
+                detect(other.path(), None, &[]),
+                [&[Harness::AgentsMd], harnesses(Agent::Opencode)].concat(),
+                "{name}"
+            );
+        }
+        fs::write(root.join("opencode.json"), "{}").unwrap();
+        let both = detect(root, None, &[]);
+        assert_eq!(
+            both,
+            [
+                Harness::AgentsMd,
+                Harness::AgentSkill { user: false },
+                Harness::CodexConfig { user: false },
+                Harness::OpencodeJson { user: false },
+            ]
+        );
+        // A file where `.codex/` goes blocks the row, as for the others.
+        let blocked = tempfile::tempdir().unwrap();
+        fs::write(blocked.path().join(".codex"), "").unwrap();
+        assert_eq!(detect(blocked.path(), None, &[]), [Harness::AgentsMd]);
+        // `all` lists the new harnesses after the existing ones, once each.
+        let all = all();
+        let at = |h: Harness| all.iter().position(|&x| x == h).unwrap();
+        assert!(at(Harness::McpJson) < at(Harness::AgentSkill { user: false }));
+        assert!(at(Harness::CursorRule) < at(Harness::CodexConfig { user: false }));
+        assert_eq!(
+            all.iter()
+                .filter(|&&h| h == Harness::AgentSkill { user: false })
+                .count(),
+            1
+        );
+    }
+
+    /// Test 2: `auto --user` writes the user-level files of the agents
+    /// whose home directories exist, honoring their variables.
+    #[test]
+    fn user_level_follows_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let home_dir = dir.path().join("home");
+        fs::create_dir_all(home_dir.join(".codex")).unwrap();
+        let home = home(&home_dir);
+        let found = detect(&root, Some(&home), &[]);
+        for harness in user_harnesses(Agent::Codex) {
+            assert!(found.contains(harness), "{harness:?} in {found:?}");
+        }
+        assert!(
+            !found.contains(&Harness::ClaudeSkill { user: true }),
+            "{found:?}"
+        );
+        assert!(
+            !found.contains(&Harness::OpencodeJson { user: true }),
+            "{found:?}"
+        );
+        fs::remove_dir(home_dir.join(".codex")).unwrap();
+        fs::create_dir(home_dir.join(".claude")).unwrap();
+        let found = detect(&root, Some(&home), &[]);
+        assert!(
+            found.contains(&Harness::ClaudeSkill { user: true }),
+            "{found:?}"
+        );
+        assert!(
+            !found.contains(&Harness::CodexConfig { user: true }),
+            "{found:?}"
+        );
+        // The variables move the agents' directories.
+        let codex = dir.path().join("codex-home");
+        let config = dir.path().join("xdg");
+        fs::create_dir_all(config.join("opencode")).unwrap();
+        fs::create_dir(&codex).unwrap();
+        let moved = Home::from_env(|name| match name {
+            "HOME" => Some(home_dir.clone().into_os_string()),
+            "CODEX_HOME" => Some(codex.clone().into_os_string()),
+            "XDG_CONFIG_HOME" => Some(config.clone().into_os_string()),
+            _ => None,
+        })
+        .unwrap();
+        let found = detect(&root, Some(&moved), &[]);
+        assert!(
+            found.contains(&Harness::CodexConfig { user: true }),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&Harness::OpencodeJson { user: true }),
+            "{found:?}"
+        );
+        assert_eq!(
+            Harness::CodexConfig { user: true }.path(&root, Some(&moved)),
+            Some(codex.join("config.toml"))
+        );
+        assert_eq!(
+            Harness::OpencodeJson { user: true }.path(&root, Some(&moved)),
+            Some(config.join("opencode/opencode.json"))
+        );
+        // A relative variable counts as unset.
+        let relative = Home::from_env(|name| match name {
+            "HOME" => Some(home_dir.clone().into_os_string()),
+            "CODEX_HOME" => Some("rel".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            Harness::CodexConfig { user: true }.path(&root, Some(&relative)),
+            Some(home_dir.join(".codex/config.toml"))
+        );
+        assert_eq!(Home::from_env(|_| None), None);
+    }
+
+    /// Test 3.
+    #[test]
+    fn codex_config_merge() {
+        let (action, written) = merge_codex_toml(None);
+        assert_eq!(action, Action::Write);
+        let written = written.unwrap();
+        assert_eq!(
+            written,
+            "[mcp_servers.reef]\ncommand = \"reef\"\nargs = [\"mcp\"]\n"
+        );
+        assert_eq!(merge_codex_toml(Some(&written)), (Action::Unchanged, None));
+        // Comments, other servers and other tables are kept byte for byte.
+        let theirs = "# mine\nmodel = \"o3\" # inline\n\n[mcp_servers.other]\ncommand = \"x\"\n\n[profiles.a]\nmodel = \"b\"\n";
+        let (action, merged) = merge_codex_toml(Some(theirs));
+        assert_eq!(action, Action::Update);
+        let merged = merged.unwrap();
+        assert!(merged.starts_with(theirs), "{merged}");
+        assert_eq!(merge_codex_toml(Some(&merged)), (Action::Unchanged, None));
+        // An explicit `[mcp_servers]`, an inline table, dotted keys and a
+        // header each keep the other server.
+        for file in [
+            "[mcp_servers]\nother = { command = \"x\" }\n",
+            "mcp_servers = { other = { command = \"x\" } }\n",
+            "mcp_servers.other.command = \"x\"\n",
+            "[mcp_servers.other]\ncommand = \"x\"\n",
+        ] {
+            let (action, merged) = merge_codex_toml(Some(file));
+            assert_eq!(action, Action::Update, "{file}");
+            let merged = merged.unwrap();
+            let doc: toml_edit::DocumentMut = merged.parse().unwrap();
+            assert_eq!(
+                doc["mcp_servers"]["other"]["command"].as_str(),
+                Some("x"),
+                "{file} became {merged}"
+            );
+            assert_eq!(
+                merge_codex_toml(Some(&merged)),
+                (Action::Unchanged, None),
+                "{merged}"
+            );
+        }
+        // Changed by someone: kept, and `--check` does not call it stale.
+        let changed = "[mcp_servers.reef]\ncommand = \"reef\"\nargs = [\"mcp\"]\nenv = { REEF_AGENT = \"a\" }\n";
+        assert_eq!(
+            merge_codex_toml(Some(changed)).0,
+            Action::Skip("mcp_servers.reef is not reef init's".to_owned())
+        );
+        assert_eq!(
+            merge_codex_toml(Some("[x")).0,
+            Action::Skip("not TOML".to_owned())
+        );
+        assert_eq!(
+            merge_codex_toml(Some("mcp_servers = 1\n")).0,
+            Action::Skip("mcp_servers is not a table".to_owned())
+        );
+        let (_, crlf) = merge_codex_toml(Some("model = \"o3\"\r\n"));
+        let crlf = crlf.unwrap();
+        assert_eq!(
+            crlf.matches('\n').count(),
+            crlf.matches("\r\n").count(),
+            "{crlf:?}"
+        );
+        assert_eq!(merge_codex_toml(Some(&crlf)), (Action::Unchanged, None));
+    }
+
+    /// Test 4.
+    #[test]
+    fn opencode_json_merge() {
+        let (action, written) = JsonTarget::OPENCODE.merge(None);
+        assert_eq!(action, Action::Write);
+        let written = written.unwrap();
+        assert!(
+            written
+                .starts_with("{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\""),
+            "{written}"
+        );
+        assert_eq!(
+            JsonTarget::OPENCODE.merge(Some(&written)),
+            (Action::Unchanged, None)
+        );
+        let (action, merged) = JsonTarget::OPENCODE.merge(Some(
+            r#"{"model": "x", "mcp": {"other": {"type": "remote"}}}"#,
+        ));
+        assert_eq!(action, Action::Update);
+        let merged = merged.unwrap();
+        assert!(merged.find("\"other\"").unwrap() < merged.find("\"reef\"").unwrap());
+        assert!(
+            !merged.contains("$schema"),
+            "an existing file gains no $schema"
+        );
+        assert_eq!(
+            JsonTarget::OPENCODE
+                .merge(Some(
+                    r#"{"mcp": {"reef": {"type": "local", "command": ["reef"]}}}"#
+                ))
+                .0,
+            Action::Skip("mcp.reef is not reef init's".to_owned())
+        );
+        // `opencode.jsonc` is not rewritten; the reason carries the entry.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("opencode.jsonc"), "// mine\n{}\n").unwrap();
+        let plan = plan(
+            &root,
+            None,
+            &[Harness::OpencodeJson { user: false }],
+            &GUIDE,
+            "1",
+        )
+        .unwrap();
+        let Action::Skip(why) = &plan[0].action else {
+            panic!("{plan:?}");
+        };
+        assert!(
+            why.starts_with("opencode.jsonc: comments are not rewritten"),
+            "{why}"
+        );
+        assert!(
+            why.contains(
+                r#"{"mcp":{"reef":{"type":"local","command":["reef","mcp"],"enabled":true}}}"#
+            ),
+            "{why}"
+        );
+    }
+
+    /// Test 5.
+    #[test]
+    fn agent_skill_follows_the_standard() {
+        let skill = render(Harness::AgentSkill { user: false }, &GUIDE, "1.2.3");
+        let frontmatter: Vec<&str> = skill
+            .lines()
+            .skip(1)
+            .take_while(|line| *line != "---")
+            .collect();
+        assert_eq!(frontmatter[0], "name: reef");
+        assert_eq!(frontmatter[1], format!("description: {DESCRIPTION}"));
+        assert_eq!(frontmatter[2..], ["metadata:", "  generated-by: reef init"]);
+        assert!(DESCRIPTION.len() <= 1024);
+        assert!(skill.ends_with("Long form.\n"), "{skill}");
+        assert!(generated_by_reef(&skill));
+        // The older, top-level form is Reef's too.
+        assert!(generated_by_reef(&render(
+            Harness::ClaudeSkill { user: false },
+            &GUIDE,
+            "1"
+        )));
+        assert_eq!(whole_file(Some(&skill), &skill).0, Action::Unchanged);
+    }
+
+    /// Test 6.
+    #[test]
+    fn mcp_shapes_agree() {
+        for shape in [
+            McpShape::McpJson,
+            McpShape::Opencode,
+            McpShape::CodexToml,
+            McpShape::Mcpb,
+        ] {
+            let entry = render_mcp_entry(shape);
+            let words: Vec<&str> = match &entry["command"] {
+                serde_json::Value::Array(words) => {
+                    words.iter().map(|word| word.as_str().unwrap()).collect()
+                }
+                command => std::iter::once(command.as_str().unwrap())
+                    .chain(
+                        entry["args"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|a| a.as_str().unwrap()),
+                    )
+                    .collect(),
+            };
+            let program = if shape == McpShape::Mcpb {
+                "${__dirname}/reef"
+            } else {
+                "reef"
+            };
+            assert_eq!(words, [program, "mcp"], "{shape:?}");
+        }
+        // The TOML form parses, and reads back as the same entry.
+        let toml = render(Harness::CodexConfig { user: false }, &GUIDE, "1");
+        let doc: toml_edit::DocumentMut = toml.parse().unwrap();
+        assert_eq!(
+            codex_entry(&doc["mcp_servers"]["reef"]),
+            Some(render_mcp_entry(McpShape::CodexToml))
+        );
     }
 
     #[test]
@@ -915,24 +1694,30 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".cursor"), "").unwrap();
         fs::write(root.join(".claude"), "").unwrap();
-        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        assert_eq!(detect(root, None, &[]), [Harness::AgentsMd]);
         fs::remove_file(root.join(".cursor")).unwrap();
         std::os::unix::fs::symlink(root.join("nowhere"), root.join(".cursor")).unwrap();
-        assert_eq!(detect(root, false, &[]), [Harness::AgentsMd]);
+        assert_eq!(detect(root, None, &[]), [Harness::AgentsMd]);
         assert_eq!(all()[0], Harness::AgentsMd);
-        assert_eq!(
-            all().len(),
-            1 + SIGNS.iter().map(|s| s.harnesses.len()).sum::<usize>()
-        );
+        let mut unique: Vec<Harness> = Vec::new();
+        for sign in SIGNS {
+            push_unique(&mut unique, sign.harnesses);
+        }
+        assert_eq!(all().len(), 1 + unique.len());
         assert_eq!(harnesses(Agent::Cursor), [Harness::CursorRule]);
     }
 
     /// Every agent, by a match that stops compiling when one is added.
-    fn every_agent() -> [Agent; 2] {
-        let every = [Agent::ClaudeCode, Agent::Cursor];
+    fn every_agent() -> [Agent; 4] {
+        let every = [
+            Agent::ClaudeCode,
+            Agent::Cursor,
+            Agent::Codex,
+            Agent::Opencode,
+        ];
         for agent in every {
             match agent {
-                Agent::ClaudeCode | Agent::Cursor => {}
+                Agent::ClaudeCode | Agent::Cursor | Agent::Codex | Agent::Opencode => {}
             }
         }
         every
@@ -953,13 +1738,13 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".claude"), "").unwrap();
         assert_eq!(
-            detect(root, false, &[Agent::ClaudeCode]),
+            detect(root, None, &[Agent::ClaudeCode]),
             [Harness::AgentsMd]
         );
         fs::remove_file(root.join(".claude")).unwrap();
         std::os::unix::fs::symlink(root.join("nowhere"), root.join(".claude")).unwrap();
         assert_eq!(
-            detect(root, false, &[Agent::ClaudeCode]),
+            detect(root, None, &[Agent::ClaudeCode]),
             [Harness::AgentsMd]
         );
     }
@@ -968,9 +1753,9 @@ mod tests {
     fn a_running_agent_counts_as_its_files() {
         let dir = tempfile::tempdir().unwrap();
         let claude = [&[Harness::AgentsMd], harnesses(Agent::ClaudeCode)].concat();
-        assert_eq!(detect(dir.path(), false, &[Agent::ClaudeCode]), claude);
+        assert_eq!(detect(dir.path(), None, &[Agent::ClaudeCode]), claude);
         assert_eq!(
-            detect(dir.path(), false, &[Agent::Cursor]),
+            detect(dir.path(), None, &[Agent::Cursor]),
             [Harness::AgentsMd, Harness::CursorRule]
         );
         for sign in SIGNS {
@@ -1050,7 +1835,7 @@ mod tests {
     fn a_dangling_claude_md_link_counts_as_claude() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("AGENTS.md", dir.path().join("CLAUDE.md")).unwrap();
-        assert!(detect(dir.path(), false, &[]).contains(&Harness::ClaudeMd));
+        assert!(detect(dir.path(), None, &[]).contains(&Harness::ClaudeMd));
     }
 
     #[test]

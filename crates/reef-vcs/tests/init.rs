@@ -52,6 +52,10 @@ impl Fixture {
             // Each variable in `agents::SIGNS`, by which an agent says it
             // runs `reef init`.
             "CLAUDECODE",
+            "OPENCODE",
+            // Where agents keep their user-level files.
+            "CODEX_HOME",
+            "XDG_CONFIG_HOME",
         ] {
             command.env_remove(var);
         }
@@ -256,6 +260,9 @@ fn detects_claude_and_cursor() {
             (".claude/skills/reef/SKILL.md", "wrote"),
             (".mcp.json", "wrote"),
             (".cursor/rules/reef.mdc", "unchanged"),
+            (".agents/skills/reef/SKILL.md", "wrote"),
+            (".codex/config.toml", "wrote"),
+            ("opencode.json", "wrote"),
         ])
     );
 }
@@ -579,12 +586,20 @@ fn print_matches_section() {
 #[test]
 fn user_skill() {
     let repo = Fixture::new();
+    // No agent has run on this machine: nothing outside the repository.
+    let value = json(&repo.init(&["--user"]));
+    assert_eq!(
+        actions(&value, &repo.root),
+        pairs(&[("AGENTS.md", "wrote")])
+    );
+    // Claude Code has (`~/.claude`): its skill, and its files here.
+    fs::create_dir(repo.home().join(".claude")).unwrap();
     let value = json(&repo.init(&["--user"]));
     let user = repo.home().join(".claude/skills/reef/SKILL.md");
     assert_eq!(
         actions(&value, &repo.root),
         pairs(&[
-            ("AGENTS.md", "wrote"),
+            ("AGENTS.md", "unchanged"),
             ("CLAUDE.md", "wrote"),
             (".claude/skills/reef/SKILL.md", "wrote"),
             (".mcp.json", "wrote"),
@@ -642,4 +657,86 @@ async fn init_is_non_interactive() {
         .unwrap();
         assert!(status.success(), "{args:?}: {status}");
     }
+}
+
+// R2.25 11: Codex and opencode, detected by their files, get the shared
+// skill and their MCP entries; `--user` with an agent named writes its
+// home files though no home directory shows it.
+#[test]
+fn init_writes_the_new_agents() {
+    let repo = Fixture::new();
+    fs::create_dir(repo.root.join(".codex")).unwrap();
+    repo.write("opencode.json", "{\"model\": \"x\"}\n");
+    let value = json(&repo.init(&[]));
+    assert_eq!(
+        actions(&value, &repo.root),
+        pairs(&[
+            ("AGENTS.md", "wrote"),
+            (".agents/skills/reef/SKILL.md", "wrote"),
+            (".codex/config.toml", "wrote"),
+            ("opencode.json", "updated"),
+        ])
+    );
+    let skill = repo.read(".agents/skills/reef/SKILL.md");
+    assert!(
+        skill.contains("\nmetadata:\n  generated-by: reef init\n"),
+        "{skill}"
+    );
+    assert!(
+        repo.read(".codex/config.toml")
+            .contains("[mcp_servers.reef]")
+    );
+    let opencode: Value = serde_json::from_str(&repo.read("opencode.json")).unwrap();
+    assert_eq!(opencode["model"], "x");
+    assert_eq!(
+        opencode["mcp"]["reef"]["command"],
+        serde_json::json!(["reef", "mcp"])
+    );
+    let again = json(&repo.init(&[]));
+    assert!(
+        actions(&again, &repo.root)
+            .iter()
+            .all(|(_, action)| action == "unchanged"),
+        "{again}"
+    );
+    repo.init(&["--check"]).assert().success();
+    repo.write(
+        ".agents/skills/reef/SKILL.md",
+        "---\ngenerated-by: reef init\n---\nold\n",
+    );
+    let stale = repo.init(&["--check"]);
+    stale.clone().assert().code(3);
+    assert!(
+        stdout(&stale).contains(".agents/skills/reef/SKILL.md (stale)"),
+        "{}",
+        stdout(&stale)
+    );
+
+    // Named with --user: written in the home directory with nothing there.
+    let other = Fixture::new();
+    let value = json(&other.init(&["--agents", "codex,opencode", "--user"]));
+    let home = other.home();
+    let written: Vec<String> = actions(&value, &other.root)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    for path in [
+        home.join(".agents/skills/reef/SKILL.md"),
+        home.join(".codex/config.toml"),
+        home.join(".config/opencode/opencode.json"),
+    ] {
+        assert!(
+            written.contains(&path.display().to_string()),
+            "{path:?} in {written:?}"
+        );
+        assert!(path.exists(), "{path:?}");
+    }
+    assert_eq!(
+        written
+            .iter()
+            .filter(|path| path.ends_with(".agents/skills/reef/SKILL.md"))
+            .count(),
+        2,
+        "the shared skill is written once per place: {written:?}"
+    );
 }

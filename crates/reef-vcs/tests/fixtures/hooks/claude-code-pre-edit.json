@@ -1,0 +1,15 @@
+{
+  "session_id": "__SESSION__",
+  "transcript_path": "/home/user/.claude/projects/example/__SESSION__.jsonl",
+  "cwd": "__CWD__",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "__FILE__",
+    "old_string": "before",
+    "new_string": "after",
+    "replace_all": false
+  },
+  "tool_use_id": "toolu_01ABCDEFGHIJKLMNOPQRSTUV"
+}
