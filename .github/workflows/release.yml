@@ -256,6 +256,14 @@ jobs:
           curl -fsS "$url" | tee index.html
           grep -qF "$script" index.html
           "$reef" --state-dir "$state" daemon stop
+      # The released binaries serve the API and the real app to another network host over TLS
+      # with a token (R2.08): a daemon and a client in two containers.
+      - name: Remote listener
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          mkdir -p "$RUNNER_TEMP/remote-bin"
+          tar -xzf dist/reef-*-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP/remote-bin" --strip-components 1
+          scripts/test-remote.sh "$RUNNER_TEMP/remote-bin/reef" "$RUNNER_TEMP/remote-bin/reef-daemon" --real-app
       - name: Alpine
         if: runner.os == 'Linux'
         run: docker run --rm -v "$PWD:/src:ro" -w /src alpine:3.22 sh -c 'apk add -q --no-cache bash curl && scripts/test-install.sh --dist dist'

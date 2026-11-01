@@ -242,7 +242,7 @@ impl SymbolService for SymbolsHandler {
         request: Request<IndexSymbolsRequest>,
     ) -> Result<Response<IndexSymbolsResponse>, Status> {
         self.enabled()?;
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
@@ -277,7 +277,7 @@ impl SymbolService for SymbolsHandler {
         request: Request<UploadScipDocumentsRequest>,
     ) -> Result<Response<UploadScipDocumentsResponse>, Status> {
         self.enabled()?;
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         if request.documents.is_empty() || request.documents.len() > MAX_DOCUMENTS {
             return Err(status(SymbolError::InvalidUpload {
@@ -360,7 +360,7 @@ impl SymbolService for SymbolsHandler {
         request: Request<ListSymbolsRequest>,
     ) -> Result<Response<ListSymbolsResponse>, Status> {
         self.enabled()?;
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let page = PageRequest::new(
             LIST_SYMBOLS,

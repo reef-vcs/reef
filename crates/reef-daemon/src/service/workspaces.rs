@@ -347,8 +347,10 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<CreateWorkspaceRequest>,
     ) -> Result<Response<CreateWorkspaceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
+        let remote = super::remote_of(&request).cloned();
         let request = request.into_inner();
+        crate::remote::rules::check_create(remote.as_ref(), &request.path)?;
         let manager = &self.state.manager;
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
         let missing_stores =
@@ -371,6 +373,10 @@ impl WorkspaceService for WorkspacesService {
                 missing_stores,
                 skip_store: None,
                 agent: agent.clone(),
+                remote: remote.map(|caller| reef_lib::jj::oplog::RemoteToken {
+                    id: caller.token_id,
+                    name: caller.token_name,
+                }),
             })
             .await
             .map_err(status)?;
@@ -466,7 +472,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<GetWorkspaceRequest>,
     ) -> Result<Response<GetWorkspaceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -532,13 +538,15 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<ReleaseWorkspaceRequest>,
     ) -> Result<Response<ReleaseWorkspaceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
+        let remote = super::remote_of(&request).cloned();
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
             .resolve_workspace(&request.repo, &request.workspace)
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
+        crate::remote::rules::check_owned(remote.as_ref(), &record)?;
         let workspace_id = record.id.as_hex();
         let released = manager
             .leases()
@@ -592,7 +600,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<SnapshotWorkspaceRequest>,
     ) -> Result<Response<SnapshotWorkspaceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
@@ -635,12 +643,14 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<RenewLeaseRequest>,
     ) -> Result<Response<RenewLeaseResponse>, Status> {
+        let remote = super::remote_of(&request).cloned();
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
             .resolve_workspace(&request.repo, &request.workspace)
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
+        crate::remote::rules::check_owned(remote.as_ref(), &record)?;
         let lease_id: LeaseId = request.lease_id.trim().parse().map_err(status)?;
         // A quiesce holds the database still (R1.18); its resume extends
         // every lease, so the holder loses nothing by waiting.
@@ -659,13 +669,15 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<MoveWorkspaceRequest>,
     ) -> Result<Response<MoveWorkspaceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
+        let remote = super::remote_of(&request).cloned();
         let request = request.into_inner();
         let manager = &self.state.manager;
         let record = manager
             .resolve_workspace(&request.repo, &request.workspace)
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
+        crate::remote::rules::check_owned(remote.as_ref(), &record)?;
         let workspace_id = record.id.as_hex();
         let missing_stores =
             missing_stores(known("missing_stores", request.missing_stores).map_err(status)?);

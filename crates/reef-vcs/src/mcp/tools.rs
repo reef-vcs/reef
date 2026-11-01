@@ -432,6 +432,22 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN; a person runs reef ui",
     ),
     (
+        "/reef.api.v1.RemoteService/CreateRemoteToken",
+        "ADMIN; a person issues tokens",
+    ),
+    (
+        "/reef.api.v1.RemoteService/ListRemoteTokens",
+        "ADMIN; a person issues tokens",
+    ),
+    (
+        "/reef.api.v1.RemoteService/RotateRemoteToken",
+        "ADMIN; a person issues tokens",
+    ),
+    (
+        "/reef.api.v1.RemoteService/RevokeRemoteToken",
+        "ADMIN; a person issues tokens",
+    ),
+    (
         "/reef.api.v1.RepositoryService/GetRepository",
         "get_status names the repository",
     ),

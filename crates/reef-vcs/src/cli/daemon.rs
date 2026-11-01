@@ -28,13 +28,28 @@ pub(crate) struct Args {
     pub(crate) command: DaemonCommand,
 }
 
+impl Args {
+    /// Whether this is `daemon status`, which a remote daemon answers.
+    pub(crate) fn is_status(&self) -> bool {
+        matches!(self.command, DaemonCommand::Status)
+    }
+}
+
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum DaemonCommand {
     /// Run the daemon in this process, in the foreground, until SIGINT or
     /// SIGTERM.
-    Run,
+    Run {
+        /// Serve the remote listener for this run (`[remote]` in config.toml).
+        #[arg(long)]
+        serve_remote: bool,
+    },
     /// Start the daemon in the background unless it is running.
-    Start,
+    Start {
+        /// Serve the remote listener for this run, and wait until it listens.
+        #[arg(long)]
+        serve_remote: bool,
+    },
     /// Stop the running daemon with SIGTERM.
     Stop {
         /// Send SIGKILL if it has not exited after 15 s.
@@ -49,8 +64,8 @@ pub(crate) enum DaemonCommand {
 /// flags as given, before the CLI starts logging or a runtime, so the
 /// daemon keeps this process's pid, stdio, environment and exit code
 /// (R2.05). Returns only if that fails.
-pub(crate) fn run_foreground(global: &Global, out: &Out) -> ExitCode {
-    let error = match exec_daemon(global) {
+pub(crate) fn run_foreground(global: &Global, out: &Out, serve_remote: bool) -> ExitCode {
+    let error = match exec_daemon(global, serve_remote) {
         Ok(never) => match never {},
         Err(error) => error,
     };
@@ -58,10 +73,13 @@ pub(crate) fn run_foreground(global: &Global, out: &Out) -> ExitCode {
     ExitCode::from(error.exit_code())
 }
 
-fn exec_daemon(global: &Global) -> Result<std::convert::Infallible, CliError> {
+fn exec_daemon(global: &Global, serve_remote: bool) -> Result<std::convert::Infallible, CliError> {
     let program = autostart::daemon_binary()?;
     let mut command = Command::new(&program);
     command.arg("--foreground");
+    if serve_remote {
+        command.arg("--remote");
+    }
     for (flag, value) in [
         ("--state-dir", &global.state_dir),
         ("--socket", &global.socket),
@@ -82,14 +100,17 @@ fn exec_daemon(global: &Global) -> Result<std::convert::Infallible, CliError> {
 pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), CliError> {
     match args.command {
         // Dispatched before the runtime starts; see `cli::main`.
-        DaemonCommand::Run => Err(CliError::Usage(
+        DaemonCommand::Run { .. } => Err(CliError::Usage(
             "`daemon run` must be the whole command".to_owned(),
         )),
-        DaemonCommand::Start => start(global, out).await,
+        DaemonCommand::Start { serve_remote } => start(global, out, serve_remote).await,
         DaemonCommand::Stop { force } => stop(global, out, force).await,
         DaemonCommand::Status => {
-            let config = global.load_config()?;
-            let client = connect_only(global, &config.socket).await?;
+            let client = if global.remote.is_some() {
+                super::connect(global, out).await?.client
+            } else {
+                connect_only(global, &global.load_config()?.socket).await?
+            };
             let status = status_of(&client, global).await?;
             if status.api != "v1" {
                 out.note(&format!(
@@ -143,12 +164,30 @@ fn current(status: &Status) -> bool {
 /// speaks another API (a 0.1 daemon, R2.01): an idle one is restarted, and
 /// a busy one is reported as an error. A v1 daemon of another version is
 /// reported with its version; a later call it cannot serve restarts it then.
-async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
+async fn start(global: &Global, out: &Out, serve_remote: bool) -> Result<(), CliError> {
     let config = global.load_config()?;
     let status = match Client::connect(&config.socket).await {
         Ok(client) => {
             let status = status_of(&client, global).await?;
             drop(client);
+            if serve_remote
+                && status
+                    .remote
+                    .as_ref()
+                    .is_none_or(|remote| remote.state == "off")
+            {
+                return Err(CliError::Refused {
+                    kind: ErrorKind::Conflict,
+                    message: format!(
+                        "the daemon (pid {}) is running without the remote listener",
+                        status.pid
+                    ),
+                    advice: Some(reef_error::Advice::run(
+                        "Stop it, then start it with --serve-remote, or set `[remote] enabled = true` in config.toml for every start.",
+                        global.daemon_stop(),
+                    )),
+                });
+            }
             if status.api == "v1" {
                 if status.version == reef_client::VERSION {
                     out.note(&format!("already running (pid {})", status.pid));
@@ -172,16 +211,65 @@ async fn start(global: &Global, out: &Out) -> Result<(), CliError> {
             }
         }
         Err(ClientError::Connect { .. }) => {
-            let (client, pid) = autostart::start(global, &config).await?;
+            let (client, pid) = autostart::start_with(global, &config, serve_remote).await?;
             out.note(&format!("reef: started daemon (pid {pid})"));
             status_of(&client, global).await?
         }
         Err(error) => return Err(CliError::Daemon(error)),
     };
+    let status = if serve_remote {
+        wait_listening(global, &config.socket, out).await?
+    } else {
+        status
+    };
     if out.is_json() {
         out.object(&status)?;
     }
     Ok(())
+}
+
+/// How long `daemon start --serve-remote` waits for the remote listener.
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The daemon's status once its remote listener listens, which `start
+/// --serve-remote` notes; an error naming why if it does not within
+/// [`LISTEN_TIMEOUT`].
+async fn wait_listening(global: &Global, socket: &Path, out: &Out) -> Result<Status, CliError> {
+    let deadline = Instant::now() + LISTEN_TIMEOUT;
+    let client = connect_only(global, socket).await?;
+    loop {
+        let status = status_of(&client, global).await?;
+        let remote = status.remote.clone();
+        match remote {
+            Some(remote) if remote.state == "listening" => {
+                let fingerprint = remote
+                    .certificate
+                    .as_ref()
+                    .map_or_else(String::new, |cert| format!(", {}", cert.fingerprint));
+                out.note(&format!(
+                    "reef: remote listener on {}{fingerprint}",
+                    remote.address
+                ));
+                return Ok(status);
+            }
+            remote if Instant::now() >= deadline => {
+                let why = remote
+                    .and_then(|remote| remote.error)
+                    .unwrap_or_else(|| "it did not start".to_owned());
+                return Err(CliError::Refused {
+                    kind: ErrorKind::Unavailable,
+                    message: format!(
+                        "the remote listener is not listening after {}s: {why}",
+                        LISTEN_TIMEOUT.as_secs()
+                    ),
+                    advice: Some(reef_error::Advice::hint(
+                        "The daemon keeps retrying; `reef daemon status` shows the listener. Free the port or set `[remote] listen`, then stop and start the daemon.",
+                    )),
+                });
+            }
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
 
 /// Stops the daemon and prints that it did.
@@ -228,6 +316,7 @@ pub(crate) async fn restart(
     }
     let config = global.load_config()?;
     let socket = &config.socket;
+    let mut serve_remote = false;
     match Client::connect(socket).await {
         Ok(client) => {
             let status = status_of(&client, global).await?;
@@ -239,13 +328,18 @@ pub(crate) async fn restart(
             if status.active_workspaces > 0 {
                 return Err(old_daemon(status.active_workspaces, incompatible));
             }
+            // A listener `--remote` turned on stays on across the upgrade.
+            serve_remote = status
+                .remote
+                .as_ref()
+                .is_some_and(|remote| remote.enabled_by.as_deref() == Some("flag"));
             stop_daemon(global, false, Some(status.pid)).await?;
         }
         // Gone meanwhile: another CLI stopped it.
         Err(ClientError::Connect { .. }) => {}
         Err(error) => return Err(CliError::Daemon(error)),
     }
-    let (client, pid) = autostart::start(global, &config).await?;
+    let (client, pid) = autostart::start_with(global, &config, serve_remote).await?;
     out.note(&format!(
         "reef: restarted the daemon (reef {daemon_version}, API {daemon_api}, was running)"
     ));

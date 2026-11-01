@@ -314,6 +314,10 @@ pub struct Workspace {
     /// How many paths its change changes as of its last snapshot; only
     /// `ws list` fills it (issue #114).
     pub changed_file_count: Option<u32>,
+    /// The remote token that created it (R2.08); absent when the socket
+    /// did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_token_id: Option<String>,
 }
 
 /// A shared store mounted in a workspace (R1.20).
@@ -372,6 +376,7 @@ impl From<&v1::Workspace> for Workspace {
             local_snapshot_count: ws.local_snapshot_count,
             stores: ws.stores.iter().map(MountedStore::from).collect(),
             changed_file_count: ws.changed_file_count,
+            remote_token_id: text(&ws.remote_token_id),
         }
     }
 }
@@ -659,6 +664,161 @@ pub struct Status {
     pub active_workspaces: u32,
     /// Each backend's probe.
     pub backends: Vec<BackendProbe>,
+    /// The remote listener (R2.08); absent from a daemon before it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteListener>,
+}
+
+/// The remote listener, as `daemon status` and `remote show` print it
+/// (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemoteListener {
+    /// `off`, `listening` or `failed`; `starting` before its first bind.
+    pub state: String,
+    /// `config` or `flag`; `null` when off.
+    pub enabled_by: Option<String>,
+    /// The bound address, or `[remote] listen` until bound.
+    pub address: String,
+    /// The names it serves.
+    pub names: Vec<String>,
+    /// The certificate it presents; `null` until loaded.
+    pub certificate: Option<RemoteCertificate>,
+    /// Why it is failed, or why a reload failed.
+    pub error: Option<String>,
+    /// Tokens neither revoked nor expired.
+    pub live_tokens: u32,
+}
+
+/// The remote listener's certificate (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemoteCertificate {
+    /// `generated` or `file`.
+    pub source: String,
+    /// `sha256:<hex>` of its key: what clients pin.
+    pub fingerprint: String,
+    /// When it expires.
+    pub not_after: Option<String>,
+    /// Its subject alternative names.
+    pub subject_names: Vec<String>,
+}
+
+impl From<&v1::RemoteListener> for RemoteListener {
+    fn from(remote: &v1::RemoteListener) -> Self {
+        let state = match v1::RemoteListenerState::try_from(remote.state) {
+            Ok(v1::RemoteListenerState::Off) => "off",
+            Ok(v1::RemoteListenerState::Listening) => "listening",
+            Ok(v1::RemoteListenerState::Failed) => "failed",
+            _ => "starting",
+        };
+        let enabled_by = match v1::RemoteEnabledBy::try_from(remote.enabled_by) {
+            Ok(v1::RemoteEnabledBy::Config) => Some("config"),
+            Ok(v1::RemoteEnabledBy::Flag) => Some("flag"),
+            _ => None,
+        };
+        Self {
+            state: state.to_owned(),
+            enabled_by: enabled_by.map(str::to_owned),
+            address: remote.address.clone(),
+            names: remote.names.clone(),
+            certificate: remote.certificate.as_ref().map(|cert| RemoteCertificate {
+                source: match v1::RemoteCertificateSource::try_from(cert.source) {
+                    Ok(v1::RemoteCertificateSource::File) => "file",
+                    _ => "generated",
+                }
+                .to_owned(),
+                fingerprint: cert.fingerprint.clone(),
+                not_after: time(cert.not_after.as_ref()),
+                subject_names: cert.subject_names.clone(),
+            }),
+            error: text(&remote.error),
+            live_tokens: remote.live_token_count,
+        }
+    }
+}
+
+/// A remote token, without its secret, as `remote token list` prints it
+/// (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemoteToken {
+    /// Its id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// `read` or `write`.
+    pub scope: String,
+    /// `live`, `expired` or `revoked`.
+    pub state: String,
+    /// When it was issued.
+    pub created_at: Option<String>,
+    /// When it expires; `null`: never.
+    pub expires_at: Option<String>,
+    /// When it was last rotated.
+    pub rotated_at: Option<String>,
+    /// Until when the secret before the last rotation works.
+    pub previous_valid_until: Option<String>,
+    /// When it was revoked.
+    pub revoked_at: Option<String>,
+    /// When it was last used, to the minute.
+    pub last_used_at: Option<String>,
+    /// The address it was last used from.
+    pub last_used_from: Option<String>,
+}
+
+impl From<&v1::RemoteToken> for RemoteToken {
+    fn from(token: &v1::RemoteToken) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        let state = if token.revoked_at.is_some() {
+            "revoked"
+        } else if token
+            .expires_at
+            .as_ref()
+            .is_some_and(|at| at.seconds <= now)
+        {
+            "expired"
+        } else {
+            "live"
+        };
+        Self {
+            id: token.id.clone(),
+            name: token.name.clone(),
+            scope: match v1::RemoteScope::try_from(token.scope) {
+                Ok(v1::RemoteScope::Write) => "write",
+                _ => "read",
+            }
+            .to_owned(),
+            state: state.to_owned(),
+            created_at: time(token.created_at.as_ref()),
+            expires_at: time(token.expires_at.as_ref()),
+            rotated_at: time(token.rotated_at.as_ref()),
+            previous_valid_until: time(token.previous_valid_until.as_ref()),
+            revoked_at: time(token.revoked_at.as_ref()),
+            last_used_at: time(token.last_used_at.as_ref()),
+            last_used_from: text(&token.last_used_from),
+        }
+    }
+}
+
+/// A token just created or rotated: printed once (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CreatedRemoteToken {
+    /// The token, without its secret.
+    #[serde(flatten)]
+    pub token_info: RemoteToken,
+    /// The bearer token: a credential, shown once.
+    pub token: String,
+    /// `https://<name>:<port>`, when the listener is on.
+    pub url: Option<String>,
+    /// The web UI with the token in its fragment, when the listener is on:
+    /// a credential.
+    pub web_url: Option<String>,
+    /// What clients pin, when the listener has a certificate.
+    pub fingerprint: Option<String>,
+    /// The command to run on the other machine.
+    pub add: Option<Vec<String>>,
 }
 
 impl From<&v1::GetDaemonStatusResponse> for Status {
@@ -675,6 +835,7 @@ impl From<&v1::GetDaemonStatusResponse> for Status {
             repositories: status.repository_count,
             active_workspaces: status.active_workspace_count,
             backends: status.backends.iter().map(BackendProbe::from).collect(),
+            remote: status.remote.as_ref().map(RemoteListener::from),
         }
     }
 }
@@ -702,6 +863,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
                     filesystem: probe.filesystem.clone(),
                 })
                 .collect(),
+            remote: None,
         }
     }
 }
@@ -1134,6 +1296,19 @@ pub struct Operation {
     pub attributes: BTreeMap<String, String>,
     /// What it changed; `null` unless asked for.
     pub effects: Option<OperationEffects>,
+    /// The remote token whose call caused it (R2.08); absent for calls
+    /// over the socket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteCaller>,
+}
+
+/// Who called through the remote listener (R2.08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemoteCaller {
+    /// The token's id.
+    pub token_id: String,
+    /// Its name then.
+    pub token_name: String,
 }
 
 impl From<&v1::Operation> for Operation {
@@ -1155,6 +1330,10 @@ impl From<&v1::Operation> for Operation {
             agent: text(&op.agent),
             attributes: op.attributes.clone(),
             effects: op.effects.as_ref().map(OperationEffects::from),
+            remote: op.remote.as_ref().map(|remote| RemoteCaller {
+                token_id: remote.token_id.clone(),
+                token_name: remote.token_name.clone(),
+            }),
         }
     }
 }

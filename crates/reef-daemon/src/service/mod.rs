@@ -22,6 +22,7 @@ pub mod maintenance;
 pub mod operations;
 pub mod page;
 pub mod presence;
+pub mod remote;
 pub mod repositories;
 pub mod status;
 pub mod stores;
@@ -74,6 +75,32 @@ pub(crate) fn agent_of(metadata: &MetadataMap) -> Result<Option<String>, Status>
         return Err(status(InvalidAgent));
     }
     Ok(Some(text.to_owned()).filter(|text| !text.is_empty()))
+}
+
+/// The agent a request is for, as the write paths carry it: its
+/// `reef-agent` ([`agent_of`]); through the remote listener (R2.08), that
+/// or the token's name, marked with the token
+/// ([`reef_lib::jj::oplog::RemoteToken::mark`]), so every operation the
+/// call records names the token. Every handler that may record an
+/// operation reads it first.
+pub(crate) fn caller_of<T>(request: &tonic::Request<T>) -> Result<Option<String>, Status> {
+    let agent = agent_of(request.metadata())?;
+    let Some(caller) = request.extensions().get::<crate::remote::Caller>() else {
+        return Ok(agent);
+    };
+    let token = reef_lib::jj::oplog::RemoteToken {
+        id: caller.token_id.clone(),
+        name: caller.token_name.clone(),
+    };
+    Ok(Some(
+        token.mark(agent.as_deref().unwrap_or(&caller.token_name)),
+    ))
+}
+
+/// The remote caller of `request`, if it came through the remote listener
+/// (R2.08).
+pub(crate) fn remote_of<T>(request: &tonic::Request<T>) -> Option<&crate::remote::Caller> {
+    request.extensions().get::<crate::remote::Caller>()
 }
 
 /// The operation `op_id` of `repo` that a handler just caused, read back in

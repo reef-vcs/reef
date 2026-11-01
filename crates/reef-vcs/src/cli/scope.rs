@@ -170,6 +170,9 @@ pub(crate) async fn implicit_workspace(ctx: &Ctx) -> Result<Option<v1::Workspace
     if let Some(id) = env_workspace() {
         return lookup(ctx, String::new(), id).await.map(Some);
     }
+    if super::remote_mode() {
+        return Err(scope_required());
+    }
     let cwd = current_dir()?;
     match lookup(ctx, String::new(), cwd.display().to_string()).await {
         Ok(ws) => Ok(Some(ws)),
@@ -185,6 +188,9 @@ async fn implicit(ctx: &Ctx) -> Result<Scope, CliError> {
         let ws = lookup(ctx, String::new(), id).await?;
         return Ok(in_workspace(ws, false));
     }
+    if super::remote_mode() {
+        return Err(scope_required());
+    }
     let cwd = current_dir()?;
     match lookup(ctx, String::new(), cwd.display().to_string()).await {
         Ok(ws) => Ok(in_workspace(ws, false)),
@@ -192,6 +198,21 @@ async fn implicit(ctx: &Ctx) -> Result<Scope, CliError> {
             registered(ctx, &RepoArg::Path(cwd), false).await
         }
         Err(error) => Err(error),
+    }
+}
+
+/// A remote daemon was given no scope: this machine's directory names
+/// nothing there (R2.08).
+pub(crate) fn scope_required() -> CliError {
+    CliError::Refused {
+        kind: ErrorKind::InvalidArgument,
+        message:
+            "a remote daemon needs --workspace or --repo: this directory is not on its machine"
+                .to_owned(),
+        advice: Some(Advice::run(
+            "In remote mode, name the workspace (--workspace) or repository (--repo); `ws list` lists them.",
+            ["reef", "ws", "list"],
+        )),
     }
 }
 
@@ -277,6 +298,9 @@ async fn registered(ctx: &Ctx, repo: &RepoArg, from_flags: bool) -> Result<Scope
 /// and absolute (the daemon reads only absolute paths as paths), else an id
 /// or unique prefix as given.
 pub(crate) fn workspace_arg(text: &str) -> Result<String, CliError> {
+    if super::remote_mode() {
+        return Ok(text.to_owned());
+    }
     let path = Path::new(text);
     if text.is_empty() || !path.exists() {
         return Ok(text.to_owned());
@@ -311,7 +335,8 @@ pub(crate) fn current_dir() -> Result<PathBuf, CliError> {
 /// when the scope came from the environment and the current directory is
 /// inside it; `None` when relative paths are repository-relative as given.
 fn relative_base(scope: &Scope) -> Result<Option<PathBuf>, CliError> {
-    if scope.from_flags {
+    // A remote daemon's directories are not this machine's (R2.08).
+    if scope.from_flags || super::remote_mode() {
         return Ok(None);
     }
     let cwd = current_dir()?;

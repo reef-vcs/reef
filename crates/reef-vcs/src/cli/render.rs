@@ -272,6 +272,35 @@ impl TextRender for Inspected {
     }
 }
 
+/// `daemon status`'s remote listener line (R2.08).
+fn remote_line(remote: Option<&reef_client::json::RemoteListener>) -> String {
+    let Some(remote) = remote else {
+        return "unknown (a daemon before R2.08)".to_owned();
+    };
+    match remote.state.as_str() {
+        "listening" => {
+            let cert = remote
+                .certificate
+                .as_ref()
+                .map_or_else(String::new, |cert| {
+                    format!(
+                        ", {}, {}, expires {}",
+                        cert.fingerprint,
+                        cert.source,
+                        cert.not_after.as_deref().unwrap_or("?")
+                    )
+                });
+            format!("listening on {}{cert}", remote.address)
+        }
+        "failed" => format!(
+            "failed on {}: {}",
+            remote.address,
+            remote.error.as_deref().unwrap_or("unknown")
+        ),
+        state => state.to_owned(),
+    }
+}
+
 impl TextRender for Status {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let backends = self
@@ -300,6 +329,7 @@ impl TextRender for Status {
                 ("repositories", self.repositories.to_string()),
                 ("active_workspaces", self.active_workspaces.to_string()),
                 ("backends", backends),
+                ("remote", remote_line(self.remote.as_ref())),
             ],
         )
     }

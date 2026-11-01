@@ -15,6 +15,17 @@ pub(crate) struct Args {
     command: RepoCommand,
 }
 
+impl Args {
+    /// Whether this registers or forgets a repository, which are ADMIN
+    /// RPCs.
+    pub(crate) fn is_admin(&self) -> bool {
+        matches!(
+            self.command,
+            RepoCommand::Register { .. } | RepoCommand::Forget { .. }
+        )
+    }
+}
+
 #[derive(Debug, clap::Subcommand)]
 enum RepoCommand {
     /// Register the repository containing PATH (default: the current directory).

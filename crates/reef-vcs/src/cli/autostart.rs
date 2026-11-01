@@ -38,8 +38,21 @@ pub(crate) async fn start(
     global: &Global,
     config: &ClientConfig,
 ) -> Result<(Client, u32), CliError> {
+    start_with(global, config, false).await
+}
+
+/// [`start`], with the remote listener on for this run when
+/// `serve_remote` (`reef-daemon --remote`, R2.08).
+pub(crate) async fn start_with(
+    global: &Global,
+    config: &ClientConfig,
+    serve_remote: bool,
+) -> Result<(Client, u32), CliError> {
     let program = daemon_binary()?;
     let mut command = command(&program, global)?;
+    if serve_remote {
+        command.arg("--remote");
+    }
     let mut child = command.spawn().map_err(|error| CliError::Autostart {
         reason: format!("run {}: {error}", program.display()),
     })?;

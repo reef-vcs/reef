@@ -4,6 +4,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "reef/api/v1/options.proto";
+import "reef/api/v1/remote.proto";
 import "reef/api/v1/workspaces.proto";
 
 // The daemon's own status.
@@ -85,6 +86,8 @@ message GetDaemonStatusResponse {
   // Each materialization backend and whether it can serve workspace roots
   // under the state directory; empty with `skip_backends`.
   repeated BackendProbe backends = 11;
+  // The remote listener (R2.08).
+  RemoteListener remote = 12;
 }
 
 // One materialization backend's probe.

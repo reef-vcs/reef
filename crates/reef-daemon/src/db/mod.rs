@@ -27,15 +27,19 @@ use crate::model::{Timestamp, ids::ID_HEX_LEN};
 mod base_cache;
 mod leases;
 mod reclaims;
+mod remote_tokens;
 mod repositories;
 mod stores;
 mod workspaces;
+
+pub use remote_tokens::{Digest, RemoteTokenRow, TokenScope};
 
 pub use leases::Renewal;
 
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
-/// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14).
+/// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14),
+/// then `0006_remote_tokens` (R2.08).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -52,6 +56,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0005_watchman",
         include_str!("migrations/0005_watchman.sql"),
+    ),
+    (
+        "0006_remote_tokens",
+        include_str!("migrations/0006_remote_tokens.sql"),
     ),
 ];
 
@@ -622,8 +630,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(SCHEMA_VERSION, 6);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -631,7 +639,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -674,7 +682,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 5
+                    supported: 6
                 }
             ),
             "{error:?}"
@@ -695,7 +703,8 @@ mod tests {
                 "0002_base_cache",
                 "0003_snapshots",
                 "0004_stores",
-                "0005_watchman"
+                "0005_watchman",
+                "0006_remote_tokens"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -721,7 +730,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -729,7 +738,8 @@ mod tests {
                 "0002_base_cache",
                 "0003_snapshots",
                 "0004_stores",
-                "0005_watchman"
+                "0005_watchman",
+                "0006_remote_tokens"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -774,7 +784,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,

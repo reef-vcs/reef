@@ -54,7 +54,7 @@ impl ChangeService for ChangesHandler {
         request: Request<ListChangesRequest>,
     ) -> Result<Response<ListChangesResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let page = PageRequest::new(
             LIST_CHANGES,
@@ -165,7 +165,7 @@ impl ChangeService for ChangesHandler {
         request: Request<GetChangeRequest>,
     ) -> Result<Response<GetChangeResponse>, Status> {
         let arrived = Instant::now();
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         if request.revision.trim().is_empty() {
             return Err(status(RevisionError::Required));
@@ -208,7 +208,7 @@ impl ChangeService for ChangesHandler {
         &self,
         request: Request<DescribeChangeRequest>,
     ) -> Result<Response<DescribeChangeResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
         let write = Write::Describe {
@@ -229,7 +229,7 @@ impl ChangeService for ChangesHandler {
         &self,
         request: Request<AbandonChangeRequest>,
     ) -> Result<Response<AbandonChangeResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
         let write = Write::Abandon {

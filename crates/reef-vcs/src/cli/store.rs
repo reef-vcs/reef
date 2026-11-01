@@ -30,6 +30,13 @@ pub(crate) struct Args {
     command: StoreCommand,
 }
 
+impl Args {
+    /// Whether this is `store build`, which calls an ADMIN RPC.
+    pub(crate) fn is_build(&self) -> bool {
+        matches!(self.command, StoreCommand::Build { .. })
+    }
+}
+
 #[derive(Debug, clap::Subcommand)]
 enum StoreCommand {
     /// Build a store declared in reef.toml and seal it.

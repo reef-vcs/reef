@@ -31,6 +31,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/stores.proto",
     "proto/reef/api/v1/symbols.proto",
     "proto/reef/api/v1/history.proto",
+    "proto/reef/api/v1/remote.proto",
 ];
 
 /// Frozen at 0.1.0 and served only for version detection.

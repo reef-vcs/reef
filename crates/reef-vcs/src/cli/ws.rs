@@ -199,6 +199,11 @@ impl Args {
     pub(crate) fn is_run(&self) -> bool {
         matches!(self.command, WsCommand::Run(_))
     }
+
+    /// Whether this is `ws gc`, which calls an ADMIN RPC.
+    pub(crate) fn is_gc(&self) -> bool {
+        matches!(self.command, WsCommand::Gc { .. })
+    }
 }
 
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {

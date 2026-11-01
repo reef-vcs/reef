@@ -288,6 +288,9 @@ message Workspace {
   // releasing workspaces; unset otherwise, and when the count could not be
   // read.
   optional uint32 changed_file_count = 20;
+  // The remote token that created it (R2.08); empty if created over the
+  // socket.
+  string remote_token_id = 21;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).

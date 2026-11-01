@@ -38,6 +38,7 @@ use crate::maintenance::gc::GcRunError;
 use crate::maintenance::quiesce::QuiesceError;
 use crate::maintenance::restore::RestoreError;
 use crate::presence::PresenceError;
+use crate::remote::RemoteError;
 use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
 use crate::service::at_operation::ReplayError;
@@ -113,6 +114,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<WebError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<RemoteError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {
             revision_advice(error)
@@ -378,6 +381,55 @@ fn web_reason(error: &WebError) -> Option<(&'static str, BTreeMap<String, String
     })
 }
 
+fn remote_reason(error: &RemoteError) -> Option<(&'static str, BTreeMap<String, String>)> {
+    use reef_api::error as reason;
+    Some(match error {
+        RemoteError::TokenInvalid { state } => (
+            reason::REMOTE_TOKEN_INVALID,
+            meta(&[("state", state.as_str().to_owned())]),
+        ),
+        RemoteError::AccessDenied {
+            method,
+            access,
+            scope,
+        } => (
+            reason::REMOTE_ACCESS_DENIED,
+            meta(&[
+                ("method", method.clone()),
+                ("access", (*access).to_owned()),
+                ("scope", scope.as_str().to_owned()),
+            ]),
+        ),
+        RemoteError::FieldDenied { method, field } => (
+            reason::REMOTE_ACCESS_DENIED,
+            meta(&[("method", method.clone()), ("field", (*field).to_owned())]),
+        ),
+        RemoteError::WorkspaceNotOwned { workspace } => (
+            reason::REMOTE_WORKSPACE_NOT_OWNED,
+            meta(&[("workspace", workspace.clone())]),
+        ),
+        RemoteError::Busy { limit } => {
+            (reason::REMOTE_BUSY, meta(&[("limit", (*limit).to_owned())]))
+        }
+        RemoteError::TokenNotFound { name } => (
+            reason::REMOTE_TOKEN_NOT_FOUND,
+            meta(&[("name", name.clone())]),
+        ),
+        RemoteError::TokenExists { name } => {
+            (reason::REMOTE_TOKEN_EXISTS, meta(&[("name", name.clone())]))
+        }
+        RemoteError::TooManyTokens { limit } => (
+            reason::TOO_MANY_REMOTE_TOKENS,
+            meta(&[("limit", limit.to_string())]),
+        ),
+        RemoteError::InvalidTokenName { name } => (
+            reason::INVALID_REMOTE_TOKEN_NAME,
+            meta(&[("name", name.clone())]),
+        ),
+        _ => return None,
+    })
+}
+
 fn rewrite_reason(error: &RewriteError) -> Option<(&'static str, BTreeMap<String, String>)> {
     use reef_api::error as reason;
     let commit = |id: &dyn std::fmt::Display| meta(&[("commit_id", id.to_string())]);
@@ -609,6 +661,8 @@ fn reason_and_metadata(
             replay_reason(error)
         } else if let Some(error) = error.downcast_ref::<WebError>() {
             web_reason(error)
+        } else if let Some(error) = error.downcast_ref::<RemoteError>() {
+            remote_reason(error)
         } else {
             error.downcast_ref::<InvalidChangeFilter>().map(|error| {
                 (

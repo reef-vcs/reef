@@ -32,6 +32,10 @@ pub struct DaemonArgs {
     /// by spawning the binary.
     #[arg(long)]
     pub foreground: bool,
+    /// Serve the remote listener for this run, whatever `[remote] enabled`
+    /// says (R2.08).
+    #[arg(long)]
+    pub remote: bool,
     /// A command that needs no running daemon (`config show`, `restore`),
     /// for `reef`; none runs the daemon.
     #[command(subcommand)]
@@ -52,6 +56,7 @@ pub fn run_main(args: DaemonArgs) -> anyhow::Result<()> {
         config_file: args.config,
     })
     .context("load the daemon's configuration")?;
+    config.remote_flag = args.remote;
     config.log.filter = env_log.filter;
     config.log.format = env_log.format;
     // Before logging, which creates `<state>/logs` and would otherwise create

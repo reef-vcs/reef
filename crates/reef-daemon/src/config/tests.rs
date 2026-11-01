@@ -432,7 +432,7 @@ fn listen_must_be_loopback() {
             panic!("{listen}: {err:?}");
         };
         assert_eq!(key, "ui.listen", "{listen}");
-        assert!(reason.contains("R2.08"), "{listen}: {reason}");
+        assert!(reason.contains("[remote]"), "{listen}: {reason}");
         assert!(reason.contains(listen), "{listen}: {reason}");
     }
     for listen in ["127.0.0.2:0", "[::1]:0", "127.0.0.1:7878"] {

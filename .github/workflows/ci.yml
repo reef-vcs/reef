@@ -130,6 +130,11 @@ jobs:
         run: just installer-lint
       - name: Installer
         run: scripts/test-install.sh --build-dir target/debug
+      # Phase 2's exit criterion for remote access (R2.08): a daemon in one container reached
+      # from another, over TLS with a token, through the CLI and curl.
+      - name: Remote listener across containers
+        if: runner.os == 'Linux'
+        run: scripts/test-remote.sh target/debug/reef target/debug/reef-daemon
       # The daemon builds without Watchman too, and its unit tests (and
       # reef-lib's) pass that way.
       - name: Check without default features
@@ -159,11 +164,12 @@ jobs:
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
-  # the runner user after it, or the cache save fails on root-owned files.
+  # the runner user after it, or the cache save fails on root-owned files. 45 minutes: main's
+  # runs took 18-29 min by R2.23, the fuse-overlayfs step alone ~19 min.
   overlayfs:
     name: overlayfs (ubuntu-24.04, privileged)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:

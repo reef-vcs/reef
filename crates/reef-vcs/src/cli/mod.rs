@@ -33,6 +33,7 @@ mod log;
 mod op;
 mod out;
 mod presence;
+mod remote;
 mod render;
 mod render_vcs;
 pub(crate) mod repo;
@@ -142,6 +143,17 @@ pub(crate) struct Global {
     // `ws run` passes it on to its command as `REEF_AGENT` (R2.05).
     #[arg(long, global = true, value_name = "NAME", env = AGENT_ENV, hide_env = true)]
     agent: Option<String>,
+    /// Run on a daemon on another machine: a `reef remote add` name, or an https:// URL; overrides `REEF_REMOTE`.
+    // Before the command, as `git -C` is: every command's long help is near
+    // its 60-line budget (`help_fits_sixty_lines`).
+    #[arg(
+        long,
+        value_name = "NAME",
+        env = reef_client::remote::REMOTE_ENV,
+        hide_env = true,
+        conflicts_with = "socket"
+    )]
+    remote: Option<String>,
 }
 
 impl Global {
@@ -155,6 +167,18 @@ impl Global {
 
     fn load_config(&self) -> Result<ClientConfig, CliError> {
         ClientConfig::load(&self.overrides()).map_err(CliError::Config)
+    }
+
+    /// The client's state directory alone, for the remote profiles
+    /// (R2.08): no socket is used, so none is checked.
+    pub(crate) fn state_dir(&self) -> Result<PathBuf, CliError> {
+        reef_client::paths::Layered::resolve(
+            &self.overrides(),
+            |name| std::env::var_os(name),
+            reef_client::paths::platform_defaults,
+        )
+        .map(|layered| layered.state_dir)
+        .map_err(CliError::Config)
     }
 
     /// The agent name, `--agent` else `REEF_AGENT`, checked and trimmed;
@@ -242,6 +266,9 @@ enum Command {
     /// Open the web UI in a browser.
     #[command(after_help = "Example: reef ui --print")]
     Ui(ui::Args),
+    /// Reach a daemon on another machine, and issue tokens for it.
+    #[command(infer_subcommands = true)]
+    Remote(remote::Args),
     /// Read files and list directories at any revision.
     #[command(infer_subcommands = true)]
     File(file::Args),
@@ -422,11 +449,16 @@ pub(crate) fn main() -> ExitCode {
     // Before logging and the runtime: the daemon binary replaces this
     // process, and must start before it has any other thread.
     if let Command::Daemon(daemon::Args {
-        command: daemon::DaemonCommand::Run,
+        command: daemon::DaemonCommand::Run { serve_remote },
     }) = &command
     {
         let out = Out::detect(global.output, global.quiet);
-        return daemon::run_foreground(&global, &out);
+        if global.remote.is_some() {
+            let error = local_only_error("daemon");
+            out.error(&error);
+            return ExitCode::from(error.exit_code());
+        }
+        return daemon::run_foreground(&global, &out, *serve_remote);
     }
     // `config show` prints TOML unless asked for JSON; see its module. `ws
     // run`'s stdout is its command's, so it prints JSON only when asked. The
@@ -465,6 +497,12 @@ pub(crate) fn main() -> ExitCode {
     let result = match runtime.block_on(run(global.clone(), command, &out)) {
         // Only while no call has succeeded: one that did may have changed
         // something, which the rerun would repeat.
+        // A remote daemon of another version is never restarted (R2.08).
+        Err(CliError::Daemon(error @ ClientError::Incompatible { .. }))
+            if global.remote.is_some() =>
+        {
+            Err(remote_version_mismatch(error))
+        }
         Err(CliError::Daemon(error @ ClientError::Incompatible { .. }))
             if rerunnable && !reef_client::any_call_answered() =>
         {
@@ -512,6 +550,17 @@ async fn rerun(
     }
 }
 
+/// A remote daemon that cannot serve this reef's call: it is another
+/// version, and one side must be upgraded (R2.08).
+fn remote_version_mismatch(error: ClientError) -> CliError {
+    CliError::Advised {
+        advice: Advice::hint(
+            "The remote daemon is another version of reef than this one: upgrade reef on one side (`reef --remote … daemon status` shows its version).",
+        ),
+        error: Box::new(error),
+    }
+}
+
 /// A daemon that cannot serve this reef and is not restarted, with the
 /// `reef daemon stop` that lets the next command start the matching one.
 pub(crate) fn old_daemon(global: &Global, error: ClientError) -> CliError {
@@ -543,7 +592,55 @@ fn init_logging(verbose: u8) -> Result<(), CliError> {
     reef_client::logging::init(&filter, env.format).map_err(CliError::Logging)
 }
 
+/// The command a remote daemon cannot run, by name: it needs this
+/// machine's directories or processes, or calls an ADMIN RPC, which the
+/// remote listener never serves (R2.08).
+fn local_only(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Here(_) => "here",
+        Command::Ws(args) if args.is_run() => "ws run",
+        Command::Ws(args) if args.is_gc() => "ws gc",
+        Command::Ui(_) => "ui",
+        Command::Init(_) => "init",
+        Command::Mcp => "mcp",
+        Command::Daemon(args) if !args.is_status() => "daemon",
+        Command::Config(_) => "config",
+        Command::Backup(_) => "backup",
+        Command::Restore(_) => "restore",
+        Command::Store(args) if args.is_build() => "store build",
+        Command::Repo(args) if args.is_admin() => "repo register and forget",
+        Command::Remote(args) => return args.local_only(),
+        _ => return None,
+    })
+}
+
+/// What a remote daemon cannot run instead, and why.
+fn local_only_error(name: &str) -> CliError {
+    let hint = match name {
+        "here" => {
+            "`reef here` reads this machine's directory: name the workspace with --workspace, or run `reef here` on the daemon's machine."
+        }
+        "ws run" => {
+            "`ws run` runs a command in a directory on the daemon's machine: run it there, or use `reef --remote … ws create` and edit files with the API."
+        }
+        "ui" => "Open the web URL that `reef remote token create` printed on the daemon's machine.",
+        _ => {
+            "Run it on the daemon's machine; the remote listener serves the API to tokens, not its administration."
+        }
+    };
+    CliError::Refused {
+        kind: ErrorKind::Unsupported,
+        message: format!("`reef {name}` does not run on a remote daemon (--remote)"),
+        advice: Some(Advice::hint(hint)),
+    }
+}
+
 async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, CliError> {
+    if global.remote.is_some()
+        && let Some(name) = local_only(&command)
+    {
+        return Err(local_only_error(name));
+    }
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
         Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
@@ -558,6 +655,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,
         Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
         Command::Ui(args) => ui::run(&connect(&global, out).await?, args).await,
+        Command::Remote(args) => remote::run(&global, out, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
@@ -584,6 +682,26 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
 pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError> {
     // Before the socket is tried, so a bad name starts no daemon.
     let agent = global.agent()?.map(str::to_owned);
+    if let Some(chosen) = &global.remote {
+        let target = remote::target(global, chosen)?;
+        let client = Client::connect_remote(&target)
+            .await
+            .map_err(CliError::Daemon)?;
+        let client = match &agent {
+            Some(agent) => client.with_agent(agent).map_err(CliError::Daemon)?,
+            None => client,
+        };
+        REMOTE_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(Ctx {
+            client,
+            out: out.clone(),
+            timeout: global.timeout.unwrap_or(DEFAULT_TIMEOUT),
+            timeout_flag: global.timeout,
+            // A path names the daemon's machine; nothing is registered.
+            auto_register: false,
+            agent,
+        });
+    }
     let config = global.load_config()?;
     let socket = &config.socket;
     let client = match Client::connect(socket).await {
@@ -614,6 +732,16 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
         auto_register: config.auto_register && !global.no_register,
         agent,
     })
+}
+
+/// Set once a command connects to a remote daemon (R2.08): paths on the
+/// command line name the daemon's machine, so they are sent as given, and
+/// nothing is resolved against this machine's current directory.
+static REMOTE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this command talks to a remote daemon.
+pub(crate) fn remote_mode() -> bool {
+    REMOTE_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The output mode a command line asks for, read from the raw arguments
@@ -768,6 +896,9 @@ impl RepoArg {
     /// looks like one, else as a path that does not exist. An existing
     /// directory whose name is hex is a path.
     pub(crate) fn parse(text: &str) -> Result<RepoArg, CliError> {
+        if remote_mode() {
+            return Ok(RepoArg::Named(text.to_owned()));
+        }
         let path = Path::new(text);
         if !text.is_empty() && path.exists() {
             return absolute(path).map(RepoArg::Path);
@@ -783,6 +914,10 @@ impl RepoArg {
     /// The current directory: the default repository of commands with
     /// `--repo`.
     pub(crate) fn current() -> Result<RepoArg, CliError> {
+        // This machine's directory names nothing on a remote daemon (R2.08).
+        if remote_mode() {
+            return Err(scope::scope_required());
+        }
         current_dir().map(RepoArg::Path)
     }
 

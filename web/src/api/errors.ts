@@ -15,6 +15,8 @@ export interface ReefError {
 }
 
 export const WEB_SESSION_INVALID = "WEB_SESSION_INVALID";
+/** The remote listener refused the page's token: revoked, expired or mistyped (R2.08). */
+export const REMOTE_TOKEN_INVALID = "REMOTE_TOKEN_INVALID";
 export const TOO_FAR_BEHIND = "TOO_FAR_BEHIND";
 export const OPERATION_LOG_REWRITTEN = "OPERATION_LOG_REWRITTEN";
 
@@ -38,7 +40,14 @@ export function reefError(error: unknown): ReefError {
   };
 }
 
-/** The daemon refused the session: it restarted, or the session idled out. */
+/**
+ * The daemon refused the page's token: on loopback, the session ended (the
+ * daemon restarted, or it idled out); over the remote listener, the token was
+ * revoked, expired or mistyped (R2.08). Either way it is dead.
+ */
 export function isSessionInvalid(error: ReefError): boolean {
-  return error.code === Code.PermissionDenied && error.reason === WEB_SESSION_INVALID;
+  return (
+    error.code === Code.PermissionDenied &&
+    (error.reason === WEB_SESSION_INVALID || error.reason === REMOTE_TOKEN_INVALID)
+  );
 }

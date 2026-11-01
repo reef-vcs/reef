@@ -263,6 +263,9 @@ pub struct CreateSpec {
     pub skip_store: Option<String>,
     /// The operations' `reef.agent`; `None` for `owner` (R2.03).
     pub agent: Option<String>,
+    /// The remote token asking (R2.08): recorded on the row, and the
+    /// operations' `reef.remote-token`.
+    pub remote: Option<reef_lib::jj::oplog::RemoteToken>,
 }
 
 /// What [`Manager::create`] made.
@@ -485,6 +488,10 @@ pub enum ManagerError {
     /// The request named no owner.
     #[error("owner must not be empty")]
     EmptyOwner,
+    /// An owner with a control character: an owner stands in for the
+    /// agent on operations, and no agent holds one (R2.08).
+    #[error("owner must not contain control characters")]
+    InvalidOwner,
     /// The lease could not be issued.
     #[error(transparent)]
     Lease(#[from] LeaseError),
@@ -647,6 +654,7 @@ impl Classify for ManagerError {
             Self::PathExists(_) | Self::PathRecorded { .. } => ErrorKind::AlreadyExists,
             Self::PathNotAbsolute(_)
             | Self::EmptyOwner
+            | Self::InvalidOwner
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,

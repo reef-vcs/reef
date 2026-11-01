@@ -162,6 +162,18 @@ describe("runOperations", () => {
     });
   }
 
+  // W10: a token over its stream limit (REMOTE_BUSY) is retried, not ended.
+  it("retries on REMOTE_BUSY", async () => {
+    const t = setup();
+    await settle();
+    t.streams.lastOperations().fail(daemonError(Code.Unavailable, { reason: "REMOTE_BUSY" }));
+    await settle();
+    expect(t.onSessionInvalid).not.toHaveBeenCalled();
+    expect(t.opened.length).toBeGreaterThan(1);
+    t.controller.abort();
+    await t.done;
+  });
+
   it("stops on WEB_SESSION_INVALID", async () => {
     const t = setup();
     await settle();

@@ -46,6 +46,11 @@
 //!     (R2.18), which binds `[ui] listen` and registers a shutdown hook
 //!     joining its server. Launch files an earlier run left in `<state>/ui`
 //!     are deleted in step 1, after the lock.
+//! 11. Start the remote listener if `[remote] enabled` or `--remote`
+//!     (R2.08): load or generate its certificate and bind, in the
+//!     background, retrying with backoff; a failure leaves the socket
+//!     serving and the listener `FAILED`. The remote tokens' upkeep (last
+//!     use, expiry) starts either way.
 //!
 //! # Shutdown
 //!
@@ -138,6 +143,8 @@ pub struct AppState {
     pub history: Arc<crate::history::History>,
     /// The web UI's sessions and listener (R2.18).
     pub web: crate::web::WebUi,
+    /// The remote listener and its tokens (R2.08).
+    pub remote: crate::remote::RemoteListener,
 }
 
 impl fmt::Debug for AppState {
@@ -262,6 +269,9 @@ pub enum StartError {
         #[source]
         source: io::Error,
     },
+    /// The remote tokens could not be loaded (R2.08).
+    #[error("load the remote listener's tokens")]
+    Remote(#[source] crate::remote::RemoteError),
     /// The server failed while running.
     #[error("the server failed")]
     Serve(#[source] tonic::transport::Error),
@@ -278,6 +288,7 @@ impl Classify for StartError {
             Self::Db(error) => error.kind(),
             Self::RestartGrace(error) => error.kind(),
             Self::Settings(error) => error.kind(),
+            Self::Remote(error) => error.kind(),
             Self::SocketInUse { .. } => ErrorKind::Unavailable,
             Self::NotOwned { .. } => ErrorKind::PermissionDenied,
             Self::CreateDir { source, .. }
@@ -356,6 +367,13 @@ impl Daemon {
         let symbols = crate::symbols::SymbolIndex::new(&config.file.symbols, &config.paths);
         let history = crate::history::History::new(&config.file.history, &config.paths);
         let config_web = config.web;
+        let remote = match crate::remote::RemoteListener::new(&config, Arc::clone(&db)) {
+            Ok(remote) => remote,
+            Err(error) => {
+                remove_if_present(&paths.pid);
+                return Err(StartError::Remote(error));
+            }
+        };
         let state = Arc::new(AppState {
             config,
             db,
@@ -376,6 +394,7 @@ impl Daemon {
             symbols,
             history,
             web: crate::web::WebUi::new(config_web),
+            remote,
         });
 
         // Before any snapshot can run (R2.10).
@@ -412,6 +431,8 @@ impl Daemon {
             state_dir = %paths.state_dir.display(),
             "daemon started"
         );
+        // 11. The remote listener, after the socket serves.
+        crate::remote::RemoteListener::start(&state);
         let task = tokio::spawn(supervise(Arc::clone(&state), server, lock));
         Ok(DaemonHandle {
             state,

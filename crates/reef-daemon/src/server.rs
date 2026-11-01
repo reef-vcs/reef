@@ -29,6 +29,7 @@ use reef_api::v1::history_service_server::HistoryServiceServer;
 use reef_api::v1::maintenance_service_server::MaintenanceServiceServer;
 use reef_api::v1::operation_service_server::OperationServiceServer;
 use reef_api::v1::presence_service_server::PresenceServiceServer;
+use reef_api::v1::remote_service_server::RemoteServiceServer;
 use reef_api::v1::repository_service_server::RepositoryServiceServer;
 use reef_api::v1::status_service_server::StatusServiceServer;
 use reef_api::v1::store_service_server::StoreServiceServer;
@@ -45,6 +46,8 @@ use tower::{Layer, Service};
 
 use crate::daemon::AppState;
 use crate::error::{unknown_method, v0_client};
+use crate::remote::gate::{Gate as RemoteGate, RemoteGateLayer};
+use crate::remote::streams::RemoteCallLayer;
 use crate::service::changes::ChangesHandler;
 use crate::service::compat::V0DaemonService;
 use crate::service::daemon::DaemonStatusService;
@@ -54,6 +57,7 @@ use crate::service::history::HistoryHandler;
 use crate::service::maintenance::MaintenanceHandler;
 use crate::service::operations::OperationsHandler;
 use crate::service::presence::PresenceHandler;
+use crate::service::remote::RemoteTokensService;
 use crate::service::repositories::RepositoriesService;
 use crate::service::status::StatusHandler;
 use crate::service::stores::StoresService;
@@ -62,7 +66,7 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 14] = [
+pub const SERVED: [&str; 15] = [
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
@@ -71,6 +75,7 @@ pub const SERVED: [&str; 14] = [
     "reef.api.v1.MaintenanceService",
     "reef.api.v1.OperationService",
     "reef.api.v1.PresenceService",
+    "reef.api.v1.RemoteService",
     "reef.api.v1.RepositoryService",
     "reef.api.v1.StatusService",
     "reef.api.v1.StoreService",
@@ -86,6 +91,15 @@ pub type ApiRouter = Router<Stack<CompatLayer, Identity>>;
 /// [`CompatLayer`].
 pub(crate) type WebRouter =
     Router<Stack<CompatLayer, Stack<GrpcWebLayer, Stack<WebGateLayer, Identity>>>>;
+
+/// The remote listener's router type (R2.08): the gate, gRPC-web, the
+/// remote calls' layer (which sees native gRPC), then [`CompatLayer`].
+pub(crate) type RemoteRouter = Router<
+    Stack<
+        CompatLayer,
+        Stack<RemoteCallLayer, Stack<GrpcWebLayer, Stack<RemoteGateLayer, Identity>>>,
+    >,
+>;
 
 /// Every service over `state`, one `add_service` per entry of [`SERVED`],
 /// for both listeners. Built here, not generically, so `Daemon::start`
@@ -106,6 +120,9 @@ pub fn routes(state: &Arc<AppState>) -> Routes {
         Arc::clone(state),
     )))
     .add_service(PresenceServiceServer::new(PresenceHandler::new(
+        Arc::clone(state),
+    )))
+    .add_service(RemoteServiceServer::new(RemoteTokensService::new(
         Arc::clone(state),
     )))
     .add_service(RepositoryServiceServer::new(RepositoriesService::new(
@@ -143,6 +160,22 @@ pub(crate) fn web_router(state: &Arc<AppState>, gate: Arc<Gate>) -> WebRouter {
         .accept_http1(true)
         .layer(WebGateLayer(gate))
         .layer(GrpcWebLayer::new())
+        .layer(CompatLayer)
+        .add_routes(routes(state))
+}
+
+/// The remote listener's router over `state` (R2.08, ADR 0049): HTTP/1.1
+/// and HTTP/2, native gRPC and gRPC-web and the assets, behind `gate`.
+/// Keepalives find a client that went away without closing its streams.
+pub(crate) fn remote_router(state: &Arc<AppState>, gate: Arc<RemoteGate>) -> RemoteRouter {
+    Server::builder()
+        .accept_http1(true)
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+        .max_concurrent_streams(Some(128))
+        .layer(RemoteGateLayer(gate))
+        .layer(GrpcWebLayer::new())
+        .layer(RemoteCallLayer)
         .layer(CompatLayer)
         .add_routes(routes(state))
 }

@@ -148,7 +148,7 @@ impl StoreService for StoresService {
         &self,
         request: Request<BuildStoreRequest>,
     ) -> Result<Response<Self::BuildStoreStream>, Status> {
-        let agent = super::agent_of(request.metadata())?;
+        let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         if !self.state.config.file.store.allow_builds {
             return Err(status(StoreError::BuildsOff));

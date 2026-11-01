@@ -46,6 +46,16 @@ describe("reefError", () => {
     expect(error.kind).toBe("permission_denied");
   });
 
+  // W9: the remote listener's refused token ends the session like a dead one.
+  it("treats REMOTE_TOKEN_INVALID as a dead session", () => {
+    const error = reefError(
+      daemonError(Code.PermissionDenied, { ...detail, reason: "REMOTE_TOKEN_INVALID" }),
+    );
+    expect(isSessionInvalid(error)).toBe(true);
+    const busy = reefError(daemonError(Code.Unavailable, { ...detail, reason: "REMOTE_BUSY" }));
+    expect(isSessionInvalid(busy)).toBe(false);
+  });
+
   it("has empty fields without a detail", () => {
     const error = reefError(new ConnectError("plain", Code.Unavailable));
     expect(error).toMatchObject({

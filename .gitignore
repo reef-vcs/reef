@@ -15,5 +15,5 @@ crates/reef-testing/tokens/results/
 
 # The web UI (R2.18): built by `just web-build` in CI and the release, never committed
 crates/reef-web/assets/
-web/node_modules/
+web/node_modules
 web/src/gen/
