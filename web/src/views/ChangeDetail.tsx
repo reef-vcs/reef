@@ -18,12 +18,16 @@ import { shellQuote } from "../graph/revset";
 import { after } from "../live/backoff";
 import { outcomeState } from "../state/states";
 import { StateBadge } from "../state/StateBadge";
+import { Avatar } from "../ui/Avatar";
 import { Copy } from "../ui/Copy";
+import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
 import { reverseHex, shortId } from "../ui/ids";
 import { Link } from "../ui/router";
 import { clock, dateTime } from "../ui/time";
+import { Time } from "../ui/TimeLabel";
+import { operationSentence } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
@@ -37,6 +41,14 @@ const FILE_KINDS: Partial<Record<FileChangeKind, string>> = {
   [FileChangeKind.DELETED]: "D",
   [FileChangeKind.RENAMED]: "R",
   [FileChangeKind.COPIED]: "C",
+};
+
+const FILE_WORDS: Partial<Record<FileChangeKind, string>> = {
+  [FileChangeKind.ADDED]: "added",
+  [FileChangeKind.MODIFIED]: "modified",
+  [FileChangeKind.DELETED]: "deleted",
+  [FileChangeKind.RENAMED]: "renamed",
+  [FileChangeKind.COPIED]: "copied",
 };
 
 export const EDGE_WORDS: Record<EdgeKind, string> = {
@@ -170,8 +182,27 @@ function Ids({ change }: { change: Change }) {
 }
 
 function Signature({ name, who }: { name: string; who: Change["author"] }) {
+  const dev = useDevMode();
   if (!who) return null;
   const time = dateTime(who.at);
+  if (!dev) {
+    return (
+      <>
+        <dt>{name}</dt>
+        <dd>
+          <span className="identity" title={`${who.name} <${who.email}>`}>
+            <Avatar name={who.email || who.name} size="sm" />
+            <span className="identity-text">
+              <span className="identity-name">{who.name}</span>
+            </span>
+          </span>{" "}
+          <span className="secondary">
+            · <Time at={who.at} dev="date" />
+          </span>
+        </dd>
+      </>
+    );
+  }
   return (
     <>
       <dt>{name}</dt>
@@ -197,6 +228,7 @@ function Files({
   at: string | undefined;
 }) {
   const command = `reef diff --repo ${shellQuote(repo)} -r ${commit} --stat${at ? ` --at-op ${at}` : ""}`;
+  const dev = useDevMode();
   return (
     <section>
       <h4>Files</h4>
@@ -210,7 +242,10 @@ function Files({
             const path = change?.path ?? "";
             return (
               <li key={path}>
-                <span className="mono kind">
+                <span
+                  className="mono kind"
+                  title={FILE_WORDS[change?.kind ?? FileChangeKind.UNSPECIFIED] ?? "changed"}
+                >
                   {FILE_KINDS[change?.kind ?? FileChangeKind.UNSPECIFIED] ?? "?"}
                 </span>{" "}
                 <span className="mono">
@@ -229,9 +264,11 @@ function Files({
       {files && files.totalFiles > files.files.length && (
         <p className="secondary">and {files.totalFiles - files.files.length} more files</p>
       )}
-      <p className="command">
-        <code>{command}</code> <Copy text={command} />
-      </p>
+      {dev && (
+        <p className="command">
+          <code>{command}</code> <Copy text={command} />
+        </p>
+      )}
     </section>
   );
 }
@@ -317,6 +354,7 @@ export function ChangeDetail({
   onSessionInvalid: () => void;
 }) {
   const first = rows[0];
+  const dev = useDevMode();
   const change = first?.change;
   const commit = change?.commitId ?? "";
   // A commit's files never change, so a live view reads them once per commit,
@@ -339,13 +377,30 @@ export function ChangeDetail({
   );
   if (!first || !change) return null;
   const description = change.description.trimEnd();
+  const [subject = "", ...rest] = description.split("\n");
+  const body = rest.join("\n").trim();
+  const sameCommitter =
+    change.committer?.name === change.author?.name &&
+    change.committer?.email === change.author?.email;
 
   return (
     <div className="detail">
-      <h3>
-        <span className="mono">{shortId(reverseHex(change.changeId))}</span>{" "}
-        <StateBadge {...first.state} />
-      </h3>
+      {dev ? (
+        <h3>
+          <span className="mono">{shortId(reverseHex(change.changeId))}</span>{" "}
+          <StateBadge {...first.state} />
+        </h3>
+      ) : (
+        <>
+          <h3>
+            <StateBadge {...first.state} />
+            <span className={subject ? undefined : "secondary"}>
+              {subject || "(no description)"}
+            </span>
+          </h3>
+          <p className="detail-id mono secondary">{shortId(reverseHex(change.changeId))}</p>
+        </>
+      )}
       {rows.length > 1 && (
         <section>
           <p>This change is divergent: it has {rows.length} commits in this view.</p>
@@ -365,29 +420,42 @@ export function ChangeDetail({
           </ul>
         </section>
       )}
-      <pre className="description">{description || "(no description)"}</pre>
-      <Ids change={change} />
+      {dev && <pre className="description">{description || "(no description)"}</pre>}
+      {!dev && body && <pre className="description">{body}</pre>}
+      {dev && <Ids change={change} />}
       <dl className="facts">
         <Signature name="Author" who={change.author} />
-        <Signature name="Committer" who={change.committer} />
-        <dt>Parents</dt>
-        <dd>
-          {first.graph.node.edges.length === 0 && (
-            <span className="secondary">none (the root)</span>
-          )}
-          <ul>
-            {first.graph.node.edges.map((edge, i) => (
-              <li key={i}>
-                <span className="mono">{shortId(edge.parent)}</span>{" "}
-                <span className="secondary">{EDGE_WORDS[edge.kind]}</span>
-              </li>
-            ))}
-          </ul>
-        </dd>
+        {(dev || !sameCommitter) && <Signature name="Committer" who={change.committer} />}
+        {dev && (
+          <>
+            <dt>Parents</dt>
+            <dd>
+              {first.graph.node.edges.length === 0 && (
+                <span className="secondary">none (the root)</span>
+              )}
+              <ul>
+                {first.graph.node.edges.map((edge, i) => (
+                  <li key={i}>
+                    <span className="mono">{shortId(edge.parent)}</span>{" "}
+                    <span className="secondary">{EDGE_WORDS[edge.kind]}</span>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
         {change.bookmarks.length > 0 && (
           <>
             <dt>Bookmarks</dt>
-            <dd>{change.bookmarks.join(", ")}</dd>
+            <dd className="chips">
+              {dev
+                ? change.bookmarks.join(", ")
+                : change.bookmarks.map((name) => (
+                    <span key={name} className="label">
+                      {name}
+                    </span>
+                  ))}
+            </dd>
           </>
         )}
         {change.tags.length > 0 && (
@@ -432,13 +500,28 @@ export function ChangeDetail({
         {cause && (
           <>
             <dt>Last changed</dt>
-            <dd>
-              {operationLabel(cause)} by {cause.agent || "-"} at{" "}
-              <time title={clock(cause.endedAt).title}>{clock(cause.endedAt).text}</time>, operation{" "}
-              <Link to={activityHref({ repo, op: cause.id })} title={cause.id}>
-                <span className="mono">{shortId(cause.id)}</span>
-              </Link>
-            </dd>
+            {dev ? (
+              <dd>
+                {operationLabel(cause)} by {cause.agent || "-"} at{" "}
+                <time title={clock(cause.endedAt).title}>{clock(cause.endedAt).text}</time>,
+                operation{" "}
+                <Link to={activityHref({ repo, op: cause.id })} title={cause.id}>
+                  <span className="mono">{shortId(cause.id)}</span>
+                </Link>
+              </dd>
+            ) : (
+              <dd>
+                {cause.agent && (
+                  <>
+                    <Avatar name={cause.agent} size="sm" /> {cause.agent}{" "}
+                  </>
+                )}
+                <Link to={activityHref({ repo, op: cause.id })}>{operationSentence(cause)}</Link>{" "}
+                <span className="secondary">
+                  · <Time at={cause.endedAt} />
+                </span>
+              </dd>
+            )}
           </>
         )}
       </dl>

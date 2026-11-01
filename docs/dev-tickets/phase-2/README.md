@@ -46,6 +46,7 @@ Phase 1 is complete and released as 0.1.0 (2026-10-25). What it left behind, and
 | #128 | [issue-128-playwright-smoke-test.md](issue-128-playwright-smoke-test.md) | S | R2.18, R2.19 | none listed (R2.20, R2.21 and R3.31 add their views' steps to the test) |
 | R2.20 | [R2.20-workspaces-and-fleet-panel.md](R2.20-workspaces-and-fleet-panel.md) | M | R2.18, R2.10, R2.11, R2.12, R2.19 | R3.39 (its menu bar's fleet state), R5.06 (tier outcomes in the panel); R3.36 reuses its agent join (Phase 2's exit criterion on the web UI) |
 | R2.21 | [R2.21-activity-feed-with-scrubber.md](R2.21-activity-feed-with-scrubber.md) | M | R2.18, R2.12, R2.09, R2.19, R2.20 | none listed (R3.33, R3.37 and R3.38 reuse its window, coalescing and scrubber) |
+| design | [web-ui-design-pass.md](web-ui-design-pass.md) | L | R2.18, R2.19, R2.20, R2.21 | none listed (R3.31 on build on its tokens, components and developer mode) |
 
 ## Departures from dev-phases.md
 

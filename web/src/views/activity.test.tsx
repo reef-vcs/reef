@@ -19,6 +19,11 @@ import { FakeOplog, REPO, T } from "../test/oplog-daemon";
 import { useSearch } from "../ui/router";
 import { Activity } from "./Activity";
 import { activityParams } from "./activity-route";
+import { withDevMode } from "../test/dev-mode";
+import { setDevMode } from "../ui/dev-mode";
+
+// These tests check the ids, commands and exact times developer mode shows.
+withDevMode();
 
 const MIN = 60_000;
 
@@ -433,5 +438,64 @@ describe("Activity, after review", () => {
     await flush();
     expect(rows()).toHaveLength(5);
     expect(scrolled).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Activity, outside developer mode (the design pass)", () => {
+  beforeEach(() => {
+    setDevMode(false);
+  });
+
+  it("tells each row as a sentence, with relative times and no command", async () => {
+    const s = story();
+    await setup(s.oplog);
+    const r = rows();
+    expect(cells(r[0] as HTMLElement)[1]).toBe("Described a change<script>alert(1)</script>");
+    expect(cells(r[3] as HTMLElement)[1]).toBe("Created a workspacereef: create workspace w1");
+    expect(screen.queryByText(/^reef op log/)).toBeNull();
+    // A run says how long it took, with the exact range in its title.
+    const run = (r[2] as HTMLElement).querySelector(".run-span");
+    expect(run?.textContent).toBe("over 2 min");
+    expect(run?.getAttribute("title")).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d to /);
+    // Times are relative, with the absolute time in the title.
+    const time = (r[0] as HTMLElement).querySelector("time");
+    expect(time?.getAttribute("title")).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    expect(time?.getAttribute("datetime")).toBe(new Date(T + 5 * MIN).toISOString());
+    // Who: still the link to the agent, named by its identity.
+    expect(
+      within(r[2] as HTMLElement)
+        .getByRole("link", { name: "ann" })
+        .getAttribute("href"),
+    ).toBe(`/repos/${REPO}/workspaces?agent=ann`);
+  });
+
+  it("holds new operations while the first row is under the sticky header", async () => {
+    const header = document.createElement("header");
+    header.style.position = "sticky";
+    vi.spyOn(header, "getBoundingClientRect").mockReturnValue({ bottom: 100 } as DOMRect);
+    document.body.append(header);
+    try {
+      const s = story();
+      const { push } = await setup(s.oplog);
+      const first = rows()[0] as HTMLElement;
+      // Below the top of the viewport, but under the header.
+      vi.spyOn(first, "getBoundingClientRect").mockReturnValue({
+        bottom: 60,
+        height: 30,
+      } as DOMRect);
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+        await settle(10);
+      });
+      const next = s.oplog.add({ endedAt: T + 6 * MIN, workspaceId: "w1", agent: "ann" });
+      await act(async () => {
+        push([next]);
+        await settle(20);
+      });
+      expect(rows()).toHaveLength(4);
+      expect(screen.getByRole("button", { name: "1 new operation · Show" })).toBeTruthy();
+    } finally {
+      header.remove();
+    }
   });
 });

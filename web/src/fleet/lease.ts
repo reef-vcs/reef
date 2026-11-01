@@ -35,7 +35,7 @@ function ms(timestamp: Timestamp | undefined): number {
   return timestamp ? timestampMs(timestamp) : Number.NEGATIVE_INFINITY;
 }
 
-function durationMs(duration: Duration | undefined): number {
+export function durationMs(duration: Duration | undefined): number {
   return duration ? Number(duration.seconds) * 1000 + duration.nanos / 1e6 : 0;
 }
 

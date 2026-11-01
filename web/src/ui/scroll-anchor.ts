@@ -56,11 +56,11 @@ export function useScrollAnchor(view: AnchorView, version: number, selected: str
   }, [version, view, selected]);
 }
 
-/** The rows' elements, for the scroll anchor: a stable view over the current keys. */
-export function useTableAnchor(keys: string[], version: number, selected: string) {
-  const [elements] = useState(() => new Map<string, HTMLTableRowElement>());
+/** The rows' (or cards') elements, for the scroll anchor: a stable view over the current keys. */
+export function useElementAnchor(keys: string[], version: number, selected: string) {
+  const [elements] = useState(() => new Map<string, HTMLElement>());
   const register = useMemo(
-    () => (key: string, element: HTMLTableRowElement | null) => {
+    () => (key: string, element: HTMLElement | null) => {
       if (element) elements.set(key, element);
       else elements.delete(key);
     },

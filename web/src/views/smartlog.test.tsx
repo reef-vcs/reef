@@ -17,6 +17,11 @@ import { entries, FakeRepoDaemon, hexId, REPO } from "../test/smartlog-daemon";
 import { reverseHex } from "../ui/ids";
 import { useSearch } from "../ui/router";
 import { Smartlog, smartlogParams } from "./Smartlog";
+import { withDevMode } from "../test/dev-mode";
+import { setDevMode } from "../ui/dev-mode";
+
+// These tests check the ids, commands and exact times developer mode shows.
+withDevMode();
 
 const LOG = `
 a2 a1
@@ -400,5 +405,46 @@ describe("Smartlog", () => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toContain("Register it with reef init");
     expect(alert.textContent).toContain("reef repo list");
+  });
+});
+
+describe("Smartlog, outside developer mode (the design pass)", () => {
+  beforeEach(() => {
+    setDevMode(false);
+  });
+
+  it("leads rows with the description and leaves out the revset, the command and commit ids", async () => {
+    setup(withLog(LOG, { a2: { workspaceIds: ["ws00000000000001"] } }));
+    await flush();
+    expect(screen.queryByLabelText("Revset")).toBeNull();
+    expect(screen.queryByText(/^reef log /)).toBeNull();
+    const a2 = option("a2");
+    // No commit id: developer mode adds it after the change id.
+    expect(within(a2).queryByText("a2")).toBeNull();
+    const subject = within(a2).getByText("a2: a change");
+    const id = within(a2).getByText(reverseHex(hexId("a2")).slice(0, 8));
+    expect(subject.compareDocumentPosition(id) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The workspace chip is its id, with the owner in its title.
+    expect(a2.textContent).not.toContain("ws ws000000");
+    expect(within(a2).getByTitle(/^Workspace ws000000, owner agent-a$/)).toBeTruthy();
+  });
+
+  it("says when a custom selection is shown, with a way back", async () => {
+    setup(withLog(LOG), { query: "revset=all()" });
+    await flush();
+    const link = screen.getByRole("link", { name: "Show the default view" });
+    expect(screen.getByText(/Showing a custom selection of changes/)).toBeTruthy();
+    expect(link.getAttribute("href")).toBe(`/repos/${REPO}/smartlog`);
+  });
+
+  it("reads a past point as a sentence, linking to the feed", async () => {
+    setup(withLog(LOG), { query: "at=abcd" });
+    await flush();
+    const banner = screen.getByRole("status");
+    expect(banner.textContent).toContain("Viewing the past");
+    expect(banner.textContent).not.toContain("abcd");
+    expect(
+      within(banner).getByRole("link", { name: "See it in Activity" }).getAttribute("href"),
+    ).toBe(`/repos/${REPO}/activity?op=abcd-full&at=abcd-full`);
   });
 });

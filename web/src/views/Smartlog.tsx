@@ -26,13 +26,19 @@ import { joinAgents, type AgentJoin } from "../fleet/agents";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { AtBanner } from "../ui/AtBanner";
+import { Avatar, AvatarStack } from "../ui/Avatar";
+import { useNow } from "../ui/clock";
 import { Copy } from "../ui/Copy";
+import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { useScrollAnchor, type AnchorView } from "../ui/scroll-anchor";
 import { operationLabel } from "../ui/operation";
 import { reverseHex, shortId } from "../ui/ids";
 import { Link, navigate } from "../ui/router";
 import { clock, dateTime } from "../ui/time";
+import { Time, timeText } from "../ui/TimeLabel";
+import { StateBadge } from "../state/StateBadge";
+import { operationSentence, plural } from "../ui/words";
 import { ChangeDetail } from "./ChangeDetail";
 import { fleetHref } from "./fleet-route";
 import { GraphCell, LANE_WIDTH, OpenLanes, ROW_HEIGHT } from "./GraphCell";
@@ -109,13 +115,18 @@ function Row({
   register: (commit: string, element: HTMLLIElement | null) => void;
 }) {
   const change = row.change;
+  const dev = useDevMode();
+  const now = useNow(!dev);
   const time = dateTime(change.committer?.at);
   const draft = row.state.state === "draft";
   const cause = row.cause;
   // The state's word is always in the title, for draft rows too (decision 3).
   const title = cause
-    ? `${row.state.label}; changed at ${clock(cause.endedAt).text} by ${cause.agent || "-"}, ${operationLabel(cause)}`
+    ? dev
+      ? `${row.state.label}; changed at ${clock(cause.endedAt).text} by ${cause.agent || "-"}, ${operationLabel(cause)}`
+      : `${row.state.label} · ${cause.agent || "someone"} ${operationSentence(cause).replace(" a change", " it")} ${timeText(cause.endedAt, now, false)}`
     : row.state.label;
+  const subject = change.description.split("\n", 1)[0];
   return (
     <li
       role="option"
@@ -141,49 +152,69 @@ function Row({
             {row.state.label}
           </span>
         )}
-        <span className="mono" title={reverseHex(change.changeId)}>
-          {shortId(reverseHex(change.changeId))}
+        <span className={subject ? "subject" : "subject secondary"}>
+          {subject || "(no description)"}
         </span>
-        <span className="mono secondary">{shortId(change.commitId)}</span>
-        {change.bookmarks.map((name) => (
-          <span key={name} className={`label${name.includes("@") ? " secondary" : ""}`}>
-            {name}
-          </span>
-        ))}
-        {change.tags.map((name) => (
-          <span key={name} className="label">
-            tag:{name}
-          </span>
-        ))}
-        {change.workspaceIds.map((id) => {
-          const owner = workspaces.get(id)?.owner;
-          return (
-            <span key={id} className="label">
-              ws <span className="mono">{shortId(id)}</span>
-              {owner ? ` ${owner}` : ""}
+        <span className="meta">
+          {change.bookmarks.map((name) => (
+            <span key={name} className={`label${name.includes("@") ? " secondary" : ""}`}>
+              {name}
             </span>
-          );
-        })}
-        {change.jjWorkspaces.map((name) => (
-          <span key={name} className="label">
-            jj {name}
+          ))}
+          {change.tags.map((name) => (
+            <span key={name} className="label">
+              tag:{name}
+            </span>
+          ))}
+          {change.empty && <span className="secondary">empty</span>}
+          {change.workspaceIds.map((id) => {
+            const owner = workspaces.get(id)?.owner;
+            return dev ? (
+              <span key={id} className="label ws-chip">
+                ws <span className="mono">{shortId(id)}</span>
+                {owner ? ` ${owner}` : ""}
+              </span>
+            ) : (
+              <span
+                key={id}
+                className="label ws-chip"
+                title={`Workspace ${shortId(id)}${owner ? `, owner ${owner}` : ""}`}
+              >
+                {owner && <Avatar name={owner} size="sm" />}
+                <span className="mono">{shortId(id)}</span>
+              </span>
+            );
+          })}
+          {change.jjWorkspaces.map((name) => (
+            <span key={name} className="label">
+              jj {name}
+            </span>
+          ))}
+          {dev ? (
+            <>
+              {agents.slice(0, AGENTS_SHOWN).map((agent) => (
+                <span key={agent} className="label agent">
+                  {agent}
+                </span>
+              ))}
+              {agents.length > AGENTS_SHOWN && (
+                <span className="label agent">+{agents.length - AGENTS_SHOWN}</span>
+              )}
+            </>
+          ) : (
+            <AvatarStack names={agents} max={AGENTS_SHOWN} />
+          )}
+          <span
+            className="mono secondary change-id"
+            title={dev ? reverseHex(change.changeId) : undefined}
+          >
+            {shortId(reverseHex(change.changeId))}
           </span>
-        ))}
-        {agents.slice(0, AGENTS_SHOWN).map((agent) => (
-          <span key={agent} className="label agent">
-            {agent}
+          {dev && <span className="mono secondary">{shortId(change.commitId)}</span>}
+          <span className="when">
+            {dev ? <time title={time.title}>{time.text}</time> : <Time at={change.committer?.at} />}
           </span>
-        ))}
-        {agents.length > AGENTS_SHOWN && (
-          <span className="label agent">+{agents.length - AGENTS_SHOWN}</span>
-        )}
-        {change.empty && <span className="secondary">empty</span>}
-        <span className="secondary subject">
-          {change.description.split("\n", 1)[0] || "(no description)"}
         </span>
-        <time className="secondary" title={time.title}>
-          {time.text}
-        </time>
       </span>
     </li>
   );
@@ -380,13 +411,36 @@ export function Smartlog({
   const root = snapshot.repository?.root;
   const name = root ? root.replace(/\/+$/, "").split("/").pop() || root : shortId(params.repo);
   const status = snapshot.status;
+  const dev = useDevMode();
+  const fleetLink = fleetHref({ repo: snapshot.repository?.id ?? params.repo, at: params.at });
 
   return (
     <div className="smartlog">
-      <h2>
+      <h1 className="visually-hidden">
         <span title={root}>{name}</span> · Smartlog
-      </h2>
-      {status && (
+      </h1>
+      {status && !dev && (
+        <p className="summary page-summary">
+          {status.trunkBookmark ? (
+            <span>
+              Trunk: <span className="label">{status.trunkBookmark}</span>
+            </span>
+          ) : (
+            <span className="secondary">No trunk bookmark</span>
+          )}
+          {status.conflictedChangeIds.length > 0 && (
+            <StateBadge
+              state="conflicted"
+              label={`${String(status.conflictedChangeIds.length)} conflicted`}
+            />
+          )}
+          {status.divergentChangeIds.length > 0 && (
+            <span className="secondary">{status.divergentChangeIds.length} divergent</span>
+          )}
+          <Link to={fleetLink}>{plural(status.activeWorkspaceCount, "active workspace")}</Link>
+        </p>
+      )}
+      {status && dev && (
         <p className="secondary summary">
           {status.trunkBookmark ? `trunk is ${status.trunkBookmark}` : "no trunk bookmark"}
           {status.conflictedChangeIds.length > 0 &&
@@ -394,9 +448,7 @@ export function Smartlog({
           {status.divergentChangeIds.length > 0 &&
             ` · ${String(status.divergentChangeIds.length)} divergent`}
           {" · "}
-          <Link to={fleetHref({ repo: snapshot.repository?.id ?? params.repo, at: params.at })}>
-            {status.activeWorkspaceCount} active workspaces
-          </Link>
+          <Link to={fleetLink}>{status.activeWorkspaceCount} active workspaces</Link>
         </p>
       )}
       {frozen && (
@@ -407,11 +459,22 @@ export function Smartlog({
           live={smartlogHref({ ...params, at: "" })}
         />
       )}
-      <RevsetField key={params.revset} params={params} error={revsetError} />
-      <p className="command">
-        <code>{command}</code> <Copy text={command} />
-      </p>
-      {!frozen && (
+      {dev && <RevsetField key={params.revset} params={params} error={revsetError} />}
+      {dev && (
+        <p className="command">
+          <code>{command}</code> <Copy text={command} />
+        </p>
+      )}
+      {!dev && params.revset !== SMARTLOG_REVSET && (
+        <p className="notice">
+          Showing a custom selection of changes.{" "}
+          <Link to={smartlogHref({ ...params, revset: SMARTLOG_REVSET })}>
+            Show the default view
+          </Link>
+        </p>
+      )}
+      {!dev && revsetError && <ErrorView error={revsetError} />}
+      {dev && !frozen && (
         <p className="secondary note">
           Stacks keep their place while you watch; <code>reef log</code> lists the most recently
           changed first.
@@ -483,7 +546,9 @@ export function Smartlog({
                     Show {DEFAULT_LIMIT} more
                   </button>
                 ) : (
-                  <span className="secondary">Narrow the revset to see more.</span>
+                  <span className="secondary">
+                    {dev ? "Narrow the revset to see more." : "Narrow the view to see more."}
+                  </span>
                 )}
               </div>
             )}
@@ -510,7 +575,13 @@ export function Smartlog({
             )}
             {params.change && selectedRows.length === 0 && (
               <p className="secondary">
-                This change is not in this view. <code>{command}</code> lists what it shows.
+                This change is not in this view.
+                {dev && (
+                  <>
+                    {" "}
+                    <code>{command}</code> lists what it shows.
+                  </>
+                )}
               </p>
             )}
           </aside>

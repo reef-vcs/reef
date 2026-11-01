@@ -17,13 +17,17 @@ import type { DiskResult } from "../fleet/disk";
 import type { Ending } from "../live/presence";
 import { changeState } from "../state/states";
 import { StateBadge } from "../state/StateBadge";
+import { Avatar, Identity } from "../ui/Avatar";
 import { Copy } from "../ui/Copy";
+import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { reverseHex, shortId } from "../ui/ids";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
 import { size } from "../ui/size";
-import { clock, dateTime } from "../ui/time";
+import { clock } from "../ui/time";
+import { Time as TimeLabel } from "../ui/TimeLabel";
+import { HEALTH_WORDS, operationSentence } from "../ui/words";
 import type { WorkspaceRow } from "./fleet-model";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
@@ -76,17 +80,21 @@ function seconds(duration: { seconds: bigint; nanos: number } | undefined): stri
 }
 
 function Time({ at }: { at: Parameters<typeof clock>[0] }) {
-  const time = dateTime(at);
-  return <time title={time.title}>{time.text}</time>;
+  return <TimeLabel at={at} dev="date" />;
 }
 
 function LeaseFacts({ lease, view }: { lease: Lease; view: LeaseView | undefined }) {
+  const dev = useDevMode();
   return (
     <dl className="facts">
-      <dt>Lease</dt>
-      <dd className="mono">{lease.id}</dd>
+      {dev && (
+        <>
+          <dt>Lease</dt>
+          <dd className="mono">{lease.id}</dd>
+        </>
+      )}
       <dt>Holder</dt>
-      <dd>{lease.owner}</dd>
+      <dd>{dev ? lease.owner : <Identity identity={lease.owner} size="sm" />}</dd>
       <dt>Issued</dt>
       <dd>
         <Time at={lease.issuedAt} />
@@ -107,7 +115,7 @@ function LeaseFacts({ lease, view }: { lease: Lease; view: LeaseView | undefined
         <>
           <dt>Health</dt>
           <dd>
-            {view.health.word}
+            {dev ? view.health.word : HEALTH_WORDS[view.health.word]}
             {view.health.title && <span className="secondary"> ({view.health.title})</span>}
           </dd>
         </>
@@ -157,6 +165,7 @@ export function WorkspaceDetail({
   const answer = frozen ? frozenResponse : result?.response;
   const response = answer?.workspace?.id === row.id ? answer : undefined;
   const workspace = row.ended?.workspace ?? row.workspace;
+  const dev = useDevMode();
   const change = row.change;
   const attention = ATTENTION_WORDS[workspace.attention];
   const usage = response?.diskUsage;
@@ -174,10 +183,14 @@ export function WorkspaceDetail({
         </p>
       )}
       <dl className="facts">
-        <dt>Id</dt>
-        <dd className="mono">{workspace.id}</dd>
+        {dev && (
+          <>
+            <dt>Id</dt>
+            <dd className="mono">{workspace.id}</dd>
+          </>
+        )}
         <dt>Owner</dt>
-        <dd>{workspace.owner}</dd>
+        <dd>{dev ? workspace.owner : <Identity identity={workspace.owner} size="sm" />}</dd>
         {workspace.purpose && (
           <>
             <dt>Purpose</dt>
@@ -193,14 +206,19 @@ export function WorkspaceDetail({
           <span className="mono">{workspace.path}</span> <Copy text={workspace.path} />
           {remote && <div className="secondary">on the daemon's machine</div>}
         </dd>
-        <dt>Backend</dt>
-        <dd>{BACKENDS[workspace.backend] ?? "-"}</dd>
-        <dt>Watcher</dt>
-        <dd>
-          {WATCHERS[workspace.watcher] ?? "-"}
-          {WATCH_STATES[workspace.watchState] && `, ${WATCH_STATES[workspace.watchState] ?? ""}`}
-        </dd>
-        {workspace.remoteTokenId && (
+        {dev && (
+          <>
+            <dt>Backend</dt>
+            <dd>{BACKENDS[workspace.backend] ?? "-"}</dd>
+            <dt>Watcher</dt>
+            <dd>
+              {WATCHERS[workspace.watcher] ?? "-"}
+              {WATCH_STATES[workspace.watchState] &&
+                `, ${WATCH_STATES[workspace.watchState] ?? ""}`}
+            </dd>
+          </>
+        )}
+        {dev && workspace.remoteTokenId && (
           <>
             <dt>Remote token</dt>
             <dd className="mono">{workspace.remoteTokenId}</dd>
@@ -213,6 +231,11 @@ export function WorkspaceDetail({
             <span key={name}>
               {i > 0 && ", "}
               <Link to={fleetHref({ repo, at, agent: name })} replace>
+                {!dev && (
+                  <>
+                    <Avatar name={name} size="sm" />{" "}
+                  </>
+                )}
                 {name}
               </Link>
             </span>
@@ -224,11 +247,21 @@ export function WorkspaceDetail({
         <dt>Change</dt>
         <dd>
           {change && <StateBadge {...changeState(change)} />}{" "}
-          <span className="mono">{reverseHex(workspace.changeId)}</span>
-          <div className="secondary mono">{workspace.changeId}</div>
+          {dev ? (
+            <>
+              <span className="mono">{reverseHex(workspace.changeId)}</span>
+              <div className="secondary mono">{workspace.changeId}</div>
+            </>
+          ) : (
+            <span className="mono">{shortId(reverseHex(workspace.changeId))}</span>
+          )}
         </dd>
-        <dt>Commit</dt>
-        <dd className="mono">{workspace.commitId}</dd>
+        {dev && (
+          <>
+            <dt>Commit</dt>
+            <dd className="mono">{workspace.commitId}</dd>
+          </>
+        )}
         {change && (
           <>
             <dt>Description</dt>
@@ -306,11 +339,20 @@ export function WorkspaceDetail({
           <ul className="activity">
             {response.recentSnapshots.slice(0, SNAPSHOTS_SHOWN).map((s) => (
               <li key={s.operationId}>
-                <Time at={s.takenAt} /> · <span className="mono">{shortId(s.commitId)}</span> ·
-                operation{" "}
-                <Link to={activityHref({ repo, op: s.operationId })} title={s.operationId}>
-                  <span className="mono">{shortId(s.operationId)}</span>
-                </Link>
+                {dev ? (
+                  <>
+                    <Time at={s.takenAt} /> · <span className="mono">{shortId(s.commitId)}</span> ·
+                    operation{" "}
+                    <Link to={activityHref({ repo, op: s.operationId })} title={s.operationId}>
+                      <span className="mono">{shortId(s.operationId)}</span>
+                    </Link>
+                  </>
+                ) : (
+                  <>
+                    <Time at={s.takenAt} /> ·{" "}
+                    <Link to={activityHref({ repo, op: s.operationId })}>See in Activity</Link>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -344,7 +386,10 @@ export function WorkspaceDetail({
                       ` and ${String(p.paths.length - PATHS_SHOWN)} more`}
                   </div>
                 )}
-                <span className="secondary"> · {clock(p.updatedAt).text}</span>
+                <span className="secondary">
+                  {" "}
+                  · <TimeLabel at={p.updatedAt} />
+                </span>
               </li>
             ))}
           </ul>
@@ -360,13 +405,20 @@ export function WorkspaceDetail({
               .map((e) => (
                 <li key={e.presence.id}>
                   {e.presence.agent} · {doing(e.presence)} · {ENDING_WORDS[e.reason]}{" "}
-                  {clock(timestampFromMs(e.at)).text}
+                  <TimeLabel at={timestampFromMs(e.at)} />
                 </li>
               ))}
           </ul>
         </>
       )}
-      {row.cause && (
+      {row.cause && !dev && (
+        <p className="secondary">
+          Last: {row.cause.agent || "someone"}{" "}
+          <Link to={activityHref({ repo, op: row.cause.id })}>{operationSentence(row.cause)}</Link>{" "}
+          <TimeLabel at={row.cause.endedAt} />
+        </p>
+      )}
+      {row.cause && dev && (
         <p className="secondary">
           Last: {operationLabel(row.cause)} by {row.cause.agent || "-"} at{" "}
           {clock(row.cause.endedAt).text}, operation{" "}
@@ -375,9 +427,11 @@ export function WorkspaceDetail({
           </Link>
         </p>
       )}
-      <p className="command">
-        <code>{command}</code> <Copy text={command} />
-      </p>
+      {dev && (
+        <p className="command">
+          <code>{command}</code> <Copy text={command} />
+        </p>
+      )}
     </div>
   );
 }

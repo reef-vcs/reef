@@ -1,5 +1,6 @@
 // The scrubber (R2.21): one slider over the window's operations, in the
-// header of the three repository pages. A stop is an operation, and "Live"
+// header of the three repository pages (the app bar's strip since the design
+// pass, labelled "History"). A stop is an operation, and "Live"
 // is a stop after the newest; committing one moves the open page to
 // `?at=<operation>`, which the smartlog and the workspaces page read at,
 // remounted, and the feed shows. The track is a time axis from the window's
@@ -27,12 +28,17 @@ import { userOf } from "../log/coalesce";
 import { bucketWidth, buckets } from "../log/counts";
 import type { OpRecord } from "../log/record";
 import type { OperationWindow } from "../log/window";
+import { useNow } from "./clock";
 import { count } from "./count";
+import { useDevMode } from "./dev-mode";
 import { ErrorView } from "./ErrorView";
+import { HistoryIcon } from "./icons";
 import { shortId } from "./ids";
 import { operationLabel } from "./operation";
 import { navigate, usePath, useSearch } from "./router";
+import { ago } from "./relative";
 import { clock } from "./time";
+import { operationSentence } from "./words";
 
 /** The pause after the last step before a burst commits. */
 export const COMMIT_DELAY_MS = 250;
@@ -51,6 +57,13 @@ function describe(record: OpRecord): string {
   return `${shortId(record.id)} · ${operationLabel(record)} · ${who} · ${clock(timestampFromMs(record.endedAt)).text}`;
 }
 
+/** "4 min ago · ann saved a snapshot", outside developer mode. */
+function sentence(record: OpRecord, now: number): string {
+  const who = record.agent || userOf(record);
+  const what = operationSentence(record);
+  return `${ago(record.endedAt, now)} · ${who ? `${who} ${what}` : what}`;
+}
+
 export function Scrubber({
   window: win,
   at,
@@ -64,6 +77,8 @@ export function Scrubber({
   onSessionInvalid: () => void;
 }) {
   const snap = useSyncExternalStore(win.subscribe, win.getSnapshot);
+  const dev = useDevMode();
+  const now = useNow(!dev);
   const records = useMemo(() => snap.records ?? [], [snap.records]);
   const n = records.length;
   useEffect(() => {
@@ -198,19 +213,32 @@ export function Scrubber({
   }
 
   const current = recordAt(value);
-  const label =
-    point?.state === "detached"
+  const label = dev
+    ? point?.state === "detached"
       ? `${shortId(point.operation.id)} · older than the loaded period`
       : point?.state === "loading" && preview === null
         ? `Looking up ${shortId(at)}`
         : value >= n || !current
           ? "Live"
-          : `${describe(current)} · ${count(value + 1)} of ${count(n)}`;
+          : `${describe(current)} · ${count(value + 1)} of ${count(n)}`
+    : point?.state === "detached"
+      ? "Older than the loaded period"
+      : point?.state === "loading" && preview === null
+        ? "Looking up the point"
+        : value >= n || !current
+          ? "Now"
+          : `${sentence(current, now)} · ${count(value + 1)} of ${count(n)}`;
+  // Bars after the point are what the view does not include yet.
+  const pointEnd = value >= n || !current ? Infinity : current.endedAt;
   const handleAt = detached ? 0 : current ? position(current.endedAt) : 100;
 
   return (
     <div className="scrubber">
       <div className="scrubber-row">
+        <span className="strip-title">
+          <HistoryIcon />
+          History
+        </span>
         <div
           ref={track}
           className="track"
@@ -241,7 +269,7 @@ export function Scrubber({
             {bars.map((bar) => (
               <div
                 key={bar.start}
-                className="bar"
+                className={bar.start > pointEnd ? "bar future" : "bar"}
                 style={{ height: `${String((bar.count / tallest) * 100)}%` }}
                 title={`${clock(timestampFromMs(bar.start)).text}: ${count(bar.count)}`}
               />
@@ -254,13 +282,6 @@ export function Scrubber({
           />
         </div>
         <span className="scrubber-label">{label}</span>
-      </div>
-      <div className="scrubber-row secondary">
-        <span>
-          {bars.length > 0 && `Tallest bar: ${count(tallest)} · `}
-          {n > 0 &&
-            `${clock(timestampFromMs(oldest)).text} to ${clock(timestampFromMs(newest)).text}`}
-        </span>
         <form
           className="go-to-time"
           onSubmit={(event) => {
@@ -281,6 +302,15 @@ export function Scrubber({
           <button type="submit">Go</button>
         </form>
       </div>
+      {dev && (
+        <div className="scrubber-row secondary">
+          <span>
+            {bars.length > 0 && `Tallest bar: ${count(tallest)} · `}
+            {n > 0 &&
+              `${clock(timestampFromMs(oldest)).text} to ${clock(timestampFromMs(newest)).text}`}
+          </span>
+        </div>
+      )}
       {error && <ErrorView error={error} />}
     </div>
   );

@@ -28,13 +28,18 @@ import { newerFirst, type OpRecord } from "../log/record";
 import { PAGE_SIZE, WINDOW_CAP, type OperationWindow } from "../log/window";
 import { OperationKind, SnapshotKind } from "../gen/reef/api/v1/operations_pb";
 import { AtBanner } from "../ui/AtBanner";
+import { Identity } from "../ui/Avatar";
 import { Copy } from "../ui/Copy";
+import { useDevMode } from "../ui/dev-mode";
 import { count } from "../ui/count";
 import { ErrorView } from "../ui/ErrorView";
 import { shortId } from "../ui/ids";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
-import { clock, dateTime } from "../ui/time";
+import { span } from "../ui/relative";
+import { clock, dateTime, fullTime } from "../ui/time";
+import { Time } from "../ui/TimeLabel";
+import { capitalize, operationSentence } from "../ui/words";
 import { activityHref, type ActivityParams } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { OperationCache, OperationDetail } from "./OperationDetail";
@@ -120,11 +125,15 @@ function FeedRow({
   selected: boolean;
   arrived: boolean;
 }) {
+  const dev = useDevMode();
   const newest = row.operations[0] as OpRecord;
   const oldest = row.operations.at(-1) as OpRecord;
   const what =
     row.class === "event"
-      ? { text: operationLabel(newest), title: newest.description }
+      ? {
+          text: dev ? operationLabel(newest) : capitalize(operationSentence(newest)),
+          title: newest.description,
+        }
       : runWhat(row);
   const user = userOf(newest);
   return (
@@ -134,13 +143,27 @@ function FeedRow({
       }
       aria-current={selected ? "true" : undefined}
     >
-      <td>
-        {row.operations.length > 1 ? (
-          <>
-            <When ms={oldest.endedAt} day={day} /> to <When ms={newest.endedAt} day={day} />
-          </>
+      <td className="when-cell">
+        {dev ? (
+          row.operations.length > 1 ? (
+            <>
+              <When ms={oldest.endedAt} day={day} /> to <When ms={newest.endedAt} day={day} />
+            </>
+          ) : (
+            <When ms={newest.endedAt} day={day} />
+          )
         ) : (
-          <When ms={newest.endedAt} day={day} />
+          <>
+            <Time at={newest.endedAt} />
+            {row.operations.length > 1 && (
+              <div
+                className="secondary run-span"
+                title={`${fullTime(at(oldest.endedAt)).text} to ${fullTime(at(newest.endedAt)).text}`}
+              >
+                over {span(newest.endedAt - oldest.endedAt)}
+              </div>
+            )}
+          </>
         )}
       </td>
       <td>
@@ -157,21 +180,27 @@ function FeedRow({
       </td>
       <td>
         {newest.agent ? (
-          <Link to={fleetHref({ repo, agent: newest.agent, at: point })}>{newest.agent}</Link>
-        ) : (
+          <Link to={fleetHref({ repo, agent: newest.agent, at: point })}>
+            {dev ? newest.agent : <Identity identity={newest.agent} size="sm" />}
+          </Link>
+        ) : dev || !user ? (
           user || "-"
+        ) : (
+          <Identity identity={user} size="sm" />
         )}
       </td>
       <td>
         {newest.workspaceId ? (
           <Link
             to={fleetHref({ repo, workspace: newest.workspaceId, at: point })}
-            title={newest.workspaceId}
+            title={dev ? newest.workspaceId : undefined}
           >
             <span className="mono">{shortId(newest.workspaceId)}</span>
           </Link>
         ) : (
-          <span className="mono">{newest.jjWorkspace || "-"}</span>
+          <span className={newest.jjWorkspace && !dev ? "label" : "mono"}>
+            {newest.jjWorkspace || "-"}
+          </span>
         )}
       </td>
       <td className="number">{count(row.operations.length)}</td>
@@ -213,7 +242,14 @@ class Arrivals {
   }
 }
 
-/** Reading: the first row is out of view, or focus is in the table. */
+/** Where the sticky header ends, or 0 when the header scrolls away with the page. */
+export function headerBottom(): number {
+  const header = document.querySelector("header");
+  if (!header || getComputedStyle(header).position !== "sticky") return 0;
+  return header.getBoundingClientRect().bottom;
+}
+
+/** Reading: the first row is out of view (under the sticky header), or focus is in the table. */
 function useReading(box: RefObject<HTMLDivElement | null>, rows: number): boolean {
   const [scrolled, setScrolled] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -222,7 +258,7 @@ function useReading(box: RefObject<HTMLDivElement | null>, rows: number): boolea
     const measure = () => {
       const box = element?.querySelector("tbody tr")?.getBoundingClientRect();
       // A row with no height has not been laid out: not out of view.
-      setScrolled(box ? box.height > 0 && box.bottom <= 0 : false);
+      setScrolled(box ? box.height > 0 && box.bottom <= headerBottom() : false);
     };
     const onFocusIn = () => {
       setFocused(true);
@@ -260,6 +296,7 @@ export function Activity({
   params: ActivityParams;
 }) {
   const snap = useSyncExternalStore(win.subscribe, win.getSnapshot);
+  const dev = useDevMode();
   const state = useSyncExternalStore(
     (listener) => live.subscribeState(listener),
     () => live.state,
@@ -347,9 +384,9 @@ export function Activity({
 
   return (
     <div className="feed">
-      <h2>
+      <h1 className="visually-hidden">
         <span title={root}>{name}</span> · Activity
-      </h2>
+      </h1>
       {params.at && (
         <AtBanner
           repo={repo}
@@ -359,8 +396,9 @@ export function Activity({
         />
       )}
       {!params.at && state !== "live" && newest && (
-        <p className="secondary">
-          Not live: the last operation arrived at {clock(at(newest.endedAt)).text}.
+        <p className="notice">
+          Not live: the last operation arrived{" "}
+          {dev ? `at ${clock(at(newest.endedAt)).text}` : <Time at={newest.endedAt} />}.
         </p>
       )}
       {snap.note && (
@@ -388,18 +426,22 @@ export function Activity({
                   plural(summary.workspaces, "workspace", "workspaces"),
                 ].join(" · ")}
               </p>
-              <p className="command">
-                <code>{command}</code> <Copy text={command} />
-              </p>
+              {dev && (
+                <p className="command">
+                  <code>{command}</code> <Copy text={command} />
+                </p>
+              )}
               {snap.held.size > 0 && !params.at && (
                 <div className="held">
                   <button
                     type="button"
+                    className="primary"
                     onClick={() => {
                       win.showHeld();
                       setToTop(toTop + 1);
                     }}
                   >
+                    <span aria-hidden="true">↑ </span>
                     {plural(snap.held.size, "new operation", "new operations")} · Show
                   </button>
                 </div>
@@ -456,10 +498,16 @@ export function Activity({
               ) : snap.capped ? (
                 <p className="secondary">
                   Loaded back to {dateTime(at(oldest?.endedAt ?? 0)).text} · {count(WINDOW_CAP)}{" "}
-                  operations, the most this page holds. For everything older:{" "}
-                  <code>
-                    reef op log --repo {repo} --at-op {commandId(oldest?.id ?? "")} --limit 0
-                  </code>
+                  operations, the most this page holds.
+                  {dev && (
+                    <>
+                      {" "}
+                      For everything older:{" "}
+                      <code>
+                        reef op log --repo {repo} --at-op {commandId(oldest?.id ?? "")} --limit 0
+                      </code>
+                    </>
+                  )}
                 </p>
               ) : (
                 <p className="secondary">

@@ -2,11 +2,15 @@
 // commands, which can be copied.
 import type { ReefError } from "../api/errors";
 import { Copy } from "./Copy";
+import { AlertIcon } from "./icons";
 
 export function ErrorView({ error }: { error: ReefError }) {
   return (
     <div className="error" role="alert">
-      <p>{error.message || "The daemon did not answer."}</p>
+      <p className="error-message">
+        <AlertIcon />
+        <span>{error.message || "The daemon did not answer."}</span>
+      </p>
       {error.hint && <p className="secondary">{error.hint}</p>}
       {error.next.map((command) => (
         <p className="next" key={command}>

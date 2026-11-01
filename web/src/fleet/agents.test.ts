@@ -3,7 +3,7 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { PresenceKind, PresenceSchema, type Presence } from "../gen/reef/api/v1/presence_pb";
-import { agentCounts, agentsOfWorkspace, joinAgents } from "./agents";
+import { agentCounts, agentNames, agentsOfWorkspace, joinAgents } from "./agents";
 
 const REPO = "a3dda866c7e8f343";
 
@@ -86,5 +86,21 @@ describe("joinAgents", () => {
     ]);
     expect(counts.get(REPO)).toBe(1);
     expect(counts.get("ffff")).toBe(1);
+  });
+});
+
+describe("agentNames", () => {
+  it("names the agents agentCounts counts, per repository (the design pass)", () => {
+    const entries = [
+      entry({ id: "a", agent: "reviewer", workspaceId: "w1" }),
+      entry({ id: "l", agent: "owner", workspaceId: "w1", byDaemon: true }),
+      entry({ id: "b", agent: "builder", workspaceId: "w2" }),
+      entry({ id: "o", agent: "other", repoId: "ffff" }),
+    ];
+    const names = agentNames(entries);
+    expect(names.get(REPO)).toEqual(["reviewer", "builder"]);
+    expect(names.get("ffff")).toEqual(["other"]);
+    const counts = agentCounts(entries);
+    for (const [repo, list] of names) expect(counts.get(repo)).toBe(list.length);
   });
 });

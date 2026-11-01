@@ -10,18 +10,90 @@
  *
  * The dark block appears twice, for `prefers-color-scheme` and for
  * `data-theme="dark"`; the test checks that the two are the same.
+ *
+ * Brand tokens (the design pass, ADR 0047's amendment) are chrome and
+ * identity only: the ocean app bar, the mark, tabs, focus and selection.
+ * They never mark an object's state or health. Coral sits near
+ * `--state-failed`, so it appears only on `--ocean`.
  */
+
+/* Theme-independent scales: type, spacing, radii and fixed sizes. */
+:root {
+  --text-xs: 12px;
+  --text-xs-lh: 16px;
+  --text-sm: 13px;
+  --text-sm-lh: 18px;
+  --text-md: 14px;
+  --text-md-lh: 20px;
+  --text-base: 15px;
+  --text-base-lh: 22px;
+  --text-lg: 17px;
+  --text-lg-lh: 24px;
+  --text-xl: 22px;
+  --text-xl-lh: 28px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  --appbar-h: 56px;
+  --strip-h: 44px;
+  --pane-w: 400px;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
 :root,
 [data-theme="light"] {
   color-scheme: light;
+  --canvas: #f4f6f8;
   --surface: #ffffff;
   --surface-raised: #f5f6f8;
   --text: #1b1f24;
   --text-secondary: #5b616b;
-  --border: #d5d9df;
-  --focus: #1f5fbf;
-  --link: #1f5fbf;
+  --border: #dfe3e8;
+  --control-border: #858d97;
+  --focus: #0b7285;
+  --link: #0b7285;
+
+  --brand: #0b7285;
+  --brand-strong: #086070;
+  --brand-tint: #e3f4f5;
+  --on-brand: #ffffff;
+  --coral: #e8735a;
+  --ocean: #0c2b3a;
+  --on-ocean: #ffffff;
+  --on-ocean-muted: #a9c2cf;
+  --ocean-accent: #5fd0d6;
+
+  --avatar-0-bg: #cdeef0;
+  --avatar-0-fg: #0a5b66;
+  --avatar-1-bg: #fbd9d0;
+  --avatar-1-fg: #8f3320;
+  --avatar-2-bg: #d3e3f3;
+  --avatar-2-fg: #1d4a75;
+  --avatar-3-bg: #f3e4c4;
+  --avatar-3-fg: #6b4a0b;
+  --avatar-4-bg: #e4dcf5;
+  --avatar-4-fg: #4f3591;
+  --avatar-5-bg: #f7d7e6;
+  --avatar-5-fg: #85234f;
+  --avatar-6-bg: #dbe9cf;
+  --avatar-6-fg: #3c5a1f;
+  --avatar-7-bg: #dfe3e8;
+  --avatar-7-fg: #3a4553;
+
+  --shadow-1: 0 1px 2px rgb(16 24 40 / 0.06), 0 1px 3px rgb(16 24 40 / 0.08);
+  --shadow-2: 0 8px 24px rgb(16 24 40 / 0.14);
 
   --state-draft: #4b5a6e;
   --state-draft-tint: #e9ebee;
@@ -46,13 +118,45 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --canvas: #0f1114;
     --surface: #14161a;
     --surface-raised: #1d2025;
     --text: #e6e8eb;
     --text-secondary: #a3a9b3;
-    --border: #353a42;
-    --focus: #7fb0ff;
-    --link: #7fb0ff;
+    --border: #30353c;
+    --control-border: #5f6873;
+    --focus: #4fc3cc;
+    --link: #4fc3cc;
+
+    --brand: #4fc3cc;
+    --brand-strong: #7ad6dc;
+    --brand-tint: #17323a;
+    --on-brand: #0c2b3a;
+    --coral: #f2937c;
+    --ocean: #0a1e29;
+    --on-ocean: #ffffff;
+    --on-ocean-muted: #9fb6c2;
+    --ocean-accent: #5fd0d6;
+
+    --avatar-0-bg: #123b40;
+    --avatar-0-fg: #9ce3e8;
+    --avatar-1-bg: #45231b;
+    --avatar-1-fg: #f8b8a7;
+    --avatar-2-bg: #16304a;
+    --avatar-2-fg: #a9cbef;
+    --avatar-3-bg: #3d3014;
+    --avatar-3-fg: #ecd29a;
+    --avatar-4-bg: #2d2550;
+    --avatar-4-fg: #cdbdf5;
+    --avatar-5-bg: #46192f;
+    --avatar-5-fg: #f3b2cf;
+    --avatar-6-bg: #24361a;
+    --avatar-6-fg: #bfdca5;
+    --avatar-7-bg: #2a313b;
+    --avatar-7-fg: #c4ccd6;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.5);
+    --shadow-2: 0 8px 24px rgb(0 0 0 / 0.55);
 
     --state-draft: #a9b8cc;
     --state-draft-tint: #26292f;
@@ -77,13 +181,45 @@
 
 [data-theme="dark"] {
   color-scheme: dark;
+  --canvas: #0f1114;
   --surface: #14161a;
   --surface-raised: #1d2025;
   --text: #e6e8eb;
   --text-secondary: #a3a9b3;
-  --border: #353a42;
-  --focus: #7fb0ff;
-  --link: #7fb0ff;
+  --border: #30353c;
+  --control-border: #5f6873;
+  --focus: #4fc3cc;
+  --link: #4fc3cc;
+
+  --brand: #4fc3cc;
+  --brand-strong: #7ad6dc;
+  --brand-tint: #17323a;
+  --on-brand: #0c2b3a;
+  --coral: #f2937c;
+  --ocean: #0a1e29;
+  --on-ocean: #ffffff;
+  --on-ocean-muted: #9fb6c2;
+  --ocean-accent: #5fd0d6;
+
+  --avatar-0-bg: #123b40;
+  --avatar-0-fg: #9ce3e8;
+  --avatar-1-bg: #45231b;
+  --avatar-1-fg: #f8b8a7;
+  --avatar-2-bg: #16304a;
+  --avatar-2-fg: #a9cbef;
+  --avatar-3-bg: #3d3014;
+  --avatar-3-fg: #ecd29a;
+  --avatar-4-bg: #2d2550;
+  --avatar-4-fg: #cdbdf5;
+  --avatar-5-bg: #46192f;
+  --avatar-5-fg: #f3b2cf;
+  --avatar-6-bg: #24361a;
+  --avatar-6-fg: #bfdca5;
+  --avatar-7-bg: #2a313b;
+  --avatar-7-fg: #c4ccd6;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-2: 0 8px 24px rgb(0 0 0 / 0.55);
 
   --state-draft: #a9b8cc;
   --state-draft-tint: #26292f;

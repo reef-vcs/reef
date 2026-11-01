@@ -1,8 +1,9 @@
 // The web UI in a real browser against a real daemon (#128): the session
 // hand-off, one operation stream and one presence stream shared by two tabs,
 // live updates of the overview, the smartlog and the workspaces page, the
-// activity feed's counts and the scrubber (R2.21), and the no-session page
-// after a restart. Each project (browser) gets its own
+// activity feed's counts and the scrubber (R2.21), developer mode (the
+// design pass), and the no-session page after a restart. Developer mode is
+// off but in its own step, so the test reads what people see. Each project (browser) gets its own
 // scratch daemon.
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -86,8 +87,11 @@ async function changeOrder(page: Page): Promise<string[]> {
 test("smoke", async ({ reef, context, page }) => {
   const streams = new Streams(context);
   const [wsA, wsB] = reef.workspaces as [(typeof reef.workspaces)[0], (typeof reef.workspaces)[0]];
-  const repoRow = (p: Page) =>
-    p.getByRole("row").filter({ has: p.getByRole("link", { name: "e2e-fixture", exact: true }) });
+  const repoCard = (p: Page) =>
+    p
+      .getByRole("list", { name: "Repositories" })
+      .getByRole("listitem")
+      .filter({ has: p.getByRole("link", { name: "e2e-fixture", exact: true }) });
 
   const first = await test.step("the daemon serves this checkout's app", async () => {
     const session = await reef.session();
@@ -115,7 +119,7 @@ test("smoke", async ({ reef, context, page }) => {
   });
 
   await test.step("the overview lists the repository", async () => {
-    await expect(repoRow(page)).toContainText(reef.repo.slice(0, 8));
+    await expect(repoCard(page)).toBeVisible();
   });
 
   const second = await context.newPage();
@@ -123,7 +127,7 @@ test("smoke", async ({ reef, context, page }) => {
   await test.step("a second tab shares the streams", async () => {
     await second.goto(url);
     await expect(indicator(second, "Live")).toBeVisible();
-    await expect(repoRow(second)).toContainText(reef.repo.slice(0, 8));
+    await expect(repoCard(second)).toBeVisible();
     await streams.hold(tabs);
   });
 
@@ -132,7 +136,9 @@ test("smoke", async ({ reef, context, page }) => {
     await reef.reef(["describe", "--workspace", wsB.id, "-m", "e2e: overview"], {
       agent: "e2e-overview",
     });
-    for (const tab of tabs) await expect(repoRow(tab)).toContainText("describe · e2e-overview");
+    for (const tab of tabs) {
+      await expect(repoCard(tab)).toContainText("e2e-overview described a change");
+    }
     expect(await marker(page)).toBe(markers[0]);
     expect(await marker(second)).toBe(markers[1]);
     await streams.hold(tabs);
@@ -158,7 +164,7 @@ test("smoke", async ({ reef, context, page }) => {
     const row = options.nth(index);
     await expect(row).toHaveAccessibleName(new RegExp(`\\bchange ${a8}, .*e2e: smartlog`));
     expect(await row.getAttribute("data-commit"), "a new commit").not.toBe(commit);
-    await expect(row).toHaveAttribute("title", /by e2e-smartlog, describe$/);
+    await expect(row).toHaveAttribute("title", /e2e-smartlog described it/);
     expect(await changeOrder(page)).toEqual(before);
     expect(await marker(page)).toBe(markers[0]);
     await streams.hold(tabs);
@@ -180,30 +186,30 @@ test("smoke", async ({ reef, context, page }) => {
     // A `ws create` lease is never renewed: not heartbeating, not stuck.
     // Renewed, it heartbeats; its entry then lapses 10 s later.
     const health = (ws: { id: string }) => wsRow(ws).getByRole("cell").nth(6);
-    await expect(health(wsA)).toContainText("not heartbeating");
+    await expect(health(wsA)).toContainText("idle");
     await reef.reef(["ws", "renew", wsA.id]);
-    await expect(health(wsA)).toContainText(/^heartbeating/);
-    await expect(health(wsA)).toContainText("missed heartbeats", { timeout: 20_000 });
+    await expect(health(wsA)).toContainText(/^healthy/);
+    await expect(health(wsA)).toContainText("unresponsive", { timeout: 20_000 });
 
     // A reported activity is one agent on wsA: while the owner's lease entry
     // is live (renewed just before), it joins the reporter instead of
     // counting as a second agent.
     await reef.reef(["ws", "renew", wsA.id]);
-    await expect(health(wsA)).toContainText(/^heartbeating/);
+    await expect(health(wsA)).toContainText(/^healthy/);
     const reported = (await reef.reef(["presence", "report", "--workspace", wsA.id, "e2e: fleet"], {
       agent: "e2e-fleet",
     })) as { id: string };
-    const agents = page.getByRole("table", { name: "Agents" });
-    const agentRow = agents
-      .getByRole("row")
-      .filter({ has: page.getByRole("link", { name: "e2e-fleet" }) });
-    await expect(agentRow).toContainText("e2e: fleet");
+    // The agents are cards (the design pass).
+    const agents = page.getByRole("list", { name: "Agents" });
+    const cards = agents.locator(":scope > li");
+    const agentCard = cards.filter({ has: page.getByRole("link", { name: "e2e-fleet" }) });
+    await expect(agentCard).toContainText("e2e: fleet");
     await expect(wsRow(wsA).getByRole("cell").nth(2)).toHaveText("e2e-fleet");
-    await expect(health(wsA)).toContainText(/^heartbeating/);
-    const order = await agents.getByRole("row").allTextContents();
+    await expect(health(wsA)).toContainText(/^healthy/);
+    const order = await cards.count();
     await reef.reef(["presence", "clear", reported.id]);
-    await expect(agentRow).toContainText(/finished \d\d:\d\d:\d\d/);
-    expect((await agents.getByRole("row").allTextContents()).length).toBe(order.length);
+    await expect(agentCard).toContainText(/finished (just now|\d+ min ago)/);
+    expect(await cards.count()).toBe(order);
 
     // A write is snapshotted: Files rises, and the selection measures its disk.
     await writeFile(join(wsA.path, "e2e-fleet.txt"), "fleet\n");
@@ -278,16 +284,28 @@ test("smoke", async ({ reef, context, page }) => {
       agent: "e2e-feed",
     });
     const top = feed(page).getByRole("row").nth(1);
-    await expect(top).toContainText("describe");
-    await top.getByRole("link", { name: "describe" }).click();
+    await expect(top).toContainText("Described a change");
+    await top.getByRole("link", { name: "Described a change" }).click();
     await expect(page.getByRole("complementary", { name: "Selection" })).toContainText("rewritten");
 
     // Another tab, a direct load and a reload count the same.
     await second.goto(`${url}repos/${repo}/activity`);
     await expect(feed(second)).toBeVisible();
     await expect.poll(async () => (await total(second)) - (await total(page))).toBe(0);
+    // Cells after When: a relative time can tick between two reads.
     const firstRows = async (p: Page) =>
-      (await feed(p).getByRole("row").allTextContents()).slice(1, 4);
+      (
+        await feed(p)
+          .getByRole("row")
+          .evaluateAll((rows) =>
+            rows.map((r) =>
+              [...r.querySelectorAll("td")]
+                .slice(1)
+                .map((c) => c.textContent)
+                .join("|"),
+            ),
+          )
+      ).slice(1, 4);
     const before = await firstRows(page);
     await second.reload();
     await expect(feed(second)).toBeVisible();
@@ -305,26 +323,59 @@ test("smoke", async ({ reef, context, page }) => {
       .poll(async () => new URL(page.url()).searchParams.get("at") === (await secondNewest()))
       .toBe(true);
     const previous = { id: new URL(page.url()).searchParams.get("at") ?? "" };
-    const short = previous.id.slice(0, 8);
-    await expect(page.getByRole("status")).toContainText(`At operation ${short}`);
+    const pastLink = (p: Page) =>
+      p.getByRole("status").getByRole("link", { name: "See it in Activity" });
+    await expect(page.getByRole("status")).toContainText("Viewing the past");
+    await expect(pastLink(page)).toHaveAttribute("href", new RegExp(`op=${previous.id}`));
     await page
       .getByRole("navigation", { name: "Repository" })
       .getByRole("link", { name: "Smartlog" })
       .click();
     await expect(page).toHaveURL(new RegExp(`/repos/${repo}/smartlog\\?at=${previous.id}$`));
-    await expect(page.getByRole("status")).toContainText(`At operation ${short}`);
+    await expect(pastLink(page)).toHaveAttribute("href", new RegExp(`op=${previous.id}`));
     await page.getByRole("slider").focus();
     await page.getByRole("slider").press("End");
     await expect.poll(() => new URL(page.url()).search).toBe("");
 
     // The overview's latest operation opens the feed with it selected.
     await page.getByRole("link", { name: "Reef", exact: true }).click();
-    const latest = repoRow(page).getByRole("cell").nth(2).getByRole("link").first();
-    const id = (await latest.getAttribute("title")) ?? "";
+    const latest = repoCard(page).getByRole("link", {
+      name: /^(saved|took|snapshotted|created|released|moved|described|abandoned|undid|edited|imported|ran|did) /i,
+    });
+    const id = new URL((await latest.getAttribute("href")) ?? "", url).searchParams.get("op") ?? "";
     expect(id).toMatch(/^[0-9a-f]{16,}$/);
     await latest.click();
     await expect(page).toHaveURL(`${url}repos/${repo}/activity?op=${id}`);
     expect(await marker(page)).toBe(markers[0]);
+    await streams.hold(tabs);
+  });
+
+  await test.step("developer mode shows the machine details", async () => {
+    // In-app navigation only in the first tab: a load there would hand the
+    // streams to the second tab.
+    const nav = page.getByRole("navigation", { name: "Repository" });
+    await expect(page.getByRole("table", { name: "Activity" })).toBeVisible();
+    await expect(page.getByText(/^reef op log --repo/)).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("switch", { name: "Developer mode" }).click();
+    await expect(page.getByText(/^reef op log --repo/)).toBeVisible();
+    // The switch's label is "Developer mode" too: check the pill once the
+    // panel is closed.
+    await page.keyboard.press("Escape");
+    const pill = (p: Page) => p.getByRole("banner").getByText("Developer mode", { exact: true });
+    await expect(pill(page)).toBeVisible();
+    // The other tab follows without a reload (the storage event); a reload keeps it.
+    await expect(pill(second)).toBeVisible();
+    await second.reload();
+    await expect(pill(second)).toBeVisible();
+    await nav.getByRole("link", { name: "Smartlog" }).click();
+    await expect(page.getByLabel("Revset")).toBeVisible();
+    await expect(page.getByText(/^reef log --repo/)).toBeVisible();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("switch", { name: "Developer mode" }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByLabel("Revset")).toHaveCount(0);
+    await expect(pill(page)).toHaveCount(0);
     await streams.hold(tabs);
   });
 
@@ -356,6 +407,6 @@ test("smoke", async ({ reef, context, page }) => {
     await page.goto(next.sessionUrl);
     await expect(indicator(page, "Live")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Repositories" })).toBeVisible();
-    await expect(repoRow(page)).toContainText(reef.repo.slice(0, 8));
+    await expect(repoCard(page)).toBeVisible();
   });
 });
