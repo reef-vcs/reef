@@ -1,0 +1,2280 @@
+[
+  {
+    "change_id": "4c9f49fa58e9cb5696f1d1ef6230bc3c",
+    "change_id_reverse_hex": "vnqkvqkpurlqnoutqtkymylktxwzonwn",
+    "commit_id": "18ca6868baa3edbdbec44b9a2a5d3d56cb334432",
+    "parent_commit_ids": ["8442d31e0aa6d2acc81a78607f01fd5e6ecb737d"],
+    "parent_change_ids": ["1a8feb92e605c86ea040897355642577"],
+    "description": "",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T00:58:26.670Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T01:03:00.000Z"
+    },
+    "tree_id": "a95ddd43a360e3a7254e23d72bace83bf3e1e332",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": ["3081ad6e91ed55ac"],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "8442d31e0aa6d2acc81a78607f01fd5e6ecb737d",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "1a8feb92e605c86ea040897355642577",
+    "change_id_reverse_hex": "yprkloqxltzunrtlpzvzrqswuutvxuss",
+    "commit_id": "8442d31e0aa6d2acc81a78607f01fd5e6ecb737d",
+    "parent_commit_ids": ["ce8c67c5a1896062ca376946122a47d9f9aae521"],
+    "parent_change_ids": ["84a7559f9be254486296ec5346069185"],
+    "description": "R2.19: brief for the smartlog view",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T00:50:12.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T00:58:09.000Z"
+    },
+    "tree_id": "a0de4900220ed3db42ac41d87e7854fec6e97a08",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "ce8c67c5a1896062ca376946122a47d9f9aae521",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "02338593f154710139ba3960f3663d14",
+    "change_id_reverse_hex": "zxwwruqwkyuvsyzywqopwqtzkwttwmyv",
+    "commit_id": "263281f028bc66cf069c5d9c808e2a8fc9a1cc40",
+    "parent_commit_ids": ["ce8c67c5a1896062ca376946122a47d9f9aae521"],
+    "parent_change_ids": ["84a7559f9be254486296ec5346069185"],
+    "description": "Bump the cargo-minor group across 1 directory with 7 updates",
+    "author": {
+      "name": "dependabot[bot]",
+      "email": "49699333+dependabot[bot]@users.noreply.github.com",
+      "at": "2026-10-31T21:54:37.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T21:54:37.000Z"
+    },
+    "tree_id": "b697bd4935e214c648496c4e2afc53673eb2f514",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["dependabot/cargo/cargo-minor-914a316e18@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "ce8c67c5a1896062ca376946122a47d9f9aae521",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "c5fdd103d63f4fb26526f2405f72c681",
+    "change_id_reverse_hex": "nukmmyzwmtwkvkoxtuxtkxvzuksxntry",
+    "commit_id": "e31cd004e53aace88eb212c80295d1a2141e2520",
+    "parent_commit_ids": ["3dbfcb79475678da177240b823d3c9a3e1cb6639"],
+    "parent_change_ids": ["4d8803743d92202739879bcfa80c5fa5"],
+    "description": "ci: give the overlayfs job 45 minutes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T00:28:45.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-11-01T00:28:58.000Z"
+    },
+    "tree_id": "3b41987b2b30618ae4dc37e66be79557ca5e414a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["r2.08-remote-daemon-access", "r2.08-remote-daemon-access@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "3dbfcb79475678da177240b823d3c9a3e1cb6639",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "4d8803743d92202739879bcfa80c5fa5",
+    "change_id_reverse_hex": "vmrrzwsvwmqxxzxswqrsqonkprznukpu",
+    "commit_id": "3dbfcb79475678da177240b823d3c9a3e1cb6639",
+    "parent_commit_ids": ["974d3cb77ca014f81461618af6410e26e3389ab5"],
+    "parent_change_ids": ["2d570932439eb0b5b6f210bc1dc3268f"],
+    "description": "R2.08: remote daemon access",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T22:22:53.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T23:53:38.000Z"
+    },
+    "tree_id": "f54e7321b7192911ba1142bc59e2ffb4dda06d78",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "974d3cb77ca014f81461618af6410e26e3389ab5",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "2d570932439eb0b5b6f210bc1dc3268f",
+    "change_id_reverse_hex": "xmuszqwxvwqlozouotkxyzonymnwxtrk",
+    "commit_id": "974d3cb77ca014f81461618af6410e26e3389ab5",
+    "parent_commit_ids": ["ce8c67c5a1896062ca376946122a47d9f9aae521"],
+    "parent_change_ids": ["84a7559f9be254486296ec5346069185"],
+    "description": "R2.08: brief for remote daemon access",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T22:15:16.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T22:22:18.000Z"
+    },
+    "tree_id": "2130e9358aea097fa20bd3c65697cd7c10dd37b4",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "ce8c67c5a1896062ca376946122a47d9f9aae521",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "f0da39135764ebe7f44a4b6ad4e93219",
+    "change_id_reverse_hex": "kzmpwqywustvlolskvvpvotpmvlqwxyq",
+    "commit_id": "3ff72672264c42fd6cc0f6e418ab6a29c24fd583",
+    "parent_commit_ids": ["ce8c67c5a1896062ca376946122a47d9f9aae521"],
+    "parent_change_ids": ["84a7559f9be254486296ec5346069185"],
+    "description": "",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T21:50:56.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T21:50:56.000Z"
+    },
+    "tree_id": "f7cb95624fd33415cf05e52466a0a271f0166e26",
+    "empty": true,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": ["default"],
+    "edges": [
+      {
+        "commit_id": "ce8c67c5a1896062ca376946122a47d9f9aae521",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "84a7559f9be254486296ec5346069185",
+    "change_id_reverse_hex": "rvpsuuqkqolxuvvrtxqtlnuwvtztqyru",
+    "commit_id": "ce8c67c5a1896062ca376946122a47d9f9aae521",
+    "parent_commit_ids": ["29da6dbcb197dab7a62bef5d35a99c6a3c143f2a"],
+    "parent_change_ids": ["54fc283c563995acbaf7d465ed5be98d"],
+    "description": "R2.23: incremental status index (#131)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T21:50:02.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T21:50:02.000Z"
+    },
+    "tree_id": "f7cb95624fd33415cf05e52466a0a271f0166e26",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": ["main", "main@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "29da6dbcb197dab7a62bef5d35a99c6a3c143f2a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "3d1e7e3e43d762cff4b86455334c973f",
+    "change_id_reverse_hex": "wmylslwlvwmstxnkkvortvuuwwvnqswk",
+    "commit_id": "a2bee318fce932ccaa261d2ff346ebc27c7e78bc",
+    "parent_commit_ids": ["29da6dbcb197dab7a62bef5d35a99c6a3c143f2a"],
+    "parent_change_ids": ["54fc283c563995acbaf7d465ed5be98d"],
+    "description": "Bump base64 from 0.22.1 to 0.23.1",
+    "author": {
+      "name": "dependabot[bot]",
+      "email": "49699333+dependabot[bot]@users.noreply.github.com",
+      "at": "2026-10-31T16:38:09.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T16:38:09.000Z"
+    },
+    "tree_id": "5fa682f6766a11375b16d2eba5523bed8f8567bc",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["dependabot/cargo/base64-0.23.1@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "29da6dbcb197dab7a62bef5d35a99c6a3c143f2a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "52bbee9b5042becaf2de31a666245279",
+    "change_id_reverse_hex": "uxoollqouzvxolnpkxmlwyptttxvuxsq",
+    "commit_id": "66c2929f9e4a2466658c7b4f537d420ad977dd4a",
+    "parent_commit_ids": ["29da6dbcb197dab7a62bef5d35a99c6a3c143f2a"],
+    "parent_change_ids": ["54fc283c563995acbaf7d465ed5be98d"],
+    "description": "Bump rusqlite from 0.40.2 to 0.41.0",
+    "author": {
+      "name": "dependabot[bot]",
+      "email": "49699333+dependabot[bot]@users.noreply.github.com",
+      "at": "2026-10-31T16:38:07.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T16:38:07.000Z"
+    },
+    "tree_id": "c8a5017af092f4eac11c4daf8cf5ffcdfeea258c",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["dependabot/cargo/rusqlite-0.41.0@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "29da6dbcb197dab7a62bef5d35a99c6a3c143f2a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "54fc283c563995acbaf7d465ed5be98d",
+    "change_id_reverse_hex": "uvknxrwnutwqqupnopksmvtulmuolqrm",
+    "commit_id": "29da6dbcb197dab7a62bef5d35a99c6a3c143f2a",
+    "parent_commit_ids": ["58ce9ef48d3a2e9ae63617f77e862b45a78c6309"],
+    "parent_change_ids": ["90c631e5a2d4617eefe86c6759745cb1"],
+    "description": "R2.18: web UI scaffold (#127)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T16:35:41.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T16:35:41.000Z"
+    },
+    "tree_id": "fcbab1f6d84b03cc5c6222c725b6dd2d5f4d985e",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "505bfabb70972aa51604004a4db5a03f944c0aff",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "ad6488c8158826844fec2873cd413f98",
+    "change_id_reverse_hex": "pmtvrrnryurrxtrvvklnxrswnmvywkqr",
+    "commit_id": "1240d44519fc82b3ce1437f2216411a8131126b5",
+    "parent_commit_ids": ["505bfabb70972aa51604004a4db5a03f944c0aff"],
+    "parent_change_ids": ["ff503229fc05adb252002068a554e90e"],
+    "description": "Token benchmark results, 2026-10-31",
+    "author": {
+      "name": "github-actions[bot]",
+      "email": "41898282+github-actions[bot]@users.noreply.github.com",
+      "at": "2026-10-31T03:22:00.000Z"
+    },
+    "committer": {
+      "name": "github-actions[bot]",
+      "email": "41898282+github-actions[bot]@users.noreply.github.com",
+      "at": "2026-10-31T03:22:00.000Z"
+    },
+    "tree_id": "2d63a50dd6d6332a2482032dcc621133e9e60217",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["tokens/2026-10-31-41163502205@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "505bfabb70972aa51604004a4db5a03f944c0aff",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "ff503229fc05adb252002068a554e90e",
+    "change_id_reverse_hex": "kkuzwxxqknzupmoxuxzzxztrpuuvlqzl",
+    "commit_id": "505bfabb70972aa51604004a4db5a03f944c0aff",
+    "parent_commit_ids": ["79ad454805b82700d264951754ee351cf264a03d"],
+    "parent_change_ids": ["bc05264f38ac772ae8a9264b00e41da0"],
+    "description": "R2.17: token-efficiency benchmark (#120)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-31T03:12:58.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-31T03:12:58.000Z"
+    },
+    "tree_id": "88dc0c76d1d9c17abff0e4bc4c9207bbea5ef382",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "f4e34d3d063cfb98163eea40ea3c6b56db62cf3b",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "06bf15cd2e0bea07e4e0d398c99eb4ce",
+    "change_id_reverse_hex": "ztokyunmxlzolpzslvlzmwqrnqqlovnl",
+    "commit_id": "09fde838a9a0a5bb83174d5c4a76e12c905ca03b",
+    "parent_commit_ids": ["96fac0e3bfcc8b2007123eb703a7337ce667b3f0"],
+    "parent_change_ids": ["a820a83beb2ebefdc3baf5f8c96c4233"],
+    "description": "R2.16: tests that race the history worker",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T23:06:37.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T23:37:28.000Z"
+    },
+    "tree_id": "a71abbc955ee807116892f7d5d47ce8fa59321a9",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["r2.16-query-layer", "r2.16-query-layer@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "96fac0e3bfcc8b2007123eb703a7337ce667b3f0",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "a820a83beb2ebefdc3baf5f8c96c4233",
+    "change_id_reverse_hex": "prxzprwoloxlolkmnwopkukrnqtnvxww",
+    "commit_id": "96fac0e3bfcc8b2007123eb703a7337ce667b3f0",
+    "parent_commit_ids": ["c419cce4cced0cab3ecb3afc7e3b180fb9ea0646"],
+    "parent_change_ids": ["2430a9d205a32d6d95f41a9c43a50ab3"],
+    "description": "R2.16: keep the history follower off subscribers' paths",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T22:49:20.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T23:37:28.000Z"
+    },
+    "tree_id": "3d9a667a4ad7dba17facee1e43dfe4c68eb91957",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "c419cce4cced0cab3ecb3afc7e3b180fb9ea0646",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "2430a9d205a32d6d95f41a9c43a50ab3",
+    "change_id_reverse_hex": "xvwzpqmxzupwxmtmqukvypqnvwpuzpow",
+    "commit_id": "c419cce4cced0cab3ecb3afc7e3b180fb9ea0646",
+    "parent_commit_ids": ["ad54060b2e8f57f1dced936463c5178dadb5ea44"],
+    "parent_change_ids": ["a2ed0fbffa945833672f6897be5b6b0c"],
+    "description": "R2.16: query layer",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T20:09:37.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T22:02:53.000Z"
+    },
+    "tree_id": "f39035c1c4a227b4b78f98bd39bf4e5af311f37a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "ad54060b2e8f57f1dced936463c5178dadb5ea44",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "a2ed0fbffa945833672f6897be5b6b0c",
+    "change_id_reverse_hex": "pxlmzkokkpqvurwwtsxktrqsoluotozn",
+    "commit_id": "ad54060b2e8f57f1dced936463c5178dadb5ea44",
+    "parent_commit_ids": ["f4e34d3d063cfb98163eea40ea3c6b56db62cf3b"],
+    "parent_change_ids": ["dcf346db6ad63c5702577c6819df3c60"],
+    "description": "R2.16: brief for the query layer",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T20:04:51.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T22:01:05.000Z"
+    },
+    "tree_id": "4585a41a1be324e66714ed8a5a290414e7c5ea0c",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "f4e34d3d063cfb98163eea40ea3c6b56db62cf3b",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "dcf346db6ad63c5702577c6819df3c60",
+    "change_id_reverse_hex": "mnkwvtmotpmtwnuszxussntryqmkwntz",
+    "commit_id": "f4e34d3d063cfb98163eea40ea3c6b56db62cf3b",
+    "parent_commit_ids": ["b68578b741db5e64deecddaccc8698f57778cb8c"],
+    "parent_change_ids": ["31d31eeeaf19613335bb377b267adb82"],
+    "description": "Fixed-width RFC 3339 timestamps (#111)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T20:38:14.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-30T20:38:14.000Z"
+    },
+    "tree_id": "42793f6703b774d1307e260a7b017bd851e0399b",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a4fb5b5ab9e69b6eff26b2ae43332094c433bc9b",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "3e6bdbd0e558baf7f07325cbcdba7efc",
+    "change_id_reverse_hex": "wltomomzluuropkskzswxunonmopslkn",
+    "commit_id": "736d2e5392d206015683b13d069f1f1d51f1728a",
+    "parent_commit_ids": ["825b836dfb172295528c9e4aedf2599cb4420f63"],
+    "parent_change_ids": ["864572cb42dae421704fcffaa703f636"],
+    "description": "burst_coalesces: the shipped min_interval too",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T19:06:26.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T19:07:52.000Z"
+    },
+    "tree_id": "7a6d83a63c5229572b9d4ad90ab31a5f852c51a2",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["fix-burst-coalesces-debounce", "fix-burst-coalesces-debounce@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "825b836dfb172295528c9e4aedf2599cb4420f63",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "864572cb42dae421704fcffaa703f636",
+    "change_id_reverse_hex": "rtvusxnovxmplvxyszvknkkppszwktwt",
+    "commit_id": "825b836dfb172295528c9e4aedf2599cb4420f63",
+    "parent_commit_ids": ["a4fb5b5ab9e69b6eff26b2ae43332094c433bc9b"],
+    "parent_change_ids": ["d93dcc232904ccc2754d64ff76d9679d"],
+    "description": "burst_coalesces at the shipped debounce",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T18:47:34.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-30T18:50:21.000Z"
+    },
+    "tree_id": "51e341fc404c782b8c5dd24d2863fdfb6447e258",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a4fb5b5ab9e69b6eff26b2ae43332094c433bc9b",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "d93dcc232904ccc2754d64ff76d9679d",
+    "change_id_reverse_hex": "mqwmnnxwxqzvnnnxsuvmtvkkstmqtsqm",
+    "commit_id": "a4fb5b5ab9e69b6eff26b2ae43332094c433bc9b",
+    "parent_commit_ids": ["b5741e8f71728f9362f8ebe59ec2ebe8427e77cf"],
+    "parent_change_ids": ["f3ee7e4217d74379a7d71f46c9f14e8e"],
+    "description": "CI: macOS job cap 40 to 50 minutes (#106)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T20:31:29.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-28T20:31:29.000Z"
+    },
+    "tree_id": "a664f7cc48d2c2a03df5e44a4bfaa9c3e55893e3",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "c2692f7fd02f90b986c9db391574408f296523b6",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "b64425ce221a983b3133c1aedc594d56",
+    "change_id_reverse_hex": "otvvxunlxxypqrwowywwnyplmnuqvmut",
+    "commit_id": "bef2c3fa1d55c496762bbee9f5c0d3410a8136e8",
+    "parent_commit_ids": ["79675259075a04533ace23977cbcfe30b5c3c79a"],
+    "parent_change_ids": ["0f41a9142f94c23b84b3127c5ba10997"],
+    "description": "reef init: agent table review fixes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:56:55.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:59:43.000Z"
+    },
+    "tree_id": "49df1ab710803715dcbc5fdd2a67ef64c2c66f78",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["pr104"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "79675259075a04533ace23977cbcfe30b5c3c79a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "0f41a9142f94c23b84b3127c5ba10997",
+    "change_id_reverse_hex": "zkvypqyvxkqvnxworvowyxsnuopyzqqs",
+    "commit_id": "79675259075a04533ace23977cbcfe30b5c3c79a",
+    "parent_commit_ids": ["cc24264119b3ce74b2a39a5d0b61b0366a13b7ba"],
+    "parent_change_ids": ["dc014551cefc05bd535a4d48394b1e0d"],
+    "description": "reef init: one table of the agents auto recognizes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:49:40.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:52:35.000Z"
+    },
+    "tree_id": "98212251b2867a32805628977d855af725543cda",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "cc24264119b3ce74b2a39a5d0b61b0366a13b7ba",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "dc014551cefc05bd535a4d48394b1e0d",
+    "change_id_reverse_hex": "mnzyvuuynlknzuomuwupvmvrwqvoylzm",
+    "commit_id": "cc24264119b3ce74b2a39a5d0b61b0366a13b7ba",
+    "parent_commit_ids": ["c2692f7fd02f90b986c9db391574408f296523b6"],
+    "parent_change_ids": ["6dc4a694f1022ea89cdb93619d09f40b"],
+    "description": "reef init detects Claude Code running it",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:28:07.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:38:56.000Z"
+    },
+    "tree_id": "dd81253df6b4ea01e7bb463940c3b5703a9e08db",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "c2692f7fd02f90b986c9db391574408f296523b6",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "6dc4a694f1022ea89cdb93619d09f40b",
+    "change_id_reverse_hex": "tmnvptqvkyzxxlprqnmoqwtyqmzqkvzo",
+    "commit_id": "c2692f7fd02f90b986c9db391574408f296523b6",
+    "parent_commit_ids": ["5111aeb02b84c4de1e17e64b08f0962195463bbc"],
+    "parent_change_ids": ["3ddc62a984690f10d267e8787b2321d4"],
+    "description": "docs: README reflects 0.1.0 released and Phase 2 on main (#102)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T17:12:19.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-28T17:12:19.000Z"
+    },
+    "tree_id": "01c149f4f7d280cc5e4ca35b2e2dace04e2bc152",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "efdc473bb5c7a102b1a9d1667102f87654caa18d",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "3f27a8073f4d4d106c68f1d1c2afe8a9",
+    "change_id_reverse_hex": "wkxsprzswkvmvmyztntrkymynxpklrpq",
+    "commit_id": "59fd674a3897262c37e7c11348ebaf63425ff619",
+    "parent_commit_ids": ["9c567ecdd190bdd475738b3b2fd14d676e431de4"],
+    "parent_change_ids": ["a737cbd89ab8c6bc2be4dda53fda148d"],
+    "description": "R2.14: symbol index ingestion",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T04:27:57.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T06:50:34.000Z"
+    },
+    "tree_id": "da71462726d1b295196d5bf7882bfba953dd866d",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["r2.14-symbol-index-ingestion", "r2.14-symbol-index-ingestion@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "9c567ecdd190bdd475738b3b2fd14d676e431de4",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "a737cbd89ab8c6bc2be4dda53fda148d",
+    "change_id_reverse_hex": "pswsnomrqporntonxolvmmpuwkmpyvrm",
+    "commit_id": "9c567ecdd190bdd475738b3b2fd14d676e431de4",
+    "parent_commit_ids": ["efdc473bb5c7a102b1a9d1667102f87654caa18d"],
+    "parent_change_ids": ["b185532a6e1f408e668b958d4085e3ad"],
+    "description": "R2.14: brief for symbol index ingestion",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T04:16:43.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T06:35:59.000Z"
+    },
+    "tree_id": "b434cc0833e8219119405df65468ea75b2a90b03",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "efdc473bb5c7a102b1a9d1667102f87654caa18d",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "b185532a6e1f408e668b958d4085e3ad",
+    "change_id_reverse_hex": "oyruuwxptlykvzrlttroqurmvzrulwpm",
+    "commit_id": "efdc473bb5c7a102b1a9d1667102f87654caa18d",
+    "parent_commit_ids": ["3a14316811b8e7f0f02935e92a4c8eb7579b3994"],
+    "parent_change_ids": ["299cd9eaed71325497ac940f0fe71d88"],
+    "description": "Issue #95: GC runs on a timer (#97)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T06:21:05.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-28T06:21:05.000Z"
+    },
+    "tree_id": "dbeee3d83e3c2ae35ce6ff050d04f814e89b6463",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "3a14316811b8e7f0f02935e92a4c8eb7579b3994",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "56432a8dae8fea66fb1cf0bbd975a0b2",
+    "change_id_reverse_hex": "utvwxprmplrklpttkoynkzoomqsupzox",
+    "commit_id": "a0aef7aa6a0542ec33d08feab221faf08a39df09",
+    "parent_commit_ids": ["55ddf9803f5eba36b89ad727896b263184d8e6f0"],
+    "parent_change_ids": ["6010a93e3840f71421b496d4e35bb724"],
+    "description": "ci: give the check job 40 minutes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:54:29.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:54:38.000Z"
+    },
+    "tree_id": "dbeee3d83e3c2ae35ce6ff050d04f814e89b6463",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["issue-95-gc-on-a-timer", "issue-95-gc-on-a-timer@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "55ddf9803f5eba36b89ad727896b263184d8e6f0",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "6010a93e3840f71421b496d4e35bb724",
+    "change_id_reverse_hex": "tzyzpqwlwrvzksyvxyovqtmvlwuoosxv",
+    "commit_id": "55ddf9803f5eba36b89ad727896b263184d8e6f0",
+    "parent_commit_ids": ["8f815ff41e12612704b274d68504e267f917647c"],
+    "parent_change_ids": ["94380c53cb1973f087dc7d1c174d5ad9"],
+    "description": "Issue #95: review fixes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:14:11.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:14:25.000Z"
+    },
+    "tree_id": "8aedcf1b4c5ee9021c38133cb62c6d86fa523df5",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "8f815ff41e12612704b274d68504e267f917647c",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "94380c53cb1973f087dc7d1c174d5ad9",
+    "change_id_reverse_hex": "qvwrznuwnoyqswkzrsmnsmynysvmupmq",
+    "commit_id": "8f815ff41e12612704b274d68504e267f917647c",
+    "parent_commit_ids": ["66700f1131ef82bf51285315062b82ee93c1b925"],
+    "parent_change_ids": ["f2fbb99c8a338cd2327809a21c3f46b8"],
+    "description": "Issue #95: GC runs on a timer",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:14:11.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T03:14:25.000Z"
+    },
+    "tree_id": "cf38da1e8cc75f12f800bc0f0f0e96f72caee748",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "66700f1131ef82bf51285315062b82ee93c1b925",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "f2fbb99c8a338cd2327809a21c3f46b8",
+    "change_id_reverse_hex": "kxkooqqnrpwwrnmxwxsrzqpxynwkvtor",
+    "commit_id": "66700f1131ef82bf51285315062b82ee93c1b925",
+    "parent_commit_ids": ["3a14316811b8e7f0f02935e92a4c8eb7579b3994"],
+    "parent_change_ids": ["299cd9eaed71325497ac940f0fe71d88"],
+    "description": "Issue #95 brief: GC runs on a timer",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T02:26:55.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T02:28:15.000Z"
+    },
+    "tree_id": "9e44ebfc6b936db6a373f1e88db627fc5c36f005",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "3a14316811b8e7f0f02935e92a4c8eb7579b3994",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "299cd9eaed71325497ac940f0fe71d88",
+    "change_id_reverse_hex": "xqqnmqlplmsywxuvqspnqvzkzklsymrr",
+    "commit_id": "3a14316811b8e7f0f02935e92a4c8eb7579b3994",
+    "parent_commit_ids": ["26189c76053a3c191acfaa2f8e368a3ba9980ad4"],
+    "parent_change_ids": ["2b501995dc516c71f455f358983c5ca0"],
+    "description": "Issue #94: GC keeps the user's jj workspaces loadable (#96)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-28T01:29:12.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-28T01:29:12.000Z"
+    },
+    "tree_id": "3e35ca004a54400f6fd9560140dbf0ba0591b7f3",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "5fcdbea0636cfc2baaead9405eb6f9e21a441ade",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "cdd204e71621de9f1cf8884f2041f0f9",
+    "change_id_reverse_hex": "nmmxzvlsytxymlqkynkrrrvkxzvykzkq",
+    "commit_id": "3473c60759e98f66b12e148e89e4eee8d85d1a7f",
+    "parent_commit_ids": ["a060dbfb3a197877660112c45c16705842bf7cb6"],
+    "parent_change_ids": ["76b7861126637b12e0c08d72956f2daa"],
+    "description": "R2.09: review fixes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T08:27:52.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T08:44:52.000Z"
+    },
+    "tree_id": "cc5fea10c6ec527043c90f0f87bc52528ded72e5",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["r2.09-operation-log-subscription", "r2.09-operation-log-subscription@origin"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a060dbfb3a197877660112c45c16705842bf7cb6",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "76b7861126637b12e0c08d72956f2daa",
+    "change_id_reverse_hex": "stosrtyyxttwsoyxlznzrmsxqutkxmpp",
+    "commit_id": "a060dbfb3a197877660112c45c16705842bf7cb6",
+    "parent_commit_ids": ["bc7261eaef641de294dfb58d7865eb1a83e9ec06"],
+    "parent_change_ids": ["90256a89889d373acb3ded5c8e3188a6"],
+    "description": "R2.09: operation log subscription",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T07:33:13.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T08:26:49.000Z"
+    },
+    "tree_id": "3834750e505a654be4433f79bd03f8b7ef8b3d88",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "bc7261eaef641de294dfb58d7865eb1a83e9ec06",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "90256a89889d373acb3ded5c8e3188a6",
+    "change_id_reverse_hex": "qzxutprqrrqmwswpnowmlmunrlwyrrpt",
+    "commit_id": "bc7261eaef641de294dfb58d7865eb1a83e9ec06",
+    "parent_commit_ids": ["5fcdbea0636cfc2baaead9405eb6f9e21a441ade"],
+    "parent_change_ids": ["7b582258479f6d7a029b5755d43f36c6"],
+    "description": "R2.09 brief: operation log subscription",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T07:30:30.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T07:32:34.000Z"
+    },
+    "tree_id": "48cf62312f061b2ec732bd29fd002133b041f4a6",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "5fcdbea0636cfc2baaead9405eb6f9e21a441ade",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "7b582258479f6d7a029b5755d43f36c6",
+    "change_id_reverse_hex": "sourxxurvsqktmspzxqousuumvwkwtnt",
+    "commit_id": "5fcdbea0636cfc2baaead9405eb6f9e21a441ade",
+    "parent_commit_ids": ["f3036ebf972051f17ad193a4496e2f6d7326de96"],
+    "parent_change_ids": ["697b64ceb6f4769225c98b5e8f8a04e9"],
+    "description": "R2.13: MCP server (#84)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-27T07:08:19.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-27T07:08:19.000Z"
+    },
+    "tree_id": "8ccf7589d316e97198f71fc701fa651f225a3b31",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "576af0aa1d8f1404ae1d5088f4e839751cf2fb8a",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "55727f022ba460b0ee3f99591ad6b1e7",
+    "change_id_reverse_hex": "uusxskzxxopvtzozllwkqquqypmtoyls",
+    "commit_id": "68d0d9a8dedafaf3eb811c107f9c386aaea07961",
+    "parent_commit_ids": ["e3d762978c650ff6c9f858e6128e4a0c8c618bfa"],
+    "parent_change_ids": ["4288d67e2c955f3913a01e10a72f9a49"],
+    "description": "R2.03: review fixes",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T21:21:55.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T21:33:10.000Z"
+    },
+    "tree_id": "a33dbe84661f4ab1d00908cfc197e47afe0900d1",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": ["r2.03-snapshot-describe-and-undo-services"],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "e3d762978c650ff6c9f858e6128e4a0c8c618bfa",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "4288d67e2c955f3913a01e10a72f9a49",
+    "change_id_reverse_hex": "vxrrmtslxnquukwqywpzylyzpsxkqpvq",
+    "commit_id": "e3d762978c650ff6c9f858e6128e4a0c8c618bfa",
+    "parent_commit_ids": ["a1639c25d5d8f956f3bee3ab117260a9a9a1a532"],
+    "parent_change_ids": ["cbed061792ab2189d7144349712024c0"],
+    "description": "R2.03: snapshot, describe, and undo services",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T20:11:16.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T21:20:40.000Z"
+    },
+    "tree_id": "c38bf05eed61d81a880831818aa867975385242c",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a1639c25d5d8f956f3bee3ab117260a9a9a1a532",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "cbed061792ab2189d7144349712024c0",
+    "change_id_reverse_hex": "nolmztysqxpoxyrqmsyvvwvqsyxzxvnz",
+    "commit_id": "a1639c25d5d8f956f3bee3ab117260a9a9a1a532",
+    "parent_commit_ids": ["576af0aa1d8f1404ae1d5088f4e839751cf2fb8a"],
+    "parent_change_ids": ["51df4f38ae9c172f110ab8752028f1b8"],
+    "description": "R2.03 brief: snapshot, describe, and undo services",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T20:05:30.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T20:09:02.000Z"
+    },
+    "tree_id": "2cb065e6cfcf589ab9f492ac2f25b1a7b40a6642",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "576af0aa1d8f1404ae1d5088f4e839751cf2fb8a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "51df4f38ae9c172f110ab8752028f1b8",
+    "change_id_reverse_hex": "uymkvkwrplqnysxkyyzporsuxzxrkyor",
+    "commit_id": "576af0aa1d8f1404ae1d5088f4e839751cf2fb8a",
+    "parent_commit_ids": ["74c43de13395b1cfe25f1c6a6fb1c712d1a4aa9b"],
+    "parent_change_ids": ["d955258b48e38df65638fa47f38da9cc"],
+    "description": "R2.02: status, log, and change services (#76)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T19:43:58.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-26T19:43:58.000Z"
+    },
+    "tree_id": "a15a2944d94f0c0e7d754c1b9b6402f966e06ab7",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "2fdb4229968a71a6490e20cdc8d919f24de33d3e",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "b0525fdeb4509fe00d10123f671d2604",
+    "change_id_reverse_hex": "ozuxukmlovuzqklzzmyzyxwktsymxtzv",
+    "commit_id": "03f4b5fdaff6f49914eb8c8969f736169cc90429",
+    "parent_commit_ids": ["2fdb4229968a71a6490e20cdc8d919f24de33d3e"],
+    "parent_change_ids": ["7cbcc7b24f989b13b3047092658e5169"],
+    "description": "",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T00:16:35.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-26T04:34:22.000Z"
+    },
+    "tree_id": null,
+    "empty": false,
+    "conflict": true,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "2fdb4229968a71a6490e20cdc8d919f24de33d3e",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "7cbcc7b24f989b13b3047092658e5169",
+    "change_id_reverse_hex": "snonnsoxvkqrqoywowzvszqxturluytq",
+    "commit_id": "2fdb4229968a71a6490e20cdc8d919f24de33d3e",
+    "parent_commit_ids": ["d156d1ee83126bb4c6d468b054414c57fa6e345d"],
+    "parent_change_ids": ["ba2c765fea32822a0d162b632dd648c1"],
+    "description": "workspaces test: accept a watcher snapshot after a move (#73)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-25T22:54:17.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-25T22:54:17.000Z"
+    },
+    "tree_id": "29a9d0e7e4603a2bca92b4f5312d27e434f9f30c",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "33e6611758affdf3250ec463d77be78d4cc4ee8a",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "2e784fea4c0660f43f32afc117c5a84f",
+    "change_id_reverse_hex": "xlsrvklpvnzttzkvwkwxpknyysnuprvk",
+    "commit_id": "28d6802a466914913850331d0679eabbea975061",
+    "parent_commit_ids": ["33e6611758affdf3250ec463d77be78d4cc4ee8a"],
+    "parent_change_ids": ["51772332b1e7deebc62370a4cfbff51a"],
+    "description": "RX.01: security review of workspace isolation",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T19:45:55.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T20:51:06.000Z"
+    },
+    "tree_id": "7b10cb31f9c2074a4c3f663f9838aaf7f6a3c39b",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "33e6611758affdf3250ec463d77be78d4cc4ee8a",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "51772332b1e7deebc62370a4cfbff51a",
+    "change_id_reverse_hex": "uyssxwwxoylsmllontxwszpvnkokkuyp",
+    "commit_id": "33e6611758affdf3250ec463d77be78d4cc4ee8a",
+    "parent_commit_ids": ["6a1ef1cf198e88c5f828f54e6f70c98f31c2ec5d"],
+    "parent_change_ids": ["ba37438cf1930ef672af141fa3117198"],
+    "description": "RX.01 brief: security review of workspace isolation (#60)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T19:43:27.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-24T19:43:27.000Z"
+    },
+    "tree_id": "3977c8f5ed1fec66d51d382b7b819eb84dfe8211",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "1956cd007979b09483ca6a8d8e98ea0bac82b546",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "99093353e2ba0a2d91486f040e2c3f00",
+    "change_id_reverse_hex": "qqzqwwuwlxopzpxmqyvrtkzvzlxnwkzz",
+    "commit_id": "6e0d79f938033069ca4937fe962da2276462f1cd",
+    "parent_commit_ids": ["43925e2614f28e55f0296835143243a8d0b32f6c"],
+    "parent_change_ids": ["73d60f3dfa6012f18e1747234dc3c4b7"],
+    "description": "RX.07 First live baseline",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T15:49:33.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T15:50:59.000Z"
+    },
+    "tree_id": "c17bde0da6d7a23e7171c9864462aa39e8b59c7a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "43925e2614f28e55f0296835143243a8d0b32f6c",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "73d60f3dfa6012f18e1747234dc3c4b7",
+    "change_id_reverse_hex": "swmtzkwmkptzyxkyrlysvsxwvmnwnvos",
+    "commit_id": "43925e2614f28e55f0296835143243a8d0b32f6c",
+    "parent_commit_ids": ["1956cd007979b09483ca6a8d8e98ea0bac82b546"],
+    "parent_change_ids": ["62ad4135d0571971b15653c1290d9e9e"],
+    "description": "RX.07 Agent onboarding benchmark (harness; no baseline yet)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T05:36:50.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T06:30:42.000Z"
+    },
+    "tree_id": "1ae1c37bd36e6e8160c4931657db0d3cf9783f7a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "1956cd007979b09483ca6a8d8e98ea0bac82b546",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "62ad4135d0571971b15653c1290d9e9e",
+    "change_id_reverse_hex": "txpmvywumzusyqsyoyutuwnyxqzmqlql",
+    "commit_id": "1956cd007979b09483ca6a8d8e98ea0bac82b546",
+    "parent_commit_ids": ["307a2321962121981ce7120048f52cfffdf73e8b"],
+    "parent_change_ids": ["d17cefbfff34af120048e73819848469"],
+    "description": "R1.30 Incremental notify snapshots (#52)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-24T05:27:49.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-24T05:27:49.000Z"
+    },
+    "tree_id": "b34a0228aab902de2e40cfd25c91af1383d64c06",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "21887d1cd101788efb9087addcb066352aa4e9a3",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "74cc19e7c13cf2eda298dd6bf9c47cea",
+    "change_id_reverse_hex": "svnnyqlsnywnkxlmpxqrmmtokqnvsnlp",
+    "commit_id": "f909d5478f8b11f45127f0d78082c7ffd0a04248",
+    "parent_commit_ids": ["21887d1cd101788efb9087addcb066352aa4e9a3"],
+    "parent_change_ids": ["c5972554ac660d3bb5e109df711e808b"],
+    "description": "R1.23 Crash, reclaim, and load integration tests",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-23T03:07:04.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-23T17:11:44.000Z"
+    },
+    "tree_id": "70cab845d6a6a699c78eead98a2804c85982b7af",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "21887d1cd101788efb9087addcb066352aa4e9a3",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "c5972554ac660d3bb5e109df711e808b",
+    "change_id_reverse_hex": "nuqsxuuvpnttzmwooulyzqmksyylrzro",
+    "commit_id": "21887d1cd101788efb9087addcb066352aa4e9a3",
+    "parent_commit_ids": ["fa2e9adc0bd7896c36c1014914adeacf300f16d2"],
+    "parent_change_ids": ["4b68f00cf357b5289280836c3691ebd0"],
+    "description": "R1.29 Workspace creation off the watcher's path (#42)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-23T02:48:19.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-23T02:48:19.000Z"
+    },
+    "tree_id": "c656e8867943653abfe6184becd9ca72b020fb01",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "f010253e90f75ab2adf6ec9750f13868102477ac",
+        "kind": "indirect"
+      }
+    ]
+  },
+  {
+    "change_id": "9caeb6f2010279a3b9d2703d5cd8983a",
+    "change_id_reverse_hex": "qnplotkxzyzxsqpwoqmxszwmunmrqrwp",
+    "commit_id": "273f1ac75c191b3abc0e4b9dc59e40804f6d7539",
+    "parent_commit_ids": ["8f2ff118cdab9809bb8d456a56fd48f20abc2ab1"],
+    "parent_change_ids": ["8d543d504f12bf6a56a2b1dd9019d5b3"],
+    "description": "Address the Fable review of R1.17",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T17:07:05.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T17:07:05.000Z"
+    },
+    "tree_id": "1bc29112c91fbaf299482c23c93eb951f8f24ded",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "8f2ff118cdab9809bb8d456a56fd48f20abc2ab1",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "8d543d504f12bf6a56a2b1dd9019d5b3",
+    "change_id_reverse_hex": "rmuvwmuzvkyxoktputpxoymmqzyqmuow",
+    "commit_id": "8f2ff118cdab9809bb8d456a56fd48f20abc2ab1",
+    "parent_commit_ids": ["4f33ccd6835d44ea6a18f3bcc27fef0fb441d532"],
+    "parent_change_ids": ["4cab822df0f7fe433dcf18565722bac1"],
+    "description": "Let grace_revives heartbeat at once after a slow create",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T17:07:04.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T17:07:04.000Z"
+    },
+    "tree_id": "3a47171c95b665fd9e71e516d6c42d32b8d4b25c",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "4f33ccd6835d44ea6a18f3bcc27fef0fb441d532",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "4cab822df0f7fe433dcf18565722bac1",
+    "change_id_reverse_hex": "vnporxxmkzksklvwwmnkyrutusxxopny",
+    "commit_id": "4f33ccd6835d44ea6a18f3bcc27fef0fb441d532",
+    "parent_commit_ids": ["79c8461f6bb9a12775b9faa0df35979651a99c9e"],
+    "parent_change_ids": ["7939958a69e9acfb055f9daee4859dd6"],
+    "description": "R1.17 Garbage collection",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T16:35:59.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T16:35:59.000Z"
+    },
+    "tree_id": "5491c1d37df9b428f7cea5fd533e3ab8216c6704",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "79c8461f6bb9a12775b9faa0df35979651a99c9e",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "7939958a69e9acfb055f9daee4859dd6",
+    "change_id_reverse_hex": "sqwqqurptqlqpnkozuukqmpllvruqmmt",
+    "commit_id": "79c8461f6bb9a12775b9faa0df35979651a99c9e",
+    "parent_commit_ids": ["f010253e90f75ab2adf6ec9750f13868102477ac"],
+    "parent_change_ids": ["35ee2408161c8f0ae9376fb54d5aef09"],
+    "description": "Wait out snapshot and reclaim attempts in two racy tests",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T16:35:59.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T16:35:59.000Z"
+    },
+    "tree_id": "c0511368e55eb85f1f6d6f15fff3c8f512308494",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "f010253e90f75ab2adf6ec9750f13868102477ac",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "35ee2408161c8f0ae9376fb54d5aef09",
+    "change_id_reverse_hex": "wullxvzrytynrkzplqwstkouvmuplkzq",
+    "commit_id": "f010253e90f75ab2adf6ec9750f13868102477ac",
+    "parent_commit_ids": ["12886c084ce279e8c92cffd59283669827d73ba2"],
+    "parent_change_ids": ["45dcebe41966c149abff3493179e4732"],
+    "description": "R1.16 Local-only snapshot marking (#24)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:50:42.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-17T15:50:42.000Z"
+    },
+    "tree_id": "bfe2691e55976d5b9605e31724b9a2f9e08d19b9",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "12886c084ce279e8c92cffd59283669827d73ba2",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "4879904ec87690afa613d1ba9523d2e4",
+    "change_id_reverse_hex": "vrsqqzvlnrstqzpkptywmyopquxwmxlv",
+    "commit_id": "e4221b7d274bc4a95d8bc865f5096e1372099e12",
+    "parent_commit_ids": ["49ee303e59d9aedb7a5d1fe85626ecfd6729a180"],
+    "parent_change_ids": ["018594e6bf37646a17f8ba5edb759b9a"],
+    "description": "Address the Fable review of R1.16",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:42:01.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:42:01.000Z"
+    },
+    "tree_id": "bfe2691e55976d5b9605e31724b9a2f9e08d19b9",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "49ee303e59d9aedb7a5d1fe85626ecfd6729a180",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "018594e6bf37646a17f8ba5edb759b9a",
+    "change_id_reverse_hex": "zyruqvltokwstvtpyskropulmosuqoqp",
+    "commit_id": "49ee303e59d9aedb7a5d1fe85626ecfd6729a180",
+    "parent_commit_ids": ["12886c084ce279e8c92cffd59283669827d73ba2"],
+    "parent_change_ids": ["45dcebe41966c149abff3493179e4732"],
+    "description": "R1.16 Local-only snapshot marking",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:31:09.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:31:09.000Z"
+    },
+    "tree_id": "36b83b417a7856361d4fe8f1afecd4fca66fd12f",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "12886c084ce279e8c92cffd59283669827d73ba2",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "45dcebe41966c149abff3493179e4732",
+    "change_id_reverse_hex": "vumnlolvyqttnyvqpokkwvqwysqlvswx",
+    "commit_id": "12886c084ce279e8c92cffd59283669827d73ba2",
+    "parent_commit_ids": ["a20929d547ee496de5d3d667a2cf3145e7782b02"],
+    "parent_change_ids": ["40d41ee7a28cf345e66bcba7b69277e2"],
+    "description": "R1.21 reef ws run (#23)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T15:14:10.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-17T15:14:10.000Z"
+    },
+    "tree_id": "c281896b9a8a41d69157143bcf011e566d8f6cd4",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a20929d547ee496de5d3d667a2cf3145e7782b02",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "8d216e0419c08fc6997bf515e12d7699",
+    "change_id_reverse_hex": "rmxytlzvyqnzrkntqqsokuyulyxmstqq",
+    "commit_id": "8e095550996eb487a8afde9963f10398207684b1",
+    "parent_commit_ids": ["3eb7c184007b717cac999f3beebe4fdf10200ee5"],
+    "parent_change_ids": ["a7700408fbf27d77dcf999353e8ede00"],
+    "description": "Address the Fable review of R1.21",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T14:52:20.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T14:52:20.000Z"
+    },
+    "tree_id": "c281896b9a8a41d69157143bcf011e566d8f6cd4",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "3eb7c184007b717cac999f3beebe4fdf10200ee5",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "a7700408fbf27d77dcf999353e8ede00",
+    "change_id_reverse_hex": "psszzvzrkokxsmssmnkqqqwuwlrlmlzz",
+    "commit_id": "3eb7c184007b717cac999f3beebe4fdf10200ee5",
+    "parent_commit_ids": ["a20929d547ee496de5d3d667a2cf3145e7782b02"],
+    "parent_change_ids": ["40d41ee7a28cf345e66bcba7b69277e2"],
+    "description": "R1.21 reef ws run",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T14:37:21.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T14:37:21.000Z"
+    },
+    "tree_id": "6469365a886494436fa1fdd4c5d21f260d5b6fe2",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "a20929d547ee496de5d3d667a2cf3145e7782b02",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "40d41ee7a28cf345e66bcba7b69277e2",
+    "change_id_reverse_hex": "vzmvyllspxrnkwvulttonopsotqxsslx",
+    "commit_id": "a20929d547ee496de5d3d667a2cf3145e7782b02",
+    "parent_commit_ids": ["637a5f4e4e91b69b5d4c5d86f895f0b4e85cb764"],
+    "parent_change_ids": ["26ed3a172d0fa91f61ba32bad96d8972"],
+    "description": "R1.15 Lease manager (#22)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T14:20:02.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-17T14:20:02.000Z"
+    },
+    "tree_id": "ea5817f2c06a61a15c2ddaa0bfbba94b5f74c86e",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "637a5f4e4e91b69b5d4c5d86f895f0b4e85cb764",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "e07bea0d667309c5cf8da5df7e07b56b",
+    "change_id_reverse_hex": "lzsolpzmttswzqnunkrmpumkslzsouto",
+    "commit_id": "d2f2bd41d6ade07efba5b1f3a390ce66b057de07",
+    "parent_commit_ids": ["1d73a19fd032ca64125e49018e461c0c22d89875"],
+    "parent_change_ids": ["ae191b443038627180927a4826534c0b"],
+    "description": "Address the Fable review of R1.15",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:52:09.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:52:09.000Z"
+    },
+    "tree_id": "ea5817f2c06a61a15c2ddaa0bfbba94b5f74c86e",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "1d73a19fd032ca64125e49018e461c0c22d89875",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "ae191b443038627180927a4826534c0b",
+    "change_id_reverse_hex": "plyqyovvwzwrtxsyrzqxspvrxtuwvnzo",
+    "commit_id": "1d73a19fd032ca64125e49018e461c0c22d89875",
+    "parent_commit_ids": ["637a5f4e4e91b69b5d4c5d86f895f0b4e85cb764"],
+    "parent_change_ids": ["26ed3a172d0fa91f61ba32bad96d8972"],
+    "description": "R1.15 Lease manager",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:35:04.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:35:04.000Z"
+    },
+    "tree_id": "7bd65f0b2ab33ff9866140c66d89f2e448736fe1",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "637a5f4e4e91b69b5d4c5d86f895f0b4e85cb764",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "26ed3a172d0fa91f61ba32bad96d8972",
+    "change_id_reverse_hex": "xtlmwpysxmzkpqyktyopwxopmqtmrqsx",
+    "commit_id": "637a5f4e4e91b69b5d4c5d86f895f0b4e85cb764",
+    "parent_commit_ids": ["5cdf1a5583d0ecd40b886d6af317480feee56805"],
+    "parent_change_ids": ["a016a777f012e8cf56b611d02b370bc1"],
+    "description": "R1.22 CLI for workspaces (#21)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:14:34.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-17T06:14:34.000Z"
+    },
+    "tree_id": "bf1baccdabbda40b5e51263ff2fc64978130e07a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "5cdf1a5583d0ecd40b886d6af317480feee56805",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "de161f80ac660cf3d4499b101349511d",
+    "change_id_reverse_hex": "mlytykrzpnttznkwmvvqqoyzywvquyym",
+    "commit_id": "3d5d664bb88a92c808d9922bcf30663501f8687b",
+    "parent_commit_ids": ["c023a48df8511fcfa95636eb512caf25a05f6884"],
+    "parent_change_ids": ["2116fa05a4f5348ad76c6a95f3f88a1f"],
+    "description": "Address the Fable review of R1.22",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:08:11.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T06:08:11.000Z"
+    },
+    "tree_id": "bf1baccdabbda40b5e51263ff2fc64978130e07a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "c023a48df8511fcfa95636eb512caf25a05f6884",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "2116fa05a4f5348ad76c6a95f3f88a1f",
+    "change_id_reverse_hex": "xyytkpzupvkuwvrpmstntpqukwkrrpyk",
+    "commit_id": "c023a48df8511fcfa95636eb512caf25a05f6884",
+    "parent_commit_ids": ["5cdf1a5583d0ecd40b886d6af317480feee56805"],
+    "parent_change_ids": ["a016a777f012e8cf56b611d02b370bc1"],
+    "description": "R1.22 CLI for workspaces",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T05:51:44.000Z"
+    },
+    "committer": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T05:51:44.000Z"
+    },
+    "tree_id": "a4dde0eda5a18f4bc09b122e90c276e6ef4b5440",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": false,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "5cdf1a5583d0ecd40b886d6af317480feee56805",
+        "kind": "direct"
+      }
+    ]
+  },
+  {
+    "change_id": "a016a777f012e8cf56b611d02b370bc1",
+    "change_id_reverse_hex": "pzytpssskzyxlrnkutotyymzxowszony",
+    "commit_id": "5cdf1a5583d0ecd40b886d6af317480feee56805",
+    "parent_commit_ids": ["3645c5718ef85c3266e99fe8849fbc9bdaee5834"],
+    "parent_change_ids": ["2c1a775bd93df92117f997664c3a1f71"],
+    "description": "R1.14 Watchman backend (#20)",
+    "author": {
+      "name": "Aaron Sood",
+      "email": "arsood@gmail.com",
+      "at": "2026-10-17T05:27:12.000Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "at": "2026-10-17T05:27:12.000Z"
+    },
+    "tree_id": "b64bae15c969a32767ebff711010b4b69469409a",
+    "empty": false,
+    "conflict": false,
+    "divergent": false,
+    "immutable": true,
+    "hidden": false,
+    "bookmarks": [],
+    "tags": [],
+    "workspace_ids": [],
+    "jj_workspaces": [],
+    "edges": [
+      {
+        "commit_id": "3645c5718ef85c3266e99fe8849fbc9bdaee5834",
+        "kind": "missing"
+      }
+    ]
+  }
+]

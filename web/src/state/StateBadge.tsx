@@ -3,7 +3,8 @@ import type { State } from "./states";
 
 const R = 5.5;
 
-function Shape({ state }: { state: State }) {
+/** A state's shape in a 14 × 14 box, drawn in `currentColor`. */
+export function StateShape({ state }: { state: State }) {
   const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
   switch (state) {
     case "draft":
@@ -67,15 +68,34 @@ function Shape({ state }: { state: State }) {
   }
 }
 
-export function StateBadge({ state, label }: { state: State; label?: string }) {
+/**
+ * A state's shape and word. With `word={false}` the word is only the badge's
+ * `title`: for draft rows in the smartlog (R2.19 decision 3), where the row's
+ * accessible name carries it.
+ */
+export function StateBadge({
+  state,
+  label,
+  word = true,
+}: {
+  state: State;
+  label?: string;
+  word?: boolean;
+}) {
+  const text = label ?? state;
   return (
-    <span className="state-badge" style={{ color: `var(--state-${state})` }} data-state={state}>
+    <span
+      className="state-badge"
+      style={{ color: `var(--state-${state})` }}
+      data-state={state}
+      title={word ? undefined : text}
+    >
       {state !== "none" && (
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
-          <Shape state={state} />
+          <StateShape state={state} />
         </svg>
       )}
-      <span>{label ?? state}</span>
+      {word && <span>{text}</span>}
     </span>
   );
 }

@@ -196,3 +196,234 @@ button {
   margin: 0 0 8px;
   font-size: 1rem;
 }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The smartlog (R2.19): one fixed-height row per commit, its graph cell a
+   small SVG, and the selected change's details beside the list from 900 px,
+   below it on narrower screens. */
+.smartlog .summary,
+.smartlog .note {
+  margin: 0 0 12px;
+}
+
+.smartlog .revset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.smartlog .revset input {
+  flex: 1 1 20rem;
+  min-width: 0;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.smartlog .field-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text);
+  border-left: 4px solid var(--border);
+  padding-left: 8px;
+}
+
+.command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.command code {
+  overflow-wrap: anywhere;
+}
+
+.banner {
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  padding: 8px 12px;
+  margin: 0 0 12px;
+}
+
+.smartlog-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .smartlog-body {
+    grid-template-columns: minmax(0, 1fr) 360px;
+    align-items: start;
+  }
+
+  .detail-pane {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+  }
+}
+
+/* The graph scrolls inside its own box when it is wider than the column. */
+.graph-box {
+  overflow-x: auto;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.row:focus-visible {
+  outline-offset: -2px;
+}
+
+.row.selected {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.graph-cell {
+  flex: none;
+  display: flex;
+}
+
+.graph {
+  display: block;
+  overflow: visible;
+}
+
+.row-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-text .subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.label {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 0.85em;
+}
+
+.label.agent {
+  color: var(--text-secondary);
+}
+
+.state-word {
+  font-size: 0.85em;
+}
+
+.more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.fade {
+  opacity: 0.5;
+}
+
+.detail h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.detail h4 {
+  margin: 16px 0 4px;
+  font-size: 0.95rem;
+}
+
+.detail .description {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 0 0 8px;
+}
+
+.facts dt {
+  color: var(--text-secondary);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts ul,
+.files,
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.files li {
+  overflow-wrap: anywhere;
+}
+
+/* Below 900 px the selected change's details are a sheet at the bottom of
+   the viewport, so selecting a row shows them without scrolling past the
+   list. */
+@media (max-width: 899.98px) {
+  .detail-pane:not(:empty) {
+    position: sticky;
+    bottom: 0;
+    max-height: 50vh;
+    overflow-y: auto;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 8px 0;
+  }
+}
+
+/* A revset parse error points at a column: keep its lines. */
+.field-error .error > p:first-child {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}

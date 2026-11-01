@@ -118,6 +118,18 @@ describe("Overview", () => {
     expect(screen.getByText("beta").getAttribute("title")).toBe("/src/beta/");
   });
 
+  it("links each repository to its smartlog (R2.19 test 10)", async () => {
+    setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
+    await flush();
+    const link = screen.getByRole("link", { name: "alpha" });
+    expect(link.getAttribute("href")).toBe("/repos/aaaaaaaa11/smartlog");
+    act(() => {
+      link.click();
+    });
+    expect(window.location.pathname).toBe("/repos/aaaaaaaa11/smartlog");
+    window.history.replaceState(null, "", "/");
+  });
+
   it("keeps the newer of the listed and the streamed operation, whichever arrives first", async () => {
     let release: () => void = () => undefined;
     const listed = new Promise<void>((resolve) => {

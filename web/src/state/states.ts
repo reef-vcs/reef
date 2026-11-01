@@ -35,9 +35,11 @@ export interface Labelled {
 }
 
 /**
- * A change's state. `immutable` is `immutable_heads()` and its ancestors,
- * which include tags and untracked remote bookmarks as well as `trunk()`: the
- * closest `Change` has to "landed" until R2.19 refines it.
+ * A change's state. `immutable` is `immutable_heads()` and its ancestors, and
+ * Reef's `immutable_heads()` is `trunk() | tags()` (unlike jj's, it leaves out
+ * untracked remote bookmarks, so a remote-only branch is a draft). The one
+ * immutable commit not on trunk is an ancestor of a tag outside trunk's
+ * ancestry, so R2.19 kept immutable as "landed".
  */
 export function changeState(change: Change): Labelled {
   if (change.conflict) return { state: "conflicted", label: "conflicted" };

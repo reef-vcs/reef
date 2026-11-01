@@ -1522,3 +1522,220 @@ async fn list_workspaces_counts_changed_files() {
         .unwrap();
     assert_eq!(rest.workspaces.len(), 1);
 }
+
+/// The smartlog's revset (R2.19), read from the web app's source so the two
+/// cannot drift: the one double-quoted string on `SMARTLOG_REVSET`'s line.
+fn smartlog_revset_from_web() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/graph/revset.ts");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let line = source
+        .lines()
+        .find(|line| line.starts_with("export const SMARTLOG_REVSET"))
+        .expect("SMARTLOG_REVSET is declared on one line");
+    let start = line.find('"').unwrap() + 1;
+    let end = line.rfind('"').unwrap();
+    line[start..end].to_owned()
+}
+
+/// R2.19 test 1: the smartlog's revset hangs each stack from its fork point
+/// on the trunk spine, through indirect edges, and reading it in repository
+/// scope records no operation.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scripted history, then its log")]
+async fn smartlog_revset() {
+    use std::collections::BTreeMap;
+
+    use jj_lib::backend::CommitId;
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::op_store::{RefTarget, RemoteRef, RemoteRefState};
+    use jj_lib::ref_name::{RefName, RemoteName};
+    use jj_lib::repo::Repo as _;
+
+    let revset = smartlog_revset_from_web();
+    assert_eq!(
+        revset,
+        "trunk() | working_copies() | ancestors(mutable(), 2)"
+    );
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let base = Repo::open(&repo.root, &test_settings())
+        .await
+        .unwrap()
+        .wc_change()
+        .unwrap()
+        .commit_id;
+
+    // Trunk t1..t6 on the fixture's commit, `main` at t6; stack a1, a2 on
+    // t6; b1 on t2; d1 on t4, named only by the remote bookmark dep@origin.
+    let mut ids = BTreeMap::<&str, String>::new();
+    with_tx(&repo.root, "smartlog history", |tx| {
+        let store = tx.repo().store().clone();
+        let tree = store
+            .get_commit(&CommitId::try_from_hex(base.as_str()).unwrap())
+            .unwrap()
+            .tree();
+        let mut commit = |name: &'static str, parent: &str, ids: &mut BTreeMap<&str, String>| {
+            let written = pollster::block_on(
+                tx.repo_mut()
+                    .new_commit(vec![CommitId::try_from_hex(parent).unwrap()], tree.clone())
+                    .set_description(name)
+                    .write(),
+            )
+            .unwrap();
+            ids.insert(name, written.id().hex());
+        };
+        let mut parent = base.as_str().to_owned();
+        for name in ["t1", "t2", "t3", "t4", "t5", "t6"] {
+            commit(name, &parent, &mut ids);
+            parent.clone_from(&ids[name]);
+        }
+        let t2 = ids["t2"].clone();
+        let t4 = ids["t4"].clone();
+        let t6 = ids["t6"].clone();
+        commit("a1", &t6, &mut ids);
+        let a1 = ids["a1"].clone();
+        commit("a2", &a1, &mut ids);
+        commit("b1", &t2, &mut ids);
+        commit("d1", &t4, &mut ids);
+        tx.repo_mut().set_local_bookmark_target(
+            RefName::new("main"),
+            RefTarget::normal(CommitId::try_from_hex(&t6).unwrap()),
+        );
+        tx.repo_mut().set_remote_bookmark(
+            RefName::new("dep").to_remote_symbol(RemoteName::new("origin")),
+            RemoteRef {
+                target: RefTarget::normal(CommitId::try_from_hex(&ids["d1"]).unwrap()),
+                state: RemoteRefState::New,
+            },
+        );
+    });
+
+    // A workspace on a2, with an edit not yet snapshotted.
+    let ws = client
+        .create_workspace(CreateWorkspaceRequest {
+            repo: repo.id.clone(),
+            owner: "smartlog@test".into(),
+            start: Some(create_workspace_request::Start::Change(ids["a2"].clone())),
+            ..CreateWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    write(&ws, "unsnapshotted.txt", "x\n");
+    let operations = |client: &Client| {
+        let client = client.clone();
+        let id = repo.id.clone();
+        async move {
+            client
+                .list_operations_page(ListOperationsRequest {
+                    repo: id,
+                    page_size: 1000,
+                    ..ListOperationsRequest::default()
+                })
+                .await
+                .unwrap()
+                .operations
+                .len()
+        }
+    };
+    let before = operations(client).await;
+
+    for skip_snapshot in [true, false] {
+        let log = client
+            .list_changes(ListChangesRequest {
+                repo: repo.id.clone(),
+                revset: revset.clone(),
+                skip_snapshot,
+                ..ListChangesRequest::default()
+            })
+            .await
+            .unwrap();
+        let name = |commit: &str| {
+            ids.iter().find(|(_, id)| id.as_str() == commit).map_or(
+                if commit == base.as_str() {
+                    "base"
+                } else {
+                    "other"
+                },
+                |(name, _)| name,
+            )
+        };
+        let by_name: BTreeMap<&str, &v1::LogEntry> = log
+            .iter()
+            .map(|entry| (name(&entry.change.as_ref().unwrap().commit_id), entry))
+            .collect();
+        let mut names: Vec<&str> = by_name.keys().copied().collect();
+        names.sort_unstable();
+        // `base` is the root jj workspace's working copy, so in
+        // `working_copies()`; the workspace's own working copy is `a2` or a
+        // new commit on it.
+        let wc = ws.commit_id.as_str();
+        let expected: BTreeSet<&str> = ["a1", "a2", "b1", "base", "d1", "t2", "t4", "t6"]
+            .into_iter()
+            .chain((name(wc) == "other").then_some("other"))
+            .collect();
+        assert_eq!(names.into_iter().collect::<BTreeSet<_>>(), expected);
+        let edges = |entry: &str| -> Vec<(&str, i32)> {
+            by_name[entry]
+                .edges
+                .iter()
+                .map(|edge| (name(&edge.commit_id), edge.kind))
+                .collect()
+        };
+        let direct = v1::GraphEdgeKind::Direct as i32;
+        let indirect = v1::GraphEdgeKind::Indirect as i32;
+        assert_eq!(edges("t6"), [("t4", indirect)], "t5 left out");
+        assert_eq!(edges("t4"), [("t2", indirect)], "t3 left out");
+        assert_eq!(edges("t2"), [("base", indirect)], "t1 left out");
+        assert_eq!(edges("a1"), [("t6", direct)]);
+        assert_eq!(edges("a2"), [("a1", direct)]);
+        assert_eq!(edges("b1"), [("t2", direct)]);
+        assert_eq!(edges("d1"), [("t4", direct)]);
+        // Children before parents: each loaded parent comes later in the log.
+        let position: BTreeMap<&str, usize> = log
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (entry.change.as_ref().unwrap().commit_id.as_str(), i))
+            .collect();
+        for (i, entry) in log.iter().enumerate() {
+            for edge in &entry.edges {
+                if let Some(&parent) = position.get(edge.commit_id.as_str()) {
+                    assert!(parent > i, "{} before its child", name(&edge.commit_id));
+                }
+            }
+        }
+        // base's parent is outside the set: a missing edge, the stub.
+        let missing = v1::GraphEdgeKind::Missing as i32;
+        assert!(
+            !by_name["base"].edges.is_empty()
+                && by_name["base"]
+                    .edges
+                    .iter()
+                    .all(|edge| edge.kind == missing),
+            "{:?}",
+            by_name["base"].edges
+        );
+        let change = |entry: &str| by_name[entry].change.as_ref().unwrap();
+        assert!(change("t6").immutable && change("t2").immutable);
+        assert!(
+            !change("d1").immutable,
+            "Reef's immutable_heads() leaves out remote-only bookmarks"
+        );
+        let workspace_change = by_name
+            .values()
+            .find(|entry| entry.change.as_ref().unwrap().commit_id == ws.commit_id)
+            .unwrap();
+        assert_eq!(
+            workspace_change.change.as_ref().unwrap().workspace_ids,
+            std::slice::from_ref(&ws.id)
+        );
+        // Repository scope never snapshots, with or without `skip_snapshot`.
+        assert_eq!(
+            operations(client).await,
+            before,
+            "skip_snapshot {skip_snapshot}"
+        );
+    }
+    daemon.stop().await;
+}
