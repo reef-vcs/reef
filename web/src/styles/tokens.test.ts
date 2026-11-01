@@ -46,3 +46,110 @@ describe("state tokens", () => {
     }
   }
 });
+
+// The design pass: every custom property, not only hex ones (shadows).
+function allProperties(selector: RegExp): Map<string, string> {
+  const match = selector.exec(css);
+  if (!match) throw new Error(`no block for ${String(selector)}`);
+  const body = css.slice(match.index + match[0].length, css.indexOf("}", match.index));
+  return new Map([...body.matchAll(/--([\w-]+):\s*([^;]+);/g)].map((m) => [m[1]!, m[2]!.trim()]));
+}
+
+/** Hue in degrees of a `#rrggbb` color. */
+function hue(hex: string): number {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [
+    number,
+    number,
+    number,
+  ];
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  if (d === 0) return 0;
+  const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60 + 360) % 360;
+}
+
+const BRAND_TOKENS = [
+  "canvas",
+  "control-border",
+  "brand",
+  "brand-strong",
+  "brand-tint",
+  "on-brand",
+  "coral",
+  "ocean",
+  "on-ocean",
+  "on-ocean-muted",
+  "ocean-accent",
+  ...Array.from({ length: 8 }, (_, n) => [
+    `avatar-${String(n)}-bg`,
+    `avatar-${String(n)}-fg`,
+  ]).flat(),
+];
+
+describe("brand and neutral tokens", () => {
+  it("defines the dark theme the same way for every property, shadows included", () => {
+    expect([...allProperties(/:root:not\(\[data-theme="light"\]\)\s*\{/)]).toEqual([
+      ...allProperties(/\n\[data-theme="dark"\]\s*\{/),
+    ]);
+  });
+
+  for (const [theme, tokens] of Object.entries(themes)) {
+    const get = (name: string) => {
+      const value = tokens.get(name);
+      if (!value) throw new Error(`--${name} is missing in ${theme}`);
+      return value;
+    };
+
+    it(`defines every brand token in ${theme}`, () => {
+      for (const name of BRAND_TOKENS) expect(tokens.get(name), name).toBeDefined();
+    });
+
+    it(`holds text pairs to 4.5:1 in ${theme}`, () => {
+      const pairs: [string, string][] = [
+        ["text", "canvas"],
+        ["text-secondary", "canvas"],
+        ["link", "surface"],
+        ["link", "canvas"],
+        ["link", "surface-raised"],
+        ["link", "brand-tint"],
+        ["brand-strong", "brand-tint"],
+        ["on-brand", "brand"],
+        ["on-ocean", "ocean"],
+        ["on-ocean-muted", "ocean"],
+        ["ocean-accent", "ocean"],
+        ...STATES.flatMap((s): [string, string][] => [
+          [`state-${s}`, "canvas"],
+          [`state-${s}`, "brand-tint"],
+        ]),
+        ...Array.from({ length: 8 }, (_, n): [string, string] => [
+          `avatar-${String(n)}-fg`,
+          `avatar-${String(n)}-bg`,
+        ]),
+      ];
+      for (const [fg, bg] of pairs) {
+        expect(contrast(get(fg), get(bg)), `--${fg} on --${bg}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    it(`holds edges and the coral to 3:1 in ${theme}`, () => {
+      const pairs: [string, string][] = [
+        ["control-border", "surface"],
+        ["control-border", "canvas"],
+        ["focus", "surface"],
+        ["focus", "canvas"],
+        ["coral", "ocean"],
+      ];
+      for (const [fg, bg] of pairs) {
+        expect(contrast(get(fg), get(bg)), `--${fg} on --${bg}`).toBeGreaterThanOrEqual(3);
+      }
+    });
+
+    it(`keeps brand teal at least 30° of hue from landed green, and off every state, in ${theme}`, () => {
+      const distance = Math.abs(hue(get("brand")) - hue(get("state-landed")));
+      expect(Math.min(distance, 360 - distance)).toBeGreaterThanOrEqual(30);
+      for (const s of STATES) expect(get("brand")).not.toBe(get(`state-${s}`));
+    });
+  }
+});

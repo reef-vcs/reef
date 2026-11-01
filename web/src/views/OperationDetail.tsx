@@ -10,12 +10,16 @@ import {
   type Operation,
 } from "../gen/reef/api/v1/operations_pb";
 import type { Row } from "../log/coalesce";
+import { Identity } from "../ui/Avatar";
 import { Copy } from "../ui/Copy";
+import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { reverseHex, shortId } from "../ui/ids";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
 import { clock, fullTime } from "../ui/time";
+import { Time } from "../ui/TimeLabel";
+import { capitalize, operationSentence } from "../ui/words";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
@@ -66,6 +70,7 @@ function ChangeItem({
   operation: Operation;
   effect: ChangeEffect;
 }) {
+  const dev = useDevMode();
   // An abandoned change is not visible at the operation; it is at its parent.
   const at =
     effect.kind === ChangeEffectKind.ABANDONED
@@ -74,7 +79,10 @@ function ChangeItem({
   return (
     <li>
       {EFFECT_WORDS[effect.kind] ?? "changed"}{" "}
-      <Link to={smartlogHref({ repo, change: effect.changeId, at })} title={effect.commitId}>
+      <Link
+        to={smartlogHref({ repo, change: effect.changeId, at })}
+        title={dev ? effect.commitId : undefined}
+      >
         <span className="mono">{shortId(reverseHex(effect.changeId))}</span>
       </Link>
     </li>
@@ -82,6 +90,7 @@ function ChangeItem({
 }
 
 function Effects({ repo, operation }: { repo: string; operation: Operation }) {
+  const dev = useDevMode();
   const effects = operation.effects;
   if (!effects) return null;
   const changesMore = effects.changeCount - effects.changes.length;
@@ -137,7 +146,10 @@ function Effects({ repo, operation }: { repo: string; operation: Operation }) {
             {effects.workingCopies.map((w) => (
               <li key={w.workspaceId || w.jjWorkspace}>
                 {w.workspaceId ? (
-                  <Link to={fleetHref({ repo, workspace: w.workspaceId })} title={w.workspaceId}>
+                  <Link
+                    to={fleetHref({ repo, workspace: w.workspaceId })}
+                    title={dev ? w.workspaceId : undefined}
+                  >
                     <span className="mono">{shortId(w.workspaceId)}</span>
                   </Link>
                 ) : (
@@ -213,6 +225,12 @@ export function OperationDetail({
   const error = answer.op === op ? answer.error : undefined;
   const select = (id: string) => activityHref({ repo, op: id, at });
   const command = `reef op show ${operation?.id ?? op} --repo ${repo}`;
+  const dev = useDevMode();
+  const by = operation ? `${operation.username || "-"}@${operation.hostname || "-"}` : "";
+  const startedApart =
+    operation?.startedAt &&
+    operation.endedAt &&
+    operation.endedAt.seconds - operation.startedAt.seconds >= 1n;
 
   return (
     <div className="detail">
@@ -227,8 +245,16 @@ export function OperationDetail({
                   replace
                   current={o.id === operation?.id ? "true" : undefined}
                 >
-                  {clock(timestampFromMs(o.endedAt)).text} · {operationLabel(o)} ·{" "}
-                  <span className="mono">{shortId(o.id)}</span>
+                  {dev ? (
+                    <>
+                      {clock(timestampFromMs(o.endedAt)).text} · {operationLabel(o)} ·{" "}
+                      <span className="mono">{shortId(o.id)}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Time at={o.endedAt} /> · {operationSentence(o)}
+                    </>
+                  )}
                 </Link>
               </li>
             ))}
@@ -242,7 +268,7 @@ export function OperationDetail({
       {!error && !operation && <p className="secondary">Loading the operation.</p>}
       {operation && (
         <>
-          <h3>{operationLabel(operation)}</h3>
+          <h3>{dev ? operationLabel(operation) : capitalize(operationSentence(operation))}</h3>
           {!inWindow && (
             <p>
               Not in the loaded period.{" "}
@@ -252,20 +278,32 @@ export function OperationDetail({
             </p>
           )}
           <dl className="facts">
-            <dt>Id</dt>
-            <dd>
-              <span className="mono">{operation.id}</span> <Copy text={operation.id} />
+            {dev && (
+              <>
+                <dt>Id</dt>
+                <dd>
+                  <span className="mono">{operation.id}</span> <Copy text={operation.id} />
+                </dd>
+              </>
+            )}
+            {(dev || startedApart) && (
+              <>
+                <dt>Started</dt>
+                <dd title={dev ? fullTime(operation.startedAt).title : undefined}>
+                  {dev ? fullTime(operation.startedAt).text : <Time at={operation.startedAt} />}
+                </dd>
+              </>
+            )}
+            <dt>{dev ? "Ended" : "When"}</dt>
+            <dd title={dev ? fullTime(operation.endedAt).title : undefined}>
+              {dev ? fullTime(operation.endedAt).text : <Time at={operation.endedAt} />}
             </dd>
-            <dt>Started</dt>
-            <dd title={fullTime(operation.startedAt).title}>
-              {fullTime(operation.startedAt).text}
-            </dd>
-            <dt>Ended</dt>
-            <dd title={fullTime(operation.endedAt).title}>{fullTime(operation.endedAt).text}</dd>
             <dt>Agent</dt>
             <dd>
               {operation.agent ? (
-                <Link to={fleetHref({ repo, agent: operation.agent, at })}>{operation.agent}</Link>
+                <Link to={fleetHref({ repo, agent: operation.agent, at })}>
+                  {dev ? operation.agent : <Identity identity={operation.agent} size="sm" />}
+                </Link>
               ) : (
                 "-"
               )}
@@ -275,7 +313,7 @@ export function OperationDetail({
               {operation.workspaceId ? (
                 <Link
                   to={fleetHref({ repo, workspace: operation.workspaceId, at })}
-                  title={operation.workspaceId}
+                  title={dev ? operation.workspaceId : undefined}
                 >
                   <span className="mono">{shortId(operation.workspaceId)}</span>
                 </Link>
@@ -284,32 +322,32 @@ export function OperationDetail({
               )}
             </dd>
             <dt>By</dt>
-            <dd>
-              {operation.username || "-"}@{operation.hostname || "-"}
-            </dd>
-            {operation.remote?.tokenName && (
+            <dd>{dev ? by : <Identity identity={by} size="sm" />}</dd>
+            {dev && operation.remote?.tokenName && (
               <>
                 <dt>Remote token</dt>
                 <dd>{operation.remote.tokenName}</dd>
               </>
             )}
-            <dt>Parents</dt>
-            <dd>
-              {operation.parentIds.length === 0
-                ? "none (the root)"
-                : operation.parentIds.map((id, i) => (
-                    <span key={id}>
-                      {i > 0 && ", "}
-                      <Link to={select(id)} replace title={id}>
-                        <span className="mono">{shortId(id)}</span>
-                      </Link>
-                    </span>
-                  ))}
-            </dd>
+            {dev && <dt>Parents</dt>}
+            {dev && (
+              <dd>
+                {operation.parentIds.length === 0
+                  ? "none (the root)"
+                  : operation.parentIds.map((id, i) => (
+                      <span key={id}>
+                        {i > 0 && ", "}
+                        <Link to={select(id)} replace title={id}>
+                          <span className="mono">{shortId(id)}</span>
+                        </Link>
+                      </span>
+                    ))}
+              </dd>
+            )}
           </dl>
           {operation.description && <p className="description pre-wrap">{operation.description}</p>}
           <Effects repo={repo} operation={operation} />
-          {Object.keys(operation.attributes).length > 0 && (
+          {dev && Object.keys(operation.attributes).length > 0 && (
             <>
               <h4>Attributes</h4>
               <ul className="activity mono">
@@ -331,9 +369,11 @@ export function OperationDetail({
           </p>
         </>
       )}
-      <p className="command">
-        <code>{command}</code> <Copy text={command} />
-      </p>
+      {dev && (
+        <p className="command">
+          <code>{command}</code> <Copy text={command} />
+        </p>
+      )}
     </div>
   );
 }

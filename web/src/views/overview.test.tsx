@@ -27,6 +27,7 @@ import {
   presenceFrame,
   settle,
 } from "../test/fakes";
+import { setDevMode } from "../ui/dev-mode";
 import { Overview } from "./Overview";
 import { RELOAD_EVERY_MS } from "./overview-model";
 
@@ -96,11 +97,15 @@ function setup(daemon: Partial<Daemon> = {}, live = true) {
   return { state, operations, presence, onSessionInvalid };
 }
 
+afterEach(() => {
+  setDevMode(false);
+});
+
 function row(name: string): HTMLElement {
   const cell = screen.getByText(name);
-  const tr = cell.closest("tr");
-  if (!tr) throw new Error(`no row for ${name}`);
-  return tr;
+  const card = cell.closest("li");
+  if (!card) throw new Error(`no card for ${name}`);
+  return card;
 }
 
 async function flush() {
@@ -111,9 +116,15 @@ async function flush() {
 
 describe("Overview", () => {
   it("renders repositories from two pages", async () => {
+    setDevMode(true);
     setup({ repositories: [repo("aaaaaaaa11", "/src/alpha"), repo("bbbbbbbb22", "/src/beta/")] });
     await flush();
     expect(row("alpha").textContent).toContain("aaaaaaaa");
+    act(() => {
+      setDevMode(false);
+    });
+    // The id is a developer detail.
+    expect(row("alpha").textContent).not.toContain("aaaaaaaa");
     expect(row("beta").getAttribute("title")).toBeNull();
     expect(screen.getByText("beta").getAttribute("title")).toBe("/src/beta/");
   });
@@ -131,6 +142,7 @@ describe("Overview", () => {
   });
 
   it("keeps the newer of the listed and the streamed operation, whichever arrives first", async () => {
+    setDevMode(true);
     let release: () => void = () => undefined;
     const listed = new Promise<void>((resolve) => {
       release = resolve;
@@ -176,8 +188,9 @@ describe("Overview", () => {
   it("counts distinct active agents per repository from presence", async () => {
     const t = setup({ repositories: [repo("ra", "/src/alpha")] });
     await flush();
-    const agents = () => row("alpha").lastElementChild?.textContent;
-    expect(agents()).toBe("0");
+    const agents = () =>
+      within(row("alpha")).getByRole("link", { name: /agents? working$/ }).textContent;
+    expect(agents()).toBe("No agents working");
     await act(async () => {
       t.presence.applyFrame(
         presenceFrame(
@@ -192,12 +205,12 @@ describe("Overview", () => {
       );
       await settle();
     });
-    expect(agents()).toBe("2");
+    expect(agents()).toBe("2 agents working");
     await act(async () => {
       t.presence.applyFrame(presenceFrame([{ id: "p3", ended: true }]));
       await settle();
     });
-    expect(agents()).toBe("1");
+    expect(agents()).toBe("1 agent working");
   });
 
   it("counts an agent and its workspace's owner once, and links into the workspaces page (R2.20 test 9)", async () => {
@@ -224,7 +237,7 @@ describe("Overview", () => {
       );
       await settle();
     });
-    const count = within(row("alpha")).getByRole("link", { name: "1" });
+    const count = within(row("alpha")).getByRole("link", { name: "1 agent working" });
     expect(count.getAttribute("href")).toBe("/repos/ra/workspaces");
     expect(within(row("alpha")).getByRole("link", { name: "reviewer" }).getAttribute("href")).toBe(
       "/repos/ra/workspaces?agent=reviewer",
@@ -232,7 +245,14 @@ describe("Overview", () => {
     expect(within(row("alpha")).getByRole("link", { name: "ws123456" }).getAttribute("href")).toBe(
       "/repos/ra/workspaces?workspace=ws12345678abcdef",
     );
-    // The operation itself links to the feed with it selected (R2.21).
+    // The operation itself links to the feed with it selected (R2.21), as a
+    // sentence, or the API's word in developer mode.
+    expect(
+      within(row("alpha")).getByRole("link", { name: "saved a snapshot" }).getAttribute("href"),
+    ).toBe("/repos/ra/activity?op=o1");
+    act(() => {
+      setDevMode(true);
+    });
     expect(within(row("alpha")).getByRole("link", { name: "snapshot" }).getAttribute("href")).toBe(
       "/repos/ra/activity?op=o1",
     );
@@ -362,5 +382,39 @@ describe("Overview", () => {
     });
     expect(t.state.listLoads).toBe(3);
     expect(screen.getByText("yota")).toBeTruthy();
+  });
+});
+
+describe("Overview, outside developer mode (the design pass)", () => {
+  it("tells the latest operation as a sentence and sums up the fleet", async () => {
+    const t = setup({
+      repositories: [repo("ra", "/src/alpha")],
+      latest: {
+        ra: operation("o1", "ra", 1000, {
+          kind: OperationKind.SNAPSHOT,
+          snapshotKind: SnapshotKind.WATCHER,
+          agent: "reviewer",
+          workspaceId: "ws12345678abcdef",
+          description: "reef: snapshot\nmore",
+        }),
+      },
+    });
+    await flush();
+    await act(async () => {
+      t.presence.applyFrame(
+        presenceFrame([{ id: "a", agent: "reviewer", repoId: "ra", workspaceId: "ws1" }], true),
+      );
+      await settle();
+    });
+    const card = row("alpha");
+    expect(card.textContent).toContain("reviewer saved a snapshot in ws123456 · ");
+    expect(card.textContent).toContain("reef: snapshot");
+    expect(card.textContent).not.toContain("more");
+    const time = card.querySelector("time");
+    expect(time?.getAttribute("datetime")).toBe(new Date(1000).toISOString());
+    expect(time?.getAttribute("title")).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    expect(within(card).getByRole("link", { name: "1 agent working" })).toBeTruthy();
+    expect(card.querySelectorAll(".repo-agents .avatar")).toHaveLength(1);
+    expect(screen.getByText(/^1 repository · 1 agent working now · last activity/)).toBeTruthy();
   });
 });

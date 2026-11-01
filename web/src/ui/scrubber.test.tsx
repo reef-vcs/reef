@@ -8,6 +8,10 @@ import { immediateFrames, operationsFrame, settle } from "../test/fakes";
 import { FakeOplog, REPO, T } from "../test/oplog-daemon";
 import { navigate, useSearch } from "./router";
 import { COMMIT_DELAY_MS, Scrubber } from "./Scrubber";
+import { withDevMode } from "../test/dev-mode";
+
+// These tests check the ids, commands and exact times developer mode shows.
+withDevMode();
 
 const MIN = 60_000;
 const PAGE = `/repos/${REPO}/smartlog`;

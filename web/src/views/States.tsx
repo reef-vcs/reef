@@ -1,6 +1,7 @@
 // `/states`: every state as a badge and as a tinted row, in both themes side
 // by side, with each foreground's contrast on the surface and on its tint.
-// Later views check their colors against this page.
+// Later views check their colors against this page. The brand and neutral
+// pairs (the design pass) are measured the same way.
 import { useLayoutEffect, useRef, useState } from "react";
 import { contrast } from "../state/contrast";
 import { StateBadge } from "../state/StateBadge";
@@ -29,6 +30,41 @@ function Ratios({ state }: { state: State }) {
   );
 }
 
+/** Brand and neutral pairs: foreground, background, and the ratio each must meet. */
+const BRAND_PAIRS: [string, string, number][] = [
+  ["--link", "--surface", 4.5],
+  ["--link", "--canvas", 4.5],
+  ["--brand-strong", "--brand-tint", 4.5],
+  ["--on-brand", "--brand", 4.5],
+  ["--on-ocean", "--ocean", 4.5],
+  ["--on-ocean-muted", "--ocean", 4.5],
+  ["--ocean-accent", "--ocean", 3],
+  ["--coral", "--ocean", 3],
+];
+
+function BrandRow({ fg, bg, min }: { fg: string; bg: string; min: number }) {
+  const ref = useRef<HTMLTableRowElement>(null);
+  const [text, setText] = useState("");
+  useLayoutEffect(() => {
+    if (!ref.current) return;
+    const style = getComputedStyle(ref.current);
+    const read = (name: string) => style.getPropertyValue(name).trim();
+    try {
+      setText(`${contrast(read(fg), read(bg)).toFixed(1)}:1 (needs ${String(min)}:1)`);
+    } catch {
+      setText("");
+    }
+  }, [fg, bg, min]);
+  return (
+    <tr ref={ref} style={{ background: `var(${bg})`, color: `var(${fg})` }}>
+      <td className="mono">
+        {fg} on {bg}
+      </td>
+      <td>{text}</td>
+    </tr>
+  );
+}
+
 function Theme({ theme }: { theme: "light" | "dark" }) {
   return (
     <section data-theme={theme}>
@@ -47,6 +83,14 @@ function Theme({ theme }: { theme: "light" | "dark" }) {
           ))}
         </tbody>
       </table>
+      <h3>Brand and neutral colors</h3>
+      <table>
+        <tbody>
+          {BRAND_PAIRS.map(([fg, bg, min]) => (
+            <BrandRow key={`${fg} ${bg}`} fg={fg} bg={bg} min={min} />
+          ))}
+        </tbody>
+      </table>
     </section>
   );
 }
@@ -54,10 +98,11 @@ function Theme({ theme }: { theme: "light" | "dark" }) {
 export function States() {
   return (
     <>
-      <h2>States</h2>
+      <h1>States</h1>
       <p className="secondary">
         One color per object state, used for every object that has it, always with its shape and its
-        word. Connection status, errors and chrome never use these colors.
+        word. Connection status, errors and chrome never use these colors; chrome uses the brand
+        colors, which never mark a state.
       </p>
       <div className="table-box">
         <table>

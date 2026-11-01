@@ -15,6 +15,11 @@ import { reverseHex } from "../ui/ids";
 import { useSearch } from "../ui/router";
 import { Fleet } from "./Fleet";
 import { fleetParams } from "./fleet-route";
+import { withDevMode } from "../test/dev-mode";
+import { setDevMode } from "../ui/dev-mode";
+
+// These tests check the ids, commands and exact times developer mode shows.
+withDevMode();
 
 const C1 = "c1".padEnd(32, "0");
 const C2 = "c2".padEnd(32, "0");
@@ -106,6 +111,12 @@ const row = (name: string, text: string) =>
   within(table(name))
     .getAllByRole("row")
     .find((r) => r.textContent.includes(text))!;
+// The agents are cards (the design pass): a list named "Agents".
+const card = (text: string) =>
+  within(screen.getByRole("list", { name: "Agents" }))
+    .getAllByRole("listitem")
+    .filter((li) => li.parentElement?.getAttribute("aria-label") === "Agents")
+    .find((li) => li.textContent.includes(text))!;
 const cells = (r: HTMLElement) =>
   within(r)
     .getAllByRole("cell")
@@ -192,11 +203,13 @@ describe("Fleet", () => {
       ],
     });
     await flush();
-    const agents = within(table("Agents")).getAllByRole("row").slice(1);
+    const agents = within(screen.getByRole("list", { name: "Agents" }))
+      .getAllByRole("listitem")
+      .filter((li) => li.parentElement?.getAttribute("aria-label") === "Agents");
     expect(agents).toHaveLength(1);
-    expect(cells(agents[0]!)[0]).toBe("reviewer");
-    expect(cells(agents[0]!)[3]).toBe("running tests");
-    expect(cells(agents[0]!)[4]).toBe("heartbeating");
+    expect(within(agents[0]!).getAllByRole("link")[0]!.textContent).toBe("reviewer");
+    expect(agents[0]!.textContent).toContain("running tests");
+    expect(agents[0]!.querySelector(".health")?.textContent).toBe("heartbeating");
     expect(cells(row("Workspaces", "w1000000"))[2]).toBe("reviewer");
   });
 
@@ -219,7 +232,7 @@ describe("Fleet", () => {
       );
       await settle();
     });
-    expect(row("Agents", "reviewer").textContent).toMatch(/finished \d\d:\d\d:\d\d/);
+    expect(card("reviewer").textContent).toMatch(/finished \d\d:\d\d:\d\d/);
     fireEvent.click(screen.getByRole("button", { name: "Hide 1 gone" }));
     await flush();
     expect(screen.getByText("No agents are reporting presence in this repository.")).toBeTruthy();
@@ -299,7 +312,7 @@ describe("Fleet", () => {
         .getByRole("link", { name: "abcd-ful" })
         .getAttribute("href"),
     ).toBe(`/repos/${REPO}/activity?op=abcd-full&at=abcd-full`);
-    expect(screen.queryByRole("table", { name: "Agents" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Agents" })).toBeNull();
     expect(cells(row("Workspaces", "w1000000"))[6]).toMatch(/^issued \d\d:\d\d:\d\d$/);
     expect(t.daemon.getCalls).toHaveLength(0);
   });
@@ -419,7 +432,7 @@ describe("Fleet", () => {
       t.presence.applyFrame(presenceFrame([{ id: "a", ended: true }]));
       await settle();
     });
-    expect(row("Agents", "reviewer").className).toContain("changed");
+    expect(card("reviewer").className).toContain("changed");
     t.daemon.workspaces = t.daemon.workspaces.filter((w) => w.id !== "w2000000");
     t.daemon.finals.set("w2000000", workspace("w2000000", C2, { state: WorkspaceState.RELEASED }));
     t.push(operation("o-rel", REPO, T, { workspaceId: "w2000000" }));
@@ -437,5 +450,56 @@ describe("Fleet", () => {
     await afterSpacing();
     expect(row("Workspaces", "w3000000").className).toContain("changed");
     expect(row("Workspaces", "w1000000").className).not.toContain("changed");
+  });
+});
+
+describe("Fleet, outside developer mode (the design pass)", () => {
+  beforeEach(() => {
+    setDevMode(false);
+  });
+
+  it("speaks of health and the summary in people's words", async () => {
+    setup(withTwo(), {
+      presence: [
+        {
+          id: "a",
+          agent: "reviewer",
+          repoId: REPO,
+          workspaceId: "w1000000",
+          kind: PresenceKind.ACTIVITY,
+          activity: "running tests",
+          updatedAt: timestampFromMs(T),
+        },
+        {
+          id: "l",
+          agent: "bob@host",
+          repoId: REPO,
+          workspaceId: "w1000000",
+          kind: PresenceKind.LEASE,
+          byDaemon: true,
+          lease: create(LeaseSchema, { expiresAt: timestampFromMs(T) }),
+        },
+      ],
+    });
+    await flush();
+    expect(card("reviewer").querySelector(".health")?.textContent).toBe("healthy");
+    expect(card("reviewer").textContent).toContain("running tests");
+    const w1 = row("Workspaces", "w1000000");
+    expect(w1.textContent).not.toContain("heartbeating");
+    // The owner is still its full identity, split into name and host.
+    expect(cells(w1)[1]).toContain("bob@host");
+    expect(screen.getByText(/^2 active workspaces/)).toBeTruthy();
+  });
+
+  it("leaves the ids and the command out of the workspace pane", async () => {
+    setup(withTwo(), { query: "workspace=w1000000" });
+    await flush();
+    await flush();
+    const pane = screen.getByRole("complementary", { name: "Selection" });
+    expect(pane.textContent).toContain("w1000000");
+    expect(pane.textContent).not.toContain("reef ws inspect");
+    expect(within(pane).queryByText("Backend")).toBeNull();
+    expect(within(pane).queryByText("Id")).toBeNull();
+    expect(pane.textContent).toContain("18 MiB, 3 files differ from the base");
   });
 });

@@ -67,8 +67,8 @@ export function agentsOfWorkspace(join: AgentJoin, id: string): string[] {
     .sort();
 }
 
-/** Each repository's number of agents: the overview's count. */
-export function agentCounts(entries: Iterable<Presence>): Map<string, number> {
+/** The agents `agentCounts` counts, by name, per repository: the overview's cards. */
+export function agentNames(entries: Iterable<Presence>): Map<string, string[]> {
   const byRepo = new Map<string, Presence[]>();
   for (const p of entries) {
     if (!p.repoId) continue;
@@ -77,6 +77,11 @@ export function agentCounts(entries: Iterable<Presence>): Map<string, number> {
     list.push(p);
   }
   return new Map(
-    [...byRepo].map(([repo, list]) => [repo, joinAgents(list, repo).agents.size] as const),
+    [...byRepo].map(([repo, list]) => [repo, [...joinAgents(list, repo).agents.keys()]] as const),
   );
+}
+
+/** Each repository's number of agents. */
+export function agentCounts(entries: Iterable<Presence>): Map<string, number> {
+  return new Map([...agentNames(entries)].map(([repo, names]) => [repo, names.length] as const));
 }

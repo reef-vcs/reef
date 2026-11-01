@@ -1,20 +1,21 @@
-// The app shell: header, routes and footer over one connection and one live
+// The app shell: the app bar and the routes over one connection and one live
 // layer. Without a session, or once the daemon refuses it, every route is
 // the no-session page. The overview is in the entry chunk; every other page
 // is its own (R2.21), and the three repository pages share a frame keyed by
 // the repository.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
 import type { GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
 import { endSession } from "./session";
-import { ConnectionIndicator } from "./ui/ConnectionIndicator";
+import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
+import { HeaderSlots } from "./ui/header-slots";
 import { lazyRoute } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
-import { Link, match, usePath, useSearch } from "./ui/router";
+import { match, usePath, useSearch } from "./ui/router";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
@@ -75,50 +76,56 @@ function Shell({
   const search = useSearch();
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const repo = repoRoute(path);
+  // The app bar's slots, for the repository frame's portals (ui/header-slots).
+  const [crumb, setCrumb] = useState<HTMLElement | null>(null);
+  const [tabs, setTabs] = useState<HTMLElement | null>(null);
+  const [strip, setStrip] = useState<HTMLElement | null>(null);
+  const slots = useMemo(() => ({ crumb, tabs, strip }), [crumb, tabs, strip]);
+  // The repository frame titles its own pages, once it knows the name.
+  const inRepo = repo !== null;
+  useEffect(() => {
+    if (inRepo) return;
+    document.title =
+      path === "/" ? "Reef" : path === "/states" ? "States — Reef" : "Not found — Reef";
+  }, [inRepo, path]);
   return (
-    <div className="page">
-      <header className="header">
-        <h1>
-          <Link to="/">Reef</Link>
-        </h1>
-        {status && (
-          <span className="daemon">
-            reef-daemon {status.version} · API revision {status.apiRevision}
-          </span>
-        )}
-        <ConnectionIndicator live={live} />
-      </header>
-      <main>
-        {error && <ErrorView error={error} />}
-        {path === "/" ? (
-          <Overview
-            connection={connection}
-            live={live}
-            frame={frame}
-            onSessionInvalid={onSessionInvalid}
-          />
-        ) : repo ? (
-          <RepoFrame
-            key={repo.repo}
-            repo={repo.repo}
-            page={repo.page}
-            search={search}
-            connection={connection}
-            live={live}
-            frame={frame}
-            onSessionInvalid={onSessionInvalid}
-          />
-        ) : path === "/states" ? (
-          <States />
-        ) : (
-          <NotFound />
-        )}
-      </main>
-      <footer className="footer">
-        <Link to="/states">States</Link>
-        <a href="/THIRD_PARTY_LICENSES.txt">Third-party licenses</a>
-      </footer>
-    </div>
+    <HeaderSlots.Provider value={slots}>
+      <div className={repo ? "page repo-page" : "page"}>
+        <AppBar
+          live={live}
+          status={status}
+          onCrumb={setCrumb}
+          onTabs={setTabs}
+          onStrip={setStrip}
+        />
+        <main>
+          {error && <ErrorView error={error} />}
+          {path === "/" ? (
+            <Overview
+              connection={connection}
+              live={live}
+              frame={frame}
+              onSessionInvalid={onSessionInvalid}
+            />
+          ) : repo ? (
+            <RepoFrame
+              key={repo.repo}
+              repo={repo.repo}
+              page={repo.page}
+              search={search}
+              connection={connection}
+              live={live}
+              frame={frame}
+              onSessionInvalid={onSessionInvalid}
+            />
+          ) : path === "/states" ? (
+            <States />
+          ) : (
+            <NotFound />
+          )}
+        </main>
+      </div>
+    </HeaderSlots.Provider>
   );
 }
 

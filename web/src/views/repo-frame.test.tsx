@@ -13,6 +13,10 @@ import { FakeOplog, REPO, T } from "../test/oplog-daemon";
 import { navigate, usePath, useSearch } from "../ui/router";
 import type { RepoPage } from "../ui/RepoNav";
 import { RepoFrame } from "./RepoFrame";
+import { withDevMode } from "../test/dev-mode";
+
+// These tests check the ids, commands and exact times developer mode shows.
+withDevMode();
 
 beforeEach(() => {
   window.history.replaceState(null, "", `/repos/${REPO}/activity`);

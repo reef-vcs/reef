@@ -662,3 +662,19 @@ From the owner, recorded so they are not asked again:
 ## Open questions
 
 None. Everything an implementer would otherwise decide is decided above; the two departures from earlier rules (relative times, brand chrome) follow from the owner's decisions and are recorded in the ADR amendment.
+
+## Departures in the implementation
+
+- **File names.** `Time.tsx` is `ui/TimeLabel.tsx`: macOS's case-insensitive file system takes `Time.tsx` and `time.ts` for one file. `Avatar`, `AvatarStack` and `Identity` share `ui/Avatar.tsx`. `header-slots` is a `.tsx` with an `InSlot` component that portals or renders in place.
+- **Three header slots, not two.** The crumb, the tabs and the strip each have a slot, so the bar can put the tabs on a second row below 900 px without moving the crumb. The shell passes its state setters as the slots' ref callbacks (stable, so no ref churn).
+- **Heading levels in the panes stay `h3`/`h4`.** Pages gain a visually hidden `h1`, the overview's `h1` is visible, and the workspaces page's sections are `h2`; the panes keep R2.19's levels so their CSS and tests did not move.
+- **`ago`'s day boundaries.** Hours count within the same calendar day; an earlier time yesterday reads `yesterday 14:03` even when under 24 h ago (the brief's table made "yesterday" unreachable).
+- **Lease grace reads "in grace, ends in 2 min"**, and `HealthWord` keys its transition on the API's word, so a human word changing with the API word is one transition.
+- **`useNow(active)`**: the clock subscribes only when `active`; the scrubber, smartlog rows and workspace rows pass `!dev`, so developer mode schedules nothing. Developer mode adds the scrubber's "Tallest bar" row, so the strip is one row taller than `--header-h` assumes there; the pane's sticky offset is that much short in developer mode only.
+- **`--header-h` lives on `:root`** (`:root:has(.repo-page)` on repository pages), so `html`'s `scroll-padding-top` sees it.
+- **Effects keep their short commit ids** in both modes ("moved abc12345 to def67890"): the brief keeps effects as they are, and those ids are how the commits are told apart. Full ids in `title`s are developer mode only.
+- **No `reef ui` command box on the no-session page.** The sentence already holds `reef ui`, and two copies broke the bootstrap test's exact match.
+- **The change pane's title** in human form is the state badge, then the description's first line, wrapping under it on narrow panes.
+- **Phone rows.** Below 600 px a smartlog row keeps its description (down to 3em), its first chip (2.5 to 6em, cut) and its time; the meta group never shrinks below the time.
+- **The smoke test's developer-mode step reloads the second tab, not the first**: a load in the first tab hands the shared streams to the second, which `streams.hold` checks against.
+- **Firefox** still fails to launch on macOS 27.0.1 under Playwright 1.64.1 ("Could not find profile folder", as in #128); the smoke test ran in Chromium and WebKit locally, and CI runs all three on Linux.

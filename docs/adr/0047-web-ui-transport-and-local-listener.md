@@ -51,3 +51,9 @@ The daemon listened only on its Unix socket, which a browser cannot reach, and t
 - **Building the assets once per target in the release.** Four Node setups, and four chances for the bytes to differ.
 - **A router or a state library.** Every runtime dependency runs with the token; routing is about 50 lines over the History API, and state is `useSyncExternalStore` over the stream layer.
 - **Streams per tab.** Three tabs with two streams each would use every connection the browser allows an origin over HTTP/1.1.
+
+## Amendment, 2026-11-01 (web UI design pass): brand chrome, relative times and developer mode
+
+- **Chrome may use the brand tokens.** Decision 11's "chrome uses neutral tokens" now reads: chrome may use the brand tokens (`--brand*`, `--ocean*`, `--coral`), which never mark an object's state or health, and whose teal the token test holds at least 30° of hue from `--state-landed`. Coral sits near `--state-failed`, so it appears only on the ocean app bar, where no object is shown. Connection status, errors, lease health and attention stay neutral. Green still means only landed.
+- **Relative times.** The app shows times relative to a clock that ticks once a minute, at the minute, through `after`, and reads nothing over the network; the exact time is in each time's `title` and in developer mode. R2.18's "absolute, never relative" is replaced. The scrubber's track still reads no clock, and periods (the feed's summary, "Loaded back to", "Go to time") stay absolute.
+- **Developer mode.** A per-origin setting in `localStorage` (`reef.devMode`), off by default, that renders every page as before the design pass: ids, CLI commands, the smartlog's revset, exact times and the API's words. Off, those elements are not in the DOM.

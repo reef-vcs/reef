@@ -82,12 +82,14 @@ export function Link({
   title,
   replace = false,
   current,
+  className,
   children,
 }: {
   to: string;
   title?: string | undefined;
   replace?: boolean;
   current?: "page" | "true" | undefined;
+  className?: string | undefined;
   children: ReactNode;
 }) {
   function onClick(event: MouseEvent<HTMLAnchorElement>) {
@@ -98,7 +100,7 @@ export function Link({
     navigate(to, { replace });
   }
   return (
-    <a href={to} title={title} aria-current={current} onClick={onClick}>
+    <a href={to} title={title} aria-current={current} className={className} onClick={onClick}>
       {children}
     </a>
   );

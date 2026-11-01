@@ -26,7 +26,7 @@ function write(storage: Storage | null, token: string | null) {
   }
 }
 
-function localStorageOrNull(): Storage | null {
+export function localStorageOrNull(): Storage | null {
   try {
     return window.localStorage;
   } catch {

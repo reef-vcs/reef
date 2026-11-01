@@ -4,9 +4,10 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import type { Ending } from "../live/presence";
 import { changeState } from "../state/states";
 import { StateBadge } from "../state/StateBadge";
+import { Avatar } from "../ui/Avatar";
 import { reverseHex, shortId } from "../ui/ids";
 import { Link } from "../ui/router";
-import { clock } from "../ui/time";
+import { Time } from "../ui/TimeLabel";
 import type { WorkspaceRow } from "./fleet-model";
 import { fleetHref } from "./fleet-route";
 import { doing, ENDING_WORDS, type AgentRow } from "./fleet-rows";
@@ -31,11 +32,19 @@ export function AgentDetail({
   const agent = row.agent;
   return (
     <div className="detail">
-      <h3>{row.name}</h3>
+      <h3>
+        <Avatar name={row.name} size="lg" />
+        {row.name}
+      </h3>
       {!agent && (
         <p>
           {row.ending ? ENDING_WORDS[row.ending.reason] : "ended"}
-          {row.ending && ` ${clock(timestampFromMs(row.ending.at)).text}`}
+          {row.ending && (
+            <>
+              {" "}
+              <Time at={timestampFromMs(row.ending.at)} />
+            </>
+          )}
         </p>
       )}
       {agent && (
@@ -78,7 +87,10 @@ export function AgentDetail({
                   </span>
                 )}
                 {p.byDaemon && <span className="secondary"> (reported by the daemon)</span>}
-                <span className="secondary"> · {clock(p.updatedAt).text}</span>
+                <span className="secondary">
+                  {" "}
+                  · <Time at={p.updatedAt} />
+                </span>
               </li>
             ))}
           </ul>
@@ -93,7 +105,7 @@ export function AgentDetail({
               .reverse()
               .map((e) => (
                 <li key={e.presence.id}>
-                  {doing(e.presence)} · {ENDING_WORDS[e.reason]} {clock(timestampFromMs(e.at)).text}
+                  {doing(e.presence)} · {ENDING_WORDS[e.reason]} <Time at={timestampFromMs(e.at)} />
                 </li>
               ))}
           </ul>

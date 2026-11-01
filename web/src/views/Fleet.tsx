@@ -10,23 +10,30 @@
 // first row in view, stays where it is on screen across an update.
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { Connection } from "../api/connection";
-import { timestampFromMs } from "@bufbuild/protobuf/wkt";
+import { timestampDate, timestampFromMs } from "@bufbuild/protobuf/wkt";
 import type { Presence } from "../gen/reef/api/v1/presence_pb";
 import { LeaseState, WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
 import { agentsOfWorkspace, joinAgents } from "../fleet/agents";
-import { expiry, type Health } from "../fleet/lease";
+import { durationMs, expiry, type Health } from "../fleet/lease";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { changeState } from "../state/states";
 import { StateBadge } from "../state/StateBadge";
 import { AtBanner } from "../ui/AtBanner";
+import { Avatar, Identity } from "../ui/Avatar";
+import { useNow } from "../ui/clock";
+import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
+import { AlertIcon } from "../ui/icons";
 import { reverseHex, shortId } from "../ui/ids";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
-import { useTableAnchor } from "../ui/scroll-anchor";
+import { useElementAnchor } from "../ui/scroll-anchor";
 import { size } from "../ui/size";
-import { clock } from "../ui/time";
+import { until } from "../ui/relative";
+import { clock, fullTime } from "../ui/time";
+import { Time, timeText } from "../ui/TimeLabel";
+import { HEALTH_WORDS, operationSentence, plural } from "../ui/words";
 import { AgentDetail } from "./AgentDetail";
 import { FleetModel, WORKSPACES_SHOWN, type WorkspaceRow } from "./fleet-model";
 import { fleetHref, type FleetParams } from "./fleet-route";
@@ -69,44 +76,110 @@ function Word({ word, children }: { word: string; children?: ReactNode }) {
   );
 }
 
-function HealthWord({ health }: { health: Health }) {
+/** The shape beside a human health word: no color, as health is no object state. */
+function HealthShape({ word }: { word: Health["word"] }) {
+  if (word === "missed heartbeats") return <AlertIcon />;
+  if (word === "-") return null;
   return (
-    <span title={health.title} className={health.stuck ? "health stuck" : "health"}>
-      <Word word={health.word} />
+    <svg className="health-shape" viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+      <circle
+        cx="5"
+        cy="5"
+        r="3.5"
+        fill={word === "heartbeating" ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeDasharray={word === "waiting for a heartbeat" ? "2 1.6" : undefined}
+      />
+    </svg>
+  );
+}
+
+function HealthWord({ health }: { health: Health }) {
+  const dev = useDevMode();
+  return (
+    <span
+      title={health.title}
+      className={`${health.stuck ? "health stuck" : "health"}${dev ? "" : " health-pill"}`}
+    >
+      {/* Keyed on the API's word, so the transition marks a state change. */}
+      <Word word={health.word}>
+        {dev ? (
+          health.word
+        ) : (
+          <>
+            <HealthShape word={health.word} />
+            {HEALTH_WORDS[health.word]}
+          </>
+        )}
+      </Word>
     </span>
   );
 }
 
+/** The lease's expiry in people's words; developer mode keeps `expiry`'s. */
+function humanExpiry(lease: NonNullable<LeaseView["lease"]>, now: number): string {
+  if (lease.state === LeaseState.EXPIRED) return "expired, to be reclaimed";
+  if (!lease.expiresAt) return "expires -";
+  const expires = timestampDate(lease.expiresAt).getTime();
+  // As last reported, never predicted: a time already past says so.
+  if (lease.state === LeaseState.IN_GRACE) {
+    const ends = expires + durationMs(lease.grace);
+    return ends > now ? `in grace, ends ${until(ends, now)}` : "in grace, ended";
+  }
+  return expires > now ? `expires ${until(expires, now)}` : "expiry passed";
+}
+
 function ChangeCell({ repo, at, row }: { repo: string; at: string; row: WorkspaceRow }) {
+  const dev = useDevMode();
   const id = row.workspace.changeId;
   const change = row.change;
   const subject = change?.description.split("\n", 1)[0] ?? "";
   return (
     <Word word={id}>
       {change && <StateBadge {...changeState(change)} />}{" "}
-      <Link to={smartlogHref({ repo, at, change: id })} title={subject || reverseHex(id)}>
+      <Link
+        to={smartlogHref({ repo, at, change: id })}
+        title={subject || (dev ? reverseHex(id) : undefined)}
+      >
         <span className="mono">{shortId(reverseHex(id))}</span>
       </Link>
+      {!dev && subject && <div className="secondary one-line">{subject}</div>}
     </Word>
   );
 }
 
 function LeaseCell({ view, frozen, row }: { view: LeaseView; frozen: boolean; row: WorkspaceRow }) {
+  const dev = useDevMode();
   const lease = view.lease;
   if (!lease) return <span className="secondary">-</span>;
   if (frozen) {
     const issued = clock(lease.issuedAt);
-    return <span title={issued.title}>issued {issued.text}</span>;
+    return dev ? (
+      <span title={issued.title}>issued {issued.text}</span>
+    ) : (
+      <span>
+        issued <Time at={lease.issuedAt} />
+      </span>
+    );
   }
-  const time = expiry(lease);
   return (
     <>
       <HealthWord health={view.health} />
-      <div className="secondary" title={time.title}>
-        {time.text}
-      </div>
+      <Expiry lease={lease} />
       {row.workspace.lease?.state === LeaseState.ENDED && <div className="secondary">ended</div>}
     </>
+  );
+}
+
+function Expiry({ lease }: { lease: NonNullable<LeaseView["lease"]> }) {
+  const dev = useDevMode();
+  const now = useNow(!dev);
+  const time = expiry(lease);
+  return (
+    <div className="secondary" title={dev ? time.title : fullTime(lease.expiresAt).text}>
+      {dev ? time.text : humanExpiry(lease, now)}
+    </div>
   );
 }
 
@@ -130,13 +203,17 @@ function WorkspaceTableRow({
   disk: { text: string; title: string };
   frozen: boolean;
   selected: boolean;
-  register: (key: string, element: HTMLTableRowElement | null) => void;
+  register: (key: string, element: HTMLElement | null) => void;
 }) {
+  const dev = useDevMode();
+  const now = useNow(!dev);
   const workspace = row.workspace;
   const attention = ATTENTION_WORDS[workspace.attention];
   const cause = row.cause;
   const title = cause
-    ? `${operationLabel(cause)} at ${clock(cause.endedAt).text} by ${cause.agent || "-"}`
+    ? dev
+      ? `${operationLabel(cause)} at ${clock(cause.endedAt).text} by ${cause.agent || "-"}`
+      : `${cause.agent || "Someone"} ${operationSentence(cause)} ${timeText(cause.endedAt, now, false)}`
     : undefined;
   const key = `ws:${row.id}`;
   const ended = row.ended;
@@ -150,7 +227,11 @@ function WorkspaceTableRow({
       title={title}
     >
       <td>
-        <Link to={fleetHref({ repo, at, workspace: row.id })} replace title={row.id}>
+        <Link
+          to={fleetHref({ repo, at, workspace: row.id })}
+          replace
+          title={dev ? row.id : undefined}
+        >
           <span className="mono">{shortId(row.id)}</span>
         </Link>
         {attention && (
@@ -171,16 +252,21 @@ function WorkspaceTableRow({
               {ended.operation && (
                 <span className="secondary">
                   {" "}
-                  {clock(ended.operation.endedAt).text} by {ended.operation.agent || "-"}
+                  <Time at={ended.operation.endedAt} /> by {ended.operation.agent || "-"}
                 </span>
               )}
             </div>
           )}
         </Word>
+        {!dev && workspace.purpose && (
+          <div className="secondary one-line" title={workspace.purpose}>
+            {workspace.purpose}
+          </div>
+        )}
       </td>
       <td>
-        {workspace.owner}
-        {workspace.purpose && (
+        {dev ? workspace.owner : <Identity identity={workspace.owner} size="sm" />}
+        {dev && workspace.purpose && (
           <div className="secondary one-line" title={workspace.purpose}>
             {workspace.purpose}
           </div>
@@ -188,9 +274,10 @@ function WorkspaceTableRow({
       </td>
       <td>
         {agents.slice(0, AGENTS_SHOWN).map((name, i) => (
-          <span key={name}>
-            {i > 0 && ", "}
+          <span key={name} className={dev ? undefined : "agent-link"}>
+            {i > 0 && (dev ? ", " : " ")}
             <Link to={fleetHref({ repo, at, agent: name })} replace>
+              {!dev && <Avatar name={name} size="sm" />}
               {name}
             </Link>
           </span>
@@ -208,9 +295,7 @@ function WorkspaceTableRow({
       <td>{ended ? "" : <LeaseCell view={view} frozen={frozen} row={row} />}</td>
       <td>
         {workspace.lastSnapshotAt ? (
-          <time title={clock(workspace.lastSnapshotAt).title}>
-            {clock(workspace.lastSnapshotAt).text}
-          </time>
+          <Time at={workspace.lastSnapshotAt} />
         ) : (
           <span className="secondary">none</span>
         )}
@@ -219,7 +304,7 @@ function WorkspaceTableRow({
   );
 }
 
-function AgentTableRow({
+function AgentCard({
   repo,
   at,
   row,
@@ -234,78 +319,86 @@ function AgentTableRow({
   /** The workspaces' rows by id, for each workspace's current change. */
   rows: ReadonlyMap<string, WorkspaceRow>;
   selected: boolean;
-  register: (key: string, element: HTMLTableRowElement | null) => void;
+  register: (key: string, element: HTMLElement | null) => void;
 }) {
+  const dev = useDevMode();
   const key = `agent:${row.name}`;
   const agent = row.agent;
-  const link = (
-    <Link to={fleetHref({ repo, at, agent: row.name })} replace>
-      {row.name}
-    </Link>
+  const head = (
+    <div className="agent-card-head">
+      <Avatar name={row.name} size="lg" />
+      <Link to={fleetHref({ repo, at, agent: row.name })} replace className="name-link">
+        {row.name}
+      </Link>
+      {agent && <HealthWord health={row.health} />}
+    </div>
   );
   const common = {
-    ref: (element: HTMLTableRowElement | null) => {
+    ref: (element: HTMLElement | null) => {
       register(key, element);
     },
-    className: selected ? "selected" : undefined,
     "aria-current": selected ? ("true" as const) : undefined,
   };
   if (!agent) {
     const ending = row.ending;
     const word = ending ? ENDING_WORDS[ending.reason] : "ended";
-    // The same row element as when it was live: the class starts the one
+    // The same card element as when it was live: the class starts the one
     // transition as it turns to its ended form.
     return (
-      <tr {...common} className={selected ? "selected changed" : "changed"}>
-        <td>{link}</td>
-        <td colSpan={5}>
+      <li {...common} className={`card agent-card gone changed${selected ? " selected" : ""}`}>
+        {head}
+        <p className="secondary">
           {word}
-          {ending && ` ${clock(timestampOf(ending.at)).text}`}
-        </td>
-      </tr>
+          {ending && (
+            <>
+              {" "}
+              <Time at={timestampOf(ending.at)} />
+            </>
+          )}
+        </p>
+      </li>
     );
   }
   // Entries with only a repository name their change themselves.
   const loose = agent.entries.filter((p) => !p.workspaceId && p.changeId);
   return (
-    <tr {...common}>
-      <td>{link}</td>
-      <td>
-        {agent.workspaceIds.map((id, i) => (
-          <span key={id}>
-            {i > 0 && ", "}
-            <Link to={fleetHref({ repo, at, workspace: id })} replace title={id}>
-              <span className="mono">{shortId(id)}</span>
-            </Link>
-          </span>
-        ))}
-        {agent.workspaceIds.length === 0 && <span className="secondary">no workspace</span>}
-      </td>
-      <td>
+    <li {...common} className={`card agent-card${selected ? " selected" : ""}`}>
+      {head}
+      <p className="agent-doing" title={row.doingTitle || undefined}>
+        <Word word={row.doing} />
+      </p>
+      <ul className="agent-work">
         {agent.workspaceIds.map((id) => {
           const workspaceRow = rows.get(id);
-          return workspaceRow ? (
-            <div key={id}>
-              <ChangeCell repo={repo} at={at} row={workspaceRow} />
-            </div>
-          ) : null;
+          return (
+            <li key={id}>
+              <span className="secondary">in </span>
+              <Link
+                to={fleetHref({ repo, at, workspace: id })}
+                replace
+                title={dev ? id : undefined}
+              >
+                <span className="mono">{shortId(id)}</span>
+              </Link>{" "}
+              {workspaceRow && <ChangeCell repo={repo} at={at} row={workspaceRow} />}
+            </li>
+          );
         })}
+        {agent.workspaceIds.length === 0 && <li className="secondary">no workspace</li>}
         {loose.map((p) => (
-          <div key={p.id}>
+          <li key={p.id}>
             <Link to={smartlogHref({ repo, at, change: p.changeId })}>
               <span className="mono">{shortId(reverseHex(p.changeId))}</span>
             </Link>
-          </div>
+          </li>
         ))}
-      </td>
-      <td title={row.doingTitle || undefined}>
-        <Word word={row.doing} />
-      </td>
-      <td>
-        <HealthWord health={row.health} />
-      </td>
-      <td>{row.since && <time title={clock(row.since).title}>{clock(row.since).text}</time>}</td>
-    </tr>
+      </ul>
+      {row.since && (
+        <p className="agent-since secondary">
+          since <Time at={row.since} />
+        </p>
+      )}
+    </li>
   );
 }
 
@@ -379,7 +472,9 @@ export function Fleet({
     [rows, order],
   );
   // Presence changes the Agents table's height too.
-  const register = useTableAnchor(keys, snapshot.version + presence.version, selectedKey);
+  const register = useElementAnchor(keys, snapshot.version + presence.version, selectedKey);
+
+  const dev = useDevMode();
 
   if (snapshot.fatal) {
     return (
@@ -399,12 +494,19 @@ export function Fleet({
   ).length;
   const attention = active.filter((row) => ATTENTION_WORDS[row.workspace.attention]).length;
   const gone = agents.filter((a) => !a.agent).map((a) => a.name);
-  const summary = [
-    `${String(active.length)} active`,
-    stuck && `${String(stuck)} missed heartbeats`,
-    grace && `${String(grace)} in grace`,
-    attention && `${String(attention)} need attention`,
-  ].filter(Boolean);
+  const summary = dev
+    ? [
+        `${String(active.length)} active`,
+        stuck && `${String(stuck)} missed heartbeats`,
+        grace && `${String(grace)} in grace`,
+        attention && `${String(attention)} need attention`,
+      ].filter(Boolean)
+    : [
+        plural(active.length, "active workspace"),
+        stuck && `${String(stuck)} unresponsive`,
+        grace && `${String(grace)} in grace`,
+        attention && `${String(attention)} ${attention === 1 ? "needs" : "need"} attention`,
+      ].filter(Boolean);
 
   const disk = (row: WorkspaceRow) => {
     const result = model.disk.results.get(row.id);
@@ -424,9 +526,9 @@ export function Fleet({
 
   return (
     <div className="fleet">
-      <h2>
+      <h1 className="visually-hidden">
         <span title={root}>{name}</span> · Workspaces and agents
-      </h2>
+      </h1>
       {frozen && (
         <AtBanner
           repo={repoId}
@@ -436,8 +538,14 @@ export function Fleet({
         />
       )}
       {!frozen && state !== "live" && snapshot.lastRefreshAt !== undefined && (
-        <p className="secondary">
-          Not live: the last update was at {clock(timestampOf(snapshot.lastRefreshAt)).text}.
+        <p className="notice">
+          Not live: the last update was{" "}
+          {dev ? (
+            `at ${clock(timestampOf(snapshot.lastRefreshAt)).text}`
+          ) : (
+            <Time at={snapshot.lastRefreshAt} />
+          )}
+          .
         </p>
       )}
       {snapshot.error && <ErrorView error={snapshot.error} />}
@@ -445,7 +553,14 @@ export function Fleet({
         <div>
           {!frozen && (
             <section aria-labelledby="agents-heading">
-              <h3 id="agents-heading">Agents</h3>
+              <h2>
+                <span id="agents-heading">Agents</span>
+                {!dev && agents.length > 0 && (
+                  <span className="count" aria-hidden="true">
+                    {agents.filter((a) => a.agent).length}
+                  </span>
+                )}
+              </h2>
               {rows === null ? (
                 <p className="secondary">Loading workspaces.</p>
               ) : !presence.synced ? (
@@ -453,34 +568,19 @@ export function Fleet({
               ) : agents.length === 0 ? (
                 <p className="secondary">No agents are reporting presence in this repository.</p>
               ) : (
-                <div className="table-box">
-                  <table>
-                    <caption className="visually-hidden">Agents</caption>
-                    <thead>
-                      <tr>
-                        <th scope="col">Agent</th>
-                        <th scope="col">Workspaces</th>
-                        <th scope="col">Current change</th>
-                        <th scope="col">Doing</th>
-                        <th scope="col">Health</th>
-                        <th scope="col">Since</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {agents.map((row) => (
-                        <AgentTableRow
-                          key={row.name}
-                          repo={repoId}
-                          at={params.at}
-                          row={row}
-                          rows={byId}
-                          selected={params.agent === row.name && !params.workspace}
-                          register={register}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <ul className="agent-cards" aria-label="Agents">
+                  {agents.map((row) => (
+                    <AgentCard
+                      key={row.name}
+                      repo={repoId}
+                      at={params.at}
+                      row={row}
+                      rows={byId}
+                      selected={params.agent === row.name && !params.workspace}
+                      register={register}
+                    />
+                  ))}
+                </ul>
               )}
               {gone.length > 0 && (
                 <button
@@ -495,7 +595,7 @@ export function Fleet({
             </section>
           )}
           <section aria-labelledby="workspaces-heading">
-            <h3 id="workspaces-heading">Workspaces</h3>
+            <h2 id="workspaces-heading">Workspaces</h2>
             {rows === null && !snapshot.error && <p className="secondary">Loading workspaces.</p>}
             {rows?.length === 0 && (
               <p>
@@ -598,7 +698,7 @@ export function Fleet({
             (params.agent && !params.workspace && !selectedAgent)) && (
             <div className="detail">
               <p>Not active in this repository.</p>
-              {params.workspace && (
+              {params.workspace && dev && (
                 <p>
                   <code>reef ws inspect {params.workspace}</code>
                 </p>
