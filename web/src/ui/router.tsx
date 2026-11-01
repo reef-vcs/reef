@@ -72,14 +72,22 @@ export function navigate(to: string, { replace = false }: { replace?: boolean } 
   for (const listener of [...listeners]) listener();
 }
 
-/** A link to a route of the app; other links are plain `<a>`. */
+/**
+ * A link to a route of the app; other links are plain `<a>`. With `replace`,
+ * following it adds no history entry (a selection); `current` marks the
+ * page it names (`aria-current`).
+ */
 export function Link({
   to,
   title,
+  replace = false,
+  current,
   children,
 }: {
   to: string;
   title?: string | undefined;
+  replace?: boolean;
+  current?: "page" | "true" | undefined;
   children: ReactNode;
 }) {
   function onClick(event: MouseEvent<HTMLAnchorElement>) {
@@ -87,10 +95,10 @@ export function Link({
       return;
     }
     event.preventDefault();
-    navigate(to);
+    navigate(to, { replace });
   }
   return (
-    <a href={to} title={title} onClick={onClick}>
+    <a href={to} title={title} aria-current={current} onClick={onClick}>
       {children}
     </a>
   );

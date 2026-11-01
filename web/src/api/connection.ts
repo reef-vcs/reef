@@ -12,6 +12,7 @@ import { OperationService } from "../gen/reef/api/v1/operations_pb";
 import { PresenceService } from "../gen/reef/api/v1/presence_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { StatusService } from "../gen/reef/api/v1/status_pb";
+import { WorkspaceService } from "../gen/reef/api/v1/workspaces_pb";
 
 export interface Clients {
   daemon: Client<typeof DaemonService>;
@@ -22,6 +23,7 @@ export interface Clients {
   status: Client<typeof StatusService>;
   diff: Client<typeof DiffService>;
   history: Client<typeof HistoryService>;
+  workspaces: Client<typeof WorkspaceService>;
 }
 
 export interface Connection {
@@ -52,6 +54,7 @@ export function connectionOver(transport: Transport, label: string): Connection 
       status: createClient(StatusService, transport),
       diff: createClient(DiffService, transport),
       history: createClient(HistoryService, transport),
+      workspaces: createClient(WorkspaceService, transport),
     },
   };
 }

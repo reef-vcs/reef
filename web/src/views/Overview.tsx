@@ -1,17 +1,20 @@
 // `/`: every registered repository with its latest operation and the number
 // of agents active in it now, live from both streams. The repository links to
-// its smartlog (R2.19); R2.20 and R2.21 make the other cells links into
-// their views, and until then those are shown as text.
+// its smartlog (R2.19); the agent count, and the latest operation's workspace
+// and agent, link to its workspaces page (R2.20). R2.21 makes the operation
+// itself a link.
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { Connection } from "../api/connection";
 import type { Operation } from "../gen/reef/api/v1/operations_pb";
 import type { Repository } from "../gen/reef/api/v1/repositories_pb";
 import type { FrameScheduler } from "../live/frame";
+import { agentCounts } from "../fleet/agents";
 import type { Live } from "../live/share";
 import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
 import { clock } from "../ui/time";
+import { fleetHref } from "./fleet-route";
 import { OverviewModel } from "./overview-model";
 import { smartlogHref } from "./Smartlog";
 
@@ -31,10 +34,25 @@ function LatestOperation({ operation }: { operation: Operation | undefined }) {
       className={operation.id === first ? undefined : "changed"}
       title={operation.description}
     >
-      {operationLabel(operation)} · {operation.agent || "-"} ·{" "}
-      <span className="mono">
-        {operation.workspaceId ? operation.workspaceId.slice(0, 8) : "-"}
-      </span>{" "}
+      {operationLabel(operation)} ·{" "}
+      {operation.agent ? (
+        <Link to={fleetHref({ repo: operation.repoId, agent: operation.agent })}>
+          {operation.agent}
+        </Link>
+      ) : (
+        "-"
+      )}{" "}
+      ·{" "}
+      {operation.workspaceId ? (
+        <Link
+          to={fleetHref({ repo: operation.repoId, workspace: operation.workspaceId })}
+          title={operation.workspaceId}
+        >
+          <span className="mono">{operation.workspaceId.slice(0, 8)}</span>
+        </Link>
+      ) : (
+        <span className="mono">-</span>
+      )}{" "}
       · <time title={time.title}>{time.text}</time>
     </span>
   );
@@ -60,26 +78,23 @@ function Row({
       <td>
         <LatestOperation operation={operation} />
       </td>
-      <td>{agents}</td>
+      <td>
+        <Link to={fleetHref({ repo: repository.id })} title="Workspaces and agents">
+          {agents}
+        </Link>
+      </td>
     </tr>
   );
 }
 
-/** Distinct agents among live presence entries, per repository. */
+/** Agents among live presence entries, per repository, counted once each (fleet/agents.ts). */
 function useActiveAgents(live: Live): Map<string, number> {
-  // Re-renders when the set changes; counting a few hundred entries is cheap.
+  // Re-renders when the set changes; joining a few hundred entries is cheap.
   useSyncExternalStore(
     (listener) => live.presence.subscribe(listener),
     () => live.presence.version,
   );
-  const agents = new Map<string, Set<string>>();
-  for (const presence of live.presence.entries.values()) {
-    if (!presence.repoId) continue;
-    let set = agents.get(presence.repoId);
-    if (!set) agents.set(presence.repoId, (set = new Set()));
-    set.add(presence.agent);
-  }
-  return new Map([...agents].map(([repo, set]) => [repo, set.size]));
+  return agentCounts(live.presence.entries.values());
 }
 
 export function Overview({

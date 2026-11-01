@@ -41,6 +41,8 @@ export interface Workspace {
   id: string;
   /** The change's id as jj prints it, for the smartlog's `change <8>`. */
   change: string;
+  /** Its directory, for writing a file into it. */
+  path: string;
 }
 
 export interface Session {
@@ -137,19 +139,21 @@ export class Reef {
         this.repo,
         "--purpose",
         "e2e smoke",
-      ])) as { id: string; change_id_reverse_hex: string };
-      this.workspaces.push({ id: ws.id, change: ws.change_id_reverse_hex });
+      ])) as { id: string; change_id_reverse_hex: string; path: string };
+      this.workspaces.push({ id: ws.id, change: ws.change_id_reverse_hex, path: ws.path });
     }
   }
 
   /**
    * `[ui] listen`, read by the next start. The watcher is notify's: Watchman,
-   * if the machine runs one, is the user's daemon, not this test's.
+   * if the machine runs one, is the user's daemon, not this test's. A 5 s
+   * heartbeat lets a workspace's lease entry lapse within the test (R2.20):
+   * 10 s after its issue or renewal, since nothing renews a `ws create`.
    */
   async writeConfig(listen: string) {
     await writeFile(
       join(this.state, "config.toml"),
-      `[ui]\nlisten = "${listen}"\n\n[watcher]\nbackend = "notify"\n`,
+      `[ui]\nlisten = "${listen}"\n\n[watcher]\nbackend = "notify"\n\n[lease]\nheartbeat = "5s"\n`,
     );
   }
 

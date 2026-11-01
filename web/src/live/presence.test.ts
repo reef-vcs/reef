@@ -11,7 +11,8 @@ import {
   settle,
 } from "../test/fakes";
 import { Backoff } from "./backoff";
-import { PresenceStore, runPresence } from "./presence";
+import { PresenceEndReason } from "../gen/reef/api/v1/presence_pb";
+import { ENDINGS_LIMIT, PresenceStore, runPresence } from "./presence";
 import { Live } from "./share";
 
 describe("PresenceStore", () => {
@@ -108,5 +109,61 @@ describe("connection state", () => {
     await settle(3);
     expect(live.state).toBe("reconnecting");
     live.close();
+  });
+});
+
+describe("PresenceStore endings (R2.20 test 8)", () => {
+  it("keeps each ended entry's last state, reason and time", () => {
+    const store = new PresenceStore(manualFrames().frame, () => 42);
+    store.applyFrame(presenceFrame([{ id: "p1", agent: "a", activity: "tests" }], true));
+    store.applyFrame(
+      presenceFrame([
+        {
+          id: "p1",
+          agent: "a",
+          activity: "tests",
+          ended: true,
+          endReason: PresenceEndReason.CLEARED,
+        },
+      ]),
+    );
+    expect(store.entries.size).toBe(0);
+    const ending = store.endings.get("p1")!;
+    expect(ending.reason).toBe(PresenceEndReason.CLEARED);
+    expect(ending.presence.activity).toBe("tests");
+    expect(ending.at).toBe(42);
+    // Reported again: live, and no longer an ending.
+    store.applyFrame(presenceFrame([{ id: "p1", agent: "a" }]));
+    expect(store.endings.has("p1")).toBe(false);
+  });
+
+  it("records entries a resync's set drops as UNSPECIFIED, and counts resyncs", () => {
+    const store = new PresenceStore(manualFrames().frame);
+    store.beginResync();
+    store.applyFrame(presenceFrame([{ id: "p1" }, { id: "p2" }], true));
+    expect(store.resyncs).toBe(1);
+    store.beginResync();
+    store.applyFrame(presenceFrame([{ id: "p2" }], true));
+    expect(store.resyncs).toBe(2);
+    expect(store.endings.get("p1")!.reason).toBe(PresenceEndReason.UNSPECIFIED);
+    expect(store.endings.has("p2")).toBe(false);
+  });
+
+  it("holds at most ENDINGS_LIMIT endings, dropping the oldest", () => {
+    const store = new PresenceStore(manualFrames().frame);
+    const ids = Array.from({ length: ENDINGS_LIMIT + 2 }, (_, i) => `p${String(i)}`);
+    store.applyFrame(presenceFrame(ids.map((id) => ({ id, ended: true }))));
+    expect(store.endings.size).toBe(ENDINGS_LIMIT);
+    expect(store.endings.has("p0")).toBe(false);
+    expect(store.endings.has("p1")).toBe(false);
+    expect(store.endings.has("p2")).toBe(true);
+  });
+
+  it("leaves the joining tab's frame unchanged: live entries only", () => {
+    const store = new PresenceStore(manualFrames().frame);
+    store.applyFrame(presenceFrame([{ id: "p1" }, { id: "p2" }], true));
+    store.applyFrame(presenceFrame([{ id: "p2", ended: true }]));
+    const frame = store.snapshotFrame();
+    expect(frame.events.map((e) => [e.presence?.id, e.ended])).toEqual([["p1", false]]);
   });
 });

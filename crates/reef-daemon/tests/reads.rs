@@ -1523,15 +1523,16 @@ async fn list_workspaces_counts_changed_files() {
     assert_eq!(rest.workspaces.len(), 1);
 }
 
-/// The smartlog's revset (R2.19), read from the web app's source so the two
-/// cannot drift: the one double-quoted string on `SMARTLOG_REVSET`'s line.
-fn smartlog_revset_from_web() -> String {
+/// A revset the web app reads (R2.19, R2.20), from its source so the two
+/// cannot drift: the one double-quoted string on constant `name`'s line.
+fn revset_from_web(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/graph/revset.ts");
     let source = std::fs::read_to_string(&path).unwrap();
+    let declared = format!("export const {name} ");
     let line = source
         .lines()
-        .find(|line| line.starts_with("export const SMARTLOG_REVSET"))
-        .expect("SMARTLOG_REVSET is declared on one line");
+        .find(|line| line.starts_with(&declared))
+        .unwrap_or_else(|| panic!("{name} is declared on one line"));
     let start = line.find('"').unwrap() + 1;
     let end = line.rfind('"').unwrap();
     line[start..end].to_owned()
@@ -1551,7 +1552,7 @@ async fn smartlog_revset() {
     use jj_lib::ref_name::{RefName, RemoteName};
     use jj_lib::repo::Repo as _;
 
-    let revset = smartlog_revset_from_web();
+    let revset = revset_from_web("SMARTLOG_REVSET");
     assert_eq!(
         revset,
         "trunk() | working_copies() | ancestors(mutable(), 2)"
@@ -1738,4 +1739,152 @@ async fn smartlog_revset() {
         );
     }
     daemon.stop().await;
+}
+
+/// R2.20 test 1: what the workspaces page reads, in repository scope and
+/// without a snapshot: both workspaces listed newest first with their
+/// leases, their changes from `working_copies()`, an unsnapshotted file in a
+/// disk walk but not in the count, no operation recorded, and one daemon
+/// `LEASE` presence entry per workspace naming its owner.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "each read the page makes, then the stream"
+)]
+async fn fleet_panel_reads() {
+    use reef_api::v1::{
+        GetWorkspaceRequest, PresenceKind, SubscribePresenceRequest, WorkspaceState,
+    };
+
+    let revset = revset_from_web("WORKING_COPIES_REVSET");
+    assert_eq!(revset, "working_copies()");
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let mut presence = client
+        .subscribe_presence(SubscribePresenceRequest::default())
+        .await
+        .unwrap();
+    let first = create(client, &repo, "first@test").await;
+    let second = create(client, &repo, "second@test").await;
+    write(&first, "unsnapshotted.txt", "x\n");
+    let operation_count = || async {
+        client
+            .list_operations_page(ListOperationsRequest {
+                repo: repo.id.clone(),
+                page_size: 1000,
+                ..ListOperationsRequest::default()
+            })
+            .await
+            .unwrap()
+            .operations
+            .len()
+    };
+    let before = operation_count().await;
+
+    let listed = client
+        .list_workspaces_page(ListWorkspacesRequest {
+            repo: repo.id.clone(),
+            states: vec![
+                WorkspaceState::Active.into(),
+                WorkspaceState::Releasing.into(),
+            ],
+            changed_file_counts: true,
+            page_size: 1000,
+            ..ListWorkspacesRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspaces;
+    let ids: Vec<_> = listed.iter().map(|ws| ws.id.as_str()).collect();
+    assert_eq!(ids, [second.id.as_str(), first.id.as_str()], "newest first");
+    for ws in &listed {
+        let lease = ws.lease.as_ref().unwrap();
+        assert_eq!(lease.state(), v1::LeaseState::Active, "{}", ws.id);
+        assert!(lease.heartbeat_every.is_some(), "{}", ws.id);
+        // Never renewed: the page reads it as "not heartbeating".
+        assert_eq!(lease.last_heartbeat_at, lease.issued_at, "{}", ws.id);
+    }
+    assert_eq!(listed[1].changed_file_count, Some(0), "not snapshotted");
+
+    let entries = client
+        .list_changes(ListChangesRequest {
+            repo: repo.id.clone(),
+            revset,
+            skip_snapshot: true,
+            ..ListChangesRequest::default()
+        })
+        .await
+        .unwrap();
+    for ws in [&first, &second] {
+        let change = entries
+            .iter()
+            .filter_map(|entry| entry.change.as_ref())
+            .find(|change| change.workspace_ids.contains(&ws.id))
+            .unwrap_or_else(|| panic!("{}'s change in {entries:?}", ws.id));
+        assert_eq!(change.change_id, ws.change_id);
+    }
+
+    let got = client
+        .get_workspace(GetWorkspaceRequest {
+            repo: repo.id.clone(),
+            workspace: first.id.clone(),
+            ..GetWorkspaceRequest::default()
+        })
+        .await
+        .unwrap();
+    let disk = got.disk_usage.expect("measured");
+    assert!(disk.files_changed >= 1, "{disk:?}");
+    assert!(disk.allocated_bytes > 0, "{disk:?}");
+
+    assert_eq!(
+        operation_count().await,
+        before,
+        "the reads recorded nothing"
+    );
+    let commit = client
+        .list_workspaces_page(ListWorkspacesRequest {
+            repo: repo.id.clone(),
+            ..ListWorkspacesRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspaces
+        .into_iter()
+        .find(|ws| ws.id == first.id)
+        .unwrap()
+        .commit_id;
+    assert_eq!(commit, first.commit_id, "nothing snapshotted");
+
+    // The stream's set, then the creates' entries.
+    let mut leases = BTreeSet::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while leases.len() < 2 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let frame = tokio::time::timeout(left, presence.message())
+            .await
+            .expect("lease entries in time")
+            .unwrap()
+            .unwrap();
+        for event in frame.events {
+            let Some(entry) = event.presence else {
+                continue;
+            };
+            if event.ended || entry.kind() != PresenceKind::Lease {
+                continue;
+            }
+            assert!(entry.by_daemon, "{entry:?}");
+            assert!(entry.lease.is_some(), "{entry:?}");
+            let owner = if entry.workspace_id == first.id {
+                "first@test"
+            } else {
+                "second@test"
+            };
+            assert_eq!(entry.agent, owner, "{entry:?}");
+            leases.insert(entry.workspace_id);
+        }
+    }
+    assert_eq!(
+        leases,
+        BTreeSet::from([first.id.clone(), second.id.clone()])
+    );
 }

@@ -200,6 +200,40 @@ describe("Overview", () => {
     expect(agents()).toBe("1");
   });
 
+  it("counts an agent and its workspace's owner once, and links into the workspaces page (R2.20 test 9)", async () => {
+    const t = setup({
+      repositories: [repo("ra", "/src/alpha")],
+      latest: {
+        ra: operation("o1", "ra", 1000, {
+          kind: OperationKind.SNAPSHOT,
+          agent: "reviewer",
+          workspaceId: "ws12345678abcdef",
+        }),
+      },
+    });
+    await flush();
+    await act(async () => {
+      t.presence.applyFrame(
+        presenceFrame(
+          [
+            { id: "a", agent: "reviewer", repoId: "ra", workspaceId: "ws1" },
+            { id: "l", agent: "ann@host:42", repoId: "ra", workspaceId: "ws1", byDaemon: true },
+          ],
+          true,
+        ),
+      );
+      await settle();
+    });
+    const count = within(row("alpha")).getByRole("link", { name: "1" });
+    expect(count.getAttribute("href")).toBe("/repos/ra/workspaces");
+    expect(within(row("alpha")).getByRole("link", { name: "reviewer" }).getAttribute("href")).toBe(
+      "/repos/ra/workspaces?agent=reviewer",
+    );
+    expect(within(row("alpha")).getByRole("link", { name: "ws123456" }).getAttribute("href")).toBe(
+      "/repos/ra/workspaces?workspace=ws12345678abcdef",
+    );
+  });
+
   it("reloads the list for an unknown repository at most once per second", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const t = setup({ repositories: [repo("ra", "/src/alpha")] });

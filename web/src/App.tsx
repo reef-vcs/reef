@@ -11,6 +11,8 @@ import { endSession } from "./session";
 import { ConnectionIndicator } from "./ui/ConnectionIndicator";
 import { ErrorView } from "./ui/ErrorView";
 import { Link, match, usePath, useSearch } from "./ui/router";
+import { Fleet } from "./views/Fleet";
+import { fleetParams } from "./views/fleet-route";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
@@ -56,6 +58,8 @@ function Shell({
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const smartlog = match("/repos/:repo/smartlog", path);
   const smartlogQuery = smartlog && smartlogParams(smartlog.repo ?? "", search);
+  const fleet = match("/repos/:repo/workspaces", path);
+  const fleetQuery = fleet && fleetParams(fleet.repo ?? "", search);
   return (
     <div className="page">
       <header className="header">
@@ -88,6 +92,16 @@ function Shell({
             frame={frame}
             onSessionInvalid={onSessionInvalid}
             params={smartlogQuery}
+          />
+        ) : fleetQuery ? (
+          // A new operation or repository is a new page; a new selection is not.
+          <Fleet
+            key={`${fleetQuery.repo}\n${fleetQuery.at}`}
+            connection={connection}
+            live={live}
+            frame={frame}
+            onSessionInvalid={onSessionInvalid}
+            params={fleetQuery}
           />
         ) : path === "/states" ? (
           <States />

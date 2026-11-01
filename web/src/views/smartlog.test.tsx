@@ -342,6 +342,43 @@ describe("Smartlog", () => {
     expect(screen.getByText(/^reef diff .* --stat --at-op abcd-full$/)).toBeTruthy();
   });
 
+  it("labels an agent and its owner once, and links them from the pane, not the rows (R2.20 test 10)", async () => {
+    setup(withLog(LOG, { a2: { workspaceIds: ["ws00000000000001"] } }), {
+      query: `change=${reverseHex(hexId("a2"))}`,
+      presence: [
+        { id: "c", agent: "reviewer", repoId: REPO, workspaceId: "ws00000000000001" },
+        {
+          id: "l",
+          agent: "agent-a",
+          repoId: REPO,
+          workspaceId: "ws00000000000001",
+          byDaemon: true,
+        },
+      ],
+    });
+    await flush();
+    const a2 = option("a2");
+    expect(within(a2).getByText("reviewer")).toBeTruthy();
+    expect(a2.querySelectorAll(".label.agent")).toHaveLength(1);
+    expect(a2.querySelector("a")).toBeNull();
+    const pane = screen.getByRole("complementary", { name: "Selected change" });
+    expect(within(pane).getByRole("link", { name: "ws00000000000001" }).getAttribute("href")).toBe(
+      `/repos/${REPO}/workspaces?workspace=ws00000000000001`,
+    );
+    expect(
+      within(pane)
+        .getAllByRole("link", { name: "reviewer" })
+        .every((l) => l.getAttribute("href") === `/repos/${REPO}/workspaces?agent=reviewer`),
+    ).toBe(true);
+    const nav = screen.getByRole("navigation", { name: "Repository" });
+    expect(within(nav).getByRole("link", { name: "Smartlog" }).getAttribute("aria-current")).toBe(
+      "page",
+    );
+    expect(screen.getByRole("link", { name: "1 active workspaces" }).getAttribute("href")).toBe(
+      `/repos/${REPO}/workspaces`,
+    );
+  });
+
   it("says when nothing matches, and shows a failed read's hint and next", async () => {
     setup(withLog(""));
     await flush();

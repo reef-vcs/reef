@@ -17,6 +17,7 @@ import {
 import {
   PresenceEventSchema,
   PresenceSchema,
+  type PresenceEndReason,
   SubscribePresenceResponseSchema,
   type SubscribePresenceResponse,
 } from "../gen/reef/api/v1/presence_pb";
@@ -119,20 +120,21 @@ export function operationsFrame(
 }
 
 export function presenceFrame(
-  entries: {
+  entries: (MessageInitShape<typeof PresenceSchema> & {
     id: string;
-    agent?: string;
-    repoId?: string;
-    workspaceId?: string;
-    changeId?: string;
     ended?: boolean;
-  }[],
+    endReason?: PresenceEndReason;
+  })[],
   synced = false,
 ): SubscribePresenceResponse {
   return create(SubscribePresenceResponseSchema, {
     synced,
-    events: entries.map(({ ended = false, ...presence }) =>
-      create(PresenceEventSchema, { ended, presence: create(PresenceSchema, presence) }),
+    events: entries.map(({ ended = false, endReason, ...presence }) =>
+      create(PresenceEventSchema, {
+        ended,
+        ...(endReason === undefined ? {} : { endReason }),
+        presence: create(PresenceSchema, presence),
+      }),
     ),
   });
 }

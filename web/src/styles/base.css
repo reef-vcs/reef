@@ -427,3 +427,68 @@ button {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
 }
+
+/* The repository pages' nav (R2.20). */
+.repo-nav {
+  margin: 0 0 8px;
+}
+
+.repo-nav [aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* The workspaces page (R2.20): health words take no state color, since
+   lease health is not an object state; a stuck holder is bold. */
+.fleet h3 {
+  font-size: 1rem;
+  margin: 16px 0 8px;
+}
+
+.fleet section + section {
+  margin-top: 8px;
+}
+
+.fleet tr.selected > td:first-child {
+  box-shadow: inset 2px 0 0 var(--focus);
+}
+
+.fleet tr.selected {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.fleet td.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.health {
+  color: var(--text);
+}
+
+.health.stuck {
+  font-weight: 700;
+}
+
+.one-line {
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pre-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fleet .summary {
+  margin: 0 0 8px;
+}
+
+.fleet button {
+  margin-top: 8px;
+}

@@ -1,8 +1,9 @@
 // The web UI in a real browser against a real daemon (#128): the session
 // hand-off, one operation stream and one presence stream shared by two tabs,
-// live updates of the overview and the smartlog, and the no-session page
-// after a restart. Each project (browser) gets its own scratch daemon.
-import { readFile } from "node:fs/promises";
+// live updates of the overview, the smartlog and the workspaces page, and
+// the no-session page after a restart. Each project (browser) gets its own
+// scratch daemon.
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserContext, Page, Request } from "@playwright/test";
 import { expect, test, WEB_DIR } from "./reef";
@@ -158,6 +159,65 @@ test("smoke", async ({ reef, context, page }) => {
     expect(await row.getAttribute("data-commit"), "a new commit").not.toBe(commit);
     await expect(row).toHaveAttribute("title", /by e2e-smartlog, describe$/);
     expect(await changeOrder(page)).toEqual(before);
+    expect(await marker(page)).toBe(markers[0]);
+    await streams.hold(tabs);
+  });
+
+  await test.step("the workspaces page follows workspaces and agents live", async () => {
+    await page
+      .getByRole("navigation", { name: "Repository" })
+      .getByRole("link", { name: "Workspaces" })
+      .click();
+    await expect(page).toHaveURL(`${url}repos/${encodeURIComponent(reef.repo)}/workspaces`);
+    const workspaces = page.getByRole("table", { name: "Workspaces" });
+    const wsRow = (ws: { id: string }) =>
+      workspaces
+        .getByRole("row")
+        .filter({ has: page.getByRole("link", { name: ws.id.slice(0, 8) }) });
+    for (const ws of [wsA, wsB]) await expect(wsRow(ws)).toContainText(ws.change.slice(0, 8));
+
+    // A `ws create` lease is never renewed: not heartbeating, not stuck.
+    // Renewed, it heartbeats; its entry then lapses 10 s later.
+    const health = (ws: { id: string }) => wsRow(ws).getByRole("cell").nth(6);
+    await expect(health(wsA)).toContainText("not heartbeating");
+    await reef.reef(["ws", "renew", wsA.id]);
+    await expect(health(wsA)).toContainText(/^heartbeating/);
+    await expect(health(wsA)).toContainText("missed heartbeats", { timeout: 20_000 });
+
+    // A reported activity is one agent on wsA: while the owner's lease entry
+    // is live (renewed just before), it joins the reporter instead of
+    // counting as a second agent.
+    await reef.reef(["ws", "renew", wsA.id]);
+    await expect(health(wsA)).toContainText(/^heartbeating/);
+    const reported = (await reef.reef(["presence", "report", "--workspace", wsA.id, "e2e: fleet"], {
+      agent: "e2e-fleet",
+    })) as { id: string };
+    const agents = page.getByRole("table", { name: "Agents" });
+    const agentRow = agents
+      .getByRole("row")
+      .filter({ has: page.getByRole("link", { name: "e2e-fleet" }) });
+    await expect(agentRow).toContainText("e2e: fleet");
+    await expect(wsRow(wsA).getByRole("cell").nth(2)).toHaveText("e2e-fleet");
+    await expect(health(wsA)).toContainText(/^heartbeating/);
+    const order = await agents.getByRole("row").allTextContents();
+    await reef.reef(["presence", "clear", reported.id]);
+    await expect(agentRow).toContainText(/finished \d\d:\d\d:\d\d/);
+    expect((await agents.getByRole("row").allTextContents()).length).toBe(order.length);
+
+    // A write is snapshotted: Files rises, and the selection measures its disk.
+    await writeFile(join(wsA.path, "e2e-fleet.txt"), "fleet\n");
+    await expect(wsRow(wsA).getByRole("cell").nth(4)).toHaveText("1", { timeout: 20_000 });
+    await wsRow(wsA)
+      .getByRole("link", { name: wsA.id.slice(0, 8) })
+      .click();
+    const pane = page.getByRole("complementary", { name: "Selection" });
+    await expect(pane).toContainText(/[1-9]\d* files? differ from the base/);
+
+    // A release keeps its row, in place.
+    const before = await workspaces.getByRole("row").count();
+    await reef.reef(["ws", "release", wsB.id]);
+    await expect(wsRow(wsB)).toContainText("released");
+    expect(await workspaces.getByRole("row").count()).toBe(before);
     expect(await marker(page)).toBe(markers[0]);
     await streams.hold(tabs);
   });
