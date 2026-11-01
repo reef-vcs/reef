@@ -232,6 +232,10 @@ describe("Overview", () => {
     expect(within(row("alpha")).getByRole("link", { name: "ws123456" }).getAttribute("href")).toBe(
       "/repos/ra/workspaces?workspace=ws12345678abcdef",
     );
+    // The operation itself links to the feed with it selected (R2.21).
+    expect(within(row("alpha")).getByRole("link", { name: "snapshot" }).getAttribute("href")).toBe(
+      "/repos/ra/activity?op=o1",
+    );
   });
 
   it("reloads the list for an unknown repository at most once per second", async () => {

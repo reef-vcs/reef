@@ -25,6 +25,7 @@ import { Link } from "../ui/router";
 import { size } from "../ui/size";
 import { clock, dateTime } from "../ui/time";
 import type { WorkspaceRow } from "./fleet-model";
+import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import {
   ATTENTION_MEANINGS,
@@ -306,7 +307,10 @@ export function WorkspaceDetail({
             {response.recentSnapshots.slice(0, SNAPSHOTS_SHOWN).map((s) => (
               <li key={s.operationId}>
                 <Time at={s.takenAt} /> · <span className="mono">{shortId(s.commitId)}</span> ·
-                operation <span className="mono">{shortId(s.operationId)}</span>
+                operation{" "}
+                <Link to={activityHref({ repo, op: s.operationId })} title={s.operationId}>
+                  <span className="mono">{shortId(s.operationId)}</span>
+                </Link>
               </li>
             ))}
           </ul>
@@ -366,7 +370,9 @@ export function WorkspaceDetail({
         <p className="secondary">
           Last: {operationLabel(row.cause)} by {row.cause.agent || "-"} at{" "}
           {clock(row.cause.endedAt).text}, operation{" "}
-          <span className="mono">{shortId(row.cause.id)}</span>
+          <Link to={activityHref({ repo, op: row.cause.id })} title={row.cause.id}>
+            <span className="mono">{shortId(row.cause.id)}</span>
+          </Link>
         </p>
       )}
       <p className="command">

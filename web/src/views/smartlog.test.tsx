@@ -329,6 +329,12 @@ describe("Smartlog", () => {
     });
     await flush();
     expect(screen.getByRole("status").textContent).toContain("At operation abcd-ful");
+    // The banner's operation links to the feed with it selected (R2.21).
+    expect(
+      within(screen.getByRole("status"))
+        .getByRole("link", { name: "abcd-ful" })
+        .getAttribute("href"),
+    ).toBe(`/repos/${REPO}/activity?op=abcd-full&at=abcd-full`);
     expect(screen.getByText(/Not live; presence is not replayed/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Back to live" }).getAttribute("href")).toBe(
       `/repos/${REPO}/smartlog`,
@@ -370,10 +376,8 @@ describe("Smartlog", () => {
         .getAllByRole("link", { name: "reviewer" })
         .every((l) => l.getAttribute("href") === `/repos/${REPO}/workspaces?agent=reviewer`),
     ).toBe(true);
-    const nav = screen.getByRole("navigation", { name: "Repository" });
-    expect(within(nav).getByRole("link", { name: "Smartlog" }).getAttribute("aria-current")).toBe(
-      "page",
-    );
+    // The repository header renders the nav (R2.21).
+    expect(screen.queryByRole("navigation", { name: "Repository" })).toBeNull();
     expect(screen.getByRole("link", { name: "1 active workspaces" }).getAttribute("href")).toBe(
       `/repos/${REPO}/workspaces`,
     );

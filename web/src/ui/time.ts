@@ -22,3 +22,10 @@ export function dateTime(timestamp: Timestamp | undefined): { text: string; titl
     title: date.toISOString(),
   };
 }
+
+/** `2026-10-31 14:03:22`, local, with RFC 3339 for a `title`. */
+export function fullTime(timestamp: Timestamp | undefined): { text: string; title: string } {
+  if (!timestamp) return { text: "-", title: "" };
+  const { text, title } = dateTime(timestamp);
+  return { text: `${text}:${pad(timestampDate(timestamp).getSeconds())}`, title };
+}

@@ -1,7 +1,8 @@
 // The web UI in a real browser against a real daemon (#128): the session
 // hand-off, one operation stream and one presence stream shared by two tabs,
-// live updates of the overview, the smartlog and the workspaces page, and
-// the no-session page after a restart. Each project (browser) gets its own
+// live updates of the overview, the smartlog and the workspaces page, the
+// activity feed's counts and the scrubber (R2.21), and the no-session page
+// after a restart. Each project (browser) gets its own
 // scratch daemon.
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -218,6 +219,111 @@ test("smoke", async ({ reef, context, page }) => {
     await reef.reef(["ws", "release", wsB.id]);
     await expect(wsRow(wsB)).toContainText("released");
     expect(await workspaces.getByRole("row").count()).toBe(before);
+    expect(await marker(page)).toBe(markers[0]);
+    await streams.hold(tabs);
+  });
+
+  await test.step("the activity feed counts, coalesces and scrubs", async () => {
+    const repo = encodeURIComponent(reef.repo);
+    type Op = { id: string; kind: string };
+    const opLog = async (args: string[] = []) =>
+      (await reef.reef(["op", "log", "--repo", reef.repo, "--limit", "0", ...args])) as Op[];
+    // The CLI lists the root operation too; the feed never counts it.
+    const cliTotal = async () => (await opLog()).length - 1;
+    const total = async (p: Page) => {
+      const text = (await p.locator(".feed .summary").textContent()) ?? "";
+      return Number(/^([\d,]+) operations?/.exec(text)?.[1]?.replaceAll(",", "") ?? NaN);
+    };
+    const feed = (p: Page) => p.getByRole("table", { name: "Activity" });
+
+    // The first visit loads the page's own chunk.
+    const scripts: string[] = [];
+    const onRequest = (request: Request) => {
+      if (/\/assets\/.+\.js$/.test(new URL(request.url()).pathname)) scripts.push(request.url());
+    };
+    page.on("request", onRequest);
+    await page
+      .getByRole("navigation", { name: "Repository" })
+      .getByRole("link", { name: "Activity" })
+      .click();
+    await expect(page).toHaveURL(`${url}repos/${repo}/activity`);
+    await expect(feed(page)).toBeVisible();
+    page.off("request", onRequest);
+    expect(
+      scripts.some((s) => /\/Activity-[^/]+\.js$/.test(s)),
+      "the feed's chunk",
+    ).toBe(true);
+    await expect.poll(async () => (await total(page)) - (await cliTotal())).toBe(0);
+
+    // Three writes, each snapshotted for e2e-feed: one row by e2e-feed in
+    // wsA, whatever the watcher snapshotted first under the owner.
+    for (const n of [1, 2, 3]) {
+      await writeFile(join(wsA.path, "e2e-feed.txt"), `feed ${String(n)}\n`);
+      await reef.reef(["ws", "snapshot", wsA.id], { agent: "e2e-feed" });
+    }
+    const feedRows = feed(page)
+      .getByRole("row")
+      .filter({ has: page.getByRole("link", { name: "e2e-feed", exact: true }) });
+    await expect(feedRows).toHaveCount(1);
+    const byFeed = async () =>
+      (await opLog(["--workspace", wsA.id, "--by", "e2e-feed", "--kind", "snapshot"])).length;
+    await expect
+      .poll(async () => Number(await feedRows.getByRole("cell").nth(4).textContent()))
+      .toBe(await byFeed());
+    expect(await byFeed()).toBeGreaterThanOrEqual(1);
+    await expect.poll(async () => (await total(page)) - (await cliTotal())).toBe(0);
+
+    // A describe is a row of its own, on top; its pane names the change.
+    await reef.reef(["describe", "--workspace", wsA.id, "-m", "e2e: feed"], {
+      agent: "e2e-feed",
+    });
+    const top = feed(page).getByRole("row").nth(1);
+    await expect(top).toContainText("describe");
+    await top.getByRole("link", { name: "describe" }).click();
+    await expect(page.getByRole("complementary", { name: "Selection" })).toContainText("rewritten");
+
+    // Another tab, a direct load and a reload count the same.
+    await second.goto(`${url}repos/${repo}/activity`);
+    await expect(feed(second)).toBeVisible();
+    await expect.poll(async () => (await total(second)) - (await total(page))).toBe(0);
+    const firstRows = async (p: Page) =>
+      (await feed(p).getByRole("row").allTextContents()).slice(1, 4);
+    const before = await firstRows(page);
+    await second.reload();
+    await expect(feed(second)).toBeVisible();
+    await expect.poll(() => firstRows(second)).toEqual(before);
+
+    // The scrubber: Left from Live is the newest operation, Left again the
+    // one before it; a burst of steps is one navigation.
+    const secondNewest = async () =>
+      ((await reef.reef(["op", "log", "--repo", reef.repo, "--limit", "2"])) as Op[])[1]?.id;
+    const slider = page.getByRole("slider");
+    await slider.focus();
+    await slider.press("ArrowLeft");
+    await slider.press("ArrowLeft");
+    await expect
+      .poll(async () => new URL(page.url()).searchParams.get("at") === (await secondNewest()))
+      .toBe(true);
+    const previous = { id: new URL(page.url()).searchParams.get("at") ?? "" };
+    const short = previous.id.slice(0, 8);
+    await expect(page.getByRole("status")).toContainText(`At operation ${short}`);
+    await page
+      .getByRole("navigation", { name: "Repository" })
+      .getByRole("link", { name: "Smartlog" })
+      .click();
+    await expect(page).toHaveURL(new RegExp(`/repos/${repo}/smartlog\\?at=${previous.id}$`));
+    await expect(page.getByRole("status")).toContainText(`At operation ${short}`);
+    await page.getByRole("slider").focus();
+    await page.getByRole("slider").press("End");
+    await expect.poll(() => new URL(page.url()).search).toBe("");
+
+    // The overview's latest operation opens the feed with it selected.
+    await page.getByRole("link", { name: "Reef", exact: true }).click();
+    const latest = repoRow(page).getByRole("cell").nth(2).getByRole("link").first();
+    const id = (await latest.getAttribute("title")) ?? "";
+    expect(id).toMatch(/^[0-9a-f]{16,}$/);
+    await latest.click();
+    await expect(page).toHaveURL(`${url}repos/${repo}/activity?op=${id}`);
     expect(await marker(page)).toBe(markers[0]);
     await streams.hold(tabs);
   });

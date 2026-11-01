@@ -492,3 +492,101 @@ button {
 .fleet button {
   margin-top: 8px;
 }
+
+/* The repository pages' header (R2.21): the nav and the scrubber. */
+.repo-header {
+  margin: 0 0 12px;
+}
+
+.scrubber-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.scrubber-row + .scrubber-row {
+  margin-top: 4px;
+}
+
+/* The track: count bars on a time axis, with the handle at the point. The
+   slider keeps 44 px of touch height. */
+.track {
+  position: relative;
+  flex: 1 1 320px;
+  min-width: 0;
+  height: 44px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.track .bars {
+  position: absolute;
+  inset: 4px 0 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.track .bar {
+  flex: 1 1 0;
+  min-height: 1px;
+  background: var(--text-secondary);
+  opacity: 0.45;
+}
+
+.track .handle {
+  position: absolute;
+  top: 0;
+  bottom: -1px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+}
+
+.track .handle.detached {
+  border-left: 2px dashed var(--text);
+  background: none;
+}
+
+.scrubber-label {
+  flex: 0 1 auto;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.go-to-time input {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+/* The activity feed (R2.21). `.activity` is the panes' plain lists. */
+.feed .summary,
+.feed .note {
+  margin: 0 0 8px;
+}
+
+.feed .held {
+  margin: 0 0 8px;
+}
+
+.feed tr.selected {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.feed td.number,
+.feed th.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.feed button {
+  margin-top: 8px;
+}
