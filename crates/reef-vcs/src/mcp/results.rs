@@ -7,10 +7,12 @@
 
 use reef_client::brief;
 use reef_client::json::{Change, FileEntry, FileRead, History, LogEntry, Operation, Repository};
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// `list_repositories`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Repositories")]
 pub(super) struct Repositories {
     pub(super) repositories: Vec<Repository>,
     pub(super) next_page_token: Option<String>,
@@ -18,7 +20,8 @@ pub(super) struct Repositories {
 
 /// `list_workspaces`: brief workspaces, with their changed-file counts;
 /// no `next_page_token` on the last page.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Workspaces")]
 pub(super) struct Workspaces<'a> {
     pub(super) workspaces: Vec<brief::Workspace<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,7 +29,8 @@ pub(super) struct Workspaces<'a> {
 }
 
 /// `list_changes`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Changes")]
 pub(super) struct Changes {
     pub(super) entries: Vec<LogEntry>,
     pub(super) at_operation: String,
@@ -34,14 +38,16 @@ pub(super) struct Changes {
 }
 
 /// `list_operations`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Operations")]
 pub(super) struct Operations {
     pub(super) operations: Vec<Operation>,
     pub(super) next_page_token: Option<String>,
 }
 
 /// `query_changes`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.HistoryPage")]
 pub(super) struct HistoryPage {
     #[serde(flatten)]
     pub(super) history: History,
@@ -49,7 +55,8 @@ pub(super) struct HistoryPage {
 }
 
 /// `list_files`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Files")]
 pub(super) struct Files {
     pub(super) entries: Vec<FileEntry>,
     pub(super) commit_id: String,
@@ -58,7 +65,8 @@ pub(super) struct Files {
 }
 
 /// `get_change`: the change without its files (`get_diff` has them).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.ChangeAt")]
 pub(super) struct ChangeAt {
     pub(super) change: Option<Change>,
     pub(super) at_operation: String,
@@ -66,7 +74,8 @@ pub(super) struct ChangeAt {
 
 /// `get_diff`: one page of files, brief; no `next_page_token` on the last
 /// page.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.DiffPage")]
 pub(super) struct DiffPage<'a> {
     #[serde(flatten)]
     pub(super) diff: brief::Diff<'a>,
@@ -75,7 +84,8 @@ pub(super) struct DiffPage<'a> {
 }
 
 /// `read_file`: one range of the file, and where the next one starts.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.FileRange")]
 pub(super) struct FileRange {
     #[serde(flatten)]
     pub(super) file: FileRead,
@@ -85,7 +95,8 @@ pub(super) struct FileRange {
 }
 
 /// `wait_for_operations`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Waited")]
 pub(super) struct Waited {
     /// New matching operations, oldest first; empty on a timeout.
     pub(super) operations: Vec<Operation>,

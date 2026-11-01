@@ -39,8 +39,9 @@ pub(crate) fn long() -> String {
 
 /// The JSON form: the text, and every leaf command as its words, so a
 /// harness can generate a tool per command.
-#[derive(Serialize)]
-struct GuideJson {
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.GuideJson")]
+pub(crate) struct GuideJson {
     guide: String,
     commands: Vec<Vec<String>>,
 }

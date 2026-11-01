@@ -133,6 +133,8 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | ? | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 <!-- tokens-rows:fixed -->
 
+R2.24 publishes every tool's output schema through `reef schema mcp` and does not declare them in `tools/list` ([ADR 0050](adr/0050-published-schemas.md)), so the fixed cost and break-even above are unchanged; declaring them all would make `tools/list` 141,756 bytes instead of 21,211.
+
 ### Live: Claude Code
 
 Answer tokens and bytes are medians over correct trials; the other columns are medians over every trial that counted.

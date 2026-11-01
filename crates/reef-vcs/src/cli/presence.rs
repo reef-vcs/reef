@@ -269,8 +269,9 @@ async fn report(ctx: &Ctx, args: ReportArgs) -> Result<(), CliError> {
 }
 
 /// What `presence clear` cleared.
-#[derive(Debug, Serialize)]
-struct Cleared {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Cleared")]
+pub(crate) struct Cleared {
     cleared: Vec<String>,
 }
 

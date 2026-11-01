@@ -34,7 +34,9 @@ fn reef(state: &Path, args: &[&str], vars: &[(&str, &Path)]) -> Output {
     for (name, value) in vars {
         command.env(name, value);
     }
-    command.output().unwrap()
+    let output = command.output().unwrap();
+    common::schema::check(args, &output);
+    output
 }
 
 fn stdout(output: &Output) -> String {

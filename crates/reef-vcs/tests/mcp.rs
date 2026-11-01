@@ -181,6 +181,19 @@ async fn handshake_and_tools() {
     );
     let bytes = serde_json::to_vec(&listed["result"]).unwrap().len();
     eprintln!("tools/list: {bytes} bytes");
+    // R2.24 publishes the output schemas through `reef schema mcp` and
+    // does not declare them (ADR 0050): what declaring them would cost.
+    assert!(
+        tools.iter().all(|tool| tool.get("outputSchema").is_none()),
+        "tools/list declares an outputSchema"
+    );
+    let mut declared = listed["result"].clone();
+    for tool in declared["tools"].as_array_mut().unwrap() {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        tool["outputSchema"] = common::schema::tool(&name)["outputSchema"].clone();
+    }
+    let with_outputs = serde_json::to_vec(&declared).unwrap().len();
+    eprintln!("tools/list with every outputSchema: {with_outputs} bytes");
     // 20,000 until R2.15, whose symbol view of `get_diff` (the one input
     // whose purpose is fewer tokens per answer) took it to 20,048 after
     // tightening `get_diff`'s own texts (ADR 0043). R2.16's `query_changes`
@@ -1194,4 +1207,76 @@ async fn list_workspaces_is_brief_with_counts() {
         assert_ne!(value, &json!(false), "{key}: {diff}");
     }
     assert!(diff.get("at_operation").is_none(), "{diff}");
+}
+
+// R2.24 11: every tool's result matches its `outputSchema` in `reef schema
+// mcp`; `Mcp::tool` checks each call, and this test calls every tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_tool_result_matches_its_output_schema() {
+    let (daemon, repo) = fixture().await;
+    let mut root = server(&daemon, &repo.root).await;
+    let mut called = std::collections::BTreeSet::new();
+    let mut call = async |mcp: &mut Mcp, name: &'static str, arguments: Value| {
+        called.insert(name);
+        mcp.ok(name, arguments).await
+    };
+    call(&mut root, "list_repositories", json!({})).await;
+    let created = call(&mut root, "create_workspace", json!({})).await;
+    let other = call(&mut root, "create_workspace", json!({})).await;
+    let ws = id(&created);
+    write(&created, "notes/a.txt", "one\ntwo\n");
+    let mut mcp = server(&daemon, &path(&created)).await;
+    call(&mut mcp, "snapshot_workspace", json!({"workspace": ws})).await;
+    call(&mut mcp, "list_workspaces", json!({})).await;
+    call(&mut mcp, "get_workspace", json!({})).await;
+    call(&mut mcp, "get_status", json!({})).await;
+    call(&mut mcp, "list_changes", json!({"page_size": 2})).await;
+    call(&mut mcp, "get_change", json!({})).await;
+    call(&mut mcp, "get_diff", json!({})).await;
+    call(&mut mcp, "read_file", json!({"path": "notes/a.txt"})).await;
+    call(&mut mcp, "list_files", json!({"path": "notes"})).await;
+    let described = call(&mut mcp, "describe_change", json!({"description": "x\n"})).await;
+    let op = described["operation"]["id"].as_str().unwrap().to_owned();
+    call(&mut mcp, "get_operation", json!({"operation_id": op})).await;
+    call(&mut mcp, "list_operations", json!({"page_size": 2})).await;
+    call(&mut mcp, "query_changes", json!({"paths": ["notes/a.txt"]})).await;
+    call(
+        &mut mcp,
+        "wait_for_operations",
+        json!({"after_operation": op, "timeout_seconds": 1}),
+    )
+    .await;
+    let child = call(
+        &mut mcp,
+        "edit_files",
+        json!({"new_on": "@", "edits": [{"path": "child.txt", "content": "c\n"}]}),
+    )
+    .await;
+    let child_change = child["change"]["change_id"].as_str().unwrap().to_owned();
+    call(
+        &mut mcp,
+        "abandon_change",
+        json!({"revision": child_change}),
+    )
+    .await;
+    call(&mut mcp, "undo_operation", json!({"operation_id": op})).await;
+    let change = created["change_id"].as_str().unwrap();
+    call(
+        &mut mcp,
+        "move_workspace",
+        json!({"workspace": id(&other), "new_on": change}),
+    )
+    .await;
+    call(
+        &mut mcp,
+        "release_workspace",
+        json!({"workspace": id(&other)}),
+    )
+    .await;
+    // An error result matches the error result's schema.
+    mcp.err("get_operation", json!({"operation_id": "abcdef0123"}))
+        .await;
+    for tool in TOOLS {
+        assert!(called.contains(tool), "{tool} was not called");
+    }
 }

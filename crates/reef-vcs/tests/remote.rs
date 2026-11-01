@@ -55,9 +55,11 @@ async fn run(mut command: Command, args: &[&str], stdin: Option<&str>) -> Output
     if let Some(text) = stdin {
         command.write_stdin(text.to_owned());
     }
-    tokio::task::spawn_blocking(move || command.output().unwrap())
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
         .await
-        .unwrap()
+        .unwrap();
+    common::schema::check(args, &output);
+    output
 }
 
 fn stdout(output: &Output) -> String {

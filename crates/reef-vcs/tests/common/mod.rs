@@ -8,6 +8,7 @@
 )]
 
 pub(crate) mod mcp;
+pub(crate) mod schema;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

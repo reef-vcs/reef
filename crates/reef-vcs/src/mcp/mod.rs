@@ -405,3 +405,16 @@ impl ServerHandler for ReefServer {
         Ok(result.into())
     }
 }
+
+/// `reef schema mcp`'s part (R2.24, ADR 0050): the command that serves the
+/// tools, the server's instructions, every tool as `tools/list` gives it
+/// with its `outputSchema`, and the schema of an error result's structured
+/// content.
+pub(crate) fn schema_part() -> Value {
+    serde_json::json!({
+        "command": ["reef", "mcp"],
+        "instructions": INSTRUCTIONS,
+        "tools": tools::definitions(),
+        "error_result": tools::output::<reef_client::json::ErrorDocument>(),
+    })
+}

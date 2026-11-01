@@ -32,8 +32,10 @@ pub(crate) struct Args {
 }
 
 /// Inside a workspace: the workspace, then what to do.
-#[derive(Debug, Serialize)]
-struct Inside {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Inside")]
+pub(crate) struct Inside {
+    #[schemars(extend("const" = true))]
     in_workspace: bool,
     #[serde(flatten)]
     workspace: Workspace,
@@ -46,8 +48,10 @@ struct Inside {
 
 /// Outside every workspace: the directory, the registered repository that
 /// contains it if any, and how to get a workspace.
-#[derive(Debug, Serialize)]
-struct Outside {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.Outside")]
+pub(crate) struct Outside {
+    #[schemars(extend("const" = false))]
     in_workspace: bool,
     directory: String,
     repo: Option<Repository>,

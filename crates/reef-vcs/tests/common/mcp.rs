@@ -159,12 +159,18 @@ impl Mcp {
     }
 
     /// `tools/call`: whether it is an error result, and its structured
-    /// content, after checking that the text block holds the same JSON.
+    /// content, after checking that the text block holds the same JSON
+    /// and that the content matches the tool's output schema in `reef
+    /// schema mcp` (R2.24).
     pub(crate) async fn tool(&mut self, name: &str, arguments: Value) -> (bool, Value) {
         let response = self
             .request("tools/call", json!({"name": name, "arguments": arguments}))
             .await;
-        result_of(&response)
+        let (is_error, value) = result_of(&response);
+        if response["result"].is_object() {
+            super::schema::check_tool(name, is_error, &value);
+        }
+        (is_error, value)
     }
 
     /// A tool that must succeed.

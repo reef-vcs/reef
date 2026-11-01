@@ -3,7 +3,7 @@
 //! `show`, `diff`, `describe`, `abandon`, `undo`, `op`, `file`, `ws
 //! snapshot`; R2.27) and `reef mcp`'s tools ([`crate::mcp`], R2.13)
 //! included, except `config show`,
-//! `completions`, `guide`, `init` when it registers nothing (`--check`,
+//! `completions`, `guide`, `schema`, `init` when it registers nothing (`--check`,
 //! `--print`, `--no-register`), `daemon run`, and `restore`, which is
 //! offline (R1.18). Output follows [`out`]'s
 //! rules and failures exit with their kind's code ([`error`]).
@@ -38,6 +38,7 @@ mod render;
 mod render_vcs;
 pub(crate) mod repo;
 mod restore;
+pub(crate) mod schema;
 pub(crate) mod scope;
 mod status;
 mod store;
@@ -284,6 +285,11 @@ enum Command {
     /// Serve Reef's API to an agent harness over MCP on stdio (put it in the harness's config).
     #[command(after_help = "Example: claude mcp add reef -- reef mcp")]
     Mcp,
+    /// Print the commands, MCP tools and API as JSON Schema, to generate tool definitions.
+    #[command(
+        after_help = "Example: reef schema cli ws create   # or mcp, or api; --descriptor-set"
+    )]
+    Schema(schema::Args),
     /// Register and forget repositories.
     #[command(infer_subcommands = true)]
     Repo(repo::Args),
@@ -660,6 +666,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
+        Command::Schema(args) => schema::run(out, &args),
         Command::Daemon(args) => daemon::run(&global, out, args).await,
         Command::Config(args) => args.run(&global, out),
         Command::Completions { shell } => {

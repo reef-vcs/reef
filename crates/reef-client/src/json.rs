@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use reef_api::v1;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -150,6 +151,58 @@ fn operation_id(operation: Option<&v1::Operation>) -> Option<String> {
     operation.map(|operation| operation.id.clone())
 }
 
+/// `schema_with` functions for the string fields a name function fills
+/// (R2.24): their values listed from the function, so the schema cannot
+/// drift from what prints; `null` too where the field prints it.
+macro_rules! names_schema {
+    ($($schema:ident = $name:ident, $nullable:literal;)*) => {$(
+        fn $schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+            crate::schema::names(|value| crate::schema::Name::name($name(value)), $nullable)
+        }
+    )*};
+}
+
+names_schema! {
+    attention_name_schema_or_null = attention_name, true;
+    backend_name_schema = backend_name, false;
+    call_site_status_name_schema_or_null = call_site_status_name, true;
+    change_effect_kind_name_schema_or_null = change_effect_kind_name, true;
+    change_outcome_name_schema_or_null = change_outcome_name, true;
+    entry_type_name_schema_or_null = entry_type_name, true;
+    file_change_kind_name_schema_or_null = file_change_kind_name, true;
+    graph_edge_kind_name_schema_or_null = graph_edge_kind_name, true;
+    history_symbol_coverage_name_schema_or_null = history_symbol_coverage_name, true;
+    lease_end_reason_schema_or_null = lease_end_reason, true;
+    lease_state_schema = lease_state, false;
+    operation_kind_name_schema_or_null = operation_kind_name, true;
+    presence_kind_schema = presence_kind, false;
+    snapshot_kind_name_schema = snapshot_kind_name, false;
+    snapshot_kind_opt_schema_or_null = snapshot_kind_opt, true;
+    state_name_schema = state_name, false;
+    status_source_name_schema_or_null = status_source_name, true;
+    status_walk_reason_name_schema = status_walk_reason_name, false;
+    symbol_change_kind_name_schema_or_null = symbol_change_kind_name, true;
+    symbol_coverage_name_schema_or_null = symbol_coverage_name, true;
+    symbol_index_state_name_schema_or_null = symbol_index_state_name, true;
+    symbol_kind_name_schema_or_null = symbol_kind_name, true;
+    symbol_role_name_schema_or_null = symbol_role_name, true;
+    symbol_skip_reason_name_schema_or_null = symbol_skip_reason_name, true;
+    symbol_source_name_schema_or_null = symbol_source_name, true;
+    touch_state_name_schema_or_null = touch_state_name, true;
+    watch_state_name_schema_or_null = watch_state_name, true;
+    watcher_name_schema = watcher_name, false;
+}
+
+/// `UploadProblem.reason`: a rejection's name, or one of the two the CLI
+/// gives a file it did not send.
+fn upload_problem_reason_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = crate::schema::names(|value| Some(scip_rejection_name(value)), false);
+    if let Some(serde_json::Value::Array(values)) = schema.get_mut("enum") {
+        values.extend(["unreadable", "too_large"].map(serde_json::Value::from));
+    }
+    schema
+}
+
 /// A hex change id in jj's "reverse hex", the spelling `jj log` shows: the
 /// digits `0` to `f` become the letters `z` to `k`. Other characters are
 /// kept.
@@ -164,7 +217,7 @@ pub fn reverse_hex(hex: &str) -> String {
 }
 
 /// A registered repository.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Repository {
     /// 16 hex characters.
     pub id: String,
@@ -188,7 +241,7 @@ impl From<&v1::Repository> for Repository {
 }
 
 /// A workspace's lease.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Lease {
     /// The lease's id.
     pub id: String,
@@ -208,8 +261,10 @@ pub struct Lease {
     /// How long after `expires_at` a heartbeat still revives it.
     pub grace_ms: u64,
     /// `active`, `in_grace`, `expired`, or `ended`, as of the response.
+    #[schemars(schema_with = "lease_state_schema")]
     pub state: String,
     /// `released`, `expired`, or `restored` once it has ended.
+    #[schemars(schema_with = "lease_end_reason_schema_or_null")]
     pub end_reason: Option<String>,
     /// How often its holder should heartbeat.
     pub heartbeat_every_ms: Option<u64>,
@@ -266,7 +321,7 @@ impl From<&v1::Lease> for Lease {
 }
 
 /// A Reef workspace.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Workspace {
     /// 16 hex characters.
     pub id: String,
@@ -283,14 +338,17 @@ pub struct Workspace {
     /// Its working-copy commit as of the last snapshot or check-out.
     pub commit_id: String,
     /// The materialization backend.
+    #[schemars(schema_with = "backend_name_schema")]
     pub backend: String,
     /// Its directory.
     pub path: String,
     /// `active`, `releasing`, `released`, or `reclaimed`.
+    #[schemars(schema_with = "state_name_schema")]
     pub state: String,
     /// Whether its change is divergent.
     pub divergent: bool,
     /// Why it needs attention, if it does.
+    #[schemars(schema_with = "attention_name_schema_or_null")]
     pub attention: Option<String>,
     /// When it was created.
     pub created_at: Option<String>,
@@ -302,10 +360,12 @@ pub struct Workspace {
     /// released or reclaimed.
     pub lease: Option<Lease>,
     /// What triggers its snapshots: `notify` or `watchman`.
+    #[schemars(schema_with = "watcher_name_schema")]
     pub watcher: String,
     /// `waiting` while its Watchman subscription waits for a burst of
     /// creates to end (R1.29); `attaching` while its notify watch attaches
     /// in the background (Linux, R1.32).
+    #[schemars(schema_with = "watch_state_name_schema_or_null")]
     pub watch_state: Option<String>,
     /// How many of its snapshots have not been published; 0 in `ws create`.
     pub local_snapshot_count: u64,
@@ -321,7 +381,7 @@ pub struct Workspace {
 }
 
 /// A shared store mounted in a workspace (R1.20).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct MountedStore {
     /// The store's name.
     pub name: String,
@@ -382,13 +442,14 @@ impl From<&v1::Workspace> for Workspace {
 }
 
 /// One indexed snapshot operation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SnapshotEntry {
     /// The operation.
     pub op_id: String,
     /// The working-copy commit it wrote.
     pub commit_id: String,
     /// `watcher`, `explicit`, `final`, `move`, or `shutdown`.
+    #[schemars(schema_with = "snapshot_kind_name_schema")]
     pub kind: String,
     /// Not yet published.
     pub local: bool,
@@ -409,7 +470,7 @@ impl From<&v1::SnapshotEntry> for SnapshotEntry {
 }
 
 /// How much disk a workspace uses beyond its base. An estimate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct DiskUsage {
     /// Allocated bytes of the files that differ from the base.
     pub allocated_bytes: u64,
@@ -428,7 +489,7 @@ impl From<&v1::DiskUsage> for DiskUsage {
 
 /// `WorkspaceService.CreateWorkspace`'s answer: the workspace's fields, then
 /// the create's.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Created {
     /// The new workspace.
     #[serde(flatten)]
@@ -465,7 +526,7 @@ impl Created {
 }
 
 /// A create's steps, in milliseconds; see `v1::CreateTimings`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CreateTimings {
     /// Resolving the start revision.
     pub resolve_ms: u64,
@@ -505,7 +566,7 @@ impl From<&v1::CreateTimings> for CreateTimings {
 
 /// `WorkspaceService.MoveWorkspace`'s answer (R1.06): the workspace's fields, then the
 /// move's.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Moved {
     /// The workspace afterwards.
     #[serde(flatten)]
@@ -541,7 +602,7 @@ impl Moved {
 
 /// `WorkspaceService.GetWorkspace`'s answer: the workspace's fields, then
 /// the rest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Inspected {
     /// The workspace, after the snapshot if one was taken.
     #[serde(flatten)]
@@ -577,7 +638,7 @@ impl Inspected {
 }
 
 /// `WorkspaceService.ReleaseWorkspace`'s answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Released {
     /// The workspace released.
     pub id: String,
@@ -602,7 +663,7 @@ impl From<&v1::ReleaseWorkspaceResponse> for Released {
 
 /// `reef ui`'s answer (R2.18). `session_url`, a credential, only with
 /// `--print`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct WebSession {
     /// The web UI's address, without a token.
     pub url: String,
@@ -616,9 +677,10 @@ pub struct WebSession {
 }
 
 /// One materialization backend's probe.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct BackendProbe {
     /// The backend's name.
+    #[schemars(schema_with = "backend_name_schema")]
     pub kind: String,
     /// Whether it can serve workspace roots under the state directory.
     pub available: bool,
@@ -640,7 +702,7 @@ impl From<&v1::BackendProbe> for BackendProbe {
 }
 
 /// `DaemonService.GetDaemonStatus`'s answer, or 0.1's `Daemon/Status`'s.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Status {
     /// The daemon's version.
     pub version: String,
@@ -671,7 +733,7 @@ pub struct Status {
 
 /// The remote listener, as `daemon status` and `remote show` print it
 /// (R2.08).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RemoteListener {
     /// `off`, `listening` or `failed`; `starting` before its first bind.
     pub state: String,
@@ -690,7 +752,7 @@ pub struct RemoteListener {
 }
 
 /// The remote listener's certificate (R2.08).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RemoteCertificate {
     /// `generated` or `file`.
     pub source: String,
@@ -738,7 +800,7 @@ impl From<&v1::RemoteListener> for RemoteListener {
 
 /// A remote token, without its secret, as `remote token list` prints it
 /// (R2.08).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RemoteToken {
     /// Its id.
     pub id: String,
@@ -803,7 +865,7 @@ impl From<&v1::RemoteToken> for RemoteToken {
 }
 
 /// A token just created or rotated: printed once (R2.08).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CreatedRemoteToken {
     /// The token, without its secret.
     #[serde(flatten)]
@@ -869,7 +931,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
 }
 
 /// A built store, from `StoreService.ListStores` (R1.20).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Store {
     /// The `[[store]] name`.
     pub name: String,
@@ -905,7 +967,7 @@ impl From<&v1::StoreInfo> for Store {
 }
 
 /// How a `StoreService.BuildStore` ended (R1.20).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct BuiltStore {
     /// The store.
     pub name: String,
@@ -945,7 +1007,7 @@ impl From<&v1::BuildResult> for BuiltStore {
 
 /// One repository's report from `MaintenanceService.CollectGarbage`
 /// (R1.17).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct GcReport {
     /// The repository.
     pub repo_id: String,
@@ -1134,7 +1196,7 @@ fn name(value: Option<&'static str>) -> Option<String> {
 }
 
 /// An author or committer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Signature {
     /// Their name.
     pub name: String,
@@ -1155,7 +1217,7 @@ impl From<&v1::Signature> for Signature {
 }
 
 /// One commit of a change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[expect(clippy::struct_excessive_bools, reason = "the v1 message's flags")]
 pub struct Change {
     /// The change, in hex.
@@ -1226,16 +1288,17 @@ fn change_or_default(change: Option<&v1::Change>) -> Change {
 }
 
 /// An edge of the log's graph, from an entry to an ancestor.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct GraphEdge {
     /// The ancestor's commit.
     pub commit_id: String,
     /// `direct`, `indirect`, or `missing`.
+    #[schemars(schema_with = "graph_edge_kind_name_schema_or_null")]
     pub kind: Option<String>,
 }
 
 /// One entry of `reef log`: a change and its graph edges.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct LogEntry {
     /// The change.
     #[serde(flatten)]
@@ -1261,7 +1324,7 @@ impl From<&v1::LogEntry> for LogEntry {
 }
 
 /// An operation of the repository's log.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Operation {
     /// Its id.
     pub id: String,
@@ -1282,9 +1345,11 @@ pub struct Operation {
     /// Whether it is a working-copy snapshot.
     pub is_snapshot: bool,
     /// Its `reef.kind`.
+    #[schemars(schema_with = "operation_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// For a snapshot: `watcher`, `explicit`, `final`, `move`, or
     /// `shutdown`.
+    #[schemars(schema_with = "snapshot_kind_opt_schema_or_null")]
     pub snapshot_kind: Option<String>,
     /// The Reef workspace it ran for.
     pub workspace_id: Option<String>,
@@ -1303,7 +1368,7 @@ pub struct Operation {
 }
 
 /// Who called through the remote listener (R2.08).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RemoteCaller {
     /// The token's id.
     pub token_id: String,
@@ -1339,7 +1404,7 @@ impl From<&v1::Operation> for Operation {
 }
 
 /// What an operation changed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct OperationEffects {
     /// Changes it created, rewrote, abandoned, or hid.
     pub changes: Vec<ChangeEffect>,
@@ -1354,13 +1419,14 @@ pub struct OperationEffects {
 }
 
 /// What an operation did to one change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ChangeEffect {
     /// The change, in hex.
     pub change_id: String,
     /// The same, in reverse hex.
     pub change_id_reverse_hex: String,
     /// `created`, `rewritten`, `abandoned`, or `hidden`.
+    #[schemars(schema_with = "change_effect_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// Its commit afterwards.
     pub commit_id: Option<String>,
@@ -1369,7 +1435,7 @@ pub struct ChangeEffect {
 }
 
 /// What an operation did to one bookmark.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct BookmarkEffect {
     /// The bookmark.
     pub name: String,
@@ -1384,7 +1450,7 @@ pub struct BookmarkEffect {
 }
 
 /// What an operation did to one working copy.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct WorkingCopyEffect {
     /// The Reef workspace.
     pub workspace_id: Option<String>,
@@ -1442,17 +1508,20 @@ fn operation(op: Option<&v1::Operation>) -> Option<Operation> {
 }
 
 /// A path a diff or a status reports.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct FileChange {
     /// Repository-relative, `/`-separated.
     pub path: String,
     /// `added`, `modified`, `deleted`, `renamed`, or `copied`.
+    #[schemars(schema_with = "file_change_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// Where a rename or copy came from.
     pub old_path: Option<String>,
     /// The type before; `null` when added.
+    #[schemars(schema_with = "entry_type_name_schema_or_null")]
     pub old_type: Option<String>,
     /// The type after; `null` when deleted.
+    #[schemars(schema_with = "entry_type_name_schema_or_null")]
     pub new_type: Option<String>,
 }
 
@@ -1469,7 +1538,7 @@ impl From<&v1::FileChange> for FileChange {
 }
 
 /// A hunk of a file's diff.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Hunk {
     /// Its first line on the old side, from 1.
     pub old_start: u32,
@@ -1484,7 +1553,7 @@ pub struct Hunk {
 }
 
 /// One file of a diff.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[expect(clippy::struct_excessive_bools, reason = "the v1 message's flags")]
 pub struct FileDiff {
     /// The path and how it changed.
@@ -1546,7 +1615,7 @@ impl From<&v1::FileDiff> for FileDiff {
 
 /// One call site of a changed symbol (R2.15): compact, since the change
 /// names the symbol, its kind and the role.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CallSite {
     /// The file.
     pub path: String,
@@ -1555,6 +1624,7 @@ pub struct CallSite {
     /// The definition containing it: the caller.
     pub caller: Option<String>,
     /// `scip` (by exact symbol) or `tags` (by name).
+    #[schemars(schema_with = "symbol_source_name_schema_or_null")]
     pub source: Option<String>,
     /// SCIP's roles beyond the reference, as in `reef symbols list`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1575,9 +1645,10 @@ impl From<&v1::SymbolOccurrence> for CallSite {
 }
 
 /// One definition that differs (R2.15).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolChange {
     /// `added`, `removed`, `changed` or `moved`.
+    #[schemars(schema_with = "symbol_change_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// Its symbol: the new side's, or the old side's when removed.
     pub symbol: String,
@@ -1586,6 +1657,7 @@ pub struct SymbolChange {
     /// Its display name.
     pub name: String,
     /// What it is.
+    #[schemars(schema_with = "symbol_kind_name_schema_or_null")]
     pub symbol_kind: Option<String>,
     /// The definition containing it.
     pub enclosing_symbol: Option<String>,
@@ -1603,6 +1675,7 @@ pub struct SymbolChange {
     pub nested_only: bool,
     /// `found`, `capped`, `not_tracked`, `index_incomplete` or
     /// `page_limit`; `null` when not looked up.
+    #[schemars(schema_with = "call_site_status_name_schema_or_null")]
     pub call_site_status: Option<String>,
     /// Call sites found.
     pub call_site_count: u32,
@@ -1678,13 +1751,16 @@ impl From<&v1::SymbolChange> for SymbolChange {
 }
 
 /// One file's symbol changes (R2.15).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct FileSymbolDiff {
     /// `covered`, `unsupported`, `skipped`, `no_scip` or `diff_too_large`.
+    #[schemars(schema_with = "symbol_coverage_name_schema_or_null")]
     pub coverage: Option<String>,
     /// Why a side was skipped.
+    #[schemars(schema_with = "symbol_skip_reason_name_schema_or_null")]
     pub skip_reason: Option<String>,
     /// `tags` or `scip`, when covered.
+    #[schemars(schema_with = "symbol_source_name_schema_or_null")]
     pub source: Option<String>,
     /// A side parsed with syntax errors.
     pub parse_errors: bool,
@@ -1709,7 +1785,7 @@ impl From<&v1::FileSymbolDiff> for FileSymbolDiff {
 }
 
 /// A diff's symbol changes over every page (R2.15).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolDiffSummary {
     /// Definitions added.
     pub added: u32,
@@ -1748,7 +1824,7 @@ impl From<&v1::SymbolDiffSummary> for SymbolDiffSummary {
 }
 
 /// `reef diff`: every file of a diff between two trees.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Diff {
     /// The old side: one commit, or several merged.
     pub from_commit_ids: Vec<String>,
@@ -1779,7 +1855,7 @@ impl From<&v1::GetDiffResponse> for Diff {
 }
 
 /// `reef show`: a change and the paths it changes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ChangeSummary {
     /// The change.
     #[serde(flatten)]
@@ -1810,7 +1886,7 @@ impl ChangeSummary {
 
 /// `reef status`: the repository, and the workspace when there is one.
 /// (`Status` is `daemon status`'s.)
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RepoStatus {
     /// The repository.
     pub repository: Option<Repository>,
@@ -1823,7 +1899,7 @@ pub struct RepoStatus {
 }
 
 /// A repository's state.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RepositoryStatus {
     /// `trunk()`.
     pub trunk: Option<Change>,
@@ -1846,7 +1922,7 @@ pub struct RepositoryStatus {
 }
 
 /// A workspace's state.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct WorkspaceStatus {
     /// The workspace.
     pub workspace: Option<Workspace>,
@@ -1863,9 +1939,11 @@ pub struct WorkspaceStatus {
     /// How many.
     pub conflicted_path_count: u32,
     /// `snapshot`, `index`, `walk`, or `last-snapshot`.
+    #[schemars(schema_with = "status_source_name_schema_or_null")]
     pub source: Option<String>,
     /// Why the tree was walked, with `walk` (R2.23); left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "status_walk_reason_name_schema")]
     pub walk_reason: Option<String>,
     /// The snapshot the status took, if it recorded one.
     pub snapshot: Option<Operation>,
@@ -1907,7 +1985,7 @@ impl From<&v1::GetStatusResponse> for RepoStatus {
 }
 
 /// `reef describe`'s answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Described {
     /// The change afterwards.
     pub change: Option<Change>,
@@ -1932,7 +2010,7 @@ impl Described {
 }
 
 /// `reef abandon`'s answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Abandoned {
     /// The commit abandoned.
     pub abandoned_commit_id: String,
@@ -1957,7 +2035,7 @@ impl Abandoned {
 }
 
 /// `reef undo`'s answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Undone {
     /// The operation that reverted it; `null` when there was nothing to
     /// revert.
@@ -1986,7 +2064,7 @@ impl Undone {
 }
 
 /// `reef ws snapshot`'s answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Snapshotted {
     /// Whether anything changed.
     pub changed: bool,
@@ -2018,7 +2096,7 @@ impl Snapshotted {
 
 /// `FileService.EditFiles`' answer, as `reef mcp`'s `edit_files` returns it
 /// (R2.13).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Edited {
     /// The change afterwards.
     pub change: Option<Change>,
@@ -2040,13 +2118,14 @@ impl Edited {
 }
 
 /// An entry of `reef file list`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct FileEntry {
     /// Repository-relative, `/`-separated.
     pub path: String,
     /// `file`, `executable`, `symlink`, `directory`, `conflict`, or
     /// `submodule`.
     #[serde(rename = "type")]
+    #[schemars(schema_with = "entry_type_name_schema_or_null")]
     pub kind: Option<String>,
     /// Its content's id; `null` for a directory or conflict.
     pub file_id: Option<String>,
@@ -2063,12 +2142,13 @@ impl From<&v1::FileEntry> for FileEntry {
 }
 
 /// `reef file read -o json`: the file and its bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct FileRead {
     /// Repository-relative, `/`-separated.
     pub path: String,
     /// `file`, `executable`, `symlink`, or `conflict`.
     #[serde(rename = "type")]
+    #[schemars(schema_with = "entry_type_name_schema_or_null")]
     pub kind: Option<String>,
     /// Its content's id.
     pub file_id: Option<String>,
@@ -2107,7 +2187,7 @@ impl From<&v1::ReadFileResponse> for FileRead {
 
 /// `{"error": {...}}`: a failed command's JSON on stdout (ADR 0025), and
 /// what a `reef-daemon` offline command prints when it fails.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorObject {
     /// The kind's `snake_case` name ([`crate::error::kind_text`]).
     pub kind: String,
@@ -2128,14 +2208,14 @@ pub struct ErrorObject {
 }
 
 /// [`ErrorObject`] under its `error` key.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorDocument {
     /// The error.
     pub error: ErrorObject,
 }
 
 /// What `reef restore` prints (R1.18).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Restored {
     /// The repositories restored.
     pub repos: Vec<RestoredRepo>,
@@ -2150,7 +2230,7 @@ pub struct Restored {
 }
 
 /// One repository `reef restore` restored.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RestoredRepo {
     /// Its id, in hex.
     pub id: String,
@@ -2465,7 +2545,7 @@ mod tests {
 }
 
 /// How far a long-running operation has got (R2.10).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Progress {
     /// What it is doing now.
     pub phase: Option<String>,
@@ -2478,7 +2558,7 @@ pub struct Progress {
 }
 
 /// One presence entry (R2.10).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Presence {
     /// The entry's id.
     pub id: String,
@@ -2491,6 +2571,7 @@ pub struct Presence {
     /// The change it is about, in hex.
     pub change_id: Option<String>,
     /// `activity`, `editing`, `lease`, or `progress`.
+    #[schemars(schema_with = "presence_kind_schema")]
     pub kind: String,
     /// For `activity`.
     pub activity: Option<String>,
@@ -2550,7 +2631,7 @@ impl From<&v1::Presence> for Presence {
 
 /// A change to one presence entry, as `reef presence watch` prints it
 /// (R2.10).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct PresenceEvent {
     /// It ended: cleared, expired, or what it is about is gone.
     pub ended: bool,
@@ -2686,11 +2767,12 @@ fn source_range(range: Option<&v1::SourceRange>) -> Option<SourceRange> {
 }
 
 /// A tree's indexing, as `reef symbols index` prints it (R2.14).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolStatus {
     /// The commit.
     pub commit_id: String,
     /// `not_indexed`, `indexing` or `complete`.
+    #[schemars(schema_with = "symbol_index_state_name_schema_or_null")]
     pub state: Option<String>,
     /// Supported files.
     pub files: u64,
@@ -2733,7 +2815,7 @@ impl From<&v1::SymbolIndexStatus> for SymbolStatus {
 }
 
 /// One occurrence, as `reef symbols list` prints it (R2.14).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolOccurrence {
     /// The file.
     pub path: String,
@@ -2742,8 +2824,10 @@ pub struct SymbolOccurrence {
     /// The SCIP symbol string; `null` for a tags reference.
     pub symbol: Option<String>,
     /// What it is.
+    #[schemars(schema_with = "symbol_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// `definition` or `reference`.
+    #[schemars(schema_with = "symbol_role_name_schema_or_null")]
     pub role: Option<String>,
     /// The name's range.
     pub range: Option<SourceRange>,
@@ -2752,6 +2836,7 @@ pub struct SymbolOccurrence {
     /// The innermost definition containing it.
     pub enclosing_symbol: Option<String>,
     /// `tags` or `scip`.
+    #[schemars(schema_with = "symbol_source_name_schema_or_null")]
     pub source: Option<String>,
     /// The file's language.
     pub language: Option<String>,
@@ -2789,12 +2874,13 @@ impl From<&v1::SymbolOccurrence> for SymbolOccurrence {
 }
 
 /// A document an upload did not store, or did not send.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct UploadProblem {
     /// Its repository path.
     pub path: String,
     /// Why: a rejection's name, or `unreadable` and `too_large` for one the
     /// CLI did not send.
+    #[schemars(schema_with = "upload_problem_reason_schema")]
     pub reason: String,
     /// In words; absent for one not sent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2802,7 +2888,7 @@ pub struct UploadProblem {
 }
 
 /// What `reef symbols upload` did (R2.14).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolUpload {
     /// The commit.
     pub commit_id: String,
@@ -2857,7 +2943,7 @@ fn history_symbol_coverage_name(coverage: i32) -> Option<&'static str> {
 }
 
 /// One agent's writes to a change in one workspace (R2.16).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ChangeActivity {
     /// The agent; `null` for another jj client's writes and imports.
     pub agent: Option<String>,
@@ -2887,7 +2973,7 @@ impl From<&v1::ChangeActivity> for ChangeActivity {
 }
 
 /// A definition a change's net diff touched (R2.16).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SymbolTouch {
     /// Its symbol.
     pub symbol: String,
@@ -2896,8 +2982,10 @@ pub struct SymbolTouch {
     /// Its display name.
     pub name: String,
     /// What it is.
+    #[schemars(schema_with = "symbol_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// How it changed.
+    #[schemars(schema_with = "symbol_change_kind_name_schema_or_null")]
     pub change: Option<String>,
     /// Its file.
     pub path: String,
@@ -2917,7 +3005,7 @@ impl From<&v1::SymbolTouch> for SymbolTouch {
 }
 
 /// One change of the history index (R2.16).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct HistoryChange {
     /// The change id.
     pub change_id: String,
@@ -2926,6 +3014,7 @@ pub struct HistoryChange {
     /// Its latest commit.
     pub commit_id: String,
     /// What became of it.
+    #[schemars(schema_with = "change_outcome_name_schema_or_null")]
     pub outcome: Option<String>,
     /// More than one visible commit.
     pub divergent: bool,
@@ -2960,8 +3049,10 @@ pub struct HistoryChange {
     /// Symbols its net diff touches.
     pub symbols_changed: u32,
     /// `pending`, `current` or `stale`.
+    #[schemars(schema_with = "touch_state_name_schema_or_null")]
     pub touches_state: Option<String>,
     /// `covered`, `partial`, `too_large` or `disabled`.
+    #[schemars(schema_with = "history_symbol_coverage_name_schema_or_null")]
     pub symbols_coverage: Option<String>,
 }
 
@@ -2995,13 +3086,14 @@ impl From<&v1::HistoryChange> for HistoryChange {
 }
 
 /// One group's count (R2.16).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ChangeGroup {
     /// The agent, when grouped by agent.
     pub agent: Option<String>,
     /// The workspace, when grouped by workspace.
     pub workspace_id: Option<String>,
     /// The outcome, when grouped by outcome.
+    #[schemars(schema_with = "change_outcome_name_schema_or_null")]
     pub outcome: Option<String>,
     /// How many.
     pub count: u32,
@@ -3019,7 +3111,7 @@ impl From<&v1::ChangeGroup> for ChangeGroup {
 }
 
 /// How much history an answer covers (R2.16).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct HistoryCoverage {
     /// The earliest write the index holds.
     pub oldest_at: Option<String>,
@@ -3046,7 +3138,7 @@ impl From<&v1::HistoryCoverage> for HistoryCoverage {
 }
 
 /// `reef history`'s answer (R2.16): changes or groups, and the coverage.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct History {
     /// The changes, newest activity first; empty with `--group-by`.
     pub changes: Vec<HistoryChange>,

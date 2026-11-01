@@ -46,6 +46,7 @@ tokio-rustls.workspace = true
 webpki.workspace = true          # a leaf's SubjectPublicKeyInfo, for fingerprints
 ring.workspace = true            # SHA-256 of a pinned key
 rustls-native-certs.workspace = true   # the OS's roots, for a CA-issued certificate
+schemars.workspace = true        # the JSON's schemas, which `reef schema` prints (R2.24)
 
 [dev-dependencies]
 tempfile.workspace = true

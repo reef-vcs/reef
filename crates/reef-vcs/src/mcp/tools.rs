@@ -33,7 +33,7 @@ use schemars::JsonSchema;
 use serde_json::{Map, Value};
 
 use super::results::{
-    ChangeAt, Changes, DiffPage, FileRange, Files, HistoryPage, Operations, Repositories,
+    ChangeAt, Changes, DiffPage, FileRange, Files, HistoryPage, Operations, Repositories, Waited,
     Workspaces, token,
 };
 use super::{Call, ToolError, args, parse, to_value, wait};
@@ -62,6 +62,9 @@ pub(super) struct ToolDef {
     /// `idempotentHint` for a write: its RPC's `IDEMPOTENT`.
     pub(super) idempotent: bool,
     pub(super) schema: fn() -> Arc<JsonObject>,
+    /// The result's schema, which `reef schema mcp` publishes and
+    /// `tools/list` does not declare (R2.24, ADR 0050).
+    pub(super) output: fn() -> Value,
     pub(super) call: ToolFn,
 }
 
@@ -103,6 +106,53 @@ pub(super) fn list() -> Vec<Tool> {
     TOOLS.iter().map(ToolDef::tool).collect()
 }
 
+/// Every tool as `tools/list` gives it, with its `outputSchema`, for `reef
+/// schema mcp` (R2.24). `tools/list` leaves the output schemas out: every
+/// session pays for the list in tokens (#116), the descriptions name each
+/// result's shape, and a declared schema would bind error results too.
+pub(super) fn definitions() -> Vec<Value> {
+    TOOLS
+        .iter()
+        .map(|def| {
+            let mut tool = serde_json::to_value(def.tool()).unwrap_or_default();
+            if let Value::Object(tool) = &mut tool {
+                tool.insert("outputSchema".to_owned(), (def.output)());
+            }
+            tool
+        })
+        .collect()
+}
+
+/// A tool's output schema: self-contained, as a tool definition cannot
+/// point into another document, and described as the result serializes,
+/// `null` included.
+pub(super) fn output<T: JsonSchema + 'static>() -> Value {
+    let generator = schemars::SchemaGenerator::new(reef_client::schema::settings());
+    let mut schema = Value::from(generator.into_root_schema_for::<T>());
+    if let Some(Value::Object(defs)) = schema.get_mut("$defs") {
+        reef_client::schema::describe_brief(defs);
+    }
+    // A brief view at the root (`get_status`), or flattened into it
+    // (`get_diff`'s page), is not among the `$defs`.
+    let title = schema
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    match title.as_deref() {
+        Some("mcp.DiffPage") => reef_client::schema::describe_view_root(&mut schema, "Diff"),
+        Some(view) if view.starts_with(reef_client::schema::BRIEF_PREFIX) => {
+            let full = view
+                .trim_start_matches(reef_client::schema::BRIEF_PREFIX)
+                .to_owned();
+            reef_client::schema::describe_view_root(&mut schema, &full);
+        }
+        _ => {}
+    }
+    compact(&mut schema, true);
+    reef_client::schema::strip_doc_links(&mut schema);
+    schema
+}
+
 /// A tool's input schema; `T` always derives an object. Compacted, since
 /// every session pays for the tool list in tokens.
 fn schema<T: JsonSchema + 'static>() -> Arc<JsonObject> {
@@ -110,7 +160,7 @@ fn schema<T: JsonSchema + 'static>() -> Arc<JsonObject> {
         return schema_for_empty_input();
     };
     let mut schema = Value::Object((*schema).clone());
-    compact(&mut schema);
+    compact(&mut schema, false);
     inline_enums(&mut schema);
     match schema {
         Value::Object(object) => Arc::new(object),
@@ -160,16 +210,19 @@ fn inline_enums(schema: &mut Value) {
 }
 
 /// Drops what a model does not need from a derived schema: `$schema`,
-/// integer `format`s and their `minimum: 0`, and `null` beside an optional
-/// field's type (the field is optional by not being `required`). `schema`
-/// is a schema object; the rules apply to schemas only, never to the maps
-/// of them (`properties`, `$defs`), whose keys are field names.
-fn compact(schema: &mut Value) {
+/// integer `format`s and their `minimum: 0`, and, unless `keep_null`,
+/// `null` beside an optional field's type (an input field is optional by
+/// not being `required`; an output prints `null`). `schema` is a schema
+/// object; the rules apply to schemas only, never to the maps of them
+/// (`properties`, `$defs`), whose keys are field names.
+fn compact(schema: &mut Value, keep_null: bool) {
     let Value::Object(object) = schema else {
         return;
     };
     object.remove("$schema");
-    if let Some(Value::Array(types)) = object.get_mut("type") {
+    if let Some(Value::Array(types)) = object.get_mut("type")
+        && !keep_null
+    {
         types.retain(|kind| kind != "null");
         if types.len() == 1 {
             let kind = types.remove(0);
@@ -185,6 +238,7 @@ fn compact(schema: &mut Value) {
         object.remove("minimum");
     }
     if let Some(Value::Array(any)) = object.get("anyOf")
+        && !keep_null
         && let [only, null] = any.as_slice()
         && null == &serde_json::json!({"type": "null"})
         && let Value::Object(only) = only.clone()
@@ -195,11 +249,15 @@ fn compact(schema: &mut Value) {
     for (key, value) in object.iter_mut() {
         match (key.as_str(), value) {
             ("properties" | "$defs", Value::Object(schemas)) => {
-                schemas.values_mut().for_each(compact);
+                for schema in schemas.values_mut() {
+                    compact(schema, keep_null);
+                }
             }
-            ("items" | "additionalProperties", value) => compact(value),
+            ("items" | "additionalProperties", value) => compact(value, keep_null),
             ("anyOf" | "oneOf" | "allOf" | "prefixItems", Value::Array(schemas)) => {
-                schemas.iter_mut().for_each(compact);
+                for schema in schemas.iter_mut() {
+                    compact(schema, keep_null);
+                }
             }
             _ => {}
         }
@@ -216,6 +274,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListRepositories>,
+        output: output::<Repositories>,
         call: list_repositories,
     },
     ToolDef {
@@ -226,6 +285,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListWorkspaces>,
+        output: output::<Workspaces<'static>>,
         call: list_workspaces,
     },
     ToolDef {
@@ -236,6 +296,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetWorkspace>,
+        output: output::<Inspected>,
         call: get_workspace,
     },
     ToolDef {
@@ -246,6 +307,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetStatus>,
+        output: output::<brief::RepoStatus<'static>>,
         call: get_status,
     },
     ToolDef {
@@ -256,6 +318,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListChanges>,
+        output: output::<Changes>,
         call: list_changes,
     },
     ToolDef {
@@ -266,6 +329,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetChange>,
+        output: output::<ChangeAt>,
         call: get_change,
     },
     ToolDef {
@@ -276,6 +340,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetDiff>,
+        output: output::<DiffPage<'static>>,
         call: get_diff,
     },
     ToolDef {
@@ -286,6 +351,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListOperations>,
+        output: output::<Operations>,
         call: list_operations,
     },
     ToolDef {
@@ -296,6 +362,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::QueryChanges>,
+        output: output::<HistoryPage>,
         call: query_changes,
     },
     ToolDef {
@@ -306,6 +373,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::GetOperation>,
+        output: output::<Operation>,
         call: get_operation,
     },
     ToolDef {
@@ -316,6 +384,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ReadFile>,
+        output: output::<FileRange>,
         call: read_file,
     },
     ToolDef {
@@ -326,6 +395,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::ListFiles>,
+        output: output::<Files>,
         call: list_files,
     },
     ToolDef {
@@ -336,6 +406,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::WaitForOperations>,
+        output: output::<Waited>,
         call: wait::run,
     },
     ToolDef {
@@ -346,6 +417,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: false,
         schema: schema::<args::CreateWorkspace>,
+        output: output::<Created>,
         call: create_workspace,
     },
     ToolDef {
@@ -356,6 +428,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: false,
         idempotent: true,
         schema: schema::<args::SnapshotWorkspace>,
+        output: output::<Snapshotted>,
         call: snapshot_workspace,
     },
     ToolDef {
@@ -366,6 +439,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::MoveWorkspace>,
+        output: output::<Moved>,
         call: move_workspace,
     },
     ToolDef {
@@ -376,6 +450,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::ReleaseWorkspace>,
+        output: output::<Released>,
         call: release_workspace,
     },
     ToolDef {
@@ -386,6 +461,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::DescribeChange>,
+        output: output::<Described>,
         call: describe_change,
     },
     ToolDef {
@@ -396,6 +472,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::AbandonChange>,
+        output: output::<Abandoned>,
         call: abandon_change,
     },
     ToolDef {
@@ -406,6 +483,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::UndoOperation>,
+        output: output::<Undone>,
         call: undo_operation,
     },
     ToolDef {
@@ -416,6 +494,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         destructive: true,
         idempotent: false,
         schema: schema::<args::EditFiles>,
+        output: output::<Edited>,
         call: edit_files,
     },
 ];
