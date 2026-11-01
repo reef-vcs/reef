@@ -10,6 +10,7 @@
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -360,8 +361,7 @@ async fn every_write_path_wakes(served: Served) {
         .skip(1)
         .cloned()
         .collect();
-    let kinds: std::collections::BTreeSet<OperationKind> =
-        after.iter().map(v1::Operation::kind).collect();
+    let kinds: BTreeSet<OperationKind> = after.iter().map(v1::Operation::kind).collect();
     for kind in [
         OperationKind::CreateWorkspace,
         OperationKind::Snapshot,
@@ -1091,4 +1091,91 @@ async fn subscriptions_are_capped_and_freed() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     subscribe(&daemon.client, request(&repo)).await;
+}
+
+/// Every operation `ListOperations` lists from the heads, or from
+/// `at_operation` when it is not empty, following page tokens of
+/// `page_size`, newest first.
+async fn list_all(
+    client: &Client,
+    repo: &SyntheticRepo,
+    page_size: i32,
+    at_operation: &str,
+) -> Vec<v1::Operation> {
+    let mut out = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let page = client
+            .list_operations_page(ListOperationsRequest {
+                repo: repo.id.clone(),
+                page_size,
+                page_token: page_token.clone(),
+                at_operation: at_operation.to_owned(),
+                ..ListOperationsRequest::default()
+            })
+            .await
+            .unwrap();
+        out.extend(page.operations);
+        if page.next_page_token.is_empty() {
+            return out;
+        }
+        page_token = page.next_page_token;
+    }
+}
+
+// R2.21 test 1: the seam the activity feed's window relies on. A stream
+// that is live before a list is read, joined to the list by operation id,
+// holds every operation of the log exactly once, whatever the list read
+// while writes landed. The log is read at the writer's last operation, so
+// anything the daemon records after it cannot fail the comparison.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_and_stream_cover_the_log() {
+    let (daemon, repo) = fixture().await;
+    let a = create(&daemon.client, &repo, "ann").await;
+    let b = create(&daemon.client, &repo, "bob").await;
+    // Every repository and no start, as the web UI's one stream is.
+    let mut stream = subscribe(&daemon.client, SubscribeOperationsRequest::default()).await;
+    assert!(frame(&mut stream, SECOND).await.live);
+    let writer = {
+        let client = daemon.client.clone();
+        tokio::spawn(async move {
+            let mut last = None;
+            for i in 0..200 {
+                let ws = if i % 2 == 0 { &a } else { &b };
+                last = Some(describe(&client, ws, &format!("change {i}")).await.id);
+            }
+            last.expect("200 writes")
+        })
+    };
+    let first = list_all(&daemon.client, &repo, 50, "").await;
+    let second = list_all(&daemon.client, &repo, 50, "").await;
+    let last = writer.await.unwrap();
+    let mut streamed: Vec<String> = Vec::new();
+    while !streamed.contains(&last) {
+        let next = frame(&mut stream, 30 * SECOND).await;
+        streamed.extend(next.operations.iter().map(|op| op.id.clone()));
+    }
+    let unique: BTreeSet<&String> = streamed.iter().collect();
+    assert_eq!(
+        unique.len(),
+        streamed.len(),
+        "an operation came twice on the stream"
+    );
+    let full: BTreeSet<String> = ids(&list_all(&daemon.client, &repo, 1000, &last).await)
+        .into_iter()
+        .collect();
+    let listed: BTreeSet<String> = ids(&first).into_iter().chain(ids(&second)).collect();
+    let missing: Vec<&String> = full
+        .iter()
+        .filter(|id| !unique.contains(id) && !listed.contains(*id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "neither listed nor streamed: {missing:?}"
+    );
+    let joined: BTreeSet<String> = streamed.iter().cloned().chain(ids(&first)).collect();
+    assert_eq!(
+        joined, full,
+        "the stream and the first list, by id, are the log"
+    );
 }

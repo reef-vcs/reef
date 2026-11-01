@@ -1,8 +1,12 @@
-// The repository pages' nav (R2.20): "Smartlog · Workspaces", the current
-// one marked. A read at an operation keeps its `at` across the two.
+// The repository pages' nav (R2.20, in the shared header since R2.21):
+// "Smartlog · Workspaces · Activity", the current one marked. A read at an
+// operation keeps its `at` across the three.
+import { activityHref } from "../views/activity-route";
 import { fleetHref } from "../views/fleet-route";
 import { smartlogHref } from "../views/smartlog-route";
 import { Link } from "./router";
+
+export type RepoPage = "smartlog" | "workspaces" | "activity";
 
 export function RepoNav({
   repo,
@@ -10,7 +14,7 @@ export function RepoNav({
   at,
 }: {
   repo: string;
-  current: "smartlog" | "workspaces";
+  current: RepoPage;
   /** Empty when live. */
   at?: string;
 }) {
@@ -28,6 +32,13 @@ export function RepoNav({
         current={current === "workspaces" ? "page" : undefined}
       >
         Workspaces
+      </Link>
+      {" · "}
+      <Link
+        to={activityHref({ repo, at: at ?? "" })}
+        current={current === "activity" ? "page" : undefined}
+      >
+        Activity
       </Link>
     </nav>
   );

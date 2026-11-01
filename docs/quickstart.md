@@ -122,12 +122,13 @@ reef status --at 1h
 reef ui
 ```
 
-`reef ui` opens a read-only page in your browser on a new session, live from the daemon's operation and presence streams. The overview lists every repository with its latest operation and its active agents; each repository has two pages:
+`reef ui` opens a read-only page in your browser on a new session, live from the daemon's operation and presence streams. The overview lists every repository with its latest operation and its active agents; each repository has three pages, under a header with a scrubber:
 
 - **Smartlog**: the changes in view as a graph, stacks hanging off trunk, each with its state, bookmarks, workspaces and the agents on it. Select one for its description, files and who wrote it.
 - **Workspaces**: who is doing what, and what is stuck. The Agents table lists each agent with its workspaces, current change and what it is doing; the Workspaces table lists each active workspace with its owner, agents, change, changed files, disk use beyond its base, lease and last snapshot. A lease reads `heartbeating` while its holder renews it (`reef ws run` and `reef mcp` do), `not heartbeating` when nothing ever renewed it (a `reef ws create --lease 24h` holder relies on the lease's length), and `missed heartbeats` when a holder that was renewing it stopped. Workspaces that end and agents that leave keep their rows until you hide them.
+- **Activity**: the operation log as a live feed. One agent's snapshots and edits in one workspace are one row while no more than 5 minutes apart, and so are one user's `jj` commands in one jj workspace; every other operation is a row of its own. Every count on the page is exact, and the page prints the `reef op log` command that lists the same operations. While you scroll down or work in the table, new operations wait behind a count instead of moving the rows. Select a row for the operation's details and what it changed.
 
-Both pages take `?at=<operation>` to show the repository as of then, frozen. Built from source, the binaries embed a placeholder page unless `just web-build` ran before `cargo build`; released binaries embed the app.
+Every page takes `?at=<operation>` to show the repository as of then, frozen; the scrubber moves the page you are on to any operation it has loaded, by arrow keys, by dragging along its time axis, or by a time. Built from source, the binaries embed a placeholder page unless `just web-build` ran before `cargo build`; released binaries embed the app.
 
 ## Set up your agent
 

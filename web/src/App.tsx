@@ -1,6 +1,8 @@
 // The app shell: header, routes and footer over one connection and one live
 // layer. Without a session, or once the daemon refuses it, every route is
-// the no-session page.
+// the no-session page. The overview is in the entry chunk; every other page
+// is its own (R2.21), and the three repository pages share a frame keyed by
+// the repository.
 import { useEffect, useState } from "react";
 import type { Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
@@ -10,14 +12,30 @@ import { Live, type LiveEnvironment } from "./live/share";
 import { endSession } from "./session";
 import { ConnectionIndicator } from "./ui/ConnectionIndicator";
 import { ErrorView } from "./ui/ErrorView";
+import { lazyRoute } from "./ui/lazy-route";
+import type { RepoPage } from "./ui/RepoNav";
 import { Link, match, usePath, useSearch } from "./ui/router";
-import { Fleet } from "./views/Fleet";
-import { fleetParams } from "./views/fleet-route";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
-import { Smartlog, smartlogParams } from "./views/Smartlog";
-import { States } from "./views/States";
+
+const RepoFrame = lazyRoute(() => import("./views/RepoFrame").then((m) => m.RepoFrame));
+const States = lazyRoute(() => import("./views/States").then((m) => m.States));
+
+const REPO_PAGES: [string, RepoPage][] = [
+  ["/repos/:repo/smartlog", "smartlog"],
+  ["/repos/:repo/workspaces", "workspaces"],
+  ["/repos/:repo/activity", "activity"],
+];
+
+/** The repository page `path` names, if any. */
+function repoRoute(path: string): { repo: string; page: RepoPage } | null {
+  for (const [pattern, page] of REPO_PAGES) {
+    const params = match(pattern, path);
+    if (params?.repo) return { repo: params.repo, page };
+  }
+  return null;
+}
 
 function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [status, setStatus] = useState<GetDaemonStatusResponse | null>(null);
@@ -56,10 +74,7 @@ function Shell({
   const path = usePath();
   const search = useSearch();
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
-  const smartlog = match("/repos/:repo/smartlog", path);
-  const smartlogQuery = smartlog && smartlogParams(smartlog.repo ?? "", search);
-  const fleet = match("/repos/:repo/workspaces", path);
-  const fleetQuery = fleet && fleetParams(fleet.repo ?? "", search);
+  const repo = repoRoute(path);
   return (
     <div className="page">
       <header className="header">
@@ -82,26 +97,16 @@ function Shell({
             frame={frame}
             onSessionInvalid={onSessionInvalid}
           />
-        ) : smartlogQuery ? (
-          // A new operation or repository is a new view; a new revset, limit
-          // or selection is not, so a bad revset keeps the last good graph.
-          <Smartlog
-            key={`${smartlogQuery.repo}\n${smartlogQuery.at}`}
+        ) : repo ? (
+          <RepoFrame
+            key={repo.repo}
+            repo={repo.repo}
+            page={repo.page}
+            search={search}
             connection={connection}
             live={live}
             frame={frame}
             onSessionInvalid={onSessionInvalid}
-            params={smartlogQuery}
-          />
-        ) : fleetQuery ? (
-          // A new operation or repository is a new page; a new selection is not.
-          <Fleet
-            key={`${fleetQuery.repo}\n${fleetQuery.at}`}
-            connection={connection}
-            live={live}
-            frame={frame}
-            onSessionInvalid={onSessionInvalid}
-            params={fleetQuery}
           />
         ) : path === "/states" ? (
           <States />

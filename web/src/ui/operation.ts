@@ -1,4 +1,5 @@
-// An operation's kind as words, as the overview and the smartlog show it.
+// An operation's kind as words, as the overview, the smartlog and the
+// activity feed show it.
 import { OperationKind, SnapshotKind, type Operation } from "../gen/reef/api/v1/operations_pb";
 
 const KINDS: Partial<Record<OperationKind, string>> = {
@@ -23,7 +24,7 @@ const SNAPSHOTS: Partial<Record<SnapshotKind, string>> = {
   [SnapshotKind.SHUTDOWN]: "shutdown",
 };
 
-export function operationLabel(operation: Operation): string {
+export function operationLabel(operation: Pick<Operation, "kind" | "snapshotKind">): string {
   const kind = KINDS[operation.kind] ?? "unknown";
   const snapshot = SNAPSHOTS[operation.snapshotKind];
   return operation.kind === OperationKind.SNAPSHOT && snapshot ? `${kind} (${snapshot})` : kind;

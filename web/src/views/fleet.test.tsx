@@ -257,16 +257,10 @@ describe("Fleet", () => {
     expect(screen.getByText("Not active in this repository.")).toBeTruthy();
   });
 
-  it("marks the nav's current page", async () => {
+  it("renders no nav of its own: the repository header does (R2.21)", async () => {
     setup();
     await flush();
-    const nav = screen.getByRole("navigation", { name: "Repository" });
-    expect(within(nav).getByRole("link", { name: "Workspaces" }).getAttribute("aria-current")).toBe(
-      "page",
-    );
-    expect(within(nav).getByRole("link", { name: "Smartlog" }).getAttribute("aria-current")).toBe(
-      null,
-    );
+    expect(screen.queryByRole("navigation", { name: "Repository" })).toBeNull();
   });
 
   it("says when presence is not synced, and when the page is not live", async () => {
@@ -299,6 +293,12 @@ describe("Fleet", () => {
     const t = setup(withTwo(), { query: "at=abcd" });
     await flush();
     expect(screen.getByRole("status").textContent).toMatch(/^At operation abcd-ful/);
+    // The banner's operation links to the feed with it selected (R2.21).
+    expect(
+      within(screen.getByRole("status"))
+        .getByRole("link", { name: "abcd-ful" })
+        .getAttribute("href"),
+    ).toBe(`/repos/${REPO}/activity?op=abcd-full&at=abcd-full`);
     expect(screen.queryByRole("table", { name: "Agents" })).toBeNull();
     expect(cells(row("Workspaces", "w1000000"))[6]).toMatch(/^issued \d\d:\d\d:\d\d$/);
     expect(t.daemon.getCalls).toHaveLength(0);

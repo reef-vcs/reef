@@ -62,7 +62,7 @@ Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositor
 - **A local web UI.** `reef ui` opens a read-only page in your browser, live from the operation and presence streams: every repository with its latest operation, each repository's smartlog, and its workspaces and agents, with who is on which change, each lease's health, and disk use ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md)).
 - **Garbage collection on a timer.** The daemon runs `reef ws gc` by itself every `[gc] interval` (a day by default), and GC leaves the user's own jj workspaces loadable ([ADR 0040](docs/adr/0040-gc-and-the-users-jj-workspaces.md), [ADR 0041](docs/adr/0041-gc-on-a-timer.md)).
 
-Still to come in Phase 2: Python and TypeScript SDKs, `reef schema`, harness packages, a workspace provider contract, and the web UI's activity feed. The rows are in [docs/dev-phases.md](docs/dev-phases.md#phase-2-typed-api-mcp-server-and-live-state).
+Still to come in Phase 2: Python and TypeScript SDKs, harness packages, and a workspace provider contract. The rows are in [docs/dev-phases.md](docs/dev-phases.md#phase-2-typed-api-mcp-server-and-live-state).
 
 ## Install
 

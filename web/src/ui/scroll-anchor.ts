@@ -3,7 +3,7 @@
 // update. Measured on scroll, corrected before paint. A view says where a
 // row's top is (`locate`) and which row is first in view; the smartlog's rows
 // are all one height, so its answers are arithmetic, not layout reads.
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 type Anchor = { key: string; top: number } | null;
 
@@ -54,4 +54,27 @@ export function useScrollAnchor(view: AnchorView, version: number, selected: str
     }
     anchor.current = measure(view, selected);
   }, [version, view, selected]);
+}
+
+/** The rows' elements, for the scroll anchor: a stable view over the current keys. */
+export function useTableAnchor(keys: string[], version: number, selected: string) {
+  const [elements] = useState(() => new Map<string, HTMLTableRowElement>());
+  const register = useMemo(
+    () => (key: string, element: HTMLTableRowElement | null) => {
+      if (element) elements.set(key, element);
+      else elements.delete(key);
+    },
+    [elements],
+  );
+  const view = useMemo<AnchorView>(
+    () => ({
+      locate: (key) => elements.get(key)?.getBoundingClientRect().top,
+      firstInView: () =>
+        keys.find((key) => (elements.get(key)?.getBoundingClientRect().bottom ?? 0) > 0),
+      rowHeight: (key) => elements.get(key)?.getBoundingClientRect().height ?? 0,
+    }),
+    [elements, keys],
+  );
+  useScrollAnchor(view, version, selected);
+  return register;
 }

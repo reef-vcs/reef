@@ -28,7 +28,6 @@ import type { Live } from "../live/share";
 import { AtBanner } from "../ui/AtBanner";
 import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
-import { RepoNav } from "../ui/RepoNav";
 import { useScrollAnchor, type AnchorView } from "../ui/scroll-anchor";
 import { operationLabel } from "../ui/operation";
 import { reverseHex, shortId } from "../ui/ids";
@@ -384,7 +383,6 @@ export function Smartlog({
 
   return (
     <div className="smartlog">
-      <RepoNav repo={params.repo} current="smartlog" at={params.at} />
       <h2>
         <span title={root}>{name}</span> · Smartlog
       </h2>
@@ -403,6 +401,7 @@ export function Smartlog({
       )}
       {frozen && (
         <AtBanner
+          repo={snapshot.repository?.id ?? params.repo}
           operation={snapshot.frozenAt}
           at={params.at}
           live={smartlogHref({ ...params, at: "" })}

@@ -119,6 +119,189 @@ fn table_is_sound() {
     assert!(text(licenses.bytes).contains("react"));
 }
 
+/// The little JSON Vite's manifest uses: objects, arrays, strings and
+/// booleans. reef-web has no dependencies (`crate_graph`), so no serde.
+#[derive(Debug)]
+enum Json {
+    Object(Vec<(String, Json)>),
+    Array(Vec<Json>),
+    String(String),
+    Bool(bool),
+}
+
+impl Json {
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn str(&self) -> &str {
+        match self {
+            Json::String(s) => s,
+            other => panic!("not a string: {other:?}"),
+        }
+    }
+
+    /// An array of strings at `key`, or none.
+    fn strings(&self, key: &str) -> Vec<&str> {
+        match self.get(key) {
+            Some(Json::Array(items)) => items.iter().map(Json::str).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn is(&self, key: &str) -> bool {
+        matches!(self.get(key), Some(Json::Bool(true)))
+    }
+}
+
+fn parse(text: &str) -> Json {
+    fn skip(s: &[u8], at: &mut usize) {
+        while *at < s.len() && s[*at].is_ascii_whitespace() {
+            *at += 1;
+        }
+    }
+    fn string(s: &[u8], at: &mut usize) -> String {
+        assert_eq!(s[*at], b'"');
+        *at += 1;
+        let mut out = Vec::new();
+        while s[*at] != b'"' {
+            if s[*at] == b'\\' {
+                *at += 1;
+                out.push(match s[*at] {
+                    b'n' => b'\n',
+                    b't' => b'\t',
+                    other => other,
+                });
+            } else {
+                out.push(s[*at]);
+            }
+            *at += 1;
+        }
+        *at += 1;
+        String::from_utf8(out).expect("UTF-8")
+    }
+    fn value(s: &[u8], at: &mut usize) -> Json {
+        skip(s, at);
+        match s[*at] {
+            b'{' => {
+                *at += 1;
+                let mut fields = Vec::new();
+                loop {
+                    skip(s, at);
+                    if s[*at] == b'}' {
+                        *at += 1;
+                        return Json::Object(fields);
+                    }
+                    if s[*at] == b',' {
+                        *at += 1;
+                        skip(s, at);
+                    }
+                    let key = string(s, at);
+                    skip(s, at);
+                    assert_eq!(s[*at], b':');
+                    *at += 1;
+                    fields.push((key, value(s, at)));
+                }
+            }
+            b'[' => {
+                *at += 1;
+                let mut items = Vec::new();
+                loop {
+                    skip(s, at);
+                    if s[*at] == b']' {
+                        *at += 1;
+                        return Json::Array(items);
+                    }
+                    if s[*at] == b',' {
+                        *at += 1;
+                    }
+                    items.push(value(s, at));
+                }
+            }
+            b'"' => Json::String(string(s, at)),
+            b't' => {
+                *at += 4;
+                Json::Bool(true)
+            }
+            b'f' => {
+                *at += 5;
+                Json::Bool(false)
+            }
+            other => panic!("unexpected {:?} in the manifest", other as char),
+        }
+    }
+    let mut at = 0;
+    value(text.as_bytes(), &mut at)
+}
+
+fn manifest() -> Json {
+    parse(text(get("manifest.json").expect("manifest.json").bytes))
+}
+
+/// The pages that load lazily, by their source path in the manifest.
+const PAGES: &[&str] = &[
+    "src/views/RepoFrame.tsx",
+    "src/views/Smartlog.tsx",
+    "src/views/Fleet.tsx",
+    "src/views/Activity.tsx",
+    "src/views/States.tsx",
+];
+
+/// The chunks a route loads: the entry, each lazy chunk on its way (the
+/// repository frame, then the page), and their static imports, transitively.
+fn route_files(manifest: &Json, lazy: &[&str]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut stack: Vec<String> = vec!["index.html".to_owned()];
+    stack.extend(lazy.iter().map(|&key| key.to_owned()));
+    while let Some(key) = stack.pop() {
+        let entry = manifest
+            .get(&key)
+            .unwrap_or_else(|| panic!("{key} not in the manifest"));
+        let file = entry.get("file").expect("file").str().to_owned();
+        if seen.contains(&file) {
+            continue;
+        }
+        seen.push(file);
+        stack.extend(entry.strings("imports").into_iter().map(str::to_owned));
+    }
+    seen
+}
+
+#[test]
+fn manifest_is_sound() {
+    if !BUILT {
+        eprintln!("skipped: the placeholder is embedded");
+        return;
+    }
+    let manifest = manifest();
+    let Json::Object(entries) = &manifest else {
+        panic!("the manifest is not an object")
+    };
+    for (key, entry) in entries {
+        let file = entry.get("file").expect("file").str();
+        assert!(get(file).is_some(), "{key}: {file} is not embedded");
+        for css in entry.strings("css") {
+            assert!(get(css).is_some(), "{key}: {css} is not embedded");
+        }
+    }
+    let entry = manifest.get("index.html").expect("the entry");
+    assert!(entry.is("isEntry"));
+    let scripts = linked(text(index().bytes), "src");
+    assert_eq!(
+        scripts,
+        vec![entry.get("file").expect("file").str().to_owned()]
+    );
+    for page in PAGES {
+        assert!(
+            manifest.get(page).is_some_and(|p| p.is("isDynamicEntry")),
+            "{page} is not a lazy chunk"
+        );
+    }
+}
+
 #[test]
 fn bundle_budget() {
     if !BUILT {
@@ -139,6 +322,34 @@ fn bundle_budget() {
         "assets are {} bytes, over 600 KiB",
         total - licenses
     );
-    // Raised from 450 KiB by R2.20 (the workspaces page), for R2.21's room.
-    assert!(js <= 500 << 10, "JavaScript is {js} bytes, over 500 KiB");
+    // What a page loads, not what is embedded (R2.21, one chunk per page).
+    // 500 KiB since R2.20; per page since R2.21, decided with the user.
+    let manifest = manifest();
+    let routes: &[(&str, &[&str])] = &[
+        ("/", &[]),
+        (
+            "/repos/<id>/smartlog",
+            &["src/views/RepoFrame.tsx", "src/views/Smartlog.tsx"],
+        ),
+        (
+            "/repos/<id>/workspaces",
+            &["src/views/RepoFrame.tsx", "src/views/Fleet.tsx"],
+        ),
+        (
+            "/repos/<id>/activity",
+            &["src/views/RepoFrame.tsx", "src/views/Activity.tsx"],
+        ),
+        ("/states", &["src/views/States.tsx"]),
+    ];
+    for (route, lazy) in routes {
+        let bytes: usize = route_files(&manifest, lazy)
+            .iter()
+            .map(|file| get(file).expect("embedded").bytes.len())
+            .sum();
+        eprintln!("{route}: {bytes} bytes of JavaScript");
+        assert!(
+            bytes <= 500 << 10,
+            "{route} loads {bytes} bytes of JavaScript, over 500 KiB"
+        );
+    }
 }

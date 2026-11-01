@@ -24,6 +24,7 @@ import { operationLabel } from "../ui/operation";
 import { reverseHex, shortId } from "../ui/ids";
 import { Link } from "../ui/router";
 import { clock, dateTime } from "../ui/time";
+import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
 
@@ -434,7 +435,9 @@ export function ChangeDetail({
             <dd>
               {operationLabel(cause)} by {cause.agent || "-"} at{" "}
               <time title={clock(cause.endedAt).title}>{clock(cause.endedAt).text}</time>, operation{" "}
-              <span className="mono">{shortId(cause.id)}</span>
+              <Link to={activityHref({ repo, op: cause.id })} title={cause.id}>
+                <span className="mono">{shortId(cause.id)}</span>
+              </Link>
             </dd>
           </>
         )}

@@ -1,8 +1,8 @@
 // `/`: every registered repository with its latest operation and the number
 // of agents active in it now, live from both streams. The repository links to
 // its smartlog (R2.19); the agent count, and the latest operation's workspace
-// and agent, link to its workspaces page (R2.20). R2.21 makes the operation
-// itself a link.
+// and agent, link to its workspaces page (R2.20); the operation itself, to
+// the activity feed with it selected (R2.21).
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { Connection } from "../api/connection";
 import type { Operation } from "../gen/reef/api/v1/operations_pb";
@@ -14,9 +14,10 @@ import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
 import { Link } from "../ui/router";
 import { clock } from "../ui/time";
+import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { OverviewModel } from "./overview-model";
-import { smartlogHref } from "./Smartlog";
+import { smartlogHref } from "./smartlog-route";
 
 function lastComponent(root: string): string {
   return root.replace(/\/+$/, "").split("/").pop() || root;
@@ -34,7 +35,10 @@ function LatestOperation({ operation }: { operation: Operation | undefined }) {
       className={operation.id === first ? undefined : "changed"}
       title={operation.description}
     >
-      {operationLabel(operation)} ·{" "}
+      <Link to={activityHref({ repo: operation.repoId, op: operation.id })} title={operation.id}>
+        {operationLabel(operation)}
+      </Link>{" "}
+      ·{" "}
       {operation.agent ? (
         <Link to={fleetHref({ repo: operation.repoId, agent: operation.agent })}>
           {operation.agent}

@@ -23,9 +23,8 @@ import { AtBanner } from "../ui/AtBanner";
 import { ErrorView } from "../ui/ErrorView";
 import { reverseHex, shortId } from "../ui/ids";
 import { operationLabel } from "../ui/operation";
-import { RepoNav } from "../ui/RepoNav";
 import { Link } from "../ui/router";
-import { useScrollAnchor, type AnchorView } from "../ui/scroll-anchor";
+import { useTableAnchor } from "../ui/scroll-anchor";
 import { size } from "../ui/size";
 import { clock } from "../ui/time";
 import { AgentDetail } from "./AgentDetail";
@@ -312,29 +311,6 @@ function AgentTableRow({
 
 const timestampOf = timestampFromMs;
 
-/** The rows' elements, for the scroll anchor: a stable view over the current keys. */
-function useTableAnchor(keys: string[], version: number, selected: string) {
-  const [elements] = useState(() => new Map<string, HTMLTableRowElement>());
-  const register = useMemo(
-    () => (key: string, element: HTMLTableRowElement | null) => {
-      if (element) elements.set(key, element);
-      else elements.delete(key);
-    },
-    [elements],
-  );
-  const view = useMemo<AnchorView>(
-    () => ({
-      locate: (key) => elements.get(key)?.getBoundingClientRect().top,
-      firstInView: () =>
-        keys.find((key) => (elements.get(key)?.getBoundingClientRect().bottom ?? 0) > 0),
-      rowHeight: (key) => elements.get(key)?.getBoundingClientRect().height ?? 0,
-    }),
-    [elements, keys],
-  );
-  useScrollAnchor(view, version, selected);
-  return register;
-}
-
 export function Fleet({
   connection,
   live,
@@ -408,7 +384,6 @@ export function Fleet({
   if (snapshot.fatal) {
     return (
       <div className="fleet">
-        <RepoNav repo={params.repo} current="workspaces" at={params.at} />
         <ErrorView error={snapshot.fatal} />
       </div>
     );
@@ -449,12 +424,12 @@ export function Fleet({
 
   return (
     <div className="fleet">
-      <RepoNav repo={params.repo} current="workspaces" at={params.at} />
       <h2>
         <span title={root}>{name}</span> · Workspaces and agents
       </h2>
       {frozen && (
         <AtBanner
+          repo={repoId}
           operation={snapshot.frozenAt}
           at={params.at}
           live={fleetHref({ ...params, at: "" })}
