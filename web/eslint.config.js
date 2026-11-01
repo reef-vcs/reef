@@ -15,7 +15,7 @@ const noTimeout = {
 };
 
 export default tseslint.config(
-  { ignores: ["src/gen/", "node_modules/"] },
+  { ignores: ["src/gen/", "node_modules/", "test-results/", "playwright-report/", "blob-report/"] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   {
@@ -55,6 +55,36 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/require-await": "off",
+    },
+  },
+  // The browser smoke test (#128): Node, and waits on the page's state, never
+  // on time or on an idle network (the streams never let it go idle). The
+  // list restates the base block's, since a later block's options replace it.
+  {
+    files: ["e2e/**", "playwright.config.ts"],
+    languageOptions: { globals: { ...globals.node } },
+    rules: {
+      "@typescript-eslint/no-non-null-assertion": "off",
+      // Playwright's fixtures: `async ({}, use) => ...` is its idiom, and its
+      // `use` is not React's.
+      "no-empty-pattern": "off",
+      "react-hooks/rules-of-hooks": "off",
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message:
+            "Never render API text as HTML: it comes from repositories, which may be hostile.",
+        },
+        {
+          selector: "CallExpression[callee.property.name='waitForTimeout']",
+          message: "Wait on the page's state with expect, never on time.",
+        },
+        {
+          selector: "Literal[value='networkidle'], TemplateElement[value.raw='networkidle']",
+          message: "The streams never let the network go idle: wait on the page's state.",
+        },
+      ],
     },
   },
   {

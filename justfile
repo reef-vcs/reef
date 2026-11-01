@@ -72,6 +72,15 @@ web-check:
     cd web && npm run lint && npm run typecheck && npm test && npm run build
     REEF_WEB_EXPECT_BUILT=1 cargo nextest run -p reef-web
 
+# The web UI in Chromium, Firefox and WebKit against a scratch daemon (#128): builds the app, then
+# reef and reef-daemon embedding it, then runs Playwright with ARGS (`--project=firefox`,
+# `--headed`). Once: `cd web && npx playwright install chromium firefox webkit`.
+web-e2e *ARGS:
+    cd web && npm run build
+    cargo build -p reef-vcs -p reef-daemon
+    target=$(cargo metadata --no-deps --format-version 1 | node -p 'JSON.parse(require("fs").readFileSync(0)).target_directory'); \
+        cd web && REEF_E2E_BIN_DIR="$target/debug" npx playwright test "$@"
+
 # Vite's dev server on http://127.0.0.1:5173, proxying the API to REEF_UI_URL (the `url` from
 # `reef ui --print`); open it with that command's `#session=<token>`.
 web-dev:

@@ -33,7 +33,7 @@ just ci      # everything CI runs, in CI order
 - PR titles lead with the ticket ID and its name, for example `R0.04 jj-lib embedding spike`.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - PRs are squash merged, so each ticket lands as one commit on `main` with the PR description as its body. Push fixes as new commits on the branch; there is no need to rewrite history during review.
-- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, `synth determinism`, and `web` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
+- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, `overlayfs`, `synth determinism`, `CLI shape`, `web`, and `web e2e` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
 - If a ticket brief and `docs/dev-phases.md` disagree on scope, the brief wins for the implementation; fix `dev-phases.md` in the same PR.
 
 ## Commit messages
@@ -98,6 +98,7 @@ just web-gen       # regenerate it, for an editor's types after pulling a schema
 just web-dev       # Vite's dev server on http://127.0.0.1:5173
 just web-build     # build the app into crates/reef-web/assets for the next cargo build
 just web-check     # lint, typecheck, Vitest, build, then reef-web's tests against the build
+just web-e2e       # the app in Chromium, Firefox and WebKit against a scratch daemon
 just web-clean     # remove the build and the generated code: back to the placeholder
 ```
 
@@ -106,6 +107,8 @@ Nothing built or generated is committed: `web/src/gen/` (the client, written by 
 Without a build, `reef-web` embeds a placeholder page, so a plain `cargo build`, `cargo install` and `just ci` need no Node. A daemon built that way refuses `reef ui` with `WEB_UI_NOT_BUILT`. Run `just web-build`, then `cargo build`, for a daemon that serves the app; `just web-clean` and another `cargo build` go back. Released binaries always embed the app: the release workflow builds it once and every target embeds the same bytes.
 
 CI's `web` job runs `just web-check` on every pull request. It is where a schema change that breaks the app's generated types fails, so a pull request that changes the protos may need app changes too. The daemon's own web tests (`crates/reef-daemon/tests/web_ui.rs`) run in the `check` jobs against the placeholder.
+
+`just web-e2e` is the browser smoke test (`web/e2e/`, Playwright), and CI's `web e2e` job runs it. Install the browsers once with `cd web && npx playwright install chromium firefox webkit`. The recipe builds the app and then `reef` and `reef-daemon` embedding it, so it never tests stale binaries; the test starts its own daemon on a scratch state directory in `TMPDIR`, with its own home and configuration, and touches no other daemon. Arguments go to Playwright: `just web-e2e --project=firefox` runs one browser, `--headed` shows it. A failure leaves a trace in `web/test-results/` for `npx playwright show-trace`, with the daemon's logs and every `reef` call attached; CI uploads the same as the `web-e2e` artifact. Waits are on the page's state, never on time: ESLint rejects `waitForTimeout` and `networkidle` in `e2e/`, and nothing is retried. A view that later tickets add gets a step in `e2e/smoke.spec.ts`.
 
 To work on the app against a real daemon, run `reef ui --print` with a daemon built after `just web-build` (or any daemon whose `CreateWebSession` works), then start the dev server with `REEF_UI_URL` set to the printed `url`: Vite proxies `/reef.api.v1.` paths to the daemon's listener and rewrites `Host` and `Origin` to its own, so the daemon has no dev mode. Open `http://127.0.0.1:5173/#session=<token>` with the token from the printed session URL. That URL is a credential until the daemon stops; keep it out of issues and logs.
 
