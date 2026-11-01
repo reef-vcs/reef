@@ -164,11 +164,12 @@ jobs:
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
-  # the runner user after it, or the cache save fails on root-owned files.
+  # the runner user after it, or the cache save fails on root-owned files. 45 minutes: main's
+  # runs took 18-29 min by R2.23, the fuse-overlayfs step alone ~19 min.
   overlayfs:
     name: overlayfs (ubuntu-24.04, privileged)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
