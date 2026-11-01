@@ -10,7 +10,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -23,51 +22,28 @@ import type { ReefError } from "../api/errors";
 import type { Presence } from "../gen/reef/api/v1/presence_pb";
 import type { Workspace } from "../gen/reef/api/v1/workspaces_pb";
 import { DEFAULT_LIMIT, logCommand, MAX_LIMIT, SMARTLOG_REVSET } from "../graph/revset";
+import { joinAgents, type AgentJoin } from "../fleet/agents";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
+import { AtBanner } from "../ui/AtBanner";
 import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
+import { RepoNav } from "../ui/RepoNav";
+import { useScrollAnchor, type AnchorView } from "../ui/scroll-anchor";
 import { operationLabel } from "../ui/operation";
-import { hexFromEither, reverseHex, shortId } from "../ui/ids";
-import { href, Link, navigate } from "../ui/router";
+import { reverseHex, shortId } from "../ui/ids";
+import { Link, navigate } from "../ui/router";
 import { clock, dateTime } from "../ui/time";
 import { ChangeDetail } from "./ChangeDetail";
+import { fleetHref } from "./fleet-route";
 import { GraphCell, LANE_WIDTH, OpenLanes, ROW_HEIGHT } from "./GraphCell";
 import { INVALID_REVSET, SmartlogModel, type SmartlogRow } from "./smartlog-model";
+import { smartlogHref, smartlogParams, type SmartlogParams } from "./smartlog-route";
 
 /** Agents named on a row before `+n`. */
 const AGENTS_SHOWN = 3;
 
-export interface SmartlogParams {
-  repo: string;
-  revset: string;
-  limit: number;
-  /** Hex, or empty. */
-  change: string;
-  at: string;
-}
-
-/** The route's parameters from its query string, with defaults. */
-export function smartlogParams(repo: string, search: string): SmartlogParams {
-  const query = new URLSearchParams(search);
-  const limit = Number.parseInt(query.get("limit") ?? "", 10);
-  return {
-    repo,
-    revset: query.get("revset") || SMARTLOG_REVSET,
-    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT,
-    change: hexFromEither(query.get("change") ?? "") ?? "",
-    at: query.get("at") ?? "",
-  };
-}
-
-export function smartlogHref(params: Partial<SmartlogParams> & { repo: string }): string {
-  return href(`/repos/${encodeURIComponent(params.repo)}/smartlog`, {
-    revset: params.revset === SMARTLOG_REVSET ? undefined : params.revset,
-    limit: params.limit && params.limit !== DEFAULT_LIMIT ? String(params.limit) : undefined,
-    change: params.change ? reverseHex(params.change) : undefined,
-    at: params.at,
-  });
-}
+export { smartlogHref, smartlogParams, type SmartlogParams };
 
 /** Distinct agents present on each change: on it, or on one of its workspaces. */
 function presentAgents(
@@ -91,8 +67,9 @@ function presentAgents(
   return out;
 }
 
-function agentNames(entries: Presence[] | undefined): string[] {
-  return [...new Set((entries ?? []).map((p) => p.agent))].sort();
+/** The agents of a change's entries, each once (fleet/agents.ts). */
+function agentNames(entries: Presence[] | undefined, join: AgentJoin): string[] {
+  return [...new Set((entries ?? []).flatMap((p) => join.byEntry.get(p.id) ?? [p.agent]))].sort();
 }
 
 /** What the row shows, in words, for its accessible name. */
@@ -214,58 +191,35 @@ function Row({
 }
 
 /**
- * Keeps the selected row, or else the first row in view, at the same place
- * on screen across a refresh: measured on scroll, corrected before paint.
- * Rows are all `ROW_HEIGHT` high, so a row's place is the list's top plus its
- * index: one measurement per scroll event, whatever the number of rows.
+ * The smartlog's rows for the scroll anchor (ui/scroll-anchor.ts). Rows are
+ * all `ROW_HEIGHT` high, so a row's place is the list's top plus its index:
+ * one measurement per scroll event, whatever the number of rows.
  */
-type Anchor = { change: string; top: number } | null;
-
-/** The selected row if it is in view, or else the first row in view, and its top. */
-function measureAnchor(
-  element: HTMLUListElement | null,
-  changes: string[],
-  selectedChange: string,
-): Anchor {
-  if (!element || changes.length === 0) return null;
-  const top = element.getBoundingClientRect().top;
-  const selected = changes.indexOf(selectedChange);
-  const selectedTop = top + selected * ROW_HEIGHT;
-  if (selected >= 0 && selectedTop + ROW_HEIGHT > 0 && selectedTop < window.innerHeight) {
-    return { change: selectedChange, top: selectedTop };
-  }
-  const first = Math.min(changes.length - 1, Math.max(0, Math.ceil(-top / ROW_HEIGHT)));
-  return { change: changes[first] ?? "", top: top + first * ROW_HEIGHT };
-}
-
-function useScrollAnchor(
+function useRowAnchor(
   list: RefObject<HTMLUListElement | null>,
   changes: string[],
   version: number,
   selectedChange: string,
 ) {
-  const anchor = useRef<Anchor>(null);
-
-  useEffect(() => {
-    const onScroll = () => {
-      anchor.current = measureAnchor(list.current, changes, selectedChange);
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-    };
-  }, [list, changes, selectedChange]);
-
-  useLayoutEffect(() => {
-    const held = anchor.current;
-    const element = list.current;
-    const index = held ? changes.indexOf(held.change) : -1;
-    if (held && element && index >= 0) {
-      const delta = element.getBoundingClientRect().top + index * ROW_HEIGHT - held.top;
-      if (delta !== 0) window.scrollBy(0, delta);
-    }
-    anchor.current = measureAnchor(element, changes, selectedChange);
-  }, [version, list, changes, selectedChange]);
+  const view = useMemo<AnchorView>(
+    () => ({
+      locate: (change) => {
+        const index = changes.indexOf(change);
+        const element = list.current;
+        if (index < 0 || !element) return undefined;
+        return element.getBoundingClientRect().top + index * ROW_HEIGHT;
+      },
+      firstInView: () => {
+        const element = list.current;
+        if (!element || changes.length === 0) return undefined;
+        const top = element.getBoundingClientRect().top;
+        return changes[Math.min(changes.length - 1, Math.max(0, Math.ceil(-top / ROW_HEIGHT)))];
+      },
+      rowHeight: () => ROW_HEIGHT,
+    }),
+    [list, changes],
+  );
+  useScrollAnchor(view, version, selectedChange);
 }
 
 function RevsetField({ params, error }: { params: SmartlogParams; error: ReefError | null }) {
@@ -345,7 +299,7 @@ export function Smartlog({
   );
   const list = useRef<HTMLUListElement>(null);
   const changes = useMemo(() => (rows ?? []).map((r) => r.change.changeId), [rows]);
-  useScrollAnchor(list, changes, snapshot.version, params.change);
+  useRowAnchor(list, changes, snapshot.version, params.change);
 
   // The commit with focus: the selected change's first row unless the
   // keyboard moved to another of its commits.
@@ -411,13 +365,11 @@ export function Smartlog({
   const workspaces = new Map(
     (snapshot.status?.activeWorkspaces ?? []).map((w) => [w.id, w] as const),
   );
+  const repoId = snapshot.repository?.id ?? params.repo;
+  const join = frozen ? joinAgents([], repoId) : joinAgents(live.presence.entries.values(), repoId);
   const presence = frozen
     ? new Map<string, Presence[]>()
-    : presentAgents(
-        live.presence.entries.values(),
-        snapshot.repository?.id ?? params.repo,
-        rows ?? [],
-      );
+    : presentAgents(live.presence.entries.values(), repoId, rows ?? []);
   const error = snapshot.error;
   const revsetError = error?.reason === INVALID_REVSET ? error : null;
   const command = logCommand({
@@ -432,6 +384,7 @@ export function Smartlog({
 
   return (
     <div className="smartlog">
+      <RepoNav repo={params.repo} current="smartlog" at={params.at} />
       <h2>
         <span title={root}>{name}</span> · Smartlog
       </h2>
@@ -442,21 +395,18 @@ export function Smartlog({
             ` · ${String(status.conflictedChangeIds.length)} conflicted`}
           {status.divergentChangeIds.length > 0 &&
             ` · ${String(status.divergentChangeIds.length)} divergent`}
-          {` · ${String(status.activeWorkspaceCount)} active workspaces`}
+          {" · "}
+          <Link to={fleetHref({ repo: snapshot.repository?.id ?? params.repo, at: params.at })}>
+            {status.activeWorkspaceCount} active workspaces
+          </Link>
         </p>
       )}
       {frozen && (
-        <div className="banner" role="status">
-          At operation <span className="mono">{shortId(snapshot.frozenAt?.id ?? params.at)}</span>
-          {snapshot.frozenAt && (
-            <>
-              , ended {clock(snapshot.frozenAt.endedAt).text} ({snapshot.frozenAt.agent || "-"},{" "}
-              {operationLabel(snapshot.frozenAt)})
-            </>
-          )}
-          . Not live; presence is not replayed.{" "}
-          <Link to={smartlogHref({ ...params, at: "" })}>Back to live</Link>
-        </div>
+        <AtBanner
+          operation={snapshot.frozenAt}
+          at={params.at}
+          live={smartlogHref({ ...params, at: "" })}
+        />
       )}
       <RevsetField key={params.revset} params={params} error={revsetError} />
       <p className="command">
@@ -507,7 +457,7 @@ export function Smartlog({
                     key={row.change.commitId}
                     row={row}
                     width={snapshot.width}
-                    agents={agentNames(presence.get(row.change.changeId))}
+                    agents={agentNames(presence.get(row.change.changeId), join)}
                     workspaces={workspaces}
                     selected={isSelected}
                     focusable={row === focused}
@@ -552,6 +502,7 @@ export function Smartlog({
                 rows={selectedRows}
                 workspaces={workspaces}
                 presence={presence.get(params.change) ?? []}
+                agentsOf={join.byEntry}
                 at={snapshot.atOperation}
                 frozen={frozen}
                 onSelect={select}

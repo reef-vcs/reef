@@ -6,10 +6,9 @@
 // on the stream and asks for another. A refresh is `ListChanges`
 // in repository scope with `skip_snapshot` (a page never snapshots an agent's
 // workspace), then `GetStatus` at the operation it echoed, so both describe
-// one operation. Operations during a refresh ask for exactly one more, which
-// starts no sooner than `max(250 ms, 4 × the last refresh)` after the last
-// one started: a burst is one read and a trailing one, and a slow daemon is
-// asked less often. Nothing is read on a timer.
+// one operation. Refreshes are paced by live/paced.ts: operations during one
+// ask for exactly one more, spaced by the last one's cost. Nothing is read on
+// a timer.
 //
 // At an operation (`at`), the view is frozen: the operation is looked up
 // once, both reads are made at it, and the stream is not consulted.
@@ -24,16 +23,16 @@ import { layout, type GraphRow, type Layout } from "../graph/layout";
 import { graphNode } from "../graph/node";
 import { order, type OrderState } from "../graph/order";
 import { DEFAULT_LIMIT, MAX_LIMIT } from "../graph/revset";
-import { after, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { OperationBatch, OperationStore } from "../live/operations";
+import { MIN_SPACING_MS, Paced } from "../live/paced";
 import { changeState, type Labelled } from "../state/states";
 
 export const OPERATION_NOT_FOUND = "OPERATION_NOT_FOUND";
 export const INVALID_REVSET = "INVALID_REVSET";
 
-/** The least time between the starts of two refreshes. */
-export const MIN_SPACING_MS = 250;
+/** The least time between the starts of two refreshes (live/paced.ts). */
+export { MIN_SPACING_MS };
 
 export interface SmartlogRow {
   entry: LogEntry;
@@ -111,13 +110,9 @@ export class SmartlogModel {
   private fresh = false;
   /** A read was asked for while the stream was not live. */
   private waiting = false;
-  private loading = false;
-  private again = false;
   /** The next refresh is "Show more": new heads go below, nothing animates. */
   private revealing = false;
-  private lastStart = Number.NEGATIVE_INFINITY;
-  private lastDuration = 0;
-  private pending: Cancel | undefined;
+  private readonly paced: Paced;
   private stopped = false;
   /** As the route gave it: an id, a prefix or a path. */
   private readonly repo: string;
@@ -135,6 +130,7 @@ export class SmartlogModel {
     private readonly now: () => number = Date.now,
   ) {
     this.notifier = new FrameNotifier(frame);
+    this.paced = new Paced(() => this.refresh(), now);
     this.repo = options.repo;
     this.revset = options.revset;
     this.at = options.at || undefined;
@@ -176,7 +172,7 @@ export class SmartlogModel {
     return () => {
       this.stopped = true;
       unsubscribe();
-      this.pending?.();
+      this.paced.stop();
     };
   }
 
@@ -238,57 +234,38 @@ export class SmartlogModel {
     if (batch.live) this.request();
   }
 
-  /**
-   * A read the user asked for: not spaced, since the spacing paces reads the
-   * stream asks for. One in flight still finishes first.
-   */
+  /** A read the user asked for: not spaced (live/paced.ts). */
   private requestNow() {
     if (this.stopped) return;
-    this.pending?.();
-    this.pending = undefined;
-    if (this.loading) this.again = true;
-    else void this.refresh();
+    this.paced.requestNow();
   }
 
   /** Asks for a refresh: now, after the spacing, or after the one in flight. */
   private request() {
     if (this.stopped) return;
-    if (this.loading) {
-      this.again = true;
-      return;
-    }
-    if (this.pending) return;
-    const spacing = Math.max(MIN_SPACING_MS, 4 * this.lastDuration);
-    const wait = this.lastStart + spacing - this.now();
-    if (wait <= 0) {
-      void this.refresh();
-      return;
-    }
-    this.pending = after(wait, () => {
-      this.pending = undefined;
-      void this.refresh();
-    });
+    this.paced.request();
   }
 
-  private async refresh() {
-    if (this.stopped) return;
+  private refresh(): Promise<void> | undefined {
+    if (this.stopped) return undefined;
     if (!this.operations.live) {
       // A reset since this was asked for: read once the stream is live again.
       this.waiting = true;
-      return;
+      return undefined;
     }
-    this.loading = true;
+    return this.readLive();
+  }
+
+  private async readLive() {
     const revset = this.revset;
     const revealing = this.revealing;
     this.revealing = false;
-    const started = this.now();
-    this.lastStart = started;
     try {
       const read = await this.read("", revset);
       if (this.isStopped()) return;
       if (revset !== this.revset) {
         // The revset changed during the read: read the new one.
-        this.again = true;
+        this.paced.request();
         return;
       }
       this.apply(read, {
@@ -297,13 +274,6 @@ export class SmartlogModel {
       });
     } catch (thrown) {
       this.fail(thrown);
-    } finally {
-      this.loading = false;
-      this.lastDuration = this.now() - started;
-      if (this.again) {
-        this.again = false;
-        this.request();
-      }
     }
   }
 

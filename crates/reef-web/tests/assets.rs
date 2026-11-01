@@ -139,5 +139,6 @@ fn bundle_budget() {
         "assets are {} bytes, over 600 KiB",
         total - licenses
     );
-    assert!(js <= 450 << 10, "JavaScript is {js} bytes, over 450 KiB");
+    // Raised from 450 KiB by R2.20 (the workspaces page), for R2.21's room.
+    assert!(js <= 500 << 10, "JavaScript is {js} bytes, over 500 KiB");
 }

@@ -1,6 +1,8 @@
 // The selected change (R2.19): what the loaded entry says, with no read; its
 // files from `GetDiff`; who wrote it from `QueryChanges` (live only: the
-// history index is not replayed); and the agents present on it now. All text
+// history index is not replayed); and the agents present on it now. Its
+// workspaces and agents link to the workspaces page (R2.20): the rows are
+// listbox options, which cannot hold links, so the links are here. All text
 // is plain text: nothing from the API is rendered as HTML.
 import { useEffect, useRef, useState } from "react";
 import type { Connection } from "../api/connection";
@@ -20,7 +22,9 @@ import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
 import { reverseHex, shortId } from "../ui/ids";
+import { Link } from "../ui/router";
 import { clock, dateTime } from "../ui/time";
+import { fleetHref } from "./fleet-route";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
 
 export const HISTORY_DISABLED = "HISTORY_DISABLED";
@@ -291,6 +295,7 @@ export function ChangeDetail({
   rows,
   workspaces,
   presence,
+  agentsOf,
   at,
   frozen,
   onSelect,
@@ -302,6 +307,8 @@ export function ChangeDetail({
   rows: SmartlogRow[];
   workspaces: ReadonlyMap<string, Workspace>;
   presence: Presence[];
+  /** Each entry id's agents (fleet/agents.ts). */
+  agentsOf: ReadonlyMap<string, string[]>;
   /** The operation the rows were read at. */
   at: string;
   frozen: boolean;
@@ -396,7 +403,12 @@ export function ChangeDetail({
                 const workspace = workspaces.get(id);
                 return (
                   <div key={id}>
-                    <span className="mono">{id}</span>
+                    <Link
+                      to={fleetHref({ repo, at: frozen ? at : "", workspace: id })}
+                      title="On the workspaces page"
+                    >
+                      <span className="mono">{id}</span>
+                    </Link>
                     {workspace && (
                       <span className="secondary">
                         {" "}
@@ -441,7 +453,13 @@ export function ChangeDetail({
           <ul className="activity">
             {presence.map((p) => (
               <li key={p.id}>
-                {p.agent} · {PRESENCE_KINDS[p.kind] ?? "present"}
+                {(agentsOf.get(p.id) ?? [p.agent]).map((agent, i) => (
+                  <span key={agent}>
+                    {i > 0 && ", "}
+                    <Link to={fleetHref({ repo, agent })}>{agent}</Link>
+                  </span>
+                ))}{" "}
+                · {PRESENCE_KINDS[p.kind] ?? "present"}
                 {p.activity ? ` · ${p.activity}` : ""}
                 {p.paths.length > 0 ? ` · editing ${String(p.paths.length)} paths` : ""}
               </li>

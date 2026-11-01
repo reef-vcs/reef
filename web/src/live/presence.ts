@@ -1,8 +1,11 @@
 // The presence stream: state, not history (R2.10). The daemon sends the
 // current set and then changes, with `synced` on the frame that completes
 // the set, and no cursor: a new subscription's set replaces what was held.
+// Entries that end are kept as endings, with why, so a view can tell
+// "finished" from "went silent" (ADR 0037, decision 15; R2.20).
 import { create } from "@bufbuild/protobuf";
 import {
+  PresenceEndReason,
   PresenceEventSchema,
   SubscribePresenceResponseSchema,
   type Presence,
@@ -12,17 +15,40 @@ import { isSessionInvalid, reefError } from "../api/errors";
 import { FrameNotifier, type FrameScheduler } from "./frame";
 import type { StreamHooks } from "./operations";
 
+/** Endings held at most, oldest dropped first. */
+export const ENDINGS_LIMIT = 1024;
+
+/** An entry that ended while this tab watched. */
+export interface Ending {
+  /** Its last state. */
+  presence: Presence;
+  /** `UNSPECIFIED` when a resubscription's set dropped it. */
+  reason: PresenceEndReason;
+  /** When this tab learned of it, in milliseconds since the epoch. */
+  at: number;
+}
+
 export class PresenceStore {
   readonly entries = new Map<string, Presence>();
+  /**
+   * Entries that ended, by id, oldest first. Per tab: one that joins later
+   * gets the leader's live set and only the endings it sees from then on.
+   */
+  readonly endings = new Map<string, Ending>();
   /** The held set is complete: the current subscription has sent `synced`. */
   synced = false;
   /** Increases with every change, for `useSyncExternalStore`. */
   version = 0;
+  /** Increases with every new subscription, whose set replaces the held one. */
+  resyncs = 0;
   /** Ids the current subscription has sent, until its set is synced. */
   private seen: Set<string> | null = null;
   private readonly notifier: FrameNotifier;
 
-  constructor(frame: FrameScheduler) {
+  constructor(
+    frame: FrameScheduler,
+    private readonly now: () => number = Date.now,
+  ) {
     this.notifier = new FrameNotifier(frame);
   }
 
@@ -34,6 +60,7 @@ export class PresenceStore {
   beginResync() {
     this.seen = new Set();
     this.synced = false;
+    this.resyncs += 1;
     this.changed();
   }
 
@@ -44,16 +71,20 @@ export class PresenceStore {
       if (event.ended) {
         this.entries.delete(presence.id);
         this.seen?.delete(presence.id);
+        this.ended(presence, event.endReason);
       } else {
         this.entries.set(presence.id, presence);
         this.seen?.add(presence.id);
+        this.endings.delete(presence.id);
       }
     }
     if (frame.synced && !this.synced) {
       const seen = this.seen;
       if (seen) {
-        for (const id of [...this.entries.keys()]) {
-          if (!seen.has(id)) this.entries.delete(id);
+        for (const [id, presence] of [...this.entries]) {
+          if (seen.has(id)) continue;
+          this.entries.delete(id);
+          this.ended(presence, PresenceEndReason.UNSPECIFIED);
         }
       }
       this.seen = null;
@@ -75,6 +106,16 @@ export class PresenceStore {
       events: entries.map((presence) => create(PresenceEventSchema, { presence })),
       synced: this.synced,
     });
+  }
+
+  private ended(presence: Presence, reason: PresenceEndReason) {
+    // Re-inserted, so the map stays oldest first.
+    this.endings.delete(presence.id);
+    this.endings.set(presence.id, { presence, reason, at: this.now() });
+    if (this.endings.size > ENDINGS_LIMIT) {
+      const oldest = this.endings.keys().next();
+      if (!oldest.done) this.endings.delete(oldest.value);
+    }
   }
 
   private changed() {

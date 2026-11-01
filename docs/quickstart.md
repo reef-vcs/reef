@@ -116,6 +116,19 @@ reef status --at 1h
 
 `reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, `reef history <path>` (or `--symbol <name>`) lists the changes that touched it, who wrote them and whether they landed, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `--at 1h` (or `--at-op <op>`) reads as of then, from the operation log. `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints brief JSON when piped (`-o json` for every field), and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
+## Watch the fleet in a browser
+
+```sh
+reef ui
+```
+
+`reef ui` opens a read-only page in your browser on a new session, live from the daemon's operation and presence streams. The overview lists every repository with its latest operation and its active agents; each repository has two pages:
+
+- **Smartlog**: the changes in view as a graph, stacks hanging off trunk, each with its state, bookmarks, workspaces and the agents on it. Select one for its description, files and who wrote it.
+- **Workspaces**: who is doing what, and what is stuck. The Agents table lists each agent with its workspaces, current change and what it is doing; the Workspaces table lists each active workspace with its owner, agents, change, changed files, disk use beyond its base, lease and last snapshot. A lease reads `heartbeating` while its holder renews it (`reef ws run` and `reef mcp` do), `not heartbeating` when nothing ever renewed it (a `reef ws create --lease 24h` holder relies on the lease's length), and `missed heartbeats` when a holder that was renewing it stopped. Workspaces that end and agents that leave keep their rows until you hide them.
+
+Both pages take `?at=<operation>` to show the repository as of then, frozen. Built from source, the binaries embed a placeholder page unless `just web-build` ran before `cargo build`; released binaries embed the app.
+
 ## Set up your agent
 
 So that an agent starts in a workspace without being told, write Reef's instructions into the repository:
