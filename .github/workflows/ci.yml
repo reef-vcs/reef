@@ -227,7 +227,7 @@ jobs:
   # The web UI (R2.18, ADR 0047): lint, typecheck, Vitest and the build, then reef-web's tests
   # against the real assets. The TypeScript is generated from the protos at every build, so a
   # schema change that breaks the app fails here. The daemon's web tests run in `check`, against
-  # the placeholder, through the same serving code.
+  # the placeholder, through the same serving code. The app in real browsers is `web-e2e`.
   web:
     name: web
     runs-on: ubuntu-24.04
@@ -258,6 +258,47 @@ jobs:
         working-directory: web
         run: npm audit --omit=dev
         continue-on-error: true
+
+  # The web UI in real browsers (#128): reef and reef-daemon built with the app, a scratch daemon,
+  # and Playwright in Chromium, Firefox and WebKit. Its own job so `web` stays fast; off the
+  # critical path (the macOS check job is). Browsers are downloaded, not cached, as Playwright
+  # advises: their system packages are installed on every run anyway.
+  web-e2e:
+    name: web e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Browsers
+        working-directory: web
+        run: npx playwright install --with-deps --only-shell chromium firefox webkit
+      - name: Smoke test
+        run: just web-e2e
+      # Traces hold the session token of a daemon that stopped before the upload, on a runner
+      # that is gone after the job.
+      - uses: actions/upload-artifact@v7
+        if: failure() || cancelled()
+        with:
+          name: web-e2e
+          path: |
+            web/test-results/
+            web/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Every platform's digest must equal the pinned one, so an output change that is the same on
   # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.
@@ -302,7 +343,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web]
+    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -318,6 +359,7 @@ jobs:
           SYNTH: ${{ needs.synth-determinism.result }}
           CLI_SHAPE: ${{ needs.cli-shape.result }}
           WEB: ${{ needs.web.result }}
+          WEB_E2E: ${{ needs.web-e2e.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" ]]
+          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" ]]

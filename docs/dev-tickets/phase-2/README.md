@@ -42,6 +42,7 @@ Phase 1 is complete and released as 0.1.0 (2026-10-25). What it left behind, and
 | #94 | [issue-94-gc-keeps-the-root-loadable.md](issue-94-gc-keeps-the-root-loadable.md) | M | R1.17, R2.09 | #95 (the jj step on a timer) |
 | #95 | [issue-95-gc-on-a-timer.md](issue-95-gc-on-a-timer.md) | M | R1.17, #94 | none listed |
 | #114 | [issue-114-brief-json-by-default.md](issue-114-brief-json-by-default.md) | M | R2.17, R2.27, R2.13 | none listed (the scripted half of Phase 2's exit criterion on repository state) |
+| #128 | [issue-128-playwright-smoke-test.md](issue-128-playwright-smoke-test.md) | S | R2.18, R2.19 | none listed (R2.20, R2.21 and R3.31 add their views' steps to the test) |
 
 ## Departures from dev-phases.md
 

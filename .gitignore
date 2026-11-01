@@ -17,3 +17,7 @@ crates/reef-testing/tokens/results/
 crates/reef-web/assets/
 web/node_modules
 web/src/gen/
+# The browser smoke test's output (#128): traces and reports, uploaded by CI on failure
+web/test-results/
+web/playwright-report/
+web/blob-report/
