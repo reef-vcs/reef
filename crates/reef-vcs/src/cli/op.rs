@@ -193,7 +193,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             let operation = response.operation.ok_or_else(|| missing("operation"))?;
             ctx.out.object(&OpShow(Operation::from(&operation)))
         }
-        OpCommand::Watch(args) => watch(ctx, args).await,
+        OpCommand::Watch(args) => Box::pin(watch(ctx, args)).await,
     }
 }
 
