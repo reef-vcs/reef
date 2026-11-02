@@ -63,7 +63,9 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 
 `reef (text)` is reported but never gated: agents get JSON (brief since #114) unless they ask. The user decided on both halves (2026-10-30). If agents miss the cheap command, the verdict is "not met" and the follow-up is about discoverability.
 
-**Verdict at the first baseline (2026-10-31): not met.** On `state-repo`, git ÷ Reef was 0.09× by bytes, 0.12× by `anthropic` and 0.10× by `o200k` for `reef (default)`, and 0.09×, 0.13× and 0.12× for `mcp` with its fixed cost. Live answer tokens: 0.18× for the CLI and 0.68× for MCP, in Claude Code only (one harness: a gap, not a proof). Reef's text output alone is 1.8× cheaper than git's; its default JSON is about eleven times dearer. [#114](https://github.com/reef-vcs/reef/issues/114) made the default output brief JSON and met the scripted half: `reef ws list` answers in 215 bytes. The live half is [#122](https://github.com/reef-vcs/reef/issues/122): every live `reef` trial began with `reef --help`, which by #122 was 3,547 bytes and 1,196 Anthropic tokens, three times the live budget, so #122 made it a 509-byte task-first help ([ADR 0051](adr/0051-task-first-help.md)). Every later run's verdict is in its results pull request.
+**Verdict at the first baseline (2026-10-31): not met.** On `state-repo`, git ÷ Reef was 0.09× by bytes, 0.12× by `anthropic` and 0.10× by `o200k` for `reef (default)`, and 0.09×, 0.13× and 0.12× for `mcp` with its fixed cost. Live answer tokens: 0.18× for the CLI and 0.68× for MCP, in Claude Code only (one harness: a gap, not a proof). Reef's text output alone is 1.8× cheaper than git's; its default JSON is about eleven times dearer. [#114](https://github.com/reef-vcs/reef/issues/114) made the default output brief JSON and met the scripted half: `reef ws list` answers in 215 bytes. The live half was [#122](https://github.com/reef-vcs/reef/issues/122): every live `reef` trial began with `reef --help`, which by #122 was 3,547 bytes and 1,196 Anthropic tokens, three times the live budget, so #122 made it a 509-byte task-first help ([ADR 0051](adr/0051-task-first-help.md)). Later runs' rows are under [Results](#results).
+
+**Verdict after #122 (2026-11-02, Linux, [run 41367055908](https://github.com/reef-vcs/reef/actions/runs/41367055908)): met.** On `state-repo`, git ÷ `reef (default)` was 12.1× by bytes, 13.1× by `anthropic` and 10.6× by `o200k`. Live, the `reef` arm answered in 286 tokens against git's 1,992 (7.0×), both 3/3 correct, in two calls (`reef --help`, then `reef ws list`) against git's three. `mcp` with its fixed cost fails both halves: 0.13× by bytes scripted, 0.21× live. The run before #122 (2026-11-01, [run 41346946845](https://github.com/reef-vcs/reef/actions/runs/41346946845), after #114) met the scripted half (12.1×, 12.8×, 10.2×) but not the live one (0.38×: 4,699 tokens against 1,796). Claude Code is still the only harness measured ([#119](https://github.com/reef-vcs/reef/issues/119)).
 
 **Decisions this baseline settled for earlier tickets.**
 
@@ -124,6 +126,60 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | bytes | 7,933 | 4,925 | – | 3,672 | 23,610 | 1.61× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | anthropic | 3,543 | 2,237 | – | 1,881 | 9,431 | 1.58× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | o200k | 2,280 | 1,669 | – | 1,313 | 5,775 | 1.37× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | bytes | 185 | 15,574 | 399 | 11,201 | 31,139 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | anthropic | 88 | 7,347 | 228 | 6,194 | 13,744 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-own` | o200k | 54 | 5,561 | 150 | 4,419 | 8,881 | 0.01× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 31,789 | 1,358 | 11,310 | 31,248 | 0.08× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | anthropic | 1,505 | 13,518 | 787 | 5,631 | 13,181 | 0.11× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `state-repo` | o200k | 842 | 9,848 | 542 | 3,822 | 8,284 | 0.10× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 13,132 | 1,196 | 9,423 | 29,361 | 1.70× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | anthropic | 9,318 | 5,420 | 658 | 4,800 | 12,350 | 1.72× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-small` | o200k | 5,722 | 3,980 | 446 | 3,188 | 7,650 | 1.44× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 25,867 | 1,737 | 20,769 | 40,707 | 1.96× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | anthropic | 20,221 | 9,775 | 913 | 10,353 | 17,903 | 2.07× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `changed-large` | o200k | 12,491 | 6,989 | 626 | 6,586 | 11,048 | 1.79× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | bytes | 619 | 5,050 | – | 3,838 | 23,776 | 0.12× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | anthropic | 370 | 2,409 | – | 2,036 | 9,586 | 0.15× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-file` | o200k | 235 | 1,845 | – | 1,478 | 5,940 | 0.13× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 4,914 | – | 3,661 | 23,599 | 1.55× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | anthropic | 3,375 | 2,259 | – | 1,903 | 9,453 | 1.49× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | 505bfabb7097 | 421f33d6ff31 | `who-symbol` | o200k | 2,133 | 1,685 | – | 1,329 | 5,791 | 1.27× | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | bytes | 185 | 858 | 399 | 859 | 20,817 | 0.22× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | anthropic | 88 | 443 | 217 | 444 | 7,999 | 0.20× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-own` | o200k | 54 | 250 | 144 | 250 | 4,717 | 0.22× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 215 | 584 | 231 | 20,189 | 12.06× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | anthropic | 1,497 | 117 | 338 | 130 | 7,685 | 12.79× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `state-repo` | o200k | 840 | 82 | 240 | 83 | 4,550 | 10.24× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 4,646 | 1,224 | 5,442 | 25,400 | 4.80× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | anthropic | 9,310 | 2,236 | 670 | 2,661 | 10,216 | 4.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-small` | o200k | 5,721 | 1,393 | 455 | 1,642 | 6,109 | 4.11× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 12,218 | 1,765 | 17,276 | 37,234 | 4.14× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | anthropic | 20,213 | 5,858 | 921 | 8,426 | 15,981 | 3.45× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `changed-large` | o200k | 12,490 | 3,605 | 635 | 5,177 | 9,644 | 3.46× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | bytes | 619 | 3,801 | – | 3,838 | 23,796 | 0.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | anthropic | 362 | 2,016 | – | 2,030 | 9,585 | 0.18× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-file` | o200k | 233 | 1,456 | – | 1,466 | 5,933 | 0.16× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | – | 3,661 | 23,619 | 2.10× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | anthropic | 3,367 | 1,892 | – | 1,903 | 9,458 | 1.78× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | b5aa37e57133 | 421f33d6ff31 | `who-symbol` | o200k | 2,131 | 1,319 | – | 1,326 | 5,793 | 1.62× | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | bytes | 185 | 858 | 399 | 859 | 20,817 | 0.22× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | anthropic | 88 | 429 | 218 | 430 | 7,985 | 0.21× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | o200k | 54 | 247 | 150 | 247 | 4,714 | 0.22× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 215 | 584 | 231 | 20,189 | 12.06× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | anthropic | 1,501 | 115 | 340 | 128 | 7,683 | 13.05× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | o200k | 850 | 80 | 244 | 81 | 4,548 | 10.62× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 4,646 | 1,224 | 5,442 | 25,400 | 4.80× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | anthropic | 9,314 | 2,237 | 671 | 2,663 | 10,218 | 4.16× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | o200k | 5,730 | 1,395 | 458 | 1,645 | 6,112 | 4.11× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 12,218 | 1,765 | 17,276 | 37,234 | 4.14× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | anthropic | 20,217 | 5,865 | 926 | 8,430 | 15,985 | 3.45× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | o200k | 12,499 | 3,608 | 639 | 5,182 | 9,649 | 3.46× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | bytes | 619 | 3,801 | – | 3,838 | 23,796 | 0.16× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | anthropic | 366 | 2,005 | – | 2,019 | 9,574 | 0.18× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | o200k | 243 | 1,456 | – | 1,466 | 5,933 | 0.17× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | – | 3,661 | 23,619 | 2.10× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | anthropic | 3,371 | 1,872 | – | 1,883 | 9,438 | 1.80× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | o200k | 2,141 | 1,317 | – | 1,324 | 5,791 | 1.63× | #122: task-first reef --help |
 <!-- tokens-rows:scripted -->
 
 ### Fixed cost
@@ -131,6 +187,9 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | Date | Reef | Tools | `tools/list` bytes | Instructions bytes | bytes | anthropic | o200k | Break-even (questions) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | 2026-10-31 | ? | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-11-01 | b5aa37e57133 | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-02 | 88c31de71f0f | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #122: task-first reef --help |
 <!-- tokens-rows:fixed -->
 
 R2.24 publishes every tool's output schema through `reef schema mcp` and does not declare them in `tools/list` ([ADR 0050](adr/0050-published-schemas.md)), so the fixed cost and break-even above are unchanged; declaring them all would make `tools/list` 141,756 bytes instead of 21,211.
@@ -159,6 +218,60 @@ Answer tokens and bytes are medians over correct trials; the other columns are m
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | git | 3/3 | 5,676 | 12,035 | 1,597 | 14,235 | 8,027 | 960 | $0.026 | 4 | 5 | 13 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | reef | 3/3 | 4,679 | 11,502 | 1,627 | 16,809 | 11,947 | 622 | $0.020 | 3 | 4 | 10 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | mcp | 3/3 | 1,933 | 3,726 | 8,068 | 18,156 | 18,150 | 319 | $0.006 | 1 | 2 | 5 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | git | 3/3 | 437 | 812 | 1,537 | 3,562 | 3,066 | 288 | $0.005 | 1 | 2 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | reef | 3/3 | 9,223 | 20,016 | 1,566 | 15,015 | 5,682 | 283 | $0.027 | 2 | 3 | 6 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-own` | mcp | 3/3 | 6,253 | 11,190 | 8,002 | 22,293 | 22,287 | 221 | $0.005 | 1 | 2 | 4 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | git | 3/3 | 1,914 | 3,296 | 1,511 | 10,676 | 8,507 | 788 | $0.013 | 4 | 5 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | reef | 3/3 | 12,512 | 27,677 | 1,540 | 40,506 | 25,301 | 650 | $0.034 | 5 | 6 | 13 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `state-repo` | mcp | 3/3 | 3,249 | 5,837 | 7,976 | 19,353 | 19,347 | 219 | $0.004 | 2 | 3 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | git | 3/3 | 4,322 | 8,710 | 1,543 | 15,037 | 10,463 | 849 | $0.021 | 3 | 4 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | reef | 3/3 | 5,939 | 14,463 | 1,572 | 24,123 | 19,077 | 351 | $0.018 | 4 | 5 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-small` | mcp | 3/3 | 5,629 | 10,969 | 8,008 | 43,288 | 37,324 | 781 | $0.026 | 4 | 5 | 11 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | git | 3/3 | 10,504 | 23,367 | 1,564 | 27,573 | 16,662 | 1,025 | $0.040 | 3 | 4 | 11 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | reef | 3/3 | 7,223 | 18,570 | 1,593 | 34,983 | 31,144 | 1,190 | $0.030 | 6 | 7 | 16 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `changed-large` | mcp | 3/3 | 9,215 | 18,753 | 8,029 | 34,093 | 34,085 | 769 | $0.033 | 2 | 3 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | git | 3/3 | 1,942 | 3,406 | 1,549 | 10,548 | 8,150 | 720 | $0.014 | 3 | 4 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | reef | 3/3 | 4,689 | 10,650 | 1,578 | 21,159 | 16,871 | 770 | $0.018 | 4 | 5 | 12 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-file` | mcp | 3/3 | 2,023 | 3,840 | 8,014 | 18,121 | 18,115 | 341 | $0.005 | 1 | 2 | 6 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | git | 3/3 | 4,765 | 10,136 | 1,565 | 10,428 | 5,439 | 773 | $0.020 | 2 | 3 | 10 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | reef | 2/3 | 4,375 | 10,902 | 1,594 | 14,186 | 14,176 | 617 | $0.019 | 3 | 4 | 9 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.310 | 505bfabb7097 | linux | `who-symbol` | mcp | 3/3 | 1,901 | 3,699 | 8,030 | 18,032 | 18,026 | 281 | $0.005 | 1 | 2 | 5 s | 0/3 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | git | 3/3 | 428 | 803 | 1,538 | 3,555 | 3,068 | 293 | $0.005 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | reef | 3/3 | 1,455 | 3,782 | 1,570 | 7,209 | 6,590 | 283 | $0.011 | 2 | 3 | 7 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-own` | mcp | 3/3 | 432 | 848 | 8,009 | 16,486 | 16,480 | 130 | $0.004 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | git | 3/3 | 1,796 | 3,052 | 1,512 | 10,336 | 8,772 | 681 | $0.012 | 3 | 4 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | reef | 3/3 | 4,699 | 10,231 | 1,544 | 14,275 | 9,063 | 459 | $0.014 | 4 | 5 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `state-repo` | mcp | 3/3 | 1,687 | 3,033 | 7,983 | 26,040 | 24,263 | 342 | $0.011 | 3 | 4 | 7 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | git | 2/3 | 4,825 | 9,829 | 1,544 | 14,693 | 10,789 | 1,000 | $0.021 | 4 | 5 | 11 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | reef | 3/3 | 8,278 | 19,708 | 1,576 | 26,611 | 21,158 | 821 | $0.027 | 5 | 6 | 13 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-small` | mcp | 3/3 | 2,649 | 5,417 | 8,015 | 26,960 | 26,952 | 529 | $0.008 | 2 | 3 | 9 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | git | 3/3 | 12,092 | 27,641 | 1,565 | 31,704 | 18,667 | 1,116 | $0.042 | 4 | 5 | 12 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | reef | 3/3 | 10,011 | 26,256 | 1,597 | 42,696 | 36,074 | 1,164 | $0.033 | 7 | 8 | 17 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `changed-large` | mcp | 3/3 | 9,212 | 18,779 | 8,036 | 43,859 | 35,472 | 1,018 | $0.036 | 4 | 5 | 13 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | git | 3/3 | 2,375 | 4,249 | 1,550 | 11,057 | 8,392 | 811 | $0.017 | 3 | 4 | 11 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | reef | 3/3 | 4,277 | 10,168 | 1,582 | 10,385 | 10,377 | 435 | $0.005 | 2 | 3 | 8 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-file` | mcp | 3/3 | 2,013 | 3,840 | 8,021 | 18,125 | 18,119 | 303 | $0.005 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | git | 3/3 | 4,778 | 10,183 | 1,566 | 10,901 | 5,086 | 806 | $0.022 | 3 | 4 | 9 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | reef | 3/3 | 4,540 | 11,337 | 1,598 | 15,026 | 9,971 | 573 | $0.018 | 3 | 4 | 10 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-01 | claude-sonnet-5-5 | claude-code 2.1.310 | b5aa37e57133 | linux | `who-symbol` | mcp | 3/3 | 1,893 | 3,699 | 8,037 | 18,038 | 18,032 | 266 | $0.004 | 1 | 2 | 5 s | 0/3 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | git | 3/3 | 415 | 798 | 1,536 | 3,538 | 3,064 | 312 | $0.005 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | reef | 3/3 | 1,715 | 3,800 | 1,563 | 6,735 | 4,910 | 263 | $0.008 | 2 | 3 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | mcp | 3/3 | 439 | 848 | 8,013 | 16,501 | 16,495 | 215 | $0.004 | 1 | 2 | 5 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | git | 3/3 | 1,992 | 3,436 | 1,510 | 10,491 | 8,682 | 666 | $0.013 | 3 | 4 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | reef | 3/3 | 286 | 735 | 1,537 | 5,218 | 5,210 | 260 | $0.003 | 2 | 3 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | mcp | 3/3 | 1,743 | 3,271 | 7,987 | 26,108 | 24,271 | 334 | $0.010 | 3 | 4 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | git | 3/3 | 4,300 | 8,661 | 1,542 | 15,028 | 10,372 | 1,003 | $0.023 | 4 | 5 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | reef | 3/3 | 4,701 | 12,966 | 1,569 | 12,735 | 7,873 | 647 | $0.016 | 3 | 4 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | mcp | 3/3 | 2,649 | 5,417 | 8,019 | 26,970 | 26,962 | 577 | $0.014 | 2 | 3 | 9 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | git | 3/3 | 10,373 | 23,243 | 1,563 | 27,701 | 16,639 | 1,143 | $0.041 | 4 | 5 | 14 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | reef | 3/3 | 4,503 | 12,580 | 1,590 | 20,341 | 15,435 | 1,050 | $0.024 | 6 | 7 | 14 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | mcp | 3/3 | 8,492 | 17,450 | 8,040 | 41,341 | 32,725 | 892 | $0.034 | 3 | 4 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | git | 3/3 | 2,602 | 4,922 | 1,548 | 11,527 | 8,540 | 866 | $0.017 | 3 | 4 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | reef | 3/3 | 2,882 | 6,251 | 1,575 | 7,938 | 7,930 | 208 | $0.004 | 2 | 3 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | mcp | 3/3 | 2,011 | 3,840 | 8,025 | 18,131 | 18,125 | 362 | $0.005 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | git | 3/3 | 4,706 | 10,120 | 1,564 | 10,216 | 5,048 | 731 | $0.020 | 2 | 3 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | reef | 3/3 | 3,130 | 7,395 | 1,591 | 10,817 | 7,643 | 463 | $0.013 | 3 | 4 | 9 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | mcp | 3/3 | 1,904 | 3,699 | 8,041 | 18,057 | 18,051 | 353 | $0.006 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
 <!-- tokens-rows:live-claude-code -->
 
 ### Diff sweep
@@ -168,6 +281,9 @@ Median bytes per view.
 | Date | Reef | Commits | `git show` | `git show --stat` | `reef diff` | `reef diff --stat` | `reef diff --symbols` | `--symbols -o text` | `--symbols` ÷ `reef diff` | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-31 | ? | 20 | 153,658 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-10-31 | 505bfabb7097 | 20 | 153,606 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | Linux baseline at 505bfab (R2.17 merge), before #114 |
+| 2026-11-01 | b5aa37e57133 | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
+| 2026-11-02 | 88c31de71f0f | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #122: task-first reef --help |
 <!-- tokens-rows:sweep -->
 
 ### Where the bytes go
@@ -192,4 +308,44 @@ The state questions' `reef (default)` output, compact JSON bytes by field.
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.active_workspaces` | 3,030 | 27% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.heads` | 2,771 | 25% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.last_operation` | 1,286 | 11% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.workspace` | 1,014 | 9% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.parents` | 751 | 7% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `repository_status.trunk` | 747 | 7% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.working_copy` | 707 | 6% |
+| 2026-10-31 | 505bfabb7097 | `state-own` | status | `workspace_status.changed_files` | 319 | 3% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].path` | 2,547 | 11% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].new_no_final_newline` | 1,764 | 8% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].old_no_final_newline` | 1,764 | 8% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].invalid_utf8` | 1,260 | 6% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files (structure)` | 1,089 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
+| 2026-10-31 | 505bfabb7097 | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.parents` | 181 | 21% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status.trunk` | 177 | 21% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.changed_files` | 167 | 20% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.working_copy` | 112 | 13% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status.workspace` | 53 | 6% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status.active_workspace_count` | 26 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `workspace_status (structure)` | 26 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-own` | status | `repository_status (structure)` | 25 | 3% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].id` | 69 | 35% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].changed_file_count` | 67 | 34% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `[].owner` | 45 | 23% |
+| 2026-11-01 | b5aa37e57133 | `state-repo` | list | `(structure)` | 16 | 8% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.parents` | 181 | 21% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status.trunk` | 177 | 21% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.changed_files` | 167 | 20% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.working_copy` | 112 | 13% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.workspace` | 53 | 6% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status.active_workspace_count` | 26 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status (structure)` | 26 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status (structure)` | 25 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].id` | 69 | 35% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].changed_file_count` | 67 | 34% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].owner` | 45 | 23% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `(structure)` | 16 | 8% |
 <!-- tokens-rows:breakdown -->
