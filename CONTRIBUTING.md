@@ -33,7 +33,8 @@ just ci      # everything CI runs, in CI order
 - PR titles lead with the ticket ID and its name, for example `R0.04 jj-lib embedding spike`.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - PRs are squash merged, so each ticket lands as one commit on `main` with the PR description as its body. Push fixes as new commits on the branch; there is no need to rewrite history during review.
-- `main` is protected. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `macos-15`, `overlayfs`, `synth determinism`, `CLI shape`, `web`, and `web e2e` jobs all succeed, and the DCO check. The rule is set by hand in the repository settings (Settings, Branches), not through the API.
+- `main` is protected by a repository ruleset (Settings, Rules), set by hand, not through the API. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `overlayfs`, `synth determinism`, `CLI shape`, `web`, and `web e2e` jobs all succeed. The DCO check runs on every pull request; keep it green, though the ruleset does not require it.
+- On a pull request, `macos-15` runs only with the `macos` label: add it to a change to macOS-specific code (the APFS backend, the `FSEvents` watcher), when you open the pull request, since adding any label restarts CI. It runs on `main` after every merge either way, so a macOS failure there is the next thing to fix. Before a release is tagged, `main`'s latest CI run, `macos-15` included, must be green: `release.yml` runs only after the tag is pushed and smoke-tests the binaries rather than running the tests.
 - If a ticket brief and `docs/dev-phases.md` disagree on scope, the brief wins for the implementation; fix `dev-phases.md` in the same PR.
 
 ## Commit messages

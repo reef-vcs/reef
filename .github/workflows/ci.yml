@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` so that adding the `macos` label runs the macOS leg (see `check`). Any label
+    # restarts the run, so labels go on when a pull request is opened. There is no
+    # `unlabeled`: removing `macos` takes effect at the next push, and a re-run keeps its
+    # event's labels.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -11,6 +17,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Whether `check` runs on macOS too: on every push to main and manual run, and on a pull
+  # request only with the `macos` label. Repeated in `check`'s matrix, which cannot read env.
+  MACOS: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos') }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_BUILD_WARNINGS: deny
@@ -92,11 +101,18 @@ jobs:
     # added about 2 more. By #104 the tests take 22 to 24 minutes, and a build
     # that misses the cache (a lockfile or version change) about 8 more, so a
     # cold run is about 40 minutes.
+    #
+    # macOS runs on main after every merge, on a manual run, and on a pull request labelled
+    # `macos`, not on every pull request: its 25 to 40 minutes and GitHub's macOS arm64
+    # capacity (on 2026-11-02 one job went unassigned twice, cancelled after 15 minutes each
+    # time) held up every merge. Pull requests are checked on macOS locally. release.yml runs
+    # only once a tag is pushed and smoke-tests the binaries, so a tag waits for main's latest
+    # run, macOS included, to be green (CONTRIBUTING.md).
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -319,7 +335,7 @@ jobs:
           merge-multiple: true
       - run: |
           head digest-*.txt crates/reef-testing/synth-small-seed1.sha256
-          [[ "$(ls digest-*.txt | wc -l)" -eq 2 ]]
+          [[ "$(ls digest-*.txt | wc -l)" -eq "$([[ "$MACOS" == true ]] && echo 2 || echo 1)" ]]
           [[ "$(cat digest-*.txt crates/reef-testing/synth-small-seed1.sha256 | sort -u | wc -l)" -eq 1 ]]
 
   # The CLI's JSON has the same keys on both platforms (R1.23, test 12).
@@ -335,6 +351,11 @@ jobs:
           merge-multiple: true
       - run: |
           ls cli-shape-*.json
+          if [[ "$MACOS" != true ]]; then
+            echo "macOS did not run on this pull request; nothing to compare"
+            [[ "$(ls cli-shape-*.json | wc -l)" -eq 1 && -f cli-shape-linux.json ]]
+            exit 0
+          fi
           [[ "$(ls cli-shape-*.json | wc -l)" -eq 2 ]]
           diff cli-shape-linux.json cli-shape-macos.json
 
