@@ -18,6 +18,9 @@
 //!   install it from.
 //! - **D**, oriented: the agent runs inside `reef ws run` and is asked
 //!   where it is.
+//! - **E**, after the plugin: a plain git checkout, and Reef's Claude Code
+//!   plugin installed into the trial's home from the checkout under test
+//!   (R2.25), `claude` without `--bare`, so its skill and MCP server load.
 //!
 //! See `docs/onboarding-benchmark.md`.
 
@@ -58,11 +61,20 @@ pub enum Scenario {
     /// Oriented: started by `reef ws run`, asked where it is.
     #[value(name = "D", alias = "d")]
     D,
+    /// After the plugin: Reef's Claude Code plugin is installed.
+    #[value(name = "E", alias = "e")]
+    E,
 }
 
 impl Scenario {
     /// Every scenario, in order.
-    pub const ALL: [Scenario; 4] = [Scenario::A, Scenario::B, Scenario::C, Scenario::D];
+    pub const ALL: [Scenario; 5] = [
+        Scenario::A,
+        Scenario::B,
+        Scenario::C,
+        Scenario::D,
+        Scenario::E,
+    ];
 
     /// The scenario's letter.
     pub fn letter(self) -> char {
@@ -71,6 +83,7 @@ impl Scenario {
             Scenario::B => 'B',
             Scenario::C => 'C',
             Scenario::D => 'D',
+            Scenario::E => 'E',
         }
     }
 
@@ -81,14 +94,18 @@ impl Scenario {
             Scenario::B => "after `reef init`",
             Scenario::C => "from nothing",
             Scenario::D => "oriented",
+            Scenario::E => "after the plugin",
         }
     }
 
-    /// The prompt, from `onboarding/prompts/`. B shares A's: the scenarios
-    /// differ in what the checkout holds, not in what the agent is told.
+    /// The prompt, from `onboarding/prompts/`. B and E share A's: the
+    /// scenarios differ in what the agent has been given, not in what it is
+    /// told.
     pub fn prompt(self) -> &'static str {
         match self {
-            Scenario::A | Scenario::B => include_str!("../../onboarding/prompts/a.txt"),
+            Scenario::A | Scenario::B | Scenario::E => {
+                include_str!("../../onboarding/prompts/a.txt")
+            }
             Scenario::C => include_str!("../../onboarding/prompts/c.txt"),
             Scenario::D => include_str!("../../onboarding/prompts/d.txt"),
         }
@@ -98,7 +115,7 @@ impl Scenario {
     /// Whether Claude Code runs with `--bare` (no `CLAUDE.md`, skills,
     /// hooks, or memory).
     pub fn bare(self) -> bool {
-        self != Scenario::B
+        !matches!(self, Scenario::B | Scenario::E)
     }
 }
 

@@ -16,6 +16,12 @@ pub mod claude;
 pub enum Tools<'a> {
     /// A shell, a file reader, and a file editor, with edits accepted.
     ShellAndEdit,
+    /// [`Tools::ShellAndEdit`], and the tools of an MCP server the harness
+    /// already has (from a plugin), by the harness's name for the server.
+    ShellEditAndServer {
+        /// The server's name, as the harness prefixes its tools.
+        server: &'a str,
+    },
     /// A shell and a file reader, nothing else.
     ShellAndRead,
     /// Only the tools of one MCP server, configured by

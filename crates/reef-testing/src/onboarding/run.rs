@@ -256,7 +256,7 @@ fn run_and_judge(
         model: &config.model,
         budget_usd: config.budget_usd,
         isolated: scenario.bare(),
-        tools: Tools::ShellAndEdit,
+        tools: scenario_tools(scenario),
     });
     let mut command = if scenario == Scenario::D {
         // `reef ws run` starts the agent in a new workspace, with
@@ -291,6 +291,7 @@ fn run_and_judge(
     result.budget_exceeded = result.result_subtype.as_deref() == Some("error_max_budget_usd");
     if let Some(error) = never_reached_the_model(&result.outcome, &transcript)
         .or_else(|| skill_missing(scenario, &transcript))
+        .or_else(|| plugin_missing(scenario, &transcript))
     {
         result.outcome = Outcome::SetupFailed { error };
     }
@@ -361,6 +362,83 @@ fn skill_missing(scenario: Scenario, transcript: &Transcript) -> Option<String> 
     let commands = transcript.slash_commands.as_ref()?;
     (scenario == Scenario::B && !commands.iter().any(|command| command == "reef"))
         .then(|| "the `reef` skill from `reef init` did not load".to_owned())
+}
+
+/// The tools a trial's agent may use: a shell and an editor, and for E
+/// the plugin's MCP server too, which Claude Code names
+/// `plugin_<plugin>_<server>`.
+fn scenario_tools(scenario: Scenario) -> Tools<'static> {
+    match scenario {
+        Scenario::E => Tools::ShellEditAndServer {
+            server: "plugin_reef_reef",
+        },
+        _ => Tools::ShellAndEdit,
+    }
+}
+
+/// For E, why the trial did not measure what it should: the stream's `init`
+/// event lists neither the plugin's skill nor its MCP server's tools, so
+/// the plugin did not load and E would measure A.
+fn plugin_missing(scenario: Scenario, transcript: &Transcript) -> Option<String> {
+    if scenario != Scenario::E {
+        return None;
+    }
+    let skill = transcript
+        .slash_commands
+        .iter()
+        .flatten()
+        .any(|command| command == "reef" || command.ends_with(":reef"));
+    let server = transcript.tools.iter().flatten().any(|tool| {
+        tool.starts_with("mcp__") && tool.contains("reef") && tool.ends_with("__get_status")
+    });
+    match (skill, server) {
+        (true, true) => None,
+        (false, _) => Some("the Reef plugin's skill did not load".to_owned()),
+        (true, false) => Some("the Reef plugin's MCP server did not load".to_owned()),
+    }
+}
+
+/// The repository whose Claude Code plugin scenario E installs: the
+/// checkout this binary was built from.
+const CHECKOUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+/// A marketplace at `into` holding the checkout's Claude Code plugin: its
+/// marketplace file, with the plugin's source (the release tag, which a
+/// change under test does not have) rewritten to the copied tree.
+pub(crate) fn plugin_marketplace(checkout: &Path, into: &Path) -> Result<(), String> {
+    let file = checkout.join(".claude-plugin/marketplace.json");
+    let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut marketplace: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let plugin = marketplace["plugins"]
+        .get_mut(0)
+        .ok_or_else(|| format!("{} lists no plugin", file.display()))?;
+    plugin["source"] = "./plugins/claude-code".into();
+    fs::create_dir_all(into.join(".claude-plugin")).map_err(|e| e.to_string())?;
+    fs::write(
+        into.join(".claude-plugin/marketplace.json"),
+        serde_json::to_string_pretty(&marketplace).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("the marketplace: {e}"))?;
+    copy_tree(
+        &checkout.join("plugins/claude-code"),
+        &into.join("plugins/claude-code"),
+    )
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let entries = fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let target = to.join(entry.file_name());
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// What setup hands the agent's run.
@@ -447,6 +525,31 @@ fn setup(
         )
         .map_err(|e| format!("reef init: {e}"))?;
     }
+    if scenario == Scenario::E {
+        // Into the trial's home, as the documented install line does, from
+        // the checkout under test; no credential is needed.
+        let marketplace = dir.root.join("marketplace");
+        plugin_marketplace(Path::new(CHECKOUT), &marketplace)?;
+        let mut plain = env.clone();
+        crate::agent::env::without_credentials(&mut plain);
+        for args in [
+            &["plugin", "marketplace", "add"][..],
+            &["plugin", "install", "reef@reef"],
+        ] {
+            let mut command = Command::new(&config.claude);
+            command.args(args);
+            if args.len() == 3 {
+                command.arg(&marketplace);
+            }
+            output(
+                command
+                    .current_dir(&dir.root)
+                    .env_clear()
+                    .envs(plain.iter().cloned()),
+            )
+            .map_err(|e| format!("claude {}: {e}", args.join(" ")))?;
+        }
+    }
     Ok(Setup { env, base_readme })
 }
 
@@ -532,6 +635,58 @@ mod tests {
             program: PathBuf::from("claude"),
         }
         .parse(stream)
+    }
+
+    /// R2.25 16: E's marketplace is the checkout's, its plugin's source the
+    /// copied tree, and a trial whose `init` event lacks the plugin's skill
+    /// or server is a setup failure.
+    #[test]
+    fn e_installs_the_checkouts_plugin() {
+        let into = tempfile::tempdir().unwrap();
+        plugin_marketplace(Path::new(CHECKOUT), into.path()).unwrap();
+        let text = fs::read_to_string(into.path().join(".claude-plugin/marketplace.json")).unwrap();
+        let marketplace: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(marketplace["name"], "reef");
+        assert_eq!(marketplace["plugins"][0]["name"], "reef");
+        assert_eq!(marketplace["plugins"][0]["source"], "./plugins/claude-code");
+        for file in [
+            ".claude-plugin/plugin.json",
+            ".mcp.json",
+            "hooks/hooks.json",
+            "skills/reef/SKILL.md",
+        ] {
+            assert!(
+                into.path().join("plugins/claude-code").join(file).is_file(),
+                "{file}"
+            );
+        }
+
+        let init = |commands: &str, tools: &str| {
+            parse(&format!(
+                r#"{{"type":"system","subtype":"init","slash_commands":{commands},"tools":{tools}}}"#
+            ))
+        };
+        let loaded = init(
+            r#"["review","reef:reef"]"#,
+            r#"["Bash","mcp__plugin_reef_reef__get_status"]"#,
+        );
+        assert_eq!(plugin_missing(Scenario::E, &loaded), None);
+        assert!(
+            plugin_missing(
+                Scenario::E,
+                &init(r#"["review"]"#, r#"["mcp__plugin_reef_reef__get_status"]"#)
+            )
+            .unwrap()
+            .contains("skill")
+        );
+        assert!(
+            plugin_missing(Scenario::E, &init(r#"["reef:reef"]"#, r#"["Bash"]"#))
+                .unwrap()
+                .contains("MCP server")
+        );
+        assert_eq!(plugin_missing(Scenario::A, &init("[]", "[]")), None);
+        assert!(!Scenario::E.bare());
+        assert_eq!(Scenario::E.prompt(), Scenario::A.prompt());
     }
 
     #[test]

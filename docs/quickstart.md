@@ -150,7 +150,19 @@ wrote .claude/skills/reef/SKILL.md
 wrote /Users/you/.claude/skills/reef/SKILL.md
 ```
 
-`reef init` writes `AGENTS.md`, and `CLAUDE.md` and a Claude Code skill when the repository uses Claude Code or Claude Code runs `reef init`. `--user` also writes the skill for every repository on this machine, and turns on the Claude files here. `reef init --check` exits 3 when a file is stale, for CI. `reef guide` prints the same text to paste into any other agent's instructions. Aider and Gemini CLI read `AGENTS.md` only when their configuration names it.
+`reef init` writes `AGENTS.md`, which most agents read, and each agent's own files when the repository shows that agent is used or the agent runs `reef init`: `CLAUDE.md`, a skill and `.mcp.json` for Claude Code, a rule for Cursor, and a skill in `.agents/skills` with an MCP entry (`.codex/config.toml`, `opencode.json`) for Codex and opencode. `--user` also writes each of those agents' user-level files, for every repository on this machine, when the agent has been used here (its directory, such as `~/.codex`, exists), and turns on its files in this repository. `--agents` names agents instead of detecting them. `reef init --check` exits 3 when a file is stale, for CI. `reef guide` prints the same text to paste into any other agent's instructions. Aider and Gemini CLI read `AGENTS.md` only when their configuration names it.
+
+To set an agent up once for every repository instead, use its install line, from Reef 0.3.0 on (on `main` until then, the marketplaces name a release without the plugins). Each assumes `reef` is installed and on `PATH`; none downloads anything else. A plugin installs the release that matches the tag it names, and a new Reef release brings a new one.
+
+| Agent | Install line | What it gets |
+| --- | --- | --- |
+| Claude Code | `claude plugin install reef --marketplace reef-vcs/reef` | the skill, Reef's MCP server, and hooks that declare the files it edits for `reef presence watch` |
+| Codex | `codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef` | the skill and Reef's MCP server, from the vendor-neutral Agent Plugins tree |
+| opencode | `reef init --agents opencode --user` | the skill in `~/.agents/skills` and Reef's MCP server in `~/.config/opencode/opencode.json` |
+| Cursor | `reef init --agents cursor` | the rule, in the repository |
+| any MCP client | `io.github.reef-vcs/reef` on the [MCP registry](https://registry.modelcontextprotocol.io), or a `.mcpb` bundle from the release | Reef's MCP server, with its own `reef-daemon` beside it |
+
+A Claude Code session that has the plugin and a repository's `.mcp.json` from `reef init` gets Reef's server twice; approve one of them.
 
 With Claude Code, `reef init` also writes `.mcp.json`, which starts `reef mcp`: Reef's API as MCP tools ([ADR 0035](adr/0035-mcp-server.md)). Claude Code asks before it starts a project's server. The tools default to the workspace or repository Claude Code was started in. An agent without a shell reads and edits files through them (`read_file`, `edit_files`), and `wait_for_operations` waits for another agent's describe or edit. For another harness, add `reef mcp` as a stdio server in its MCP configuration.
 

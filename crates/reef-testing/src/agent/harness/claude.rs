@@ -54,6 +54,18 @@ impl Harness for Claude {
                 "--allowedTools",
                 "Bash,Read,Edit",
             ],
+            Tools::ShellEditAndServer { server } => {
+                args.extend(
+                    [
+                        "--permission-mode",
+                        "acceptEdits",
+                        "--allowedTools",
+                        &format!("Bash,Read,Edit,mcp__{server}"),
+                    ]
+                    .map(str::to_owned),
+                );
+                &[]
+            }
             Tools::ShellAndRead => &["--tools", "Bash,Read", "--allowedTools", "Bash,Read"],
             Tools::Mcp { config, server } => {
                 // Claude Code names an MCP server's tools `mcp__<server>__<tool>`

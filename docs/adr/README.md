@@ -63,3 +63,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0049](0049-remote-listener.md) | Remote listener | accepted |
 | [0050](0050-published-schemas.md) | Published schemas | accepted |
 | [0051](0051-task-first-help.md) | Task-first help | accepted |
+| [0052](0052-harness-packages.md) | Harness packages | accepted |

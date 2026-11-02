@@ -221,6 +221,14 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     lines(&["presence", "watch"], object::<PresenceEvent>),
     row(&["presence", "report"], object::<Presence>),
     row(&["presence", "clear"], object::<presence::Cleared>),
+    none(
+        &["presence", "hook", "edit"],
+        "nothing; reads a harness's hook event on stdin",
+    ),
+    none(
+        &["presence", "hook", "end"],
+        "nothing; reads a harness's hook event on stdin",
+    ),
     row(&["ui"], object::<WebSession>),
     row(&["remote", "add"], object::<remote::Added>),
     row(&["remote", "list"], list::<remote::Listed>),

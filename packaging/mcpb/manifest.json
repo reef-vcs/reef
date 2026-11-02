@@ -1,0 +1,119 @@
+{
+  "manifest_version": "0.3",
+  "name": "reef",
+  "display_name": "Reef",
+  "version": "0.2.0",
+  "description": "Reef workspaces for coding agents: the skill that starts work in an isolated workspace, and Reef's MCP server.",
+  "author": {
+    "name": "Reef contributors",
+    "url": "https://github.com/reef-vcs/reef"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reef-vcs/reef"
+  },
+  "homepage": "https://github.com/reef-vcs/reef",
+  "license": "Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "reef",
+    "mcp_config": {
+      "command": "${__dirname}/reef",
+      "args": [
+        "mcp"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "list_repositories",
+      "description": "List the repositories registered with Reef, oldest first. Returns {repositories, next_page_token}."
+    },
+    {
+      "name": "list_workspaces",
+      "description": "List a repository's workspaces, newest first: each is a directory leased to one agent, editing one change, with how many files it changed. Returns {workspaces, next_page_token}."
+    },
+    {
+      "name": "get_workspace",
+      "description": "Show a workspace: its directory, change, lease and recent snapshots. Returns the workspace as `reef ws inspect -o json` prints it."
+    },
+    {
+      "name": "get_status",
+      "description": "Show what the workspace changes, after a snapshot, and the repository's state. Returns {repository_status, workspace_status}."
+    },
+    {
+      "name": "list_changes",
+      "description": "List changes, newest first, as `reef log` does. Returns {entries, at_operation, next_page_token}."
+    },
+    {
+      "name": "get_change",
+      "description": "Show one change: its ids, description, parents and state, without its files (get_diff has them). Returns {change, at_operation}."
+    },
+    {
+      "name": "get_diff",
+      "description": "A change's diff against its parents, or two revisions' diff, a page of files at a time. Returns {from_commit_ids, to_commit_id, files, symbol_summary, next_page_token}."
+    },
+    {
+      "name": "list_operations",
+      "description": "List the repository's operation log, newest first: every snapshot, describe, edit and workspace change, by whom. Returns {operations, next_page_token}."
+    },
+    {
+      "name": "query_changes",
+      "description": "Which changes touched these files or symbols: who wrote them, when, and whether they landed. Newest first. Returns {changes, coverage, next_page_token}."
+    },
+    {
+      "name": "get_operation",
+      "description": "Show one operation and what it changed (effects). Returns the operation."
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file at any revision, one range at a time, without a directory; pass the first range's at_operation on to read one version. Returns {path, size, content (text) or content_base64, offset, next_offset}; next_offset is null at the end."
+    },
+    {
+      "name": "list_files",
+      "description": "List a directory at any revision. Returns {entries, commit_id, at_operation, next_page_token}."
+    },
+    {
+      "name": "wait_for_operations",
+      "description": "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones."
+    },
+    {
+      "name": "create_workspace",
+      "description": "Create a workspace: a copy-on-write directory on a new change (or an existing one), snapshotted as it is written. Its lease is kept alive while the server runs; release_workspace it when done, or it is reclaimed with a final snapshot about 35 minutes after the server stops. Returns the workspace and its path."
+    },
+    {
+      "name": "snapshot_workspace",
+      "description": "Record the workspace's files now, as its change's new commit. Returns {changed, commit_id, operation, workspace}."
+    },
+    {
+      "name": "move_workspace",
+      "description": "Point a workspace at another change, or a new change on a revision, after a final snapshot of the one it leaves; its files are checked out again. Returns the workspace afterwards."
+    },
+    {
+      "name": "release_workspace",
+      "description": "Take a final snapshot of a workspace and remove its directory; its change stays in the repository. Returns {id, final_op_id, snapshot_taken, freed_bytes}."
+    },
+    {
+      "name": "describe_change",
+      "description": "Set a change's description (its commit message). Returns {change, operation, workspace}; operation is null when the description was already that."
+    },
+    {
+      "name": "abandon_change",
+      "description": "Abandon a change: its descendants move onto its parents. Returns {abandoned_commit_id, operation, workspace}."
+    },
+    {
+      "name": "undo_operation",
+      "description": "Revert what one operation did, as a new operation (list_operations lists them). Returns {operation, snapshot, undone_operation_id, workspace}."
+    },
+    {
+      "name": "edit_files",
+      "description": "Write, replace text in, delete, copy or chmod files in a change (revision) or a new change (new_on), as one operation, without a directory; workspaces on the change get the new files. Rename: copy_from the old path, and delete it, in one call. Returns {change, operation, workspace}."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux"
+    ]
+  }
+}

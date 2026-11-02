@@ -152,3 +152,5 @@ For agent-authored commits, the human who submits them signs off and thereby mak
 ## Release process
 
 Not yet defined; see R4.17 in [docs/dev-phases.md](docs/dev-phases.md).
+
+One rule already holds: a release pull request runs `just packages` after the version bump (the release workflow's version check fails without it), and the `v<version>` tag follows its merge at once, because the plugin marketplaces in this repository pin that tag ([ADR 0052](docs/adr/0052-harness-packages.md)).

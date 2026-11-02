@@ -47,6 +47,7 @@ schemars.workspace = true        # its tools' input schemas, and `reef schema`'s
 prost-reflect.workspace = true   # `reef schema`'s API part, from the descriptor set (R2.24)
 base64.workspace = true          # `edit_files`' `content_base64`
 indexmap.workspace = true        # `.mcp.json` merged in its own order (R2.13)
+toml_edit.workspace = true       # Codex's config.toml, merged keeping comments (R2.25)
 tempfile.workspace = true        # `presence report --id-file` writes through a temporary file (R2.11)
 
 [dev-dependencies]

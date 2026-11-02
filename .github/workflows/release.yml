@@ -7,7 +7,11 @@ name: Release
 # request that touches the release machinery, does everything but publish, and the tarballs stay
 # on the run as artifacts. Unsigned until R4.17; the publish job attests the tarballs' build
 # provenance (RX.01, S-06), which `gh attestation verify` checks. The web UI (R2.18) is built once,
-# by the `web` job, and every target embeds the same bytes.
+# by the `web` job, and every target embeds the same bytes. Since R2.25 (ADR 0052) each target also
+# gets an MCPB bundle, the release carries `reef schema`'s document and descriptor set, the harness
+# packages are installed into each harness from the checkout, and a tag lists the bundles on the
+# MCP registry. The plugins themselves are released by the tag: their marketplaces, in this
+# repository, pin it.
 
 on:
   push:
@@ -17,6 +21,9 @@ on:
       - .github/workflows/release.yml
       - install.sh
       - packaging/**
+      - plugins/**
+      - .claude-plugin/**
+      - .agents/plugins/**
       - scripts/**
       - crates/reef-vcs/build.rs
       - crates/reef-web/build.rs
@@ -37,6 +44,13 @@ env:
   CARGO_INCREMENTAL: 0
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
+  # The harnesses the packages are tested in, and the packaging tools (R2.25). A bump is a pull
+  # request, whose dry run tests it.
+  CLAUDE_CODE_VERSION: 2.1.316
+  CODEX_VERSION: 0.166.0
+  OPENCODE_VERSION: 1.19.5
+  MCPB_VERSION: 2.1.2
+  MCP_PUBLISHER_VERSION: v1.8.7
 
 permissions:
   contents: read
@@ -72,6 +86,22 @@ jobs:
           # Fail now, not after the builds, if the release would have no
           # notes; a dry run checks them too.
           scripts/release-notes.sh "$version" >/dev/null
+          # The packages name this version and pin its tag (R2.25): a release
+          # pull request that bumped the version without `just packages`
+          # fails here.
+          for file in plugins/claude-code/.claude-plugin/plugin.json plugins/agent-plugins/plugin.json \
+            packaging/mcpb/manifest.json packaging/mcp/server.json; do
+            if [[ "$(jq -r .version "$file")" != "$version" ]]; then
+              echo "::error file=$file::$file is not for reef $version; run just packages"
+              exit 1
+            fi
+          done
+          for file in .claude-plugin/marketplace.json .agents/plugins/marketplace.json; do
+            if [[ "$(jq -r '.plugins[0].source.ref' "$file")" != "v$version" ]]; then
+              echo "::error file=$file::$file does not pin v$version; run just packages"
+              exit 1
+            fi
+          done
           echo "reef $version, publish: $publish"
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "publish=$publish" >>"$GITHUB_OUTPUT"
@@ -179,10 +209,32 @@ jobs:
           fi
       - name: Package
         run: scripts/package.sh "target/$TARGET/dist" "$VERSION" "$TARGET" dist
+      # The MCPB bundle (R2.25), run as a client runs it on this target's own runner.
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+      - name: MCPB bundle
+        run: |
+          bundle="$(scripts/package-mcpb.sh "target/$TARGET/dist" "$VERSION" "$TARGET" dist)"
+          ls -l "$bundle"
+          scripts/test-mcpb.sh "$bundle" "$VERSION" "$TARGET"
+      # `reef schema`'s document and descriptor set (R2.24), once: they are the same on every target
+      # but for the document's `reef.target`.
+      - name: Schema
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          "target/$TARGET/dist/reef" schema >"dist/reef-$VERSION-schema.json"
+          "target/$TARGET/dist/reef" schema --descriptor-set >"dist/reef-$VERSION-api.binpb"
+          jq -e '.cli and .mcp and .api' "dist/reef-$VERSION-schema.json" >/dev/null
+          [[ -s "dist/reef-$VERSION-api.binpb" ]]
       - uses: actions/upload-artifact@v7
         with:
           name: reef-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.mcpb
+            dist/*-schema.json
+            dist/*-api.binpb
           if-no-files-found: error
           retention-days: 14
 
@@ -200,7 +252,10 @@ jobs:
       - run: |
           cd dist
           [[ "$(ls ./*.tar.gz | wc -l)" -eq 4 ]]
-          sha256sum ./*.tar.gz | sed 's| \./| |' >SHA256SUMS
+          [[ "$(ls ./*.mcpb | wc -l)" -eq 4 ]]
+          [[ "$(ls ./*-schema.json ./*-api.binpb | wc -l)" -eq 2 ]]
+          sha256sum ./*.tar.gz ./*.mcpb ./*-schema.json ./*-api.binpb | sed 's| \./| |' >SHA256SUMS
+          [[ "$(wc -l <SHA256SUMS)" -eq 10 ]]
           sha256sum -c SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@v7
@@ -337,9 +392,50 @@ jobs:
             tar -tzf "dist/$name.tar.gz" | grep -qx "$name/$bin"
           done
 
+  # The packages installed into each harness as its quickstart line installs them, from this
+  # checkout, against the released `reef` (R2.25, scripts/test-harness-packages.sh), and the
+  # registry listing built from this run's checksums and checked by the registry's validator,
+  # which publishes nothing. No harness is signed in.
+  harness-packages:
+    name: harness packages
+    needs: [check-version, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: reef-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+          path: dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+      - uses: sigstore/cosign-installer@v4.1.2   # no moving v4 tag
+      - name: Install reef
+        run: |
+          env HOME="$RUNNER_TEMP/reef-home" PATH=/usr/bin:/bin REEF_INSTALL_URL="file://$PWD/dist" sh install.sh </dev/null
+          echo "REEF_BIN=$RUNNER_TEMP/reef-home/.local/bin" >>"$GITHUB_ENV"
+      - name: Harnesses
+        run: scripts/test-harness-packages.sh "$REEF_BIN"
+      - name: Registry listing
+        run: |
+          scripts/mcp-server-json.sh "$VERSION" dist/SHA256SUMS >server.json
+          cat server.json
+          publisher="$(scripts/mcp-publisher.sh "$RUNNER_TEMP/publisher")"
+          "$publisher" validate server.json
+
   release:
     name: publish
-    needs: [check-version, checksums, install, homebrew-test, binstall]
+    needs: [check-version, checksums, install, homebrew-test, binstall, harness-packages]
     if: needs.check-version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -370,6 +466,9 @@ jobs:
         with:
           subject-path: |
             dist/*.tar.gz
+            dist/*.mcpb
+            dist/*-schema.json
+            dist/*-api.binpb
             dist/SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -377,7 +476,7 @@ jobs:
           scripts/release-notes.sh "$VERSION" >notes.md
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Reef $VERSION" --notes-file notes.md \
-            dist/*.tar.gz dist/SHA256SUMS install.sh
+            dist/*.tar.gz dist/*.mcpb dist/*-schema.json dist/*-api.binpb dist/SHA256SUMS install.sh
 
   # Pushes the formula `homebrew-test` installed to the tap's main, with the tap's deploy key (write
   # access to that repository only). A failure here does not fail the release: the formula can be
@@ -414,3 +513,84 @@ jobs:
             echo "::warning::pushing to the tap failed; $advice"
           fi
           rm -f "$key"
+
+  # Lists the release's MCPB bundles on the MCP registry as io.github.reef-vcs/reef (R2.25), signed
+  # in by this workflow's OIDC token, which the registry trusts for the io.github.reef-vcs
+  # namespace. A published version cannot be changed. A failure here does not fail the release: the
+  # listing can be published by hand, by an owner of the organization (the device login cannot
+  # publish to an organization's namespace).
+  mcp-registry:
+    name: MCP registry
+    needs: [check-version, release]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+      - uses: sigstore/cosign-installer@v4.1.2   # no moving v4 tag
+      - run: |
+          advice="publish it by hand: scripts/mcp-server-json.sh $VERSION SHA256SUMS >server.json, then mcp-publisher login github --token <an organization owner's token with read:org> and mcp-publisher publish"
+          if ! scripts/mcp-server-json.sh "$VERSION" SHA256SUMS >server.json; then
+            echo "::warning::server.json could not be written, so the listing was not published; $advice"
+            exit 0
+          fi
+          # The release's assets answer before the registry is told about them.
+          for url in $(jq -r '.packages[].identifier' server.json); do
+            if ! curl -fsSLI -o /dev/null "$url"; then
+              echo "::warning::$url does not answer, so the listing was not published; $advice"
+              exit 0
+            fi
+          done
+          if ! publisher="$(scripts/mcp-publisher.sh "$RUNNER_TEMP/publisher")" ||
+            ! "$publisher" login github-oidc ||
+            ! "$publisher" publish server.json; then
+            echo "::warning::publishing to the MCP registry failed; $advice"
+          fi
+
+  # The documented install lines, run as written now that the tag exists, and the listing as the
+  # registry serves it. Warns, as the tap and the listing do: the release is already out.
+  harness-packages-live:
+    name: harness packages (released)
+    needs: [check-version, release, mcp-registry]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+      - run: |
+          warn() { echo "::warning::$*"; }
+          home="$RUNNER_TEMP/live"
+          mkdir -p "$home/.codex"
+          if ! npm install --prefix "$RUNNER_TEMP/npm" --no-fund --no-audit --silent \
+            "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" "@openai/codex@$CODEX_VERSION"; then
+            warn "the harnesses could not be installed, so the released install lines were not run"
+            exit 0
+          fi
+          bin="$RUNNER_TEMP/npm/node_modules/.bin"
+          export HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" CODEX_HOME="$home/.codex"
+          "$bin/claude" plugin install reef --marketplace reef-vcs/reef || warn "the Claude Code install line failed"
+          "$bin/claude" plugin list --json | jq -e --arg v "$VERSION" '.[] | select(.id == "reef@reef" and .version == $v)' >/dev/null ||
+            warn "Claude Code did not install reef $VERSION"
+          { "$bin/codex" plugin marketplace add reef-vcs/reef && "$bin/codex" plugin add reef@reef; } || warn "the Codex install line failed"
+          "$bin/codex" plugin list --json | jq -e --arg v "$VERSION" '.installed[] | select(.pluginId == "reef@reef" and .version == $v)' >/dev/null ||
+            warn "Codex did not install reef $VERSION"
+          curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.reef-vcs/reef" |
+            jq -e --arg v "$VERSION" '[.servers[] | (.server // .) | select(.name == "io.github.reef-vcs/reef" and .version == $v)] | length > 0' >/dev/null ||
+            warn "the registry does not list io.github.reef-vcs/reef $VERSION"

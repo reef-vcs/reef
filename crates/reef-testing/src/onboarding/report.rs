@@ -70,11 +70,12 @@ fn default_repository() -> String {
 }
 
 /// Phase 1's target for a scenario: at most this many calls to success and
-/// failed `reef` calls, as medians (`docs/dev-phases.md`).
+/// failed `reef` calls, as medians (`docs/dev-phases.md`). E, set up by the
+/// plugin, is held to B's (R2.25).
 pub fn target(scenario: Scenario) -> Option<(f64, f64)> {
     match scenario {
         Scenario::A => Some((8.0, 2.0)),
-        Scenario::B => Some((4.0, 0.0)),
+        Scenario::B | Scenario::E => Some((4.0, 0.0)),
         Scenario::C | Scenario::D => None,
     }
 }

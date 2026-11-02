@@ -418,3 +418,14 @@ pub(crate) fn schema_part() -> Value {
         "error_result": tools::output::<reef_client::json::ErrorDocument>(),
     })
 }
+
+/// Every tool's name and description, in `tools/list`'s order, for the
+/// MCPB bundle's manifest (R2.25), so a listing cannot drift from the
+/// server.
+#[cfg(test)]
+pub(crate) fn tool_summaries() -> Vec<(&'static str, &'static str)> {
+    TOOLS
+        .iter()
+        .map(|def| (def.name, def.description))
+        .collect()
+}

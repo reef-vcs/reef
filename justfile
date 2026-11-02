@@ -20,6 +20,20 @@ build:
 agent-files:
     cargo run -q -p reef-vcs -- init --agents claude --no-register --check -o text
 
+# Writes the harness packages (R2.25): the plugin trees under plugins/, both marketplaces, and the
+# MCPB manifest and registry listing under packaging/, from the agent guide and the MCP tools. A
+# test fails until they are current; a release PR runs this after the version bump.
+packages:
+    REEF_BLESS=1 cargo nextest run -p reef-vcs --bin reef packages_are_current
+
+# Installs the packages into Claude Code, Codex and opencode from this checkout, against the debug
+# build, with the harness versions release.yml pins (R2.25). Needs node; run `just build` first.
+harness-packages:
+    CLAUDE_CODE_VERSION=$(sed -n 's/^  CLAUDE_CODE_VERSION: //p' .github/workflows/release.yml) \
+    CODEX_VERSION=$(sed -n 's/^  CODEX_VERSION: //p' .github/workflows/release.yml) \
+    OPENCODE_VERSION=$(sed -n 's/^  OPENCODE_VERSION: //p' .github/workflows/release.yml) \
+    scripts/test-harness-packages.sh "${CARGO_TARGET_DIR:-target}/debug"
+
 # Unit and integration tests via nextest when present, else cargo test. Doctests always via cargo test.
 test *ARGS:
     if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace "$@"; else cargo test --workspace "$@"; fi
