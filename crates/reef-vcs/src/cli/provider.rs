@@ -98,7 +98,7 @@ struct CreateArgs {
     /// What it is for [default: the name].
     #[arg(long, value_name = "TEXT")]
     purpose: Option<String>,
-    /// Who holds it [default: `<user>@<host>:<name>`].
+    /// Who holds it (default `<user>@<host>:<name>`).
     #[arg(long, value_name = "OWNER")]
     owner: Option<String>,
     /// Edit this revision.
