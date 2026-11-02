@@ -513,6 +513,16 @@ async fn reads() {
     let absolute = path(&created).join("src/read.txt").display().to_string();
     let only = mcp.ok("get_diff", json!({"paths": [absolute]})).await;
     assert_eq!(only["files"].as_array().unwrap().len(), 1, "{only}");
+    // #117: a directory with a trailing slash, as the CLI takes it.
+    for dir in ["src/", "./src/"] {
+        let under = mcp.ok("get_diff", json!({"paths": [dir]})).await;
+        assert_eq!(under["files"].as_array().unwrap().len(), 1, "{under}");
+        let touched = mcp.ok("query_changes", json!({"paths": [dir]})).await;
+        assert_eq!(
+            touched["changes"][0]["change_id"], created["change_id"],
+            "{touched}"
+        );
+    }
     write(&created, "src/more.txt", "more\n");
     let paged = mcp.ok("get_diff", json!({"page_size": 1})).await;
     assert_eq!(paged["files"].as_array().unwrap().len(), 1, "{paged}");
@@ -640,6 +650,13 @@ async fn files() {
     let text = mcp.ok("read_file", json!({"path": "notes/a.txt"})).await;
     assert_eq!(text["content"], "hello\n", "{text}");
     assert_eq!(text["next_offset"], Value::Null);
+    // #117: `./` and `..` resolve as the CLI resolves them.
+    let dotted = mcp
+        .ok("read_file", json!({"path": "./notes/../notes/a.txt"}))
+        .await;
+    assert_eq!(dotted["content"], "hello\n", "{dotted}");
+    let listed = mcp.ok("list_files", json!({"path": "notes/"})).await;
+    assert!(listed.to_string().contains("notes/a.txt"), "{listed}");
     let binary = mcp.ok("read_file", json!({"path": "notes/b.bin"})).await;
     assert_eq!(binary["content"], Value::Null, "{binary}");
     assert_eq!(binary["content_base64"], "AJ+Slg==");
@@ -695,6 +712,25 @@ async fn head(mcp: &mut Mcp) -> Value {
     mcp.ok("list_operations", json!({"page_size": 1})).await["operations"][0]["id"].clone()
 }
 
+/// #117: an edit's target with a trailing `/` names no file, so it is
+/// refused rather than written without the slash.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_target_with_a_trailing_slash_is_refused() {
+    let (daemon, repo) = fixture().await;
+    let mut root = server(&daemon, &repo.root).await;
+    let created = create(&mut root).await;
+    let dir = path(&created);
+    let mut mcp = server(&daemon, &dir).await;
+    let error = mcp
+        .err(
+            "edit_files",
+            json!({"edits": [{"path": "edit/slash/", "content": "x\n"}]}),
+        )
+        .await;
+    assert_eq!(error["kind"], "invalid_argument", "{error}");
+    assert!(!dir.join("edit/slash").exists());
+}
+
 // 12
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_files() {
@@ -716,6 +752,7 @@ async fn edit_files() {
                 {"path": "edit/moved.txt", "copy_from": dir.join("edit/new.txt").display().to_string()},
                 {"path": "edit/new.txt", "delete": true},
                 {"path": "edit/run.sh", "executable": true},
+                {"path": "./edit/dotted.txt", "content": "dotted\n"},
             ]}),
         )
         .await;
@@ -723,6 +760,7 @@ async fn edit_files() {
     assert_eq!(edited["workspace"]["id"], created["id"]);
     let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok();
     assert_eq!(read("edit/moved.txt").as_deref(), Some("new\n"));
+    assert_eq!(read("edit/dotted.txt").as_deref(), Some("dotted\n"));
     assert_eq!(read("edit/new.txt"), None);
     assert_eq!(read("edit/gone.txt"), None);
     assert_eq!(

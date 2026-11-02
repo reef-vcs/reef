@@ -7,7 +7,6 @@
 //! tool; a test fails until each v1 method is in one or the other.
 
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -601,16 +600,25 @@ fn page(size: Option<u32>, default: i32) -> i32 {
         .map_or(default, |size| i32::try_from(size).unwrap_or(i32::MAX))
 }
 
-/// `path` repository-relative: an absolute path inside the scope's
-/// directory is made relative to it; anything else goes to the daemon as
-/// given, which refuses what is not repository-relative. An MCP caller has
-/// no current directory the server can see, so relative paths are never
-/// relative to one.
+/// `path` repository-relative, as the CLI reads it under `--workspace` or
+/// `--repo` (#117): an absolute path inside the scope's directory is made
+/// relative to it, and a relative one is repository-relative with `./`,
+/// `..` and a trailing `/` resolved. A path that leaves the directory goes
+/// to the daemon as given, which refuses it. An MCP caller has no current
+/// directory the server can see, so relative paths are never relative to
+/// one.
 fn repo_path(scope: &Scope, path: String) -> String {
-    if Path::new(&path).is_absolute() {
-        scope::inside(&scope.dir, Path::new(&path)).unwrap_or(path)
-    } else {
+    scope::given_path(scope, None, &path).unwrap_or(path)
+}
+
+/// An edit's target, as [`repo_path`] reads it, except that one given
+/// with a trailing `/` goes to the daemon as given, which refuses it: a
+/// write or delete names a file, and `new/` is not one (#117).
+fn edit_path(scope: &Scope, path: String) -> String {
+    if path.ends_with('/') {
         path
+    } else {
+        repo_path(scope, path)
     }
 }
 
@@ -1163,7 +1171,7 @@ tool!(edit_files, args::EditFiles, |call, args| {
     let edits = edits
         .into_iter()
         .map(|edit| v1::FileEdit {
-            path: repo_path(&scope, edit.path),
+            path: edit_path(&scope, edit.path),
             action: match edit.action {
                 Some(file_edit::Action::CopyFrom(source)) => {
                     Some(file_edit::Action::CopyFrom(repo_path(&scope, source)))
@@ -1273,6 +1281,35 @@ mod tests {
     use prost_reflect::prost_types::method_options::IdempotencyLevel;
 
     use super::*;
+
+    /// #117: paths read as the CLI reads them under `--workspace`; one
+    /// that leaves the directory goes to the daemon unchanged.
+    #[test]
+    fn paths_resolve_as_the_cli_resolves_them() {
+        let scope = Scope {
+            repo_id: "r".to_owned(),
+            workspace: None,
+            dir: std::path::PathBuf::from("/repo"),
+            from_flags: true,
+        };
+        for (given, want) in [
+            ("src/symbols/", "src/symbols"),
+            ("./src/a.rs", "src/a.rs"),
+            ("src//a.rs", "src/a.rs"),
+            ("src/./x/../a.rs", "src/a.rs"),
+            (".", ""),
+            ("./", ""),
+            ("", ""),
+            ("/repo/src/", "src"),
+            ("/repo", ""),
+            ("../outside", "../outside"),
+            ("/elsewhere/a", "/elsewhere/a"),
+        ] {
+            assert_eq!(repo_path(&scope, given.to_owned()), want, "{given:?}");
+        }
+        assert_eq!(edit_path(&scope, "./src/a.rs".to_owned()), "src/a.rs");
+        assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
+    }
 
     /// R2.13 test 2: the annotations follow the schema, and every v1
     /// method is a tool or says why not.
