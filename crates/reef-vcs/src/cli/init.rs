@@ -166,6 +166,13 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
     if !args.check && plan.iter().any(|file| file.contents.is_some()) {
         out.note("reef: files written, not committed");
     }
+    if !args.check
+        && let Some(home) = &home
+    {
+        for note in agents::duplicate_server_notes(home, &root, &plan) {
+            out.note(&format!("reef: {note}"));
+        }
+    }
     Ok(())
 }
 

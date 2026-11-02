@@ -162,7 +162,7 @@ To set an agent up once for every repository instead, use its install line, from
 | Cursor | `reef init --agents cursor` | the rule, in the repository |
 | any MCP client | `io.github.reef-vcs/reef` on the [MCP registry](https://registry.modelcontextprotocol.io), or a `.mcpb` bundle from the release | Reef's MCP server, with its own `reef-daemon` beside it |
 
-A Claude Code session that has the plugin and a repository's `.mcp.json` from `reef init` gets Reef's server twice; approve one of them.
+A Claude Code session that has the plugin and a repository's `.mcp.json` from `reef init` would get Reef's server twice, and every tool listed twice. `reef init` still writes `.mcp.json`, which is for everyone working in the repository, but on a machine with the plugin it says so: decline `.mcp.json`'s `reef` server when Claude Code asks, or add `"disabledMcpjsonServers": ["reef"]` to `.claude/settings.local.json`, which stays on this machine.
 
 With Claude Code, a second plugin makes its worktrees (`claude --worktree`, subagents with `isolation: worktree`) Reef workspaces instead of git worktrees: `claude plugin install reef-workspaces --marketplace reef-vcs/reef`. A workspace has no `.git` and its work is a jj change, not a branch; read [the workspace provider contract](workspace-provider.md) first.
 

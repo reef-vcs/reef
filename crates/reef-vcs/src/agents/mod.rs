@@ -118,7 +118,7 @@ impl Harness {
             Harness::AgentsMd => root.join("AGENTS.md"),
             Harness::ClaudeMd => root.join("CLAUDE.md"),
             Harness::ClaudeSkill { user: false } => root.join(claude_skill),
-            Harness::ClaudeSkill { user: true } => home?.dir.join(claude_skill),
+            Harness::ClaudeSkill { user: true } => home?.claude.join("skills/reef/SKILL.md"),
             Harness::CursorRule => root.join(".cursor/rules/reef.mdc"),
             Harness::McpJson => root.join(".mcp.json"),
             Harness::AgentSkill { user: false } => root.join(agent_skill),
@@ -166,6 +166,8 @@ impl Harness {
 pub(crate) struct Home {
     /// `$HOME`.
     dir: PathBuf,
+    /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+    claude: PathBuf,
     /// `$CODEX_HOME`, else `~/.codex`.
     codex: PathBuf,
     /// `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -185,6 +187,7 @@ impl Home {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)?;
         Some(Home {
+            claude: path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| dir.join(".claude")),
             codex: path("CODEX_HOME").unwrap_or_else(|| dir.join(".codex")),
             config: path("XDG_CONFIG_HOME").unwrap_or_else(|| dir.join(".config")),
             dir,
@@ -194,7 +197,7 @@ impl Home {
     /// Whether `place` exists as a directory.
     fn has(&self, place: Place) -> bool {
         match place {
-            Place::Dot(name) => self.dir.join(name).is_dir(),
+            Place::ClaudeHome => self.claude.is_dir(),
             Place::CodexHome => self.codex.is_dir(),
             Place::Config(name) => self.config.join(name).is_dir(),
         }
@@ -205,8 +208,8 @@ impl Home {
 /// so its presence means the agent is used on this machine.
 #[derive(Clone, Copy, Debug)]
 enum Place {
-    /// A directory directly under `$HOME`, such as `.claude`.
-    Dot(&'static str),
+    /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+    ClaudeHome,
     /// `$CODEX_HOME`, else `~/.codex`.
     CodexHome,
     /// A directory under `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -254,6 +257,75 @@ pub(crate) struct Sign {
     /// documents it.
     #[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
     install: &'static str,
+    /// How to tell that the harness has Reef's plugin installed, whose MCP
+    /// server the repository's entry duplicates (#153).
+    plugin_installed: Option<PluginInstalled>,
+}
+
+/// Where a harness records Reef's plugin as installed, and what to do when
+/// the repository's MCP entry serves it a second time (#153). `reef init`
+/// still writes the entry: it is for everyone working in the repository,
+/// not only this machine (ADR 0052).
+pub(crate) struct PluginInstalled {
+    /// A JSON file under the harness's user directory that lists installed
+    /// plugins.
+    file: &'static str,
+    /// The JSON Pointer to Reef's plugin's installs in it: an array of
+    /// objects, each with a `scope` and, for a project install, the
+    /// `projectPath` it is for.
+    pointer: &'static str,
+    /// The repository harness whose MCP entry the plugin duplicates.
+    duplicates: Harness,
+    /// What `reef init` says when it writes that entry on such a machine.
+    note: &'static str,
+}
+
+/// What to tell the user about MCP servers that `plan` sets up in `root`
+/// and that a harness's installed plugin already serves on this machine:
+/// one note per such harness (#153). An entry the plan skips, or a plugin
+/// installed only for another repository, gets none.
+pub(crate) fn duplicate_server_notes(
+    home: &Home,
+    root: &Path,
+    plan: &[FileAction],
+) -> Vec<&'static str> {
+    SIGNS
+        .iter()
+        .filter_map(|sign| Some((sign.agent, sign.plugin_installed.as_ref()?)))
+        .filter(|(_, installed)| {
+            installed
+                .duplicates
+                .path(root, Some(home))
+                .is_some_and(|path| {
+                    plan.iter()
+                        .any(|file| file.path == path && !matches!(file.action, Action::Skip(_)))
+                })
+        })
+        .filter(|(agent, installed)| {
+            let dir = match agent {
+                Agent::ClaudeCode => &home.claude,
+                _ => return false,
+            };
+            fs::read(dir.join(installed.file))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value.pointer(installed.pointer)?.as_array().cloned())
+                .is_some_and(|installs| installs.iter().any(|install| serves(install, root)))
+        })
+        .map(|(_, installed)| installed.note)
+        .collect()
+}
+
+/// Whether a plugin install serves sessions in `root`: installed for the
+/// user, or for this project.
+fn serves(install: &serde_json::Value, root: &Path) -> bool {
+    match install.get("scope").and_then(serde_json::Value::as_str) {
+        Some("user") => true,
+        _ => install
+            .get("projectPath")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|project| Path::new(project) == root),
+    }
 }
 
 /// Every agent Reef writes files for besides `AGENTS.md`. Recognizing
@@ -271,12 +343,19 @@ pub(crate) const SIGNS: &[Sign] = &[
             Harness::ClaudeSkill { user: false },
             Harness::McpJson,
         ],
-        home: &[Place::Dot(".claude")],
+        home: &[Place::ClaudeHome],
         // Its user MCP configuration is `~/.claude.json`, a state file
         // Reef does not edit; the plugin is the user-level route.
         user: &[Harness::ClaudeSkill { user: true }],
         package: Some(Package::ClaudeCode),
         install: "claude plugin install reef --marketplace reef-vcs/reef",
+        // Keyed `<plugin>@<marketplace>` (Claude Code 2.1.316).
+        plugin_installed: Some(PluginInstalled {
+            file: "plugins/installed_plugins.json",
+            pointer: "/plugins/reef@reef",
+            duplicates: Harness::McpJson,
+            note: "Claude Code's reef plugin already serves Reef's MCP server here, so .mcp.json's `reef` server would list every tool twice; decline it when Claude Code asks, or add \"disabledMcpjsonServers\": [\"reef\"] to .claude/settings.local.json",
+        }),
     },
     Sign {
         agent: Agent::Cursor,
@@ -287,6 +366,7 @@ pub(crate) const SIGNS: &[Sign] = &[
         user: &[],
         package: None,
         install: "reef init --agents cursor",
+        plugin_installed: None,
     },
     Sign {
         agent: Agent::Codex,
@@ -304,6 +384,7 @@ pub(crate) const SIGNS: &[Sign] = &[
         ],
         package: Some(Package::AgentPlugins),
         install: "codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef",
+        plugin_installed: None,
     },
     Sign {
         agent: Agent::Opencode,
@@ -324,6 +405,7 @@ pub(crate) const SIGNS: &[Sign] = &[
         // MCP server; `reef init` writes both files instead.
         package: None,
         install: "reef init --agents opencode --user",
+        plugin_installed: None,
     },
 ];
 

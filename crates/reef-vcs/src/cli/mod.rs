@@ -330,7 +330,9 @@ enum Command {
     #[command(after_help = "Example: reef init --check   # in CI: exit 3 if a file is stale")]
     Init(init::Args),
     /// Serve Reef's API to an agent harness over MCP on stdio (put it in the harness's config).
-    #[command(after_help = "Example: claude mcp add reef -- reef mcp")]
+    #[command(
+        after_help = "Example: reef mcp   # as the command of a stdio server in the harness's MCP config"
+    )]
     Mcp,
     /// Print the commands, MCP tools and API as JSON Schema, to generate tool definitions.
     #[command(
