@@ -4,6 +4,18 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+The rest of Phase 2's agent surface and its live views. Agents get brief JSON by default, a task-first `reef --help`, symbol-level diffs and a queryable history (`reef history`, the MCP `query_changes` tool), `reef schema` for generating tool definitions, and one-line installs for Claude Code, Codex and opencode, with the MCP server listed on the MCP registry. Humans get a web UI (`reef ui`) with a live smartlog, a workspaces and fleet page, and an activity feed with a replay scrubber. Status answers from an incremental index instead of a tree walk, a daemon can be reached remotely over TLS with a token, and harnesses that isolate sessions in git worktrees can ask Reef for workspaces instead (the workspace provider contract). Every Phase 2 exit criterion is met; the Python and TypeScript SDKs (R2.06, R2.07) follow in a 0.3 release.
+
+### Upgrading from 0.2
+
+Piped output is now brief JSON: compact, one list element per line, and for `ws list`, `status` and `diff` only the keys an agent acts on. A script that reads piped `reef` output and needs the full objects passes `-o json`.
+
+A 0.2 daemon keeps running after the binaries are replaced, and serves the calls it knows. The first command that needs something newer restarts it when it has no active workspaces; otherwise that command fails with exit code 9 and `next` set to `reef daemon stop`: stop it once its `ws run` sessions end, and the next command starts the new one. Restart it yourself after upgrading (`reef daemon stop`, then any command) so that every command runs against 0.3.
+
+The new daemon migrates its database (schema 6, for remote tokens) when it starts, and a 0.2 daemon then refuses that database: there is no going back to 0.2 on the same state directory.
+
 ### Added
 
 - Harness packages ([ADR 0052](docs/adr/0052-harness-packages.md)): one line sets up an agent for every repository. Claude Code: `claude plugin install reef --marketplace reef-vcs/reef` (the skill, Reef's MCP server, and hooks that declare the files it edits). Codex: `codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef` (the skill and the server, from a plugin in the vendor-neutral Agent Plugins format). opencode: `reef init --agents opencode --user`. This repository is both marketplaces, pinned to each release's tag.
