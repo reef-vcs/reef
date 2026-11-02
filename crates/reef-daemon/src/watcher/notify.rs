@@ -305,8 +305,9 @@ impl Watcher for NotifyWatcher {
             root,
             skip,
         )?;
-        // A stream that failed to start says nothing (notify drops the
-        // error): see one cookie through it first.
+        // A stream can start and still deliver nothing (notify 8.2.1
+        // reports one that fails to start, 8.2.0 did not): see one
+        // cookie through it first.
         #[cfg(target_os = "macos")]
         if !self.shared.journals.confirm(workspace, CONFIRM_TIMEOUT) {
             if let Some(root) = lock(&self.shared.demux).remove(workspace) {
