@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `labeled` so that adding the `macos` label runs the macOS leg (see `check`).
+    # `labeled` so that adding the `macos` label runs the macOS leg (see `check`). Any label
+    # restarts the run, so labels go on when a pull request is opened. There is no
+    # `unlabeled`: removing `macos` takes effect at the next push, and a re-run keeps its
+    # event's labels.
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
@@ -102,8 +105,9 @@ jobs:
     # macOS runs on main after every merge, on a manual run, and on a pull request labelled
     # `macos`, not on every pull request: its 25 to 40 minutes and GitHub's macOS arm64
     # capacity (on 2026-11-02 one job went unassigned twice, cancelled after 15 minutes each
-    # time) held up every merge. Pull requests are checked on macOS locally, and release.yml
-    # builds and tests every target before a tag.
+    # time) held up every merge. Pull requests are checked on macOS locally. release.yml runs
+    # only once a tag is pushed and smoke-tests the binaries, so a tag waits for main's latest
+    # run, macOS included, to be green (CONTRIBUTING.md).
     timeout-minutes: 50
     strategy:
       fail-fast: false
@@ -349,7 +353,7 @@ jobs:
           ls cli-shape-*.json
           if [[ "$MACOS" != true ]]; then
             echo "macOS did not run on this pull request; nothing to compare"
-            [[ "$(ls cli-shape-*.json | wc -l)" -eq 1 ]]
+            [[ "$(ls cli-shape-*.json | wc -l)" -eq 1 && -f cli-shape-linux.json ]]
             exit 0
           fi
           [[ "$(ls cli-shape-*.json | wc -l)" -eq 2 ]]
