@@ -361,7 +361,15 @@ pub(crate) fn default_list_path(scope: &Scope) -> Result<String, CliError> {
     }
 }
 
-fn given_path(scope: &Scope, base: Option<&Path>, given: &str) -> Result<String, CliError> {
+/// `given` repository-relative: absolute inside the scope's directory, or
+/// relative to `base` (the scope's directory when `None`), with `.`, `..`
+/// and a trailing `/` resolved by components; `INVALID_PATH` when it
+/// leaves the directory.
+pub(crate) fn given_path(
+    scope: &Scope,
+    base: Option<&Path>,
+    given: &str,
+) -> Result<String, CliError> {
     let path = Path::new(given);
     let relative = if path.is_absolute() {
         inside(&scope.dir, path)

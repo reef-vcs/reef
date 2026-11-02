@@ -60,6 +60,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 - On macOS, creating or releasing a workspace no longer drops other workspaces' filesystem events: each notify workspace has its own `FSEvents` stream.
 - A read at a GC-kept copy of an operation from before the last GC failed: jj could not build an index for it once GC had removed its ancestors. It answers through the head's index now (R2.12).
+- The MCP server reads path arguments as the CLI does under `--workspace`: `./`, `..` and a trailing `/` resolve, and `.` is the root where a tool takes one (`get_diff`, `list_files`). `get_diff`, `read_file` and `list_files` had refused `src/` with `INVALID_PATH`, and `query_changes` matched nothing for `./src`. An `edit_files` target with a trailing `/` is still refused (#117).
 - The MCP server's `get_diff` described `max_lines_per_file` as "[default: no cut]"; the default is 1,000.
 - Timestamps print with exactly three fraction digits (`2026-10-30T17:04:34.000Z`, `…34.100Z`), in the CLI's JSON and text, MCP results and backup manifests, so they sort as strings. `time`'s RFC 3339 formatting had trimmed trailing zeros and dropped a zero fraction, so a time on a whole second sorted after a later one in the same second.
 
