@@ -3356,7 +3356,7 @@ dependencies = [
 name = "reef-client"
 version = "0.3.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "etcetera",
  "hyper-util",
@@ -3390,7 +3390,7 @@ name = "reef-daemon"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "clap",
  "criterion",
@@ -3527,7 +3527,7 @@ name = "reef-vcs"
 version = "0.3.0"
 dependencies = [
  "assert_cmd",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "clap_complete",
  "humantime",
