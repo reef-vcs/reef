@@ -5,7 +5,9 @@
 //!
 //! - `status/<preset>/walk`: the tree unchanged, the journal marked
 //!   `events-lost` before each call, so the snapshot walks every file;
-//! - `walk_one_edit`: the same after one file appended (untimed);
+//! - `walk_one_edit`: the same after one file appended (untimed); both
+//!   with the workspace's automatic snapshots paused, so none takes the
+//!   journal first;
 //! - `index_clean`: the tree unchanged and the watcher settled: no snapshot;
 //! - `index_one_edit`: one file appended just before the call, so its event
 //!   may still be in flight: a snapshot of that path;
@@ -113,6 +115,9 @@ fn bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group(format!("status/{name}"));
     group.sample_size(20);
+    // No watcher snapshot of an injected event or an edit: one that took
+    // the journal first would leave the timed read the index's.
+    let paused = scheduler.pause(id);
     group.bench_function("walk", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
@@ -140,6 +145,7 @@ fn bench(c: &mut Criterion) {
             total
         });
     });
+    drop(paused);
     settle();
     group.bench_function("index_clean", |b| {
         b.iter_custom(|iters| {

@@ -258,8 +258,10 @@ impl Manager {
         let notify = index.enabled && self.scheduler.is_notify(id);
         let journals = Arc::clone(self.scheduler.journals());
         // Outside the scan lock: a scan in flight need not end first. A
-        // stale journal walks anyway, and says why.
-        let synced = if notify && journals.peek(id).stale.is_none() {
+        // stale journal walks anyway, and says why, even if a scan that
+        // began before the read arrived takes the journal first.
+        let stale = journals.peek(id).stale;
+        let synced = if notify && stale.is_none() {
             journals.sync(id, arrived, index.sync_timeout).await
         } else {
             None
@@ -303,7 +305,7 @@ impl Manager {
         }
         let peek = journals.peek(id);
         let walk = if notify && synced.is_none() {
-            Some(peek.stale.unwrap_or(WalkReason::NotSynced))
+            Some(peek.stale.or(stale).unwrap_or(WalkReason::NotSynced))
         } else {
             None
         };
