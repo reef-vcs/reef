@@ -1,7 +1,7 @@
 {
   "name": "reef-web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reef's web UI (R2.18, ADR 0047). Built into crates/reef-web/assets, which reef-daemon embeds.",
   "license": "Apache-2.0",
   "type": "module",

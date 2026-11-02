@@ -10,7 +10,7 @@
         "source": "git-subdir",
         "url": "https://github.com/reef-vcs/reef.git",
         "path": "plugins/agent-plugins",
-        "ref": "v0.2.0"
+        "ref": "v0.3.0"
       },
       "policy": {
         "installation": "AVAILABLE",

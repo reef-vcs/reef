@@ -4,6 +4,20 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+The rest of Phase 2's agent surface and its live views. Agents get brief JSON by default, a task-first `reef --help`, symbol-level diffs and a queryable history (`reef history`, the MCP `query_changes` tool), `reef schema` for generating tool definitions, and one-line installs for Claude Code, Codex and opencode, with the MCP server published to the MCP registry and as an MCPB bundle per target. Humans get a web UI (`reef ui`) with a live smartlog, a workspaces and fleet page, and an activity feed with a replay scrubber. Status answers from an incremental index instead of a tree walk, a daemon can be reached remotely over TLS with a token, and harnesses that isolate sessions in git worktrees can ask Reef for workspaces instead (the workspace provider contract). Every Phase 2 exit criterion is met; the Python and TypeScript SDKs (R2.06, R2.07) follow in a later release.
+
+### Upgrading from 0.2
+
+Piped output is now brief JSON: compact, one list element per line, and for `ws list`, `status` and `diff` only the keys an agent acts on, with zero values (`false`, `0`, `""`, `[]`) left out, so a check such as `.divergent == false` no longer matches. A script that reads piped `reef` output and needs the full objects passes `-o json`, or sets `REEF_OUTPUT=json` once. The MCP server's `list_workspaces`, `get_status` and `get_diff` return the brief objects too.
+
+**Restart the daemon after upgrading:** `reef daemon stop` once `reef ws list` shows no active workspaces, and the next command starts 0.3's. A 0.2 daemon keeps running after the binaries are replaced, and it answers commands that use new options of calls it already has as if the option were absent: `--at-op` and `--at` read the current state, `diff --symbols` returns no symbols, and `ws list` shows no file counts. A command whose first call the 0.2 daemon lacks restarts it when it has no active workspaces (not under `--no-autostart` or `--remote`); otherwise it fails with exit code 9 and `next` set to `reef daemon stop`.
+
+The new daemon migrates its database (schema 6, for remote tokens) when it starts, and a 0.2 daemon then refuses that database: there is no going back to 0.2 on the same state directory. Its first start also backfills each repository's history index (`repos/<id>/history.sqlite3`, up to 100,000 operations and 512 MiB, `[history]`) in the background, and the state directory gains `ui/` and `remote/`.
+
+`reef init --user` now writes the user-level files only of the agents it detects by their home directories, so a machine without `~/.claude` (or `CLAUDE_CONFIG_DIR`) no longer gets the Claude Code skill; `--agents` names them instead.
+
 ### Added
 
 - Harness packages ([ADR 0052](docs/adr/0052-harness-packages.md)): one line sets up an agent for every repository. Claude Code: `claude plugin install reef --marketplace reef-vcs/reef` (the skill, Reef's MCP server, and hooks that declare the files it edits). Codex: `codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef` (the skill and the server, from a plugin in the vendor-neutral Agent Plugins format). opencode: `reef init --agents opencode --user`. This repository is both marketplaces, pinned to each release's tag.
