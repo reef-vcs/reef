@@ -18,6 +18,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, is_watched, test_settings, watcher_name};
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
@@ -635,27 +637,62 @@ async fn watchman_waits_for_a_quiet_window() {
     assert!(is_watched(&inspect(&daemon, &repo, &c).await));
     subscribed(&c, before + 1).await;
 
-    // Creates every 500 ms never leave a quiet second; D subscribes by the
-    // cap anyway.
-    let d = create(&daemon, &repo).await;
-    let d_created = Instant::now();
-    let mut others = Vec::new();
-    let mut next = d_created;
-    while established(&d) == 0 {
+    // Creates starting every 500 ms never leave a quiet second; D subscribes
+    // by the cap anyway. They start on the cadence side by side, D's first.
+    // One after another, a create slower than 500 ms opened a quiet second:
+    // on loaded CI runners D (the first create after the restart) then
+    // subscribed about 1 s in, with one create done meanwhile.
+    // The cap counts from D's tracking, at the end of its create, so the
+    // wait is measured from D's reply, checked every 50 ms.
+    let started = Instant::now();
+    let mut ticks = tokio::time::interval(Duration::from_millis(500));
+    let mut polls = tokio::time::interval(Duration::from_millis(50));
+    let mut burst = FuturesUnordered::new();
+    let mut sent = 0_usize;
+    let mut d: Option<(Workspace, Instant)> = None;
+    let mut others = 0_usize;
+    let waited = loop {
+        if let Some((d, replied)) = &d {
+            if established(d) > 0 {
+                break replied.elapsed();
+            }
+            assert!(
+                replied.elapsed() < cap + Duration::from_secs(5),
+                "D did not subscribe by the cap"
+            );
+        }
         assert!(
-            d_created.elapsed() < cap + Duration::from_secs(5),
-            "D did not subscribe by the cap"
+            started.elapsed() < Duration::from_secs(60),
+            "D's create did not return"
         );
-        // On a fixed cadence, so a slow create does not open a quiet second.
-        next += Duration::from_millis(500);
-        tokio::time::sleep_until(next.into()).await;
-        others.push(create(&daemon, &repo).await);
-    }
-    let waited = d_created.elapsed();
+        tokio::select! {
+            _ = ticks.tick() => {
+                let (daemon, repo, index) = (&daemon, &repo, sent);
+                sent += 1;
+                burst.push(async move { (index, create(daemon, repo).await) });
+            }
+            _ = polls.tick() => {}
+            Some((index, ws)) = burst.next() => {
+                if index == 0 {
+                    d = Some((ws, Instant::now()));
+                } else {
+                    others += 1;
+                }
+            }
+        }
+    };
+    let (_, replied) = d.unwrap();
+    let took = replied - started;
     eprintln!(
-        "D subscribed {waited:.2?} after its create, with {} creates meanwhile",
-        others.len()
+        "D subscribed {waited:.2?} after its create returned (it took {took:.2?}), \
+         with {others} creates done meanwhile"
     );
+    // Dropped mid-flight, a create could be cut off part way.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while burst.next().await.is_some() {}
+    })
+    .await
+    .expect("the creates in flight finish");
     assert!(waited >= Duration::from_millis(4500), "{waited:?}");
 }
 
