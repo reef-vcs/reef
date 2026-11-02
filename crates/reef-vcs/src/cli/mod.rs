@@ -767,9 +767,11 @@ pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError>
     let client = match Client::connect(socket).await {
         Ok(client) => client,
         Err(ClientError::Connect { .. }) if !global.no_autostart => {
-            let (client, pid) = autostart::start(global, &config).await?;
-            out.note(&format!("reef: started daemon (pid {pid})"));
-            client
+            let started = autostart::start(global, &config).await?;
+            if started.spawned {
+                out.note(&format!("reef: started daemon (pid {})", started.pid));
+            }
+            started.client
         }
         Err(ClientError::Connect { .. }) => {
             return Err(CliError::NotRunning {
