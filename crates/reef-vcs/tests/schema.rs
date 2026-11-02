@@ -418,6 +418,32 @@ async fn outputs_match_their_schemas() {
         .run(&root, &["-o", "brief", "ws", "run", "--", "true"])
         .await;
     script.both(&root, &["schema", "cli", "status"]).await;
+    // The provider contract (R2.26), without a holder: no follower.
+    let provided = script
+        .json(&root, &["ws", "provider", "create", "--name", "schema-p"])
+        .await;
+    let provided_id = text(&provided["workspace_id"]);
+    script
+        .run(&root, &["ws", "provider", "create", "--name", "schema-p"])
+        .await;
+    script
+        .both(
+            &root,
+            &["ws", "provider", "attach", "--workspace", &provided_id],
+        )
+        .await;
+    script
+        .json(
+            &root,
+            &["ws", "provider", "release", "--workspace", &provided_id],
+        )
+        .await;
+    script
+        .run(
+            &root,
+            &["ws", "provider", "release", "--workspace", &provided_id],
+        )
+        .await;
 
     // Releases and GC last: they end the workspaces.
     script.json(&root, &["ws", "release", &a_id]).await;

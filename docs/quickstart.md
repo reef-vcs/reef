@@ -164,6 +164,8 @@ To set an agent up once for every repository instead, use its install line, from
 
 A Claude Code session that has the plugin and a repository's `.mcp.json` from `reef init` gets Reef's server twice; approve one of them.
 
+With Claude Code, a second plugin makes its worktrees (`claude --worktree`, subagents with `isolation: worktree`) Reef workspaces instead of git worktrees: `claude plugin install reef-workspaces --marketplace reef-vcs/reef`. A workspace has no `.git` and its work is a jj change, not a branch; read [the workspace provider contract](workspace-provider.md) first.
+
 With Claude Code, `reef init` also writes `.mcp.json`, which starts `reef mcp`: Reef's API as MCP tools ([ADR 0035](adr/0035-mcp-server.md)). Claude Code asks before it starts a project's server. The tools default to the workspace or repository Claude Code was started in. An agent without a shell reads and edits files through them (`read_file`, `edit_files`), and `wait_for_operations` waits for another agent's describe or edit. For another harness, add `reef mcp` as a stdio server in its MCP configuration.
 
 ## Watch it reclaim

@@ -16,6 +16,17 @@
       },
       "description": "Reef workspaces for coding agents: the skill that starts work in an isolated workspace, and Reef's MCP server.",
       "category": "development"
+    },
+    {
+      "name": "reef-workspaces",
+      "source": {
+        "source": "git-subdir",
+        "url": "reef-vcs/reef",
+        "path": "plugins/claude-code-workspaces",
+        "ref": "v0.2.0"
+      },
+      "description": "Reef workspaces in place of git worktrees: each worktree session and subagent gets a copy-on-write Reef workspace, held while the session runs.",
+      "category": "development"
     }
   ]
 }

@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "reef ws provider create --at repo=/cwd --at name=/name --hold-while parent -o text",
+            "statusMessage": "Creating a Reef workspace"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "reef ws provider release --at workspace=/worktree_path --hold-while parent"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "reef --no-autostart ws provider attach --at workspace=/cwd --hold-while parent >/dev/null 2>&1 || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

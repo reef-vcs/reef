@@ -299,7 +299,7 @@ pub(crate) fn error_object(error: &CliError) -> ErrorObject {
         error.reason(),
         &ErrorChain(error).to_string(),
         error.advice().as_ref(),
-        error.metadata(),
+        &error.metadata(),
     )
 }
 

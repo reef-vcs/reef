@@ -28,12 +28,14 @@ pub(crate) mod heartbeat;
 mod helper;
 mod here;
 mod history;
+pub(crate) mod holder;
 mod hook;
 mod init;
 mod log;
 mod op;
 mod out;
 mod presence;
+mod provider;
 mod remote;
 mod render;
 mod render_vcs;
@@ -651,6 +653,8 @@ fn local_only(command: &Command) -> Option<&'static str> {
         Command::Here(_) => "here",
         Command::Ws(args) if args.is_run() => "ws run",
         Command::Ws(args) if args.is_gc() => "ws gc",
+        Command::Ws(args) if args.is_provider() => "ws provider",
+        Command::Ws(args) if args.is_follow() => "ws renew --follow",
         Command::Ui(_) => "ui",
         Command::Init(_) => "init",
         Command::Mcp => "mcp",
@@ -694,7 +698,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
     }
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
-        Command::Here(args) => here::run(&connect(&global, out).await?, args).await,
+        Command::Here(args) => here::run(&connect(&global, out).await?, &global, args).await,
         Command::Status(args) => Box::pin(status::run(&connect(&global, out).await?, args)).await,
         Command::Log(args) => log::run(&connect(&global, out).await?, args).await,
         Command::Show(args) => changes::show(&connect(&global, out).await?, args).await,
@@ -725,7 +729,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
             out.raw(&buffer)
         }
         Command::Repo(args) => repo::run(&connect(&global, out).await?, args).await,
-        Command::Ws(args) => return ws::run(&connect(&global, out).await?, args).await,
+        Command::Ws(args) => return ws::run(&connect(&global, out).await?, &global, args).await,
         Command::Store(args) => return store::run(&connect(&global, out).await?, args).await,
         Command::Backup(args) => return backup::run(&connect(&global, out).await?, args).await,
         Command::Restore(args) => restore::run(&global, out, &args),
