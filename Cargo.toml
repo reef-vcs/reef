@@ -107,7 +107,7 @@ ring = "0.17"                      # SHA-256 of a pinned key
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }   # the daemon's generated certificate
 rustls-native-certs = "0.8"        # the OS's roots, for a CA-issued certificate
 # Page tokens (R2.01): opaque base64url strings.
-base64 = "0.22"
+base64 = "0.23"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"                 # CancellationToken for shutdown
 hyper-util = { version = "0.1", features = ["tokio"] }
