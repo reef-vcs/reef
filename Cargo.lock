@@ -3532,6 +3532,7 @@ dependencies = [
  "indexmap",
  "jj-lib",
  "jsonschema",
+ "libc",
  "nix",
  "pollster",
  "prost-reflect",

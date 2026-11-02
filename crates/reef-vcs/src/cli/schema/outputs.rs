@@ -17,7 +17,7 @@ use reef_client::json::{
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use crate::cli::{guide, here, init, presence, remote, ws, ws_run};
+use crate::cli::{guide, here, init, presence, provider, remote, ws, ws_run};
 
 /// A schema of what a command prints, built in the document's generator
 /// so each type is defined once.
@@ -185,7 +185,12 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     ),
     row(&["ws", "inspect"], object::<Inspected>),
     row(&["ws", "snapshot"], object::<Snapshotted>),
-    row(&["ws", "renew"], object::<ws::Renewed>),
+    OutputRow {
+        note: Some(
+            "with --follow, nothing: it renews until the lease ends, the --while-pid process exits, or a signal",
+        ),
+        ..row(&["ws", "renew"], object::<ws::Renewed>)
+    },
     row(&["ws", "release"], object::<Released>),
     row(&["ws", "move"], object::<Moved>),
     OutputRow {
@@ -195,6 +200,21 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
             &["ws", "run"],
             object::<ws_run::Report>,
             "stdout is the command's own; with -o json or -o brief the report follows it, ending stdout",
+        )
+    },
+    OutputRow {
+        note: Some("-o text prints the workspace's path alone"),
+        ..row(&["ws", "provider", "create"], object::<provider::Provided>)
+    },
+    OutputRow {
+        note: Some("-o text prints the workspace's path alone"),
+        ..row(&["ws", "provider", "attach"], object::<provider::Provided>)
+    },
+    OutputRow {
+        note: Some("-o text prints nothing on stdout and `released <id>` on stderr"),
+        ..row(
+            &["ws", "provider", "release"],
+            object::<provider::ProviderReleased>,
         )
     },
     OutputRow {

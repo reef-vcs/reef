@@ -16,7 +16,7 @@ use super::out::{TextRender, block, shell_line};
 use super::render::{lease_text, now_ms, span};
 use super::repo::missing;
 use super::scope::{current_dir, divergent_log, is_workspace_not_found};
-use super::{CliError, Ctx};
+use super::{CliError, Ctx, Global};
 
 /// Operation ids are shown by this many characters, as `ws inspect` does.
 const OP_WIDTH: usize = 12;
@@ -37,6 +37,9 @@ pub(crate) struct Args {
 pub(crate) struct Inside {
     #[schemars(extend("const" = true))]
     in_workspace: bool,
+    /// Whether a program holds it through `ws provider` (R2.26), and
+    /// releases it itself.
+    held: bool,
     #[serde(flatten)]
     workspace: Workspace,
     /// Milliseconds since the last snapshot, for the text form.
@@ -61,7 +64,7 @@ pub(crate) struct Outside {
     next: Vec<String>,
 }
 
-pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
+pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), CliError> {
     let from_env = std::env::var("REEF_WORKSPACE")
         .ok()
         .filter(|id| !id.trim().is_empty());
@@ -80,7 +83,13 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     match ctx.call(ctx.client.get_workspace(request)).await {
         Ok(response) => {
             let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
-            ctx.out.object(&inside(&ws, from_env.is_some()))
+            // A holder record is this machine's; a remote daemon's
+            // workspaces have none here.
+            let held = !super::remote_mode()
+                && global
+                    .state_dir()
+                    .is_ok_and(|dir| super::holder::current(&dir, &ws).is_some());
+            ctx.out.object(&inside(&ws, from_env.is_some(), held))
         }
         Err(CliError::Daemon(error)) if from_env.is_none() && is_workspace_not_found(&error) => {
             let repos = ctx.call(ctx.client.list_repositories()).await?;
@@ -90,13 +99,15 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     }
 }
 
-/// The answer for `ws`; `in_run` when `ws run` started this process, which
-/// releases the workspace itself.
-fn inside(ws: &v1::Workspace, in_run: bool) -> Inside {
+/// The answer for `ws`; `in_run` when `ws run` started this process, and
+/// `held` when a `ws provider` holder holds it: both release it
+/// themselves.
+fn inside(ws: &v1::Workspace, in_run: bool, held: bool) -> Inside {
     let workspace = Workspace::from(ws);
-    let (hint, next) = advise(&workspace, in_run);
+    let (hint, next) = advise(&workspace, in_run, held);
     Inside {
         in_workspace: true,
+        held,
         snapshot_age_ms: ws
             .last_snapshot_at
             .as_ref()
@@ -110,7 +121,7 @@ fn inside(ws: &v1::Workspace, in_run: bool) -> Inside {
 /// What to do in `ws`, by its state: release a healthy one when done (or
 /// nothing, inside `ws run`), renew one in its grace period (R2.11), list a divergent one's commits (R2.27),
 /// inspect a flagged one, make another if it is gone.
-fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
+fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
     let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
     let lease_state = ws
         .lease
@@ -133,6 +144,10 @@ fn advise(ws: &Workspace, in_run: bool) -> (String, Vec<String>) {
         ("active", "active" | "in_grace") if in_run => (
             "Work here; `ws run` snapshots and releases this workspace when your command exits."
                 .to_owned(),
+            Vec::new(),
+        ),
+        ("active", "active") if held => (
+            "Work here; the program that created this workspace releases it.".to_owned(),
             Vec::new(),
         ),
         ("active", "active") => (
@@ -288,24 +303,33 @@ mod tests {
 
     #[test]
     fn next_follows_the_state() {
-        let (_, next) = advise(&workspace("active", Some("active")), false);
+        let (_, next) = advise(&workspace("active", Some("active")), false, false);
         assert_eq!(next, ["reef", "ws", "release", "0123456789abcdef"]);
-        let (hint, next) = advise(&workspace("active", Some("active")), true);
+        let (hint, next) = advise(&workspace("active", Some("active")), true, false);
         assert!(next.is_empty() && hint.contains("ws run"), "{hint}");
-        let (hint, next) = advise(&workspace("active", Some("in_grace")), false);
+        let (hint, next) = advise(&workspace("active", Some("in_grace")), false, false);
         assert_eq!(next, ["reef", "ws", "renew", "0123456789abcdef"]);
         assert!(hint.contains("renew"), "{hint}");
-        let (hint, next) = advise(&workspace("active", Some("in_grace")), true);
+        let (hint, next) = advise(&workspace("active", Some("in_grace")), true, false);
         assert!(next.is_empty() && hint.contains("ws run"), "{hint}");
-        let (_, next) = advise(&workspace("released", Some("ended")), false);
+        // R2.26 test 11: a held workspace names no release; one in grace
+        // still says to renew, since its follower is evidently failing.
+        let (hint, next) = advise(&workspace("active", Some("active")), false, true);
+        assert!(
+            next.is_empty() && hint.contains("program that created"),
+            "{hint}"
+        );
+        let (_, next) = advise(&workspace("active", Some("in_grace")), false, true);
+        assert_eq!(next, ["reef", "ws", "renew", "0123456789abcdef"]);
+        let (_, next) = advise(&workspace("released", Some("ended")), false, false);
         assert_eq!(next, ["reef", "ws", "create", "--repo", "fedcba9876543210"]);
-        let (hint, next) = advise(&workspace("active", Some("expired")), true);
+        let (hint, next) = advise(&workspace("active", Some("expired")), true, false);
         assert_eq!(next[..3], ["reef", "ws", "create"]);
         assert!(hint.contains("expired"), "{hint}");
         let mut divergent = workspace("active", Some("active"));
         divergent.divergent = true;
         divergent.change_id = "01".into();
-        let (hint, next) = advise(&divergent, true);
+        let (hint, next) = advise(&divergent, true, false);
         assert_eq!(
             next,
             [
@@ -320,7 +344,7 @@ mod tests {
         assert!(hint.contains("reef abandon"), "{hint}");
         let mut flagged = workspace("active", Some("active"));
         flagged.attention = Some("store-missing".into());
-        let (_, next) = advise(&flagged, true);
+        let (_, next) = advise(&flagged, true, false);
         assert_eq!(next, ["reef", "ws", "inspect", "0123456789abcdef"]);
     }
 
@@ -351,9 +375,10 @@ mod tests {
         let mut ws = workspace("active", Some("active"));
         ws.divergent = true;
         ws.attention = Some("store-missing".into());
-        let (hint, next) = advise(&ws, false);
+        let (hint, next) = advise(&ws, false, false);
         let here = Inside {
             in_workspace: true,
+            held: false,
             workspace: ws,
             snapshot_age_ms: Some(12_000),
             hint,

@@ -5,6 +5,7 @@
 //! object, and may have an [`Advice`]: the `hint` and `next` of ADR 0025.
 //! A daemon error's `reason` (R2.01) is the JSON error object's `reason`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
@@ -43,6 +44,19 @@ pub(crate) enum CliError {
         reason: &'static str,
         /// The message.
         message: String,
+        /// How to fix it.
+        advice: Advice,
+    },
+    /// A request field the CLI refused, named in the error's metadata as
+    /// `field` (R2.26's provider input).
+    #[error("{message}")]
+    Input {
+        /// The reason.
+        reason: &'static str,
+        /// The message.
+        message: String,
+        /// The field, as the request names it.
+        field: &'static str,
         /// How to fix it.
         advice: Advice,
     },
@@ -169,7 +183,9 @@ impl CliError {
                 reef_api::AGENT_MAX_BYTES
             ))),
             Self::Daemon(error) => error.advice(),
-            Self::Advised { advice, .. } | Self::Precheck { advice, .. } => Some(advice.clone()),
+            Self::Advised { advice, .. }
+            | Self::Precheck { advice, .. }
+            | Self::Input { advice, .. } => Some(advice.clone()),
             Self::NotRunning {
                 start,
                 autostart_off,
@@ -220,19 +236,23 @@ impl CliError {
             Self::Daemon(error) => error.reason(),
             Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.reason(),
             Self::Helper { reason, .. } => reason,
-            Self::Precheck { reason, .. } => reason,
+            Self::Precheck { reason, .. } | Self::Input { reason, .. } => reason,
             _ => "",
         }
     }
 
     /// The daemon's `ErrorDetail.metadata`, empty when there is none
     /// (R2.27).
-    pub(crate) fn metadata(&self) -> &BTreeMap<String, String> {
-        static NONE: BTreeMap<String, String> = BTreeMap::new();
+    pub(crate) fn metadata(&self) -> Cow<'_, BTreeMap<String, String>> {
         match self {
-            Self::Daemon(error) => error.metadata(),
-            Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.metadata(),
-            _ => &NONE,
+            Self::Daemon(error) => Cow::Borrowed(error.metadata()),
+            Self::OldDaemon { error, .. } | Self::Advised { error, .. } => {
+                Cow::Borrowed(error.metadata())
+            }
+            Self::Input { field, .. } => {
+                Cow::Owned(BTreeMap::from([("field".to_owned(), (*field).to_owned())]))
+            }
+            _ => Cow::Owned(BTreeMap::new()),
         }
     }
 }
@@ -252,7 +272,7 @@ impl Classify for CliError {
             | Self::Helper { kind, .. }
             | Self::Precheck { kind, .. } => *kind,
             Self::NoDaemonBinary { .. } => ErrorKind::NotFound,
-            Self::Usage(_) => ErrorKind::InvalidArgument,
+            Self::Usage(_) | Self::Input { .. } => ErrorKind::InvalidArgument,
             Self::Io { source, .. } | Self::Stdout(source) => classify_by_source(source),
         }
     }

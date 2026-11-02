@@ -172,7 +172,10 @@ struct Outcome {
 
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
     let (ws, start) = match &args.workspace {
-        Some(workspace) => (attach(ctx, workspace, args.owner.as_deref()).await?, None),
+        Some(workspace) => (
+            attach_rule(ctx, workspace, args.owner.as_deref()).await?,
+            None,
+        ),
         None => create(ctx, &args).await?,
     };
     // The workspace exists from here on: a failure before the command runs
@@ -306,8 +309,13 @@ fn purpose_of(command: &[String]) -> String {
 /// Looks `workspace` up and takes over its lease: it must be active with a
 /// live lease, and its owner must be `owner` or, without one, this user on
 /// this machine. Heartbeats once, which proves the lease can be renewed and
-/// gives a grace-period lease its full length back.
-async fn attach(ctx: &Ctx, workspace: &str, owner: Option<&str>) -> Result<Workspace, CliError> {
+/// gives a grace-period lease its full length back. `ws provider attach`
+/// applies the same rule (R2.26).
+pub(crate) async fn attach_rule(
+    ctx: &Ctx,
+    workspace: &str,
+    owner: Option<&str>,
+) -> Result<Workspace, CliError> {
     let response = ctx
         .call(ctx.client.inspect_workspace("", workspace, false))
         .await?;
@@ -318,11 +326,15 @@ async fn attach(ctx: &Ctx, workspace: &str, owner: Option<&str>) -> Result<Works
             .as_ref()
             .is_some_and(|lease| matches!(lease.state(), LeaseState::Active | LeaseState::InGrace));
     if !live {
-        return Err(conflict(format!(
-            "workspace {} is {} and its lease has ended; only an active workspace can be attached",
-            ws.id,
-            json::state_name(ws.state)
-        )));
+        return Err(CliError::Refused {
+            kind: ErrorKind::Conflict,
+            message: format!(
+                "workspace {} is {} and its lease has ended; only an active workspace can be attached",
+                ws.id,
+                json::state_name(ws.state)
+            ),
+            advice: Some(super::provider::ended_advice(ctx, &ws).await),
+        });
     }
     if !may_attach(&ws.owner, owner, &default_owner()) {
         return Err(conflict(format!(

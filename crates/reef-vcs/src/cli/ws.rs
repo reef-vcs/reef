@@ -1,4 +1,4 @@
-//! `reef ws create | list | inspect | snapshot | renew | release | move | run | gc`.
+//! `reef ws create | list | inspect | snapshot | renew | release | move | run | provider | gc`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,9 +18,11 @@ use serde::Serialize;
 
 use super::advice::AdviceCtx;
 use super::changes::{note_divergence, short, workspace_after};
+use super::heartbeat::{Heartbeater, heartbeats};
+use super::holder::{self, HoldWhile};
 use super::render::{GcReports, lease_text, now_ms, span};
 use super::repo::missing;
-use super::{CliError, Ctx, RepoArg, absolute, scope, ws_move, ws_run};
+use super::{CliError, Ctx, Global, RepoArg, absolute, provider, scope, ws_move, ws_run};
 
 /// `reef ws`.
 #[derive(Debug, clap::Args)]
@@ -79,6 +81,12 @@ enum WsCommand {
         /// Renew this lease, failing unless it is the workspace's current one.
         #[arg(long, value_name = "ID")]
         lease_id: Option<String>,
+        /// Keep renewing on the daemon's cadence until the lease ends or a signal.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow, stop once this process exits.
+        #[arg(long, value_name = "PID", requires = "follow")]
+        while_pid: Option<i32>,
     },
     /// Snapshot a workspace, then remove its directory and end its lease.
     #[command(visible_alias = "rm")]
@@ -98,6 +106,8 @@ enum WsCommand {
     /// Run a command in a new workspace, then release it.
     #[command(after_help = "Example: reef ws run -- cargo test")]
     Run(ws_run::Args),
+    /// Create, attach and release workspaces for a program, JSON in and out.
+    Provider(provider::Args),
     /// Delete old operations, unused bases, and released workspace records.
     ///
     /// Snapshots every active workspace, then removes what is older than
@@ -200,14 +210,27 @@ impl Args {
         matches!(self.command, WsCommand::Run(_))
     }
 
+    /// Whether this is `ws provider`, which holds workspaces for a local
+    /// process.
+    pub(crate) fn is_provider(&self) -> bool {
+        matches!(self.command, WsCommand::Provider(_))
+    }
+
+    /// Whether this is `ws renew --follow`, which follows a local process
+    /// and keeps a local record.
+    pub(crate) fn is_follow(&self) -> bool {
+        matches!(self.command, WsCommand::Renew { follow: true, .. })
+    }
+
     /// Whether this is `ws gc`, which calls an ADMIN RPC.
     pub(crate) fn is_gc(&self) -> bool {
         matches!(self.command, WsCommand::Gc { .. })
     }
 }
 
-pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
+pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCode, CliError> {
     let done = match args.command {
+        WsCommand::Provider(args) => provider::run(ctx, global, args).await,
         WsCommand::Run(args) => return ws_run::run(ctx, args).await,
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, args).await,
@@ -216,55 +239,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             all,
             limit,
             at,
-        } => {
-            let states: Vec<i32> = if all {
-                Vec::new()
-            } else {
-                vec![
-                    WorkspaceState::Active.into(),
-                    WorkspaceState::Releasing.into(),
-                ]
-            };
-            let list = |repo| {
-                ctx.client.list_workspaces(ListWorkspacesRequest {
-                    repo,
-                    states: states.clone(),
-                    changed_file_counts: true,
-                    ..ListWorkspacesRequest::default()
-                })
-            };
-            let listed = if at.given() {
-                // One repository's, at one of its operations (R2.12).
-                let scope = scope::resolve_repo_only(ctx, repo.as_deref()).await?;
-                let at_operation = at.at_operation(ctx, &scope).await?;
-                let advice = AdviceCtx {
-                    operation_given: true,
-                    ..AdviceCtx::new(&scope)
-                };
-                ctx.call(ctx.client.list_workspaces(ListWorkspacesRequest {
-                    repo: scope.repo_id.clone(),
-                    at_operation,
-                    ..ListWorkspacesRequest::default()
-                }))
-                .await
-                .map_err(|error| advice.refine(error))?
-            } else {
-                match repo {
-                    Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
-                    None => ctx.call(list(String::new())).await?,
-                }
-            };
-            let total = listed.len();
-            let listed = newest(listed, limit);
-            if listed.len() < total {
-                ctx.out.note(&format!(
-                    "reef: showing the newest {} of {total} workspaces; --limit 0 shows all",
-                    listed.len()
-                ));
-            }
-            let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
-            ctx.out.list_with(&listed, brief::workspaces)
-        }
+        } => list(ctx, repo, all, limit, &at).await,
         WsCommand::Inspect {
             workspace,
             no_snapshot,
@@ -286,21 +261,27 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
         WsCommand::Renew {
             workspace,
             lease_id,
+            follow: true,
+            while_pid,
+        } => {
+            follow(
+                ctx,
+                global,
+                workspace.as_deref(),
+                lease_id.as_deref(),
+                while_pid,
+            )
+            .await
+        }
+        WsCommand::Renew {
+            workspace,
+            lease_id,
+            ..
         } => renew(ctx, workspace.as_deref(), lease_id.as_deref()).await,
         WsCommand::Release {
             workspace,
             no_snapshot,
-        } => {
-            let response = ctx
-                .call(
-                    ctx.client
-                        .release_workspace("", &workspace, !no_snapshot, false),
-                )
-                .await?;
-            let released = Released::from(&response);
-            let note = format!("released {}", released.id);
-            ctx.out.done(&released, &note)
-        }
+        } => release(ctx, &workspace, no_snapshot).await,
         WsCommand::Move(args) => ws_move::run(ctx, args).await,
     };
     done.map(|()| ExitCode::SUCCESS)
@@ -408,6 +389,236 @@ async fn renew(ctx: &Ctx, workspace: Option<&str>, lease_id: Option<&str>) -> Re
         },
         &note,
     )
+}
+
+/// `reef ws list`.
+async fn list(
+    ctx: &Ctx,
+    repo: Option<String>,
+    all: bool,
+    limit: usize,
+    at: &scope::AtArgs,
+) -> Result<(), CliError> {
+    let states: Vec<i32> = if all {
+        Vec::new()
+    } else {
+        vec![
+            WorkspaceState::Active.into(),
+            WorkspaceState::Releasing.into(),
+        ]
+    };
+    let list = |repo| {
+        ctx.client.list_workspaces(ListWorkspacesRequest {
+            repo,
+            states: states.clone(),
+            changed_file_counts: true,
+            ..ListWorkspacesRequest::default()
+        })
+    };
+    let listed = if at.given() {
+        // One repository's, at one of its operations (R2.12).
+        let scope = scope::resolve_repo_only(ctx, repo.as_deref()).await?;
+        let at_operation = at.at_operation(ctx, &scope).await?;
+        let advice = AdviceCtx {
+            operation_given: true,
+            ..AdviceCtx::new(&scope)
+        };
+        ctx.call(ctx.client.list_workspaces(ListWorkspacesRequest {
+            repo: scope.repo_id.clone(),
+            at_operation,
+            ..ListWorkspacesRequest::default()
+        }))
+        .await
+        .map_err(|error| advice.refine(error))?
+    } else {
+        match repo {
+            Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
+            None => ctx.call(list(String::new())).await?,
+        }
+    };
+    let total = listed.len();
+    let listed = newest(listed, limit);
+    if listed.len() < total {
+        ctx.out.note(&format!(
+            "reef: showing the newest {} of {total} workspaces; --limit 0 shows all",
+            listed.len()
+        ));
+    }
+    let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
+    ctx.out.list_with(&listed, brief::workspaces)
+}
+
+/// `reef ws release`.
+async fn release(ctx: &Ctx, workspace: &str, no_snapshot: bool) -> Result<(), CliError> {
+    let response = ctx
+        .call(
+            ctx.client
+                .release_workspace("", workspace, !no_snapshot, false),
+        )
+        .await?;
+    let released = Released::from(&response);
+    let note = format!("released {}", released.id);
+    ctx.out.done(&released, &note)
+}
+
+/// How often a follower checks that its holder still runs.
+const HOLDER_CHECK: Duration = Duration::from_secs(2);
+
+/// `reef ws renew --follow` (R2.26): renews the lease on the daemon's
+/// cadence until it is gone, the `--while-pid` process exits, or a SIGTERM
+/// or SIGINT, recording itself under `<state>/holders/` meanwhile, after
+/// its first renewal. Prints nothing on stdout; its notes go to stderr.
+async fn follow(
+    ctx: &Ctx,
+    global: &Global,
+    workspace: Option<&str>,
+    lease_id: Option<&str>,
+    while_pid: Option<i32>,
+) -> Result<(), CliError> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    // First, so a signal at any point below ends the follower cleanly.
+    let mut terminate = signal(SignalKind::terminate()).map_err(CliError::Signals)?;
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(CliError::Signals)?;
+    let holder = match while_pid {
+        Some(pid) => match holder::resolve(HoldWhile::Pid(pid)) {
+            Ok(holder) => Some(holder),
+            // Already gone: nothing to hold the lease for.
+            Err(_) => return Ok(()),
+        },
+        None => None,
+    };
+    let named = named_or_current(ctx, workspace).await?;
+    // The first renewal is retried while the daemon is away (a restart,
+    // a quiesce): the program that asked for the workspace was already
+    // told it is held.
+    let mut backoff = Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    let (ws, renewed) = loop {
+        match first_renewal(ctx, &named, lease_id).await {
+            Ok(found) => break found,
+            Err(error) if !retryable(&error) => return Err(error),
+            Err(error) => {
+                let holder_gone = holder.as_ref().is_some_and(|holder| !holder::alive(holder));
+                let unheld_too_long = holder.is_none() && started.elapsed() > FIRST_RENEWAL_UNHELD;
+                if holder_gone {
+                    return Ok(());
+                }
+                if unheld_too_long {
+                    return Err(error);
+                }
+                ctx.out.note(&format!(
+                    "reef: cannot renew yet ({}); retrying in {}",
+                    reef_error::ErrorChain(&error),
+                    humantime::format_duration(backoff)
+                ));
+                tokio::select! {
+                    () = tokio::time::sleep(backoff) => {}
+                    _ = terminate.recv() => return Ok(()),
+                    _ = interrupt.recv() => return Ok(()),
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
+    };
+    let me = holder::resolve(HoldWhile::Pid(
+        i32::try_from(std::process::id()).unwrap_or(0),
+    ))?;
+    let state_dir = global.state_dir()?;
+    let record = holder::Record {
+        workspace_id: ws.id.clone(),
+        lease_id: renewed.id.clone(),
+        follower: me,
+        holder,
+        since: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
+    };
+    holder::write(&state_dir, &record).map_err(|source| CliError::Io {
+        op: "write",
+        path: state_dir.join("holders"),
+        source,
+    })?;
+    let _record = RecordGuard {
+        state_dir,
+        workspace_id: ws.id.clone(),
+        follower: me,
+    };
+    let out = ctx.out.clone();
+    let heartbeater = Heartbeater::new(
+        std::sync::Arc::new(ctx.client.clone()),
+        &ws,
+        &renewed,
+        Box::new(move |text: &str| out.note(text)),
+    )?;
+    let mut check = tokio::time::interval(HOLDER_CHECK);
+    let beats = heartbeats(heartbeater);
+    tokio::pin!(beats);
+    loop {
+        tokio::select! {
+            () = &mut beats => break,
+            _ = terminate.recv() => break,
+            _ = interrupt.recv() => break,
+            _ = check.tick() => {
+                if holder.as_ref().is_some_and(|holder| !holder::alive(holder)) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How long a follower with no holder retries its first renewal.
+const FIRST_RENEWAL_UNHELD: Duration = Duration::from_secs(60);
+
+/// The workspace and its lease, renewed once.
+async fn first_renewal(
+    ctx: &Ctx,
+    named: &str,
+    lease_id: Option<&str>,
+) -> Result<(reef_api::v1::Workspace, reef_api::v1::Lease), CliError> {
+    let ws = ctx
+        .call(ctx.client.inspect_workspace("", named, false))
+        .await?
+        .workspace
+        .ok_or_else(|| missing("workspace"))?;
+    let lease_id = match lease_id {
+        Some(id) => id.to_owned(),
+        None => ws
+            .lease
+            .as_ref()
+            .ok_or_else(|| missing("lease"))?
+            .id
+            .clone(),
+    };
+    let renewed = ctx
+        .call(ctx.client.renew_lease("", &ws.id, &lease_id))
+        .await?
+        .lease
+        .ok_or_else(|| missing("lease"))?;
+    Ok((ws, renewed))
+}
+
+/// Whether a failed first renewal may succeed later: the daemon away, not
+/// a lease or workspace that is gone.
+fn retryable(error: &CliError) -> bool {
+    use reef_error::Classify as _;
+    matches!(
+        error.kind(),
+        ErrorKind::Unavailable | ErrorKind::Internal | ErrorKind::Io
+    )
+}
+
+/// Removes a follower's record on every way out.
+struct RecordGuard {
+    state_dir: PathBuf,
+    workspace_id: String,
+    follower: holder::Holder,
+}
+
+impl Drop for RecordGuard {
+    fn drop(&mut self) {
+        holder::remove(&self.state_dir, &self.workspace_id, &self.follower);
+    }
 }
 
 /// `reef ws snapshot` (R2.27): the explicit form of what `ws inspect` does
