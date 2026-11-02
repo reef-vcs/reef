@@ -33,6 +33,10 @@ const REPO_URL: &str = "https://github.com/reef-vcs/reef";
 const PLUGIN_DESCRIPTION: &str = "Reef workspaces for coding agents: the skill that starts work \
      in an isolated workspace, and Reef's MCP server.";
 
+/// The plugins' keywords.
+const PLUGIN_KEYWORDS: &[&str] = &["version-control", "workspaces", "jj", "mcp"];
+const WORKSPACES_KEYWORDS: &[&str] = &["version-control", "workspaces", "worktrees", "jj"];
+
 /// The registry listing's description, at most 100 characters.
 const SERVER_DESCRIPTION: &str =
     "Version control for fleets of coding agents: isolated workspaces, status, diff and history.";
@@ -54,6 +58,62 @@ const CLAUDE_CODE_SESSION: &str = "/session_id";
 /// Claude Code, which reads a hook's stdout as a decision.
 fn hook_command(args: &str) -> String {
     format!("command -v reef >/dev/null 2>&1 && reef presence hook {args} >/dev/null 2>&1 || true")
+}
+
+/// The opt-in plugin that makes Claude Code's worktrees Reef workspaces
+/// (R2.26, ADR 0053): a tree of its own, since it changes what a session's
+/// isolation is.
+const WORKSPACES_DIR: &str = "plugins/claude-code-workspaces";
+const WORKSPACES_NAME: &str = "reef-workspaces";
+const WORKSPACES_DESCRIPTION: &str = "Reef workspaces in place of git worktrees: each worktree \
+     session and subagent gets a copy-on-write Reef workspace, held while the session runs.";
+
+/// Claude Code's worktree events and where their fields are (JSON Pointers
+/// into the hook event), as `reef ws provider` reads them: facts about one
+/// harness, which the command knows nothing of. `WorktreeCreate` replaces
+/// git's worktree and reads the path from the last line of stdout;
+/// `WorktreeRemove` names the directory. A resumed session returns to its
+/// worktree without either, and its `SessionStart` names the directory it
+/// started in, not the worktree (Claude Code 2.1.316, checked live); the
+/// event's `cwd` follows the session into its worktree from the first
+/// prompt, so `UserPromptSubmit` holds the workspace again.
+const PROVIDER_CREATE: (&str, &[(&str, &str)]) =
+    ("WorktreeCreate", &[("repo", "/cwd"), ("name", "/name")]);
+const PROVIDER_RELEASE: (&str, &[(&str, &str)]) =
+    ("WorktreeRemove", &[("workspace", "/worktree_path")]);
+const PROVIDER_REHOLD: (&str, &[(&str, &str)]) = ("UserPromptSubmit", &[("workspace", "/cwd")]);
+
+/// `--at` for each pair.
+fn at(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(field, pointer)| format!("--at {field}={pointer}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The provider hooks' commands: create, release, re-hold. Create and
+/// release fail loudly, so a harness without `reef` never falls back to
+/// git unnoticed. Re-hold runs on every prompt: it never fails (exit 2
+/// would block the prompt), prints nothing (its stdout becomes context),
+/// starts no daemon, and is a lookup that finds nothing outside a
+/// workspace and keeps the follower of a workspace already held.
+fn provider_commands() -> [String; 3] {
+    [
+        format!(
+            "reef ws provider create {} --hold-while parent -o text",
+            at(PROVIDER_CREATE.1)
+        ),
+        // For this session: kept while another session holds it.
+        format!(
+            "reef ws provider release {} --hold-while parent",
+            at(PROVIDER_RELEASE.1)
+        ),
+        format!(
+            "reef --no-autostart ws provider attach {} --hold-while parent >/dev/null 2>&1 || true",
+            at(PROVIDER_REHOLD.1)
+        ),
+    ]
 }
 
 /// The hook commands in `hooks.json`, as a harness runs them, for tests.
@@ -88,7 +148,13 @@ fn files(guide: &Guide<'_>, version: &str) -> Vec<(PathBuf, String)> {
             Package::ClaudeCode => {
                 add(
                     &format!("{dir}/.claude-plugin/plugin.json"),
-                    pretty(&plugin_json(version, None)),
+                    pretty(&plugin_json(
+                        "reef",
+                        PLUGIN_DESCRIPTION,
+                        PLUGIN_KEYWORDS,
+                        version,
+                        None,
+                    )),
                 );
                 add(
                     &format!("{dir}/skills/reef/SKILL.md"),
@@ -99,11 +165,29 @@ fn files(guide: &Guide<'_>, version: &str) -> Vec<(PathBuf, String)> {
                     pretty(&servers(None, McpShape::McpJson)),
                 );
                 add(&format!("{dir}/hooks/hooks.json"), pretty(&hooks_json()));
+                add(&format!("{WORKSPACES_DIR}/README.md"), workspaces_readme());
+                add(
+                    &format!("{WORKSPACES_DIR}/.claude-plugin/plugin.json"),
+                    pretty(&plugin_json(
+                        WORKSPACES_NAME,
+                        WORKSPACES_DESCRIPTION,
+                        WORKSPACES_KEYWORDS,
+                        version,
+                        None,
+                    )),
+                );
+                add(
+                    &format!("{WORKSPACES_DIR}/hooks/hooks.json"),
+                    pretty(&provider_hooks_json()),
+                );
             }
             Package::AgentPlugins => {
                 add(
                     &format!("{dir}/plugin.json"),
                     pretty(&plugin_json(
+                        "reef",
+                        PLUGIN_DESCRIPTION,
+                        PLUGIN_KEYWORDS,
                         version,
                         Some("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"),
                     )),
@@ -163,6 +247,81 @@ fn readme(package: Package, install: &str) -> String {
     )
 }
 
+/// The workspaces plugin's README: what changes for a session, said
+/// before how to install it.
+fn workspaces_readme() -> String {
+    format!(
+        "# Reef workspaces\n\n\
+         This plugin makes every worktree Claude Code creates (`claude --worktree`, the \
+         `EnterWorktree` tool, subagents with `isolation: worktree`) a Reef workspace instead: a \
+         copy-on-write copy of the repository on its own jj change, snapshotted as it is \
+         written, held while the session runs and reclaimed with a final snapshot after it ends. \
+         It calls `reef ws provider` ({REPO_URL}/blob/main/docs/workspace-provider.md) from \
+         Claude Code's `WorktreeCreate` and `WorktreeRemove` hooks, and holds a resumed session's \
+         workspace again from its first prompt (`UserPromptSubmit`).\n\n\
+         What changes:\n\n\
+         - A workspace has no `.git`: `git status` in it fails, and Claude Code's check for \
+         uncommitted changes finds none, so it removes an unnamed session's worktree without \
+         asking. Nothing is lost: the release snapshots first.\n\
+         - Work lands as a jj change (`reef log`), not a branch.\n\
+         - `.worktreeinclude` is not applied; untracked files stay in your checkout.\n\
+         - A workspace is held while a session that uses it runs, and reclaimed with a final \
+         snapshot when its lease runs out after that (35 minutes by default). Subagents' \
+         workspaces last until the session ends. A background session the supervisor stops \
+         loses its hold the same way; a name used again later starts on the change its last \
+         workspace left.\n\
+         - The first worktree in a repository registers it with Reef, which initializes jj \
+         beside git there (`reef init` does the same, and says so).\n\
+         - The repository is the one the session is in when it asks for the worktree, which \
+         follows `cd`.\n\n\
+         Requires Claude Code 2.1.300 or later. A plugin's `WorktreeCreate` hook does not run \
+         for `claude --worktree --tmux`, which then makes a git worktree; to use Reef there too, \
+         put this plugin's `hooks/hooks.json` entries in a settings file \
+         (`~/.claude/settings.json`). Claude Code refuses a worktree inside a git repository, \
+         so if your home directory is one, set `REEF_STATE_DIR` to a directory outside it.\n\n\
+         It runs the `reef` on your `PATH`; install Reef first ({REPO_URL}#install). Then:\n\n\
+         ```sh\nclaude plugin install {WORKSPACES_NAME} --marketplace {REPO}\n```\n\n\
+         Generated by `just packages` from Reef's agent table.\n"
+    )
+}
+
+/// Claude Code's worktree hooks over `reef ws provider`. No timeout on
+/// create or remove: a first workspace of a large repository builds its
+/// base, inside the harness's default.
+fn provider_hooks_json() -> Json {
+    let [create, release, rehold] = provider_commands();
+    let hook = |command: &str, timeout: Option<u64>, status: Option<&str>| {
+        let mut pairs = vec![("type", text("command")), ("command", text(command))];
+        if let Some(timeout) = timeout {
+            pairs.push(("timeout", Json::Number(timeout.into())));
+        }
+        if let Some(status) = status {
+            pairs.push(("statusMessage", text(status)));
+        }
+        Json::Array(vec![object(pairs)])
+    };
+    object(vec![(
+        "hooks",
+        object(vec![
+            (
+                PROVIDER_CREATE.0,
+                Json::Array(vec![object(vec![(
+                    "hooks",
+                    hook(&create, None, Some("Creating a Reef workspace")),
+                )])]),
+            ),
+            (
+                PROVIDER_RELEASE.0,
+                Json::Array(vec![object(vec![("hooks", hook(&release, None, None))])]),
+            ),
+            (
+                PROVIDER_REHOLD.0,
+                Json::Array(vec![object(vec![("hooks", hook(&rehold, Some(10), None))])]),
+            ),
+        ]),
+    )])
+}
+
 /// The tag a release is published at, which the marketplaces pin.
 fn tag(version: &str) -> String {
     format!("v{version}")
@@ -197,27 +356,28 @@ fn author() -> Json {
 
 /// A plugin's manifest; `schema` is the Agent Plugins one, whose
 /// `repository` is a string and which allows no other keys.
-fn plugin_json(version: &str, schema: Option<&str>) -> Json {
+fn plugin_json(
+    name: &str,
+    description: &str,
+    keywords: &[&str],
+    version: &str,
+    schema: Option<&str>,
+) -> Json {
     let mut pairs = Vec::new();
     if let Some(schema) = schema {
         pairs.push(("$schema", text(schema)));
     }
     pairs.extend([
-        ("name", text("reef")),
+        ("name", text(name)),
         ("version", text(version)),
-        ("description", text(PLUGIN_DESCRIPTION)),
+        ("description", text(description)),
         ("author", author()),
         ("homepage", text(REPO_URL)),
         ("repository", text(REPO_URL)),
         ("license", text("Apache-2.0")),
         (
             "keywords",
-            Json::Array(
-                ["version-control", "workspaces", "jj", "mcp"]
-                    .into_iter()
-                    .map(text)
-                    .collect(),
-            ),
+            Json::Array(keywords.iter().copied().map(text).collect()),
         ),
     ]);
     object(pairs)
@@ -273,20 +433,36 @@ fn claude_marketplace(version: &str) -> Json {
         ("owner", author()),
         (
             "plugins",
-            Json::Array(vec![object(vec![
-                ("name", text("reef")),
-                (
-                    "source",
-                    object(vec![
-                        ("source", text("git-subdir")),
-                        ("url", text(REPO)),
-                        ("path", text(Package::ClaudeCode.dir())),
-                        ("ref", text(&tag(version))),
-                    ]),
-                ),
-                ("description", text(PLUGIN_DESCRIPTION)),
-                ("category", text("development")),
-            ])]),
+            Json::Array(vec![
+                object(vec![
+                    ("name", text("reef")),
+                    (
+                        "source",
+                        object(vec![
+                            ("source", text("git-subdir")),
+                            ("url", text(REPO)),
+                            ("path", text(Package::ClaudeCode.dir())),
+                            ("ref", text(&tag(version))),
+                        ]),
+                    ),
+                    ("description", text(PLUGIN_DESCRIPTION)),
+                    ("category", text("development")),
+                ]),
+                object(vec![
+                    ("name", text(WORKSPACES_NAME)),
+                    (
+                        "source",
+                        object(vec![
+                            ("source", text("git-subdir")),
+                            ("url", text(REPO)),
+                            ("path", text(WORKSPACES_DIR)),
+                            ("ref", text(&tag(version))),
+                        ]),
+                    ),
+                    ("description", text(WORKSPACES_DESCRIPTION)),
+                    ("category", text("development")),
+                ]),
+            ]),
         ),
     ])
 }
@@ -467,6 +643,7 @@ mod tests {
         let version = env!("CARGO_PKG_VERSION");
         for path in [
             "plugins/claude-code/.claude-plugin/plugin.json",
+            "plugins/claude-code-workspaces/.claude-plugin/plugin.json",
             "plugins/agent-plugins/plugin.json",
             "packaging/mcpb/manifest.json",
             "packaging/mcp/server.json",
@@ -477,11 +654,9 @@ mod tests {
             ".claude-plugin/marketplace.json",
             ".agents/plugins/marketplace.json",
         ] {
-            assert_eq!(
-                json(path)["plugins"][0]["source"]["ref"],
-                format!("v{version}"),
-                "{path}"
-            );
+            for plugin in json(path)["plugins"].as_array().unwrap() {
+                assert_eq!(plugin["source"]["ref"], format!("v{version}"), "{path}");
+            }
         }
         let (long, _) = guide_text();
         for (path, contents) in rendered() {
@@ -545,6 +720,56 @@ mod tests {
             assert_eq!(words[..3], ["reef", "presence", "hook"], "{line}");
             crate::cli::Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{line}: {e}"));
         }
+    }
+
+    /// R2.26 test 15: every provider hook runs a `reef ws provider` this
+    /// binary parses, create prints the path alone, and re-hold can never
+    /// fail a session's start.
+    #[test]
+    fn provider_hooks_parse() {
+        let hooks = json("plugins/claude-code-workspaces/hooks/hooks.json");
+        let mut commands = Vec::new();
+        for (_, groups) in hooks["hooks"].as_object().unwrap() {
+            for group in groups.as_array().unwrap() {
+                for hook in group["hooks"].as_array().unwrap() {
+                    commands.push(hook["command"].as_str().unwrap().to_owned());
+                }
+            }
+        }
+        // The test's JSON sorts keys; the file keeps the renderer's order.
+        let mut expected = provider_commands().to_vec();
+        expected.sort();
+        commands.sort();
+        assert_eq!(commands, expected);
+        let [create, _, rehold] = provider_commands();
+        for command in &commands {
+            let line = command
+                .strip_suffix(" >/dev/null 2>&1 || true")
+                .unwrap_or(command);
+            let words: Vec<&str> = line.split(' ').collect();
+            let leaf: Vec<&str> = words
+                .iter()
+                .copied()
+                .filter(|word| *word != "--no-autostart")
+                .collect();
+            assert_eq!(leaf[..3], ["reef", "ws", "provider"], "{line}");
+            crate::cli::Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+        assert!(create.ends_with(" -o text"), "{create}");
+        assert!(rehold.ends_with("|| true"), "{rehold}");
+        assert!(rehold.contains("--no-autostart"), "{rehold}");
+        // Worktree events and UserPromptSubmit take no matcher.
+        for (_, groups) in hooks["hooks"].as_object().unwrap() {
+            assert!(groups[0].get("matcher").is_none(), "{groups}");
+        }
+        let marketplace = json(".claude-plugin/marketplace.json");
+        let names: Vec<&str> = marketplace["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|plugin| plugin["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["reef", WORKSPACES_NAME]);
     }
 
     /// Test 17: the quickstart documents each install line as the agent

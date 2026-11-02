@@ -81,23 +81,33 @@ harness_env() {
         XDG_STATE_HOME="$home/.local/state" PATH="$bin:$PATH" "$@"
 }
 
-# A copy of the marketplace at `$1` (relative to the root) with its plugin's
-# source rewritten to `$2`, and the trees it names.
+# A copy of the marketplace at `$1` (relative to the root) with every plugin's
+# source rewritten by the jq filter `$2`, which sees the entry's tree as
+# `$path` (`./plugins/...`), and the trees it names.
 marketplace_copy() {
-    local file=$1 source=$2 copy="$tmp/marketplace-${1//\//-}"
+    local file=$1 filter=$2 copy="$tmp/marketplace-${1//\//-}"
     mkdir -p "$copy/$(dirname "$file")"
     cp -R "$root/plugins" "$copy/"
-    jq --argjson source "$source" '.plugins[0].source = $source' "$root/$file" >"$copy/$file"
+    jq ".plugins |= map((\"./\" + .source.path) as \$path | .source = ($filter))" "$root/$file" >"$copy/$file"
     echo "$copy"
 }
 
 step "Claude Code $("$claude" --version)"
 (cd "$root" && harness_env "$tmp/claude-validate" "$claude" plugin validate . --strict)
 harness_env "$tmp/claude-validate" "$claude" plugin validate "$root/plugins/claude-code" --strict
-market=$(marketplace_copy .claude-plugin/marketplace.json '"./plugins/claude-code"')
+harness_env "$tmp/claude-validate" "$claude" plugin validate "$root/plugins/claude-code-workspaces" --strict
+# shellcheck disable=SC2016 # a jq variable, not the shell's
+market=$(marketplace_copy .claude-plugin/marketplace.json '$path')
 home="$tmp/claude-home"
 harness_env "$home" "$claude" plugin install reef --marketplace "$market"
+# The opt-in workspace provider plugin (R2.26), from the same marketplace.
+harness_env "$home" "$claude" plugin install reef-workspaces --marketplace "$market"
 harness_env "$home" "$claude" plugin list --json >"$tmp/claude-list.json"
+if ! jq -e '.[] | select(.id == "reef-workspaces@reef" and .enabled)' "$tmp/claude-list.json" >/dev/null; then
+    fail "Claude Code does not list reef-workspaces@reef: $(cat "$tmp/claude-list.json")"
+fi
+workspaces=$(jq -r '.[] | select(.id == "reef-workspaces@reef") | .installPath' "$tmp/claude-list.json")
+[[ -f "$workspaces/hooks/hooks.json" ]] || fail "the installed reef-workspaces plugin has no hooks"
 jq -e '.[] | select(.id == "reef@reef" and .enabled and .mcpServers.reef.command == "reef")' \
     "$tmp/claude-list.json" >/dev/null || fail "Claude Code does not list reef@reef with its server: $(cat "$tmp/claude-list.json")"
 installed=$(jq -r '.[] | select(.id == "reef@reef") | .installPath' "$tmp/claude-list.json")
@@ -131,7 +141,8 @@ if ! (cd "$ws" && harness_env "$home" "$claude" mcp list 2>&1 | grep -E 'reef');
 fi
 
 step "Codex $("$codex" --version)"
-market=$(marketplace_copy .agents/plugins/marketplace.json '{"source":"local","path":"./plugins/agent-plugins"}')
+# shellcheck disable=SC2016 # a jq variable, not the shell's
+market=$(marketplace_copy .agents/plugins/marketplace.json '{"source": "local", "path": $path}')
 home="$tmp/codex-home"
 # Codex refuses a CODEX_HOME that does not exist.
 mkdir -p "$home/.codex"

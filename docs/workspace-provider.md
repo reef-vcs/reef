@@ -22,7 +22,7 @@ Each command takes its fields as flags, or as one JSON object on stdin keyed by 
 | Field | Meaning |
 | --- | --- |
 | `repo` | The repository: an id, a prefix, or a path inside it. Default: the current directory's. A path inside an active workspace starts the new one on that workspace's change, after a snapshot. |
-| `name` | 1 to 64 ASCII letters, digits, `.`, `_` and `-`; not all digits, not `mcp`. With a name, `create` returns the active workspace of that name if there is one (`attached: true`), so a retry or a repeated name gets the same directory. |
+| `name` | Any non-empty text. A name of 1 to 64 ASCII letters, digits, `.`, `_` and `-`, not all digits and not `mcp`, is used as given; any other is made one, the same way every time (other characters become `-`, and a short hash of the name is added). With a name, `create` returns the active workspace of that name if there is one (`attached: true`), so a retry or a repeated name gets the same directory. If that name's last workspace has ended and its change was kept, a new one starts on that change, so a session resumed after a reclaim finds its files. |
 | `purpose` | What it is for. Default: the name. |
 | `owner` | Who holds it. Default: `<user>@<host>:<name>`, else `<user>@<host>`. Not with `name`: a name is held through its owner, so the two together are refused. |
 | `change`, `new_on` | Edit this revision, or start a new change on it. Default: as `reef ws create`. |
@@ -42,15 +42,15 @@ With `-o text` it prints the path alone, one line.
 
 ### `attach`
 
-Takes `workspace` (an id, a prefix, or a path inside it; required), `owner` (the owner it must have; default: this user on this machine) and `hold_while`. It holds an existing active workspace for a new holder, as a restarted or resumed session does. It renews the lease once, which gives a lease in its grace period its full length back. It ends the previous holder's follower and prints the same object as `create`, with `attached: true`. A released or reclaimed workspace is refused (`conflict`, exit 5), and its `next` starts a new workspace on its change.
+Takes `workspace` (an id, a prefix, or a path inside it; required), `owner` (the owner it must have; default: this user on this machine) and `hold_while`. It holds an existing active workspace for a new holder, as a restarted or resumed session does. It renews the lease once, which gives a lease in its grace period its full length back. It adds a holder and prints the same object as `create`, with `attached: true`; earlier holders that still run keep holding it. A released or reclaimed workspace is refused (`conflict`, exit 5), and its `next` starts a new workspace on its change.
 
 ### `release`
 
-Takes `workspace` (required). It snapshots the workspace, removes its directory, ends its lease, and stops its follower:
+Takes `workspace` (required) and `hold_while`. It snapshots the workspace, removes its directory, ends its lease, and stops its followers. With `hold_while`, it releases on that holder's behalf only: while another holder still runs, it stops that holder's follower and keeps the workspace, printing `released: false`, `state: "active"` and `held_by`, the number of other holders. A program whose sessions can share a workspace passes its own session here.
 
 ```json
 {"contract": 1, "workspace_id": "3f2a…", "released": true, "state": "released",
- "snapshot_taken": true, "final_op_id": "…"}
+ "snapshot_taken": true, "final_op_id": "…", "held_by": 0}
 ```
 
 By id, releasing a workspace that already ended, or is being released or reclaimed, is not an error: it prints `released: false` and the state it is in. By path, a directory that is gone is `not_found`, exit 3.
@@ -73,7 +73,7 @@ A program that got an error has no workspace left behind. The commands run only 
 - A pid holds the workspace while that process runs. A reused pid is told apart by its start time.
 - `parent` is the nearest ancestor of `reef` that is not a shell (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `fish`, `csh`, `tcsh`, `nu`, `pwsh`), up to eight levels. A program that runs its hooks through a shell gets itself. A wrapper that is not a shell (`timeout`, `make`, `npm run`) becomes the holder and ends with the hook, so run `reef` directly from the hook, or pass the program's pid.
 
-`create` and `attach` start a follower, a detached `reef ws renew --follow --while-pid <holder>`, that renews the lease on the daemon's cadence while the holder runs. When the holder exits, the follower exits and the lease runs out. The daemon then reclaims the workspace with a final snapshot, at most the lease plus its grace after the holder's last renewal: 35 minutes by default. Nothing is released at the holder's death, so a session restarted or resumed within that time `attach`es and finds its directory.
+`create` and `attach` start a follower, a detached `reef ws renew --follow --while-pid <holder>`, that renews the lease on the daemon's cadence while the holder runs. When the holder exits, the follower exits and the lease runs out. The daemon then reclaims the workspace with a final snapshot, at most the lease plus its grace after the holder's last renewal: 35 minutes by default. Nothing is released at the holder's death, so a session restarted or resumed within that time `attach`es and finds its directory. A workspace may have several holders, each with its own follower, and is held while any of them runs: no holder takes a workspace from another.
 
 While a follower holds a workspace, `reef here` inside it reports `held: true` and does not suggest releasing it, since the program that created it will. Each follower keeps a record, `<state>/holders/<workspace id>.<follower pid>.json`, while it runs; a record whose follower has gone is ignored and removed by the next reader.
 
@@ -85,6 +85,6 @@ An adapter is configuration, not code:
 
 1. Run `create` when the program makes a session's directory. Map the program's event onto the fields with `--at`, for example `--at repo=/cwd --at name=/name`. Pass `--hold-while parent`, and `-o text` if the program reads a path from the command's output.
 2. Run `release` when the program removes the directory, mapping `workspace` to the path or id it gives.
-3. If the program resumes sessions in their old directories, run `attach --at workspace=/cwd --hold-while parent` when it does.
+3. If the program resumes sessions in their old directories, run `attach --at workspace=/cwd --hold-while parent` from the first event that names the session's directory after it resumes. An event that fires before the session is back in its directory names the wrong one. If that event fires often, such as on every prompt, add `--no-autostart` and ignore the exit code: outside a workspace it is a lookup that finds nothing, and in a workspace that is already held by the same process it keeps the follower.
 
 Reef's own adapters are rows of its agent table, rendered into each program's package format.

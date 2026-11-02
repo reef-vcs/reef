@@ -89,7 +89,8 @@ jobs:
           # The packages name this version and pin its tag (R2.25): a release
           # pull request that bumped the version without `just packages`
           # fails here.
-          for file in plugins/claude-code/.claude-plugin/plugin.json plugins/agent-plugins/plugin.json \
+          for file in plugins/claude-code/.claude-plugin/plugin.json \
+            plugins/claude-code-workspaces/.claude-plugin/plugin.json plugins/agent-plugins/plugin.json \
             packaging/mcpb/manifest.json packaging/mcp/server.json; do
             if [[ "$(jq -r .version "$file")" != "$version" ]]; then
               echo "::error file=$file::$file is not for reef $version; run just packages"
@@ -97,7 +98,9 @@ jobs:
             fi
           done
           for file in .claude-plugin/marketplace.json .agents/plugins/marketplace.json; do
-            if [[ "$(jq -r '.plugins[0].source.ref' "$file")" != "v$version" ]]; then
+            # Every entry: the marketplace lists more than one plugin (R2.26).
+            refs="$(jq -r '.plugins[] | .source.ref? // "missing"' "$file")"
+            if grep -qvxF "v$version" <<<"$refs"; then
               echo "::error file=$file::$file does not pin v$version; run just packages"
               exit 1
             fi

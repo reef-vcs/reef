@@ -139,6 +139,9 @@ struct ReleaseArgs {
     /// The workspace: id, prefix, or a path inside it.
     #[arg(long, value_name = "WS")]
     workspace: Option<String>,
+    /// Release for this holder only: kept while another holder runs.
+    #[arg(long, value_name = "PID|parent")]
+    hold_while: Option<String>,
 }
 
 const CREATE_FIELDS: &[&str] = &[
@@ -152,7 +155,7 @@ const CREATE_FIELDS: &[&str] = &[
     "hold_while",
 ];
 const ATTACH_FIELDS: &[&str] = &["workspace", "owner", "hold_while"];
-const RELEASE_FIELDS: &[&str] = &["workspace"];
+const RELEASE_FIELDS: &[&str] = &["workspace", "hold_while"];
 
 /// A created or attached workspace.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -203,6 +206,9 @@ pub(crate) struct ProviderReleased {
     state: String,
     snapshot_taken: bool,
     final_op_id: Option<String>,
+    /// Other processes that still hold it, when a release for one holder
+    /// kept it (`released: false`, state `active`); 0 otherwise.
+    held_by: u32,
 }
 
 pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), CliError> {
@@ -332,27 +338,43 @@ fn invalid(field: &'static str, message: String) -> CliError {
     }
 }
 
-/// A name is ASCII letters, digits, `.`, `_` and `-`, at most
-/// [`NAME_MAX`] long, not all digits and not `mcp`, which would collide
-/// with `ws run`'s and `reef mcp`'s owners.
-fn check_name(name: &str) -> Result<(), CliError> {
-    let fits = !name.is_empty()
-        && name.len() <= NAME_MAX
+/// A name as the owner holds it: ASCII letters, digits, `.`, `_` and
+/// `-`, at most [`NAME_MAX`] long, not all digits and not `mcp` (which
+/// would collide with `ws run`'s and `reef mcp`'s owners). Any other name
+/// is made one, the same way every time so a repeated name finds the same
+/// workspace: other characters become `-`, and a short hash of the name
+/// as given is added. Only an empty name is refused.
+fn name_slug(name: &str) -> Result<String, CliError> {
+    if name.is_empty() {
+        return Err(invalid("name", "name is empty".to_owned()));
+    }
+    let fits = name.len() <= NAME_MAX
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         && !name.bytes().all(|byte| byte.is_ascii_digit())
         && name != "mcp";
     if fits {
-        Ok(())
-    } else {
-        Err(invalid(
-            "name",
-            format!(
-                "name {name:?} is not 1 to {NAME_MAX} ASCII letters, digits, `.`, `_` or `-`, or is all digits, or `mcp`"
-            ),
-        ))
+        return Ok(name.to_owned());
     }
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(NAME_MAX - 9)
+        .collect();
+    let stem = mapped.trim_matches('-');
+    let stem = if stem.is_empty() { "name" } else { stem };
+    // FNV-1a: stable across versions and machines, which a std hasher is not.
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    Ok(format!("{stem}-{:08x}", hash & 0xffff_ffff))
 }
 
 /// The owner a create gives: `owner`, else `<user>@<host>:<name>`, else
@@ -390,10 +412,8 @@ struct CreateRequest {
 
 impl CreateRequest {
     fn from(args: CreateArgs, fields: &Fields) -> Result<Self, CliError> {
-        let name = fields.get("name", args.name)?;
-        if let Some(name) = &name {
-            check_name(name)?;
-        }
+        let given = fields.get("name", args.name)?;
+        let name = given.as_deref().map(name_slug).transpose()?;
         let owner = fields.get("owner", args.owner)?;
         if name.is_some() && owner.is_some() {
             return Err(invalid(
@@ -430,9 +450,7 @@ impl CreateRequest {
             .transpose()?;
         Ok(Self {
             repo: fields.get("repo", args.repo)?,
-            purpose: fields
-                .get("purpose", args.purpose)?
-                .or_else(|| name.clone()),
+            purpose: fields.get("purpose", args.purpose)?.or(given),
             owner: owner_for(owner, name.as_deref(), &default_owner()),
             name,
             start,
@@ -463,7 +481,12 @@ async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliE
         let ws = attach_rule(ctx, &existing.id, Some(&request.owner)).await?;
         return provide(ctx, global, &ws, holder, true, None);
     }
-    let start = request.start.clone().or_else(|| {
+    let again = if request.name.is_some() && request.start.is_none() && outer.is_none() {
+        kept_change(ctx, &repo, &request.owner).await?
+    } else {
+        None
+    };
+    let start = request.start.clone().or(again).or_else(|| {
         outer
             .as_ref()
             .map(|outer| create_workspace_request::Start::NewOn(outer.commit_id.clone()))
@@ -573,9 +596,60 @@ async fn named(ctx: &Ctx, repo: &RepoArg, owner: &str) -> Result<Option<v1::Work
         .max_by_key(|ws| ws.created_at.map(|at| (at.seconds, at.nanos))))
 }
 
-/// Starts a follower for `holder`, if any, then ends any previous
-/// holder's, so a failed start leaves the workspace held as it was, and
-/// prints the workspace.
+/// The change a name's last workspace left, if it ended and its change was
+/// kept: a session resumed after its workspace was reclaimed starts again
+/// on its own files, not on the default start.
+async fn kept_change(
+    ctx: &Ctx,
+    repo: &RepoArg,
+    owner: &str,
+) -> Result<Option<create_workspace_request::Start>, CliError> {
+    let listed = ctx
+        .call_with_repo(repo, |repo| {
+            ctx.client.list_workspaces(ListWorkspacesRequest {
+                repo,
+                owner: owner.to_owned(),
+                ..ListWorkspacesRequest::default()
+            })
+        })
+        .await?;
+    let Some(last) = listed
+        .into_iter()
+        .filter(|ws| ws.owner == owner)
+        .max_by_key(|ws| ws.created_at.map(|at| (at.seconds, at.nanos)))
+    else {
+        return Ok(None);
+    };
+    if matches!(
+        last.state(),
+        WorkspaceState::Active | WorkspaceState::Releasing
+    ) || !change_kept(ctx, &last).await
+    {
+        return Ok(None);
+    }
+    Ok(Some(create_workspace_request::Start::Change(reverse_hex(
+        &last.change_id,
+    ))))
+}
+
+/// Whether `ws`'s change is still in the log: an empty change is dropped
+/// when its workspace ends.
+async fn change_kept(ctx: &Ctx, ws: &v1::Workspace) -> bool {
+    ctx.call(ctx.client.list_changes_page(v1::ListChangesRequest {
+        repo: ws.repo_id.clone(),
+        revset: format!("change_id({})", reverse_hex(&ws.change_id)),
+        skip_snapshot: true,
+        page_size: 1,
+        ..v1::ListChangesRequest::default()
+    }))
+    .await
+    .is_ok_and(|response| !response.entries.is_empty())
+}
+
+/// Starts a follower for `holder`, if one is not already following it,
+/// and prints the workspace. A workspace may have several holders, each
+/// with its follower: it is held while any of them runs, and no holder
+/// takes it from another.
 fn provide(
     ctx: &Ctx,
     global: &Global,
@@ -586,27 +660,29 @@ fn provide(
 ) -> Result<(), CliError> {
     let lease = ws.lease.as_ref().ok_or_else(|| missing("lease"))?;
     let state_dir = global.state_dir()?;
-    let previous = holder::current(&state_dir, ws);
-    let holder = match (holder, previous) {
-        (Some(holder), Some(previous)) if previous.holder == Some(holder) => Some(ProvidedHolder {
-            pid: holder.pid,
-            follower_pid: u32::try_from(previous.follower.pid).unwrap_or(0),
-        }),
-        (Some(holder), _) => {
-            let follower_pid =
-                holder::spawn_follower(global, ctx.agent.as_deref(), &ws.id, &lease.id, &holder)?;
-            let started = i32::try_from(follower_pid).unwrap_or(0);
-            for record in holder::read(&state_dir, &ws.id) {
-                if record.follower.pid != started {
-                    holder::stop(&record);
-                }
-            }
+    let holder = match holder {
+        Some(holder) => {
+            let following = holder::read(&state_dir, &ws.id).into_iter().find(|record| {
+                record.holder == Some(holder)
+                    && record.lease_id == lease.id
+                    && holder::alive(&record.follower)
+            });
+            let follower_pid = match following {
+                Some(record) => u32::try_from(record.follower.pid).unwrap_or(0),
+                None => holder::spawn_follower(
+                    global,
+                    ctx.agent.as_deref(),
+                    &ws.id,
+                    &lease.id,
+                    &holder,
+                )?,
+            };
             Some(ProvidedHolder {
                 pid: holder.pid,
                 follower_pid,
             })
         }
-        (None, _) => None,
+        None => None,
     };
     ctx.out.object(&Provided {
         contract: CONTRACT,
@@ -650,6 +726,55 @@ fn required(
         .ok_or_else(|| invalid(field, format!("`{field}` is required")))
 }
 
+/// A release for `caller` while other holders still run: `caller`'s
+/// followers stop, and the workspace is kept for the others. `None` when
+/// no other holder runs.
+fn keep_for_others(
+    ctx: &Ctx,
+    state_dir: &std::path::Path,
+    found: &v1::Workspace,
+    records: &[holder::Record],
+    caller: Holder,
+) -> Option<Result<(), CliError>> {
+    let others = records
+        .iter()
+        .filter(|record| {
+            holder::alive(&record.follower)
+                && record
+                    .holder
+                    .is_some_and(|holder| holder != caller && holder::alive(&holder))
+        })
+        .count();
+    if others > 0 {
+        for record in records
+            .iter()
+            .filter(|record| record.holder == Some(caller))
+        {
+            holder::stop(record);
+            holder::remove(state_dir, &found.id, &record.follower);
+        }
+        let note = format!(
+            "reef: {} kept: {others} other holder{} still hold{} it",
+            found.id,
+            if others == 1 { "" } else { "s" },
+            if others == 1 { "s" } else { "" }
+        );
+        return Some(ctx.out.done(
+            &ProviderReleased {
+                contract: CONTRACT,
+                held_by: u32::try_from(others).unwrap_or(u32::MAX),
+                workspace_id: found.id.clone(),
+                released: false,
+                state: "active".to_owned(),
+                snapshot_taken: false,
+                final_op_id: None,
+            },
+            &note,
+        ));
+    }
+    None
+}
+
 async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), CliError> {
     let fields = Fields::read(&args.input, RELEASE_FIELDS)?;
     let workspace = super::scope::workspace_arg(&required(&fields, "workspace", args.workspace)?)?;
@@ -660,6 +785,16 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
         .ok_or_else(|| missing("workspace"))?;
     let state_dir = global.state_dir()?;
     let records = holder::read(&state_dir, &found.id);
+    // For one holder: while another still runs, only this one lets go.
+    // A caller that is not running is no holder of it.
+    let caller = hold_while(fields.get("hold_while", args.hold_while)?)?
+        .and_then(|hold_while| holder::resolve(hold_while).ok());
+    if let Some(caller) = caller
+        && found.state() == WorkspaceState::Active
+        && let Some(kept) = keep_for_others(ctx, &state_dir, &found, &records, caller)
+    {
+        return kept;
+    }
     let response = if found.state() == WorkspaceState::Active {
         ctx.call_within(
             ctx.timeout.max(CREATE_DEADLINE),
@@ -695,6 +830,7 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
             return ctx.out.done(
                 &ProviderReleased {
                     contract: CONTRACT,
+                    held_by: 0,
                     workspace_id: now.id,
                     released: false,
                     state,
@@ -711,6 +847,7 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
     ctx.out.done(
         &ProviderReleased {
             contract: CONTRACT,
+            held_by: 0,
             workspace_id: released.id,
             released: true,
             state: "released".to_owned(),
@@ -739,16 +876,7 @@ pub(crate) async fn ended_advice(ctx: &Ctx, ws: &v1::Workspace) -> Advice {
         );
     }
     let rev = reverse_hex(&ws.change_id);
-    let kept = ctx
-        .call(ctx.client.list_changes_page(v1::ListChangesRequest {
-            repo: ws.repo_id.clone(),
-            revset: format!("change_id({rev})"),
-            skip_snapshot: true,
-            page_size: 1,
-            ..v1::ListChangesRequest::default()
-        }))
-        .await
-        .is_ok_and(|response| !response.entries.is_empty());
+    let kept = change_kept(ctx, ws).await;
     if kept {
         Advice::run(
             format!(
@@ -902,12 +1030,28 @@ mod tests {
     #[test]
     fn names_are_checked() {
         for good in ["bold-oak-a3f2", "agent-a1b2c3d4", "a.b_c"] {
-            check_name(good).unwrap();
+            assert_eq!(name_slug(good).unwrap(), good);
         }
+        // Anything else becomes a slug with a hash of the name as given:
+        // the same every time, different for names that map alike.
         let long = "a".repeat(NAME_MAX + 1);
-        for bad in ["", "123", "mcp", long.as_str(), "a b", "a/b"] {
-            assert_eq!(field_of(&check_name(bad).unwrap_err()), "name", "{bad:?}");
+        for odd in ["123", "mcp", long.as_str(), "a b", "fix/login", "#123", "/"] {
+            let slug = name_slug(odd).unwrap();
+            assert_eq!(name_slug(odd).unwrap(), slug);
+            assert!(slug.len() <= NAME_MAX, "{slug}");
+            assert!(
+                slug.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')),
+                "{slug}"
+            );
+            assert_eq!(name_slug(&slug).unwrap(), slug, "a slug is its own slug");
         }
+        assert!(name_slug("fix/login").unwrap().starts_with("fix-login-"));
+        assert_ne!(name_slug("a b").unwrap(), name_slug("a/b").unwrap());
+        assert_eq!(field_of(&name_slug("").unwrap_err()), "name");
+        let request = create(&["--name", "fix/login"], None).unwrap();
+        assert_eq!(request.purpose.as_deref(), Some("fix/login"));
+        assert!(request.owner.ends_with(&name_slug("fix/login").unwrap()));
         assert_eq!(owner_for(None, Some("t1"), "me@host"), "me@host:t1");
         assert_eq!(owner_for(None, None, "me@host"), "me@host");
         assert_eq!(owner_for(Some("x".to_owned()), Some("t1"), "me@host"), "x");

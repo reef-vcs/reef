@@ -888,3 +888,450 @@ fn the_contract_names_no_harness() {
         }
     }
 }
+
+/// Stands in for a coding-agent harness (R2.26 test 13) when
+/// `REEF_FAKE_HARNESS` holds `{out, cwd, event, command}`: runs the hook
+/// command with `sh -c`, the event on stdin and `cwd` as its directory, as
+/// a harness runs a command hook; writes its stdout, stderr and exit code
+/// under `out` (the code last); then stays alive, as the harness's own
+/// process does, until killed. This test binary is not a shell, so
+/// `--hold-while parent` resolves to it. Without the variable it does
+/// nothing.
+#[test]
+fn fake_harness() {
+    let Ok(spec) = std::env::var("REEF_FAKE_HARNESS") else {
+        return;
+    };
+    let spec: Value = serde_json::from_str(&spec).unwrap();
+    let out = PathBuf::from(text(&spec["out"]));
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(text(&spec["command"]))
+        .current_dir(text(&spec["cwd"]))
+        .stdin(std::fs::File::open(text(&spec["event"])).unwrap())
+        .output()
+        .unwrap();
+    std::fs::write(out.join("stdout"), &output.stdout).unwrap();
+    std::fs::write(out.join("stderr"), &output.stderr).unwrap();
+    // Written aside and renamed, so a reader never sees it half written.
+    std::fs::write(
+        out.join("code.partial"),
+        output.status.code().unwrap_or(-1).to_string(),
+    )
+    .unwrap();
+    std::fs::rename(out.join("code.partial"), out.join("code")).unwrap();
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// One hook run by a [`fake_harness`].
+struct Hook {
+    harness: Child,
+    out: tempfile::TempDir,
+}
+
+impl Hook {
+    /// Runs `command` on `event` (a fixture with `fields` replaced) in
+    /// `cwd`, with `reef` on `PATH` unless `with_reef` is false.
+    fn run(
+        daemon: &TestDaemon,
+        command: &str,
+        fixture: &str,
+        fields: &Value,
+        cwd: &Path,
+        with_reef: bool,
+    ) -> Self {
+        let out = tempfile::tempdir().unwrap();
+        let mut event: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/hooks")
+                    .join(fixture),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (key, value) in fields.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        let event_path = out.path().join("event.json");
+        std::fs::write(&event_path, event.to_string()).unwrap();
+        let bin = Path::new(env!("CARGO_BIN_EXE_reef"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let path = if with_reef {
+            format!("{}:/usr/bin:/bin", bin.display())
+        } else {
+            "/usr/bin:/bin".to_owned()
+        };
+        let spec = json!({
+            "out": out.path(),
+            "cwd": cwd,
+            "event": event_path,
+            "command": command,
+        });
+        let mut harness = std::process::Command::new(std::env::current_exe().unwrap());
+        for var in [
+            "REEF_SOCKET",
+            "REEF_CONFIG",
+            "REEF_AGENT",
+            "REEF_WORKSPACE",
+            "REEF_REMOTE",
+            "REEF_OUTPUT",
+        ] {
+            harness.env_remove(var);
+        }
+        let harness = harness
+            .args(["--exact", "fake_harness", "--nocapture", "--test-threads=1"])
+            .env("REEF_FAKE_HARNESS", spec.to_string())
+            .env("REEF_STATE_DIR", daemon.state_dir())
+            .env("PATH", path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self { harness, out }
+    }
+
+    fn pid(&self) -> i64 {
+        i64::from(self.harness.id())
+    }
+
+    /// The hook's exit code and stdout, once it has run.
+    async fn done(&self) -> (i32, String) {
+        let code = self.out.path().join("code");
+        until(Duration::from_secs(60), "the hook to finish", || {
+            code.exists()
+        })
+        .await;
+        let read = |name: &str| std::fs::read_to_string(self.out.path().join(name)).unwrap();
+        (read("code").trim().parse().unwrap(), read("stdout"))
+    }
+}
+
+impl Drop for Hook {
+    fn drop(&mut self) {
+        let _ = self.harness.kill();
+        let _ = self.harness.wait();
+    }
+}
+
+/// The plugin's hook command for `event`.
+fn hook_command(hooks: &Value, event: &str) -> String {
+    text(&hooks["hooks"][event][0]["hooks"][0]["command"])
+}
+
+// 13
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one session's story, in the order the harness tells it"
+)]
+async fn adapter_drives_the_contract() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        short_leases(config);
+        config.file.lease.default = Duration::from_secs(15);
+    })
+    .await;
+    let _followers = Followers::of(&daemon);
+    let hooks: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../plugins/claude-code-workspaces/hooks/hooks.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let create = hook_command(&hooks, "WorktreeCreate");
+    let remove = hook_command(&hooks, "WorktreeRemove");
+    let rehold = hook_command(&hooks, "UserPromptSubmit");
+    let root = repo.root.clone();
+    let event = |pairs: Value| pairs;
+
+    // WorktreeCreate: the path alone, on the last line, outside the
+    // repository, normalized; held by the harness.
+    let first = Hook::run(
+        &daemon,
+        &create,
+        "claude-code-worktree-create.json",
+        &event(json!({"cwd": root, "name": "r226-e2e"})),
+        &root,
+        true,
+    );
+    let (code, stdout) = first.done().await;
+    assert_eq!(code, 0, "{stdout}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    let path = PathBuf::from(lines[0]);
+    assert!(path.is_absolute() && path.is_dir(), "{path:?}");
+    assert!(!path.starts_with(&root), "{path:?}");
+    assert!(
+        path.components().all(|part| !matches!(
+            part,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )),
+        "{path:?}"
+    );
+    let ws = ok(
+        &daemon,
+        &[
+            "ws",
+            "inspect",
+            "--no-snapshot",
+            &path.display().to_string(),
+        ],
+    )
+    .await;
+    let id = text(&ws["id"]);
+    wait_record(&daemon, &id).await;
+    assert_eq!(record(&daemon, &id).unwrap()["holder"]["pid"], first.pid());
+    std::fs::write(path.join("hooked.txt"), "from the session\n").unwrap();
+
+    // The session ends; a resumed one's first prompt, in the old
+    // directory, holds it again, printing nothing.
+    drop(first);
+    let second = Hook::run(
+        &daemon,
+        &rehold,
+        "claude-code-user-prompt-submit.json",
+        &event(json!({"cwd": path})),
+        &path,
+        true,
+    );
+    let (code, stdout) = second.done().await;
+    assert_eq!((code, stdout.as_str()), (0, ""));
+    until(RECORD_WITHIN, "the second holder", || {
+        record(&daemon, &id).is_some_and(|record| record["holder"]["pid"] == second.pid())
+    })
+    .await;
+
+    // A prompt outside any workspace: nothing, and no failure.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = Hook::run(
+        &daemon,
+        &rehold,
+        "claude-code-user-prompt-submit.json",
+        &event(json!({"cwd": elsewhere.path()})),
+        elsewhere.path(),
+        true,
+    );
+    assert_eq!(outside.done().await, (0, String::new()));
+
+    // The same name again: the same directory.
+    let again = Hook::run(
+        &daemon,
+        &create,
+        "claude-code-worktree-create.json",
+        &event(json!({"cwd": root, "name": "r226-e2e"})),
+        &root,
+        true,
+    );
+    let (code, stdout) = again.done().await;
+    assert_eq!((code, stdout.trim()), (0, path.to_str().unwrap()));
+
+    // WorktreeRemove from a session that does not hold it, while two
+    // sessions do: kept for them.
+    let early = Hook::run(
+        &daemon,
+        &remove,
+        "claude-code-worktree-remove.json",
+        &event(json!({"worktree_path": path})),
+        &root,
+        true,
+    );
+    assert_eq!(early.done().await.0, 0);
+    assert_eq!(inspect(&daemon, &id).await["state"], "active");
+
+    // Both sessions end; their followers go.
+    drop(second);
+    drop(again);
+    until(RECORD_WITHIN, "the followers to exit", || {
+        record(&daemon, &id).is_none()
+    })
+    .await;
+
+    // WorktreeRemove: released, the file in its final snapshot.
+    let removed = Hook::run(
+        &daemon,
+        &remove,
+        "claude-code-worktree-remove.json",
+        &event(json!({"worktree_path": path})),
+        &root,
+        true,
+    );
+    assert_eq!(removed.done().await.0, 0);
+    let released = inspect(&daemon, &id).await;
+    assert_eq!(released["state"], "released", "{released}");
+    let read = ok(
+        &daemon,
+        &[
+            "file",
+            "read",
+            "--repo",
+            &repo.id,
+            "-r",
+            &text(&released["commit_id"]),
+            "hooked.txt",
+        ],
+    )
+    .await;
+    assert_eq!(read["content"], "from the session\n", "{read}");
+
+    // No reef: the create fails, and the harness reports it.
+    let missing = Hook::run(
+        &daemon,
+        &create,
+        "claude-code-worktree-create.json",
+        &event(json!({"cwd": root, "name": "r226-no-reef"})),
+        &root,
+        false,
+    );
+    assert_ne!(missing.done().await.0, 0);
+}
+
+/// A workspace with two holders is kept while either runs: a release for
+/// one lets that one go, and the last release releases it.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_holders_share_a_workspace() {
+    let (daemon, repo) = daemon().await;
+    let _followers = Followers::of(&daemon);
+    let mut holders = Holders::default();
+    let (a, b) = (holders.spawn(), holders.spawn());
+    let create = |pid: i32| {
+        let pid = pid.to_string();
+        let daemon = &daemon;
+        let repo_id = repo.id.clone();
+        async move {
+            ok(
+                daemon,
+                &[
+                    "ws",
+                    "provider",
+                    "create",
+                    "--repo",
+                    &repo_id,
+                    "--name",
+                    "shared",
+                    "--lease",
+                    HELD_LEASE,
+                    "--hold-while",
+                    &pid,
+                ],
+            )
+            .await
+        }
+    };
+    let first = create(a).await;
+    let second = create(b).await;
+    assert_eq!(second["workspace_id"], first["workspace_id"]);
+    assert_eq!(second["attached"], true);
+    assert_ne!(
+        second["holder"]["follower_pid"],
+        first["holder"]["follower_pid"]
+    );
+    let id = text(&first["workspace_id"]);
+    let followers = [
+        first["holder"]["follower_pid"].as_i64().unwrap(),
+        second["holder"]["follower_pid"].as_i64().unwrap(),
+    ];
+    // Each follower's own record, written after its first renewal.
+    let holders_dir = daemon.state_dir().join("holders");
+    until(RECORD_WITHIN, "both records", || {
+        followers
+            .iter()
+            .all(|pid| holders_dir.join(format!("{id}.{pid}.json")).exists())
+    })
+    .await;
+
+    // For B: B's follower stops, A keeps it.
+    let kept = ok(
+        &daemon,
+        &[
+            "ws",
+            "provider",
+            "release",
+            "--workspace",
+            &id,
+            "--hold-while",
+            &b.to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(kept["released"], false, "{kept}");
+    assert_eq!(kept["held_by"], 1);
+    until(Duration::from_secs(3), "B's follower to exit", || {
+        !running(followers[1])
+    })
+    .await;
+    assert!(running(followers[0]));
+    assert_eq!(inspect(&daemon, &id).await["state"], "active");
+
+    // For A, the last: released.
+    let released = ok(
+        &daemon,
+        &[
+            "ws",
+            "provider",
+            "release",
+            "--workspace",
+            &id,
+            "--hold-while",
+            &a.to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(released["released"], true, "{released}");
+    until(Duration::from_secs(3), "A's follower to exit", || {
+        !running(followers[0])
+    })
+    .await;
+}
+
+/// A name used again after its workspace ended starts on the change it
+/// left, when that was kept; any other name, on the default start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_starts_again_on_its_kept_change() {
+    let (daemon, repo) = daemon().await;
+    let _followers = Followers::of(&daemon);
+    let create = [
+        "ws", "provider", "create", "--repo", &repo.id, "--name", "again", "--lease", "60s",
+    ];
+    let first = ok(&daemon, &create).await;
+    std::fs::write(
+        Path::new(&text(&first["path"])).join("left.txt"),
+        "left here\n",
+    )
+    .unwrap();
+    ok(
+        &daemon,
+        &[
+            "ws",
+            "provider",
+            "release",
+            "--workspace",
+            &text(&first["workspace_id"]),
+        ],
+    )
+    .await;
+    let second = ok(&daemon, &create).await;
+    assert_ne!(second["workspace_id"], first["workspace_id"]);
+    assert_eq!(second["attached"], false);
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&text(&second["path"])).join("left.txt")).unwrap(),
+        "left here\n"
+    );
+    let other = ok(
+        &daemon,
+        &[
+            "ws", "provider", "create", "--repo", &repo.id, "--name", "fresh", "--lease", "60s",
+        ],
+    )
+    .await;
+    assert!(!Path::new(&text(&other["path"])).join("left.txt").exists());
+}
