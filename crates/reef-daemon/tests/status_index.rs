@@ -461,14 +461,14 @@ async fn overflow_walks_then_recovers() {
     let other = create(&daemon, &repo).await;
     settle(&daemon, &ws).await;
     let scheduler = daemon.handle.state().manager.scheduler();
+    // No watcher snapshot of the injected event: one that took the
+    // journal first would leave the read nothing lost to walk for.
+    let _paused = scheduler.pause(id_of(&ws));
     scheduler.inject_event(id_of(&ws), Vec::new(), true);
     let status = status_of(&daemon, &ws, false).await;
-    // A watcher snapshot of the injected event may have walked first.
-    assert!(
-        matches!(
-            source(&status),
-            (StatusSource::Walk, StatusWalkReason::EventsLost)
-        ) || source(&status) == walk(StatusWalkReason::CoveredByFullScan),
+    assert_eq!(
+        source(&status),
+        walk(StatusWalkReason::EventsLost),
         "{status:?}"
     );
     assert_eq!(source(&status_of(&daemon, &ws, false).await), INDEX);
