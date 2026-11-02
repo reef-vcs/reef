@@ -54,6 +54,7 @@ impl Fixture {
             "CLAUDECODE",
             "OPENCODE",
             // Where agents keep their user-level files.
+            "CLAUDE_CONFIG_DIR",
             "CODEX_HOME",
             "XDG_CONFIG_HOME",
         ] {
@@ -265,6 +266,86 @@ fn detects_claude_and_cursor() {
             ("opencode.json", "wrote"),
         ])
     );
+}
+
+/// With Reef's Claude Code plugin installed for this user or this
+/// repository, `reef init` still writes `.mcp.json` but says the plugin
+/// already serves its server; not when it skips the file, and not for an
+/// install in another repository (#153).
+#[test]
+fn notes_the_plugins_server_beside_mcp_json() {
+    const NOTE: &str = "Claude Code's reef plugin already serves Reef's MCP server";
+    let repo = Fixture::new();
+    fs::create_dir(repo.root.join(".claude")).unwrap();
+    let noted = |output: &Output| stderr(output).contains(NOTE);
+    let output = repo.init(&[]);
+    assert!(!noted(&output), "{}", stderr(&output));
+
+    let plugins = repo.home().join(".claude/plugins");
+    fs::create_dir_all(&plugins).unwrap();
+    let installed = |entries: &str| {
+        fs::write(
+            plugins.join("installed_plugins.json"),
+            format!(r#"{{"version": 2, "plugins": {entries}}}"#),
+        )
+        .unwrap();
+    };
+    installed(r#"{"other@elsewhere": [{"scope": "user"}]}"#);
+    let output = repo.init(&[]);
+    assert!(!noted(&output), "{}", stderr(&output));
+    installed(r#"{"reef@reef": [{"scope": "project", "projectPath": "/elsewhere"}]}"#);
+    let output = repo.init(&[]);
+    assert!(!noted(&output), "{}", stderr(&output));
+    installed(&format!(
+        r#"{{"reef@reef": [{{"scope": "local", "projectPath": {}}}]}}"#,
+        serde_json::to_string(&repo.root).unwrap()
+    ));
+    let output = repo.init(&[]);
+    assert!(noted(&output), "{}", stderr(&output));
+
+    installed(r#"{"reef@reef": [{"scope": "user"}]}"#);
+    let output = repo.init(&[]);
+    let value = json(&output);
+    assert!(
+        actions(&value, &repo.root).contains(&(".mcp.json".to_owned(), "unchanged".to_owned())),
+        "{value}"
+    );
+    assert!(noted(&output), "{}", stderr(&output));
+    // No `.mcp.json` written, no note.
+    let output = repo.init(&["--agents", "cursor"]);
+    assert!(!noted(&output), "{}", stderr(&output));
+    // A `.mcp.json` skipped as damaged has no `reef` server to decline.
+    repo.write(".mcp.json", "[]\n");
+    let output = repo.init(&[]);
+    assert!(
+        actions(&json(&output), &repo.root)
+            .contains(&(".mcp.json".to_owned(), "skipped".to_owned())),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!noted(&output), "{}", stderr(&output));
+    fs::remove_file(repo.root.join(".mcp.json")).unwrap();
+
+    // Claude Code's user directory moved by `CLAUDE_CONFIG_DIR`.
+    let moved = repo.tmp.path().join("claude-config");
+    fs::create_dir_all(moved.join("plugins")).unwrap();
+    fs::rename(
+        plugins.join("installed_plugins.json"),
+        moved.join("plugins/installed_plugins.json"),
+    )
+    .unwrap();
+    let state = repo.tmp.path().join("no-daemon");
+    let run = |config: Option<&Path>| {
+        let mut command = repo.reef(&state);
+        if let Some(config) = config {
+            command.env("CLAUDE_CONFIG_DIR", config);
+        }
+        command.args(["--no-register", "init"]).output().unwrap()
+    };
+    let output = run(None);
+    assert!(!noted(&output), "{}", stderr(&output));
+    let output = run(Some(&moved));
+    assert!(noted(&output), "{}", stderr(&output));
 }
 
 #[test]

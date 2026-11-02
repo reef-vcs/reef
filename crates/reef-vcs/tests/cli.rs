@@ -1806,6 +1806,41 @@ fn root_help_names_every_command() {
     }
 }
 
+/// No command's help names an agent harness (#118), except `--agents`'s
+/// list of the harnesses `reef init` writes for.
+#[test]
+fn no_help_names_a_harness() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    let mut paths: Vec<Vec<String>> = help_commands(&state, &[])
+        .into_iter()
+        .map(|noun| vec![noun])
+        .collect();
+    paths.extend(leaf_commands(&state));
+    for path in paths {
+        let text = stdout(&reef_in(&state).args(&path).arg("--help").output().unwrap());
+        let name = path.join(" ");
+        for line in text
+            .lines()
+            .filter(|line| !line.contains("possible values"))
+        {
+            let lower = line.to_lowercase();
+            for harness in [
+                "claude",
+                "codex",
+                "cursor",
+                "opencode",
+                "gemini",
+                "anthropic",
+                "openai",
+                "gpt",
+            ] {
+                assert!(!lower.contains(harness), "reef {name} --help: {line}");
+            }
+        }
+    }
+}
+
 /// `--help-all` is clap's full help, global options included, at the
 /// root and on every command.
 #[test]
