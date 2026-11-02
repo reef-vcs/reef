@@ -708,6 +708,91 @@ fn autostart_spawns_daemon() {
     failed(&output, 6, "unavailable");
 }
 
+// #162
+/// While another process holds the daemon's instance lock and nothing
+/// answers on the socket, as while a daemon drains at shutdown or runs its
+/// migrations at start, a command waits instead of starting a daemon that
+/// would lose the lock and exit; once the lock is let go, it starts one. A
+/// pid file naming a live process that holds no lock (a pid reused after a
+/// crash) is not waited for.
+#[test]
+fn autostart_waits_while_the_lock_is_held() {
+    let tmp = short_tempdir();
+    let state = tmp.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let exe = bin.join("reef");
+    std::fs::copy(env!("CARGO_BIN_EXE_reef"), &exe).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::daemon_beside(&bin);
+    let _guard = StopOnDrop(state.clone());
+    let reef = || {
+        let mut command = std::process::Command::new(&exe);
+        for var in [
+            "REEF_SOCKET",
+            "REEF_CONFIG",
+            "REEF_LOG",
+            "RUST_LOG",
+            "REEF_AGENT",
+        ] {
+            command.env_remove(var);
+        }
+        command
+            .env("REEF_STATE_DIR", &state)
+            .env("PATH", &bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    };
+
+    // A live process at the pid file's pid, holding no lock: started at once.
+    let mut other = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    std::fs::write(state.join("daemon.pid"), format!("{}\n", other.id())).unwrap();
+    let output = reef().args(["repo", "list"]).output().unwrap();
+    assert_eq!(json(&output), Value::Array(vec![]), "{}", stderr(&output));
+    let _ = other.kill();
+    let _ = other.wait();
+    reef()
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap()
+        .assert()
+        .success();
+
+    // The lock held, as by a daemon that does not answer.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("daemon.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut waiting = reef().args(["repo", "list"]).spawn().unwrap();
+    // Before #162 the started daemon lost the lock and the command failed
+    // within about a second; it waits up to 15 s now.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        waiting.try_wait().unwrap().is_none(),
+        "the command ended while the lock was held: {}",
+        stderr(&waiting.wait_with_output().unwrap())
+    );
+    lock.unlock().unwrap();
+    let output = waiting.wait_with_output().unwrap();
+    assert_eq!(json(&output), Value::Array(vec![]), "{}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with("reef: started daemon (pid "),
+        "{}",
+        stderr(&output)
+    );
+}
+
 // 9
 #[test]
 fn daemon_stop_refuses_stale_pid() {

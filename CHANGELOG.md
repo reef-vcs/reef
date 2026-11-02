@@ -70,6 +70,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- A command run while the daemon was shutting down, or still starting, started a second daemon, which lost the instance lock and exited, and the command reported "reef-daemon exited … before … answered". Since tonic 0.14.7 a daemon refuses connections while it drains. A command now waits, up to 15 s, while the daemon's lock is held and its socket refuses, and starts one only once the lock is free (#162).
+- A panic on the daemon's filesystem-watcher threads no longer ends a workspace's watch silently. Since notify 8.2.1 such a panic unwound out of the macOS `FSEvents` thread, and a later unwatch could then spin forever. A panic in Reef's tap is logged and marks every notify workspace's journal `events-lost`, so the next reads walk; any other panic on notify's or the debouncer's threads aborts the daemon, as notify did before 8.2.1 on macOS, and the next command starts one that rescans (#161).
 - On macOS, creating or releasing a workspace no longer drops other workspaces' filesystem events: each notify workspace has its own `FSEvents` stream.
 - A read at a GC-kept copy of an operation from before the last GC failed: jj could not build an index for it once GC had removed its ancestors. It answers through the head's index now (R2.12).
 - The MCP server reads path arguments as the CLI does under `--workspace`: `./`, `..` and a trailing `/` resolve, and `.` is the root where a tool takes one (`get_diff`, `list_files`). `get_diff`, `read_file` and `list_files` had refused `src/` with `INVALID_PATH`, and `query_changes` matched nothing for `./src`. An `edit_files` target with a trailing `/` is still refused (#117).

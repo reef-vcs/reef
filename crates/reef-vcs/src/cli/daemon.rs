@@ -211,9 +211,15 @@ async fn start(global: &Global, out: &Out, serve_remote: bool) -> Result<(), Cli
             }
         }
         Err(ClientError::Connect { .. }) => {
-            let (client, pid) = autostart::start_with(global, &config, serve_remote).await?;
-            out.note(&format!("reef: started daemon (pid {pid})"));
-            status_of(&client, global).await?
+            let started = autostart::start_with(global, &config, serve_remote).await?;
+            if !started.spawned {
+                // The daemon that held the lock answered: report it as
+                // running, with `--serve-remote`'s check.
+                drop(started);
+                return Box::pin(start(global, out, serve_remote)).await;
+            }
+            out.note(&format!("reef: started daemon (pid {})", started.pid));
+            status_of(&started.client, global).await?
         }
         Err(error) => return Err(CliError::Daemon(error)),
     };
@@ -339,7 +345,8 @@ pub(crate) async fn restart(
         Err(ClientError::Connect { .. }) => {}
         Err(error) => return Err(CliError::Daemon(error)),
     }
-    let (client, pid) = autostart::start_with(global, &config, serve_remote).await?;
+    let autostart::Started { client, pid, .. } =
+        autostart::start_with(global, &config, serve_remote).await?;
     out.note(&format!(
         "reef: restarted the daemon (reef {daemon_version}, API {daemon_api}, was running)"
     ));

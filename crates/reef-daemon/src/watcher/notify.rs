@@ -731,33 +731,125 @@ struct DropReads<F> {
 }
 
 impl<F: notify::EventHandler> notify::EventHandler for DropReads<F> {
+    /// A panic in the tap, Reef's code on notify's thread, is caught (#161):
+    /// logged, and every notify journal loses its events, so the next reads
+    /// walk instead of trusting an index that missed this one; the event
+    /// still goes to the debouncer. A panic anywhere else on notify's or
+    /// the debouncer's threads aborts the daemon ([`abort_on_watcher_panic`]).
     fn handle_event(&mut self, mut event: notify::Result<notify::Event>) {
-        if let (Err(error), Some(tap)) = (&event, &self.tap)
+        let tapped = IN_TAP.with(|inside| {
+            let outer = inside.replace(true);
+            let tapped =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.filter(&mut event)));
+            inside.set(outer);
+            tapped
+        });
+        let forward = tapped.unwrap_or_else(|panic| {
+            tracing::error!(
+                panic = panic_message(panic.as_ref()),
+                "the watcher's tap panicked; the next reads walk every watched workspace"
+            );
+            if let Some(tap) = &self.tap {
+                tap.journals.lost_all_notify();
+            }
+            true
+        });
+        if forward {
+            self.handler.handle_event(event);
+        }
+    }
+}
+
+impl<F> DropReads<F> {
+    /// Journals `event` and rewrites a close after writing; whether the
+    /// debouncer gets it.
+    fn filter(&self, event: &mut notify::Result<notify::Event>) -> bool {
+        #[cfg(test)]
+        if let Ok(event) = &*event
+            && event.paths.iter().any(|path| path.ends_with(TAP_PANICS))
+        {
+            panic!("test: the tap panics");
+        }
+        if let (Err(error), Some(tap)) = (&*event, &self.tap)
             && is_limit(error)
         {
             // notify stops adding the batch's new watches at the first
             // limit error, whichever workspaces they were in.
             tap.journals.lost_all_notify();
         }
-        if let Ok(event) = &mut event {
+        if let Ok(event) = event {
             let close_write = matches!(
                 event.kind,
                 EventKind::Access(AccessKind::Close(AccessMode::Write))
             );
             if matches!(event.kind, EventKind::Access(_)) && !close_write && !event.need_rescan() {
-                return;
+                return false;
             }
             if let Some(tap) = &self.tap
                 && !tap.see(event)
             {
-                return;
+                return false;
             }
             if close_write && !event.need_rescan() {
                 event.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
             }
         }
-        self.handler.handle_event(event);
+        true
     }
+}
+
+/// Test hook: an event naming this file name makes the tap panic.
+#[cfg(test)]
+const TAP_PANICS: &str = "reef-test-tap-panics";
+
+thread_local! {
+    /// Whether this thread is in [`DropReads::filter`], under the
+    /// `catch_unwind` that takes any panic there.
+    static IN_TAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A panic's message, when it has one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(no message)")
+}
+
+/// The threads notify and its debouncer start, by name (notify 8.2.1,
+/// notify-debouncer-full 0.7.0).
+const WATCHER_THREADS: &[&str] = &[
+    "notify-rs fsevents loop",
+    "notify-rs inotify loop",
+    "notify-rs debouncer loop",
+];
+
+/// Aborts the process on a panic on notify's or the debouncer's threads
+/// outside the tap (#161). Unwinding there ends the thread silently: on
+/// macOS notify 8.2.1's `C-unwind` callbacks let a panic (an invalid UTF-8
+/// path, flags it cannot decode) out of the run loop, after which its
+/// `stop` spins forever waiting for that loop, under the debouncer's lock;
+/// a panic in the debouncer poisons its lock, after which every event
+/// panics; and a panic in Reef's debounced handler ends delivery. notify
+/// 8.2.0's `extern "C"` callbacks aborted on any panic on macOS; this
+/// keeps that, on every platform and thread named above: the next command
+/// starts a daemon that rescans. Installed once, chaining the hook before
+/// it, which still reports the panic.
+fn abort_on_watcher_panic() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            let on_watcher = std::thread::current()
+                .name()
+                .is_some_and(|name| WATCHER_THREADS.contains(&name));
+            if on_watcher && !IN_TAP.with(std::cell::Cell::get) {
+                std::process::abort();
+            }
+        }));
+    });
 }
 
 /// One handler behind every macOS stream.
@@ -784,6 +876,7 @@ impl ChangesOnly {
 impl notify::Watcher for ChangesOnly {
     fn new<F: notify::EventHandler>(handler: F, config: notify::Config) -> notify::Result<Self> {
         let tap = NEXT_TAP.with(|next| next.borrow_mut().take());
+        abort_on_watcher_panic();
         let handler = DropReads {
             handler,
             tap: tap.clone(),
@@ -1247,6 +1340,32 @@ mod routing_tests {
                 at,
             }]
         );
+    }
+
+    /// A panic in the tap neither unwinds into notify nor goes unnoticed:
+    /// every notify journal is marked lost, so the next read walks, and the
+    /// event still reaches the debouncer (#161).
+    #[test]
+    fn a_tap_panic_loses_events_instead_of_unwinding() {
+        let journals = Arc::new(Journals::new(1_000));
+        journals.track(id(3), PathBuf::from("/nowhere/ws"), true, None, None);
+        let forwarded = Arc::new(Mutex::new(0_u32));
+        let count = Arc::clone(&forwarded);
+        let mut handler = DropReads {
+            handler: move |_: notify::Result<Event>| *count.lock().unwrap() += 1,
+            tap: Some(Tap {
+                demux: Arc::new(Mutex::new(demux())),
+                journals: Arc::clone(&journals),
+            }),
+        };
+        notify::EventHandler::handle_event(
+            &mut handler,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(Path::new("/nowhere/ws").join(TAP_PANICS))),
+        );
+        assert_eq!(journals.peek(id(3)).stale, Some(WalkReason::EventsLost));
+        assert_eq!(*forwarded.lock().unwrap(), 1);
+        assert!(!IN_TAP.with(std::cell::Cell::get));
     }
 }
 
