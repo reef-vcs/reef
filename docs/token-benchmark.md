@@ -124,6 +124,24 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | bytes | 7,933 | 4,925 | – | 3,672 | 23,610 | 1.61× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | anthropic | 3,543 | 2,237 | – | 1,881 | 9,431 | 1.58× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | ? | 421f33d6ff31 | `who-symbol` | o200k | 2,280 | 1,669 | – | 1,313 | 5,775 | 1.37× | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | bytes | 185 | 858 | 399 | 859 | 20,817 | 0.22× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | anthropic | 88 | 429 | 218 | 430 | 7,985 | 0.21× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-own` | o200k | 54 | 247 | 150 | 247 | 4,714 | 0.22× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | bytes | 2,593 | 215 | 584 | 231 | 20,189 | 12.06× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | anthropic | 1,501 | 115 | 340 | 128 | 7,683 | 13.05× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `state-repo` | o200k | 850 | 80 | 244 | 81 | 4,548 | 10.62× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | bytes | 22,321 | 4,646 | 1,224 | 5,442 | 25,400 | 4.80× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | anthropic | 9,314 | 2,237 | 671 | 2,663 | 10,218 | 4.16× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-small` | o200k | 5,730 | 1,395 | 458 | 1,645 | 6,112 | 4.11× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | bytes | 50,606 | 12,218 | 1,765 | 17,276 | 37,234 | 4.14× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | anthropic | 20,217 | 5,865 | 926 | 8,430 | 15,985 | 3.45× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `changed-large` | o200k | 12,499 | 3,608 | 639 | 5,182 | 9,649 | 3.46× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | bytes | 619 | 3,801 | – | 3,838 | 23,796 | 0.16× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | anthropic | 366 | 2,005 | – | 2,019 | 9,574 | 0.18× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-file` | o200k | 243 | 1,456 | – | 1,466 | 5,933 | 0.17× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | – | 3,661 | 23,619 | 2.10× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | anthropic | 3,371 | 1,872 | – | 1,883 | 9,438 | 1.80× | #122: task-first reef --help |
+| 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | o200k | 2,141 | 1,317 | – | 1,324 | 5,791 | 1.63× | #122: task-first reef --help |
 <!-- tokens-rows:scripted -->
 
 ### Fixed cost
@@ -131,6 +149,7 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | Date | Reef | Tools | `tools/list` bytes | Instructions bytes | bytes | anthropic | o200k | Break-even (questions) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | 2026-10-31 | ? | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-02 | 88c31de71f0f | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #122: task-first reef --help |
 <!-- tokens-rows:fixed -->
 
 R2.24 publishes every tool's output schema through `reef schema mcp` and does not declare them in `tools/list` ([ADR 0050](adr/0050-published-schemas.md)), so the fixed cost and break-even above are unchanged; declaring them all would make `tools/list` 141,756 bytes instead of 21,211.
@@ -159,6 +178,24 @@ Answer tokens and bytes are medians over correct trials; the other columns are m
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | git | 3/3 | 5,676 | 12,035 | 1,597 | 14,235 | 8,027 | 960 | $0.026 | 4 | 5 | 13 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | reef | 3/3 | 4,679 | 11,502 | 1,627 | 16,809 | 11,947 | 622 | $0.020 | 3 | 4 | 10 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
 | 2026-10-31 | claude-sonnet-5-5 | claude-code 2.1.314 | ? | macos | `who-symbol` | mcp | 3/3 | 1,933 | 3,726 | 8,068 | 18,156 | 18,150 | 319 | $0.006 | 1 | 2 | 5 s | 0/3 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | git | 3/3 | 415 | 798 | 1,536 | 3,538 | 3,064 | 312 | $0.005 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | reef | 3/3 | 1,715 | 3,800 | 1,563 | 6,735 | 4,910 | 263 | $0.008 | 2 | 3 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-own` | mcp | 3/3 | 439 | 848 | 8,013 | 16,501 | 16,495 | 215 | $0.004 | 1 | 2 | 5 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | git | 3/3 | 1,992 | 3,436 | 1,510 | 10,491 | 8,682 | 666 | $0.013 | 3 | 4 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | reef | 3/3 | 286 | 735 | 1,537 | 5,218 | 5,210 | 260 | $0.003 | 2 | 3 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `state-repo` | mcp | 3/3 | 1,743 | 3,271 | 7,987 | 26,108 | 24,271 | 334 | $0.010 | 3 | 4 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | git | 3/3 | 4,300 | 8,661 | 1,542 | 15,028 | 10,372 | 1,003 | $0.023 | 4 | 5 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | reef | 3/3 | 4,701 | 12,966 | 1,569 | 12,735 | 7,873 | 647 | $0.016 | 3 | 4 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-small` | mcp | 3/3 | 2,649 | 5,417 | 8,019 | 26,970 | 26,962 | 577 | $0.014 | 2 | 3 | 9 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | git | 3/3 | 10,373 | 23,243 | 1,563 | 27,701 | 16,639 | 1,143 | $0.041 | 4 | 5 | 14 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | reef | 3/3 | 4,503 | 12,580 | 1,590 | 20,341 | 15,435 | 1,050 | $0.024 | 6 | 7 | 14 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `changed-large` | mcp | 3/3 | 8,492 | 17,450 | 8,040 | 41,341 | 32,725 | 892 | $0.034 | 3 | 4 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | git | 3/3 | 2,602 | 4,922 | 1,548 | 11,527 | 8,540 | 866 | $0.017 | 3 | 4 | 12 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | reef | 3/3 | 2,882 | 6,251 | 1,575 | 7,938 | 7,930 | 208 | $0.004 | 2 | 3 | 7 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-file` | mcp | 3/3 | 2,011 | 3,840 | 8,025 | 18,131 | 18,125 | 362 | $0.005 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | git | 3/3 | 4,706 | 10,120 | 1,564 | 10,216 | 5,048 | 731 | $0.020 | 2 | 3 | 10 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | reef | 3/3 | 3,130 | 7,395 | 1,591 | 10,817 | 7,643 | 463 | $0.013 | 3 | 4 | 9 s | 0/3 | #122: task-first reef --help |
+| 2026-11-02 | claude-sonnet-5-5 | claude-code 2.1.310 | 88c31de71f0f | linux | `who-symbol` | mcp | 3/3 | 1,904 | 3,699 | 8,041 | 18,057 | 18,051 | 353 | $0.006 | 1 | 2 | 6 s | 0/3 | #122: task-first reef --help |
 <!-- tokens-rows:live-claude-code -->
 
 ### Diff sweep
@@ -168,6 +205,7 @@ Median bytes per view.
 | Date | Reef | Commits | `git show` | `git show --stat` | `reef diff` | `reef diff --stat` | `reef diff --symbols` | `--symbols -o text` | `--symbols` ÷ `reef diff` | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-10-31 | ? | 20 | 153,658 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | first baseline, local run; Reef 79ad454 built in a Reef workspace (no git, so no commit in --version) |
+| 2026-11-02 | 88c31de71f0f | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #122: task-first reef --help |
 <!-- tokens-rows:sweep -->
 
 ### Where the bytes go
@@ -192,4 +230,16 @@ The state questions' `reef (default)` output, compact JSON bytes by field.
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].lines_removed` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].new_type` | 1,071 | 5% |
 | 2026-10-31 | ? | `state-repo` | list, diff summary | `files.[].too_large` | 1,071 | 5% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.parents` | 181 | 21% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status.trunk` | 177 | 21% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.changed_files` | 167 | 20% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.working_copy` | 112 | 13% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status.workspace` | 53 | 6% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status.active_workspace_count` | 26 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `workspace_status (structure)` | 26 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-own` | status | `repository_status (structure)` | 25 | 3% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].id` | 69 | 35% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].changed_file_count` | 67 | 34% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `[].owner` | 45 | 23% |
+| 2026-11-02 | 88c31de71f0f | `state-repo` | list | `(structure)` | 16 | 8% |
 <!-- tokens-rows:breakdown -->
