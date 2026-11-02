@@ -11,7 +11,8 @@ name: Release
 # gets an MCPB bundle, the release carries `reef schema`'s document and descriptor set, the harness
 # packages are installed into each harness from the checkout, and a tag lists the bundles on the
 # MCP registry. The plugins themselves are released by the tag: their marketplaces, in this
-# repository, pin it.
+# repository, pin it. Since R2.06 (ADR 0054) the Python SDK is built and smoke-tested on every run,
+# and a tag publishes it to PyPI by trusted publishing.
 
 on:
   push:
@@ -28,6 +29,10 @@ on:
       - crates/reef-vcs/build.rs
       - crates/reef-web/build.rs
       - crates/reef-web/placeholder/**
+      - sdk/python/pyproject.toml
+      - sdk/python/hatch_build.py
+      - sdk/python/codegen/**
+      - sdk/python/tests/smoke.py
   workflow_dispatch:
     inputs:
       dry_run:
@@ -436,9 +441,58 @@ jobs:
           publisher="$(scripts/mcp-publisher.sh "$RUNNER_TEMP/publisher")"
           "$publisher" validate server.json
 
+  # The Python SDK (R2.06, ADR 0054): the sdist and the wheel built from it, at the workspace
+  # version, checked by twine and smoke-tested alone (no checkout on the path) against this run's
+  # Linux daemon on the floor and the newest Python. Every run, dry runs included; `release` waits
+  # for it, and `pypi` publishes what it built.
+  python-sdk:
+    name: Python SDK
+    needs: [check-version, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.13.6"
+          enable-cache: false
+      - name: Build
+        working-directory: sdk/python
+        run: |
+          uv build --out-dir dist
+          pep440="$(uv run --no-project --with packaging==26.3 python -c 'import sys; from packaging.version import Version; print(Version(sys.argv[1]))' "$VERSION")"
+          ls -l dist
+          [[ -f "dist/reef_vcs-$pep440-py3-none-any.whl" && -f "dist/reef_vcs-$pep440.tar.gz" ]]
+          [[ "$(ls dist | wc -l)" -eq 2 ]]
+          uvx twine==7.0.0 check --strict dist/*
+      - uses: actions/download-artifact@v8
+        with:
+          name: reef-x86_64-unknown-linux-musl
+          path: tarball
+      - name: Smoke test
+        run: |
+          mkdir "$RUNNER_TEMP/reef"
+          tar -xzf tarball/reef-"$VERSION"-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP/reef"
+          bin="$(dirname "$(find "$RUNNER_TEMP/reef" -name reef-daemon -type f | head -1)")"
+          for python in 3.11 3.15; do
+            uv venv --python "$python" "$RUNNER_TEMP/py$python"
+            uv pip install --python "$RUNNER_TEMP/py$python/bin/python" sdk/python/dist/*.whl
+            (cd "$RUNNER_TEMP" && REEF_BIN_DIR="$bin" "$RUNNER_TEMP/py$python/bin/python" "$GITHUB_WORKSPACE/sdk/python/tests/smoke.py")
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-dist
+          path: sdk/python/dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: publish
-    needs: [check-version, checksums, install, homebrew-test, binstall, harness-packages]
+    needs: [check-version, checksums, install, homebrew-test, binstall, harness-packages, python-sdk]
     if: needs.check-version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -559,6 +613,39 @@ jobs:
             ! "$publisher" publish server.json; then
             echo "::warning::publishing to the MCP registry failed; $advice"
           fi
+
+  # reef-vcs on PyPI (R2.06), by trusted publishing: the run's OIDC token is exchanged for a
+  # short-lived upload token, so no secret is stored. PyPI's publisher names this repository, this
+  # workflow and the `pypi` environment (the brief's one-time setup). After `release`: a version on
+  # PyPI can never be uploaded again, so it goes out once the binaries it talks to exist. Warns
+  # rather than fails, as the tap and the listing do: the release is already out.
+  pypi:
+    name: PyPI
+    needs: [check-version, release]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/reef-vcs/
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-dist
+          path: dist
+      - id: publish
+        uses: pypa/gh-action-pypi-publish@v1.14.3   # by its full tag, as cosign-installer is
+        continue-on-error: true
+        with:
+          packages-dir: dist/
+      - if: steps.publish.outcome == 'failure'
+        run: |
+          echo "::warning::publishing reef-vcs $VERSION to PyPI failed; check the trusted publisher (project reef-vcs, repository $GITHUB_REPOSITORY, workflow release.yml, environment pypi), then re-run this job: the run keeps python-dist for 14 days. By hand: download python-dist and run uvx twine upload dist/* with an API token for reef-vcs."
 
   # The documented install lines, run as written now that the tag exists, and the listing as the
   # registry serves it. Warns, as the tap and the listing do: the release is already out.

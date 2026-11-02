@@ -47,6 +47,7 @@ Every pull request that touches `crates/reef-api/proto` is reviewed against this
 9. Errors' kinds and reasons are documented on the RPC.
 10. The RPC is implemented or answers `NOT_IMPLEMENTED`.
 11. CHANGELOG lists the addition.
+12. `just python-check` passes: the SDKs generate the new RPC's methods ([0054](0054-sdks.md)). A new paged RPC whose response has more than one repeated field names its items in `sdk/python/codegen/clientgen.py`'s `PAGE_ITEMS`.
 
 ## Consequences
 

@@ -467,6 +467,88 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidArgument);
     }
 
+    /// `sdk/fixtures/socket-paths.json`'s placeholders filled in.
+    fn fill(text: &str, tmp: &Path) -> String {
+        let cwd = std::env::current_dir().unwrap();
+        text.replace("{tmp}", &tmp.display().to_string())
+            .replace("{cwd}", &cwd.display().to_string())
+    }
+
+    // R2.06: the cases the Python SDK (and R2.07's TypeScript SDK) pass too, so
+    // the clients cannot drift from this implementation.
+    #[test]
+    fn paths_follow_the_shared_table() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../../sdk/fixtures/socket-paths.json")).unwrap();
+        for case in table["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let fill = |value: &serde_json::Value| fill(value.as_str().unwrap(), tmp.path());
+            if let Some(files) = case["files"].as_object() {
+                for (path, text) in files {
+                    let path = PathBuf::from(fill(&serde_json::Value::from(path.as_str())));
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, fill(text)).unwrap();
+                }
+            }
+            let env: HashMap<String, OsString> = case["env"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, value)| (key.clone(), OsString::from(fill(value))))
+                .collect();
+            let arg = |key: &str| {
+                case["args"]
+                    .get(key)
+                    .map(|value| PathBuf::from(fill(value)))
+            };
+            let overrides = PathOverrides {
+                state_dir: arg("state_dir"),
+                socket: arg("socket"),
+                config_file: arg("config"),
+            };
+            let defaults = match &case.get("defaults") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(defaults) => Some(PlatformDefaults {
+                    state_dir: PathBuf::from(fill(&defaults["state_dir"])),
+                    runtime_dir: defaults
+                        .get("runtime_dir")
+                        .map(|value| PathBuf::from(fill(value))),
+                }),
+            };
+            let result = ClientConfig::load_with(
+                &overrides,
+                |key| env.get(key).cloned(),
+                || defaults.ok_or(PathsError::NoHome),
+            );
+            if let Some(kind) = case.get("error") {
+                let error = result.expect_err(name);
+                assert_eq!(
+                    crate::error::kind_text(error.kind()),
+                    kind.as_str().unwrap(),
+                    "{name}: {error}"
+                );
+                continue;
+            }
+            let config = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                config.socket,
+                PathBuf::from(fill(&case["socket"])),
+                "{name}"
+            );
+            if let Some(state_dir) = case.get("state_dir") {
+                assert_eq!(config.state_dir, PathBuf::from(fill(state_dir)), "{name}");
+            }
+            if let Some(config_file) = case.get("config_file") {
+                assert_eq!(
+                    config.config_file,
+                    PathBuf::from(fill(config_file)),
+                    "{name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_named_file_must_exist() {
         let tmp = tempfile::tempdir().unwrap();

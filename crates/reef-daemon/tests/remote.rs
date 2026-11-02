@@ -622,6 +622,65 @@ async fn unknown_methods_are_named() {
     );
 }
 
+// R2.06: a service's error is a trailers-only answer, its HEADERS frame
+// ending the stream, as gRPC requires. A body that hid its end made hyper
+// send the headers and then an empty DATA frame with END_STREAM, which
+// tonic tolerates and grpcio (the Python SDK) refuses as "Stream removed".
+#[tokio::test(flavor = "multi_thread")]
+async fn service_errors_are_trailers_only() {
+    use http_body::Body as _;
+    let (daemon, addr, _) = daemon_with(|_| {}).await;
+    let read = token(&daemon, "reader", RemoteScope::Read).await;
+    let bearer = format!("Bearer {read}");
+    let calls = [
+        (
+            "/reef.api.v1.WorkspaceService/GetWorkspace",
+            frame(&v1::GetWorkspaceRequest {
+                workspace: "abcd0123".to_owned(),
+                ..v1::GetWorkspaceRequest::default()
+            }),
+            reef_api::error::WORKSPACE_NOT_FOUND,
+        ),
+        (
+            "/reef.api.v1.OperationService/SubscribeOperations",
+            frame(&SubscribeOperationsRequest {
+                start: Some(v1::subscribe_operations_request::Start::Cursor(
+                    "nope".to_owned(),
+                )),
+                ..SubscribeOperationsRequest::default()
+            }),
+            reef_api::error::INVALID_CURSOR,
+        ),
+    ];
+    for (path, body, expected) in calls {
+        let response = open(
+            addr,
+            true,
+            request(
+                Method::POST,
+                &format!("localhost:{}", addr.port()),
+                path,
+                &[
+                    ("content-type", "application/grpc"),
+                    ("te", "trailers"),
+                    ("authorization", &bearer),
+                ],
+                body,
+            ),
+        )
+        .await;
+        assert_eq!(
+            reason_in(response.headers()),
+            expected,
+            "{path}: {response:?}"
+        );
+        assert!(
+            response.body().is_end_stream(),
+            "{path}: the HEADERS frame must end the stream"
+        );
+    }
+}
+
 // Review: an owner cannot carry a remote token's mark into the operations
 // that fall back to it.
 #[tokio::test(flavor = "multi_thread")]

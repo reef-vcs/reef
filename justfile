@@ -104,6 +104,33 @@ web-dev:
 web-clean:
     rm -rf crates/reef-web/assets web/src/gen
 
+# The Python SDK (R2.06, ADR 0054) needs uv (https://docs.astral.sh/uv/); nothing else here does.
+# Its gRPC code and methods are generated from the protos at every build and never committed.
+# The generated code, for an editor's types; `uv sync` (and every recipe below) regenerates it.
+python-gen:
+    cd sdk/python && uv run --frozen python codegen/generate.py
+
+# What CI's `python` job runs first: the generation, ruff, mypy --strict, and the unit tests.
+python-check:
+    cd sdk/python && uv run --frozen python codegen/generate.py
+    cd sdk/python && uv run --frozen ruff check src tests codegen hatch_build.py
+    cd sdk/python && uv run --frozen ruff format --check src tests codegen hatch_build.py
+    cd sdk/python && uv run --frozen mypy
+    cd sdk/python && uv run --frozen pytest -m "not integration" -q
+
+# The SDK against scratch daemons: REEF_BIN_DIR, default the cargo target's debug directory
+# (after `cargo build -p reef-vcs -p reef-daemon`).
+python-test *ARGS:
+    cd sdk/python && uv run --frozen python codegen/generate.py
+    target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'); \
+        cd sdk/python && REEF_BIN_DIR="${REEF_BIN_DIR:-$target/debug}" uv run --frozen pytest -m integration -q "$@"
+
+# The sdist and the wheel built from it, into sdk/python/dist, checked by twine.
+python-build:
+    rm -rf sdk/python/dist
+    cd sdk/python && uv build --out-dir dist
+    cd sdk/python && uv run --frozen twine check --strict dist/*
+
 # Benchmarks on the REEF_BENCH_PRESET synthetic repo (default medium). See docs/benchmarks.md.
 bench *ARGS:
     cargo bench --workspace --bench '*' "$@"

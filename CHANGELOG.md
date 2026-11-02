@@ -4,6 +4,14 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Added
+
+- The Python SDK ([ADR 0054](docs/adr/0054-sdks.md), [`docs/python-sdk.md`](docs/python-sdk.md)): `pip install reef-vcs`, then `import reef`. Every API call is a typed method on `reef.connect()`'s client and on `reef.aio`'s, generated from the schema, with page iterators and streams. The daemon's errors arrive as exceptions by kind, with `reason`, `hint` and `next`. The SDK finds the daemon as the CLI does and reaches a remote one with its key pinned before the token is sent. `client.workspace(...)` holds a workspace for a block of code as `reef ws run` does for a command: lease heartbeats, a presence entry, and a release with a final snapshot. Published to PyPI by each release.
+
+### Fixed
+
+- The remote listener sends a service's error as a trailers-only answer, its HEADERS frame ending the stream. It used to send the headers and then an empty DATA frame, which tonic accepted and other gRPC clients (grpcio) refused as "Stream removed".
+
 ## [0.3.0] - 2026-11-02
 
 The rest of Phase 2's agent surface and its live views. Agents get brief JSON by default, a task-first `reef --help`, symbol-level diffs and a queryable history (`reef history`, the MCP `query_changes` tool), `reef schema` for generating tool definitions, and one-line installs for Claude Code, Codex and opencode, with the MCP server published to the MCP registry and as an MCPB bundle per target. Humans get a web UI (`reef ui`) with a live smartlog, a workspaces and fleet page, and an activity feed with a replay scrubber. Status answers from an incremental index instead of a tree walk, a daemon can be reached remotely over TLS with a token, and harnesses that isolate sessions in git worktrees can ask Reef for workspaces instead (the workspace provider contract). Every Phase 2 exit criterion is met; the Python and TypeScript SDKs (R2.06, R2.07) follow in a later release.
