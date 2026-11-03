@@ -335,7 +335,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
         with:
           version: "0.13.6"
           python-version: ${{ matrix.python }}
