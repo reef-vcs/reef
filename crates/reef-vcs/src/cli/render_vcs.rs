@@ -87,6 +87,43 @@ fn log_line(entry: &LogEntry, workspace: &str) -> String {
     words.join(" ")
 }
 
+/// `At operation <12 hex>`, with ` (<ended_at>)` when known: the first line
+/// of text read at an operation the request named (#126). Reads at head
+/// print no such line.
+fn at_operation_line(w: &mut dyn Write, id: &str, ended_at: Option<&str>) -> io::Result<()> {
+    match ended_at {
+        Some(at) => writeln!(w, "At operation {} ({at})", short(id)),
+        None => writeln!(w, "At operation {}", short(id)),
+    }
+}
+
+/// `reef status`: the status, and whether the request named the operation
+/// it was read at (`--at-op`, `--at`), which text then names first.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct StatusText {
+    pub(crate) status: RepoStatus,
+    #[serde(skip)]
+    pub(crate) named: bool,
+}
+
+impl TextRender for StatusText {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let status = &self.status;
+        if self.named && !status.at_operation.is_empty() {
+            // The repository's last operation is the one read at.
+            let ended_at = status
+                .repository_status
+                .as_ref()
+                .and_then(|repo| repo.last_operation.as_ref())
+                .filter(|op| op.id == status.at_operation)
+                .and_then(|op| op.ended_at.as_deref());
+            at_operation_line(w, &status.at_operation, ended_at)?;
+        }
+        status.render(w)
+    }
+}
+
 impl TextRender for RepoStatus {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         if let Some(ws) = &self.workspace_status {
@@ -234,10 +271,18 @@ pub(crate) struct DiffText {
     /// `--symbols`: each file's symbol changes instead of its lines.
     #[serde(skip)]
     pub(crate) symbols: bool,
+    /// The request named the operation read at (`--at-op`, `--at`), so the
+    /// text names it first. A diff carries no operation time, and `git
+    /// apply` skips the line.
+    #[serde(skip)]
+    pub(crate) named: bool,
 }
 
 impl TextRender for DiffText {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        if self.named && !self.diff.at_operation.is_empty() {
+            at_operation_line(w, &self.diff.at_operation, None)?;
+        }
         if self.symbols {
             return symbol_diff(w, &self.diff, self.format == DiffFormat::Stat);
         }
@@ -795,6 +840,7 @@ mod tests {
                 diff: Diff::from(&diff),
                 format,
                 symbols: false,
+                named: false,
             })
         };
         assert_eq!(
@@ -807,6 +853,92 @@ mod tests {
             text(DiffFormat::Stat),
             "a | +1 -0\nnew | +0 -0\n2 files changed, +1 -0\n"
         );
+    }
+
+    // #126 test 5a
+    #[test]
+    fn status_text_names_a_named_operation() {
+        let id = "9e".repeat(64);
+        let response = v1::GetStatusResponse {
+            at_operation: id.clone(),
+            repository_status: Some(v1::RepositoryStatus {
+                active_workspace_count: 1,
+                head_count: 2,
+                last_operation: Some(v1::Operation {
+                    id: id.clone(),
+                    ended_at: Some(prost_types::Timestamp {
+                        seconds: 1_762_191_474,
+                        nanos: 807_000_000,
+                    }),
+                    ..v1::Operation::default()
+                }),
+                ..v1::RepositoryStatus::default()
+            }),
+            ..v1::GetStatusResponse::default()
+        };
+        let text = |response: &v1::GetStatusResponse, named| {
+            render(&StatusText {
+                status: RepoStatus::from(response),
+                named,
+            })
+        };
+        let head = text(&response, false);
+        assert!(!head.contains("At operation"), "{head}");
+        assert_eq!(
+            text(&response, true),
+            format!("At operation 9e9e9e9e9e9e (2025-11-03T17:37:54.807Z)\n{head}")
+        );
+        let mut untimed = response.clone();
+        if let Some(op) = untimed
+            .repository_status
+            .as_mut()
+            .and_then(|repo| repo.last_operation.as_mut())
+        {
+            op.ended_at = None;
+        }
+        assert_eq!(
+            text(&untimed, true),
+            format!("At operation 9e9e9e9e9e9e\n{}", text(&untimed, false))
+        );
+    }
+
+    // #126 test 5b
+    #[test]
+    fn diff_text_names_a_named_operation() {
+        let diff = v1::GetDiffResponse {
+            at_operation: "9e".repeat(64),
+            total_files: 1,
+            files: vec![v1::FileDiff {
+                change: Some(v1::FileChange {
+                    path: "a".into(),
+                    kind: v1::FileChangeKind::Modified.into(),
+                    ..v1::FileChange::default()
+                }),
+                ..v1::FileDiff::default()
+            }],
+            ..v1::GetDiffResponse::default()
+        };
+        let text = |format, symbols, named| {
+            render(&DiffText {
+                diff: Diff::from(&diff),
+                format,
+                symbols,
+                named,
+            })
+        };
+        for (format, symbols) in [
+            (DiffFormat::Summary, false),
+            (DiffFormat::Stat, false),
+            (DiffFormat::Hunks, false),
+            (DiffFormat::Summary, true),
+        ] {
+            let head = text(format, symbols, false);
+            assert!(!head.contains("At operation"), "{head}");
+            assert_eq!(
+                text(format, symbols, true),
+                format!("At operation 9e9e9e9e9e9e\n{head}")
+            );
+        }
     }
 
     #[test]

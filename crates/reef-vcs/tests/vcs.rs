@@ -1308,11 +1308,12 @@ async fn op_watch() {
     let bad = run_in(&daemon, &dir, &["op", "watch", "--after", "zzzz"]).await;
     failed(&bad, 2, "INVALID_OPERATION_ID");
 
-    // `--follow` ends when nobody reads any more.
+    // `--follow` ends when nobody reads any more. The binary is quoted: a
+    // target dir under a Reef workspace has a space in its path.
     let head = head_op(&daemon, &dir).await;
     ok(&daemon, &dir, &["describe", "-m", "piped"]).await;
     let script = format!(
-        "{} --no-autostart op watch --after {head} --follow -o json | head -1",
+        "'{}' --no-autostart op watch --after {head} --follow -o json | head -1",
         env!("CARGO_BIN_EXE_reef")
     );
     let script = format!("set -o pipefail; {script}");
@@ -1496,7 +1497,7 @@ async fn presence_watch() {
 
     // `--follow` ends when nobody reads any more.
     let script = format!(
-        "set -o pipefail; {} --no-autostart presence watch --follow -o json | head -1",
+        "set -o pipefail; '{}' --no-autostart presence watch --follow -o json | head -1",
         env!("CARGO_BIN_EXE_reef")
     );
     let mut shell = std::process::Command::new("bash");
@@ -2592,6 +2593,102 @@ async fn replay_cli() {
             .contains("operation log starts at"),
         "{error}"
     );
+    daemon.stop().await;
+}
+
+// #126 test 6: brief and text `status` and `diff` read at a named operation
+// name it; reads at head print what they did.
+#[tokio::test(flavor = "multi_thread")]
+async fn brief_names_the_operation_read() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    write(&ws, "one.txt", "1\n");
+    ok(&daemon, &dir, &["ws", "snapshot"]).await;
+    let x = head_op(&daemon, &dir).await;
+    write(&ws, "two.txt", "2\n");
+    ok(&daemon, &dir, &["ws", "snapshot"]).await;
+    assert_ne!(head_op(&daemon, &dir).await, x);
+
+    // Workspace scope, from a prefix: the full id, first.
+    let output = run_in(&daemon, &dir, &["status", "--at-op", &x[..12]]).await;
+    let status = json(&output);
+    assert_eq!(status["at_operation"], x.as_str());
+    assert!(
+        stdout(&output).starts_with(&format!("{{\"at_operation\":\"{x}\",")),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(status["workspace_status"]["source"], "operation");
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+
+    // Repository scope.
+    let status = ok(
+        &daemon,
+        &repo.root,
+        &["status", "--repo", &repo.id, "--at-op", &x],
+    )
+    .await;
+    assert_eq!(status["at_operation"], x.as_str());
+    assert!(status.get("workspace_status").is_none(), "{status}");
+
+    // `--at` names it too, and still notes it on stderr.
+    let output = run_in(&daemon, &dir, &["status", "--at", "0s"]).await;
+    assert_eq!(
+        json(&output)["at_operation"],
+        head_op(&daemon, &dir).await.as_str()
+    );
+    assert!(
+        stderr(&output).starts_with("reef: at operation "),
+        "{}",
+        stderr(&output)
+    );
+
+    // At head, byte for byte what it was, less the key.
+    let h = head_op(&daemon, &dir).await;
+    let head = stdout(&run_in(&daemon, &repo.root, &["status", "--repo", &repo.id]).await);
+    let named = stdout(
+        &run_in(
+            &daemon,
+            &repo.root,
+            &["status", "--repo", &repo.id, "--at-op", &h],
+        )
+        .await,
+    );
+    assert!(!head.contains("\"at_operation\":"), "{head}");
+    assert_eq!(
+        named.replacen(&format!("\"at_operation\":\"{h}\","), "", 1),
+        head
+    );
+
+    // Diff: lossless at a named operation; no key at head.
+    let brief = ok(&daemon, &dir, &["diff", "--at-op", &x]).await;
+    assert_eq!(brief["at_operation"], x.as_str());
+    let full = ok(&daemon, &dir, &["-o", "json", "diff", "--at-op", &x]).await;
+    assert_brief_of(&brief, &full, "diff");
+    let head = stdout(&run_in(&daemon, &dir, &["diff"]).await);
+    assert!(!head.contains("\"at_operation\":"), "{head}");
+
+    // `ws list` is unchanged: an array, with no key.
+    let listed = stdout(&run_in(&daemon, &dir, &["ws", "list", "--at-op", &x]).await);
+    assert!(listed.starts_with('['), "{listed}");
+    assert!(!listed.contains("\"at_operation\":"), "{listed}");
+
+    // Text names it in a first line; at head it does not.
+    let text = stdout(&run_in(&daemon, &dir, &["-o", "text", "status", "--at-op", &x]).await);
+    assert!(
+        text.starts_with(&format!("At operation {} (", &x[..12])),
+        "{text}"
+    );
+    let text = stdout(&run_in(&daemon, &dir, &["-o", "text", "diff", "--at-op", &x]).await);
+    assert!(
+        text.starts_with(&format!("At operation {}\ndiff --git ", &x[..12])),
+        "{text}"
+    );
+    for args in [&["-o", "text", "status"][..], &["-o", "text", "diff"]] {
+        let text = stdout(&run_in(&daemon, &dir, args).await);
+        assert!(!text.contains("At operation"), "{text}");
+    }
     daemon.stop().await;
 }
 

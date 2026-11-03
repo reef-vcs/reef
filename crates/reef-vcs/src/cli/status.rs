@@ -2,13 +2,15 @@
 //! after a snapshot, and the repository's state; the repository's alone in
 //! repository scope. `here` is the cheap "where am I"; this snapshots and
 //! lists what changed. With `--at-op` or `--at` (R2.12), both as they
-//! were at that operation, without a snapshot.
+//! were at that operation, without a snapshot; the brief and the text then
+//! name the operation (#126).
 
 use reef_api::v1::GetStatusRequest;
 use reef_client::brief;
 use reef_client::json::RepoStatus;
 
 use super::advice::AdviceCtx;
+use super::render_vcs::StatusText;
 use super::scope::{self, AtArgs, ScopeArgs};
 use super::{CliError, Ctx};
 
@@ -34,6 +36,9 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         snapshots_first: !args.no_snapshot && !args.at.given(),
         ..AdviceCtx::new(&scope)
     };
+    let at_operation = args.at.at_operation(ctx, &scope).await?;
+    // The request named an operation; an empty `--at-op` reads at head.
+    let named = !at_operation.trim().is_empty();
     let request = GetStatusRequest {
         repo: scope.repo_id.clone(),
         workspace: scope.workspace_id(),
@@ -41,12 +46,21 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         max_files: args
             .max_files
             .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
-        at_operation: args.at.at_operation(ctx, &scope).await?,
+        at_operation,
     };
     let response = ctx
         .call(Box::pin(ctx.client.get_status(request)))
         .await
         .map_err(|error| advice.refine(error))?;
-    ctx.out
-        .object_with(&RepoStatus::from(&response), brief::RepoStatus::from)
+    let status = StatusText {
+        status: RepoStatus::from(&response),
+        named,
+    };
+    ctx.out.object_with(&status, |text| {
+        if text.named {
+            brief::RepoStatus::read_at(&text.status)
+        } else {
+            brief::RepoStatus::from(&text.status)
+        }
+    })
 }

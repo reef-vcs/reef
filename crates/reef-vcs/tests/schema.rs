@@ -299,6 +299,9 @@ async fn outputs_match_their_schemas() {
         .both(&a_dir, &["describe", "-m", "schema test"])
         .await;
     let op = text(&described["operation"]["id"]);
+    // #126: the views of a read at a named operation.
+    script.both(&a_dir, &["status", "--at-op", &op]).await;
+    script.both(&a_dir, &["diff", "--at-op", &op]).await;
     let last = script.json(&a_dir, &["describe", "-m", "to undo"]).await;
     script
         .json(&a_dir, &["undo", &text(&last["operation"]["id"])])

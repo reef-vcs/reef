@@ -774,6 +774,12 @@ tool!(get_diff, args::GetDiff, |call, args| {
         .map(|path| repo_path(&scope, path))
         .collect();
     let format = args.format.unwrap_or(args::Format::Hunks);
+    // A read at an operation the call named returns it, as the CLI's brief
+    // does (#126).
+    let named = args
+        .at_operation
+        .as_deref()
+        .is_some_and(|op| !op.trim().is_empty());
     let response = ctx
         .call(ctx.client.get_diff_page(GetDiffRequest {
             repo: scope.repo_id.clone(),
@@ -795,7 +801,11 @@ tool!(get_diff, args::GetDiff, |call, args| {
         .await?;
     let diff = Diff::from(&response);
     to_value(&DiffPage {
-        diff: brief::Diff::from(&diff),
+        diff: if named {
+            brief::Diff::read_at(&diff)
+        } else {
+            brief::Diff::from(&diff)
+        },
         next_page_token: token(response.next_page_token),
     })
 });
