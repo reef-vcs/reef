@@ -1,6 +1,6 @@
 {
   "name": "reef",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Reef workspaces for coding agents: the skill that starts work in an isolated workspace, and Reef's MCP server.",
   "author": {
     "name": "Reef contributors",

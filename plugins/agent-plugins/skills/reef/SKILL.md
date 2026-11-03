@@ -5,7 +5,7 @@ metadata:
   generated-by: reef init
 ---
 
-Part of the Reef plugin (reef 0.3.0); `reef guide` prints the current guide.
+Part of the Reef plugin (reef 0.4.0); `reef guide` prints the current guide.
 
 # Reef
 

@@ -1,6 +1,6 @@
 {
   "name": "reef-workspaces",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Reef workspaces in place of git worktrees: each worktree session and subagent gets a copy-on-write Reef workspace, held while the session runs.",
   "author": {
     "name": "Reef contributors",
