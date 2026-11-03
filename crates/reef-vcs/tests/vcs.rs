@@ -2305,6 +2305,84 @@ async fn history() {
     assert_eq!(next_of(&error), ["reef", "history", "--help"]);
 }
 
+/// `reef history -o text` says who wrote each change: its agents, or its
+/// author's email when no agent wrote it, as for a commit imported from git
+/// (#115).
+#[tokio::test(flavor = "multi_thread")]
+async fn history_text_names_authors() {
+    let daemon = TestDaemon::start_with(|config| {
+        config.file.watcher.debounce = Duration::from_hours(1);
+        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+    })
+    .await;
+    daemon
+        .handle
+        .state()
+        .history
+        .set_throttle(Duration::ZERO, Duration::ZERO);
+    let plain = daemon.tmp.path().join("plain-git");
+    std::fs::create_dir_all(&plain).unwrap();
+    let plain = plain.canonicalize().unwrap();
+    let first = reef_testing::git::init_repo(&plain, &[("README", "plain git\n")]);
+    // A commit nobody wrote through Reef, which registering imports, as the
+    // token benchmark's fixture lands its history.
+    reef_testing::git::commit(
+        &plain,
+        "refs/heads/main",
+        Some(&first),
+        &[("README", "plain git\n"), ("landed.txt", "landed\n")],
+    );
+    ok(&daemon, &plain, &["repo", "register", "-o", "json"]).await;
+
+    let created = ok(&daemon, &plain, &["ws", "create", "-o", "json"]).await;
+    let ws = PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::write(ws.join("agent.txt"), "agent\n").unwrap();
+    ok(&daemon, &ws, &["--agent", "bot-1", "status", "-o", "json"]).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let landed = loop {
+        let landed = ok(&daemon, &plain, &["history", "landed.txt", "-o", "json"]).await;
+        let agent = ok(&daemon, &plain, &["history", "agent.txt", "-o", "json"]).await;
+        let current = |found: &Value| {
+            found["changes"]
+                .as_array()
+                .is_some_and(|c| !c.is_empty() && c.iter().all(|c| c["touches_state"] == "current"))
+        };
+        if current(&landed) && current(&agent) {
+            break landed;
+        }
+        assert!(std::time::Instant::now() < deadline, "{landed}\n{agent}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let change = &landed["changes"][0];
+    assert_eq!(change["author_email"], "reef-test@example.com", "{landed}");
+    assert!(
+        change["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["agent"].is_null()),
+        "{landed}"
+    );
+
+    let text = stdout(&run_in(&daemon, &plain, &["history", "landed.txt", "-o", "text"]).await);
+    assert!(
+        text.lines()
+            .any(|line| line.contains(" <reef-test@example.com> ")),
+        "{text}"
+    );
+    assert!(!text.contains("  -  "), "{text}");
+    let text = stdout(&run_in(&daemon, &plain, &["history", "agent.txt", "-o", "text"]).await);
+    let line = text.lines().next().unwrap();
+    assert!(line.contains(" bot-1"), "{text}");
+    // Agents only, never the author; dropping an agent-less row's `-` beside
+    // them is the unit tests' (this change's rows all name an agent).
+    assert!(
+        !line.contains('<') && !line.contains("-,") && !line.contains(", -"),
+        "{text}"
+    );
+}
+
 /// Whether `value` is a zero value a brief view leaves out (ADR 0045).
 fn is_zero(value: &Value) -> bool {
     match value {

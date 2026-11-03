@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use reef_api::v1::DiffFormat;
 use reef_client::json::{
-    Change, ChangeSummary, Diff, FileChange, FileDiff, FileEntry, FileRead, History, LogEntry,
-    Operation, Presence, PresenceEvent, RepoStatus,
+    Change, ChangeSummary, Diff, FileChange, FileDiff, FileEntry, FileRead, History, HistoryChange,
+    LogEntry, Operation, Presence, PresenceEvent, RepoStatus,
 };
 use serde::Serialize;
 
@@ -853,14 +853,116 @@ mod tests {
         ]);
         assert_eq!(render(&lines), "src/\na.rs\n");
     }
+
+    /// One landed change with the given activity agents and author.
+    fn history(agents: &[Option<&str>], author: Option<&str>) -> HistoryText {
+        HistoryText(History::from(&v1::QueryChangesResponse {
+            changes: vec![v1::HistoryChange {
+                change_id: "0123456789abcdef".into(),
+                outcome: v1::ChangeOutcome::Landed.into(),
+                subject: "fix parser".into(),
+                author_email: author.unwrap_or_default().into(),
+                activity: agents
+                    .iter()
+                    .map(|agent| v1::ChangeActivity {
+                        agent: agent.unwrap_or_default().into(),
+                        ..v1::ChangeActivity::default()
+                    })
+                    .collect(),
+                matched_paths: vec!["src/parser.rs".into()],
+                ..v1::HistoryChange::default()
+            }],
+            ..v1::QueryChangesResponse::default()
+        }))
+    }
+
+    /// The who column of a one-change history.
+    fn who(history: &HistoryText) -> String {
+        let text = render(history);
+        let line = text.lines().next().unwrap();
+        line.strip_prefix("zyxwvutsrqpo  landed     ")
+            .and_then(|rest| rest.strip_suffix(" -  fix parser"))
+            .unwrap_or_else(|| panic!("{text}"))
+            .to_owned()
+    }
+
+    #[test]
+    fn history_text_names_the_author_without_an_agent() {
+        let text = render(&history(&[None], Some("bot-2@agents.invalid")));
+        assert_eq!(
+            text,
+            "zyxwvutsrqpo  landed     <bot-2@agents.invalid> -  fix parser\n    src/parser.rs\n1 change\n"
+        );
+        assert_eq!(
+            render(&history(&[], Some("bot-2@agents.invalid"))),
+            text,
+            "no activity rows at all"
+        );
+    }
+
+    #[test]
+    fn history_text_lists_agents_not_the_author() {
+        let agents = [Some("bot-4"), None, Some("bot-5"), Some("bot-4")];
+        assert_eq!(
+            who(&history(&agents, Some("bot-2@agents.invalid"))),
+            "bot-4, bot-5  "
+        );
+    }
+
+    #[test]
+    fn history_text_caps_agents_and_skips_agentless_rows() {
+        let agents = [
+            Some("a"),
+            None,
+            Some("b"),
+            Some("c"),
+            None,
+            Some("d"),
+            Some("e"),
+        ];
+        assert_eq!(who(&history(&agents, None)), "a, b, c +2    ");
+    }
+
+    #[test]
+    fn history_text_dash_without_agent_or_author() {
+        assert_eq!(who(&history(&[None], None)), "-             ");
+    }
 }
 
-/// `reef history` (R2.16): one line per change (its id, outcome, agents,
-/// last write and subject) with its matched touches and paths indented, or
-/// one line per group; then the count and what the history covers.
+/// `reef history` (R2.16): one line per change (its id, outcome, who wrote
+/// it, last write and subject) with its matched touches and paths indented,
+/// or one line per group; then the count and what the history covers. Who
+/// wrote it is its agents, or its author's email in angle brackets when no
+/// agent wrote it (#115).
 #[derive(Debug, Serialize)]
 #[serde(transparent)]
 pub(crate) struct HistoryText(pub(crate) History);
+
+/// A change's who column: its first three named agents, newest first, then
+/// ` +N`; else `<author email>` (no Reef agent wrote it: committed or
+/// fetched outside Reef, or written by another jj client); else `-`. Rows
+/// with no agent are such operations, not writers, so they never print
+/// beside named agents (#115). It reads the rows the daemon sends, the
+/// newest 16 (`activity_count` may be more).
+fn history_who(change: &HistoryChange) -> String {
+    let mut agents: Vec<&str> = Vec::new();
+    for agent in change.activity.iter().filter_map(|a| a.agent.as_deref()) {
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    if agents.is_empty() {
+        return change
+            .author_email
+            .as_deref()
+            .map_or_else(|| "-".to_owned(), |email| format!("<{email}>"));
+    }
+    let mut who = agents[..agents.len().min(3)].join(", ");
+    if agents.len() > 3 {
+        let _ = write!(who, " +{}", agents.len() - 3);
+    }
+    who
+}
 
 fn touch_mark(change: Option<&str>) -> &'static str {
     match change {
@@ -894,25 +996,7 @@ impl TextRender for HistoryText {
             return Ok(());
         }
         for change in &history.changes {
-            let mut agents: Vec<&str> = Vec::new();
-            for activity in &change.activity {
-                let agent = activity.agent.as_deref().unwrap_or("-");
-                if !agents.contains(&agent) {
-                    agents.push(agent);
-                }
-            }
-            let mut who = agents
-                .iter()
-                .take(3)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(", ");
-            if agents.len() > 3 {
-                let _ = write!(who, " +{}", agents.len() - 3);
-            }
-            if who.is_empty() {
-                who.push('-');
-            }
+            let who = history_who(change);
             let mut outcome = change.outcome.clone().unwrap_or_else(|| "-".to_owned());
             for (set, flag) in [
                 (change.divergent, "divergent"),

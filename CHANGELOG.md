@@ -11,6 +11,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- `reef history -o text` names a change's author, as `<email>`, when no Reef agent wrote it (committed or fetched outside Reef, or written by another jj client), and no longer lists `-` beside the agents of a change that has some ([#115](https://github.com/reef-vcs/reef/issues/115)).
 - The remote listener sends a service's error as a trailers-only answer, its HEADERS frame ending the stream. It used to send the headers and then an empty DATA frame, which tonic accepted and other gRPC clients (grpcio) refused as "Stream removed".
 
 ## [0.3.0] - 2026-11-02

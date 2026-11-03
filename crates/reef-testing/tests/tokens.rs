@@ -351,6 +351,13 @@ fn check(scenario: &Scenario, fixture: &Fixture) {
             );
         }
     }
+    // `reef history -o text` names the landed authors these ask for (#115).
+    for id in ["who-file", "who-symbol"] {
+        assert!(
+            cheapest(&results, id, Arm::Reef, "bytes", |c| c.text_output).is_some(),
+            "{id} has no sufficient `reef -o text` candidate"
+        );
+    }
     assert_eq!(
         fixture.fingerprint().unwrap(),
         before,
