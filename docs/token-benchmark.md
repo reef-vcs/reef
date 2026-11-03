@@ -180,6 +180,12 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | – | 3,661 | 23,619 | 2.10× | #122: task-first reef --help |
 | 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | anthropic | 3,371 | 1,872 | – | 1,883 | 9,438 | 1.80× | #122: task-first reef --help |
 | 2026-11-02 | 88c31de71f0f | 421f33d6ff31 | `who-symbol` | o200k | 2,141 | 1,317 | – | 1,324 | 5,791 | 1.63× | #122: task-first reef --help |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-file` | bytes | 619 | 3,801 | 559 | 3,838 | 23,796 | 0.16× | #115: history text names authors |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-file` | anthropic | 364 | 2,002 | 285 | 2,016 | 9,571 | 0.18× | #115: history text names authors |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-file` | o200k | 237 | 1,458 | 206 | 1,468 | 5,935 | 0.16× | #115: history text names authors |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-symbol` | bytes | 7,633 | 3,631 | 620 | 3,661 | 23,619 | 2.10× | #115: history text names authors |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-symbol` | anthropic | 3,369 | 1,879 | 310 | 1,890 | 9,445 | 1.79× | #115: history text names authors |
+| 2026-11-03 | 179f5ca36c35 | 421f33d6ff31 | `who-symbol` | o200k | 2,135 | 1,320 | 212 | 1,327 | 5,794 | 1.62× | #115: history text names authors |
 <!-- tokens-rows:scripted -->
 
 ### Fixed cost
@@ -190,6 +196,7 @@ Each arm's cheapest sufficient candidate, counted; "git ÷ best gated" is git ov
 | 2026-10-31 | 505bfabb7097 | 21 | 21,191 | 844 | 19,938 | 7,550 | 4,462 | bytes 4.9, anthropic 15.2, o200k 7.5 | Linux baseline at 505bfab (R2.17 merge), before #114 |
 | 2026-11-01 | b5aa37e57133 | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 | 2026-11-02 | 88c31de71f0f | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #122: task-first reef --help |
+| 2026-11-03 | 179f5ca36c35 | 21 | 21,211 | 844 | 19,958 | 7,555 | 4,467 | bytes never, anthropic never, o200k never | #115: history text names authors |
 <!-- tokens-rows:fixed -->
 
 R2.24 publishes every tool's output schema through `reef schema mcp` and does not declare them in `tools/list` ([ADR 0050](adr/0050-published-schemas.md)), so the fixed cost and break-even above are unchanged; declaring them all would make `tools/list` 141,756 bytes instead of 21,211.
@@ -284,6 +291,7 @@ Median bytes per view.
 | 2026-10-31 | 505bfabb7097 | 20 | 153,606 | 1,600 | 170,894 | 11,092 | 151,320 | 9,029 | 1.02 | Linux baseline at 505bfab (R2.17 merge), before #114 |
 | 2026-11-01 | b5aa37e57133 | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #114: brief JSON by default (new baseline: scenario changed); post-#114 run owed since #124, before #122 |
 | 2026-11-02 | 88c31de71f0f | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #122: task-first reef --help |
+| 2026-11-03 | 179f5ca36c35 | 20 | 153,606 | 1,600 | 156,445 | 2,391 | 76,351 | 9,029 | 0.57 | #115: history text names authors |
 <!-- tokens-rows:sweep -->
 
 ### Where the bytes go
