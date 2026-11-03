@@ -16,6 +16,10 @@ import { RemoteUrl, type RemoteTarget } from "../../src/remote.js";
 import { parseLeaf } from "../../src/tls.js";
 import { caSession, pinnedSession, type Session } from "../../src/transport.js";
 
+// Named-curve parameters, as the integration tests need (LibreSSL, macOS's /usr/bin/openssl,
+// writes explicit ones by default).
+const P256 = ["-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve"];
+
 let dir: string;
 let server: Server;
 let port = 0;
@@ -27,17 +31,10 @@ function openssl(...args: string[]): void {
 }
 
 function selfSigned(name: string): void {
-  openssl(
-    "genpkey",
-    "-algorithm",
-    "EC",
-    "-pkeyopt",
-    "ec_paramgen_curve:P-256",
-    "-out",
-    `${name}.key`,
-  );
+  openssl("genpkey", "-algorithm", "EC", ...P256, "-out", `${name}.key`);
   openssl(
     "req",
+    "-new",
     "-x509",
     "-key",
     `${name}.key`,

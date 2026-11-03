@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import reef
+from reef.api.v1 import RemoteListenerState
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -62,13 +63,30 @@ class Daemon:
             if self.process.poll() is not None:
                 raise RuntimeError(f"reef-daemon exited during start:\n{self.log()}")
             try:
-                reef.connect(state_dir=self.state, connect_timeout=0.5).close()
-                return
+                client = reef.connect(state_dir=self.state, connect_timeout=0.5)
+                break
             except reef.ReefError:
                 if time.monotonic() > deadline:
                     raise RuntimeError(
                         f"reef-daemon did not answer in 30 s:\n{self.log()}"
                     ) from None
+                time.sleep(0.1)
+        # The socket answers before the remote listener binds (step 11 binds in the background):
+        # until then nothing listens, and the status gives the configured address (port 0 here).
+        with client:
+            while True:
+                if self.process.poll() is not None:
+                    raise RuntimeError(f"reef-daemon exited during start:\n{self.log()}")
+                remote = client.get_daemon_status(skip_backends=True).remote
+                if remote.state in (
+                    RemoteListenerState.REMOTE_LISTENER_STATE_OFF,
+                    RemoteListenerState.REMOTE_LISTENER_STATE_LISTENING,
+                ):
+                    return
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"the remote listener did not start: {remote.error}\n{self.log()}"
+                    )
                 time.sleep(0.1)
 
     def stop(self) -> None:

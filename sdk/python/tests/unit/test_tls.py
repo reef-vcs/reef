@@ -12,6 +12,10 @@ import pytest
 import reef
 from reef import _tls
 
+# Named-curve parameters, as the integration tests need (LibreSSL, macOS's /usr/bin/openssl,
+# writes explicit ones by default).
+P256 = ("-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve")
+
 pytestmark = pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
 
 
@@ -19,7 +23,7 @@ def make_cert(directory: Path, *, san: str | None, ca: bool = False) -> bytes:
     key = directory / "key.pem"
     cert = directory / "cert.der"
     command = [
-        "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+        "openssl", "req", "-x509", "-newkey", "ec", *P256,
         "-nodes", "-keyout", str(key), "-out", str(directory / "cert.pem"), "-days", "30",
         "-subj", "/CN=reef test",
     ]  # fmt: skip

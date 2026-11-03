@@ -13,6 +13,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RemoteTlsError } from "../../src/errors.js";
 import { checkDates, fingerprintOf, parseLeaf, pemOf, targetName } from "../../src/tls.js";
 
+// Named-curve parameters, as the integration tests need (LibreSSL, macOS's /usr/bin/openssl,
+// writes explicit ones by default).
+const P256 = ["-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve"];
+
 let dir: string;
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "reef-tls-"));
@@ -29,6 +33,7 @@ function cert(name: string, keyArgs: string[], san: string, days = "30"): Buffer
   openssl("genpkey", ...keyArgs, "-out", `${name}.key`);
   openssl(
     "req",
+    "-new",
     "-x509",
     "-key",
     `${name}.key`,
@@ -51,11 +56,7 @@ function opensslFingerprint(name: string): string {
 
 describe("tls", () => {
   it("fingerprints the SubjectPublicKeyInfo, for EC and RSA keys", () => {
-    const ec = cert(
-      "ec",
-      ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
-      "DNS:reefvm.test",
-    );
+    const ec = cert("ec", ["-algorithm", "EC", ...P256], "DNS:reefvm.test");
     const rsa = cert(
       "rsa",
       ["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
@@ -67,11 +68,7 @@ describe("tls", () => {
   });
 
   it("never hashes getPeerCertificate().pubkey: for an EC key it is the bare point", async () => {
-    const der = cert(
-      "trap",
-      ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
-      "DNS:reefvm.test",
-    );
+    const der = cert("trap", ["-algorithm", "EC", ...P256], "DNS:reefvm.test");
     const server = createServer({
       key: readFileSync(join(dir, "trap.key")),
       cert: readFileSync(join(dir, "trap.pem")),
@@ -100,7 +97,7 @@ describe("tls", () => {
   it("chooses the name the session uses", () => {
     const der = cert(
       "names",
-      ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
+      ["-algorithm", "EC", ...P256],
       "DNS:reefvm.test,DNS:other.test,IP:127.0.0.1",
     );
     const leaf = parseLeaf(der);
@@ -109,18 +106,14 @@ describe("tls", () => {
     expect(targetName(leaf, "127.0.0.1")).toBe("127.0.0.1");
     expect(targetName(leaf, "localhost")).toBe("reefvm.test");
     expect(targetName(leaf, "10.0.0.1")).toBe("reefvm.test");
-    const ipOnly = parseLeaf(
-      cert("ip", ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"], "IP:10.1.2.3"),
-    );
+    const ipOnly = parseLeaf(cert("ip", ["-algorithm", "EC", ...P256], "IP:10.1.2.3"));
     expect(targetName(ipOnly, "vm")).toBe("10.1.2.3");
     expect(pemOf(der)).toContain("-----BEGIN CERTIFICATE-----");
     expect(new X509Certificate(pemOf(der)).raw.equals(der)).toBe(true);
   });
 
   it("refuses a leaf outside its dates", () => {
-    const leaf = parseLeaf(
-      cert("dates", ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"], "DNS:reefvm.test"),
-    );
+    const leaf = parseLeaf(cert("dates", ["-algorithm", "EC", ...P256], "DNS:reefvm.test"));
     const late = new Date(leaf.notAfter.getTime() + 1_000);
     const early = new Date(leaf.notBefore.getTime() - 1_000);
     for (const when of [late, early]) {
