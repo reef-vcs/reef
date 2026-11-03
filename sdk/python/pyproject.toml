@@ -1,0 +1,131 @@
+# The Python SDK (R2.06, ADR 0054): generated from crates/reef-api/proto at build time and never
+# committed. `just python-check` lints and unit-tests it; `just python-test` runs it against a daemon.
+
+[build-system]
+# Exact, so a build is reproducible. Bumping grpcio-tools raises the runtime floors below in the
+# same change; tests/unit/test_codegen.py's test_floors_match_the_generator checks they agree.
+requires = ["hatchling==1.33.0", "grpcio-tools==1.85.1", "mypy-protobuf==5.1.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reef-vcs"
+dynamic = ["version"]
+description = "Python client for the Reef daemon: workspaces for agents on git and jj repositories."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Reef contributors" }]
+keywords = ["reef", "jj", "git", "vcs", "agents", "workspaces"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Software Development :: Version Control",
+    "Typing :: Typed",
+]
+# The floors are what the generated code checks at import (GRPC_GENERATED_VERSION and
+# ValidateProtobufRuntimeVersion).
+dependencies = [
+    "grpcio>=1.85.1,<2",
+    "grpcio-status>=1.85.1,<2",
+    "protobuf>=7.35.1,<8",
+]
+
+[project.urls]
+Homepage = "https://github.com/reef-vcs/reef"
+Documentation = "https://github.com/reef-vcs/reef/blob/main/docs/python-sdk.md"
+Repository = "https://github.com/reef-vcs/reef"
+Changelog = "https://github.com/reef-vcs/reef/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "grpcio-tools==1.85.1",
+    "mypy-protobuf==5.1.0",
+    "hatchling==1.33.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
+    "ruff==0.17.3",
+    "mypy==2.4.1",
+    "twine==7.0.0",
+    "types-protobuf==7.35.1.20260906",
+    "types-grpcio==1.85.0.20261028",
+]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/codegen",
+    "/hatch_build.py",
+    "/README.md",
+    "/LICENSE",
+    "/tests",
+]
+# Generated and VCS-ignored, but carried by the sdist so the wheel builds from it alone.
+artifacts = ["/src/reef/api", "/src/reef/daemon", "/src/reef/_build.py", "/src/reef/_rpcs.py", "/src/reef/_methods.py", "/src/reef/aio/_methods.py", "/LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reef"]
+artifacts = ["/src/reef/api", "/src/reef/daemon", "/src/reef/_build.py", "/src/reef/_rpcs.py", "/src/reef/_methods.py", "/src/reef/aio/_methods.py"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["src/reef/api", "src/reef/daemon"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "D"]
+ignore = [
+    "D105", # magic methods document themselves
+    "D205", # a summary may run over two lines
+    "D107", # __init__ is documented on the class
+    "ANN401", # Any is deliberate where the schema's types are open
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN"]
+"codegen/**" = ["D"]
+# Generated: the docstrings are the schema's comments.
+"src/reef/_methods.py" = ["E501", "D"]
+"src/reef/aio/_methods.py" = ["E501", "D"]
+"src/reef/_rpcs.py" = ["E501"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src/reef", "codegen", "hatch_build.py"]
+exclude = ["src/reef/api/", "src/reef/daemon/"]
+
+[[tool.mypy.overrides]]
+module = ["reef.api.*", "reef.daemon.*"]
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["grpc_status.*", "grpc_tools.*", "google.rpc.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: needs reef-daemon from REEF_BIN_DIR",
+    "remote: needs a daemon with its remote listener (implies integration)",
+]

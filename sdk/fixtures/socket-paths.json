@@ -1,0 +1,153 @@
+{
+  "about": "How a client settles the daemon's socket (ADR 0013, R2.05). Read by reef-client's paths_follow_the_shared_table and the Python SDK's test_socket_paths_follow_the_shared_table (R2.06, ADR 0054); R2.07 reads it too. {tmp} is a scratch directory and {cwd} the test's current directory. `defaults` is the platform's default state directory and, on Linux, runtime directory; null means no home directory. `files` are written before the case runs. A case expects `socket` (and, when given, `state_dir` and `config_file`), or an error of `error`'s kind.",
+  "cases": [
+    {
+      "name": "the default state directory",
+      "defaults": { "state_dir": "{tmp}/home/state/reef" },
+      "socket": "{tmp}/home/state/reef/daemon.sock",
+      "state_dir": "{tmp}/home/state/reef",
+      "config_file": "{tmp}/home/state/reef/config.toml"
+    },
+    {
+      "name": "the runtime directory, for the default state directory",
+      "defaults": { "state_dir": "{tmp}/home/state/reef", "runtime_dir": "{tmp}/run" },
+      "socket": "{tmp}/run/reef/daemon.sock"
+    },
+    {
+      "name": "no runtime directory for a state directory of its own",
+      "env": { "REEF_STATE_DIR": "{tmp}/given" },
+      "defaults": { "state_dir": "{tmp}/home/state/reef", "runtime_dir": "{tmp}/run" },
+      "socket": "{tmp}/given/daemon.sock"
+    },
+    {
+      "name": "an argument beats the environment",
+      "env": { "REEF_STATE_DIR": "{tmp}/from-env" },
+      "args": { "state_dir": "{tmp}/from-arg" },
+      "defaults": { "state_dir": "{tmp}/home/state/reef" },
+      "socket": "{tmp}/from-arg/daemon.sock"
+    },
+    {
+      "name": "REEF_SOCKET beats the file",
+      "env": { "REEF_STATE_DIR": "{tmp}/st", "REEF_SOCKET": "{tmp}/env.sock" },
+      "files": { "{tmp}/st/config.toml": "[daemon]\nsocket = \"file.sock\"\n" },
+      "socket": "{tmp}/env.sock"
+    },
+    {
+      "name": "a socket argument beats REEF_SOCKET",
+      "env": { "REEF_SOCKET": "{tmp}/env.sock" },
+      "args": { "socket": "{tmp}/arg.sock" },
+      "defaults": { "state_dir": "{tmp}/home/state/reef" },
+      "socket": "{tmp}/arg.sock"
+    },
+    {
+      "name": "the file's relative socket is under the state directory",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[daemon]\nsocket = \"custom.sock\"\n" },
+      "socket": "{tmp}/st/custom.sock"
+    },
+    {
+      "name": "the file's absolute socket",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[daemon]\nsocket = \"{tmp}/abs.sock\"\n" },
+      "socket": "{tmp}/abs.sock"
+    },
+    {
+      "name": "the file's socket beats the runtime directory",
+      "defaults": { "state_dir": "{tmp}/home/state/reef", "runtime_dir": "{tmp}/run" },
+      "files": { "{tmp}/home/state/reef/config.toml": "[daemon]\nsocket = \"f.sock\"\n" },
+      "socket": "{tmp}/home/state/reef/f.sock"
+    },
+    {
+      "name": "empty variables are unset",
+      "env": { "REEF_STATE_DIR": "", "REEF_SOCKET": "", "REEF_CONFIG": "" },
+      "defaults": { "state_dir": "{tmp}/home/state/reef" },
+      "socket": "{tmp}/home/state/reef/daemon.sock"
+    },
+    {
+      "name": "relative paths are made absolute against the current directory",
+      "env": { "REEF_STATE_DIR": "rel/./state", "REEF_SOCKET": "{tmp}/s.sock" },
+      "socket": "{tmp}/s.sock",
+      "state_dir": "{cwd}/rel/state",
+      "config_file": "{cwd}/rel/state/config.toml"
+    },
+    {
+      "name": "repeated separators go",
+      "env": { "REEF_STATE_DIR": "{tmp}//st", "REEF_SOCKET": "{tmp}/x//y.sock" },
+      "socket": "{tmp}/x/y.sock",
+      "state_dir": "{tmp}/st"
+    },
+    {
+      "name": "a config file named by REEF_CONFIG",
+      "env": { "REEF_STATE_DIR": "{tmp}/st", "REEF_CONFIG": "{tmp}/other.toml" },
+      "files": { "{tmp}/other.toml": "[daemon]\nsocket = \"o.sock\"\n" },
+      "socket": "{tmp}/st/o.sock",
+      "config_file": "{tmp}/other.toml"
+    },
+    {
+      "name": "a config argument beats REEF_CONFIG",
+      "env": { "REEF_STATE_DIR": "{tmp}/st", "REEF_CONFIG": "{tmp}/env.toml" },
+      "args": { "config": "{tmp}/arg.toml" },
+      "files": {
+        "{tmp}/env.toml": "[daemon]\nsocket = \"env.sock\"\n",
+        "{tmp}/arg.toml": "[daemon]\nsocket = \"arg.sock\"\n"
+      },
+      "socket": "{tmp}/st/arg.sock"
+    },
+    {
+      "name": "a named config file must exist",
+      "env": { "REEF_STATE_DIR": "{tmp}/st", "REEF_CONFIG": "{tmp}/absent.toml" },
+      "error": "not_found"
+    },
+    {
+      "name": "a config file that is not TOML",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[daemon\n" },
+      "error": "invalid_argument"
+    },
+    {
+      "name": "daemon.socket must be a string",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[daemon]\nsocket = 3\n" },
+      "error": "invalid_argument"
+    },
+    {
+      "name": "repo.auto_register must be a boolean",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[repo]\nauto_register = \"yes\"\n" },
+      "error": "invalid_argument"
+    },
+    {
+      "name": "the daemon's other keys are ignored",
+      "env": { "REEF_STATE_DIR": "{tmp}/st" },
+      "files": { "{tmp}/st/config.toml": "[watcher]\nnope = 1\n[lease]\ndefault = \"forever\"\n" },
+      "socket": "{tmp}/st/daemon.sock"
+    },
+    {
+      "name": "an empty socket argument",
+      "args": { "socket": "" },
+      "defaults": { "state_dir": "{tmp}/home/state/reef" },
+      "error": "io"
+    },
+    {
+      "name": "no home directory and no state directory",
+      "defaults": null,
+      "error": "invalid_argument"
+    },
+    {
+      "name": "a socket path of 103 bytes",
+      "env": {
+        "REEF_STATE_DIR": "{tmp}/st",
+        "REEF_SOCKET": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "socket": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "a socket path of 104 bytes",
+      "env": {
+        "REEF_STATE_DIR": "{tmp}/st",
+        "REEF_SOCKET": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "error": "invalid_argument"
+    }
+  ]
+}

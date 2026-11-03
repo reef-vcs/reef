@@ -522,6 +522,33 @@ mod tests {
         }
     }
 
+    // R2.06: the cases the Python SDK (and R2.07's TypeScript SDK) pass too.
+    #[test]
+    fn urls_follow_the_shared_table() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../../sdk/fixtures/remote-urls.json")).unwrap();
+        for case in table["cases"].as_array().unwrap() {
+            let text = case["url"].as_str().unwrap();
+            let parsed = RemoteUrl::parse(text);
+            if case.get("valid") == Some(&serde_json::Value::Bool(false)) {
+                assert_eq!(parsed, None, "{text}");
+                continue;
+            }
+            let url = parsed.unwrap_or_else(|| panic!("{text} did not parse"));
+            assert_eq!(url.host, case["host"].as_str().unwrap(), "{text}");
+            assert_eq!(
+                u64::from(url.port),
+                case["port"].as_u64().unwrap(),
+                "{text}"
+            );
+            assert_eq!(
+                url.authority(),
+                case["authority"].as_str().unwrap(),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn fingerprints() {
         assert!(is_fingerprint(&format!("sha256:{}", "a1".repeat(32))));

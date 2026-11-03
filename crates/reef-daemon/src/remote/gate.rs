@@ -337,6 +337,15 @@ where
         Box::pin(async move {
             let response = inner.call(request).await?;
             let (parts, body) = response.into_parts();
+            // A trailers-only answer (its status in the headers) is whole:
+            // the hold ends now, and the body stays one that says it is
+            // empty, so hyper ends the stream on the HEADERS frame. Wrapped,
+            // hyper would send an empty DATA frame after it, which gRPC
+            // clients other than tonic refuse (R2.06).
+            if super::streams::is_trailers_only(&parts.headers) {
+                drop(held);
+                return Ok(secure(http::Response::from_parts(parts, body)));
+            }
             Ok(secure(http::Response::from_parts(
                 parts,
                 super::streams::Holding::body(body, held),

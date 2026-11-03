@@ -113,6 +113,19 @@ CI's `web` job runs `just web-check` on every pull request. It is where a schema
 
 To work on the app against a real daemon, run `reef ui --print` with a daemon built after `just web-build` (or any daemon whose `CreateWebSession` works), then start the dev server with `REEF_UI_URL` set to the printed `url`: Vite proxies `/reef.api.v1.` paths to the daemon's listener and rewrites `Host` and `Origin` to its own, so the daemon has no dev mode. Open `http://127.0.0.1:5173/#session=<token>` with the token from the printed session URL. That URL is a credential until the daemon stops; keep it out of issues and logs.
 
+### The Python SDK
+
+The Python SDK is in `sdk/python/` ([ADR 0054](docs/adr/0054-sdks.md), [docs/python-sdk.md](docs/python-sdk.md)). It needs [uv](https://docs.astral.sh/uv/); nothing else in the repository does, and `just ci` does not run it. Its gRPC code and its clients' methods are generated from `crates/reef-api/proto` at every build (`codegen/`, run by the hatchling hook in `hatch_build.py`) and never committed.
+
+```sh
+just python-gen      # regenerate the code, for an editor's types after pulling a schema change
+just python-check    # generate, ruff, ruff format --check, mypy --strict, the unit tests
+just python-test     # the integration tests against scratch daemons, after `cargo build -p reef-vcs -p reef-daemon`
+just python-build    # the sdist and wheel into sdk/python/dist, checked by twine
+```
+
+CI's `python` job runs all four on Python 3.11 and 3.15, so a schema change the SDK cannot generate fails there (ADR 0029's checklist, item 12). The integration tests start their own daemons from `REEF_BIN_DIR` (default the cargo target's `debug`) on scratch state directories with a space in their path, and touch no other daemon. Socket discovery and remote URLs follow `sdk/fixtures/`, which `reef-client`'s tests read too: change the fixture, not one implementation.
+
 The app follows a few rules that keep it live and safe; ESLint rejects `setInterval` and `dangerouslySetInnerHTML`:
 
 - No `setInterval`, and `setTimeout` only in `live/backoff.ts`: views update from the streams, never on a timer.
@@ -154,4 +167,4 @@ For agent-authored commits, the human who submits them signs off and thereby mak
 
 Not yet defined; see R4.17 in [docs/dev-phases.md](docs/dev-phases.md).
 
-One rule already holds: a release pull request runs `just packages` after the version bump (the release workflow's version check fails without it), and the `v<version>` tag follows its merge at once, because the plugin marketplaces in this repository pin that tag ([ADR 0052](docs/adr/0052-harness-packages.md)).
+One rule already holds: a release pull request runs `just packages` after the version bump (the release workflow's version check fails without it), and the `v<version>` tag follows its merge at once, because the plugin marketplaces in this repository pin that tag ([ADR 0052](docs/adr/0052-harness-packages.md)). The Python SDK's version follows the workspace version, so nothing is bumped for it; after the tag's run, check the `PyPI` job for a warning, as for the tap's and the MCP registry's.

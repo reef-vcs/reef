@@ -87,6 +87,12 @@ pub(crate) struct RemoteCall<S> {
     inner: S,
 }
 
+/// Whether a response is gRPC's trailers-only answer: its status is in the
+/// headers, and nothing follows them.
+pub(crate) fn is_trailers_only(headers: &HeaderMap) -> bool {
+    headers.contains_key("grpc-status")
+}
+
 /// The trailers that end a stream whose token ended.
 fn ended_trailers(state: Refusal) -> HeaderMap {
     let response: http::Response<Body> =
@@ -279,7 +285,7 @@ where
             let (parts, body) = response.into_parts();
             let body = if let Some(entry) = entry {
                 // A trailers-only answer carries its status in the headers.
-                if parts.headers.contains_key("grpc-status") {
+                if is_trailers_only(&parts.headers) {
                     entry.finish(&parts.headers);
                     body
                 } else {
@@ -291,7 +297,7 @@ where
             } else {
                 body
             };
-            let body = if super::gate::is_streaming(&path) {
+            let body = if super::gate::is_streaming(&path) && !is_trailers_only(&parts.headers) {
                 Revocable::body(body, &caller)
             } else {
                 body

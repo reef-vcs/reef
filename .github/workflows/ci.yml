@@ -316,6 +316,51 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The Python SDK (R2.06, ADR 0054): generated from the protos at every build, then ruff, mypy
+  # --strict and the unit tests, then the integration tests against reef-daemon built from the same
+  # commit, on the floor and the newest Python. Ubuntu on every pull request; macOS where `check`
+  # runs it (the default state directory's space is in real paths there). One leg also builds the
+  # sdist and wheel and smoke-tests the wheel alone, as the release does before publishing.
+  python:
+    name: python ${{ matrix.python }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
+        python: ["3.11", "3.15"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
+        with:
+          version: "0.13.6"
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Sync
+        working-directory: sdk/python
+        run: uv sync --frozen --python ${{ matrix.python }}
+      - name: Check
+        run: just python-check
+      - name: Build the daemon
+        run: cargo build -p reef-vcs -p reef-daemon
+      - name: Integration tests
+        run: just python-test
+      - name: Build and smoke-test the wheel
+        if: runner.os == 'Linux' && matrix.python == '3.11'
+        run: |
+          just python-build
+          uv venv --python 3.11 "$RUNNER_TEMP/wheel"
+          uv pip install --python "$RUNNER_TEMP/wheel/bin/python" sdk/python/dist/*.whl
+          cd "$RUNNER_TEMP" && REEF_BIN_DIR="$GITHUB_WORKSPACE/target/debug" "$RUNNER_TEMP/wheel/bin/python" "$GITHUB_WORKSPACE/sdk/python/tests/smoke.py"
+
   # Every platform's digest must equal the pinned one, so an output change that is the same on
   # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.
   synth-determinism:
@@ -364,7 +409,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e]
+    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -381,6 +426,7 @@ jobs:
           CLI_SHAPE: ${{ needs.cli-shape.result }}
           WEB: ${{ needs.web.result }}
           WEB_E2E: ${{ needs.web-e2e.result }}
+          PYTHON: ${{ needs.python.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" ]]
+          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" ]]

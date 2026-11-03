@@ -1,0 +1,33 @@
+{
+  "about": "Which remote URLs a client accepts (R2.08's RemoteUrl::parse): https://<host>[:<port>][/], port 443 by default, an IPv6 host bracketed. Read by reef-client's urls_follow_the_shared_table and the Python SDK's test_remote_urls_follow_the_shared_table (R2.06, ADR 0054); R2.07 reads it too. A case expects `host`, `port` and `authority`, or `valid: false`.",
+  "cases": [
+    { "url": "https://vm.example:7470", "host": "vm.example", "port": 7470, "authority": "vm.example:7470" },
+    { "url": "https://vm.example:7470/", "host": "vm.example", "port": 7470, "authority": "vm.example:7470" },
+    { "url": "https://vm.example", "host": "vm.example", "port": 443, "authority": "vm.example:443" },
+    { "url": "https://127.0.0.1:17470", "host": "127.0.0.1", "port": 17470, "authority": "127.0.0.1:17470" },
+    { "url": "https://[::1]:9", "host": "::1", "port": 9, "authority": "[::1]:9" },
+    { "url": "https://[::1]", "host": "::1", "port": 443, "authority": "[::1]:443" },
+    { "url": "https://[fe80::1]:7470/", "host": "fe80::1", "port": 7470, "authority": "[fe80::1]:7470" },
+    { "url": "https://vm:65535", "host": "vm", "port": 65535, "authority": "vm:65535" },
+    { "url": "http://vm:1", "valid": false },
+    { "url": "https://", "valid": false },
+    { "url": "https:///", "valid": false },
+    { "url": "https://vm:x", "valid": false },
+    { "url": "https://vm:", "valid": false },
+    { "url": "https://vm:0", "valid": false },
+    { "url": "https://vm:65536", "valid": false },
+    { "url": "https://vm/path", "valid": false },
+    { "url": "https://vm:7470/path", "valid": false },
+    { "url": "https://vm?query", "valid": false },
+    { "url": "https://vm#fragment", "valid": false },
+    { "url": "https://u@vm", "valid": false },
+    { "url": "https://::1", "valid": false },
+    { "url": "https://[::1", "valid": false },
+    { "url": "https://[not-v6]:1", "valid": false },
+    { "url": "https://[::1]x", "valid": false },
+    { "url": "https://[fe80::1%25eth0]:1", "valid": false },
+    { "url": "https://[fe80::1%eth0]:1", "valid": false },
+    { "url": "vm:7470", "valid": false },
+    { "url": "HTTPS://vm", "valid": false }
+  ]
+}
