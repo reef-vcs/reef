@@ -25,6 +25,15 @@ updates:
     groups:
       typescript:
         patterns: ["*"]
+    ignore:
+      # @types/node follows the oldest Node in package.json's engines (>=22.15), so the types
+      # don't offer APIs that release lacks. Raise it by hand with the engines floor.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint's peer range caps TypeScript (8.72 takes <6.1), so a TypeScript
+      # major fails npm ci until typescript-eslint supports it. Bump the two together by hand.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /
     schedule:
