@@ -6,7 +6,7 @@ Phase 2 · Size S (no row; see "Size") · Fixes: issue #190 · Depends on: R2.13
 
 `reef init` adds Reef's MCP server to a JSON file it shares with the user (`.mcp.json`, `opencode.json`) by parsing the whole file into an order-keeping value, inserting the entry, and printing the whole value again with `serde_json::to_string_pretty`. Keys and values survive. Everything else is reformatted: a tab-indented file comes out with two-space indents, one-line arrays and objects are spread over several lines, `1e5` becomes `100000.0`, `"é"` becomes `"é"`, and a file without a final newline gains one. On a large monorepo the diff touched every line of `.mcp.json`.
 
-This ticket inserts Reef's member into the file's text instead, at the file's own indentation and line ending, and keeps every other byte. If the result does not parse to the same value today's code writes, the file is reprinted at its own indentation instead. It changes two functions in `crates/reef-vcs/src/agents/mod.rs` and adds about 130 lines there. There is no API, schema, CLI or output change, and a file with Reef's entry already in it is still never written.
+This ticket inserts Reef's member into the file's text instead, at the file's own indentation and line ending, and keeps every other byte. If the result does not parse to the same value today's code writes, the file is reprinted at its own indentation instead. It changes two functions in `crates/reef-vcs/src/agents/mod.rs` and adds about 450 lines of code there with their doc comments (the JSONC check of decision 3 is about 70 of them), and about 300 lines of tests. There is no API, schema, CLI or output change, and a file with Reef's entry already in it is still never written.
 
 ### What was verified while writing this ticket
 
@@ -27,7 +27,7 @@ All of this was checked at d8ed637. Paths are under `crates/reef-vcs/` unless th
 - **What `PrettyFormatter::with_indent` alone would give.** Checked with serde_json 1.0.154 (the lockfile's): a tab file parsed and reprinted with `with_indent(b"\t")` keeps the tabs but still spreads `"args": ["-y", "x"]` over four lines, writes `1e5` as `100000.0` and unescapes `é` and `\/`. Hand-written and formatter-written `.mcp.json` files keep short arrays on one line (Prettier and Biome both do; Biome indents with tabs by default), so indent detection alone would still touch most lines of a file like the one in the issue.
 - **When the writer runs.** Only for `Action::Update`, when the file is a JSON object whose servers key is missing or is an object without `reef` (`:955-977`). A missing or blank file is `Action::Write` with `render(None)`. A `reef` entry equal to `render_mcp_entry` is `Action::Unchanged` with no contents, compared as values (`:960-964`), so its formatting is never looked at. A different `reef` entry is a skip ("`mcpServers.reef` is not reef init's"). A file that does not parse, is not an object, or has a non-object servers key is a skip ("not a JSON object").
 - **How `--check` decides.** `cli/init.rs:277-321`: a file is stale only when its action is `Write` (missing) or `Update` (stale). `Unchanged` and every `Skip` pass. So formatting can only make `--check` flap if a written file fails to parse back to an `Unchanged` entry. The design below checks exactly that before it returns.
-- **JSON with comments.** Every target is parsed with `serde_json`, which rejects comments and trailing commas, so such a file is skipped with "not a JSON object" and left alone. `opencode.jsonc` is detected by name and skipped with a reason that quotes the entry to paste (`:723-742`). opencode documents comments for `opencode.jsonc`; whether it also accepts them in `opencode.json`, and whether Claude Code accepts them in `.mcp.json`, was not checked (no opencode is installed here). It does not matter for this ticket: text reaches the new code only after `serde_json` has parsed it as strict JSON.
+- **JSON with comments.** Every target is parsed with `serde_json`, which rejects comments and trailing commas, so such a file is skipped with "not a JSON object" and left alone. `opencode.jsonc` is detected by name and skipped with a reason that quotes the entry to paste (`:723-742`). opencode documents comments for `opencode.jsonc`; whether it also accepts them in `opencode.json`, and whether Claude Code accepts them in `.mcp.json`, was not checked (no opencode is installed here). The splice is unaffected: text reaches it only after `serde_json` has parsed it as strict JSON. It matters for decision 3's reason, which is why a JSONC file is never reported unchanged.
 - **A byte order mark** also fails `serde_json::from_str` (checked), so a BOM file is skipped as "not a JSON object" today. Unchanged here.
 - **Duplicate keys.** `serde_json` into `IndexMap` keeps the first position and the last value (`{"a":1,"b":2,"a":3}` reads as `{"a":3,"b":2}`; checked). So the servers object that counts is the last one of that name.
 - **Codex's `config.toml` already keeps its formatting.** `merge_codex_toml` appends `[mcp_servers.reef]` after the file's text, so every existing byte is kept (`:1074-1079`; the test `codex_config_merge` asserts `merged.starts_with(theirs)`, `:1600`). When the file defines `mcp_servers` inline or by dotted keys, it falls back to `toml_edit`, which reprints only the table it changes. TOML has no indentation to detect. No change there.
@@ -39,7 +39,7 @@ All of this was checked at d8ed637. Paths are under `crates/reef-vcs/` unless th
 
 ### Size
 
-S, with no `dev-phases.md` row. Two functions in one file change: about 130 lines of new code (a scanner over already-parsed JSON, two layout helpers, the splice, the check and the fallback), one table test with fifteen cases, two existing unit tests and one integration test adjusted, one integration case added, and three documentation edits. The indent-only fix the issue suggests is about 30 lines, but it leaves the reported diff mostly in place (see above). Question 1 asks the user to confirm the splice.
+S, with no `dev-phases.md` row. Two functions in one file change: about 450 lines of new code with doc comments (a scanner over already-parsed JSON, two layout helpers, the splice, the check, the fallback, and decision 3's JSONC check), one table test with sixteen cases, two existing unit tests and one integration test adjusted, one integration case added, and three documentation edits. The indent-only fix the issue suggests is about 30 lines, but it leaves the reported diff mostly in place (see above). Question 1 asks the user to confirm the splice.
 
 ### The rule
 
@@ -105,7 +105,7 @@ Duplicate servers keys pass the check: the splice goes into the last one, and pa
 
 - **A file with Reef's entry** is `Unchanged` and never written, whatever its formatting. That is today's behavior; test cases assert it for each layout.
 - **A new or blank file** (`render(None)`): two-space, final newline, `$schema` first for opencode. Byte-identical.
-- **Skips:** a different `reef` entry, a file that is not a JSON object (including JSONC and a BOM), a non-object servers key, `opencode.jsonc`. Same reasons.
+- **Skips:** a different `reef` entry, a file that is not a JSON object (including a BOM), a non-object servers key, `opencode.jsonc`. Same reasons. JSON with comments or trailing commas is still skipped and never written, with a new reason (decision 3).
 - **`config.toml`, the Markdown sections, whole files, the plugin trees.**
 - **`--check`, `reef init`'s JSON and text, the notes.** An updated file is still reported `updated`.
 
@@ -165,7 +165,7 @@ Every other test passes unchanged, including `packages_are_current`, `just agent
 
 - [ ] `reef init` adding Reef's entry to an existing `.mcp.json` or `opencode.json` (repository or `--user`) changes only the bytes of Reef's member and the one `,` before it: indentation, line endings, inline arrays, number and string spellings, leading whitespace and the final newline or its absence are kept (tests 1, 5).
 - [ ] A file with Reef's entry is never written, and `reef init --check` passes on any file `reef init` wrote (tests 1.15, 5).
-- [ ] A new or blank file, every skip, and `config.toml` are byte-identical to before (tests 1.6, 3, 4, 6).
+- [ ] A new or blank file, every skipped file, and `config.toml` are byte-identical to before (tests 1.6, 3, 4, 6); only a JSONC file's reason changes (decision 3).
 - [ ] No API, schema or output change. `api_digest_matches_revision` passes at revision 14.
 - [ ] ADR 0035, CHANGELOG and the tickets README are updated. `just ci` passes.
 
@@ -182,7 +182,7 @@ By hand, from a scratch directory: write case 1's `before` as `.mcp.json`, run `
 
 ## Out of scope
 
-- **JSON with comments or trailing commas** in `.mcp.json` or `opencode.json`: skipped as "not a JSON object", as now. Its reason could say what `opencode.jsonc`'s does ("comments are not rewritten; add … by hand"); see question 3.
+- **Writing into JSON with comments or trailing commas** in `.mcp.json` or `opencode.json`: such a file is skipped and never written. Its reason is in scope (decision 3); writing into it is not.
 - **A byte order mark:** skipped as "not a JSON object", as now.
 - **Mixed line endings in `config.toml`**: `keep_crlf` still makes a mixed file all CRLF there. Rare, and Codex's files are TOML written by people or by Codex.
 - **Reef's own entry matching the file's array style** (`"args": ["mcp"]` on one line in a file that writes arrays that way).
@@ -197,3 +197,12 @@ Decided by the user on 2026-11-03:
 1. **The splice**, with indent-aware reprinting as its fallback, as above.
 2. **A one-line object gets Reef's member inline**, as above.
 3. **The JSONC reason is in this ticket.** A `.mcp.json` or `opencode.json` (repository or `--user`) that fails to parse as strict JSON but looks like JSON with comments or trailing commas is skipped with a reason like `opencode.jsonc`'s (`src/agents/mod.rs:723-742`): comments are not rewritten, and the reason quotes the entry to add by hand. A file that is not JSON at all keeps "not a JSON object". The detection is a heuristic (a `//` or `/*` outside strings, or a `,` before `}` or `]`), so prefer a false "not a JSON object" to a false JSONC reason. Add a unit case for each: comments, a trailing comma, and a file that is neither. Add a CHANGELOG line, under the same **Fixed** entry or its own. The "Out of scope" bullet on JSONC now covers only *writing into* such files.
+
+As implemented:
+
+- **The JSONC check** (`jsonc_object`) runs only when strict parsing fails. It replaces comments outside strings with a space, drops a `,` whose next non-whitespace byte is `}` or `]`, and gives the reason only if something was removed and the rest then parses as a JSON object. So a file that is not JSON at all, an unclosed comment, a BOM, a top-level array with a trailing comma, or `{,}` and `[,]` (a comma is dropped only after a value, not after `{`, `[` or `,`) stay "not a JSON object". A false JSONC reason needs a file that is strict JSON once comments and trailing commas are removed, which is close to what JSONC is. The reason is `comments and trailing commas are not rewritten; add {"mcpServers":{"reef":{...}}} by hand` (`{"mcp":{"reef":{...}}}` for opencode), with the entry from the same `by_hand` that `opencode.jsonc`'s reason now uses.
+- **A JSONC file with Reef's entry is a skip, not `Unchanged`** (a decision beyond the user's, made in review): `has Reef's entry, but comments and trailing commas are not standard JSON; check that Claude Code reads this file` (`opencode` for `opencode.json`). Whether either harness reads such a file was not checked, and "unchanged" reads as "installed". A skip still passes `--check`, and once the entry is there, `reef init` no longer asks for it to be added. One with a different `reef` entry is skipped as "not reef init's", read from the stripped value.
+- **The fallback warns.** When the splice is rejected and `reformat` runs, `merge` logs `tracing::warn!` (target `reef`, with the file's name), which the CLI's default filter (`warn`) shows on stderr. Not a `debug_assert!`: the fallback is the safety net, and a panic in debug builds would turn a layout bug into a failed `reef init` in development and the integration tests.
+- **Case 16:** a `\u`-escaped servers key (`"mcp\u0053ervers"`) gets Reef's member, and a duplicate servers key spelled once plain and once escaped gets it in the second; both pass the check.
+- **`render` takes no argument**: with `with_entry` split out, its only caller is the new-file form (`render(None)` before). The output is byte-identical.
+- **Tests:** `json_with_comments_is_not_rewritten` (unit: comments, a trailing comma, both, a file that is neither, and the entry already present), and a JSONC case in `tests/init.rs`'s `mcp_json_entry` (skipped, file untouched, `--check` passes). In test 5 the issue's file has a second server (`second`), so its expected output is case 1's with Reef's member after `second`.

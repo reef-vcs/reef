@@ -613,6 +613,30 @@ fn mcp_json_entry() {
         at("\"other\"") < at("\"reef\"") && at("\"reef\"") < at("\"extra\""),
         "{merged}"
     );
+    // Issue #190: only Reef's lines are added, at the file's layout.
+    assert_eq!(
+        merged,
+        "{\r\n  \"mcpServers\": {\r\n    \"other\": {\"command\": \"x\"},\r\n    \"reef\": {\r\n      \"type\": \"stdio\",\r\n      \"command\": \"reef\",\r\n      \"args\": [\r\n        \"mcp\"\r\n      ]\r\n    }\r\n  },\r\n  \"extra\": true\r\n}\r\n"
+    );
+
+    // Issue #190's file: tabs, inline arrays and `1e5` are kept, and the
+    // file is not written again.
+    let theirs = "{\n\t\"mcpServers\": {\n\t\t\"other\": {\"command\": \"npx\", \"args\": [\"-y\", \"x\"]},\n\t\t\"second\": {\"command\": \"y\"}\n\t},\n\t\"n\": 1e5\n}\n";
+    let expected = "{\n\t\"mcpServers\": {\n\t\t\"other\": {\"command\": \"npx\", \"args\": [\"-y\", \"x\"]},\n\t\t\"second\": {\"command\": \"y\"},\n\t\t\"reef\": {\n\t\t\t\"type\": \"stdio\",\n\t\t\t\"command\": \"reef\",\n\t\t\t\"args\": [\n\t\t\t\t\"mcp\"\n\t\t\t]\n\t\t}\n\t},\n\t\"n\": 1e5\n}\n";
+    repo.write(".mcp.json", theirs);
+    let value = json(&repo.init(&["--agents", "mcp"]));
+    assert!(
+        actions(&value, &repo.root).contains(&(".mcp.json".to_owned(), "updated".to_owned())),
+        "{value}"
+    );
+    assert_eq!(repo.read(".mcp.json"), expected);
+    let again = json(&repo.init(&["--agents", "mcp"]));
+    assert!(
+        actions(&again, &repo.root).contains(&(".mcp.json".to_owned(), "unchanged".to_owned())),
+        "{again}"
+    );
+    assert_eq!(repo.read(".mcp.json"), expected);
+    json(&repo.init(&["--check", "--agents", "mcp"]));
 
     // An entry someone changed is kept, and is not stale.
     let changed = r#"{"mcpServers": {"reef": {"command": "reef", "args": ["mcp"], "env": {"REEF_AGENT": "me"}}}}"#;
@@ -631,7 +655,6 @@ fn mcp_json_entry() {
     repo.write(".mcp.json", "not json");
     let value = json(&repo.init(&["--agents", "mcp"]));
     assert!(value.to_string().contains("not a JSON object"), "{value}");
-
     // `--agents mcp` writes AGENTS.md and .mcp.json only.
     let fresh = Fixture::new();
     let value = json(&fresh.init(&["--agents", "mcp"]));
@@ -647,6 +670,38 @@ fn mcp_json_entry() {
         "{}",
         stdout(&output)
     );
+}
+
+/// Issue #190: JSON with comments is never written; the reason says what
+/// to add, or that Reef's entry is there.
+#[test]
+fn mcp_json_with_comments_is_skipped() {
+    let repo = Fixture::new();
+    // JSON with comments is not rewritten either; the reason says what to add.
+    let jsonc = "{\n  // mine\n  \"mcpServers\": {}\n}\n";
+    repo.write(".mcp.json", jsonc);
+    let value = json(&repo.init(&["--agents", "mcp"]));
+    assert!(
+        value
+            .to_string()
+            .contains("comments and trailing commas are not rewritten; add {"),
+        "{value}"
+    );
+    assert_eq!(repo.read(".mcp.json"), jsonc);
+    json(&repo.init(&["--check", "--agents", "mcp"]));
+    // With Reef's entry it is still skipped, not unchanged: whether Claude
+    // Code reads such a file is not known.
+    let jsonc = "{\n  // mine\n  \"mcpServers\": {\"reef\": {\"type\": \"stdio\", \"command\": \"reef\", \"args\": [\"mcp\"]}}\n}\n";
+    repo.write(".mcp.json", jsonc);
+    let value = json(&repo.init(&["--agents", "mcp"]));
+    assert!(
+        value
+            .to_string()
+            .contains("has Reef's entry, but comments and trailing commas are not standard JSON; check that Claude Code reads this file"),
+        "{value}"
+    );
+    assert_eq!(repo.read(".mcp.json"), jsonc);
+    json(&repo.init(&["--check", "--agents", "mcp"]));
 }
 
 #[test]
