@@ -73,7 +73,7 @@ Every prompt starts "Several agents work in this repository at the same time, ea
 - **Call sites by default (R2.15):** at the default of 10 they are 29% of `--symbols`' bytes on `changed-large` and 10% on `changed-small`, under a third: default kept.
 - **`--symbols` as agents' default (R2.15):** no. Its JSON is larger than plain `reef diff` on `changed-large` (36.7 KB against 26.8 KB) and the same size on ordinary commits (the sweep's median ratio is 1.02); only `--symbols -o text` is small. Part of #114.
 - **Agent matching (R2.16):** no live call passed a pattern to `--by` or `agents`; matching stays exact.
-- **Found on the way:** `reef history -o text` gives no author for changes without an agent ([#115](https://github.com/reef-vcs/reef/issues/115)); MCP paths refuse a trailing `/` ([#117](https://github.com/reef-vcs/reef/issues/117)); `reef mcp --help` names one harness ([#118](https://github.com/reef-vcs/reef/issues/118)); a second harness is [#119](https://github.com/reef-vcs/reef/issues/119).
+- **Found on the way:** `reef history -o text` gave no author for changes without an agent ([#115](https://github.com/reef-vcs/reef/issues/115), fixed by [#181](https://github.com/reef-vcs/reef/pull/181)); MCP paths refuse a trailing `/` ([#117](https://github.com/reef-vcs/reef/issues/117)); `reef mcp --help` names one harness ([#118](https://github.com/reef-vcs/reef/issues/118)); a second harness is [#119](https://github.com/reef-vcs/reef/issues/119).
 
 ## Pins and baselines
 
