@@ -1,5 +1,5 @@
 {
-  "about": "How a client settles the daemon's socket (ADR 0013, R2.05). Read by reef-client's paths_follow_the_shared_table and the Python SDK's test_socket_paths_follow_the_shared_table (R2.06, ADR 0054); R2.07 reads it too. {tmp} is a scratch directory and {cwd} the test's current directory. `defaults` is the platform's default state directory and, on Linux, runtime directory; null means no home directory. `files` are written before the case runs. A case expects `socket` (and, when given, `state_dir` and `config_file`), or an error of `error`'s kind.",
+  "about": "How a client settles the daemon's socket (ADR 0013, R2.05). Read by reef-client's paths_follow_the_shared_table and the Python SDK's test_socket_paths_follow_the_shared_table (R2.06, ADR 0054), and the TypeScript SDK's `socket paths follow the shared table` (R2.07). {tmp} is a scratch directory and {cwd} the test's current directory. `defaults` is the platform's default state directory and, on Linux, runtime directory; null means no home directory. `files` are written before the case runs. A case expects `socket` (and, when given, `state_dir` and `config_file`), or an error of `error`'s kind.",
   "cases": [
     {
       "name": "the default state directory",

@@ -1,0 +1,20 @@
+# The v1 schema's messages (protoc-gen-es, the web UI's generator) and the client's methods
+# (codegen/protoc-gen-reef.mjs), generated at every build and never committed (R2.07, ADR 0054).
+# `npm run gen` runs it through codegen/generate.mjs with the pinned @bufbuild/buf, so it needs no
+# network.
+version: v2
+inputs:
+  # The repository's buf.yaml module: the v1 files (the frozen v0 files are excluded there).
+  - directory: ../..
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+      - import_extension=js
+  - local: ["node", "codegen/protoc-gen-reef.mjs"]
+    out: src/gen
+    strategy: all
+    opt:
+      - target=ts
+clean: true

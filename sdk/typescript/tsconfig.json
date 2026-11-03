@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": ["src", "tests", "codegen", "scripts", "vitest.config.ts", "eslint.config.js"],
+  // Run against the installed package, which this checkout does not resolve.
+  "exclude": ["tests/smoke.mjs"]
+}

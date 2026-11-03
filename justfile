@@ -131,6 +131,33 @@ python-build:
     cd sdk/python && uv build --out-dir dist
     cd sdk/python && uv run --frozen twine check --strict dist/*
 
+# The TypeScript SDK (R2.07, ADR 0054) needs Node (web/.node-version, or 22.15 and later) and
+# npm; `cd sdk/typescript && npm ci` once. Its messages and methods are generated from the protos
+# at every build and never committed. The generated code, for an editor's types:
+typescript-gen:
+    cd sdk/typescript && npm run gen
+
+# What CI's `typescript` job runs first: ESLint and Prettier, tsc, the build, and the unit tests
+# (the process-lifetime test runs the build).
+typescript-check:
+    cd sdk/typescript && npm run lint
+    cd sdk/typescript && npm run typecheck
+    cd sdk/typescript && npm run build
+    cd sdk/typescript && npx vitest run --project unit
+
+# The SDK against scratch daemons: REEF_BIN_DIR, default the cargo target's debug directory
+# (after `cargo build -p reef-vcs -p reef-daemon`).
+typescript-test *ARGS:
+    target=$(cargo metadata --no-deps --format-version 1 | node -p 'JSON.parse(require("fs").readFileSync(0)).target_directory'); \
+        cd sdk/typescript && REEF_BIN_DIR="${REEF_BIN_DIR:-$target/debug}" npm run test:integration -- "$@"
+
+# The tarball at the workspace version, into sdk/typescript/dist-pack, checked by publint and
+# are-the-types-wrong.
+typescript-build:
+    cd sdk/typescript && npm run build && npm run pack
+    cd sdk/typescript && npx publint --strict pack
+    cd sdk/typescript && npx attw --profile esm-only dist-pack/*.tgz
+
 # Benchmarks on the REEF_BENCH_PRESET synthetic repo (default medium). See docs/benchmarks.md.
 bench *ARGS:
     cargo bench --workspace --bench '*' "$@"

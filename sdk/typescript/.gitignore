@@ -1,0 +1,7 @@
+# Generated at every build, built, or copied from the repository root: never committed (R2.07).
+/src/gen/
+/dist/
+/pack/
+/dist-pack/
+/LICENSE
+/node_modules/

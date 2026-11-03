@@ -126,6 +126,19 @@ just python-build    # the sdist and wheel into sdk/python/dist, checked by twin
 
 CI's `python` job runs all four on Python 3.11 and 3.15, so a schema change the SDK cannot generate fails there (ADR 0029's checklist, item 12). The integration tests start their own daemons from `REEF_BIN_DIR` (default the cargo target's `debug`) on scratch state directories with a space in their path, and touch no other daemon. Socket discovery and remote URLs follow `sdk/fixtures/`, which `reef-client`'s tests read too: change the fixture, not one implementation.
 
+### The TypeScript SDK
+
+The TypeScript SDK is in `sdk/typescript/` ([ADR 0054](docs/adr/0054-sdks.md), [docs/typescript-sdk.md](docs/typescript-sdk.md)). It needs Node (`web/.node-version`, or 22.15 and later) and npm; `cd sdk/typescript && npm ci` once, and `just ci` does not run it. Its messages (`protoc-gen-es`, the web UI's generator) and its client's methods (`codegen/protoc-gen-reef.mjs`) are generated from `crates/reef-api/proto` at every build and never committed.
+
+```sh
+just typescript-gen      # regenerate the code, for an editor's types after pulling a schema change
+just typescript-check    # ESLint, Prettier, tsc, the build, the unit tests
+just typescript-test     # the integration tests against scratch daemons, after `cargo build -p reef-vcs -p reef-daemon`
+just typescript-build    # the tarball into sdk/typescript/dist-pack, checked by publint and are-the-types-wrong
+```
+
+CI's `typescript` job runs all four on Node 22.15 and 26. The integration tests start their own daemons, as Python's do; the `await using` test runs on Node 24 and later only. Both SDKs read `sdk/fixtures/`, including `page-items.json`, the items of a paged RPC with more than one repeated field.
+
 The app follows a few rules that keep it live and safe; ESLint rejects `setInterval` and `dangerouslySetInnerHTML`:
 
 - No `setInterval`, and `setTimeout` only in `live/backoff.ts`: views update from the streams, never on a timer.
@@ -167,4 +180,4 @@ For agent-authored commits, the human who submits them signs off and thereby mak
 
 Not yet defined; see R4.17 in [docs/dev-phases.md](docs/dev-phases.md).
 
-One rule already holds: a release pull request runs `just packages` after the version bump (the release workflow's version check fails without it), and the `v<version>` tag follows its merge at once, because the plugin marketplaces in this repository pin that tag ([ADR 0052](docs/adr/0052-harness-packages.md)). The Python SDK's version follows the workspace version, so nothing is bumped for it; after the tag's run, check the `PyPI` job for a warning, as for the tap's and the MCP registry's.
+One rule already holds: a release pull request runs `just packages` after the version bump (the release workflow's version check fails without it), and the `v<version>` tag follows its merge at once, because the plugin marketplaces in this repository pin that tag ([ADR 0052](docs/adr/0052-harness-packages.md)). The Python and TypeScript SDKs' versions follow the workspace version, so nothing is bumped for them; after the tag's run, check the `PyPI` and `npm` jobs for a warning, as for the tap's and the MCP registry's.
