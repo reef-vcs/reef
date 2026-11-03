@@ -15,7 +15,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { IfNotJj } from "../../src/api/v1.js";
+import { IfNotJj, RemoteListenerState } from "../../src/api/v1.js";
 import { connect, type Client, isReefError } from "../../src/index.js";
 
 export const ROOT = resolve(import.meta.dirname, "..", "..", "..", "..");
@@ -75,21 +75,46 @@ export class Daemon {
       stdio: ["ignore", log, log],
     });
     this.process = child;
+    // A function, so the check is not narrowed away across the awaits below.
+    const exited = (): boolean => child.exitCode !== null;
     const deadline = Date.now() + 30_000;
+    let client: Client;
     for (;;) {
-      if (child.exitCode !== null) {
+      if (exited()) {
         throw new Error(`reef-daemon exited during start:\n${this.log()}`);
       }
       try {
-        const client = await connect({ stateDir: this.state, connectTimeoutMs: 500 });
-        await client.close();
-        return;
+        client = await connect({ stateDir: this.state, connectTimeoutMs: 500 });
+        break;
       } catch (error) {
         if (!isReefError(error) || Date.now() > deadline) {
           throw new Error(`reef-daemon did not answer in 30 s:\n${this.log()}`, { cause: error });
         }
         await sleep(100);
       }
+    }
+    // The socket answers before the remote listener binds (step 11 binds in the background): until
+    // then nothing listens, and the status gives the configured address (port 0 here).
+    try {
+      for (;;) {
+        if (exited()) {
+          throw new Error(`reef-daemon exited during start:\n${this.log()}`);
+        }
+        const remote = (await client.getDaemonStatus({ skipBackends: true })).remote;
+        if (
+          remote === undefined ||
+          remote.state === RemoteListenerState.OFF ||
+          remote.state === RemoteListenerState.LISTENING
+        ) {
+          return;
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`the remote listener did not start: ${remote.error}\n${this.log()}`);
+        }
+        await sleep(100);
+      }
+    } finally {
+      await client.close();
     }
   }
 

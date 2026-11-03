@@ -28,6 +28,25 @@ import {
 } from "../../src/index.js";
 import { BASE_CONFIG, binDir, Daemon, freePort, makeRepo } from "./harness.js";
 
+// LibreSSL (macOS /usr/bin/openssl) writes explicit curve parameters unless told
+// otherwise, and OpenSSL 3 refuses to verify a chain with such a key.
+const P256 = ["-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve"];
+
+// The test CA's own configuration, not the system's: OpenSSL 1.1.1 (Homebrew's openssl@1.1, first
+// on PATH on the macOS runners) applies the system file's v3_ca section and appends `-addext`'s
+// copy, and OpenSSL 3 refuses a CA with two basicConstraints.
+const CA_CONFIG = `[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = ca
+[dn]
+CN = reef test CA
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign
+subjectKeyIdentifier = hash
+`;
+
 function remoteConfig(listen: string, extra = ""): string {
   return `${BASE_CONFIG}\n[remote]\nenabled = true\nlisten = "${listen}"\nnames = ["reefvm.test"]\n${extra}`;
 }
@@ -122,11 +141,12 @@ function selfSigned(
   names = "DNS:reefvm.test",
 ): void {
   if (!existsSync(join(dir, key))) {
-    openssl(dir, "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", key);
+    openssl(dir, "genpkey", "-algorithm", "EC", ...P256, "-out", key);
   }
   openssl(
     dir,
     "req",
+    "-new",
     "-x509",
     "-key",
     key,
@@ -361,14 +381,17 @@ describe("remote daemon with supplied certificates", () => {
   it("remote ca verified", async () => {
     const tls = join(dir, "tls");
     mkdirSync(tls);
+    writeFileSync(join(tls, "ca.cnf"), CA_CONFIG);
     openssl(
       tls,
       "req",
+      "-new",
       "-x509",
+      "-config",
+      "ca.cnf",
       "-newkey",
       "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:P-256",
+      ...P256,
       "-nodes",
       "-keyout",
       "ca.key",
@@ -376,12 +399,7 @@ describe("remote daemon with supplied certificates", () => {
       "ca.pem",
       "-days",
       "30",
-      "-subj",
-      "/CN=reef test CA",
-      "-addext",
-      "basicConstraints=critical,CA:TRUE",
-      "-addext",
-      "keyUsage=critical,keyCertSign",
+      "-sha256",
     );
     openssl(
       tls,
@@ -389,8 +407,7 @@ describe("remote daemon with supplied certificates", () => {
       "-new",
       "-newkey",
       "ec",
-      "-pkeyopt",
-      "ec_paramgen_curve:P-256",
+      ...P256,
       "-nodes",
       "-keyout",
       "leaf.key",
@@ -401,7 +418,8 @@ describe("remote daemon with supplied certificates", () => {
     );
     writeFileSync(
       join(tls, "ext.cnf"),
-      "subjectAltName=DNS:reefvm.test,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n",
+      // OpenSSL 1.1.1 and LibreSSL add no AKID, which strict verifiers (Python 3.13+) require.
+      "subjectAltName=DNS:reefvm.test,IP:127.0.0.1\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid\n",
     );
     openssl(
       tls,
@@ -418,6 +436,7 @@ describe("remote daemon with supplied certificates", () => {
       "leaf.pem",
       "-days",
       "30",
+      "-sha256",
       "-extfile",
       "ext.cnf",
     );

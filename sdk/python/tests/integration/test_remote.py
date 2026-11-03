@@ -15,6 +15,25 @@ import reef
 import reef.aio
 from reef.api.v1 import FileEdit, WorkspaceState
 
+# LibreSSL (macOS /usr/bin/openssl) writes explicit curve parameters unless told
+# otherwise, and OpenSSL 3 refuses to verify a chain with such a key.
+P256 = ("-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve")
+
+# The test CA's own configuration, not the system's: OpenSSL 1.1.1 (Homebrew's openssl@1.1, first
+# on PATH on the macOS runners) applies the system file's v3_ca section and appends `-addext`'s
+# copy, and OpenSSL 3 refuses a CA with two basicConstraints.
+CA_CONFIG = """[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = ca
+[dn]
+CN = reef test CA
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign
+subjectKeyIdentifier = hash
+"""
+
 pytestmark = pytest.mark.remote
 
 
@@ -175,12 +194,12 @@ def self_signed(
 ) -> None:
     if not (directory / key).exists():
         openssl(
-            "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", key,
+            "genpkey", "-algorithm", "EC", *P256, "-out", key,
             cwd=directory,
         )  # fmt: skip
     openssl(
-        "req", "-x509", "-key", key, "-out", cert, "-days", days, "-subj", "/CN=reefvm.test",
-        "-addext", f"subjectAltName={names},IP:127.0.0.1",
+        "req", "-new", "-x509", "-key", key, "-out", cert, "-days", days,
+        "-subj", "/CN=reefvm.test", "-addext", f"subjectAltName={names},IP:127.0.0.1",
         cwd=directory,
     )  # fmt: skip
 
@@ -189,23 +208,25 @@ def self_signed(
 def test_remote_ca_verified(no_remote_env: pytest.MonkeyPatch, short_tmp: Path) -> None:
     tls = short_tmp / "tls"
     tls.mkdir()
+    (tls / "ca.cnf").write_text(CA_CONFIG)
     openssl(
-        "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
-        "-keyout", "ca.key", "-out", "ca.pem", "-days", "30", "-subj", "/CN=reef test CA",
-        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign",
+        "req", "-new", "-x509", "-config", "ca.cnf", "-newkey", "ec", *P256, "-nodes",
+        "-keyout", "ca.key", "-out", "ca.pem", "-days", "30", "-sha256",
         cwd=tls,
     )  # fmt: skip
     openssl(
-        "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+        "req", "-new", "-newkey", "ec", *P256, "-nodes",
         "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=reefvm.test",
         cwd=tls,
     )  # fmt: skip
     (tls / "ext.cnf").write_text(
         "subjectAltName=DNS:reefvm.test,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n"
+        # OpenSSL 1.1.1 and LibreSSL add no AKID, which Python 3.13+ (VERIFY_X509_STRICT) requires.
+        "authorityKeyIdentifier=keyid\n"
     )
     openssl(
         "x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
-        "-CAcreateserial", "-out", "leaf.pem", "-days", "30", "-extfile", "ext.cnf",
+        "-CAcreateserial", "-out", "leaf.pem", "-days", "30", "-sha256", "-extfile", "ext.cnf",
         cwd=tls,
     )  # fmt: skip
     extra = f'tls_cert = "{tls / "leaf.pem"}"\ntls_key = "{tls / "leaf.key"}"\n'
