@@ -38,7 +38,7 @@ use super::env::reef_env;
 use super::error::kind_text;
 use super::heartbeat::{Heartbeater, heartbeats};
 use super::repo::missing;
-use super::ws::{CreateTarget, lease_length, note_default_start};
+use super::ws::{CreateTarget, create_noted, lease_length, note_default_start};
 use super::{CliError, Ctx, Out};
 
 /// A second SIGINT or SIGTERM within this long of the first kills the
@@ -287,14 +287,7 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), C
         lease_length: lease_length(args.lease)?,
         ..args.target.request()?
     };
-    let response = ctx
-        .call_with_repo(&args.target.repo()?, |repo| {
-            ctx.client.create_workspace(CreateWorkspaceRequest {
-                repo,
-                ..request.clone()
-            })
-        })
-        .await?;
+    let response = create_noted(ctx, &args.target.repo()?, request).await?;
     note_default_start(ctx, &response.start);
     let start = (!response.start.is_empty()).then_some(response.start);
     let ws = response.workspace.ok_or_else(|| missing("workspace"))?;

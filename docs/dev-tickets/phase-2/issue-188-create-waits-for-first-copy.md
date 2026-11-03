@@ -4,9 +4,9 @@ Phase 2 · Size S (no row; see "Size") · Fixes: issue #188 · Depends on: R2.05
 
 ## Context
 
-The first create in a repository checks the whole tree out into the base cache. On a 277k-file git monorepo (2.1 GB checkout) that took 58 s. `reef ws run` and `reef ws create` give every RPC 30 s, so the CLI quit with a deadline error while the daemon was still checking the tree out. The checkout finished anyway, and the next create took 2.2 s. Register has its own 10-minute default and the workspace provider gives a create 300 s, but `ws create`, `ws run` and the MCP `create_workspace` tool use the 30 s default.
+A create whose tree is not in the base cache yet checks the whole tree out into it: the first create in a repository, and, on the overlay and copy backends (which have no `DirCloner`, `backend/mod.rs:395`), every create on a new tree. On APFS and reflink a new tree after the first is cloned from a recent base and only the diff is checked out. On a 277k-file git monorepo (2.1 GB checkout) that took 58 s. `reef ws run` and `reef ws create` give every RPC 30 s, so the CLI quit with a deadline error while the daemon was still checking the tree out. The checkout finished anyway, and the next create took 2.2 s. Register has its own 10-minute default and the workspace provider gives a create 300 s, but `ws create`, `ws run` and the MCP `create_workspace` tool use the 30 s default.
 
-This ticket gives a workspace create a default deadline of 5 minutes, one constant shared with the provider. It gives a create's deadline error its own message and hint: the first create builds the base cache, the build goes on after the CLI quits, a retry waits for that build, and `--timeout` waits longer. `ws create` and `ws run` also print one stderr note when a create has run 5 s. The change is in the CLI only. There is no API, schema or daemon change. Following create progress over presence goes to a follow-up issue (see "Progress over presence: a follow-up").
+This ticket gives a workspace create a default deadline of 5 minutes, one constant shared with the provider. It gives a create's deadline error its own message and hint: a create that builds the base cache checks the whole tree out, that checkout goes on after the CLI quits, a retry waits for that build, and `--timeout` waits longer. `ws create` and `ws run` also print one stderr note when a create has run 5 s. The change is in the CLI only. There is no API, schema or daemon change. Following create progress over presence goes to a follow-up issue (see "Progress over presence: a follow-up").
 
 ### What was verified while writing this ticket
 
@@ -34,7 +34,7 @@ All of this was checked at d8ed637 (main), with the installed `reef` 0.3.0 (ba17
   - **Step 7 onward** (`create.rs:238-252`, `load_created` at `:332-333`): the row and the lease are written synchronously. A drop in `scheduler.track(…).await` leaves an active, leased workspace that nobody holds, and its watch may not be set up. Its lease runs out and the daemon reclaims it: 30 min plus 5 min of grace by default (`reef-daemon/src/config.rs:293`; `docs/workspace-provider.md:76`).
   - The create's presence entry is a `Progress` guard, "ended when dropped, whatever the outcome" (`create.rs:146-157`). It ends `CLEARED` when the handler is dropped.
 
-  The issue's case is step 3, which leaves nothing behind but a finished base. The step 4-7 cases need the deadline to fire in a window of a second or two after a base that took most of the deadline. That is rare at 30 s and rarer at 5 min. It is a follow-up, not this ticket (see "Out of scope").
+  The issue's case is step 3, which leaves nothing behind but a finished base. The step 4-7 cases are not always rare (corrected in review, see "As implemented"). With APFS or reflink, step 4 is a clone and the window is a second or two after a base that took most of the deadline. With the copy backend, step 4 is a full copy of the tree, as long as the checkout or longer, so a deadline can land there: it leaves an orphaned `ws/<id>` directory until the next daemon start, and a retry copies the tree again (the base itself is cached). It is a follow-up, not this ticket (see "Out of scope").
 - **Create progress over presence exists, but it cannot tell slow from stalled.** R2.10 publishes a `PROGRESS` entry for a create after 250 ms (ADR 0037 decision 13; `reef-daemon/src/presence/publish.rs:201-265`). Its fixed fields are agent = the create's owner, repo, and the new workspace id. Its progress is `{phase, done, total: 8, unit: "steps"}`, set at each step (`create.rs:147-244`, `CREATE_STEPS` at `:83`). The base step is one `phase("base", 1)` (`:172`) and nothing moves until `phase("materialize", 2)` (`:177`). For the 58 s checkout the entry does not change at all. Its TTL after the last update is 600 s (`publish.rs:22-23`). `reef-daemon/tests/presence.rs:962` (`create_progress`) tests the phases.
 - **No test infrastructure makes a create slow.** `reef-daemon/src/testing.rs` has no delay or fault injection, and `crates/reef-testing/src` has none. The only knobs are the synthetic tree's size (`reef_testing::synth::Preset` Small 1k, Medium 10k, Large 100k, Xl 1M files; `synth/mod.rs:90-110`) and `config.presence.progress_after`. No test passes `--timeout` to a create today. `tests/cli.rs:1939` lists it only as a global option.
 - **Precedent for a note while waiting.** `ws run` prints `reef: releasing workspace <id>` when the release has run `RELEASE_NOTE_AFTER` (2 s; `ws_run.rs:47-48`, `:495-507`), with `tokio::select!` over the call and a sleep. `Out::note` (`out.rs:161-165`) prints to stderr unless `-q`, in every output form.
@@ -47,7 +47,7 @@ S, with no `dev-phases.md` row. The work is one shared constant and one deadline
 
 ### The deadline
 
-- **`CREATE_TIMEOUT = 5 min`**, in `cli/mod.rs` beside `REGISTER_TIMEOUT`, `pub(crate)`. Its doc comment: "A workspace create's deadline when `--timeout` is not given: the first create in a repository checks the whole tree out into the base cache, which takes a minute or more on a large one (#188)." 5 minutes is the provider's 300 s, and more than five times the 58 s the issue measured. One constant now covers every create, so the provider's `CREATE_DEADLINE` (`provider.rs:46-48`) is deleted and the provider uses `CREATE_TIMEOUT`.
+- **`CREATE_TIMEOUT = 5 min`**, in `cli/mod.rs` beside `REGISTER_TIMEOUT`, `pub(crate)`. Its doc comment: "A workspace create's deadline when `--timeout` is not given: a create that builds the base cache (the first in a repository, and on overlay or copy each new tree) checks the whole tree out, which takes a minute or more on a large one (#188)." 5 minutes is the provider's 300 s, and more than five times the 58 s the issue measured. One constant now covers every create, so the provider's `CREATE_DEADLINE` (`provider.rs:46-48`) is deleted and the provider uses `CREATE_TIMEOUT`.
 - **`ws create`, `ws run`, MCP `create_workspace`: `--timeout` replaces the default** (`timeout_flag.unwrap_or(CREATE_TIMEOUT)`), as for register, `ws gc`, `store build` and `backup`. Add `pub(crate) fn create_deadline(timeout_flag: Option<Duration>) -> Duration` in `cli/mod.rs`. A free function can be unit-tested without a `Ctx`. The flag's help already lists per-command defaults that way. A test can also provoke the error with `--timeout 1ms`.
 - **The provider keeps "the longer of the two"** (`ctx.timeout.max(CREATE_TIMEOUT)`, at `:468` and `:800`), now on the shared constant. Its behaviour does not change: harnesses call it, and R2.26's contract is out of scope.
 - **The help string** (`mod.rs:179-180`) becomes: `How long to wait for the daemon's answer [default: 30s; 5m for a workspace create; 10m for registering a repository; 1h for `ws gc`; for `store build`, how long its command may run, 30m].` It is a hidden flag, so it is only in `--help-all`, which has no byte budget. Register's 10 min was missing from it, and is added now that the line lists per-command defaults.
@@ -60,7 +60,7 @@ A new variant, so that no other `Timeout` changes:
 ```rust
 /// A workspace create did not answer within its deadline (#188).
 #[error(
-    "the daemon did not create the workspace within {} (--timeout); it goes on with the create",
+    "the daemon did not create the workspace within {} (--timeout); a base checkout it started goes on",
     humantime::format_duration(*after)
 )]
 CreateTimeout {
@@ -70,9 +70,9 @@ CreateTimeout {
 ```
 
 - **Kind:** `Unavailable`, exit 6, as `Timeout` (`error.rs:265`). There is no reason string, as for `Timeout`.
-- **Hint**, one sentence (ADR 0025 rule 2): `The first create in a repository checks the whole tree out into its base cache, which can take minutes on a large one and goes on after the CLI quits: run the command again, which waits for that build instead of starting another, or pass a longer --timeout, such as --timeout 15m.`
-- **No `next`.** The fix is to run the agent's own command again, maybe with a flag, and the CLI does not have that command as an argv the agent wrote. ADR 0025 rule 2 says "when the fix needs something only the agent knows, there is a `hint` and no `next`". `ws run`'s command is exactly that.
-- **The message says "it goes on with the create"**, not "may still finish". From the trace above, the base build goes on, and the workspace itself is not made in the common case. The message does not say a workspace will appear, so the generic hint's "check (reef ws list) before repeating a create" is not repeated. A retry is safe because the build is shared.
+- **Hint**, one sentence (ADR 0025 rule 2): `A create that builds the base cache (the first in a repository, and on overlay or copy each new tree) checks the whole tree out, which can take minutes on a large one and goes on after the CLI quits: run the command again, which waits for that checkout instead of starting another, or pass a longer --timeout.` No fixed example value: "such as --timeout 15m" would suggest a shorter deadline to someone who already passed 30m.
+- **No `next`.** The CLI does have its own argv, so it could build one. It does not, because neither retry is a safe verbatim command: the same argv keeps the `--timeout` that just ran out (a longer one means rewriting a value only the agent can choose), and for `ws run` it runs the agent's command again, which only the agent can judge. ADR 0025 rule 2 says "when the fix needs something only the agent knows, there is a `hint` and no `next`".
+- **The message says "a base checkout it started goes on"**, not "may still finish". From the trace above, the create itself stops at its next `.await` once the stream resets; only a base checkout already running in `spawn_blocking` goes on, and the workspace itself is not made. The message does not say a workspace will appear, so the generic hint's "check (reef ws list) before repeating a create" is not repeated. A retry is safe because the build is shared.
 - **`Timeout`'s hint and message do not change.** A deadline in any other call still gets them, and so does the implicit register inside a create's `call_with_repo_within`.
 - **`stream.rs:89`** does not list `CreateTimeout`. A create is not a stream.
 
@@ -83,7 +83,7 @@ CreateTimeout {
 `ws create` and `ws run` print one stderr line when the create has not answered within `CREATE_NOTE_AFTER` = 5 s:
 
 ```
-reef: creating the workspace; the first create in a repository checks the whole tree out, which can take minutes on a large one
+reef: creating the workspace; a create that builds the base cache (the first in a repository, and on overlay or copy each new tree) checks the whole tree out, which can take minutes on a large one
 ```
 
 - The pattern is `ws run`'s release note (`ws_run.rs:495-507`): `tokio::pin!` the call, then `select!` it against `sleep(CREATE_NOTE_AFTER)`. On the sleep, print the note and await the call. Put it in one helper, `pub(crate) async fn noted<T>(call: impl Future<Output = T>, after: Duration, note: impl FnOnce()) -> T`, beside the create helper. Both commands use it, and it is unit-testable without `Out`.
@@ -120,7 +120,7 @@ No proto change, `API_REVISION` stays 14, and the database schema stays 6. The e
 - **`crates/reef-vcs/src/cli/provider.rs`**: `CREATE_DEADLINE` removed; `super::CREATE_TIMEOUT` at `:468` and `:800`, with `.max` kept.
 - **`crates/reef-vcs/src/mcp/tools.rs`**: `create_workspace`'s deadline.
 - **Tests** 1 to 8 below.
-- **`CHANGELOG.md`**, Unreleased, **Fixed**: "`reef ws create`, `reef ws run` and the MCP `create_workspace` tool wait up to 5 minutes for a workspace create, not 30 s, so the first create in a large repository, which checks the whole tree out into the base cache, no longer fails partway. `--timeout` still sets the deadline. A create that runs past 5 s says why on stderr, and one that reaches its deadline says that the build goes on and that running the command again waits for it ([#188](https://github.com/reef-vcs/reef/issues/188))."
+- **`CHANGELOG.md`**, Unreleased, **Fixed**: "`reef ws create`, `reef ws run` and the MCP `create_workspace` tool wait up to 5 minutes for a workspace create, not 30 s, so a create in a large repository that checks the whole tree out into the base cache (the first, and on the overlay or copy backend each new tree) no longer fails partway. `--timeout` still sets the deadline. A create that runs past 5 s says why on stderr, and one that reaches its deadline says that the checkout goes on and that running the command again waits for it ([#188](https://github.com/reef-vcs/reef/issues/188))."
 - **`docs/dev-tickets/phase-2/README.md`**: the row `| #188 | [issue-188-create-waits-for-first-copy.md](issue-188-create-waits-for-first-copy.md) | S | R2.05, R2.13, R2.26 | none listed |`.
 - **Unchanged**: the proto, `API_REVISION`, ADRs, `docs/agent-guide.md`, `docs/workspace-provider.md` (it names no deadline), the SDKs, `reef ws create --help` and `reef ws run --help`, MCP tool descriptions.
 
@@ -139,8 +139,8 @@ Run with `cargo nextest run -p reef-vcs --bins error` (the `reef` bin, not `--li
 
 ### `crates/reef-vcs/src/cli/ws.rs`, in `mod tests` (add the module if there is none)
 
-4. **`noted_notes_a_slow_call_once`**: `noted(async { sleep(200 ms).await; 7 }, 1 ms, || count += 1)` returns 7 with `count == 1`.
-5. **`noted_is_silent_for_a_quick_call`**: `noted(async { 7 }, 10 s, …)` returns 7 with `count == 0`. Use `#[tokio::test]` with real time. Both cases are ordered by margins of 200x and more, so they do not flake under load. `reef-vcs` has no tokio `test-util`, so do not add `start_paused`.
+4. **`noted_notes_a_slow_call_once`**: the call waits on a oneshot that the note closure fires, so it cannot finish before the note; with `after` = 1 ms it returns 7 with `count == 1`. (A 200 ms sleep was not forced: on a stalled runtime an unbiased `select!` can see both ready.)
+5. **`noted_is_silent_for_a_quick_call`**: `noted(async { 7 }, 10 s, …)` returns 7 with `count == 0`. Use `#[tokio::test]` with real time. Test 4's order is forced and test 5's call is ready at once, so neither flakes under load. `reef-vcs` has no tokio `test-util`, so do not add `start_paused`.
 
 ### `crates/reef-vcs/tests/cli.rs`
 
@@ -154,11 +154,11 @@ Run with `cargo nextest run -p reef-vcs --bins error` (the `reef` bin, not `--li
 ### `crates/reef-daemon/tests/workspaces.rs`
 
 7. **`abandoned_create_leaves_its_base`** (`// #188 test 7`), a guard for the behaviour this ticket's hint promises:
-   - **Setup:** a `TestDaemon::with_synthetic_repo(Preset::Medium)` (10k files). Its first create's base checkout takes well over 100 ms.
-   - Subscribe to presence with `kinds: [PROGRESS]` and set `progress_after = Duration::ZERO`, as `create_progress` does (`presence.rs:962-968`). Run `tokio::time::timeout(Duration::from_millis(100), client.create_workspace(request(…)))`. It is `Err(Elapsed)`.
+   - **Setup:** `TestDaemon::with_synthetic_repo_and(Preset::Medium, …)` (10k files) with `progress_after = Duration::ZERO`, as `create_progress` does (`presence.rs:962-968`).
+   - Subscribe to presence with `repos: [repo]`, `kinds: [PROGRESS]`. Start the create (boxed), and `select!` it against the stream until a not-ended `PROGRESS` event of this repository with phase `base` arrives (within 30 s; the create finishing first fails the test). Then drop the create. The drop lands deterministically in step 3: `phase("base")` is set just before `ensure_base`'s `spawn_blocking`, which is spawned in the same poll.
    - Read the stream until a `PROGRESS` event with `ended: true` arrives, within 10 s. The dropped handler ended its entry.
-   - A second create with no client deadline succeeds. `ListWorkspaces` with every state lists exactly one workspace, the second.
-   - Do not assert on `ws/` directories or on `base_was_cached`: where the 100 ms drop lands depends on the machine (step 2 or 3 nearly always, and the step 4-6 leak is out of scope).
+   - A second create with no client deadline succeeds with `base_was_cached == true`: the whole base build, sealing and recording included, runs inside the blocking task, so it finishes after the drop, and the retry either waits on the tree's lock or finds the entry. `ListWorkspaces` with every state lists exactly one workspace, the second.
+   - Do not assert on `ws/` directories: the step 4-6 leak is out of scope.
 
 ### Existing tests
 
@@ -169,7 +169,8 @@ Run with `cargo nextest run -p reef-vcs --bins error` (the `reef` bin, not `--li
 - **Order:** `mod.rs` and `error.rs` with tests 1-3; the helper and `noted` with tests 4-5; the two commands, the provider and MCP; test 6; test 7; CHANGELOG and README.
 - **The closure.** `call_with_repo_within` takes `F: Fn(String) -> Fut` and calls it twice. The create helper keeps that shape: `|repo| ctx.client.create_workspace(CreateWorkspaceRequest { repo, ..request.clone() })`, as both commands do now. Wrap the whole helper call in `noted`, so the note counts from the first attempt.
 - **Timing tests flake under load** on `main`. Test 6 uses 1 ms and a following create with the full default. Test 7's only timed condition is a 100 ms deadline against a 10k-file checkout, and it reads presence with a 10 s bound.
-- **No `cfg(target_os = "linux")` code** is touched. On Linux with the copy backend, step 4 is a full copy as well, so a first create is slower than on APFS. The 5 minutes covers both for the issue's repository size.
+- **Future size** (found while implementing). Each extra `async fn` layer holds its `call` argument again, and the create's future is already near `clippy::large_futures`' 16 KiB. So `call_within` and `call_with_repo_within` are plain functions that return `call_within_as`'s and the shared generic's future instead of awaiting it, and `ws.rs`'s `create_noted` (the create helper both commands call) passes `Box::pin(ctx.create_with_repo(…))` to `noted`, as `status` boxes its call.
+- **No `cfg(target_os = "linux")` code** is touched. On Linux with the copy backend, step 4 is a full copy as well, so a create is slower than on APFS, and each new tree also gets a full checkout. The 5 minutes covers both for the issue's repository size.
 
 ## Acceptance criteria
 
@@ -194,7 +195,7 @@ By hand, once, with the PR's build: generate an `Xl` synthetic tree (`reef-synth
 ## Out of scope
 
 - **Following create progress over presence**, and a file count for the base checkout: the follow-up above.
-- **A create cut off in steps 4-7** leaves a directory, jj workspace and state directory until the next daemon start, or, after the row, a leased workspace nobody holds until its lease runs out (35 min by default). This was found while writing the ticket, by reading the code, not by reproducing it. The fix is a cancellation-safe create: an `Undo` that runs on `Drop`, or the handler running `Manager::create` in a spawned task so it always completes or undoes itself. That is a daemon change with its own trade-offs (a finished workspace nobody holds versus none). The PR files it as its own issue, linking this section. The longer deadline makes the window rarer, not closed.
+- **A create cut off in steps 4-7** leaves a directory, jj workspace and state directory until the next daemon start, or, after the row, a leased workspace nobody holds until its lease runs out (35 min by default). This was found while writing the ticket, by reading the code, not by reproducing it. The fix is a cancellation-safe create: an `Undo` that runs on `Drop`, or the handler running `Manager::create` in a spawned task so it always completes or undoes itself. That is a daemon change with its own trade-offs (a finished workspace nobody holds versus none). The PR files it as its own issue, linking this section. The longer deadline makes the window rarer, not closed. With the copy backend it is not rare: step 4 is a full copy, a deadline can land in it, the orphaned `ws/<id>` stays until a restart, and the retry copies the tree again.
 - **The generic `Timeout` hint**, which still tells every other command to check `ws list` "before repeating a create". It is still true for a create through another path, and is left as is.
 - **Harness shell timeouts.** Some harnesses kill a shell command after about 2 minutes, before 5 minutes. A killed `ws run` drops its create the same way, the base build goes on, and the next `ws run` waits for it. Nothing in Reef can lengthen a harness's timeout.
 
@@ -205,3 +206,19 @@ Decided on 2026-11-03, as the brief recommends:
 1. **The default is 5 minutes** (`CREATE_TIMEOUT`), shared with the provider.
 2. **The 5 s stderr note is in this ticket.**
 3. **`--timeout` on a create replaces the default**, as for register, `ws gc`, `store build` and `backup`. The provider keeps "the longer of the two".
+
+## As implemented
+
+Departures from the brief above, and corrections made in review (2026-11-03). The sections above are updated to match.
+
+1. **Future size.** `call_within` and `call_with_repo_within` are plain functions returning their inner future, and `create_noted` boxes the create (see "Implementation notes"), to stay under `clippy::large_futures`.
+2. **The create helper is two functions:** `Ctx::create_with_repo` in `mod.rs` (deadline and error) and `ws::create_noted` in `ws.rs` (the note), which both commands call.
+3. **Not only the first create builds the base.** On overlay and copy (no `DirCloner`) every new tree is a full checkout; on APFS and reflink a new tree is cloned from a recent base plus the diff. The hint, the note and the `CREATE_TIMEOUT` doc comment say "a create that builds the base cache (the first in a repository, and on overlay or copy each new tree)".
+4. **The message no longer says "it goes on with the create".** The create stops at its next `.await` after the stream resets; only a base checkout already in `spawn_blocking` goes on. The message ends "a base checkout it started goes on", and the hint's retry advice is scoped to that checkout.
+5. **The hint has no fixed `--timeout 15m` example**: it would suggest a shorter value to someone who already passed 30m.
+6. **The "no `next`" reason is corrected.** The CLI has its argv; no `next` is still right because a retry needs `--timeout` rewritten and re-runs the agent's command.
+7. **A drop in steps 4-6 is not always rare.** With the copy backend step 4 is a full copy, so a deadline can land there and leave an orphaned `ws/<id>` until restart, and a retry copies again. The leak follow-up says so.
+8. **Test 4 forces its order** with a oneshot the note fires. **Test 7 is deterministic**: it drops the create on its `base` progress event and asserts the retry's `base_was_cached`. **Test 6** uses the marker `ran-188` instead of `ran`.
+9. **An extra unit test** in `mcp/mod.rs`, `create_timeout_reaches_the_tool_error`, pins the MCP tool's error object (kind `unavailable`, the hint, no `next`).
+10. **`provider.rs`'s release** keeps `ctx.timeout.max(CREATE_TIMEOUT)` with a comment that a create's bound is deliberate (the 300 s it always had).
+

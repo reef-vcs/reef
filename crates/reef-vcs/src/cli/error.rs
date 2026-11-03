@@ -99,6 +99,15 @@ pub(crate) enum CliError {
         /// The deadline.
         after: Duration,
     },
+    /// A workspace create did not answer within its deadline (#188).
+    #[error(
+        "the daemon did not create the workspace within {} (--timeout); a base checkout it started goes on",
+        humantime::format_duration(*after)
+    )]
+    CreateTimeout {
+        /// The deadline.
+        after: Duration,
+    },
     /// The configuration did not load.
     #[error("load the daemon's configuration")]
     Config(#[source] PathsError),
@@ -221,6 +230,9 @@ impl CliError {
             Self::Timeout { .. } => Some(Advice::hint(
                 "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create.",
             )),
+            Self::CreateTimeout { .. } => Some(Advice::hint(
+                "A create that builds the base cache (the first in a repository, and on overlay or copy each new tree) checks the whole tree out, which can take minutes on a large one and goes on after the CLI quits: run the command again, which waits for that checkout instead of starting another, or pass a longer --timeout.",
+            )),
             _ => None,
         }
     }
@@ -262,9 +274,10 @@ impl Classify for CliError {
         match self {
             Self::Daemon(error) => error.kind(),
             Self::OldDaemon { error, .. } | Self::Advised { error, .. } => error.kind(),
-            Self::NotRunning { .. } | Self::Autostart { .. } | Self::Timeout { .. } => {
-                ErrorKind::Unavailable
-            }
+            Self::NotRunning { .. }
+            | Self::Autostart { .. }
+            | Self::Timeout { .. }
+            | Self::CreateTimeout { .. } => ErrorKind::Unavailable,
             Self::Config(error) => error.kind(),
             Self::Logging(error) => error.kind(),
             Self::Runtime(_) | Self::Signals(_) | Self::HelperFailed { .. } => ErrorKind::Internal,
@@ -313,5 +326,41 @@ mod tests {
             autostart_off: true,
         };
         assert_eq!(not_running.exit_code(), 6);
+    }
+
+    /// #188 test 1: a create's deadline error says the base build goes on.
+    #[test]
+    fn create_timeout_explains_the_base_cache() {
+        let error = CliError::CreateTimeout {
+            after: Duration::from_mins(5),
+        };
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert_eq!(error.exit_code(), 6);
+        let message = error.to_string();
+        assert!(message.contains("within 5m"), "{message}");
+        assert!(message.contains("--timeout"), "{message}");
+        assert!(message.contains("base checkout"), "{message}");
+        let advice = error.advice().expect("advice");
+        assert!(advice.hint.contains("base cache"), "{}", advice.hint);
+        assert!(advice.hint.contains("--timeout"), "{}", advice.hint);
+        assert!(advice.next.is_empty(), "{:?}", advice.next);
+    }
+
+    /// #188 test 2: every other deadline error is as it was.
+    #[test]
+    fn timeout_advice_is_unchanged() {
+        let error = CliError::Timeout {
+            after: Duration::from_secs(30),
+        };
+        assert_eq!(
+            error.to_string(),
+            "the daemon did not answer within 30s (--timeout); it may still finish the request"
+        );
+        let advice = error.advice().expect("advice");
+        assert_eq!(
+            advice.hint,
+            "Retry with a longer --timeout; the request may have finished anyway, so check (reef ws list) before repeating a create."
+        );
+        assert!(advice.next.is_empty(), "{:?}", advice.next);
     }
 }

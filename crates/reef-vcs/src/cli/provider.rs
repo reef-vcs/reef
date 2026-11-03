@@ -34,7 +34,7 @@ use super::repo::missing;
 use super::scope::is_workspace_not_found;
 use super::ws::{lease_length, note_default_start};
 use super::ws_run::attach_rule;
-use super::{CliError, Ctx, Global, RepoArg};
+use super::{CREATE_TIMEOUT, CliError, Ctx, Global, RepoArg};
 
 /// A field the provider refused: a wrong type, a bad name, stdin that is
 /// not one JSON object.
@@ -43,9 +43,6 @@ pub(crate) const PROVIDER_INPUT_INVALID: &str = "PROVIDER_INPUT_INVALID";
 const CONTRACT: u32 = 1;
 /// The most stdin is read.
 const STDIN_MAX: u64 = 1024 * 1024;
-/// The least time a create is given: a first workspace of a large
-/// repository builds its base.
-const CREATE_DEADLINE: Duration = Duration::from_secs(300);
 /// The longest name.
 const NAME_MAX: usize = 64;
 
@@ -465,7 +462,7 @@ async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliE
     let request = CreateRequest::from(args, &fields)?;
     // Before anything is created: a holder that is not running fails here.
     let holder = request.hold_while.map(holder::resolve).transpose()?;
-    let deadline = ctx.timeout.max(CREATE_DEADLINE);
+    let deadline = ctx.timeout.max(CREATE_TIMEOUT);
     let repo = match &request.repo {
         Some(repo) => RepoArg::parse(repo)?,
         None => RepoArg::current()?,
@@ -797,7 +794,9 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
     }
     let response = if found.state() == WorkspaceState::Active {
         ctx.call_within(
-            ctx.timeout.max(CREATE_DEADLINE),
+            // Deliberately a create's bound: the 300 s the provider's
+            // release has always had.
+            ctx.timeout.max(CREATE_TIMEOUT),
             ctx.client.release_workspace("", &found.id, true, false),
         )
         .await
