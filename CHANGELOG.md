@@ -11,6 +11,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- Piped `reef status` and `reef diff` read at an operation (`--at-op`, `--at`) keep `at_operation`, the full id of the operation read, so brief JSON says when its answer is not about now; so does the MCP `get_diff` tool when called with `at_operation`. Their text read at an operation starts with `At operation <id>`, with the operation's time for `status`. Reads at head print what they did ([#126](https://github.com/reef-vcs/reef/issues/126)).
 - `reef history -o text` names a change's author, as `<email>`, when no Reef agent wrote it (committed or fetched outside Reef, or written by another jj client), and no longer lists `-` beside the agents of a change that has some ([#115](https://github.com/reef-vcs/reef/issues/115)).
 - The remote listener sends a service's error as a trailers-only answer, its HEADERS frame ending the stream. It used to send the headers and then an empty DATA frame, which tonic accepted and other gRPC clients (grpcio) refused as "Stream removed".
 

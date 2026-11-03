@@ -1,6 +1,6 @@
 # 0045. Brief JSON by default
 
-- Status: accepted
+- Status: accepted; amended by #126 (2026-11-03)
 - Date: 2026-10-31
 - Ticket: issue #114
 
@@ -21,12 +21,12 @@ Two things made it large. `ws list` had no changed-file count, so the answer too
    - *Zero values are left out*: `null`, `false`, `0`, `""` and `[]`. A reader takes a missing key as its zero value. A view keeps some keys whatever their value, a count that answers a question among them.
    - *Dropped keys* are left out whatever their value, and each view lists them.
 4. **Three views.**
-   - *Workspace* (`ws list`, and inside `status`): `id`, `owner`, `changed_file_count` when counted (even 0), `state` when not `active`, `divergent` and `attention` when set, and `repo_id` only in a list that spans more than one repository. Everything else is dropped; `ws inspect <id>` has it.
-   - *Status*: `repository` and `at_operation` are dropped, and so are the repository's `active_workspaces` (`ws list` has them), `heads` and `last_operation`, and the workspace's `snapshot`. Both repository counts and the workspace's `changed_file_count` always show. Changes keep `change_id_reverse_hex`, the description and set flags, and `commit_id` only when divergent. Changed files keep `path` and `kind`, `old_path` when set, and a side's type when it is not `file` (a missing type is `file` when that side exists).
-   - *Diff*: lossless. Only `at_operation` is dropped; files leave out zero flags and counts, empty hunks, and `file` types under the rule above.
+   - *Workspace* (`ws list`, and inside `status`): `id`, `owner`, `changed_file_count` when counted (even 0), `state` when not `active`, `divergent` and `attention` when set, and `repo_id` only in a list that spans more than one repository. Everything else is dropped; `ws inspect <id>` has it. A list is an array and carries no read point; with `--at`, stderr names it.
+   - *Status*: `repository` is dropped, and so are the repository's `active_workspaces` (`ws list` has them), `heads` and `last_operation`, and the workspace's `snapshot`. `at_operation` is kept only when the request named an operation (`--at-op`, `--at`; #126), since at head it would only name the head. Both repository counts and the workspace's `changed_file_count` always show. Changes keep `change_id_reverse_hex`, the description and set flags, and `commit_id` only when divergent. Changed files keep `path` and `kind`, `old_path` when set, and a side's type when it is not `file` (a missing type is `file` when that side exists).
+   - *Diff*: lossless at a named operation; at head only `at_operation` is dropped; files leave out zero flags and counts, empty hunks, and `file` types under the rule above.
 5. **The full JSON is the interface for programs; brief is for reading.** Full JSON keeps [0034](0034-cli-over-the-vcs-services.md)'s rules and only grows. The three rules above are the brief form's contract; which keys a view keeps may change in a minor release. A brief object may carry `change_id_reverse_hex` without `change_id`, amending 0034 decision 4.
 6. **`ws list` counts changed files (API revision 10).** `ListWorkspacesRequest.changed_file_counts` asks for `Workspace.changed_file_count`: what each active or releasing workspace's `@` changes against its parents, merged, as `GetStatus` counts it, as of its last snapshot. It is `optional`, since 0 is an answer, and opt-in, since it costs one summary diff per workspace, run per repository on its read thread at its head. It is best effort: a repository whose job fails leaves its counts unset and the list stands. The flag is not part of the page token's binding. `reef ws list` and the MCP `list_workspaces` tool always ask; the text table gains a `FILES` column, `-` when unset.
-7. **MCP returns the same views** from `list_workspaces`, `get_status` and `get_diff`, with `next_page_token` left out on a last page, amending [0035](0035-mcp-server.md) decision 5 for those three tools. `get_workspace`, `list_changes` and `list_operations` still return full objects, so every dropped field is one call away.
+7. **MCP returns the same views** from `list_workspaces`, `get_status` and `get_diff`, with `next_page_token` left out on a last page, amending [0035](0035-mcp-server.md) decision 5 for those three tools. `get_workspace`, `list_changes` and `list_operations` still return full objects, so every dropped field is one call away. `get_diff` keeps `at_operation` when the call passes one (#126).
 8. **The benchmark guards the gate.** R2.17's scenario gains one-call `state-repo` candidates (`reef ws list`, with `-o json` and `-o text`, and `list_workspaces`), and `just tokens-check` asserts that the cheapest default `reef` sequence is at most a fifth of git's in bytes and `o200k`, and that `ws list`'s counts match git's.
 9. **One release.** The default changes in 0.3.0 with the form itself, recorded in the CHANGELOG as a change that breaks scripts reading piped `reef ws list`, `status` or `diff` without `-o json`.
 
@@ -38,4 +38,5 @@ Two things made it large. `ws list` had no changed-file count, so the answer too
 - `ws list` now does repository work: one summary diff per active workspace. Its counts lag edits the watcher has not yet snapshotted.
 - A brief workspace has no path or change id; the workspace id reaches both (`ws inspect`, `--workspace`).
 - Objects are one line, so grepping piped output by line finds less; `jq` or `-o json` is the tool.
+- A brief `status` or `diff` read at an operation names it, in 146 bytes, and its text names it in a first line, `At operation <12 hex>`; reads at head do not change (#126).
 - The `MCP + fixed cost` arm stays unmet: the tool list itself is about 20 KB (#116).

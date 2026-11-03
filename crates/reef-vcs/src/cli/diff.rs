@@ -80,6 +80,9 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     } else {
         DiffFormat::Hunks
     };
+    let at_operation = args.read.at_operation(ctx, &scope).await?;
+    // The request named an operation; an empty `--at-op` reads at head.
+    let named = !at_operation.trim().is_empty();
     let request = GetDiffRequest {
         repo: scope.repo_id.clone(),
         workspace: scope.workspace_id(),
@@ -88,7 +91,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         paths,
         format: format.into(),
         context_lines: args.context,
-        at_operation: args.read.at_operation(ctx, &scope).await?,
+        at_operation,
         skip_snapshot: args.read.no_snapshot,
         symbols: args.symbols,
         max_call_sites: args.call_sites,
@@ -114,8 +117,15 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             diff,
             format,
             symbols: args.symbols,
+            named,
         },
-        |text| brief::Diff::from(&text.diff),
+        |text| {
+            if text.named {
+                brief::Diff::read_at(&text.diff)
+            } else {
+                brief::Diff::from(&text.diff)
+            }
+        },
     )
 }
 

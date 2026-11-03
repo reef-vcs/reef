@@ -13,6 +13,10 @@
 //! 3. **Dropped keys** are left out whatever their value; each type lists
 //!    them.
 //!
+//! A view of a read at an operation the request named (`--at-op`, `--at`)
+//! keeps `at_operation` (`read_at`, #126); a read at head leaves it out,
+//! since it would only name the head.
+//!
 //! The full JSON stays the interface for programs; which keys a view keeps
 //! may change in a minor release, the rules may not.
 
@@ -238,12 +242,15 @@ impl<'a> From<&'a json::FileDiff> for FileDiff<'a> {
 }
 
 /// `reef diff`: always the two sides, `total_files` and `files`; the symbol
-/// summary when present. Dropped: `at_operation`.
+/// summary when present. Dropped at head: `at_operation`, which
+/// [`Diff::read_at`] keeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Diff")]
 pub struct Diff<'a> {
     from_commit_ids: &'a [String],
     to_commit_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at_operation: Option<&'a str>,
     total_files: u32,
     files: Vec<FileDiff<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,6 +262,7 @@ impl<'a> From<&'a json::Diff> for Diff<'a> {
         Self {
             from_commit_ids: &diff.from_commit_ids,
             to_commit_id: &diff.to_commit_id,
+            at_operation: None,
             total_files: diff.total_files,
             files: diff.files.iter().map(FileDiff::from).collect(),
             symbol_summary: diff.symbol_summary.as_ref(),
@@ -262,10 +270,30 @@ impl<'a> From<&'a json::Diff> for Diff<'a> {
     }
 }
 
-/// `reef status`. Dropped: `repository` and `at_operation`.
+impl<'a> Diff<'a> {
+    /// The view of a diff read at an operation the request named: lossless,
+    /// `at_operation` included.
+    #[must_use]
+    pub fn read_at(diff: &'a json::Diff) -> Self {
+        Self {
+            at_operation: named(&diff.at_operation),
+            ..Self::from(diff)
+        }
+    }
+}
+
+/// The operation a named read was answered at, unless empty (rule 2).
+fn named(at_operation: &str) -> Option<&str> {
+    (!at_operation.is_empty()).then_some(at_operation)
+}
+
+/// `reef status`. Dropped: `repository`; at head also `at_operation`,
+/// which [`RepoStatus::read_at`] keeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.RepoStatus")]
 pub struct RepoStatus<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at_operation: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_status: Option<RepositoryStatus<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,11 +303,24 @@ pub struct RepoStatus<'a> {
 impl<'a> From<&'a json::RepoStatus> for RepoStatus<'a> {
     fn from(status: &'a json::RepoStatus) -> Self {
         Self {
+            at_operation: None,
             repository_status: status
                 .repository_status
                 .as_ref()
                 .map(RepositoryStatus::from),
             workspace_status: status.workspace_status.as_ref().map(WorkspaceStatus::from),
+        }
+    }
+}
+
+impl<'a> RepoStatus<'a> {
+    /// The view of a read at an operation the request named (`--at-op`,
+    /// `--at`): [`From`]'s, with `at_operation`.
+    #[must_use]
+    pub fn read_at(status: &'a json::RepoStatus) -> Self {
+        Self {
+            at_operation: named(&status.at_operation),
+            ..Self::from(status)
         }
     }
 }
@@ -807,12 +848,59 @@ mod tests {
         );
         let diff = full_diff();
         assert_subset(&value(&Diff::from(&diff)), &value(&diff), "diff");
+        assert_subset(&value(&Diff::read_at(&diff)), &value(&diff), "diff");
         for status in [full_status(true), full_status(false)] {
             assert_subset(
                 &value(&RepoStatus::from(&status)),
                 &value(&status),
                 "status",
             );
+            assert_subset(
+                &value(&RepoStatus::read_at(&status)),
+                &value(&status),
+                "status",
+            );
         }
+    }
+
+    #[test]
+    fn brief_status_read_at_keeps_the_operation() {
+        for status in [full_status(true), full_status(false)] {
+            let text = serde_json::to_string(&RepoStatus::read_at(&status)).unwrap();
+            let id = "77".repeat(64);
+            assert!(
+                text.starts_with(&format!("{{\"at_operation\":\"{id}\",")),
+                "{text}"
+            );
+            let mut brief = value(&RepoStatus::read_at(&status));
+            brief.as_object_mut().unwrap().remove("at_operation");
+            assert_eq!(brief, value(&RepoStatus::from(&status)));
+        }
+    }
+
+    #[test]
+    fn brief_diff_read_at_is_lossless() {
+        let full = full_diff();
+        assert_eq!(expand_diff(&value(&Diff::read_at(&full))), value(&full));
+        let text = serde_json::to_string(&Diff::read_at(&full)).unwrap();
+        assert!(
+            text.starts_with(
+                r#"{"from_commit_ids":["ef01"],"to_commit_id":"abcd","at_operation":"7777"#
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn brief_read_at_leaves_out_an_empty_operation() {
+        let mut status = full_status(true);
+        status.at_operation = String::new();
+        assert_eq!(
+            value(&RepoStatus::read_at(&status)),
+            value(&RepoStatus::from(&status))
+        );
+        let mut diff = full_diff();
+        diff.at_operation = String::new();
+        assert_eq!(value(&Diff::read_at(&diff)), value(&Diff::from(&diff)));
     }
 }

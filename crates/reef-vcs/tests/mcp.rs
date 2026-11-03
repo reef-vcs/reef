@@ -504,6 +504,14 @@ async fn reads() {
     let hunks = mcp.ok("get_diff", json!({})).await;
     let file = &hunks["files"][0];
     assert!(file["hunks"].is_array(), "{hunks}");
+    // #126: a read at a named operation returns it; one at head does not.
+    assert!(hunks.get("at_operation").is_none(), "{hunks}");
+    let op = mcp.ok("list_changes", json!({"page_size": 1})).await["at_operation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let at = mcp.ok("get_diff", json!({"at_operation": &op[..12]})).await;
+    assert_eq!(at["at_operation"], op.as_str(), "{at}");
     for format in ["stat", "summary"] {
         let diff = mcp.ok("get_diff", json!({"format": format})).await;
         assert_eq!(diff["files"].as_array().unwrap().len(), 1, "{diff}");
