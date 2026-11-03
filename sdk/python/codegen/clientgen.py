@@ -3,7 +3,8 @@
 One method per RPC, named in snake case, on the sync and asyncio clients alike: every request
 field is a keyword-only parameter, or a whole request is passed positionally. A paged RPC (a
 ``page_token`` in, a ``next_page_token`` out) also gets ``<method>_pages``, and ``<method>_all``
-where its items are known: the response's one repeated field, or ``PAGE_ITEMS``' entry. A
+where its items are known: the response's one repeated field, or ``PAGE_ITEMS``' entry
+(``sdk/fixtures/page-items.json``). A
 server-streaming RPC returns a stream. Docstrings are the schema's comments.
 
 The output is what ``ruff format`` leaves unchanged.
@@ -11,20 +12,21 @@ The output is what ``ruff format`` leaves unchanged.
 
 from __future__ import annotations
 
+import json
 import keyword
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from google.protobuf import descriptor_pb2
 
 PACKAGE = "reef.api.v1"
 
-# A paged RPC whose response has more than one repeated field names its items here; `None` means
-# its items depend on the request, so it gets `_pages` only. ADR 0029's checklist, item 12.
-PAGE_ITEMS: dict[str, str | None] = {
-    "GetDiff": "files",
-    "QueryChanges": None,
-}
+# A paged RPC whose response has more than one repeated field names its items in
+# sdk/fixtures/page-items.json, which the TypeScript generator reads too; `None` means its items
+# depend on the request, so it gets `_pages` only. ADR 0029's checklist, item 12.
+PAGE_ITEMS_FILE = Path(__file__).resolve().parents[2] / "fixtures" / "page-items.json"
+PAGE_ITEMS: dict[str, str | None] = json.loads(PAGE_ITEMS_FILE.read_text())["items"]
 
 # `(reef.api.v1.access)` on MethodOptions, options.proto.
 ACCESS_FIELD = 50701
@@ -287,7 +289,7 @@ class Schema:
         else:
             raise GenerateError(
                 f"{method.name} is paged and its response has {len(repeated)} repeated fields; "
-                "name its items in codegen/clientgen.py's PAGE_ITEMS"
+                "name its items in sdk/fixtures/page-items.json"
             )
         if items is None:
             return

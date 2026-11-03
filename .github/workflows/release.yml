@@ -12,7 +12,8 @@ name: Release
 # packages are installed into each harness from the checkout, and a tag lists the bundles on the
 # MCP registry. The plugins themselves are released by the tag: their marketplaces, in this
 # repository, pin it. Since R2.06 (ADR 0054) the Python SDK is built and smoke-tested on every run,
-# and a tag publishes it to PyPI by trusted publishing.
+# and a tag publishes it to PyPI by trusted publishing; since R2.07 the TypeScript SDK is packed and
+# smoke-tested the same way, and a tag publishes it to npm by trusted publishing, with provenance.
 
 on:
   push:
@@ -33,6 +34,13 @@ on:
       - sdk/python/hatch_build.py
       - sdk/python/codegen/**
       - sdk/python/tests/smoke.py
+      - sdk/fixtures/page-items.json
+      - sdk/typescript/package.json
+      - sdk/typescript/package-lock.json
+      - sdk/typescript/buf.gen*.yaml
+      - sdk/typescript/codegen/**
+      - sdk/typescript/scripts/**
+      - sdk/typescript/tests/smoke.mjs
   workflow_dispatch:
     inputs:
       dry_run:
@@ -490,9 +498,66 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The TypeScript SDK (R2.07, ADR 0054): the tarball at the workspace version, checked by publint,
+  # are-the-types-wrong and `npm publish --dry-run`, and smoke-tested alone (installed in a fresh
+  # directory) against this run's Linux daemon on the floor and the newest LTS. Every run, dry runs
+  # included; `release` waits for it, and `npm` publishes what it packed.
+  typescript-sdk:
+    name: TypeScript SDK
+    needs: [check-version, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+          cache: ${{ needs.check-version.outputs.publish != 'true' && 'npm' || '' }}
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Build
+        run: |
+          (cd sdk/typescript && npm ci)
+          just typescript-build
+          ls -l sdk/typescript/dist-pack
+          [[ -f "sdk/typescript/dist-pack/reef-vcs-$VERSION.tgz" ]]
+          [[ "$(ls sdk/typescript/dist-pack | wc -l)" -eq 1 ]]
+          npm publish "sdk/typescript/dist-pack/reef-vcs-$VERSION.tgz" --dry-run --provenance=false --tag dry-run
+      - uses: actions/download-artifact@v8
+        with:
+          name: reef-x86_64-unknown-linux-musl
+          path: tarball
+      - name: Unpack the daemon
+        run: |
+          mkdir "$RUNNER_TEMP/reef"
+          tar -xzf tarball/reef-"$VERSION"-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP/reef"
+          echo "REEF_BIN_DIR=$(dirname "$(find "$RUNNER_TEMP/reef" -name reef-daemon -type f | head -1)")" >>"$GITHUB_ENV"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.15.0"
+      - name: Smoke test on Node 22.15
+        run: scripts/npm-smoke.sh "$GITHUB_WORKSPACE/sdk/typescript/dist-pack/reef-vcs-$VERSION.tgz" "$RUNNER_TEMP/smoke22"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+      - name: Smoke test on Node 26
+        run: scripts/npm-smoke.sh "$GITHUB_WORKSPACE/sdk/typescript/dist-pack/reef-vcs-$VERSION.tgz" "$RUNNER_TEMP/smoke26"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-dist
+          path: sdk/typescript/dist-pack/*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: publish
-    needs: [check-version, checksums, install, homebrew-test, binstall, harness-packages, python-sdk]
+    needs: [check-version, checksums, install, homebrew-test, binstall, harness-packages, python-sdk, typescript-sdk]
     if: needs.check-version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -646,6 +711,54 @@ jobs:
       - if: steps.publish.outcome == 'failure'
         run: |
           echo "::warning::publishing reef-vcs $VERSION to PyPI failed; check the trusted publisher (project reef-vcs, repository $GITHUB_REPOSITORY, workflow release.yml, environment pypi), then re-run this job: the run keeps python-dist for 14 days. By hand: download python-dist and run uvx twine upload dist/* with an API token for reef-vcs."
+
+  # reef-vcs on npm (R2.07), by trusted publishing: the npm CLI exchanges the run's OIDC token for a
+  # short-lived publish token and attaches a provenance attestation, so no secret is stored. npm's
+  # trusted publisher names this repository, this workflow and the `npm` environment (the brief's
+  # one-time setup). After `release`: a version on npm can never be published again, even after an
+  # unpublish, so it goes out once the binaries it talks to exist. Warns rather than fails, as PyPI,
+  # the tap and the listing do: the release is already out.
+  npm:
+    name: npm
+    needs: [check-version, release]
+    if: needs.check-version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/reef-vcs
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: web/.node-version
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.node-version
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-dist
+          path: dist
+      - name: Check npm
+        run: |
+          npm --version
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"
+      - id: publish
+        continue-on-error: true
+        run: |
+          tag=latest
+          [[ "$VERSION" == *-* ]] && tag=next
+          npm publish "dist/reef-vcs-$VERSION.tgz" --access public --tag "$tag"
+      - if: steps.publish.outcome == 'failure'
+        run: |
+          echo "::warning::publishing reef-vcs $VERSION to npm failed; check the trusted publisher on npmjs.com (package reef-vcs, owner reef-vcs, repository reef, workflow release.yml, environment npm, allowed action npm publish; a new configuration expires 2 days after it is made unless a publish uses it), then re-run this job: the run keeps npm-dist for 14 days. By hand: download npm-dist and run npm publish reef-vcs-$VERSION.tgz --provenance=false signed in with 2FA."
 
   # The documented install lines, run as written now that the tag exists, and the listing as the
   # registry serves it. Warns, as the tap and the listing do: the release is already out.

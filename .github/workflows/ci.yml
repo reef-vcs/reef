@@ -361,6 +361,58 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/wheel/bin/python" sdk/python/dist/*.whl
           cd "$RUNNER_TEMP" && REEF_BIN_DIR="$GITHUB_WORKSPACE/target/debug" "$RUNNER_TEMP/wheel/bin/python" "$GITHUB_WORKSPACE/sdk/python/tests/smoke.py"
 
+  # The TypeScript SDK (R2.07, ADR 0054): generated from the protos, linted, typechecked and
+  # unit-tested, then run against scratch daemons built from this commit, on the oldest Node it
+  # supports and the newest LTS. One leg packs the tarball and smoke-tests it alone.
+  typescript:
+    name: typescript ${{ matrix.node }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
+        node: ["22.15.0", "26"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Install
+        working-directory: sdk/typescript
+        run: npm ci
+      - name: Check
+        run: just typescript-check
+      - name: Build the daemon
+        run: cargo build -p reef-vcs -p reef-daemon
+      - name: Integration tests
+        run: just typescript-test
+      - name: Pack and smoke-test the tarball
+        if: runner.os == 'Linux' && matrix.node == '22.15.0'
+        run: |
+          just typescript-build
+          dir="$RUNNER_TEMP/npm-smoke"
+          mkdir "$dir"
+          cp sdk/typescript/tests/smoke.mjs "$dir/"
+          cd "$dir"
+          npm init -y >/dev/null
+          npm install --no-save --no-audit --no-fund "$GITHUB_WORKSPACE"/sdk/typescript/dist-pack/reef-vcs-*.tgz
+          REEF_BIN_DIR="$GITHUB_WORKSPACE/target/debug" node smoke.mjs
+          node -e 'if (typeof require("reef-vcs").connect !== "function") process.exit(1)'
+      - name: Audit
+        if: runner.os == 'Linux' && matrix.node == '22.15.0'
+        working-directory: sdk/typescript
+        continue-on-error: true
+        run: npm audit --omit=dev
+
   # Every platform's digest must equal the pinned one, so an output change that is the same on
   # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.
   synth-determinism:
@@ -409,7 +461,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python]
+    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -427,6 +479,7 @@ jobs:
           WEB: ${{ needs.web.result }}
           WEB_E2E: ${{ needs.web-e2e.result }}
           PYTHON: ${{ needs.python.result }}
+          TYPESCRIPT: ${{ needs.typescript.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" ]]
+          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]

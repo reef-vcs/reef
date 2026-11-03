@@ -7,6 +7,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 ### Added
 
 - The Python SDK ([ADR 0054](docs/adr/0054-sdks.md), [`docs/python-sdk.md`](docs/python-sdk.md)): `pip install reef-vcs`, then `import reef`. Every API call is a typed method on `reef.connect()`'s client and on `reef.aio`'s, generated from the schema, with page iterators and streams. The daemon's errors arrive as exceptions by kind, with `reason`, `hint` and `next`. The SDK finds the daemon as the CLI does and reaches a remote one with its key pinned before the token is sent. `client.workspace(...)` holds a workspace for a block of code as `reef ws run` does for a command: lease heartbeats, a presence entry, and a release with a final snapshot. Published to PyPI by each release.
+- The TypeScript SDK ([ADR 0054](docs/adr/0054-sdks.md), [`docs/typescript-sdk.md`](docs/typescript-sdk.md)): `npm install reef-vcs`, then `import { connect } from "reef-vcs"`. ESM for Node 22.15 and later, loadable by `require()`. Every API call is a typed async method, generated from the schema, with page iterators and streams; messages are in `reef-vcs/api/v1`. The same error classes, discovery, remote pinning (checked in every TLS handshake) and workspace block as the Python SDK, the block both as `await using` and as `withWorkspace(...)`. Published to npm with provenance by each release.
 
 ### Fixed
 

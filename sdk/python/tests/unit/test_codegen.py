@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 import sys
 import tomllib
@@ -85,7 +86,7 @@ def paged_descriptor(repeated: int) -> descriptor_pb2.FileDescriptorSet:
 def test_a_paged_rpc_with_two_lists_needs_page_items() -> None:
     rpcs, _, _ = clientgen.generate(paged_descriptor(1))
     assert 'items="things0"' in rpcs
-    with pytest.raises(clientgen.GenerateError, match="PAGE_ITEMS"):
+    with pytest.raises(clientgen.GenerateError, match=re.escape("sdk/fixtures/page-items.json")):
         clientgen.generate(paged_descriptor(2))
 
 
@@ -123,3 +124,8 @@ def test_build_constants() -> None:
     assert isinstance(reef.API_REVISION, int) and reef.API_REVISION >= 14
     cargo = tomllib.loads((SDK.parent.parent / "Cargo.toml").read_text())
     assert cargo["workspace"]["package"]["version"] == _build.CARGO_VERSION
+
+
+def test_page_items_come_from_the_shared_table() -> None:
+    table = json.loads((SDK.parent / "fixtures" / "page-items.json").read_text())["items"]
+    assert table == clientgen.PAGE_ITEMS

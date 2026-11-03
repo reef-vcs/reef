@@ -1,0 +1,10 @@
+# The frozen v0 messages, for the probe that names a reef 0.1 daemon (R2.07). The repository's
+# buf.yaml excludes them even when its proto directory is the input, so codegen/generate.mjs runs
+# this over a copy of the two files outside the repository.
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+      - import_extension=js

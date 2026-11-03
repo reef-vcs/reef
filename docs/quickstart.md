@@ -330,6 +330,7 @@ The daemon collects garbage daily: old snapshots, unused bases, and unused store
 ## Where next
 
 - [The Python SDK](python-sdk.md): `pip install reef-vcs`, every API call from Python, and a workspace block for a program's own agents.
+- [The TypeScript SDK](typescript-sdk.md): `npm install reef-vcs`, the same from Node.
 - [The design](design.md): why Reef exists and where it is going.
 - [Phases and tickets](dev-phases.md), the [architecture decisions](adr/README.md), [benchmarks](benchmarks.md), and [load tests](load-tests.md).
 - Report a problem with the [issue template](https://github.com/reef-vcs/reef/issues/new/choose).

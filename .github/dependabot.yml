@@ -16,6 +16,15 @@ updates:
     groups:
       python:
         patterns: ["*"]
+  # The TypeScript SDK's lock file (R2.07). A protoc-gen-es or Connect bump raises the runtime
+  # floors in package.json too; codegen.test.ts's floors tests fail until it does.
+  - package-ecosystem: npm
+    directory: /sdk/typescript
+    schedule:
+      interval: weekly
+    groups:
+      typescript:
+        patterns: ["*"]
   - package-ecosystem: cargo
     directory: /
     schedule:

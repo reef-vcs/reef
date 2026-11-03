@@ -1,5 +1,5 @@
 {
-  "about": "Which remote URLs a client accepts (R2.08's RemoteUrl::parse): https://<host>[:<port>][/], port 443 by default, an IPv6 host bracketed. Read by reef-client's urls_follow_the_shared_table and the Python SDK's test_remote_urls_follow_the_shared_table (R2.06, ADR 0054); R2.07 reads it too. A case expects `host`, `port` and `authority`, or `valid: false`.",
+  "about": "Which remote URLs a client accepts (R2.08's RemoteUrl::parse): https://<host>[:<port>][/], port 443 by default, an IPv6 host bracketed. Read by reef-client's urls_follow_the_shared_table and the Python SDK's test_remote_urls_follow_the_shared_table (R2.06, ADR 0054), and the TypeScript SDK's `remote urls follow the shared table` (R2.07). A case expects `host`, `port` and `authority`, or `valid: false`.",
   "cases": [
     { "url": "https://vm.example:7470", "host": "vm.example", "port": 7470, "authority": "vm.example:7470" },
     { "url": "https://vm.example:7470/", "host": "vm.example", "port": 7470, "authority": "vm.example:7470" },
