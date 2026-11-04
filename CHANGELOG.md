@@ -2,6 +2,12 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
+## [Unreleased]
+
+### Fixed
+
+- The TypeScript SDK reaches npm. 0.4.0's release published everything but `reef-vcs` 0.4.0 to npm: its `npm` job passed the tarball as `dist/reef-vcs-0.4.0.tgz`, which npm reads as a GitHub repository (`user/repo`), and the job only warns when it fails, so the run stayed green. Its dry run had used a path npm reads as a file. Both now run `scripts/npm-publish.sh`, which passes npm an absolute path, so every dry run checks the npm command line a tag runs, and lets a dry run through once the version is already on npm. Install the TypeScript SDK at 0.4.1 or later; the rest of 0.4.0 (the binaries, Homebrew, the MCP registry, the Python SDK on PyPI) was published.
+
 ## [0.4.0] - 2026-11-03
 
 Phase 2's last rows: the Python and TypeScript SDKs, both named `reef-vcs` and published to PyPI and npm by this release's workflow. Brief `reef status` and `reef diff` read at an operation now say which operation they read, `reef history -o text` names the authors of changes no Reef agent wrote, and the remote listener answers errors in a form every gRPC client reads. Two fixes come from trying 0.3 on a large monorepo: a workspace create waits up to 5 minutes instead of failing at 30 s, and `reef init` adds Reef's MCP entry without reformatting `.mcp.json`. Phase 2 is complete.
