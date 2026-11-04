@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and released as [0.4.0](https://github.com/reef-vcs/reef/releases/tag/v0.4.0) (2026-11-03), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.1](https://github.com/reef-vcs/reef/releases/tag/v0.4.1), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -79,7 +79,7 @@ Install Reef from https://github.com/reef-vcs/reef, then run `reef init` in this
 
 The agent finds the installer below and runs it. `reef init` then registers the repository, which adds `.jj/` beside git and starts Reef's daemon, and writes Reef's instructions to `AGENTS.md`, plus the files of each agent that reads its own instead: those the repository already has files for, and the agent running `reef init` when Reef recognizes it. Later agent sessions then start in a workspace without being told. In the [onboarding benchmark](docs/onboarding-benchmark.md), Claude Code agents that had never seen Reef, given only that link, installed it and finished a task in a workspace in a median of five or six tool calls (measured before 0.1.0, against a local copy of the installer).
 
-**Or install it yourself.** Prebuilt binaries of the latest release, 0.4.0, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
+**Or install it yourself.** Prebuilt binaries of the latest release, 0.4.1, are available for macOS and Linux on arm64 and x86_64. The Linux binaries are static, so they run in any container.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/reef-vcs/reef/main/install.sh | sh   # ~/.local/bin, no sudo

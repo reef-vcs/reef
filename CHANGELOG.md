@@ -2,7 +2,9 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
-## [Unreleased]
+## [0.4.1] - 2026-11-04
+
+The TypeScript SDK on npm, which 0.4.0's release did not publish, and a Claude Code plugin install that works without a GitHub SSH key. Nothing else changes: the API revision (14) and the database schema (6) are those of 0.4 and 0.3, and a 0.4.0 daemon serves the 0.4.1 CLI.
 
 ### Fixed
 
