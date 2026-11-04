@@ -1031,9 +1031,9 @@ impl Repo {
 
     async fn changed_paths_in_wc_unlogged(&self) -> Result<Vec<ChangedPath>, DiffError> {
         let wc_commit = self.wc_commit()?;
-        let parent_tree = wc_commit.parent_tree(self.repo.as_ref()).await?;
+        let parent_tree = wc_commit.parent_tree(self.repo.index()).await?;
         let wc_tree = wc_commit.tree();
-        let mut diff = parent_tree.diff_stream(&wc_tree, &EverythingMatcher);
+        let mut diff = parent_tree.diff(&wc_tree, &EverythingMatcher);
         let mut changed = Vec::new();
         while let Some(entry) = diff.next().await {
             let values = entry.values?;
@@ -1137,7 +1137,7 @@ async fn overwritten(
     disk: &MergedTree,
     merged: &MergedTree,
 ) -> Result<Vec<(PathBuf, Option<Stamp>)>, BackendError> {
-    let mut diff = disk.diff_stream(merged, &EverythingMatcher);
+    let mut diff = disk.diff(merged, &EverythingMatcher);
     let mut stamps = Vec::new();
     while let Some(entry) = diff.next().await {
         // A path absent from the scan is not overwritten: jj's check-out

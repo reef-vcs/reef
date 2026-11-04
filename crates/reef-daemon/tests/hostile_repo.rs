@@ -210,8 +210,9 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
     let canary = blob(&f.root, b"escaped\n");
     let name = format!("a/{CANARY}");
     f.hostile("hostile", &[(FILE, name.as_bytes(), &canary)]);
-    // jj-lib 0.46 panics reading this tree, poisoning its git backend for
-    // every workspace of the repository; Reef refuses the commit first.
+    // jj-lib before 0.47 panicked reading this tree, poisoning its git
+    // backend for every workspace of the repository; 0.47 fails the read.
+    // Reef refuses the commit first, naming the entry.
     let error = f
         .create_on("hostile", Backend::Unspecified)
         .await
@@ -236,14 +237,14 @@ async fn tree_entry_with_a_slash_does_not_take_the_repository_down() {
     );
 }
 
-// 12a: reads take any revision without the guard (R2.02). jj-lib 0.46
-// panics reading the tree; the read fails with `INTERNAL`, its repository
-// is reopened, and the next read and create work (the create writes a
-// commit, which takes the git backend's lock a poisoned store would fail).
-// The `panicked` check fails once a jj-lib bump returns an error instead,
-// which is when S-18 changes too.
+// 12a: reads take any revision without the guard (R2.02). jj-lib 0.47
+// fails to read the tree (jj-vcs/jj#10467): the read fails with
+// `INTERNAL`, nothing panics, the repository is not reopened, and the next
+// read and create work.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_of_a_tree_jj_cannot_read_fails_alone() {
+    use reef_daemon::model::RepoId;
+
     let f = fixture().await;
     let canary = blob(&f.root, b"escaped\n");
     let name = format!("a/{CANARY}");
@@ -265,8 +266,18 @@ async fn a_read_of_a_tree_jj_cannot_read_fails_alone() {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Internal, "{error}");
-        assert!(error.to_string().contains("panicked"), "{error}");
+        assert!(!error.to_string().contains("panicked"), "{error}");
+        assert!(
+            error.to_string().contains("Invalid repo path input"),
+            "{error}"
+        );
     }
+    let id: RepoId = f.repo.parse().unwrap();
+    assert_eq!(
+        f.daemon.handle.state().repos.get(id).unwrap().generation(),
+        0,
+        "not reopened"
+    );
     let main = f
         .daemon
         .client
@@ -285,11 +296,11 @@ async fn a_read_of_a_tree_jj_cannot_read_fails_alone() {
     f.create_on("main", Backend::Unspecified).await.unwrap();
 }
 
-// 12b: the guard's backstop. A job that panics anyway (here jj-lib, handed
-// the tree directly) leaves no poisoned store behind: the thread reopens
-// the repository, so the next job and the next create work, and a
-// workspace opened before the panic snapshots on a fresh store too, and
-// so does GC after another panic (#63).
+// 12b: the backstop. A job that panics (here on purpose, after reading the
+// hostile tree) leaves no stale store behind: the thread reopens the
+// repository, so the next job and the next create work, and a workspace
+// opened before the panic snapshots on a fresh store too, and so does GC
+// after another panic (#63).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicked_job_reopens_the_repository() {
     use futures::FutureExt as _;
@@ -313,6 +324,7 @@ async fn a_panicked_job_reopens_the_repository() {
             .call_async(move |head| {
                 async move {
                     let _ = head.repo.spec_at(&hostile).await;
+                    panic!("injected");
                 }
                 .boxed_local()
             })
@@ -331,6 +343,8 @@ async fn a_panicked_job_reopens_the_repository() {
         .await
         .unwrap()
         .unwrap();
+    // The next job ran on a reopened repository, not a reload of the old one.
+    assert_eq!(handle.generation(), 1, "the panic reopens the repository");
     f.create_on("main", Backend::Unspecified).await.unwrap();
     std::fs::write(Path::new(&before.path).join("after-panic"), "kept\n").unwrap();
     let snapshot = f
@@ -351,6 +365,70 @@ async fn a_panicked_job_reopens_the_repository() {
         .reports;
     assert_eq!(reports.len(), 1);
     assert!(reports[0].jj_error.is_empty(), "{}", reports[0].jj_error);
+    assert_eq!(handle.generation(), 2, "the second panic reopens it again");
+}
+
+// 12d: rename detection without the guard (R2.02). A diff restricted to
+// `README` never reads `d`, but jj's copy records come from git's rename
+// detection over the whole trees, which pairs `big.txt` with `d`'s entry
+// named `/big.txt`. jj-lib 0.47 fails on the path it cannot represent
+// (jj-vcs/jj#10501): the diff fails with `INTERNAL`, nothing panics, the
+// repository is not reopened, and the next diff and create work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_whose_renames_jj_cannot_read_fails_alone() {
+    use reef_daemon::model::RepoId;
+
+    let f = fixture().await;
+    let big = blob(&f.root, "renamed content\n".repeat(200).as_bytes());
+    let readme = blob(&f.root, b"main\n");
+    let base_tree = raw_tree(
+        &f.root,
+        &[(FILE, b"README", &readme), (FILE, b"big.txt", &big)],
+    );
+    let base = commit_tree(&f.root, "refs/heads/base", &base_tree, Some(&f.main));
+    let changed = blob(&f.root, b"changed\n");
+    let dir = raw_tree(&f.root, &[(FILE, b"/big.txt", &big)]);
+    let hostile_tree = raw_tree(&f.root, &[(FILE, b"README", &changed), (DIR, b"d", &dir)]);
+    commit_tree(&f.root, "refs/heads/hostile", &hostile_tree, Some(&base));
+    f.create_on("base", Backend::Unspecified).await.unwrap();
+    // A refused create imports the bookmark, so reads can name it.
+    let error = f
+        .create_on("hostile", Backend::Unspecified)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidArgument, "{error}");
+    let diff = |from: &str, to: &str, paths: Vec<String>| {
+        f.daemon.client.get_diff(reef_api::v1::GetDiffRequest {
+            repo: f.repo.clone(),
+            from_revision: from.to_owned(),
+            to_revision: to.to_owned(),
+            paths,
+            ..reef_api::v1::GetDiffRequest::default()
+        })
+    };
+    for _ in 0..2 {
+        let error = diff("base", "hostile", vec!["README".to_owned()])
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Internal, "{error}");
+        assert!(!error.to_string().contains("panicked"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(r#"Invalid repo path input "d//big.txt""#),
+            "{error}"
+        );
+    }
+    let id: RepoId = f.repo.parse().unwrap();
+    assert_eq!(
+        f.daemon.handle.state().repos.get(id).unwrap().generation(),
+        0,
+        "not reopened"
+    );
+    diff("main", "base", Vec::new()).await.unwrap();
+    f.assert_no_canary();
+    f.assert_alive().await;
+    f.create_on("main", Backend::Unspecified).await.unwrap();
 }
 
 // 13

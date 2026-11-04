@@ -186,7 +186,7 @@ impl<'a> Describer<'a> {
             }
         }
         let is_root = id == store.root_commit_id();
-        let empty = is_root || commit.is_empty(repo).await?;
+        let empty = is_root || commit.is_empty(repo.index()).await?;
         let targets = repo
             .resolve_change_id(commit.change_id())
             .await

@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-16
 - Ticket: R0.04
+- Amended by: [jj 0.47](../dev-tickets/phase-2/jj-lib-0.47-upgrade.md) (the pin)
 
 ## Context
 
@@ -72,7 +73,7 @@ Ids (`OperationIdHex`, `CommitIdHex`, `ChangeIdHex`), `ChangeSummary`, `Snapshot
 
 ## Decision
 
-We will continue building on jj-lib 0.46.0 through the `reef_lib::jj` module, which stays the only place that names jj-lib types. Upstream contributions worth proposing, in order:
+We will continue building on the pinned jj-lib (0.46.0 at R0.04, 0.47.0 since this ticket) through the `reef_lib::jj` module, which stays the only place that names jj-lib types. Upstream contributions worth proposing, in order:
 
 1. A hook or event when a snapshot or operation is written, so the daemon does not have to poll the op heads.
 2. A public, notify-based fsmonitor alongside Watchman, which R1.13 needs anyway.

@@ -86,9 +86,14 @@ fn settings() -> UserSettings {
 }
 
 async fn init_and_open(root: &Path) -> Repo {
-    Workspace::init_internal_git(&settings(), root, gix::hash::Kind::Sha1)
-        .await
-        .expect("init internal git repo");
+    Workspace::init_internal_git(
+        &settings(),
+        root,
+        jj_lib::ref_name::WorkspaceName::DEFAULT,
+        gix::hash::Kind::Sha1,
+    )
+    .await
+    .expect("init internal git repo");
     Repo::open(root, &settings()).await.expect("open repo")
 }
 

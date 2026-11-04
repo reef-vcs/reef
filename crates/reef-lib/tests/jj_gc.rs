@@ -89,7 +89,7 @@ async fn past_this_second() {
 /// (`debug.operation-timestamp`).
 fn settings_at(at: SystemTime) -> UserSettings {
     let mut config = settings().config().clone();
-    let stamp = chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339();
+    let stamp = jiff::Timestamp::try_from(at).unwrap().to_string();
     config.add_layer(
         ConfigLayer::parse(
             ConfigSource::User,
@@ -178,7 +178,7 @@ fn op_file(repo: &Repo, op: &OperationIdHex) -> PathBuf {
 /// moving no working copy. Leaves `repo` loaded at the new head.
 async fn strand_like_0_1(repo: &mut Repo, keep_newer: SystemTime) {
     let loader = repo.head().loader().clone();
-    let head = loader.load_at_head().await.unwrap().operation().clone();
+    let head = loader.load_at_head(None).await.unwrap().operation().clone();
     let mut ancestors = std::pin::pin!(walk_ancestors(std::slice::from_ref(&head)));
     let mut cut = None;
     while let Some(op) = ancestors.next().await {
@@ -213,12 +213,12 @@ async fn strand_like_0_1(repo: &mut Repo, keep_newer: SystemTime) {
         .unwrap()
         .reinit()
         .unwrap();
-    repo.set_head(loader.load_at_head().await.unwrap());
+    repo.set_head(loader.load_at_head(None).await.unwrap());
 }
 
 /// Runs the `jj` CLI in `dir` with no user config, or `None` (printing
-/// why) unless `jj` 0.46 is on `PATH`: its checkout and operation formats
-/// are what Reef writes for.
+/// why) unless `jj` at jj-lib's minor or the one before is on `PATH`: its
+/// checkout and operation formats are what Reef writes for.
 #[allow(
     clippy::print_stdout,
     reason = "a skipped CLI check says so in the test output"
@@ -229,10 +229,15 @@ fn jj(dir: &Path, args: &[&str]) -> Option<Output> {
         .output()
         .ok()?;
     let version = String::from_utf8_lossy(&version.stdout).into_owned();
-    if !version.trim().starts_with("jj 0.46.") {
-        println!("skipped: jj CLI is {:?}, not 0.46.x", version.trim());
+    if !jj_cli_is_supported(&version) {
+        println!(
+            "skipped: jj CLI is {:?}, not jj-lib {}'s minor or the one before",
+            version.trim(),
+            reef_lib::jj::JJ_LIB_VERSION
+        );
         return None;
     }
+    println!("using jj CLI {:?}", version.trim());
     Some(
         std::process::Command::new("jj")
             .args(args)
@@ -603,9 +608,10 @@ async fn gc_moves_a_users_jj_workspace() {
         Workspace::init_workspace_with_existing_repo(
             &dir,
             repo.repo_path(),
-            &repo.head().loader().load_at_head().await.unwrap(),
+            &repo.head().loader().load_at_head(None).await.unwrap(),
             &*factory,
             WorkspaceNameBuf::from(name),
+            None,
         )
         .await
         .unwrap();
@@ -720,9 +726,10 @@ async fn gc_skips_a_name_whose_directory_another_name_took() {
         Workspace::init_workspace_with_existing_repo(
             &dir,
             repo.repo_path(),
-            &repo.head().loader().load_at_head().await.unwrap(),
+            &repo.head().loader().load_at_head(None).await.unwrap(),
             &*factory,
             WorkspaceNameBuf::from(name),
+            None,
         )
         .await
         .unwrap();
@@ -758,4 +765,21 @@ async fn a_busy_root_blocks_nothing_with_nothing_to_abandon() {
     let outcome = repo.gc(keep()).await.unwrap();
     assert_eq!(outcome.abandon_blocked, None);
     assert_eq!(outcome.operations_abandoned, 0);
+}
+
+/// Whether `version`, `jj --version`'s output, names a `jj` CLI at jj-lib's
+/// minor ([`JJ_LIB_VERSION`](reef_lib::jj::JJ_LIB_VERSION)) or the one
+/// before it.
+fn jj_cli_is_supported(version: &str) -> bool {
+    fn minor(version: &str) -> Option<(u64, u64)> {
+        let mut parts = version.split('.');
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    }
+    let (Some((lib_major, lib_minor)), Some((major, minor))) = (
+        minor(reef_lib::jj::JJ_LIB_VERSION),
+        version.trim().strip_prefix("jj ").and_then(minor),
+    ) else {
+        return false;
+    };
+    major == lib_major && (minor == lib_minor || minor + 1 == lib_minor)
 }

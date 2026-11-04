@@ -8,9 +8,10 @@ use std::sync::Arc;
 use jj_lib::backend::BackendError;
 use jj_lib::commit::Commit;
 use jj_lib::default_backend_factories::{
-    default_backend_factories, default_working_copy_factories,
+    default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
 };
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RepoLoaderError};
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, WorkspaceInitError, WorkspaceLoadError};
@@ -277,10 +278,15 @@ impl Repo {
         path: &Path,
         settings: &UserSettings,
     ) -> Result<Self, InitError> {
-        let (workspace, repo) = Workspace::init_internal_git(settings, path, gix::hash::Kind::Sha1)
-            .await
-            .map_err(InitError::from)
-            .inspect_err(|error| crate::log_failure!(error))?;
+        let (workspace, repo) = Workspace::init_internal_git(
+            settings,
+            path,
+            WorkspaceName::DEFAULT,
+            gix::hash::Kind::Sha1,
+        )
+        .await
+        .map_err(InitError::from)
+        .inspect_err(|error| crate::log_failure!(error))?;
         let repo = Self { workspace, repo };
         tracing::info!(
             repo = %repo.workspace_root().display(),
@@ -300,11 +306,15 @@ impl Repo {
         path: &Path,
         settings: &UserSettings,
     ) -> Result<Self, InitError> {
-        let (workspace, repo) =
-            Workspace::init_colocated_git(settings, path, gix::hash::Kind::Sha1)
-                .await
-                .map_err(InitError::from)
-                .inspect_err(|error| crate::log_failure!(error))?;
+        let (workspace, repo) = Workspace::init_colocated_git(
+            settings,
+            path,
+            WorkspaceName::DEFAULT,
+            gix::hash::Kind::Sha1,
+        )
+        .await
+        .map_err(InitError::from)
+        .inspect_err(|error| crate::log_failure!(error))?;
         let repo = Self { workspace, repo };
         tracing::info!(
             repo = %repo.workspace_root().display(),
@@ -341,10 +351,11 @@ impl Repo {
             crate::log_failure!(&error);
             return Err(error);
         }
-        let (workspace, repo) = Workspace::init_external_git(settings, root, &dot_git)
-            .await
-            .map_err(InitError::from)
-            .inspect_err(|error| crate::log_failure!(error))?;
+        let (workspace, repo) =
+            Workspace::init_external_git(settings, root, WorkspaceName::DEFAULT, &dot_git)
+                .await
+                .map_err(InitError::from)
+                .inspect_err(|error| crate::log_failure!(error))?;
         let mut repo = Self { workspace, repo };
         let mut meta = OpMeta::new(OpKind::Other, "import git head");
         meta.agent = agent.map(str::to_owned);
@@ -418,13 +429,12 @@ impl Repo {
             .ancestors()
             .find(|dir| dir.join(".jj").is_dir())
             .ok_or_else(|| OpenError::NotAJjRepo(path.to_owned()))?;
-        let workspace = Workspace::load(
+        let workspace = default_workspace_loader_factory().create(root)?.load(
             settings,
-            root,
             &default_backend_factories(),
             &default_working_copy_factories(),
         )?;
-        let repo = workspace.repo_loader().load_at_head().await?;
+        let repo = workspace.repo_loader().load_at_head(None).await?;
         Ok(Self { workspace, repo })
     }
 
@@ -485,7 +495,7 @@ impl Repo {
     pub fn tracked_file_count(&self) -> Result<u64, ReadError> {
         let tree = self.wc_commit()?.tree();
         let mut count = 0;
-        for (_, value) in tree.entries() {
+        for (_, value) in futures::executor::block_on_stream(tree.entries()) {
             value?;
             count += 1;
         }
@@ -498,7 +508,7 @@ impl Repo {
     pub async fn reload_at_head(&mut self) -> Result<(), OpenError> {
         self.repo = self
             .repo
-            .reload_at_head()
+            .reload_at_head(None)
             .await
             .map_err(OpenError::from)
             .inspect_err(|error| crate::log_failure!(error))?;
@@ -555,7 +565,7 @@ impl Repo {
 /// working copy is current (R2.23).
 pub fn view_wc_commit(repo: &ReadonlyRepo, workspace: &str) -> Option<CommitIdHex> {
     repo.view()
-        .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::new(workspace))
+        .get_wc_commit_id(WorkspaceName::new(workspace))
         .map(CommitIdHex::of)
 }
 

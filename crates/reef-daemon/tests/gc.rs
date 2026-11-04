@@ -969,8 +969,9 @@ async fn old_root_fixture() -> (TestDaemon, SyntheticRepo) {
     (daemon, repo)
 }
 
-/// Runs the `jj` CLI in `dir` with no user config, or `None` unless `jj`
-/// 0.46 is on `PATH`.
+/// Runs the `jj` CLI in `dir` with no user config, or `None` (printing
+/// why) unless `jj` at jj-lib's minor or the one before is on `PATH`: its
+/// checkout and operation formats are what Reef writes for.
 #[allow(
     clippy::print_stdout,
     reason = "a skipped CLI check says so in the test output"
@@ -981,10 +982,15 @@ fn jj(dir: &Path, args: &[&str]) -> Option<Output> {
         .output()
         .ok()?;
     let version = String::from_utf8_lossy(&version.stdout).into_owned();
-    if !version.trim().starts_with("jj 0.46.") {
-        println!("skipped: jj CLI is {:?}, not 0.46.x", version.trim());
+    if !jj_cli_is_supported(&version) {
+        println!(
+            "skipped: jj CLI is {:?}, not jj-lib {}'s minor or the one before",
+            version.trim(),
+            reef_lib::jj::JJ_LIB_VERSION
+        );
         return None;
     }
+    println!("using jj CLI {:?}", version.trim());
     Some(
         std::process::Command::new("jj")
             .args(args)
@@ -1278,4 +1284,21 @@ async fn timer_off_runs_nothing() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(last_gc_at(&daemon), None);
     assert_eq!(base_dirs(&daemon, &repo), before);
+}
+
+/// Whether `version`, `jj --version`'s output, names a `jj` CLI at jj-lib's
+/// minor ([`JJ_LIB_VERSION`](reef_lib::jj::JJ_LIB_VERSION)) or the one
+/// before it.
+fn jj_cli_is_supported(version: &str) -> bool {
+    fn minor(version: &str) -> Option<(u64, u64)> {
+        let mut parts = version.split('.');
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    }
+    let (Some((lib_major, lib_minor)), Some((major, minor))) = (
+        minor(reef_lib::jj::JJ_LIB_VERSION),
+        version.trim().strip_prefix("jj ").and_then(minor),
+    ) else {
+        return false;
+    };
+    major == lib_major && (minor == lib_minor || minor + 1 == lib_minor)
 }

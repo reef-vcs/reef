@@ -116,7 +116,7 @@ impl Repo {
         })?;
         let loader =
             RepoLoader::init_from_file_system(settings, &repo_path, &default_backend_factories())?;
-        let repo = loader.load_at_head().await?;
+        let repo = loader.load_at_head(None).await?;
         let io_error = |path: &Path| {
             let path = path.to_owned();
             move |source| RecreateWorkingCopyError::Io { path, source }

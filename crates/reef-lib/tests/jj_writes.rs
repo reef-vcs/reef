@@ -188,7 +188,7 @@ async fn tree(tx: &Transaction, files: &[(&str, &str)]) -> jj_lib::merged_tree::
             .unwrap();
         builder.set_or_remove(
             path,
-            jj_lib::merge::Merge::normal(jj_lib::backend::TreeValue::File {
+            Some(jj_lib::backend::TreeValue::File {
                 id,
                 executable: false,
                 copy_id: jj_lib::backend::CopyId::placeholder(),
@@ -808,7 +808,7 @@ async fn revert_refusals() {
     new_commit(&mut two, &[], &[("y", "1")], "y").await;
     two.repo_mut().rebase_descendants().await.unwrap();
     two.commit("two").await.unwrap();
-    let merged = fx.head().loader().load_at_head().await.unwrap();
+    let merged = fx.head().loader().load_at_head(None).await.unwrap();
     fx.repo.set_head(merged);
     assert!(fx.head().operation().parent_ids().len() > 1);
     let merge_op = fx.op();

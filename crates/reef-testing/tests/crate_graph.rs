@@ -37,8 +37,15 @@ const MEMBERS: [&str; 10] = [
 /// the jj layer, and what only they need (R2.05), including the web UI's
 /// assets (R2.18), and the remote listener's certificate generator
 /// (R2.08).
-const NOT_IN_THE_CLIENT: [&str; 11] = [
+const NOT_IN_THE_CLIENT: [&str; 16] = [
     "jj-lib",
+    // The crates jj-lib 0.47 split out of itself, so a direct dependency on
+    // one cannot bypass the jj-lib entry.
+    "jj-core",
+    "jj-default-index",
+    "jj-dsl",
+    "jj-git-backend",
+    "jj-local-util",
     "reef-lib",
     "reef-daemon",
     "gix",
@@ -121,11 +128,35 @@ fn assert_no_dependency(metadata: &Value, from: &str, to: &str) {
 
 /// What the broker must never link (R2.22): it is the store's as much as
 /// the daemon's, so nothing of jj, gRPC or the daemon's database.
-const NOT_IN_THE_BROKER: [&str; 6] = ["jj-lib", "tonic", "prost", "rusqlite", "gix", "hyper"];
+const NOT_IN_THE_BROKER: [&str; 11] = [
+    "jj-lib",
+    "jj-core",
+    "jj-default-index",
+    "jj-dsl",
+    "jj-git-backend",
+    "jj-local-util",
+    "tonic",
+    "prost",
+    "rusqlite",
+    "gix",
+    "hyper",
+];
 
 /// What the symbol extractor must not link (R2.14, ADR 0042): it takes bytes
 /// and returns symbols, for the daemon, the store and structural merge alike.
-const NOT_IN_SYMBOLS: [&str; 6] = ["jj-lib", "tonic", "rusqlite", "gix", "hyper", "tokio"];
+const NOT_IN_SYMBOLS: [&str; 11] = [
+    "jj-lib",
+    "jj-core",
+    "jj-default-index",
+    "jj-dsl",
+    "jj-git-backend",
+    "jj-local-util",
+    "tonic",
+    "rusqlite",
+    "gix",
+    "hyper",
+    "tokio",
+];
 
 #[test]
 fn workspace_members_are_the_ten_crates() {

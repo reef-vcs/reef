@@ -2,6 +2,16 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
+## [Unreleased]
+
+### Changed
+
+- Reef is built on jj-lib 0.47.0 (from 0.46.0). Nothing to migrate: jj 0.47 keeps 0.46's on-disk formats, so a `jj` 0.46 CLI keeps working in a repository Reef uses, and the API revision (14) and database schema (6) are unchanged. Date patterns in revsets that name a time on a day with a daylight-saving change (`after:"2024-03-10 03:30"`) use that time's UTC offset, not the one at the start of the day, which put times after the change an hour off.
+
+### Fixed
+
+- A revset nested more than 256 levels deep is refused as an invalid argument; before, one could overflow the parser's stack and crash the daemon. A diff whose rename detection meets a git tree entry name jj cannot represent fails with an error instead of panicking the read, which reopened the repository ([jj-vcs/jj#10501](https://github.com/jj-vcs/jj/pull/10501)); so does a read of a tree with such an entry, which also panicked inside jj-lib, while holding its git backend's lock, before the repository was reopened ([jj-vcs/jj#10467](https://github.com/jj-vcs/jj/pull/10467)). Both now fail with `INTERNAL` and the path jj could not read.
+
 ## [0.4.1] - 2026-11-04
 
 The TypeScript SDK on npm, which 0.4.0's release did not publish, and a Claude Code plugin install that works without a GitHub SSH key. Nothing else changes: the API revision (14) and the database schema (6) are those of 0.4 and 0.3, and a 0.4.0 daemon serves the 0.4.1 CLI.

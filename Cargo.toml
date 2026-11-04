@@ -35,10 +35,10 @@ reef-daemon = { path = "crates/reef-daemon", version = "0.4.1" }
 reef-testing = { path = "crates/reef-testing", version = "0.4.1" }   # unpublished; see reef-daemon's `testing` feature
 
 # Core
-jj-lib = "=0.46.0"
+jj-lib = "=0.47.0"
 # Only to name gix::hash::Kind when creating repositories (`Repo::init_internal_git` and test
 # fixtures); jj-lib does not re-export gix. Must match the gix version jj-lib depends on exactly.
-gix = { version = "=0.88.0", default-features = false }
+gix = { version = "=0.90.0", default-features = false }
 # Decodes jj-lib's own protobuf messages (`tree_state`, R1.02; jj-lib does not re-export prost)
 # and the daemon API's generated code (R1.03). Same major as jj-lib's and tonic-prost's.
 prost = "0.14"
@@ -51,9 +51,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "net", "signal", "process"] }
 pollster = "1"
-# Revset date patterns (R2.02): jj-lib's `DatePatternContext` is built from a chrono time. The
-# version and features jj-lib already uses, so the lockfile gains nothing.
-chrono = { version = "0.4.44", default-features = false, features = ["std", "clock"] }
+# Revset date patterns (R2.02): jj-lib's `RevsetParseContext` takes the current time as a
+# `jiff::Zoned`. The version jj-lib already uses, so the lockfile gains nothing.
+jiff = "0.2"
 # Unified diff hunks (R2.02): jj-lib's `unified_diff_hunks` takes `BStr` sides. The version
 # jj-lib already uses.
 bstr = "1"
