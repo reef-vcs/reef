@@ -50,6 +50,7 @@ Phase 1 is complete and released as 0.1.0 (2026-10-25). What it left behind, and
 | #128 | [issue-128-playwright-smoke-test.md](issue-128-playwright-smoke-test.md) | S | R2.18, R2.19 | none listed (R2.20, R2.21 and R3.31 add their views' steps to the test) |
 | #188 | [issue-188-create-waits-for-first-copy.md](issue-188-create-waits-for-first-copy.md) | S | R2.05, R2.13, R2.26 | none listed |
 | #190 | [issue-190-init-keeps-json-formatting.md](issue-190-init-keeps-json-formatting.md) | S | R2.13, R2.25 | none listed |
+| jj 0.47 | [jj-lib-0.47-upgrade.md](jj-lib-0.47-upgrade.md) | S | RX.01, R1.17, R2.02, R2.04 | none listed |
 | R2.20 | [R2.20-workspaces-and-fleet-panel.md](R2.20-workspaces-and-fleet-panel.md) | M | R2.18, R2.10, R2.11, R2.12, R2.19 | R3.39 (its menu bar's fleet state), R5.06 (tier outcomes in the panel); R3.36 reuses its agent join (Phase 2's exit criterion on the web UI) |
 | R2.21 | [R2.21-activity-feed-with-scrubber.md](R2.21-activity-feed-with-scrubber.md) | M | R2.18, R2.12, R2.09, R2.19, R2.20 | none listed (R3.33, R3.37 and R3.38 reuse its window, coalescing and scrubber) |
 | design | [web-ui-design-pass.md](web-ui-design-pass.md) | L | R2.18, R2.19, R2.20, R2.21 | none listed (R3.31 on build on its tokens, components and developer mode) |
