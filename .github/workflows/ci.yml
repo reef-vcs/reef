@@ -25,6 +25,11 @@ env:
   CARGO_BUILD_WARNINGS: deny
   RUSTDOCFLAGS: -D warnings
   RUST_BACKTRACE: 1
+  # Rust caches are saved by main's runs only; a pull request restores main's. The repository's
+  # 10 GB of cache had filled with each pull request's own (400 to 900 MB a job), evicting main's,
+  # so every pull request built cold; and a run cancelled mid-build (see `cancel`) would save a
+  # half-built cache that its pull request's later runs restore as an exact hit and never replace.
+  RUST_CACHE_SAVE: ${{ github.event_name != 'pull_request' }}
 
 permissions:
   contents: read
@@ -83,6 +88,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19
@@ -92,6 +99,25 @@ jobs:
       - run: just deny
       - run: just deny-advisories
         continue-on-error: true
+
+  # Clippy on Linux, its own job so that a lint failure ends a pull request's run in minutes (see
+  # `cancel`) and `check` starts its build up to two minutes sooner. macOS lints in `check`, where it
+  # runs, rather than taking a second macOS runner.
+  lint:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - run: just lint
 
   check:
     name: ${{ matrix.os }}
@@ -118,6 +144,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9
@@ -132,7 +160,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y watchman
           watchman version
+      # Linux lints in the `lint` job.
       - name: Lint
+        if: runner.os == 'macOS'
         run: just lint
       - name: Build
         run: just build
@@ -191,6 +221,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9
@@ -258,6 +290,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9
@@ -293,6 +327,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: extractions/setup-just@v4
         with:
           just-version: "1"
@@ -335,6 +371,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
         with:
           version: "0.13.6"
@@ -378,6 +416,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
@@ -456,12 +496,34 @@ jobs:
           [[ "$(ls cli-shape-*.json | wc -l)" -eq 2 ]]
           diff cli-shape-linux.json cli-shape-macos.json
 
+  # A pull request whose quick gates fail stops there instead of running the 30-to-40-minute jobs to
+  # the end: the fix is another push, which would cancel this run anyway. It fires once all four
+  # gates have finished, clippy last, a few minutes in. Test failures do not
+  # cancel, so a run shows every one of them. Pushes to main keep every job's result and cache.
+  # `CI passed` still runs on a cancelled run (always()) and fails. This job checks nothing out and
+  # runs no code from the pull request, so it alone holds `actions: write`. A pull request from a
+  # fork gets a read-only token whatever the job asks for, so there it warns and the run goes on.
+  cancel:
+    name: cancel after a failed gate
+    needs: [fmt, api, deny, lint]
+    if: failure() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "a quick gate (rustfmt, API schema, cargo deny or clippy) failed; cancelling the rest of the run"
+          gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" || echo "::warning::could not cancel run $GITHUB_RUN_ID"
+
   ci-ok:
     name: CI passed
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, api, deny, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
+    needs: [fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -472,6 +534,7 @@ jobs:
           FMT: ${{ needs.fmt.result }}
           API: ${{ needs.api.result }}
           DENY: ${{ needs.deny.result }}
+          LINT: ${{ needs.lint.result }}
           CHECK: ${{ needs.check.result }}
           OVERLAYFS: ${{ needs.overlayfs.result }}
           SYNTH: ${{ needs.synth-determinism.result }}
@@ -482,4 +545,4 @@ jobs:
           TYPESCRIPT: ${{ needs.typescript.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
+          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$LINT" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
