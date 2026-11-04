@@ -5,7 +5,7 @@
 # untagged) and `latest` otherwise. A real publish authenticates by trusted publishing and gets
 # provenance; a dry run needs no credentials, so it checks neither.
 #
-#   scripts/npm-publish.sh sdk/typescript/dist-pack/reef-vcs-0.4.1.tgz --dry-run
+#   scripts/npm-publish.sh sdk/typescript/dist-pack/reef-vcs-0.4.2.tgz --dry-run
 #
 # The tarball is passed to npm as an absolute path. npm reads a relative path with one slash, such
 # as `dist/reef-vcs-0.4.0.tgz`, as a GitHub repository (`user/repo`) and fails in `git ls-remote`:
