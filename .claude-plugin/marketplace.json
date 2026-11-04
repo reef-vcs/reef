@@ -10,7 +10,7 @@
       "name": "reef",
       "source": {
         "source": "git-subdir",
-        "url": "reef-vcs/reef",
+        "url": "https://github.com/reef-vcs/reef.git",
         "path": "plugins/claude-code",
         "ref": "v0.4.0"
       },
@@ -21,7 +21,7 @@
       "name": "reef-workspaces",
       "source": {
         "source": "git-subdir",
-        "url": "reef-vcs/reef",
+        "url": "https://github.com/reef-vcs/reef.git",
         "path": "plugins/claude-code-workspaces",
         "ref": "v0.4.0"
       },

@@ -7,6 +7,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 ### Fixed
 
 - The TypeScript SDK reaches npm. 0.4.0's release published everything but `reef-vcs` 0.4.0 to npm: its `npm` job passed the tarball as `dist/reef-vcs-0.4.0.tgz`, which npm reads as a GitHub repository (`user/repo`), and the job only warns when it fails, so the run stayed green. Its dry run had used a path npm reads as a file. Both now run `scripts/npm-publish.sh`, which passes npm an absolute path, so every dry run checks the npm command line a tag runs, and lets a dry run through once the version is already on npm. Install the TypeScript SDK at 0.4.1 or later; the rest of 0.4.0 (the binaries, Homebrew, the MCP registry, the Python SDK on PyPI) was published.
+- `claude plugin install reef --marketplace reef-vcs/reef` (and `reef-workspaces`) installs without a GitHub SSH key. The Claude Code marketplace named its plugins' source as `reef-vcs/reef`, which Claude Code clones over SSH, so since 0.3.0 the install failed with `Permission denied (publickey)` in a container, on CI, or on any machine without a key; it now names `https://github.com/reef-vcs/reef.git`, as the Codex marketplace already did. Claude Code reads the marketplace from `main`, so this reached 0.4.0's plugins when it merged. If the install failed for you before, run `claude plugin marketplace update reef` first: an added marketplace keeps its old copy. The release runs' check of the published install lines only warned, and now checks `reef-workspaces` too.
 
 ## [0.4.0] - 2026-11-03
 

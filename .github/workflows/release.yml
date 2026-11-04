@@ -788,9 +788,11 @@ jobs:
           fi
           bin="$RUNNER_TEMP/npm/node_modules/.bin"
           export HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" CODEX_HOME="$home/.codex"
-          "$bin/claude" plugin install reef --marketplace reef-vcs/reef || warn "the Claude Code install line failed"
-          "$bin/claude" plugin list --json | jq -e --arg v "$VERSION" '.[] | select(.id == "reef@reef" and .version == $v)' >/dev/null ||
-            warn "Claude Code did not install reef $VERSION"
+          for plugin in reef reef-workspaces; do
+            "$bin/claude" plugin install "$plugin" --marketplace reef-vcs/reef || warn "the Claude Code install line for $plugin failed"
+            "$bin/claude" plugin list --json | jq -e --arg id "$plugin@reef" --arg v "$VERSION" '.[] | select(.id == $id and .version == $v)' >/dev/null ||
+              warn "Claude Code did not install $plugin $VERSION"
+          done
           { "$bin/codex" plugin marketplace add reef-vcs/reef && "$bin/codex" plugin add reef@reef; } || warn "the Codex install line failed"
           "$bin/codex" plugin list --json | jq -e --arg v "$VERSION" '.installed[] | select(.pluginId == "reef@reef" and .version == $v)' >/dev/null ||
             warn "Codex did not install reef $VERSION"
