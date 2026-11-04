@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-26
 - Ticket: R2.13
-- Amended by: [0045](0045-brief-json-by-default.md), [0050](0050-published-schemas.md)
+- Amended by: [0045](0045-brief-json-by-default.md), [0050](0050-published-schemas.md), [#190](https://github.com/reef-vcs/reef/issues/190) (decision 13)
 
 ## Context
 
@@ -25,7 +25,7 @@ What an MCP server has to decide beyond the API: which tools, under what names, 
 10. **`wait_for_operations` polls the operation log** every 500 ms until operations matching a filter end after a baseline (`after_operation`, else the head), or the timeout (30 s by default, 300 at most). While nothing matches, its window follows the head 2 s behind it, so each poll reads a few seconds of the log and an operation stamped before the head but recorded after it is still seen; operations already seen are told apart by id. It returns at most 100, oldest first, with a `last_operation_id` to pass back; it is not retried after the daemon goes away, since a retry would take a new baseline; it sends progress notifications when asked and stops when cancelled. When R2.09 implements `SubscribeOperations` the tool reads the stream with the same inputs and result. Since R2.09 ([0036](0036-operation-log-subscriptions.md)) the tool reads `SubscribeOperations`.
 11. **The connection is lazy**, made on the first call, so a harness can start the server before a daemon exists; `initialize` and `tools/list` need none. A daemon that goes away mid-call is reconnected (and restarted unless `--no-autostart`); a read is retried once, a write is not. Another daemon version is handled as the CLI handles it: an idle one is restarted once while no call has succeeded, a busy one is named with `reef daemon stop`.
 12. **Instructions and descriptions are the server's own.** The instructions (at most 1,000 bytes) say what the guide says that matters to tool callers; the agent guide is CLI text, full to its budget. Each tool's description is one to three sentences ending in the result's shape, not the proto comments, which are written for API implementers. Input schemas are compacted, and the whole `tools/list` result is held to 20,000 bytes by a test.
-13. **`reef init` owns `mcpServers.reef` in `.mcp.json`**: `{"type": "stdio", "command": "reef", "args": ["mcp"]}`, with no version and no absolute path. It is written with Claude Code's files, and by `--agents mcp`. The file is merged in its own order; an entry someone changed, or a file that is not a JSON object, is left alone and is not stale.
+13. **`reef init` owns `mcpServers.reef` in `.mcp.json`**: `{"type": "stdio", "command": "reef", "args": ["mcp"]}`, with no version and no absolute path. It is written with Claude Code's files, and by `--agents mcp`. The file is merged in its own order and layout: Reef's member is inserted into the text at the file's indentation and line ending, and no other byte changes (#190); an entry someone changed, or a file that is not a JSON object, is left alone and is not stale. A file with comments or trailing commas is never written: it is skipped with a reason that quotes the entry to add by hand or, when Reef's entry is there, says so and asks for a check that the harness reads such a file (#190).
 
 ## Consequences
 

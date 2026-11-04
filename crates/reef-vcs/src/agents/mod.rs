@@ -520,8 +520,8 @@ pub(crate) fn render_with(harness: Harness, guide: &Guide<'_>, preface: &str) ->
         Harness::AgentSkill { .. } => {
             format!("name: reef\ndescription: {DESCRIPTION}\nmetadata:\n  {GENERATED_BY}")
         }
-        Harness::McpJson => return JsonTarget::MCP_JSON.render(None),
-        Harness::OpencodeJson { .. } => return JsonTarget::OPENCODE.render(None),
+        Harness::McpJson => return JsonTarget::MCP_JSON.render(),
+        Harness::OpencodeJson { .. } => return JsonTarget::OPENCODE.render(),
         Harness::CodexConfig { .. } => return codex_toml(toml_edit::DocumentMut::new()),
     };
     format!(
@@ -725,17 +725,10 @@ pub(crate) fn plan(
             // rewrite a file with comments in it.
             let jsonc = path.with_extension("jsonc");
             if fs::symlink_metadata(&jsonc).is_ok() {
-                let entry = Json::Object(IndexMap::from([(
-                    "mcp".to_owned(),
-                    Json::Object(IndexMap::from([(
-                        MCP_SERVER.to_owned(),
-                        mcp_entry(McpShape::Opencode),
-                    )])),
-                )]));
-                let entry = serde_json::to_string(&entry).unwrap_or_default();
                 let why = format!(
-                    "{}: comments are not rewritten; add {entry} by hand",
-                    display(&jsonc, root)
+                    "{}: comments are not rewritten; add {} by hand",
+                    display(&jsonc, root),
+                    JsonTarget::OPENCODE.by_hand()
                 );
                 plan.push(skip(path, why));
                 continue;
@@ -873,11 +866,11 @@ fn mcp_entry(shape: McpShape) -> Json {
     }
 }
 
-/// A JSON value whose objects keep their keys' order, so a merge changes
-/// nothing but Reef's entry and whitespace (and a number's spelling:
-/// `1e5` is written `100000.0`). Not `serde_json`'s `preserve_order`:
-/// features unify across the build, and it would reorder `config show
-/// --json`.
+/// A JSON value whose objects keep their keys' order. A merge does not
+/// print it: Reef's member is inserted into the file's text
+/// ([`JsonTarget::merge`]), and this is the value the result must parse
+/// to. Not `serde_json`'s `preserve_order`: features unify across the
+/// build, and it would reorder `config show --json`.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 enum Json {
@@ -899,7 +892,14 @@ struct JsonTarget {
     shape: McpShape,
     /// The `$schema` a new file starts with.
     schema: Option<&'static str>,
+    /// The file's name, for a warning.
+    file: &'static str,
+    /// The harness that reads the file.
+    reader: &'static str,
 }
+
+/// The reason a file Reef cannot read as its servers' object is skipped.
+const NOT_OBJECT: &str = "not a JSON object";
 
 impl JsonTarget {
     /// `.mcp.json`'s `mcpServers.reef`.
@@ -907,6 +907,8 @@ impl JsonTarget {
         servers: "mcpServers",
         shape: McpShape::McpJson,
         schema: None,
+        file: ".mcp.json",
+        reader: "Claude Code",
     };
 
     /// `opencode.json`'s `mcp.reef`.
@@ -914,18 +916,13 @@ impl JsonTarget {
         servers: "mcp",
         shape: McpShape::Opencode,
         schema: Some("https://opencode.ai/config.json"),
+        file: "opencode.json",
+        reader: "opencode",
     };
 
-    /// The file as Reef writes it: `existing` with Reef's entry added, two-
-    /// space JSON with a final newline; a new file with only the entry
-    /// (after `$schema`) when `existing` is `None`.
-    fn render(self, existing: Option<IndexMap<String, Json>>) -> String {
-        let mut file = existing.unwrap_or_else(|| {
-            self.schema
-                .map(|schema| ("$schema".to_owned(), Json::String(schema.to_owned())))
-                .into_iter()
-                .collect()
-        });
+    /// `file` with Reef's entry added after the other servers, or in a new
+    /// servers object after the file's other keys.
+    fn with_entry(self, mut file: IndexMap<String, Json>) -> IndexMap<String, Json> {
         let entry = mcp_entry(self.shape);
         match file
             .entry(self.servers.to_owned())
@@ -936,44 +933,444 @@ impl JsonTarget {
             }
             other => *other = Json::Object(IndexMap::from([(MCP_SERVER.to_owned(), entry)])),
         }
-        let mut text = serde_json::to_string_pretty(&file).unwrap_or_default();
+        file
+    }
+
+    /// A new file as Reef writes it: only Reef's entry (after `$schema`),
+    /// two-space JSON with a final newline.
+    fn render(self) -> String {
+        let file = self
+            .schema
+            .map(|schema| ("$schema".to_owned(), Json::String(schema.to_owned())))
+            .into_iter()
+            .collect();
+        let mut text = serde_json::to_string_pretty(&self.with_entry(file)).unwrap_or_default();
         text.push('\n');
         text
     }
 
+    /// Reef's entry in a file of its own, on one line, for a reason that
+    /// asks for it to be added by hand.
+    fn by_hand(self) -> String {
+        let entry = Json::Object(IndexMap::from([(
+            self.servers.to_owned(),
+            Json::Object(IndexMap::from([(
+                MCP_SERVER.to_owned(),
+                mcp_entry(self.shape),
+            )])),
+        )]));
+        serde_json::to_string(&entry).unwrap_or_default()
+    }
+
     /// The action for the file: Reef owns `<servers>.reef` and nothing
-    /// else. A missing (or blank) file is written with only Reef's entry; a
-    /// file without it gets it added after the other servers, everything
-    /// else kept in order; an entry that differs from Reef's was changed by
+    /// else. A missing (or blank) file is written with only Reef's entry. A
+    /// file without it gets one member inserted into its text, after the
+    /// other servers (or a servers object after the other keys), at the
+    /// file's indentation and line ending, and no other byte changes
+    /// ([`JsonTarget::splice`]); if that does not parse to the file with
+    /// Reef's entry, the file is reprinted at its own indentation instead
+    /// ([`reformat`]). An entry that differs from Reef's was changed by
     /// someone (an `--agent`, an `env`) and is kept, as is a file that is
-    /// not a JSON object. A CRLF file stays CRLF.
+    /// not a JSON object. A file with comments or trailing commas is never
+    /// written: its reason quotes the entry to add, or, when the entry is
+    /// there, asks for a check that the harness reads such a file.
     fn merge(self, existing: Option<&str>) -> (Action, Option<String>) {
         let Some(text) = existing.filter(|text| !text.trim().is_empty()) else {
-            return (Action::Write, Some(self.render(None)));
+            return (Action::Write, Some(self.render()));
         };
-        let not_object = || (Action::Skip("not a JSON object".to_owned()), None);
-        let Ok(Json::Object(file)) = serde_json::from_str::<Json>(text) else {
-            return not_object();
-        };
-        match file.get(self.servers) {
-            None => {}
-            Some(Json::Object(servers)) => {
-                if let Some(entry) = servers.get(MCP_SERVER) {
-                    let entry = serde_json::to_value(entry).unwrap_or_default();
-                    return if entry == render_mcp_entry(self.shape) {
-                        (Action::Unchanged, None)
-                    } else {
-                        let why = format!("{}.{MCP_SERVER} is not reef init's", self.servers);
-                        (Action::Skip(why), None)
-                    };
-                }
+        let not_object = || (Action::Skip(NOT_OBJECT.to_owned()), None);
+        let file = match serde_json::from_str::<Json>(text) {
+            Ok(Json::Object(file)) => file,
+            Ok(_) => return not_object(),
+            Err(_) => {
+                let Some(file) = jsonc_object(text) else {
+                    return not_object();
+                };
+                // Whether the harness reads such a file is not known, so
+                // even Reef's own entry in it is not reported unchanged.
+                let why = match self.settled(&file) {
+                    Some(Action::Unchanged) => format!(
+                        "has Reef's entry, but comments and trailing commas are not standard JSON; check that {} reads this file",
+                        self.reader
+                    ),
+                    Some(Action::Skip(why)) => why,
+                    _ => format!(
+                        "comments and trailing commas are not rewritten; add {} by hand",
+                        self.by_hand()
+                    ),
+                };
+                return (Action::Skip(why), None);
             }
-            Some(_) => return not_object(),
+        };
+        if let Some(action) = self.settled(&file) {
+            return (action, None);
         }
-        (
-            Action::Update,
-            Some(keep_crlf(text, self.render(Some(file)))),
-        )
+        let expected = Json::Object(self.with_entry(file));
+        let parses =
+            |text: &String| serde_json::from_str::<Json>(text).ok().as_ref() == Some(&expected);
+        let spliced = self.splice(text).filter(parses).or_else(|| {
+            // No known input gets here: a scanner bug costs the file's
+            // layout, never its content, and should be reported.
+            tracing::warn!(
+                target: "reef",
+                file = self.file,
+                "cannot insert Reef's entry into the file's text; reprinting it"
+            );
+            reformat(text, &expected)
+        });
+        match spliced {
+            Some(merged) => (Action::Update, Some(merged)),
+            None => not_object(),
+        }
+    }
+
+    /// The action for a file that need not be written, or `None` when
+    /// Reef's entry is to be added: unchanged when the file has Reef's
+    /// entry, skipped when it has another or its servers are not an object.
+    fn settled(self, file: &IndexMap<String, Json>) -> Option<Action> {
+        match file.get(self.servers) {
+            None => None,
+            Some(Json::Object(servers)) => {
+                let entry = serde_json::to_value(servers.get(MCP_SERVER)?).unwrap_or_default();
+                Some(if entry == render_mcp_entry(self.shape) {
+                    Action::Unchanged
+                } else {
+                    Action::Skip(format!("{}.{MCP_SERVER} is not reef init's", self.servers))
+                })
+            }
+            Some(_) => Some(Action::Skip(NOT_OBJECT.to_owned())),
+        }
+    }
+
+    /// `text`, a JSON object without Reef's entry, with one member
+    /// inserted after the last member of the object it goes into: `"reef"`
+    /// in the servers object (the last of that name, the one `serde_json`
+    /// reads), or the servers object at the end of the top level. The
+    /// member copies the indentation of the last one before it when that
+    /// starts its line, and is inline otherwise; in an empty object it is
+    /// one unit in from the object's own line. Inserted line breaks are
+    /// CRLF when the file has any. `None` when the scanner meets anything
+    /// it does not expect.
+    fn splice(self, text: &str) -> Option<String> {
+        let open = skip_space(text.as_bytes(), 0);
+        let (top, top_close) = members(text, open)?;
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let entry = mcp_entry(self.shape);
+        // The member's key and value, the `{` it goes after, and where the
+        // indentation of that object's own line is read.
+        let (key, value, into, line) =
+            match top.iter().rev().find(|member| member.key == self.servers) {
+                Some(servers) => (MCP_SERVER, entry, servers.value_start, servers.key_start),
+                None => (
+                    self.servers,
+                    Json::Object(IndexMap::from([(MCP_SERVER.to_owned(), entry)])),
+                    open,
+                    open,
+                ),
+            };
+        let (siblings, close) = if into == open {
+            (top, top_close)
+        } else {
+            members(text, into)?
+        };
+        let outer = indent_before(text, line);
+        let key = serde_json::to_string(key).ok()?;
+        let Some(last) = siblings.last() else {
+            let between = match outer {
+                Some(outer) => {
+                    let unit = indent_unit(text);
+                    let indent = format!("{outer}{unit}");
+                    let value = pretty(&value, unit, &indent, eol)?;
+                    format!("{eol}{indent}{key}: {value}{eol}{outer}")
+                }
+                None => format!("{key}: {}", inline(&value)),
+            };
+            return Some(format!(
+                "{}{between}{}",
+                text.get(..=into)?,
+                text.get(close..)?
+            ));
+        };
+        let member = match indent_before(text, last.key_start) {
+            Some(indent) => {
+                let unit = match outer.and_then(|outer| indent.strip_prefix(outer)) {
+                    Some(unit) if !unit.is_empty() => unit,
+                    _ => indent_unit(text),
+                };
+                format!(
+                    ",{eol}{indent}{key}: {}",
+                    pretty(&value, unit, indent, eol)?
+                )
+            }
+            None => format!(", {key}: {}", inline(&value)),
+        };
+        Some(format!(
+            "{}{member}{}",
+            text.get(..last.value_end)?,
+            text.get(last.value_end..)?
+        ))
+    }
+}
+
+/// A member of an object in a JSON file's text: its key, unescaped, and
+/// the byte offsets where the key starts and its value starts and ends.
+#[derive(Debug)]
+struct Member {
+    key: String,
+    key_start: usize,
+    value_start: usize,
+    value_end: usize,
+}
+
+/// The offset of the first byte at or after `at` that is not JSON
+/// whitespace.
+fn skip_space(text: &[u8], mut at: usize) -> usize {
+    while text
+        .get(at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        at += 1;
+    }
+    at
+}
+
+/// The offset just past the closing quote of the string whose opening
+/// quote is at `at`.
+fn string_end(text: &[u8], at: usize) -> Option<usize> {
+    let mut at = at + 1;
+    loop {
+        match text.get(at)? {
+            b'"' => return Some(at + 1),
+            b'\\' => at += 2,
+            _ => at += 1,
+        }
+    }
+}
+
+/// The offset just past the JSON value that starts at `at`.
+fn value_end(text: &[u8], at: usize) -> Option<usize> {
+    match text.get(at)? {
+        b'"' => string_end(text, at),
+        b'{' | b'[' => {
+            let mut depth = 0_usize;
+            let mut at = at;
+            loop {
+                match text.get(at)? {
+                    b'"' => {
+                        at = string_end(text, at)?;
+                        continue;
+                    }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth = depth.checked_sub(1)?;
+                        if depth == 0 {
+                            return Some(at + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                at += 1;
+            }
+        }
+        _ => {
+            let end = text[at..]
+                .iter()
+                .position(|byte| matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r'))
+                .map_or(text.len(), |len| at + len);
+            (end > at).then_some(end)
+        }
+    }
+}
+
+/// The members of the object whose `{` is at `open` in `text`, a JSON
+/// document `serde_json` has parsed, and the offset of its `}`.
+fn members(text: &str, open: usize) -> Option<(Vec<Member>, usize)> {
+    let bytes = text.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut at = skip_space(bytes, open + 1);
+    if bytes.get(at) == Some(&b'}') {
+        return Some((members, at));
+    }
+    loop {
+        if bytes.get(at) != Some(&b'"') {
+            return None;
+        }
+        let key_end = string_end(bytes, at)?;
+        let key = serde_json::from_str::<String>(text.get(at..key_end)?).ok()?;
+        let colon = skip_space(bytes, key_end);
+        if bytes.get(colon) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_space(bytes, colon + 1);
+        let value_end = value_end(bytes, value_start)?;
+        members.push(Member {
+            key,
+            key_start: at,
+            value_start,
+            value_end,
+        });
+        at = skip_space(bytes, value_end);
+        match bytes.get(at)? {
+            b',' => at = skip_space(bytes, at + 1),
+            b'}' => return Some((members, at)),
+            _ => return None,
+        }
+    }
+}
+
+/// The spaces and tabs before `at` on its line, or `None` when something
+/// else comes before it there.
+fn indent_before(text: &str, at: usize) -> Option<&str> {
+    let before = text.get(..at)?;
+    let line = &before[before.rfind('\n').map_or(0, |eol| eol + 1)..];
+    line.bytes()
+        .all(|byte| byte == b' ' || byte == b'\t')
+        .then_some(line)
+}
+
+/// The file's indentation unit, for a member with no sibling to copy: a
+/// tab if the first indented line (after the first) starts with one, else
+/// its run of spaces; two spaces when no line is indented. JSON strings
+/// hold no raw line break, so every line starts outside a string.
+fn indent_unit(text: &str) -> &str {
+    text.split('\n')
+        .skip(1)
+        .find_map(|line| {
+            let content = line.trim_start_matches([' ', '\t']);
+            let indent = &line[..line.len() - content.len()];
+            if indent.is_empty() || content.trim_end_matches('\r').is_empty() {
+                None
+            } else if indent.starts_with('\t') {
+                Some("\t")
+            } else {
+                Some(&indent[..indent.len() - indent.trim_start_matches(' ').len()])
+            }
+        })
+        .unwrap_or("  ")
+}
+
+/// `value` in `serde_json`'s pretty layout at `unit`, each line after the
+/// first starting with `indent`, its line breaks `eol`.
+fn pretty(value: &impl Serialize, unit: &str, indent: &str, eol: &str) -> Option<String> {
+    let mut out = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(unit.as_bytes());
+    value
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut out, formatter,
+        ))
+        .ok()?;
+    Some(
+        String::from_utf8(out)
+            .ok()?
+            .replace('\n', &format!("{eol}{indent}")),
+    )
+}
+
+/// `value` on one line as a person writes it: `", "` between items and
+/// `": "` after keys.
+fn inline(value: &Json) -> String {
+    let quoted = |key: &String| serde_json::to_string(key).unwrap_or_default();
+    match value {
+        Json::Array(items) => {
+            let items: Vec<String> = items.iter().map(inline).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Json::Object(members) => {
+            let members: Vec<String> = members
+                .iter()
+                .map(|(key, value)| format!("{}: {}", quoted(key), inline(value)))
+                .collect();
+            format!("{{{}}}", members.join(", "))
+        }
+        scalar => serde_json::to_string(scalar).unwrap_or_default(),
+    }
+}
+
+/// `expected` reprinted at `text`'s indentation unit, with CRLF if `text`
+/// has any and a final line break only if `text` ends with one: the
+/// fallback when a splice does not parse to `expected`.
+fn reformat(text: &str, expected: &Json) -> Option<String> {
+    let mut out = pretty(expected, indent_unit(text), "", "\n")?;
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(keep_crlf(text, out))
+}
+
+/// The object `text` holds once its comments and trailing commas are
+/// removed, if it has any and is then a JSON object: a sign it is JSON with
+/// comments, which Reef does not rewrite. `None` for anything else, so a
+/// file that is not JSON at all is still "not a JSON object".
+fn jsonc_object(text: &str) -> Option<IndexMap<String, Json>> {
+    let bytes = text.as_bytes();
+    let mut changed = false;
+    // Comments become a space, which keeps tokens apart.
+    let mut uncommented = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let next = bytes.get(at + 1).copied();
+        if byte == b'"' {
+            let end = string_end(bytes, at)?;
+            uncommented.extend_from_slice(bytes.get(at..end)?);
+            at = end;
+        } else if byte == b'/' && next == Some(b'/') {
+            at = bytes[at..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(bytes.len(), |len| at + len);
+            uncommented.push(b' ');
+            changed = true;
+        } else if byte == b'/' && next == Some(b'*') {
+            let len = bytes
+                .get(at + 2..)?
+                .windows(2)
+                .position(|end| end == b"*/")?;
+            at += 2 + len + 2;
+            uncommented.push(b' ');
+            changed = true;
+        } else {
+            uncommented.push(byte);
+            at += 1;
+        }
+    }
+    // A comma before a `}` or `]` goes, unless it follows a `{`, `[` or
+    // `,` (as in `{,}`), which no JSON with trailing commas has.
+    let mut strict = Vec::with_capacity(uncommented.len());
+    let mut previous = None;
+    let mut at = 0;
+    while let Some(&byte) = uncommented.get(at) {
+        if byte == b'"' {
+            let end = string_end(&uncommented, at)?;
+            strict.extend_from_slice(uncommented.get(at..end)?);
+            previous = Some(b'"');
+            at = end;
+            continue;
+        }
+        if byte == b','
+            && !matches!(previous, None | Some(b'{' | b'[' | b','))
+            && matches!(
+                uncommented.get(skip_space(&uncommented, at + 1)),
+                Some(b'}' | b']')
+            )
+        {
+            changed = true;
+        } else {
+            strict.push(byte);
+            if !matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+                previous = Some(byte);
+            }
+        }
+        at += 1;
+    }
+    if !changed {
+        return None;
+    }
+    match serde_json::from_slice::<Json>(&strict).ok()? {
+        Json::Object(file) => Some(file),
+        _ => None,
     }
 }
 
@@ -1399,8 +1796,19 @@ mod tests {
         .collect();
         assert!(order.is_sorted(), "{merged}");
         assert!(merged.contains("1.5"), "{merged}");
-        let (_, crlf) = merge_mcp_json(Some(&theirs.replace(", \"a\"", ",\r\n\"a\"")));
-        assert!(crlf.unwrap().contains("\r\n  \"mcpServers\""));
+        // A CRLF file keeps its own line breaks, and gains none on one line.
+        let crlf = theirs.replace(", \"a\"", ",\r\n\"a\"");
+        let (_, merged) = merge_mcp_json(Some(&crlf));
+        let merged = merged.unwrap();
+        assert_eq!(
+            merged,
+            crlf.replacen(
+                "null}",
+                r#"null}, "reef": {"type": "stdio", "command": "reef", "args": ["mcp"]}"#,
+                1
+            )
+        );
+        assert_eq!(merged.matches("\r\n").count(), 2, "{merged:?}");
         assert_eq!(
             merge_mcp_json(Some(r#"{"other": 1}"#)).0,
             Action::Update,
@@ -1423,6 +1831,291 @@ mod tests {
             merge_mcp_json(Some(&format!(r#"{{"mcpServers": {{"reef": {entry}}}}}"#))).0,
             Action::Unchanged
         );
+    }
+
+    /// `.mcp.json`'s entry on its own lines: the `{` follows the key, and
+    /// every later line starts with `indent`, one `unit` in per level.
+    fn spread(indent: &str, unit: &str, eol: &str) -> String {
+        let line = |depth: usize, text: &str| format!("{eol}{indent}{}{text}", unit.repeat(depth));
+        [
+            "{".to_owned(),
+            line(1, r#""type": "stdio","#),
+            line(1, r#""command": "reef","#),
+            line(1, r#""args": ["#),
+            line(2, r#""mcp""#),
+            line(1, "]"),
+            line(0, "}"),
+        ]
+        .concat()
+    }
+
+    /// `.mcp.json`'s entry on one line.
+    const INLINE: &str = r#"{"type": "stdio", "command": "reef", "args": ["mcp"]}"#;
+
+    /// Issue #190 test 1: Reef's member goes into the file's text, at its
+    /// indentation and line ending, and no other byte changes.
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one table of sixteen cases")]
+    fn json_merge_keeps_the_files_layout() {
+        let mcp = JsonTarget::MCP_JSON;
+        let fresh = mcp.render();
+        let cases: Vec<(&str, JsonTarget, String, String)> = vec![
+            (
+                "1. the issue's file",
+                mcp,
+                "{\n\t\"mcpServers\": {\n\t\t\"other\": {\"command\": \"npx\", \"args\": [\"-y\", \"x\"]}\n\t},\n\t\"n\": 1e5\n}\n".to_owned(),
+                "{\n\t\"mcpServers\": {\n\t\t\"other\": {\"command\": \"npx\", \"args\": [\"-y\", \"x\"]},\n\t\t\"reef\": {\n\t\t\t\"type\": \"stdio\",\n\t\t\t\"command\": \"reef\",\n\t\t\t\"args\": [\n\t\t\t\t\"mcp\"\n\t\t\t]\n\t\t}\n\t},\n\t\"n\": 1e5\n}\n".to_owned(),
+            ),
+            (
+                "2. four spaces, no final newline",
+                mcp,
+                "{\n    \"mcpServers\": {\n        \"other\": {\n            \"command\": \"x\"\n        }\n    }\n}".to_owned(),
+                format!(
+                    "{{\n    \"mcpServers\": {{\n        \"other\": {{\n            \"command\": \"x\"\n        }},\n        \"reef\": {}\n    }}\n}}",
+                    spread("        ", "    ", "\n")
+                ),
+            ),
+            (
+                "3. CRLF",
+                mcp,
+                "{\r\n  \"mcpServers\": {\r\n    \"other\": {\"command\": \"x\"}\r\n  },\r\n  \"extra\": true\r\n}\r\n".to_owned(),
+                format!(
+                    "{{\r\n  \"mcpServers\": {{\r\n    \"other\": {{\"command\": \"x\"}},\r\n    \"reef\": {}\r\n  }},\r\n  \"extra\": true\r\n}}\r\n",
+                    spread("    ", "  ", "\r\n")
+                ),
+            ),
+            (
+                "4. mixed line endings",
+                mcp,
+                "{\n  \"mcpServers\": {\r\n    \"other\": {}\n  }\n}\n".to_owned(),
+                format!(
+                    "{{\n  \"mcpServers\": {{\r\n    \"other\": {{}},\r\n    \"reef\": {}\n  }}\n}}\n",
+                    spread("    ", "  ", "\r\n")
+                ),
+            ),
+            (
+                "5. one line",
+                mcp,
+                r#"{"z": 1.5, "mcpServers": {"other": {"command": "x", "b": true, "a": null}}, "a": [2, 1]}"#.to_owned(),
+                format!(
+                    r#"{{"z": 1.5, "mcpServers": {{"other": {{"command": "x", "b": true, "a": null}}, "reef": {INLINE}}}, "a": [2, 1]}}"#
+                ),
+            ),
+            (
+                "6. {}",
+                mcp,
+                "{}".to_owned(),
+                format!(
+                    "{{\n  \"mcpServers\": {{\n    \"reef\": {}\n  }}\n}}",
+                    spread("    ", "  ", "\n")
+                ),
+            ),
+            ("6. {} and a newline", mcp, "{}\n".to_owned(), fresh.clone()),
+            ("6. { } and a newline", mcp, "{ }\n".to_owned(), fresh.clone()),
+            (
+                "7. an empty servers object",
+                mcp,
+                "{\n\t\"mcpServers\": {}\n}\n".to_owned(),
+                format!(
+                    "{{\n\t\"mcpServers\": {{\n\t\t\"reef\": {}\n\t}}\n}}\n",
+                    spread("\t\t", "\t", "\n")
+                ),
+            ),
+            (
+                "8. no servers key",
+                mcp,
+                "{\n\t\"other\": 1\n}\n".to_owned(),
+                format!(
+                    "{{\n\t\"other\": 1,\n\t\"mcpServers\": {{\n\t\t\"reef\": {}\n\t}}\n}}\n",
+                    spread("\t\t", "\t", "\n")
+                ),
+            ),
+            (
+                "9. escapes",
+                mcp,
+                r#"{"s": "café \/ \"}", "mcpServers": {}}"#.to_owned(),
+                format!(r#"{{"s": "café \/ \"}}", "mcpServers": {{"reef": {INLINE}}}}}"#),
+            ),
+            (
+                "10. leading whitespace",
+                mcp,
+                "\n\n{\n  \"mcpServers\": {\n    \"other\": {}\n  }\n}\n".to_owned(),
+                format!(
+                    "\n\n{{\n  \"mcpServers\": {{\n    \"other\": {{}},\n    \"reef\": {}\n  }}\n}}\n",
+                    spread("    ", "  ", "\n")
+                ),
+            ),
+            (
+                "11. mixed indentation",
+                mcp,
+                "{\n  \"mcpServers\": {\n\t\"other\": {}\n  }\n}\n".to_owned(),
+                format!(
+                    "{{\n  \"mcpServers\": {{\n\t\"other\": {{}},\n\t\"reef\": {}\n  }}\n}}\n",
+                    spread("\t", "  ", "\n")
+                ),
+            ),
+            (
+                "12. several servers on one line",
+                mcp,
+                "{\n  \"mcpServers\": {\n    \"a\": {}, \"b\": {}\n  }\n}\n".to_owned(),
+                format!(
+                    "{{\n  \"mcpServers\": {{\n    \"a\": {{}}, \"b\": {{}}, \"reef\": {INLINE}\n  }}\n}}\n"
+                ),
+            ),
+            (
+                "13. duplicate servers keys",
+                mcp,
+                r#"{"mcpServers": {"a": {}}, "mcpServers": {"b": {}}}"#.to_owned(),
+                format!(r#"{{"mcpServers": {{"a": {{}}}}, "mcpServers": {{"b": {{}}, "reef": {INLINE}}}}}"#),
+            ),
+            (
+                "14. opencode",
+                JsonTarget::OPENCODE,
+                "{\n\t\"model\": \"x\",\n\t\"mcp\": {\n\t\t\"other\": {\"type\": \"remote\"}\n\t}\n}\n".to_owned(),
+                "{\n\t\"model\": \"x\",\n\t\"mcp\": {\n\t\t\"other\": {\"type\": \"remote\"},\n\t\t\"reef\": {\n\t\t\t\"type\": \"local\",\n\t\t\t\"command\": [\n\t\t\t\t\"reef\",\n\t\t\t\t\"mcp\"\n\t\t\t],\n\t\t\t\"enabled\": true\n\t\t}\n\t}\n}\n".to_owned(),
+            ),
+            (
+                "16. an escaped servers key",
+                mcp,
+                r#"{"mcp\u0053ervers": {"a": 1}}"#.to_owned(),
+                format!(r#"{{"mcp\u0053ervers": {{"a": 1, "reef": {INLINE}}}}}"#),
+            ),
+            (
+                "16. duplicate servers keys spelled two ways",
+                mcp,
+                r#"{"mcpServers": {"a": {}}, "mcp\u0053ervers": {"b": {}}}"#.to_owned(),
+                format!(r#"{{"mcpServers": {{"a": {{}}}}, "mcp\u0053ervers": {{"b": {{}}, "reef": {INLINE}}}}}"#),
+            ),
+        ];
+        for (name, target, before, after) in &cases {
+            assert_eq!(
+                target.merge(Some(before)),
+                (Action::Update, Some(after.clone())),
+                "{name}"
+            );
+            assert_eq!(
+                target.merge(Some(after)),
+                (Action::Unchanged, None),
+                "{name}: no flap"
+            );
+            let Ok(Json::Object(file)) = serde_json::from_str::<Json>(before) else {
+                panic!("{name}: {before}");
+            };
+            assert_eq!(
+                serde_json::from_str::<Json>(after).unwrap(),
+                Json::Object(target.with_entry(file)),
+                "{name}: the value today's code writes"
+            );
+        }
+        let crlf = &cases[2].3;
+        assert_eq!(crlf.matches('\n').count(), crlf.matches("\r\n").count());
+        // 15. A file with Reef's entry is not written, whatever its layout.
+        for unchanged in [
+            format!(
+                "{{\n\t\"mcpServers\": {{\n\t\t\"reef\": {}\n\t}}\n}}\n",
+                spread("\t\t", "\t", "\n")
+            ),
+            format!("{{\n\t\"mcpServers\": {{\"reef\": {INLINE}}}\n}}"),
+            format!(r#"{{"n": 1e5, "mcpServers": {{"other": {{}}, "reef": {INLINE}}}}}"#),
+            format!(
+                "{{\"mcpServers\": {{\"reef\": {}}}}}",
+                spread("", "\t", "\r\n")
+            ),
+        ] {
+            assert_eq!(
+                mcp.merge(Some(&unchanged)),
+                (Action::Unchanged, None),
+                "{unchanged}"
+            );
+        }
+    }
+
+    /// Issue #190 test 2: the fallback keeps the unit, the line endings and
+    /// the final newline or its absence.
+    #[test]
+    fn json_reformat_keeps_unit_endings_and_final_newline() {
+        let value: Json = serde_json::from_str(r#"{"a": 1, "b": [1]}"#).unwrap();
+        assert_eq!(
+            reformat("{\r\n\t\"a\": 1\r\n}", &value).unwrap(),
+            "{\r\n\t\"a\": 1,\r\n\t\"b\": [\r\n\t\t1\r\n\t]\r\n}"
+        );
+        assert_eq!(
+            reformat("{\n    \"a\": 1\n}\n", &value).unwrap(),
+            "{\n    \"a\": 1,\n    \"b\": [\n        1\n    ]\n}\n"
+        );
+    }
+
+    /// Issue #190, the user's question 3: JSON with comments or trailing
+    /// commas is not rewritten, and the reason quotes the entry; a file
+    /// that is not JSON at all is still not a JSON object.
+    #[test]
+    fn json_with_comments_is_not_rewritten() {
+        let by_hand = |target: JsonTarget| {
+            Action::Skip(format!(
+                "comments and trailing commas are not rewritten; add {} by hand",
+                target.by_hand()
+            ))
+        };
+        let mcp = JsonTarget::MCP_JSON;
+        assert_eq!(
+            mcp.by_hand(),
+            r#"{"mcpServers":{"reef":{"type":"stdio","command":"reef","args":["mcp"]}}}"#
+        );
+        for jsonc in [
+            "{\n  // mine\n  \"mcpServers\": {\"other\": {}}\n}\n",
+            "/* mine */ {\"mcpServers\": {}}",
+            "{\"mcpServers\": {\"other\": {},}}",
+            "{\n  \"other\": [1, 2,],\n}\n",
+            "{\"url\": \"http://x\", /* a, */ \"a\": 1, // last,\n}",
+        ] {
+            assert_eq!(mcp.merge(Some(jsonc)), (by_hand(mcp), None), "{jsonc}");
+        }
+        assert_eq!(
+            JsonTarget::OPENCODE.merge(Some("{\n  // mine\n  \"model\": \"x\"\n}\n")),
+            (by_hand(JsonTarget::OPENCODE), None)
+        );
+        // Reef's entry already there is still a skip: whether the harness
+        // reads the file is not known. Someone else's is not Reef's.
+        assert_eq!(
+            mcp.merge(Some(&format!(
+                "{{\n  // mine\n  \"mcpServers\": {{\"reef\": {INLINE},}}\n}}\n"
+            ))),
+            (
+                Action::Skip("has Reef's entry, but comments and trailing commas are not standard JSON; check that Claude Code reads this file".to_owned()),
+                None
+            )
+        );
+        assert_eq!(
+            JsonTarget::OPENCODE
+                .merge(Some(
+                    "{\"mcp\": {\"reef\": {\"type\": \"local\", \"command\": [\"reef\", \"mcp\"], \"enabled\": true}}} // mine"
+                ))
+                .0,
+            Action::Skip("has Reef's entry, but comments and trailing commas are not standard JSON; check that opencode reads this file".to_owned())
+        );
+        assert_eq!(
+            mcp.merge(Some("{\"mcpServers\": {\"reef\": {},}}")).0,
+            Action::Skip("mcpServers.reef is not reef init's".to_owned())
+        );
+        for neither in [
+            "not json",
+            "not json // at all",
+            "{\"a\": \"//\"} x",
+            "{\"a\": 1 // unclosed",
+            "{\"a\": 1 /* unclosed }",
+            "[1, 2,]",
+            "\u{feff}{}",
+            "{\"a\": {,}}",
+            "{\"a\": [,]}",
+            "[,]",
+            "{\"a\": [1,,]}",
+        ] {
+            assert_eq!(
+                mcp.merge(Some(neither)),
+                (Action::Skip(NOT_OBJECT.to_owned()), None),
+                "{neither}"
+            );
+        }
     }
 
     /// A fake home directory: `HOME` only, no agent variables.
