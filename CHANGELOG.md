@@ -2,7 +2,13 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-03
+
+Phase 2's last rows: the Python and TypeScript SDKs, both named `reef-vcs` and published to PyPI and npm by this release's workflow. Brief `reef status` and `reef diff` read at an operation now say which operation they read, `reef history -o text` names the authors of changes no Reef agent wrote, and the remote listener answers errors in a form every gRPC client reads. Two fixes come from trying 0.3 on a large monorepo: a workspace create waits up to 5 minutes instead of failing at 30 s, and `reef init` adds Reef's MCP entry without reformatting `.mcp.json`. Phase 2 is complete.
+
+### Upgrading from 0.3
+
+Nothing to migrate. The API revision (14) and the database schema (6) are those of 0.3, so a 0.3 daemon serves the 0.4 CLI. Restart it anyway, once `reef ws list` shows no active workspaces (`reef daemon stop`; the next command starts 0.4's), for the remote listener's fix below, which the SDKs need when they reach a daemon remotely.
 
 ### Added
 

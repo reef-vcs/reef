@@ -3,7 +3,7 @@
 # against REEF_BIN_DIR's daemon, then checks it loads from CommonJS (R2.07). The smoke test is
 # copied beside the install: ES modules resolve `reef-vcs` from the importing file's directory.
 #
-#   REEF_BIN_DIR=target/debug scripts/npm-smoke.sh sdk/typescript/dist-pack/reef-vcs-0.3.0.tgz /tmp/smoke
+#   REEF_BIN_DIR=target/debug scripts/npm-smoke.sh sdk/typescript/dist-pack/reef-vcs-0.4.0.tgz /tmp/smoke
 set -euo pipefail
 
 tarball="$1"

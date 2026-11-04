@@ -4,7 +4,7 @@ Thanks for helping. This file covers how work is organized, how to set up, and w
 
 ## Status
 
-Reef is in Phase 2: typed API, MCP server, and live state. Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0, and Phase 2, with every exit criterion met, as 0.2.0 and 0.3.0, for macOS and Linux; its SDK rows remain, and nothing is stable yet. The roadmap is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and the current phase's tickets have implementation briefs in [docs/dev-tickets/](docs/dev-tickets/phase-2/README.md). Open work is the Phase 2 rows not yet done and the issues labeled [`phase-2`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-2). Bugs, proposals, and tickets each have an issue form; open-ended questions belong in [Discussions](https://github.com/reef-vcs/reef/discussions).
+Reef is between Phase 2 and Phase 3. Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0, and Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.2.0 to 0.4.0, for macOS and Linux; nothing is stable yet. Phase 3 (evidence, proposals, and landing) is next, and its briefs are not written yet. The roadmap is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and each phase's tickets get implementation briefs in [docs/dev-tickets/](docs/dev-tickets/phase-2/README.md). Open work is the issues labeled [`phase-3`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-3) and the unlabelled backlog. Bugs, proposals, and tickets each have an issue form; open-ended questions belong in [Discussions](https://github.com/reef-vcs/reef/discussions).
 
 ## Setup
 
