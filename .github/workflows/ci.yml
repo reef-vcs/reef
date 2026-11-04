@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `labeled` so that adding the `macos` label runs the macOS leg (see `check`). Any label
-    # restarts the run, so labels go on when a pull request is opened. There is no
-    # `unlabeled`: removing `macos` takes effect at the next push, and a re-run keeps its
-    # event's labels.
+    # `labeled` so that adding the `macos` label runs the macOS legs while the self-hosted Mac is
+    # off (see `plan`). Any label restarts the run, so labels go on when a pull request is
+    # opened. There is no `unlabeled`: removing `macos` takes effect at the next push, and a
+    # re-run keeps its event's labels.
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
@@ -17,11 +17,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Whether `check` runs on macOS too: on every push to main and manual run, and on a pull
-  # request only with the `macos` label. Repeated in `check`'s matrix, which cannot read env.
-  MACOS: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos') }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # As setup-rust-toolchain sets it, for the self-hosted Mac, which does not run that action.
+  CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_BUILD_WARNINGS: deny
   RUSTDOCFLAGS: -D warnings
   RUST_BACKTRACE: 1
@@ -35,6 +34,45 @@ permissions:
   contents: read
 
 jobs:
+  # Where the macOS legs (`check`, `python`, `typescript`) run, if at all. With the repository
+  # variable MACOS_RUNNER set to `self-hosted`, they run on every push to main, manual run and pull
+  # request, on the maintainer's Mac (scripts/mac-runner.sh): warm, and with no wait for GitHub's
+  # macOS capacity. The repository is public, so a pull request from a fork, or from Dependabot
+  # (whose build scripts are new upstream code), goes to GitHub's macos-15 instead, which runs on
+  # pushes to main, manual runs and pull requests labelled `macos`. Unset MACOS_RUNNER when the Mac
+  # is away, or its jobs wait for it: `gh variable delete MACOS_RUNNER`.
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      macos: ${{ steps.plan.outputs.macos }}
+      os: ${{ steps.plan.outputs.os }}
+      macos_runner: ${{ steps.plan.outputs.macos_runner }}
+    steps:
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          MACOS_RUNNER: ${{ vars.MACOS_RUNNER }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}
+        run: |
+          if [[ "$MACOS_RUNNER" == self-hosted && "$SAME_REPO" == true && "$AUTHOR" != 'dependabot[bot]' ]]; then
+            macos=true
+            runner='["self-hosted", "macOS", "ARM64", "reef-mac"]'
+          else
+            macos=$([[ "$EVENT" != pull_request || "$LABELLED" == true ]] && echo true || echo false)
+            runner='"macos-15"'
+          fi
+          os=$([[ "$macos" == true ]] && echo '["ubuntu-24.04", "macos-15"]' || echo '["ubuntu-24.04"]')
+          echo "macOS legs: $macos, on $runner"
+          {
+            echo "macos=$macos"
+            echo "os=$os"
+            echo "macos_runner=$runner"
+          } >>"$GITHUB_OUTPUT"
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-24.04
@@ -119,33 +157,44 @@ jobs:
           just-version: "1"
       - run: just lint
 
+  # On the self-hosted Mac (see `plan`), checkout keeps target/ (mac-runner-hook.sh removes every
+  # other untracked file before the job), and rustup installs the toolchain in place of
+  # setup-rust-toolchain, whose macOS step needs Homebrew's bash and whose Rust cache would only
+  # restore main's build over a target/ that is already warm. The same goes for `python` and
+  # `typescript`. Its macOS is the Mac's, not 15's; release.yml builds the binaries on macos-15.
   check:
     name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    needs: plan
+    runs-on: ${{ matrix.os == 'macos-15' && fromJSON(needs.plan.outputs.macos_runner) || matrix.os }}
     # macos-15 took 24 to 29 minutes on main by #96; the `heavy` group runs
     # one test at a time (about 10 minutes there), and #95's GC timer tests
     # added about 2 more. By #104 the tests take 22 to 24 minutes, and a build
     # that misses the cache (a lockfile or version change) about 8 more, so a
     # cold run is about 40 minutes.
     #
-    # macOS runs on main after every merge, on a manual run, and on a pull request labelled
-    # `macos`, not on every pull request: its 25 to 40 minutes and GitHub's macOS arm64
-    # capacity (on 2026-11-02 one job went unassigned twice, cancelled after 15 minutes each
-    # time) held up every merge. Pull requests are checked on macOS locally. release.yml runs
-    # only once a tag is pushed and smoke-tests the binaries, so a tag waits for main's latest
-    # run, macOS included, to be green (CONTRIBUTING.md).
+    # On GitHub's runner, macOS runs on main after every merge, on a manual run, and on a pull
+    # request labelled `macos`, not on every pull request: its 25 to 45 minutes and GitHub's
+    # macOS arm64 capacity (on 2026-11-02 one job went unassigned twice, cancelled after 15
+    # minutes each time) held up every merge. release.yml runs only once a tag is pushed and
+    # smoke-tests the binaries, so a tag waits for main's latest run, macOS included, to be
+    # green (CONTRIBUTING.md).
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.environment == 'github-hosted'
         with:
           cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - name: Rust toolchain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: rustup toolchain install && rustc --version
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9
@@ -187,8 +236,12 @@ jobs:
         run: |
           cargo check -p reef-daemon --no-default-features
           cargo test -p reef-daemon -p reef-lib --no-default-features --lib
+      # A self-hosted runner keeps target/, so a shape file from an earlier run must not pass for
+      # this one's.
       - name: Test
-        run: just test
+        run: |
+          rm -f target/cli-shape-*.json
+          just test
       - name: Docs
         run: just doc
       # The synthetic repo generator must write byte-identical trees on every platform (R0.05).
@@ -359,20 +412,26 @@ jobs:
   # sdist and wheel and smoke-tests the wheel alone, as the release does before publishing.
   python:
     name: python ${{ matrix.python }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: plan
+    runs-on: ${{ matrix.os == 'macos-15' && fromJSON(needs.plan.outputs.macos_runner) || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
         python: ["3.11", "3.15"]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.environment == 'github-hosted'
         with:
           cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - name: Rust toolchain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: rustup toolchain install && rustc --version
       - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
         with:
           version: "0.13.6"
@@ -404,20 +463,26 @@ jobs:
   # supports and the newest LTS. One leg packs the tarball and smoke-tests it alone.
   typescript:
     name: typescript ${{ matrix.node }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: plan
+    runs-on: ${{ matrix.os == 'macos-15' && fromJSON(needs.plan.outputs.macos_runner) || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')) && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
         node: ["22.15.0", "26"]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.environment == 'github-hosted'
         with:
           cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - name: Rust toolchain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: rustup toolchain install && rustc --version
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
@@ -457,9 +522,11 @@ jobs:
   # both platforms still fails until GENERATOR_VERSION is bumped and the pin updated.
   synth-determinism:
     name: synth determinism
-    needs: check
+    needs: [plan, check]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      MACOS: ${{ needs.plan.outputs.macos }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -478,9 +545,11 @@ jobs:
   # The CLI's JSON has the same keys on both platforms (R1.23, test 12).
   cli-shape:
     name: CLI shape
-    needs: check
+    needs: [plan, check]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      MACOS: ${{ needs.plan.outputs.macos }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -523,7 +592,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
+    needs: [plan, fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -531,6 +600,7 @@ jobs:
       # cannot break the shell.
       - env:
           NEEDS: ${{ toJSON(needs) }}
+          PLAN: ${{ needs.plan.result }}
           FMT: ${{ needs.fmt.result }}
           API: ${{ needs.api.result }}
           DENY: ${{ needs.deny.result }}
@@ -545,4 +615,4 @@ jobs:
           TYPESCRIPT: ${{ needs.typescript.result }}
         run: |
           echo "$NEEDS"
-          [[ "$FMT" == "success" && "$API" == "success" && "$DENY" == "success" && "$LINT" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
+          [[ "$PLAN" == "success" && "$FMT" == "success" &&"$API" == "success" && "$DENY" == "success" && "$LINT" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
