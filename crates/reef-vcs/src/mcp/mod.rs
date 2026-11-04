@@ -429,3 +429,25 @@ pub(crate) fn tool_summaries() -> Vec<(&'static str, &'static str)> {
         .map(|def| (def.name, def.description))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// #188: the MCP `create_workspace` tool's deadline error is the CLI's,
+    /// with its hint.
+    #[test]
+    fn create_timeout_reaches_the_tool_error() {
+        let object = ToolError::from(CliError::CreateTimeout {
+            after: Duration::from_mins(5),
+        })
+        .object();
+        assert_eq!(object.kind, "unavailable");
+        assert!(object.message.contains("within 5m"), "{}", object.message);
+        assert!(object.hint.contains("base cache"), "{}", object.hint);
+        assert!(object.hint.contains("--timeout"), "{}", object.hint);
+        assert!(object.next.is_empty(), "{:?}", object.next);
+    }
+}

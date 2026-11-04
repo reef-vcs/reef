@@ -1561,3 +1561,83 @@ async fn create_reports_timings() {
         }
     }
 }
+
+/// #188 test 7: a create whose client gave up during its base step ends
+/// its progress entry and leaves no workspace, and the base checkout it
+/// started goes on: the retry finds the base cached. That is what the
+/// CLI's `CreateTimeout` hint says a retry waits for.
+#[tokio::test(flavor = "multi_thread")]
+async fn abandoned_create_leaves_its_base() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Medium, |config| {
+        config.presence.progress_after = Duration::ZERO;
+    })
+    .await;
+    let client = &daemon.client;
+    let mut stream = client
+        .subscribe_presence(v1::SubscribePresenceRequest {
+            repos: vec![repo.id.clone()],
+            kinds: vec![v1::PresenceKind::Progress.into()],
+            ..v1::SubscribePresenceRequest::default()
+        })
+        .await
+        .unwrap();
+    let in_phase = |event: &v1::PresenceEvent, phase: &str| {
+        event.presence.as_ref().is_some_and(|entry| {
+            entry.repo_id == repo.id
+                && entry
+                    .progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.phase == phase)
+        })
+    };
+
+    // Dropped once its entry says it is building the base: the checkout
+    // runs on a blocking thread, which the drop does not stop.
+    let mut abandoned = Box::pin(client.create_workspace(request(&repo, None)));
+    let at_base = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                result = &mut abandoned => {
+                    panic!("the create finished before its base phase was seen: {result:?}");
+                }
+                frame = stream.message() => {
+                    let frame = frame.expect("no error").expect("the stream is open");
+                    if frame
+                        .events
+                        .iter()
+                        .any(|event| !event.ended && in_phase(event, "base"))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    assert!(at_base.is_ok(), "no base phase within 30 s");
+    drop(abandoned);
+
+    // The dropped handler ended its entry.
+    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = stream
+                .message()
+                .await
+                .expect("no error")
+                .expect("the stream is open");
+            if frame.events.iter().any(|event| event.ended) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "no ended progress entry within 10 s");
+
+    // The retry waits for the running checkout, or finds it done.
+    let retry = client.create_workspace(request(&repo, None)).await.unwrap();
+    assert!(retry.base_was_cached, "{retry:?}");
+    let ws = retry.workspace.unwrap();
+    let all = all_workspaces(&daemon).await;
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].id, ws.id);
+}

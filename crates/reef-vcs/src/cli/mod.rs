@@ -58,7 +58,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{ArgAction, CommandFactory as _, FromArgMatches as _};
-use reef_api::v1::IfNotJj;
+use reef_api::v1::{CreateWorkspaceRequest, CreateWorkspaceResponse, IfNotJj};
 use reef_client::logging::EnvLog;
 use reef_client::paths::{ClientConfig, PathOverrides};
 use reef_client::{Client, ClientError};
@@ -73,6 +73,17 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// initializing jj alongside git indexes every commit of the history, which
 /// takes minutes on a large one.
 pub(crate) const REGISTER_TIMEOUT: Duration = Duration::from_mins(10);
+/// A workspace create's deadline when `--timeout` is not given: a create
+/// that builds the base cache (the first in a repository, and on overlay or
+/// copy each new tree) checks the whole tree out, which takes a minute or
+/// more on a large one (#188).
+pub(crate) const CREATE_TIMEOUT: Duration = Duration::from_mins(5);
+
+/// A workspace create's deadline: `--timeout` as given, or
+/// [`CREATE_TIMEOUT`].
+pub(crate) fn create_deadline(timeout_flag: Option<Duration>) -> Duration {
+    timeout_flag.unwrap_or(CREATE_TIMEOUT)
+}
 
 /// `reef --version`: the version, then the commit and target the binary was
 /// built from (`build.rs`, R1.28), so a bug report names the exact binary.
@@ -176,8 +187,9 @@ pub(crate) struct Global {
     /// overrides `[repo] auto_register`.
     #[arg(long, global = true, hide = true)]
     no_register: bool,
-    /// How long to wait for the daemon's answer [default: 30s; 1h for `ws
-    /// gc`; for `store build`, how long its command may run, 30m].
+    /// How long to wait for the daemon's answer [default: 30s; 5m for a
+    /// workspace create; 10m for registering a repository; 1h for `ws gc`;
+    /// for `store build`, how long its command may run, 30m].
     #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration, hide = true)]
     timeout: Option<Duration>,
     /// Print nothing on stderr but errors.
@@ -390,14 +402,26 @@ impl Ctx {
 
     /// Awaits `call` for at most `deadline`, for a call known to take
     /// longer than most.
-    pub(crate) async fn call_within<T>(
+    // Not `async`: a second layer of future would hold `call` twice.
+    pub(crate) fn call_within<T>(
         &self,
         deadline: Duration,
+        call: impl Future<Output = Result<T, ClientError>>,
+    ) -> impl Future<Output = Result<T, CliError>> {
+        self.call_within_as(deadline, |after| CliError::Timeout { after }, call)
+    }
+
+    /// [`Ctx::call_within`], the deadline's error built by `timeout`: a
+    /// create's says that a base checkout it started goes on (#188).
+    pub(crate) async fn call_within_as<T>(
+        &self,
+        deadline: Duration,
+        timeout: fn(Duration) -> CliError,
         call: impl Future<Output = Result<T, ClientError>>,
     ) -> Result<T, CliError> {
         match tokio::time::timeout(deadline, call).await {
             Ok(result) => result.map_err(CliError::Daemon),
-            Err(_) => Err(CliError::Timeout { after: deadline }),
+            Err(_) => Err(timeout(deadline)),
         }
     }
 
@@ -420,9 +444,50 @@ impl Ctx {
     /// plain git checkout (R1.25), says so on stderr, and calls once more;
     /// a second failure is returned as it is. Not with `--no-register` or
     /// `[repo] auto_register = false`, and never for a repo id or prefix.
-    pub(crate) async fn call_with_repo_within<T, F, Fut>(
+    // Not `async`, as `call_within` is not.
+    pub(crate) fn call_with_repo_within<T, F, Fut>(
         &self,
         deadline: Duration,
+        repo: &RepoArg,
+        call: F,
+    ) -> impl Future<Output = Result<T, CliError>>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = Result<T, ClientError>>,
+    {
+        self.call_with_repo_as(deadline, |after| CliError::Timeout { after }, repo, call)
+    }
+
+    /// `WorkspaceService.CreateWorkspace` with `request`, `repo` as its
+    /// repository, as [`Ctx::call_with_repo_within`] calls it: within
+    /// [`create_deadline`], and a deadline reached is
+    /// [`CliError::CreateTimeout`] (#188). An implicit register keeps its
+    /// own deadline and error.
+    pub(crate) async fn create_with_repo(
+        &self,
+        repo: &RepoArg,
+        request: CreateWorkspaceRequest,
+    ) -> Result<CreateWorkspaceResponse, CliError> {
+        self.call_with_repo_as(
+            create_deadline(self.timeout_flag),
+            |after| CliError::CreateTimeout { after },
+            repo,
+            |repo| {
+                self.client.create_workspace(CreateWorkspaceRequest {
+                    repo,
+                    ..request.clone()
+                })
+            },
+        )
+        .await
+    }
+
+    /// [`Ctx::call_with_repo_within`], each attempt's deadline error built
+    /// by `timeout`.
+    async fn call_with_repo_as<T, F, Fut>(
+        &self,
+        deadline: Duration,
+        timeout: fn(Duration) -> CliError,
         repo: &RepoArg,
         call: F,
     ) -> Result<T, CliError>
@@ -430,14 +495,17 @@ impl Ctx {
         F: Fn(String) -> Fut,
         Fut: Future<Output = Result<T, ClientError>>,
     {
-        let result = self.call_within(deadline, call(repo.text())).await;
+        let result = self
+            .call_within_as(deadline, timeout, call(repo.text()))
+            .await;
         let RepoArg::Path(path) = repo else {
             return result;
         };
         match result {
             Err(error) if self.auto_register && is_unregistered_path(&error) => {
                 self.register_implicitly(path).await?;
-                self.call_within(deadline, call(repo.text())).await
+                self.call_within_as(deadline, timeout, call(repo.text()))
+                    .await
             }
             result => result,
         }
@@ -1018,6 +1086,23 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    /// #188 test 3: a create waits 5 minutes, and `--timeout` replaces
+    /// that either way.
+    #[test]
+    fn create_deadline_defaults_to_five_minutes() {
+        assert_eq!(create_deadline(None), Duration::from_secs(300));
+        assert_eq!(create_deadline(None), CREATE_TIMEOUT);
+        assert_eq!(
+            create_deadline(Some(Duration::from_secs(10))),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            create_deadline(Some(Duration::from_mins(20))),
+            Duration::from_mins(20)
+        );
+        assert!(CREATE_TIMEOUT > DEFAULT_TIMEOUT);
     }
 
     #[test]

@@ -39,6 +39,7 @@ use super::{Call, ToolError, args, parse, to_value, wait};
 use crate::cli::changes::workspace_after;
 use crate::cli::repo::missing;
 use crate::cli::scope::{self, Scope, workspace_arg};
+use crate::cli::{CliError, create_deadline};
 
 /// A tool's body.
 pub(super) type ToolFn =
@@ -1015,7 +1016,9 @@ tool!(create_workspace, args::CreateWorkspace, |call, args| {
     };
     let scope = call.scope(args.repo.as_ref(), None).await?;
     let response = ctx
-        .call(
+        .call_within_as(
+            create_deadline(ctx.timeout_flag),
+            |after| CliError::CreateTimeout { after },
             ctx.client.create_workspace(CreateWorkspaceRequest {
                 repo: scope.repo_id,
                 start,

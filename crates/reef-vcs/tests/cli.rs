@@ -2085,6 +2085,76 @@ async fn missing_store_error_carries_next() {
     json(&run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await);
 }
 
+/// #188 test 6: a create that reaches its deadline says the base build
+/// goes on and that running the command again waits for it; nothing is
+/// left behind, and a retry succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_timeout_explains_the_base_cache() {
+    let (daemon, repo) = with_repo().await;
+    let check = |error: &Value| {
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("create the workspace within 1ms"),
+            "{error}"
+        );
+        let hint = error["hint"].as_str().unwrap();
+        assert!(hint.contains("base cache"), "{error}");
+        assert!(hint.contains("--timeout"), "{error}");
+        assert!(error.get("next").is_none(), "{error}");
+    };
+
+    // `ws create`.
+    let output = run(
+        reef(&daemon),
+        &["--timeout", "1ms", "ws", "create", "--repo", &repo.id],
+    )
+    .await;
+    let text = failed(&output, 6, "unavailable");
+    check(&json_error(&output));
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("hint: ") && line.contains("base cache")),
+        "{text}"
+    );
+
+    // `ws run` fails before its command starts.
+    let output = run(
+        reef(&daemon),
+        &[
+            "--timeout",
+            "1ms",
+            "-o",
+            "json",
+            "ws",
+            "run",
+            "--repo",
+            &repo.id,
+            "--",
+            "sh",
+            "-c",
+            "echo ran-188",
+        ],
+    )
+    .await;
+    failed(&output, 6, "unavailable");
+    check(&json_error(&output));
+    assert!(!stdout(&output).contains("ran-188"), "{}", stdout(&output));
+    assert!(!stderr(&output).contains("ran-188"), "{}", stderr(&output));
+
+    // A retry works, and no create got as far as a row.
+    let created = create(&daemon, &repo).await;
+    let all = json(&run(reef(&daemon), &["-o", "json", "ws", "list", "--all"]).await);
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["id"], created["id"]);
+}
+
+/// Stdout's JSON error object, `{"error": ...}`'s inside.
+fn json_error(output: &Output) -> Value {
+    let value: Value = serde_json::from_str(&stdout(output)).unwrap();
+    value["error"].clone()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_next_is_a_real_command() {
     let (daemon, repo) = with_repo().await;

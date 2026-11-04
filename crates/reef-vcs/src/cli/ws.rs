@@ -1,13 +1,14 @@
 //! `reef ws create | list | inspect | snapshot | renew | release | move | run | provider | gc`.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use reef_api::v1::MissingStores;
 use reef_api::v1::{
-    CreateWorkspaceRequest, GetWorkspaceRequest, GetWorkspaceResponse, ListWorkspacesRequest,
-    WorkspaceState, create_workspace_request,
+    CreateWorkspaceRequest, CreateWorkspaceResponse, GetWorkspaceRequest, GetWorkspaceResponse,
+    ListWorkspacesRequest, WorkspaceState, create_workspace_request,
 };
 use reef_client::ROOT_CHECKOUT;
 use reef_client::brief;
@@ -724,6 +725,47 @@ pub(crate) fn lease_length(
     }
 }
 
+/// A create still running after this long is explained on stderr (#188).
+pub(crate) const CREATE_NOTE_AFTER: Duration = Duration::from_secs(5);
+/// The stderr line [`create_noted`] prints after [`CREATE_NOTE_AFTER`].
+const CREATE_NOTE: &str = "reef: creating the workspace; a create that builds the base cache (the first in a repository, and on overlay or copy each new tree) checks the whole tree out, which can take minutes on a large one";
+
+/// Awaits `call`, calling `note` once if it has not finished within
+/// `after`.
+pub(crate) async fn noted<T>(
+    call: impl Future<Output = T>,
+    after: Duration,
+    note: impl FnOnce(),
+) -> T {
+    tokio::pin!(call);
+    tokio::select! {
+        result = &mut call => result,
+        () = tokio::time::sleep(after) => {
+            note();
+            call.await
+        }
+    }
+}
+
+/// `ws create`'s and `ws run`'s create: [`Ctx::create_with_repo`], saying
+/// on stderr what it waits for once it has run [`CREATE_NOTE_AFTER`]
+/// (#188).
+pub(crate) async fn create_noted(
+    ctx: &Ctx,
+    repo: &RepoArg,
+    request: CreateWorkspaceRequest,
+) -> Result<CreateWorkspaceResponse, CliError> {
+    // Boxed: the create's future is large (`clippy::large_futures`).
+    noted(
+        Box::pin(ctx.create_with_repo(repo, request)),
+        CREATE_NOTE_AFTER,
+        || {
+            ctx.out.note(CREATE_NOTE);
+        },
+    )
+    .await
+}
+
 async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
     let request = CreateWorkspaceRequest {
         owner: args.owner.unwrap_or_else(default_owner),
@@ -731,14 +773,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
         lease_length: lease_length(args.lease)?,
         ..args.target.request()?
     };
-    let response = ctx
-        .call_with_repo(&args.target.repo()?, |repo| {
-            ctx.client.create_workspace(CreateWorkspaceRequest {
-                repo,
-                ..request.clone()
-            })
-        })
-        .await?;
+    let response = create_noted(ctx, &args.target.repo()?, request).await?;
     let created = Created::from_response(&response).ok_or_else(|| missing("workspace"))?;
     note_default_start(ctx, &response.start);
     ctx.out.object(&created)
@@ -751,5 +786,41 @@ pub(crate) fn note_default_start(ctx: &Ctx, start: &str) {
         ctx.out.note(
             "reef: no main, master or trunk bookmark; starting on the root checkout's change (pass --new-on <branch>)",
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #188 test 4: a call still running after `after` is noted once. The
+    /// call finishes only once the note has fired, so the order is forced.
+    #[tokio::test]
+    async fn noted_notes_a_slow_call_once() {
+        let mut count = 0;
+        let (noted_tx, noted_rx) = tokio::sync::oneshot::channel();
+        let value = noted(
+            async {
+                noted_rx.await.expect("the note fired");
+                7
+            },
+            Duration::from_millis(1),
+            || {
+                count += 1;
+                noted_tx.send(()).expect("the call is waiting");
+            },
+        )
+        .await;
+        assert_eq!(value, 7);
+        assert_eq!(count, 1);
+    }
+
+    /// #188 test 5: a call that finishes first is not noted.
+    #[tokio::test]
+    async fn noted_is_silent_for_a_quick_call() {
+        let mut count = 0;
+        let value = noted(async { 7 }, Duration::from_secs(10), || count += 1).await;
+        assert_eq!(value, 7);
+        assert_eq!(count, 0);
     }
 }
