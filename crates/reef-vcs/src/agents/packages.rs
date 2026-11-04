@@ -29,6 +29,11 @@ const REPO: &str = "reef-vcs/reef";
 /// Its URL.
 const REPO_URL: &str = "https://github.com/reef-vcs/reef";
 
+/// What both marketplaces clone a plugin's tree from. Claude Code clones the
+/// `owner/repo` shorthand over SSH, which fails without a GitHub key (0.3.0
+/// and 0.4.0's install line, in a container or on CI); https needs none.
+const CLONE_URL: &str = "https://github.com/reef-vcs/reef.git";
+
 /// The plugins' and the bundle's description.
 const PLUGIN_DESCRIPTION: &str = "Reef workspaces for coding agents: the skill that starts work \
      in an isolated workspace, and Reef's MCP server.";
@@ -440,7 +445,7 @@ fn claude_marketplace(version: &str) -> Json {
                         "source",
                         object(vec![
                             ("source", text("git-subdir")),
-                            ("url", text(REPO)),
+                            ("url", text(CLONE_URL)),
                             ("path", text(Package::ClaudeCode.dir())),
                             ("ref", text(&tag(version))),
                         ]),
@@ -454,7 +459,7 @@ fn claude_marketplace(version: &str) -> Json {
                         "source",
                         object(vec![
                             ("source", text("git-subdir")),
-                            ("url", text(REPO)),
+                            ("url", text(CLONE_URL)),
                             ("path", text(WORKSPACES_DIR)),
                             ("ref", text(&tag(version))),
                         ]),
@@ -481,7 +486,7 @@ fn agents_marketplace(version: &str) -> Json {
                     "source",
                     object(vec![
                         ("source", text("git-subdir")),
-                        ("url", text(&format!("{REPO_URL}.git"))),
+                        ("url", text(CLONE_URL)),
                         ("path", text(Package::AgentPlugins.dir())),
                         ("ref", text(&tag(version))),
                     ]),
@@ -656,6 +661,9 @@ mod tests {
         ] {
             for plugin in json(path)["plugins"].as_array().unwrap() {
                 assert_eq!(plugin["source"]["ref"], format!("v{version}"), "{path}");
+                // A clone that needs no SSH key.
+                assert_eq!(plugin["source"]["url"], CLONE_URL, "{path}");
+                assert!(CLONE_URL.starts_with("https://"), "{CLONE_URL}");
             }
         }
         let (long, _) = guide_text();
