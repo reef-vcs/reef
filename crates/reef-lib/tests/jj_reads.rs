@@ -496,6 +496,33 @@ async fn at_sign_needs_a_workspace() {
     assert_eq!(revset::count(&head, &parsed).unwrap(), 0);
 }
 
+/// A revset nested deeper than jj's parser accepts is refused while
+/// parsing (jj-lib 0.47, jj-vcs/jj#10071); before, it recursed until the
+/// stack overflowed, which aborts the process. Runs on the default test
+/// thread, so a regression aborts this test binary rather than passing.
+#[tokio::test]
+async fn deeply_nested_revsets_are_refused() {
+    let fx = Fixture::new().await;
+    let head = fx.head();
+    let depth = 100_000;
+    for text in [
+        "~".repeat(depth) + "root()",
+        "(".repeat(depth) + "root()" + &")".repeat(depth),
+        "root()".to_owned() + &"+".repeat(depth),
+    ] {
+        let error = revset::parse(&head, &text, &fx.scope()).unwrap_err();
+        assert!(
+            matches!(error, RevisionError::Parse { .. }),
+            "{}…: {error:?}",
+            &text[..16]
+        );
+        assert_eq!(error.kind(), ErrorKind::InvalidArgument);
+    }
+    // A long flat expression is not deep.
+    let text = vec!["root()"; 1000].join(" | ");
+    revset::parse(&head, &text, &fx.scope()).unwrap();
+}
+
 /// One path's content in [`tree_with`].
 enum Entry<'a> {
     File(&'a [u8]),
@@ -511,7 +538,6 @@ async fn tree_with(
     entries: &[(&str, Entry<'_>)],
 ) -> jj_lib::merged_tree::MergedTree {
     use jj_lib::backend::{CopyId, TreeValue};
-    use jj_lib::merge::Merge;
     use jj_lib::repo_path::RepoPathBuf;
     let store = repo.store();
     let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(base.clone());
@@ -531,7 +557,7 @@ async fn tree_with(
             )),
             Entry::Gone => None,
         };
-        builder.set_or_remove(path, value.map_or_else(Merge::absent, Merge::normal));
+        builder.set_or_remove(path, value);
     }
     builder.write_tree().await.unwrap()
 }
@@ -1855,7 +1881,7 @@ async fn walk_after_on_concurrent_heads() {
     let b2 = tx.commit("b2").await.unwrap().op_id().hex();
     let heads_before = oplog::op_heads(&fx.head()).await.unwrap();
     assert_eq!(heads_before.len(), 2);
-    let merged = fx.head().loader().load_at_head().await.unwrap();
+    let merged = fx.head().loader().load_at_head(None).await.unwrap();
     let m = merged.op_id().hex();
     assert_eq!(merged.operation().parent_ids().len(), 2);
 

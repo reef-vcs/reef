@@ -15,14 +15,13 @@ use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
 use jj_lib::default_backend_factories::{
-    default_backend_factories, default_working_copy_factories,
+    default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
 };
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::diff::conflicted_paths;
 use reef_lib::jj::files::{self, Edit, EditAction};
@@ -119,16 +118,18 @@ impl Fixture {
 
     /// The repository as jj itself loads it at head from `main/`.
     async fn jj_head(&self) -> Arc<ReadonlyRepo> {
-        let workspace = Workspace::load(
-            &settings(),
-            self.main.workspace_root(),
-            &default_backend_factories(),
-            &default_working_copy_factories(),
-        )
-        .expect("load workspace");
+        let workspace = default_workspace_loader_factory()
+            .create(self.main.workspace_root())
+            .unwrap()
+            .load(
+                &settings(),
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .expect("load workspace");
         workspace
             .repo_loader()
-            .load_at_head()
+            .load_at_head(None)
             .await
             .expect("load at head")
     }
@@ -506,17 +507,23 @@ async fn two_workspaces_same_change_both_snapshot() {
 /// directory is not a jj repository.
 #[tokio::test]
 async fn jj_cli_lists_reef_workspace() {
-    // The workspace store format and `workspace list` output are checked
-    // against the jj-lib version Reef embeds; another CLI may differ.
+    // Skipped unless `jj` at jj-lib's minor or the one before is on `PATH`:
+    // its workspace store format and `workspace list` output are what Reef
+    // writes for; another CLI may differ.
     let Ok(version) = std::process::Command::new("jj").arg("--version").output() else {
         println!("skipped: jj not on PATH");
         return;
     };
     let version = String::from_utf8_lossy(&version.stdout).into_owned();
-    if !version.trim().starts_with("jj 0.46.") {
-        println!("skipped: jj CLI is {:?}, not 0.46.x", version.trim());
+    if !jj_cli_is_supported(&version) {
+        println!(
+            "skipped: jj CLI is {:?}, not jj-lib {}'s minor or the one before",
+            version.trim(),
+            reef_lib::jj::JJ_LIB_VERSION
+        );
         return;
     }
+    println!("using jj CLI {:?}", version.trim());
     let (mut fx, commit) = Fixture::with_files().await;
     let (_ws, root, _) = fx.create("reef-x", StartPoint::Edit(commit)).await;
     let jj = |dir: &Path, args: &[&str]| {
@@ -1462,4 +1469,21 @@ async fn colocated_repository_imports_git_branches() {
     assert_eq!(imported.failed_refs.len(), 0, "{:?}", imported.failed_refs);
     let resolved = repo.resolve_revision("feat").await.unwrap();
     assert_eq!(resolved.commit_id, commit);
+}
+
+/// Whether `version`, `jj --version`'s output, names a `jj` CLI at jj-lib's
+/// minor ([`JJ_LIB_VERSION`](reef_lib::jj::JJ_LIB_VERSION)) or the one
+/// before it.
+fn jj_cli_is_supported(version: &str) -> bool {
+    fn minor(version: &str) -> Option<(u64, u64)> {
+        let mut parts = version.split('.');
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    }
+    let (Some((lib_major, lib_minor)), Some((major, minor))) = (
+        minor(reef_lib::jj::JJ_LIB_VERSION),
+        version.trim().strip_prefix("jj ").and_then(minor),
+    ) else {
+        return false;
+    };
+    major == lib_major && (minor == lib_minor || minor + 1 == lib_minor)
 }

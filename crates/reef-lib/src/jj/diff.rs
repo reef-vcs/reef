@@ -23,7 +23,6 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf};
 use jj_lib::rewrite::merge_commit_trees;
-use jj_lib::tree_merge::MergeOptions;
 
 use super::files::TreeFile;
 use super::repo::CommitIdHex;
@@ -349,7 +348,7 @@ pub(crate) fn materialize_options(
     Ok(ConflictMaterializeOptions {
         marker_style: ConflictMarkerStyle::Diff,
         marker_len: None,
-        merge: MergeOptions::from_settings(settings).map_err(DiffError::Settings)?,
+        merge: settings.merge_options().map_err(DiffError::Settings)?,
     })
 }
 
@@ -661,7 +660,7 @@ pub async fn changed_paths(
     let store = repo.store();
     let from_tree = store.get_commit_async(&from.to_id()).await?.tree();
     let to_tree = store.get_commit_async(&to.to_id()).await?.tree();
-    let mut stream = from_tree.diff_stream(&to_tree, &EverythingMatcher);
+    let mut stream = from_tree.diff(&to_tree, &EverythingMatcher);
     let mut paths = Vec::new();
     while paths.len() < limit
         && let Some(entry) = stream.next().await
@@ -701,7 +700,7 @@ pub async fn diff_page(
     // skipped, as git skips it, and files are added and deleted.
     let mut copies = CopyRecords::default();
     let mut differ = 0;
-    let mut counting = from_tree.diff_stream(&to_tree, &*matcher);
+    let mut counting = from_tree.diff(&to_tree, &*matcher);
     while differ <= RENAME_LIMIT && counting.next().await.is_some() {
         differ += 1;
     }
@@ -727,7 +726,7 @@ pub async fn diff_page(
         to: to.clone(),
         pairs: (options.pairs && differ <= RENAME_LIMIT).then(Vec::new),
     };
-    let mut stream = from_tree.diff_stream_with_copies(&to_tree, &*matcher, &copies);
+    let mut stream = from_tree.diff_with_copies(&to_tree, &*matcher, &copies);
     while let Some(entry) = stream.next().await {
         if should_stop() {
             // The RPC is gone: `total` no longer matters.
@@ -803,7 +802,7 @@ pub fn conflicted_paths(
     let commit = repo.store().get_commit(&commit.to_id())?;
     let mut paths = Vec::new();
     let mut total = 0;
-    for (path, value) in commit.tree().conflicts() {
+    for (path, value) in futures::executor::block_on_stream(commit.tree().conflicts()) {
         value?;
         if paths.len() < cap {
             paths.push(path.as_internal_file_string().to_owned());

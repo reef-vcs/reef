@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use jj_lib::backend::{CommitId, CopyId, TreeValue};
 use jj_lib::commit::Commit;
-use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId as _;
@@ -174,7 +173,7 @@ async fn tree_with(
             }
             Entry::Submodule => TreeValue::GitSubmodule(store.root_commit_id().clone()),
         };
-        builder.set_or_remove(path, Merge::normal(value));
+        builder.set_or_remove(path, Some(value));
     }
     builder.write_tree().await.unwrap()
 }
@@ -1181,7 +1180,7 @@ async fn walk_and_changed_files() {
         )
         .await,
     );
-    builder.set_or_remove(path("gone.py"), Merge::absent());
+    builder.set_or_remove(path("gone.py"), None);
     let tree = builder.write_tree().await.unwrap();
     let child = tx
         .repo_mut()

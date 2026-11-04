@@ -12,7 +12,7 @@
 /// The jj-lib version Reef is built against, recorded in backup manifests
 /// (R1.18). The workspace pins jj-lib exactly; a test checks this against
 /// `Cargo.lock`.
-pub const JJ_LIB_VERSION: &str = "0.46.0";
+pub const JJ_LIB_VERSION: &str = "0.47.0";
 
 pub mod diff;
 pub mod effects;

@@ -217,15 +217,16 @@ fn outside(root: &Path, description: &str) {
     use jj_lib::default_backend_factories::{
         default_backend_factories, default_working_copy_factories,
     };
-    use jj_lib::workspace::Workspace;
-    let workspace = Workspace::load(
-        &test_settings(),
-        root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
-    let repo = pollster::block_on(workspace.repo_loader().load_at_head()).unwrap();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &test_settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
     let mut tx = repo.start_transaction();
     tx.repo_mut().set_git_ref_target(
         jj_lib::ref_name::GitRefName::new(&format!("refs/reef-test/{description}")),
@@ -433,15 +434,16 @@ fn concurrent(root: &Path) -> (String, String) {
         default_backend_factories, default_working_copy_factories,
     };
     use jj_lib::object_id::ObjectId as _;
-    use jj_lib::workspace::Workspace;
-    let workspace = Workspace::load(
-        &test_settings(),
-        root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
-    let base = pollster::block_on(workspace.repo_loader().load_at_head()).unwrap();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &test_settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let base = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
     let mut ids = Vec::new();
     for side in ["left", "right"] {
         let mut tx = base.start_transaction();
@@ -718,14 +720,15 @@ fn drop_head(root: &Path, dropped: &str, kept: &str) {
         default_backend_factories, default_working_copy_factories,
     };
     use jj_lib::op_store::OperationId;
-    use jj_lib::workspace::Workspace;
-    let workspace = Workspace::load(
-        &test_settings(),
-        root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &test_settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
     pollster::block_on(workspace.repo_loader().op_heads_store().update_op_heads(
         &[OperationId::try_from_hex(dropped).unwrap()],
         &OperationId::try_from_hex(kept).unwrap(),

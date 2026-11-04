@@ -56,16 +56,17 @@ fn with_tx(root: &Path, description: &str, f: impl FnOnce(&mut jj_lib::transacti
     use jj_lib::default_backend_factories::{
         default_backend_factories, default_working_copy_factories,
     };
-    use jj_lib::workspace::Workspace;
     let settings = test_settings();
-    let workspace = Workspace::load(
-        &settings,
-        root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
-    let repo = pollster::block_on(workspace.repo_loader().load_at_head()).unwrap();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
     let mut tx = repo.start_transaction();
     f(&mut tx);
     pollster::block_on(tx.repo_mut().rebase_descendants()).unwrap();
@@ -302,7 +303,6 @@ async fn status_reports_conflicts_and_divergence() {
     let mut merge_id = String::new();
     with_tx(&repo.root, "conflict", |tx| {
         use jj_lib::backend::{CopyId, TreeValue};
-        use jj_lib::merge::Merge;
         use jj_lib::object_id::ObjectId as _;
         use jj_lib::repo::Repo as _;
         use jj_lib::repo_path::RepoPathBuf;
@@ -317,7 +317,7 @@ async fn status_reports_conflicts_and_divergence() {
             let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(base.tree());
             builder.set_or_remove(
                 path,
-                Merge::normal(TreeValue::File {
+                Some(TreeValue::File {
                     id,
                     executable: false,
                     copy_id: CopyId::placeholder(),

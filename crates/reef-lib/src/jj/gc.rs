@@ -277,7 +277,7 @@ impl Repo {
         let mut moved = false;
         let result = self.gc_unlogged(keep_newer, abandoned, &mut moved).await;
         if result.is_err() && moved {
-            match self.repo.loader().load_at_head().await {
+            match self.repo.loader().load_at_head(None).await {
                 Ok(repo) => self.repo = repo,
                 Err(error) => tracing::error!(
                     error = %ErrorChain(&error),
@@ -380,7 +380,7 @@ impl Repo {
             tracing::warn!("the index is not jj's default; it is not rebuilt");
         }
         let reindex_start = Instant::now();
-        self.repo = loader.load_at_head().await?;
+        self.repo = loader.load_at_head(None).await?;
         let reindex = reindex_start.elapsed();
         tracing::info!(
             reindex_ms = u64::try_from(reindex.as_millis()).unwrap_or(u64::MAX),
@@ -388,12 +388,7 @@ impl Repo {
         );
 
         let git_gc_start = Instant::now();
-        let git = self
-            .repo
-            .store()
-            .backend_impl::<GitBackend>()
-            .ok_or(GcError::NotGitBackend)?;
-        git.gc(self.repo.readonly_index().as_index(), keep_newer)?;
+        self.git_gc(keep_newer).await?;
         let mut rewritten: Vec<(OperationIdHex, OperationIdHex)> = rewritten
             .unwrap_or_default()
             .iter()
@@ -411,13 +406,34 @@ impl Repo {
         })
     }
 
+    /// Runs the git backend's GC over the rebuilt index's heads, as jj-lib
+    /// 0.46's `GitBackend::gc(index, …)` collected them itself: commits
+    /// reachable from them stay, and so does any object newer than
+    /// `keep_newer` (jj-lib drops the root commit from the heads).
+    async fn git_gc(&self, keep_newer: SystemTime) -> Result<(), GcError> {
+        let git = self
+            .repo
+            .store()
+            .backend_impl::<GitBackend>()
+            .ok_or(GcError::NotGitBackend)?;
+        let heads: Vec<_> = self
+            .repo
+            .readonly_index()
+            .as_index()
+            .all_heads_for_gc()
+            .map_err(|err| BackendError::Other(err.into()))?
+            .collect();
+        jj_lib::backend::Backend::gc(git, &heads, keep_newer).await?;
+        Ok(())
+    }
+
     /// Loads at head with every user's jj workspace in its view locked or
     /// skipped. The locks are taken before the load GC classifies them at,
     /// so no `jj` command snapshots in between; a workspace added meanwhile
     /// is locked in the next round. Locks nothing if one stays busy.
     async fn hold_checkouts(&self, loader: &RepoLoader) -> Result<Holding, GcError> {
         // Merges divergent operation heads first, so there is one head.
-        let mut at_head = loader.load_at_head().await?;
+        let mut at_head = loader.load_at_head(None).await?;
         let deadline = Instant::now() + CHECKOUT_LOCK_WAIT;
         let mut held: Vec<HeldCheckout> = Vec::new();
         let mut skipped: Vec<CheckoutMove> = Vec::new();
@@ -461,7 +477,7 @@ impl Repo {
                     }
                 }
             }
-            at_head = loader.load_at_head().await?;
+            at_head = loader.load_at_head(None).await?;
         }
         held.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Holding {
@@ -995,7 +1011,7 @@ fn user_workspace_names(repo: &ReadonlyRepo) -> Vec<String> {
 }
 
 /// Writes jj's `checkout` file in `state_path`, naming `op`, as jj-lib
-/// 0.46.0's `CheckoutState::save` does (`local_working_copy.rs:2705`; check
+/// 0.47.0's `CheckoutState::save` does (`local_working_copy.rs:2708`; check
 /// again on a jj-lib upgrade). Keeps the old file's owner and mode, so a
 /// daemon running as root leaves it readable to the user's `jj`. The caller
 /// holds the working-copy lock.
@@ -1032,7 +1048,7 @@ struct Reparented {
     unreachable_count: usize,
 }
 
-/// jj-lib 0.46.0's `op_walk::reparent_range` (`op_walk.rs:403`) for one
+/// jj-lib 0.47.0's `op_walk::reparent_range` (`op_walk.rs:260`) for one
 /// root and one head, returning the old-to-new map it builds and drops.
 /// Operation ids are content hashes, so it writes exactly what jj's would.
 /// Check again on a jj-lib upgrade (`reparent_mapped_matches_jj`).
@@ -1112,7 +1128,7 @@ mod tests {
         }
         let loader = repo.head().loader().clone();
         let head = loader
-            .load_at_head()
+            .load_at_head(None)
             .await
             .expect("load")
             .operation()

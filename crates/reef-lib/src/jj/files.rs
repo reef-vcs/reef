@@ -405,7 +405,8 @@ pub async fn list_files(
             dir,
             after: options.after.as_deref(),
         };
-        for (path, value) in tree.entries_matching(&matcher) {
+        let mut entries = tree.entries_matching(&matcher);
+        while let Some((path, value)) = entries.next().await {
             if !push(&path, &value?) {
                 break;
             }
@@ -753,7 +754,8 @@ impl Overlay<'_> {
             return Ok(true);
         }
         let matcher = PrefixMatcher::new([dir]);
-        for (path, value) in self.base.entries_matching(&matcher) {
+        let mut entries = self.base.entries_matching(&matcher);
+        while let Some((path, value)) = entries.next().await {
             value?;
             if !deleted.contains(&path) {
                 return Ok(true);
@@ -1169,15 +1171,15 @@ pub async fn apply(
     let mut builder = MergedTreeBuilder::new(base.clone());
     for (path, pending) in overlay.entries {
         let value = match pending {
-            Pending::Absent => Merge::absent(),
-            Pending::Value(value) => Merge::normal(value),
+            Pending::Absent => None,
+            Pending::Value(value) => Some(value),
             Pending::Bytes {
                 bytes,
                 executable,
                 copy_id,
             } => {
                 let id = store.write_file(&path, &mut &bytes[..]).await?;
-                Merge::normal(TreeValue::File {
+                Some(TreeValue::File {
                     id,
                     executable,
                     copy_id,
@@ -1434,7 +1436,8 @@ pub fn walk_files_in(
     filter: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<Vec<TreeFile>, FileError> {
     let mut files = Vec::new();
-    for (path, value) in tree.entries_matching(&Filtered(filter, dir)) {
+    let matcher = Filtered(filter, dir);
+    for (path, value) in futures::executor::block_on_stream(tree.entries_matching(&matcher)) {
         files.extend(TreeFile::of(&path, &value?));
     }
     Ok(files)
@@ -1459,7 +1462,7 @@ pub async fn changed_files(
     filter: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<Vec<ChangedFile>, FileError> {
     let matcher = Filtered(filter, "");
-    let mut stream = from.diff_stream(to, &matcher);
+    let mut stream = from.diff(to, &matcher);
     let mut changed = Vec::new();
     while let Some(entry) = stream.next().await {
         let values = entry.values.map_err(FileError::from)?;

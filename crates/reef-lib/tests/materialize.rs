@@ -13,15 +13,15 @@ use std::time::UNIX_EPOCH;
 
 use jj_lib::backend::{CopyId, TreeValue};
 use jj_lib::default_backend_factories::{
-    default_backend_factories, default_working_copy_factories,
+    default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
 };
 use jj_lib::merge::Merge;
+use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::Workspace;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::materialize::{TREE_STATE_FILE, is_tree_key, tree_key, tree_state_entries};
 use reef_lib::jj::settings::{Identity, user_settings};
@@ -146,14 +146,16 @@ async fn materialize_conflicted_tree_has_joined_key() {
 
     // Two sides that both add f.txt with different contents, over a base
     // without it: a three-term conflict.
-    let workspace = Workspace::load(
-        &settings(),
-        &root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
-    let repo = workspace.repo_loader().load_at_head().await.unwrap();
+    let workspace = default_workspace_loader_factory()
+        .create(&root)
+        .unwrap()
+        .load(
+            &settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = workspace.repo_loader().load_at_head(None).await.unwrap();
     let store = repo.store().clone();
     let path = RepoPathBuf::from_internal_string("f.txt").unwrap();
     let file = |id| {
@@ -165,9 +167,16 @@ async fn materialize_conflicted_tree_has_joined_key() {
     };
     let left = store.write_file(&path, &mut &b"left\n"[..]).await.unwrap();
     let right = store.write_file(&path, &mut &b"right\n"[..]).await.unwrap();
-    let mut builder = MergedTreeBuilder::new(store.empty_merged_tree());
-    builder.set_or_remove(path, Merge::from_vec(vec![file(left), None, file(right)]));
-    let tree = builder.write_tree().await.unwrap();
+    let side = async |value| {
+        let mut builder = MergedTreeBuilder::new(store.empty_merged_tree());
+        builder.set_or_remove(path.clone(), value);
+        (builder.write_tree().await.unwrap(), String::new())
+    };
+    let tree = MergedTree::merge_no_resolve(Merge::from_vec(vec![
+        side(file(left)).await,
+        (store.empty_merged_tree(), String::new()),
+        side(file(right)).await,
+    ]));
     assert!(!tree.tree_ids().is_resolved());
     let mut tx = repo.start_transaction();
     let commit = tx

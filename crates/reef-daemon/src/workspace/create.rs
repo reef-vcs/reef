@@ -1056,21 +1056,22 @@ mod tests {
         };
         use jj_lib::merge::Merge;
         use jj_lib::ref_name::RefName;
-        use jj_lib::workspace::Workspace;
 
         let (tmp, repo, commit) = repo_with(&[MAIN, MASTER]).await;
         let other = repo.wc_change().unwrap().commit_id;
         let root = tmp.path().join("repo");
         let settings = settings(&tmp.path().join("state"));
         drop(repo);
-        let workspace = Workspace::load(
-            &settings,
-            &root,
-            &default_backend_factories(),
-            &default_working_copy_factories(),
-        )
-        .unwrap();
-        let loaded = workspace.repo_loader().load_at_head().await.unwrap();
+        let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let loaded = workspace.repo_loader().load_at_head(None).await.unwrap();
         let mut tx = loaded.start_transaction();
         let id = |hex: &CommitIdHex| Some(CommitId::try_from_hex(hex.as_str()).unwrap());
         tx.repo_mut().set_local_bookmark_target(

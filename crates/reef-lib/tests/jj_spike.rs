@@ -38,15 +38,25 @@ fn settings() -> UserSettings {
 }
 
 async fn init_internal_git(root: &Path) {
-    Workspace::init_internal_git(&settings(), root, gix::hash::Kind::Sha1)
-        .await
-        .expect("init internal git repo");
+    Workspace::init_internal_git(
+        &settings(),
+        root,
+        jj_lib::ref_name::WorkspaceName::DEFAULT,
+        gix::hash::Kind::Sha1,
+    )
+    .await
+    .expect("init internal git repo");
 }
 
 async fn init_colocated_git(root: &Path) {
-    Workspace::init_colocated_git(&settings(), root, gix::hash::Kind::Sha1)
-        .await
-        .expect("init colocated git repo");
+    Workspace::init_colocated_git(
+        &settings(),
+        root,
+        jj_lib::ref_name::WorkspaceName::DEFAULT,
+        gix::hash::Kind::Sha1,
+    )
+    .await
+    .expect("init colocated git repo");
 }
 
 async fn open(root: &Path) -> Repo {

@@ -58,16 +58,17 @@ fn set_bookmark(root: &Path, name: &str, commit: &str) {
     };
     use jj_lib::op_store::RefTarget;
     use jj_lib::ref_name::RefName;
-    use jj_lib::workspace::Workspace;
     let settings = test_settings();
-    let workspace = Workspace::load(
-        &settings,
-        root,
-        &default_backend_factories(),
-        &default_working_copy_factories(),
-    )
-    .unwrap();
-    let repo = pollster::block_on(workspace.repo_loader().load_at_head()).unwrap();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
     let mut tx = repo.start_transaction();
     tx.repo_mut().set_local_bookmark_target(
         RefName::new(name),

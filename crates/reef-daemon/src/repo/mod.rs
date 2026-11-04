@@ -454,8 +454,8 @@ impl RepoRegistry {
 }
 
 // `Arc<ReadonlyRepo>` and `MergedTree` cross from repository threads to
-// workspace threads (ADR 0012). jj-lib 0.46.0 declares everything inside them
-// `Send + Sync`; if a bump stops doing so, this fails to compile.
+// workspace threads (ADR 0012). jj-lib (0.47.0) declares everything inside
+// them `Send + Sync`; if a bump stops doing so, this fails to compile.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Arc<ReadonlyRepo>>();

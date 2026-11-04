@@ -346,7 +346,7 @@ fn parse_as(
     text: &str,
     aliases: &RevsetAliasesMap,
     scope: &RevsetScope<'_>,
-    now: &chrono::DateTime<chrono::Local>,
+    now: &jiff::Zoned,
     workspace: &str,
 ) -> Result<Arc<UserRevsetExpression>, RevsetParseError> {
     let converter = RepoPathUiConverter::Fs {
@@ -358,7 +358,7 @@ fn parse_as(
         aliases_map: aliases,
         local_variables: HashMap::new(),
         user_email: scope.user_email,
-        date_pattern_context: (*now).into(),
+        current_time: now.clone(),
         default_ignored_remote: Some(RemoteName::new("git")),
         fileset_aliases_map: &fileset_aliases,
         extensions: &EXTENSIONS,
@@ -390,7 +390,7 @@ pub fn parse(
     let aliases = aliases(repo);
     // One instant for every parse: a relative date (`after:"1 hour ago"`)
     // must resolve alike in the probes, or they would differ without `@`.
-    let now = chrono::Local::now();
+    let now = jiff::Zoned::now();
     let invalid = |error: RevsetParseError| RevisionError::Parse {
         revision: text.to_owned(),
         message: error.to_string(),

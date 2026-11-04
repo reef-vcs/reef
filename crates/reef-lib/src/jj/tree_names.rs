@@ -1,14 +1,15 @@
 //! Refusing trees jj-lib cannot read (RX.01).
 //!
-//! jj-lib 0.46 unwraps `RepoPathComponentBuf::new` on every git tree entry
-//! it reads (`GitBackend::read_tree`), so an entry whose name is empty or
-//! contains `/` panics it. git's porcelain never writes such a name, but a
-//! fetched commit can carry one. The panic happens while the git backend's
-//! mutex is held, which poisons it: every later read through that backend
-//! panics too, for every workspace of the repository, until the daemon
-//! restarts. [`Repo::check_tree_names`] walks a commit's trees with gix,
-//! outside jj's lock, so the daemon can refuse a commit before anything
-//! hands its tree to jj.
+//! A git tree entry whose name is empty or contains `/` cannot become a jj
+//! path. git's porcelain never writes such a name, but a fetched commit can
+//! carry one. jj-lib before 0.47 unwrapped `RepoPathComponentBuf::new` on it
+//! in `GitBackend::read_tree`, panicking while it held the git backend's
+//! mutex and poisoning the store (jj-vcs/jj#10466); 0.47 returns
+//! `BackendError::ReadObject` instead (jj-vcs/jj#10467).
+//! [`Repo::check_tree_names`] walks a commit's trees with gix, outside jj's
+//! lock, so the daemon refuses such a commit with `InvalidArgument`, naming
+//! the entry, before a create, move, store build, GC or registration reads
+//! it, rather than failing partway with jj's read error.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -56,7 +57,7 @@ impl Classify for TreeNameError {
     }
 }
 
-/// Whether jj-lib 0.46 reads a tree entry named `name` without panicking:
+/// Whether jj-lib reads a tree entry named `name`:
 /// `RepoPathComponentBuf::new` refuses an empty name or one with `/`.
 /// Names it reads but will not check out (`.`, `..`, `.git`, `.jj`) fail
 /// the checkout cleanly instead.

@@ -36,7 +36,7 @@ fn settings() -> UserSettings {
 /// `settings()` with every operation stamped `at`.
 fn settings_at(at: SystemTime) -> UserSettings {
     let mut config = settings().config().clone();
-    let stamp = chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339();
+    let stamp = jiff::Timestamp::try_from(at).unwrap().to_string();
     config.add_layer(
         ConfigLayer::parse(
             ConfigSource::User,
