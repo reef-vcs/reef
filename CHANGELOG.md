@@ -2,7 +2,13 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
-## [Unreleased]
+## [0.4.2] - 2026-11-05
+
+Reef on jj-lib 0.47.0. With jj-lib 0.46, a revset nested deeply enough overflowed the parser's stack and aborted the daemon, so one request that takes a revset or revision (`reef log -r` and `ListChanges`, `GetChange`, `GetDiff`, the file reads, the MCP tools), from a local agent or a remote reader, could take it down; 0.47 refuses one nested more than 256 levels. It also carries this project's two upstream fixes for git trees jj cannot represent.
+
+### Upgrading from 0.4.1
+
+Nothing to migrate: the API revision (14) and the database schema (6) are those of 0.4.1, and a `jj` 0.46 or 0.47 CLI works in a repository Reef uses. **Restart the daemon** once `reef ws list` shows no active workspaces (`reef daemon stop`; the next command starts 0.4.2's): the fix is in the daemon, and a 0.4.1 daemon keeps running after the binaries are replaced.
 
 ### Changed
 
