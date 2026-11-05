@@ -20,7 +20,7 @@ just ci      # everything CI runs, in CI order
 
 `just ci` checks the API schema with [buf](https://buf.build/docs/installation) (`brew install bufbuild/buf/buf`, or a release binary on Linux). Building never needs it, nor `protoc`.
 
-`just` with no arguments lists every recipe; read the [justfile](justfile) for what each one does. The pre-commit hook runs rustfmt and clippy; skip it with `git commit --no-verify` or `REEF_SKIP_HOOKS=1` when you need to.
+`just` with no arguments lists every recipe; read the [justfile](justfile) for what each one does. The pre-commit hook runs rustfmt and clippy; skip it with `git commit --no-verify` or `REEF_SKIP_HOOKS=1` when you need to. jj runs no git hooks, so in a jj checkout or a Reef workspace, run `just preflight` before pushing: rustfmt, the doc links, the installer lint and the API schema (each skipped with a warning without shellcheck or buf), cargo deny, clippy, and the agent files. It lints only the platform it runs on and does not run the API schema's breaking check (`just api-breaking`), so CI can still fail where it passed.
 
 `just ci` also lints the installer with [ShellCheck](https://www.shellcheck.net) (`brew install shellcheck` or `apt-get install shellcheck`).
 
@@ -33,7 +33,7 @@ just ci      # everything CI runs, in CI order
 - PR titles lead with the ticket ID and its name, for example `R0.04 jj-lib embedding spike`.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - PRs are squash merged, so each ticket lands as one commit on `main` with the PR description as its body. Push fixes as new commits on the branch; there is no need to rewrite history during review.
-- `main` is protected by a repository ruleset (Settings, Rules), set by hand, not through the API. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `ubuntu-24.04`, `overlayfs`, `synth determinism`, `CLI shape`, `web`, and `web e2e` jobs all succeed. The DCO check runs on every pull request; keep it green, though the ruleset does not require it.
+- `main` is protected by a repository ruleset (Settings, Rules), set by hand, not through the API. Merging requires the `CI passed` check, which succeeds only when the `rustfmt`, `API schema`, `cargo deny`, `clippy`, `ubuntu-24.04`, `overlayfs`, `synth determinism`, `CLI shape`, `web`, `web e2e`, `python` and `typescript` jobs all succeed. On a pull request from a branch of this repository, a failure in one of the first four cancels the rest of the run (a fork's token cannot); run `just preflight` before pushing to catch them in a minute or two instead. The DCO check runs on every pull request; keep it green, though the ruleset does not require it.
 - On a pull request, `macos-15` runs only with the `macos` label: add it to a change to macOS-specific code (the APFS backend, the `FSEvents` watcher), when you open the pull request, since adding any label restarts CI. It runs on `main` after every merge either way, so a macOS failure there is the next thing to fix. Before a release is tagged, `main`'s latest CI run, `macos-15` included, must be green: `release.yml` runs only after the tag is pushed and smoke-tests the binaries rather than running the tests.
 - If a ticket brief and `docs/dev-phases.md` disagree on scope, the brief wins for the implementation; fix `dev-phases.md` in the same PR.
 

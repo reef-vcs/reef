@@ -250,5 +250,17 @@ doc-links:
 # Everything CI runs, in CI order.
 ci: fmt-check api doc-links lint build agent-files installer test doc deny
 
+# Before pushing: rustfmt, the doc links, cargo deny and clippy, which are CI's quick gates and
+# cancel the rest of a pull request's run when they fail, then the agent files and the installer
+# lint. A minute or two warm, against the files in this directory. jj, and so a Reef workspace,
+# runs no git hooks, so the pre-commit hook does not catch these there. Not covered: code compiled
+# only on another platform (clippy on macOS skips the Linux code) and the API schema's breaking
+# check (`just api-breaking`). The API schema and the installer lint need buf and shellcheck, and
+# are skipped with a warning without them; CI still runs both.
+preflight: fmt-check doc-links
+    if command -v shellcheck >/dev/null; then {{just_executable()}} installer-lint; else echo "preflight: shellcheck is not installed, so the installer was not linted" >&2; fi
+    if command -v buf >/dev/null; then {{just_executable()}} api; else echo "preflight: buf is not installed, so the API schema was not checked (brew install bufbuild/buf/buf)" >&2; fi
+    {{just_executable()}} deny lint agent-files
+
 clean:
     cargo clean
