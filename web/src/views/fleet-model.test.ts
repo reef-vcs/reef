@@ -8,7 +8,7 @@ import {
   OperationKind,
   WorkingCopyEffectSchema,
 } from "../gen/reef/api/v1/operations_pb";
-import { WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
+import { Attention, WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
 import { OperationStore } from "../live/operations";
 import { MIN_SPACING_MS } from "../live/paced";
 import { PresenceStore } from "../live/presence";
@@ -190,6 +190,214 @@ describe("FleetModel", () => {
     expect(t.model.getSnapshot().rows!.find((r) => r.id === "w2")!.ended?.word).toBe(
       "reclaimed (lease expired)",
     );
+  });
+
+  describe("a workspace listed as releasing (#212)", () => {
+    const releasing = (id: string, change: string) =>
+      workspace(id, change, { state: WorkspaceState.RELEASING });
+    const released = (id: string, change: string, state = WorkspaceState.RELEASED) =>
+      workspace(id, change, { state });
+    const releaseOp = () =>
+      operation("o-rel", REPO, T, {
+        kind: OperationKind.RELEASE_WORKSPACE,
+        workspaceId: "w2",
+        agent: "ann",
+      });
+    const reads = (t: ReturnType<typeof setup>, id = "w2") =>
+      t.daemon.getCalls.filter((c) => c.workspace === id && c.skipDiskUsage).length;
+    const row = (t: ReturnType<typeof setup>, id = "w2") =>
+      t.model.getSnapshot().rows!.find((r) => r.id === id)!;
+
+    /** The issue's order: the release's operation, then its final state with none. */
+    async function releasedAfterItsOperation(final: WorkspaceState) {
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      expect(row(t).workspace.state).toBe(WorkspaceState.RELEASING);
+      expect(row(t).ended).toBeUndefined();
+      await flush(MIN_SPACING_MS);
+      expect(reads(t)).toBeGreaterThanOrEqual(1);
+      const lists = t.daemon.listCalls.length;
+      t.daemon.workspaces = [workspace("w1", C1)];
+      t.daemon.finals.set("w2", released("w2", C2, final));
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(ids(t.model)).toEqual(["w2", "w1"]);
+      expect(row(t).ended?.operation?.id).toBe("o-rel");
+      expect(t.daemon.listCalls).toHaveLength(lists + 1);
+      // The re-reads stop.
+      const settled = [reads(t), t.daemon.listCalls.length];
+      await flush(10_000);
+      expect([reads(t), t.daemon.listCalls.length]).toEqual(settled);
+      return t;
+    }
+
+    it("settles a release whose operation arrives while it is releasing", async () => {
+      // #212 test 1
+      const t = await releasedAfterItsOperation(WorkspaceState.RELEASED);
+      expect(row(t).ended?.word).toBe("released");
+    });
+
+    it("reads a reclaim's final word too", async () => {
+      // #212 test 3
+      const t = await releasedAfterItsOperation(WorkspaceState.RECLAIMED);
+      expect(row(t).ended?.word).toBe("reclaimed (lease expired)");
+    });
+
+    it("shows a release that rolled back as active", async () => {
+      // #212 test 2
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      expect(row(t).workspace.state).toBe(WorkspaceState.RELEASING);
+      t.daemon.workspaces = [
+        workspace("w2", C2, { attention: Attention.FINAL_SNAPSHOT_FAILED }),
+        workspace("w1", C1),
+      ];
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(row(t).workspace.state).toBe(WorkspaceState.ACTIVE);
+      expect(row(t).workspace.attention).toBe(Attention.FINAL_SNAPSHOT_FAILED);
+      expect(row(t).ended).toBeUndefined();
+      const settled = reads(t);
+      await flush(10_000);
+      expect(reads(t)).toBe(settled);
+    });
+
+    it("spaces the re-reads, one at a time, and stops them with the model", async () => {
+      // #212 test 4
+      const daemon = withTwo();
+      daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      const t = setup({ daemon });
+      await flush();
+      const start = reads(t);
+      for (let i = 0; i < 8; i++) await flush(MIN_SPACING_MS);
+      const over2s = reads(t) - start;
+      expect(over2s).toBeGreaterThanOrEqual(2);
+      expect(over2s).toBeLessThanOrEqual(9);
+      // One in flight: a held read is not joined by another.
+      let release: () => void = () => undefined;
+      t.daemon.holdGet = new Promise((resolve) => {
+        release = resolve;
+      });
+      await flush(MIN_SPACING_MS);
+      const held = reads(t);
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(reads(t)).toBe(held);
+      t.daemon.holdGet = undefined;
+      release();
+      await flush();
+      t.stop();
+      const stopped = reads(t);
+      for (let i = 0; i < 8; i++) await flush(MIN_SPACING_MS);
+      expect(reads(t)).toBe(stopped);
+    });
+
+    it("does not re-read with nothing releasing, or while the stream is not live", async () => {
+      // #212 test 5
+      const t = setup();
+      await flush();
+      await flush(60_000);
+      expect(t.daemon.getCalls.filter((c) => c.skipDiskUsage)).toHaveLength(0);
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      expect(reads(t)).toBeGreaterThanOrEqual(1);
+      t.operations.reset();
+      await flush(MIN_SPACING_MS);
+      const quiet = reads(t);
+      await flush(10_000);
+      expect(reads(t)).toBe(quiet);
+      // The next live frame's refresh starts them again.
+      t.operations.applyFrame(operationsFrame({ live: true, cursor: "c9" }));
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(reads(t)).toBeGreaterThan(quiet);
+    });
+
+    it("keeps re-reading through a failed read and refresh, then settles (review finding 1)", async () => {
+      // #212 test 8: the daemon is briefly unreachable mid-release.
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      t.daemon.failGetWorkspace = daemonError(Code.Unavailable, { reason: "DOWN" });
+      t.daemon.failList = daemonError(Code.Unavailable, { reason: "DOWN" });
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      t.daemon.failGetWorkspace = undefined;
+      t.daemon.failList = undefined;
+      t.daemon.workspaces = [workspace("w1", C1)];
+      t.daemon.finals.set("w2", released("w2", C2));
+      for (let i = 0; i < 4; i++) await flush(MIN_SPACING_MS);
+      expect(row(t).ended?.word).toBe("released");
+    });
+
+    it("retries a failing read, not a refresh (review finding 2)", async () => {
+      // #212 test 9
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      t.daemon.failGetWorkspace = daemonError(Code.Internal, { reason: "BOOM" });
+      const lists = t.daemon.listCalls.length;
+      const before = reads(t);
+      for (let i = 0; i < 40; i++) await flush(MIN_SPACING_MS);
+      expect(t.daemon.listCalls).toHaveLength(lists);
+      expect(reads(t) - before).toBeGreaterThanOrEqual(10);
+    });
+
+    it("ends a releasing workspace the daemon no longer knows as ended (review finding 4)", async () => {
+      // #212 test 10
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      t.daemon.workspaces = [workspace("w1", C1)];
+      t.daemon.failGetWorkspace = daemonError(Code.NotFound, { reason: "WORKSPACE_NOT_FOUND" });
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(row(t).ended?.word).toBe("ended");
+      const settled = reads(t);
+      await flush(10_000);
+      expect(reads(t)).toBe(settled);
+    });
+
+    it("stops on an invalid session, saying so once (review finding 5)", async () => {
+      // #212 test 11
+      const t = setup();
+      await flush();
+      t.daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      t.push(releaseOp());
+      await flush(MIN_SPACING_MS);
+      t.daemon.failGetWorkspace = sessionInvalid();
+      t.daemon.failList = sessionInvalid();
+      await flush(MIN_SPACING_MS);
+      await flush(MIN_SPACING_MS);
+      expect(t.onSessionInvalid).toHaveBeenCalledTimes(1);
+      const stopped = reads(t);
+      await flush(10_000);
+      expect(reads(t)).toBe(stopped);
+    });
+
+    it("never re-reads on a frozen page", async () => {
+      // #212 test 6
+      const daemon = withTwo();
+      daemon.workspaces = [releasing("w2", C2), workspace("w1", C1)];
+      const t = setup({ daemon, at: "abcd" });
+      await flush();
+      expect(row(t).workspace.state).toBe(WorkspaceState.RELEASING);
+      await flush(10_000);
+      expect(t.daemon.getCalls).toHaveLength(0);
+    });
   });
 
   it("keeps the agents' order: by name first, new ones on top, gone ones until hidden", async () => {

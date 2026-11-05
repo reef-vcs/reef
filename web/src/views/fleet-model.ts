@@ -12,8 +12,14 @@
 // that moved between the two shows its id without a badge until the next
 // operation, which the move is. Any operation in the repository asks for a
 // refresh: snapshots, most operations, change a row's commit, last snapshot
-// and file count. Refreshes are paced (live/paced.ts). Nothing is read on a
-// timer.
+// and file count. Refreshes are paced (live/paced.ts).
+//
+// Nothing is read on a timer, but for one case. A release records its last
+// operation before the workspace reaches its final state, which records none,
+// and a release that fails goes back to active without one. So while a
+// workspace is listed as releasing, it is read again (`GetWorkspace`, without
+// disk), paced the same way, until it is not, and then the page refreshes
+// (#212). A failed read is read again, not refreshed.
 //
 // Rows never move: workspaces are listed newest first, so new ones arrive on
 // top; one that ends keeps its row, in place, until the user hides it.
@@ -113,6 +119,8 @@ export class FleetModel {
   private snapshot: FleetSnapshot;
   private readonly notifier: FrameNotifier;
   private readonly paced: Paced;
+  /** Re-reads the workspaces listed as releasing until one is not (#212). */
+  private readonly settling: Paced;
   /** As the route gave it. */
   private readonly repo: string;
   /** The full id, once `GetRepository` answered. */
@@ -150,6 +158,7 @@ export class FleetModel {
   ) {
     this.notifier = new FrameNotifier(frame);
     this.paced = new Paced(() => this.refresh(), now);
+    this.settling = new Paced(() => this.settle(), now);
     this.repo = options.repo;
     this.at = options.at || undefined;
     this.disk = new DiskScheduler(
@@ -205,6 +214,7 @@ export class FleetModel {
       unsubscribeOperations();
       unsubscribePresence();
       this.paced.stop();
+      this.settling.stop();
       this.disk.stop();
       this.closeWindow?.();
     };
@@ -335,6 +345,53 @@ export class FleetModel {
       await this.apply(workspaces.workspaces, workspaces.more, changes, true);
     } catch (thrown) {
       this.fail(thrown);
+    }
+  }
+
+  /**
+   * Reads the workspaces listed as releasing, without disk. When one is no
+   * longer releasing, or the daemon no longer knows it, the page refreshes,
+   * which ends its row or lists it as active again. Otherwise, a read that
+   * failed included, it asks to read them again, spaced: a failed read is
+   * retried, not turned into a refresh, which costs a repository read and may
+   * fail too. An invalid session stops it.
+   */
+  private settle(): Promise<void> | undefined {
+    if (this.stopped) return undefined;
+    if (!this.operations.live) {
+      // As for a refresh: the next live frame refreshes, which asks again.
+      this.waiting = true;
+      return undefined;
+    }
+    const releasing = [...this.listed.values()]
+      .filter((w) => w.state === WorkspaceState.RELEASING)
+      .map((w) => w.id);
+    if (releasing.length === 0) return undefined;
+    return this.readReleasing(releasing);
+  }
+
+  private async readReleasing(ids: string[]) {
+    const answers = await Promise.all(ids.map((id) => this.readSettling(id)));
+    if (this.isStopped() || answers.includes("invalid")) return;
+    if (answers.includes("settled")) this.paced.request();
+    else this.settling.request();
+  }
+
+  private async readSettling(id: string): Promise<"releasing" | "settled" | "failed" | "invalid"> {
+    try {
+      const { workspace } = await this.connection.clients.workspaces.getWorkspace({
+        repo: this.repoId ?? this.repo,
+        workspace: id,
+        skipDiskUsage: true,
+      });
+      return workspace?.state === WorkspaceState.RELEASING ? "releasing" : "settled";
+    } catch (thrown) {
+      const error = reefError(thrown);
+      if (isSessionInvalid(error)) {
+        this.onSessionInvalid();
+        return "invalid";
+      }
+      return error.code === Code.NotFound ? "settled" : "failed";
     }
   }
 
@@ -480,6 +537,9 @@ export class FleetModel {
     this.changes = changes;
     // At an operation nothing is measured: disk is not replayed.
     if (live) this.disk.setWorkspaces(workspaces.map((w) => w.id));
+    if (live && workspaces.some((w) => w.state === WorkspaceState.RELEASING)) {
+      this.settling.request();
+    }
     this.decideWindow();
     this.update({ more, error: null, lastRefreshAt: live ? this.now() : undefined });
     this.publishRows();
@@ -549,8 +609,6 @@ function endedWord(workspace: Workspace): string {
       return "released";
     case WorkspaceState.RECLAIMED:
       return "reclaimed (lease expired)";
-    case WorkspaceState.RELEASING:
-      return "releasing";
     default:
       return "ended";
   }

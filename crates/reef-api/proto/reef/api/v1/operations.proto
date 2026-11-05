@@ -135,7 +135,10 @@ enum OperationKind {
   OPERATION_KIND_SNAPSHOT = 1;
   // A workspace was created.
   OPERATION_KIND_CREATE_WORKSPACE = 2;
-  // A workspace was released or reclaimed and its jj workspace forgotten.
+  // A workspace's jj workspace was forgotten as it was released or reclaimed.
+  // A release or reclaim of a live workspace records it before its state
+  // becomes RELEASED or RECLAIMED, which records no operation: read the
+  // workspace (GetWorkspace) for its final state.
   OPERATION_KIND_RELEASE_WORKSPACE = 3;
   // A workspace was moved to another change.
   OPERATION_KIND_MOVE_WORKSPACE = 4;

@@ -10,6 +10,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- The web UI's workspaces page shows a released workspace as `released`. When the release's last operation reached the page before the workspace's final state, the row kept reading `releasing` until the next operation in the repository. The page now reads a releasing workspace again until it ends, and also shows a release that failed as active again ([#212](https://github.com/reef-vcs/reef/issues/212)).
 - A revset nested more than 256 levels deep is refused as an invalid argument; before, one could overflow the parser's stack and crash the daemon. A diff whose rename detection meets a git tree entry name jj cannot represent fails with an error instead of panicking the read, which reopened the repository ([jj-vcs/jj#10501](https://github.com/jj-vcs/jj/pull/10501)); so does a read of a tree with such an entry, which also panicked inside jj-lib, while holding its git backend's lock, before the repository was reopened ([jj-vcs/jj#10467](https://github.com/jj-vcs/jj/pull/10467)). Both now fail with `INTERNAL` and the path jj could not read.
 
 ## [0.4.1] - 2026-11-04

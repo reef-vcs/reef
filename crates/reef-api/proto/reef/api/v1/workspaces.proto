@@ -105,7 +105,8 @@ enum WorkspaceState {
   WORKSPACE_STATE_UNSPECIFIED = 0;
   // Leased and materialized.
   WORKSPACE_STATE_ACTIVE = 1;
-  // Being released or reclaimed.
+  // Being released or reclaimed. The change to the final state, or back to
+  // ACTIVE when a release fails, records no operation.
   WORKSPACE_STATE_RELEASING = 2;
   // Released by its holder.
   WORKSPACE_STATE_RELEASED = 3;
