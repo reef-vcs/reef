@@ -93,7 +93,7 @@ fi
 
 if [[ $(basename "$0") == job-started.sh ]]; then
     # The sandbox's canary: a port it blocks that answers means the runner is running outside it.
-    for port in $(grep -o 'localhost:[0-9]*' "$(dirname "$0")/runner.sb" 2>/dev/null | cut -d: -f2); do
+    grep -o 'localhost:[0-9]*' "$(dirname "$0")/runner.sb" 2>/dev/null | cut -d: -f2 | while read -r port; do
         if /usr/bin/nc -z -G 1 127.0.0.1 "$port" >/dev/null 2>&1; then
             echo "::warning::localhost:$port answers inside the runner, so its sandbox is off: run scripts/mac-runner.sh install again"
         fi
