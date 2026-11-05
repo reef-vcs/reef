@@ -68,9 +68,7 @@ fn bench(c: &mut Criterion) {
         .unwrap();
     let (daemon, repo) = rt.block_on(TestDaemon::with_synthetic_repo_and(
         Preset::Small,
-        |config| {
-            config.file.watcher.debounce = Duration::from_hours(1);
-        },
+        reef_daemon::testing::no_automatic_snapshots,
     ));
     let state = daemon.handle.state();
     state.history.set_throttle(Duration::ZERO, Duration::ZERO);

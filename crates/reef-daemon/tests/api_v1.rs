@@ -21,7 +21,9 @@ use reef_api::v1::{
     OperationKind, SnapshotKind, move_workspace_request,
 };
 use reef_daemon::client::ClientError;
-use reef_daemon::testing::{TestDaemon, init_synthetic_repo, test_settings};
+use reef_daemon::testing::{
+    TestDaemon, init_synthetic_repo, no_automatic_snapshots, test_settings,
+};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
 use tokio::net::UnixStream;
@@ -363,8 +365,7 @@ async fn head_op(root: &Path) -> String {
 async fn writes_carry_their_operation() {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
         // No watcher snapshot races the explicit ones.
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     let client = &daemon.client;

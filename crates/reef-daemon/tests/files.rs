@@ -25,7 +25,7 @@ use reef_api::v1::{
     TextReplace, UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
 };
 use reef_daemon::client::{Client, ClientError};
-use reef_daemon::testing::{SyntheticRepo, TestDaemon};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
 use tonic::Code;
 
@@ -33,8 +33,7 @@ use tonic::Code;
 /// synthetic repository.
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await
 }

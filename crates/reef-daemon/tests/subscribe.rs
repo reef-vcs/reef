@@ -22,7 +22,9 @@ use reef_api::v1::{
 };
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, init_synthetic_repo, test_settings};
+use reef_daemon::testing::{
+    SyntheticRepo, TestDaemon, init_synthetic_repo, no_automatic_snapshots, test_settings,
+};
 use reef_testing::synth::Preset;
 use tokio::time::Instant;
 use tonic::{Code, Streaming};
@@ -31,8 +33,7 @@ use tonic::{Code, Streaming};
 /// synthetic repository, with the configuration changed by `configure`.
 async fn fixture_with(configure: impl FnOnce(&mut Config)) -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
         configure(config);
     })
     .await

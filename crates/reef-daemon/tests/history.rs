@@ -21,7 +21,7 @@ use reef_api::v1::{
     file_edit,
 };
 use reef_daemon::client::{Client, ClientError};
-use reef_daemon::testing::TestDaemon;
+use reef_daemon::testing::{TestDaemon, no_automatic_snapshots};
 use reef_testing::git::init_repo;
 
 const PARSER: &str = "class Parser:\n    def parse(self):\n        return 1\n";
@@ -35,8 +35,7 @@ struct Fixture {
 
 async fn start(configure: impl FnOnce(&mut reef_daemon::config::Config)) -> Fixture {
     let daemon = TestDaemon::start_with(|config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
         configure(config);
     })
     .await;
@@ -496,13 +495,18 @@ async fn throttle() {
     fx.change_when(&ws.change_id, |c| c.touches_state() == TouchState::Current)
         .await;
     let before = history.computed();
+    let mut last = String::new();
     for i in 0..20 {
-        fx.write(&ws, "a.txt", &format!("{i}\n")).await;
+        last = fx.write(&ws, "a.txt", &format!("{i}\n")).await;
     }
     let busy = history.computed() - before;
     assert!(busy <= 2, "computed {busy} times while busy");
+    // At the last write's commit: until the follower reads the writes, the
+    // settled row from before them is `Current` too (#205).
     let row = fx
-        .change_when(&ws.change_id, |c| c.touches_state() == TouchState::Current)
+        .change_when(&ws.change_id, |c| {
+            c.commit_id == last && c.touches_state() == TouchState::Current
+        })
         .await;
     assert_eq!(row.paths_changed, 1);
     assert!(history.computed() - before <= 3);

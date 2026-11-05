@@ -333,7 +333,9 @@ pub struct WatcherSection {
     /// Default `auto`.
     pub backend: WatcherBackend,
     /// Quiet time after the last event before a snapshot. Default 500 ms;
-    /// shorter than [`WatcherSection::fallback_interval`].
+    /// shorter than [`WatcherSection::fallback_interval`]. The full scan
+    /// after a Linux background attach
+    /// ([`WatcherSection::notify_attach_background`]) does not wait for it.
     #[serde(with = "duration")]
     pub debounce: Duration,
     /// The least time between two snapshots of one workspace. Default 1 s.
@@ -384,9 +386,11 @@ pub struct WatcherSection {
     /// create returns, on the watcher's attach thread, and its first
     /// snapshot once the watch is up is a full scan (R1.32, ADR 0028):
     /// inotify adds one watch per directory, about a second for 8,000
-    /// directories on a CI runner. `false` attaches inside the create, as
-    /// before. Read only on Linux; macOS always attaches inline. Default
-    /// true.
+    /// directories on a CI runner. That scan starts no sooner than
+    /// [`WatcherSection::min_interval`] after the workspace's last snapshot
+    /// (or its create), whatever [`WatcherSection::debounce`] is. `false` attaches inside the
+    /// create, as before. Read only on Linux; macOS always attaches inline.
+    /// Default true.
     pub notify_attach_background: bool,
 }
 

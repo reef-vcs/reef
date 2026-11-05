@@ -22,7 +22,7 @@ use reef_api::v1::{
     file_edit,
 };
 use reef_daemon::client::{Client, ClientError};
-use reef_daemon::testing::TestDaemon;
+use reef_daemon::testing::{TestDaemon, no_automatic_snapshots};
 use reef_symbols::scip::proto as scip;
 use reef_testing::git::init_repo;
 
@@ -43,8 +43,7 @@ struct Fixture {
 
 async fn start(configure: impl FnOnce(&mut reef_daemon::config::Config)) -> Fixture {
     let daemon = TestDaemon::start_with(|config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
         // The history index's worker extracts entries inline too (R2.16),
         // which would make the counts here race it.
         config.file.history.enabled = false;

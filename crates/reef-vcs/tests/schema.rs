@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, init_synthetic_repo, short_tmp};
+use reef_daemon::testing::{
+    SyntheticRepo, TestDaemon, init_synthetic_repo, no_automatic_snapshots, short_tmp,
+};
 use reef_testing::synth::Preset;
 use serde_json::{Value, json};
 
@@ -230,8 +232,7 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
         config.file.remote.enabled = true;
         "127.0.0.1:0".clone_into(&mut config.file.remote.listen);
         config.file.remote.names = vec!["localhost".to_owned()];
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -19,7 +19,7 @@ use reef_api::v1::{
     move_workspace_request,
 };
 use reef_daemon::client::{Client, ClientError};
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, test_settings};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
 use tonic::Code;
@@ -35,8 +35,7 @@ async fn fixture_with(
     configure: impl FnOnce(&mut reef_daemon::config::Config),
 ) -> (TestDaemon, SyntheticRepo) {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
         configure(config);
     })
     .await;
@@ -151,12 +150,8 @@ async fn status_snapshots_first() {
 
     let status = client.get_status(status_request(&ws)).await.unwrap();
     let found = status.workspace_status.as_ref().unwrap();
-    // The index (R2.23); on Linux a walk until the create's background
-    // attach is up.
-    assert!(
-        matches!(found.source(), StatusSource::Index | StatusSource::Walk),
-        "{found:?}"
-    );
+    // The index (R2.23): the fixture attaches watches inside the create.
+    assert_eq!(found.source(), StatusSource::Index, "{found:?}");
     let snapshot = found.snapshot.as_ref().expect("a snapshot was recorded");
     assert_eq!(snapshot.kind(), OperationKind::Snapshot);
     assert_eq!(snapshot.snapshot_kind(), SnapshotKind::Explicit);

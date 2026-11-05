@@ -23,14 +23,13 @@ use std::time::Duration;
 use assert_cmd::Command;
 use assert_cmd::assert::OutputAssertExt as _;
 use reef_api::v1::{self, CreateWorkspaceRequest, create_workspace_request};
-use reef_daemon::testing::{SyntheticRepo, TestDaemon};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
 use serde_json::Value;
 
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await
 }
@@ -273,12 +272,8 @@ async fn status_in_a_workspace_and_outside() {
     };
     assert_eq!(kind_of(&existing), Some("modified".into()), "{files:?}");
     assert_eq!(kind_of("b-new.txt"), Some("added".into()), "{files:?}");
-    // The index (R2.23); on Linux a walk until the create's background
-    // attach is up.
-    assert!(
-        ws_status["source"] == "index" || ws_status["source"] == "walk",
-        "{ws_status}"
-    );
+    // The index (R2.23): the fixture attaches watches inside the create.
+    assert_eq!(ws_status["source"], "index", "{ws_status}");
     assert_eq!(ws_status["snapshot"]["kind"], "snapshot");
     assert_eq!(ws_status["snapshot"]["snapshot_kind"], "explicit");
 
@@ -2312,8 +2307,7 @@ async fn history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn history_text_names_authors() {
     let daemon = TestDaemon::start_with(|config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     daemon

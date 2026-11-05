@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use common::mcp::{Mcp, result_of};
 use reef_api::v1::{self, GetWorkspaceRequest};
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, short_tmp};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, short_tmp};
 use reef_testing::synth::Preset;
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -57,8 +57,7 @@ async fn fixture_with(
     configure: impl FnOnce(&mut reef_daemon::config::Config),
 ) -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
         configure(config);
     })
     .await
