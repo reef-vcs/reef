@@ -2,7 +2,7 @@
 
 All notable changes to Reef. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) once a release exists.
 
-## [0.4.2] - 2026-11-04
+## [0.4.2] - 2026-11-05
 
 Reef on jj-lib 0.47.0. With jj-lib 0.46, a revset nested deeply enough overflowed the parser's stack and aborted the daemon, so one request that takes a revset or revision (`reef log -r` and `ListChanges`, `GetChange`, `GetDiff`, the file reads, the MCP tools), from a local agent or a remote reader, could take it down; 0.47 refuses one nested more than 256 levels. It also carries this project's two upstream fixes for git trees jj cannot represent.
 
