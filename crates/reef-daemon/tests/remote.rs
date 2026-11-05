@@ -24,7 +24,7 @@ use reef_api::v1::{
 use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, TlsFailure, Token};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
-use reef_daemon::testing::{SyntheticRepo, TestDaemon};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_lib::error::Classify as _;
 use reef_testing::synth::Preset;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -743,8 +743,7 @@ async fn create(client: &Client, repo: &SyntheticRepo) -> v1::Workspace {
 async fn remote_repo() -> (TestDaemon, SyntheticRepo, SocketAddr, String) {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
         remote_on(config);
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     let addr = listening(&daemon).await;

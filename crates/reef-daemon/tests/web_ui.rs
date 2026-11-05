@@ -28,7 +28,7 @@ use reef_api::v1::{
 };
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
-use reef_daemon::testing::{SyntheticRepo, TestDaemon};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
 use tonic::body::Body;
 use tonic::codegen::Bytes;
@@ -609,8 +609,7 @@ fn described(frame: &v1::SubscribeOperationsResponse) -> Vec<String> {
 #[expect(clippy::too_many_lines, reason = "one scenario, in its order")]
 async fn streams_over_grpc_web() {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     let ws = create(&daemon.client, &repo).await;

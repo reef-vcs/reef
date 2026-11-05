@@ -21,7 +21,7 @@ use assert_cmd::Command;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use reef_api::v1::RemoteScope;
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, short_tmp};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, short_tmp};
 use reef_testing::synth::Preset;
 use serde_json::Value;
 
@@ -107,8 +107,7 @@ async fn remote_daemon() -> (TestDaemon, SyntheticRepo, String, String) {
         config.file.remote.enabled = true;
         "127.0.0.1:0".clone_into(&mut config.file.remote.listen);
         config.file.remote.names = vec!["localhost".to_owned()];
-        config.file.watcher.debounce = Duration::from_hours(1);
-        config.file.watcher.watched_fallback_interval = Duration::from_hours(1);
+        no_automatic_snapshots(config);
     })
     .await;
     let deadline = Instant::now() + 10 * Duration::from_secs(1);

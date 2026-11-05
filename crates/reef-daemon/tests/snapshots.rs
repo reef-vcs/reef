@@ -878,7 +878,6 @@ async fn attach_fixture() -> (TestDaemon, SyntheticRepo) {
 }
 
 /// The scheduler's snapshot outcomes from now on, as a hook collects them.
-#[cfg(target_os = "linux")]
 fn outcomes(
     daemon: &TestDaemon,
 ) -> std::sync::Arc<std::sync::Mutex<Vec<reef_daemon::snapshot::SnapshotOutcome>>> {
@@ -1105,6 +1104,92 @@ async fn background_attach_off_attaches_in_the_create() {
     })
     .await;
     assert_eq!(attached_lines(&ws), 0);
+}
+
+/// #206 test 1: the full scan after a background attach does not wait for
+/// `watcher.debounce`. It runs `min_interval` after the workspace's last
+/// snapshot, and takes a write the explicit snapshot before it missed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_attach_scan_does_not_wait_for_the_debounce() {
+    let (daemon, repo) = fixture_with(|config| {
+        let watcher = &mut config.file.watcher;
+        watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        watcher.debounce = Duration::from_hours(1);
+        watcher.fallback_interval = Duration::from_hours(2);
+        watcher.watched_fallback_interval = Duration::from_hours(2);
+    })
+    .await;
+    let seen = outcomes(&daemon);
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_attaches();
+    let ws = create(&daemon, &repo, None).await;
+    assert_eq!(ws.watch_state(), WatchState::Attaching);
+    write(&ws, "a.txt", "a\n");
+    let explicit = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(tree_has(&repo.root, &explicit.commit_id, "a.txt").await);
+    write(&ws, "late.txt", "late\n");
+    drop(hold);
+    let bound = daemon.config.file.watcher.min_interval + Duration::from_secs(3);
+    let scan = outcome_where(&seen, &ws, bound, "the attach's full scan", |outcome| {
+        outcome.kind == reef_daemon::snapshot::SnapshotKind::Watcher && outcome.changed
+    })
+    .await;
+    assert!(!scan.narrowed, "the attach's snapshot is a full scan");
+    assert!(tree_has(&repo.root, scan.commit_id.as_str(), "late.txt").await);
+}
+
+/// #206 test 2: under `no_automatic_snapshots` nothing snapshots a
+/// workspace but the test, though its watch is up and sees the writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_automatic_snapshots_takes_none() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(
+        Preset::Small,
+        reef_daemon::testing::no_automatic_snapshots,
+    )
+    .await;
+    let seen = outcomes(&daemon);
+    let scheduler = daemon.handle.state().manager.scheduler();
+    // A no-op once attaches are inline: what the helper is for.
+    let hold = scheduler.hold_attaches();
+    let ws = create(&daemon, &repo, None).await;
+    // On Linux this is the guard: a background attach would still be
+    // `attaching` here, held, and its full scan would follow the release.
+    assert!(common::is_watched(&ws), "{:?}", ws.watch_state());
+    write(&ws, "a.txt", "a\n");
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    write(&ws, "late.txt", "late\n");
+    drop(hold);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    write(&ws, "later.txt", "later\n");
+    // Past `min_interval` and the scheduler's tick.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let id = id_of(&ws);
+    let watcher_snapshots: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|outcome| {
+            outcome.workspace == id && outcome.kind == reef_daemon::snapshot::SnapshotKind::Watcher
+        })
+        .cloned()
+        .collect();
+    assert!(watcher_snapshots.is_empty(), "{watcher_snapshots:?}");
+    let (paths, _) = scheduler.journals().journal_of(id).unwrap();
+    for file in ["late.txt", "later.txt"] {
+        assert!(
+            paths.iter().any(|path| path.ends_with(file)),
+            "{file}: {paths:?}"
+        );
+    }
 }
 
 /// R1.32, 7: workspaces loaded at daemon start attach inline: right after

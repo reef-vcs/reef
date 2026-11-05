@@ -23,6 +23,19 @@ use crate::daemon::{Daemon, DaemonHandle};
 /// full.
 const MAX_NEW_FILE_SIZE: u64 = 16 << 20;
 
+/// Turns off every automatic snapshot, so a test's snapshots are its own:
+/// no debounced watcher snapshot, no fallback or full-scan timer, and no
+/// full scan after a Linux background attach (R1.32, ADR 0028), which is
+/// not debounced. Watches attach inside `Create`, as on macOS (#206).
+pub fn no_automatic_snapshots(config: &mut Config) {
+    let watcher = &mut config.file.watcher;
+    watcher.debounce = Duration::from_hours(1);
+    // Above the debounce, as `validate` requires.
+    watcher.fallback_interval = Duration::from_hours(2);
+    watcher.watched_fallback_interval = Duration::from_hours(2);
+    watcher.notify_attach_background = false;
+}
+
 /// A running daemon with its own state directory and a connected client.
 #[derive(Debug)]
 pub struct TestDaemon {
