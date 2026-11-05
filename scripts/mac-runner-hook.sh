@@ -43,12 +43,26 @@ sweep() {
     rm -rf "$@" 2>/dev/null
 }
 
-# Processes a failed, cancelled or timed-out job leaked: scratch daemons and test binaries, all
-# started from a checkout under _work. The runner itself lives outside it.
-pkill -9 -u "$uid" -f "$work/" 2>/dev/null
-pkill -9 -u "$uid" -x reef-daemon 2>/dev/null
-pkill -9 -u "$uid" -x reef 2>/dev/null
-pkill -9 -u "$uid" -x watchman 2>/dev/null
+# Everything below acts on all of the user's processes and files: reefci's only.
+if [[ $(id -un) != reefci ]]; then
+    echo "mac-runner-hook.sh: not reefci; nothing cleaned" >&2
+    exit 0
+fi
+
+# Every process of reefci's but this hook and the runner it runs under (its ancestors: the worker,
+# the listener, run.sh), so nothing a job started, under any name, outlives it. The list is read
+# first and the kills are builtins, so no process of the hook's own is in it when they run.
+keep=" $$ "
+pid=$$
+while :; do
+    pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+    [[ -n $pid && $pid -gt 1 ]] || break
+    keep+="$pid "
+done
+mine=$(ps -axo pid=,uid= | awk -v uid="$uid" '$2 == uid { print $1 }')
+for pid in $mine; do
+    [[ $keep == *" $pid "* ]] || kill -9 "$pid" 2>/dev/null
+done
 
 # Scratch directories, including tests' whose cleanup a kill skipped (some are mode 000). The
 # daemon tests put theirs in /tmp, for short socket paths. .NET's own sockets in TMPDIR stay.
@@ -77,8 +91,14 @@ if (( before < min_free_gb )); then
     echo "::warning::${before} GB was free on the runner's disk, now $(free_gb) GB: removed every target/, the tool cache, caches and unpinned toolchains, so this build is cold"
 fi
 
-# Keep the Mac awake for the job, on battery too; caffeinate ends with the job's worker.
 if [[ $(basename "$0") == job-started.sh ]]; then
+    # The sandbox's canary: a port it blocks that answers means the runner is running outside it.
+    for port in $(grep -o 'localhost:[0-9]*' "$(dirname "$0")/runner.sb" 2>/dev/null | cut -d: -f2); do
+        if /usr/bin/nc -z -G 1 127.0.0.1 "$port" >/dev/null 2>&1; then
+            echo "::warning::localhost:$port answers inside the runner, so its sandbox is off: run scripts/mac-runner.sh install again"
+        fi
+    done
+    # Keep the Mac awake for the job, on battery too; caffeinate ends with the job's worker.
     worker=$(pgrep -u "$uid" -x Runner.Worker | head -1)
     [[ -n $worker ]] && /usr/bin/caffeinate -i -w "$worker" >/dev/null 2>&1 &
 fi

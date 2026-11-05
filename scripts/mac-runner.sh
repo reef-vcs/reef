@@ -7,13 +7,15 @@
 #
 # The runner runs from a LaunchDaemon as `reefci`, a hidden system-range user with its own group
 # and no password: no login session is needed, and it is outside `staff`, so jobs cannot read the
-# owner's home, keychain, SSH keys, toolchains or Reef daemon. The repository is public. ci.yml
+# owner's home, keychain, SSH keys, toolchains or Reef daemon. A sandbox keeps them from the
+# owner's local services (Postgres, MongoDB, Ollama and the like), which accept any local user,
+# and the job hook kills everything a job started once it ends. The repository is public. ci.yml
 # sends pull requests from forks, and Dependabot's, to GitHub's runners, and since a pull
 # request's workflow file comes from its own branch, the job hook (mac-runner-hook.sh) refuses
-# them here too. Root writes only outside reefci's home (the hook, the LaunchDaemon, the log), so
-# a job cannot redirect those writes. Running `install` again (no token needed once registered)
-# updates the hook and the LaunchDaemon, stopping a job that is running; the runner updates
-# itself. `uninstall` keeps the user and its home (target/ and toolchains):
+# them here too. Root writes only outside reefci's home (the hooks, the sandbox profile, the
+# LaunchDaemon, the log), so a job cannot redirect those writes. Running `install` again (no
+# token needed once registered) updates all of those, stopping a job that is running; the
+# runner updates itself. `uninstall` keeps the user and its home (target/ and toolchains):
 # `sysadminctl -deleteUser reefci` and `dscl . delete /Groups/reefci` remove them.
 set -euo pipefail
 
@@ -25,6 +27,11 @@ plist=/Library/LaunchDaemons/$label.plist
 hooks=/usr/local/libexec/reef-runner
 log=/var/log/reef-runner.log
 repo_url=https://github.com/reef-vcs/reef
+# Services on this Mac that accept any local connection, closed to the runner by its sandbox
+# (below): Postgres (and its socket in /tmp), MongoDB, Redis, MySQL, Ollama, LM Studio, and the
+# owner's Reef daemon's TCP listener. No test uses these ports; their own daemons take port 0.
+blocked_ports="5432 27017 6379 3306 11434 1234 7461"
+blocked_sockets='^/private/tmp/\.s\.PGSQL\. ^/private/tmp/mongodb- ^/private/tmp/redis'
 # actions/runner's release; its notes list the sha256 of each tarball.
 version=2.338.2
 sha256=25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388
@@ -128,6 +135,19 @@ touch "$log"
 chown "$user:$user" "$log"
 chmod 0640 "$log"
 
+# The runner and everything it starts run in a sandbox that allows everything but connections to
+# the owner's local services. Separate users already keep files apart; these listen to anyone.
+{
+    echo '(version 1)'
+    echo '(allow default)'
+    echo '(deny network-outbound'
+    for port in $blocked_ports; do echo "    (remote ip \"localhost:$port\")"; done
+    for socket in $blocked_sockets; do echo "    (remote unix-socket (regex #\"$socket\"))"; done
+    echo ')'
+} >"$hooks/runner.sb"
+chown root:wheel "$hooks/runner.sb"
+chmod 0644 "$hooks/runner.sb"
+
 # PATH leaves out Homebrew and /usr/local/bin, so jobs see the system's tools and their own.
 # ProcessType Interactive: launchd would otherwise run a daemon at background priority, and the
 # timing-sensitive tests would see a slower machine than the developer's. launchd's default soft
@@ -140,7 +160,7 @@ cat >"$plist" <<EOF
     <key>Label</key><string>$label</string>
     <key>UserName</key><string>$user</string>
     <key>GroupName</key><string>$user</string>
-    <key>ProgramArguments</key><array><string>$dir/run.sh</string></array>
+    <key>ProgramArguments</key><array><string>/usr/bin/sandbox-exec</string><string>-f</string><string>$hooks/runner.sb</string><string>$dir/run.sh</string></array>
     <key>WorkingDirectory</key><string>$dir</string>
     <key>EnvironmentVariables</key>
     <dict>
