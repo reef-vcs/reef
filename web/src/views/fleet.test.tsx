@@ -5,6 +5,7 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeaseSchema, Attention, WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
+import { OperationKind } from "../gen/reef/api/v1/operations_pb";
 import { PresenceEndReason, PresenceKind } from "../gen/reef/api/v1/presence_pb";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
@@ -253,6 +254,35 @@ describe("Fleet", () => {
     fireEvent.click(screen.getByRole("button", { name: "Hide 1 ended" }));
     await flush();
     expect(within(table("Workspaces")).getAllByRole("row")).toHaveLength(2);
+  });
+
+  it("turns a releasing row into released without another operation", async () => {
+    // #212 test 7: the release's operation arrives while it is still releasing.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const t = setup();
+    await flush();
+    const w2 = (init: Parameters<typeof workspace>[2]) => workspace("w2000000", C2, init);
+    t.daemon.workspaces = t.daemon.workspaces.map((w) =>
+      w.id === "w2000000" ? w2({ state: WorkspaceState.RELEASING }) : w,
+    );
+    t.push(
+      operation("o-rel", REPO, T, {
+        kind: OperationKind.RELEASE_WORKSPACE,
+        workspaceId: "w2000000",
+        agent: "ann",
+      }),
+    );
+    await afterSpacing();
+    const rows = () => within(table("Workspaces")).getAllByRole("row").slice(1);
+    expect(rows()[0]!.textContent).toContain(" releasing");
+    const count = rows().length;
+    t.daemon.workspaces = t.daemon.workspaces.filter((w) => w.id !== "w2000000");
+    t.daemon.finals.set("w2000000", w2({ state: WorkspaceState.RELEASED }));
+    await afterSpacing();
+    await afterSpacing();
+    expect(rows()[0]!.textContent).toContain("released");
+    expect(rows()[0]!.textContent).not.toContain(" releasing");
+    expect(rows()).toHaveLength(count);
   });
 
   it("shows the workspace pane with Measure again, and a message for an unknown selection", async () => {
