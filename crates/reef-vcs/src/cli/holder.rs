@@ -495,25 +495,26 @@ mod tests {
 
     /// A process named `name` among `root`'s children and grandchildren.
     fn descendants_named(root: i32, name: &str) -> Option<i32> {
-        let out = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,comm="])
-            .output()
-            .ok()?;
-        let rows: Vec<(i32, i32, String)> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let child = parts.next()?.parse().ok()?;
-                let parent = parts.next()?.parse().ok()?;
-                let comm: String = parts.collect::<Vec<_>>().join(" ");
-                Some((child, parent, comm))
-            })
-            .collect();
-        let children = |of: i32| rows.iter().filter(move |row| row.1 == of);
+        let named = pgrep(&["-x", name]);
+        let children = |of: i32| pgrep(&["-P", &of.to_string()]);
         children(root)
-            .flat_map(|child| std::iter::once(child).chain(children(child.0)))
-            .find(|row| row.2.rsplit('/').next() == Some(name))
-            .map(|row| row.0)
+            .into_iter()
+            .flat_map(|child| std::iter::once(child).chain(children(child)))
+            .find(|pid| named.contains(pid))
+    }
+
+    /// The pids `pgrep` lists. Not `ps`: macOS's is setuid root, which a
+    /// sandboxed test (the self-hosted runner's) cannot exec.
+    fn pgrep(args: &[&str]) -> Vec<i32> {
+        Command::new("pgrep").args(args).output().map_or_else(
+            |_| Vec::new(),
+            |out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|line| line.trim().parse().ok())
+                    .collect()
+            },
+        )
     }
 
     /// R2.26 test 5: a record round-trips, and a stale one is removed.

@@ -204,20 +204,41 @@ fn running(pid: i64) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
-    // A zombie answers kill(0); `ps` tells it apart where it exists.
-    if kill(Pid::from_raw(pid), None).is_err() {
-        return false;
-    }
-    match std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-    {
-        Ok(out) => {
-            let stat = String::from_utf8_lossy(&out.stdout);
-            !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
-        }
-        Err(_) => true,
-    }
+    // A zombie answers kill(0), so its status tells it apart.
+    kill(Pid::from_raw(pid), None).is_ok() && !zombie(pid)
+}
+
+/// Whether `pid` is a zombie, from the kernel. Not `ps`: macOS's is setuid
+/// root, which a sandboxed test (the self-hosted runner's) cannot exec.
+#[cfg(target_os = "macos")]
+fn zombie(pid: i32) -> bool {
+    let mut bsd = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).unwrap();
+    #[allow(
+        unsafe_code,
+        reason = "proc_pidinfo writes at most `size` bytes into the buffer it is given"
+    )]
+    let (written, bsd) = unsafe {
+        let written = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            bsd.as_mut_ptr().cast(),
+            size,
+        );
+        (written, bsd.assume_init())
+    };
+    written == size && bsd.pbi_status == libc::SZOMB
+}
+
+/// Whether `pid` is a zombie: `/proc/<pid>/stat`'s state, after the
+/// parenthesized name.
+#[cfg(not(target_os = "macos"))]
+fn zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
 }
 
 /// Waits for a follower's record of `id`, showing its log if none comes.

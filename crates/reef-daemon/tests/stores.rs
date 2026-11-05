@@ -525,23 +525,16 @@ async fn build_failure_keeps_failed_dir() {
     assert!(build(&daemon, &repo).await.sealed);
 }
 
-/// The processes whose command line is `command`, as `ps` lists them;
-/// empty if none. Exact, so a shell whose script mentions it does not
-/// count.
+/// The pids of the processes whose command line is `command`, as `pgrep`
+/// lists them; empty if none. Exact, so a shell whose script mentions it
+/// does not count. Not `ps`: macOS's is setuid root, which a sandboxed
+/// test (the self-hosted runner's) cannot exec.
 fn running(command: &str) -> String {
-    let output = std::process::Command::new("ps")
-        .args(["-axo", "pid=,pgid=,command="])
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", "-x", "--", command])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| {
-            let mut fields = line.split_whitespace();
-            let (_, _) = (fields.next(), fields.next());
-            fields.collect::<Vec<_>>().join(" ") == command
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 // 9

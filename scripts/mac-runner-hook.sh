@@ -52,14 +52,19 @@ fi
 # Every process of reefci's but this hook and the runner it runs under (its ancestors: the worker,
 # the listener, run.sh), so nothing a job started, under any name, outlives it. The list is read
 # first and the kills are builtins, so no process of the hook's own is in it when they run.
+# Not ps: it is setuid root, and the sandbox (runner.sb) cannot exec a setuid program. lsof and
+# pgrep are not; -a, since pgrep leaves out its own ancestors otherwise, this hook among them.
 keep=" $$ "
 pid=$$
 while :; do
-    pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+    pid=$(/usr/sbin/lsof -a -p "$pid" -d cwd -FR 2>/dev/null | sed -n 's/^R//p')
     [[ -n $pid && $pid -gt 1 ]] || break
     keep+="$pid "
 done
-mine=$(ps -axo pid=,uid= | awk -v uid="$uid" '$2 == uid { print $1 }')
+mine=" $(/usr/bin/pgrep -a -u "$uid" | tr '\n' ' ')"
+if [[ $mine != *" $$ "* || $keep != *" $PPID "* ]]; then
+    echo "::warning::the runner's job hook could not list reefci's processes, so a previous job's may still be running: see scripts/mac-runner-hook.sh"
+fi
 for pid in $mine; do
     [[ $keep == *" $pid "* ]] || kill -9 "$pid" 2>/dev/null
 done
