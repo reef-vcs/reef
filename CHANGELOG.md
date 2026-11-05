@@ -4,13 +4,24 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Fixed
+
+- The web UI's workspaces page shows a released workspace as `released`. When the release's last operation reached the page before the workspace's final state, the row kept reading `releasing` until the next operation in the repository. The page now reads a releasing workspace again until it ends, and also shows a release that failed as active again ([#212](https://github.com/reef-vcs/reef/issues/212)).
+
+## [0.4.2] - 2026-11-05
+
+Reef on jj-lib 0.47.0. With jj-lib 0.46, a revset nested deeply enough overflowed the parser's stack and aborted the daemon, so one request that takes a revset or revision (`reef log -r` and `ListChanges`, `GetChange`, `GetDiff`, the file reads, the MCP tools), from a local agent or a remote reader, could take it down; 0.47 refuses one nested more than 256 levels. It also carries this project's two upstream fixes for git trees jj cannot represent.
+
+### Upgrading from 0.4.1
+
+Nothing to migrate: the API revision (14) and the database schema (6) are those of 0.4.1, and a `jj` 0.46 or 0.47 CLI works in a repository Reef uses. **Restart the daemon** once `reef ws list` shows no active workspaces (`reef daemon stop`; the next command starts 0.4.2's): the fix is in the daemon, and a 0.4.1 daemon keeps running after the binaries are replaced.
+
 ### Changed
 
 - Reef is built on jj-lib 0.47.0 (from 0.46.0). Nothing to migrate: jj 0.47 keeps 0.46's on-disk formats, so a `jj` 0.46 CLI keeps working in a repository Reef uses, and the API revision (14) and database schema (6) are unchanged. Date patterns in revsets that name a time on a day with a daylight-saving change (`after:"2024-03-10 03:30"`) use that time's UTC offset, not the one at the start of the day, which put times after the change an hour off.
 
 ### Fixed
 
-- The web UI's workspaces page shows a released workspace as `released`. When the release's last operation reached the page before the workspace's final state, the row kept reading `releasing` until the next operation in the repository. The page now reads a releasing workspace again until it ends, and also shows a release that failed as active again ([#212](https://github.com/reef-vcs/reef/issues/212)).
 - A revset nested more than 256 levels deep is refused as an invalid argument; before, one could overflow the parser's stack and crash the daemon. A diff whose rename detection meets a git tree entry name jj cannot represent fails with an error instead of panicking the read, which reopened the repository ([jj-vcs/jj#10501](https://github.com/jj-vcs/jj/pull/10501)); so does a read of a tree with such an entry, which also panicked inside jj-lib, while holding its git backend's lock, before the repository was reopened ([jj-vcs/jj#10467](https://github.com/jj-vcs/jj/pull/10467)). Both now fail with `INTERNAL` and the path jj could not read.
 
 ## [0.4.1] - 2026-11-04

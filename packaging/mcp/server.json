@@ -3,7 +3,7 @@
   "name": "io.github.reef-vcs/reef",
   "title": "Reef",
   "description": "Version control for fleets of coding agents: isolated workspaces, status, diff and history.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "repository": {
     "url": "https://github.com/reef-vcs/reef",
     "source": "github"
