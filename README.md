@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-3/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -124,7 +124,7 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 
 ## Design
 
-The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and each phase's tickets have implementation briefs under [docs/dev-tickets](docs/dev-tickets/phase-2/README.md), written so that an agent can pick one up and build it.
+The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and each phase's tickets have implementation briefs under [docs/dev-tickets](docs/dev-tickets/phase-3/README.md), written so that an agent can pick one up and build it.
 
 Architecture decisions are recorded in [docs/adr](docs/adr/README.md).
 
