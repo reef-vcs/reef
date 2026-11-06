@@ -15,6 +15,7 @@ use reef_client::json::{
     RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status, Store, SymbolOccurrence,
     SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
+use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
@@ -287,6 +288,56 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         ..row(&["evidence", "show"], object::<Evidence>)
     },
     row(&["evidence", "key", "generate"], object::<EvidenceKey>),
+    view(
+        &["identity", "create"],
+        object::<Identity>,
+        object::<brief::Identity<'static>>,
+    ),
+    view(
+        &["identity", "list"],
+        list::<Identity>,
+        list::<brief::Identity<'static>>,
+    ),
+    view(
+        &["identity", "show"],
+        object::<Identity>,
+        object::<brief::Identity<'static>>,
+    ),
+    view(
+        &["identity", "revoke"],
+        object::<Identity>,
+        object::<brief::Identity<'static>>,
+    ),
+    OutputRow {
+        note: Some(
+            "the private key, a credential, only as JSON (-o json, -o brief, or a pipe); with -o text it is refused before a key is issued",
+        ),
+        ..row(
+            &["identity", "session", "issue"],
+            object::<SessionKeyIssued>,
+        )
+    },
+    view(
+        &["identity", "session", "list"],
+        list::<SessionKey>,
+        list::<brief::SessionKey<'static>>,
+    ),
+    view(
+        &["identity", "session", "show"],
+        object::<SessionKey>,
+        object::<brief::SessionKey<'static>>,
+    ),
+    view(
+        &["identity", "session", "revoke"],
+        list::<SessionKey>,
+        list::<brief::SessionKey<'static>>,
+    ),
+    row(&["identity", "authority", "show"], list::<Authority>),
+    row(&["identity", "authority", "revoke"], object::<Authority>),
+    row(
+        &["identity", "authority", "rotate"],
+        object::<AuthorityRotated>,
+    ),
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

@@ -23,6 +23,11 @@ pub(crate) enum Rule {
     /// presence, symbol uploads, evidence and artifacts in every registered
     /// repository.
     None,
+    /// Session keys (R3.03): only for the operator identity the caller's
+    /// token is linked to, never `human`, and none for a token with no
+    /// link. The handler resolves the identity from the token
+    /// (`crate::identity::issue`).
+    LinkedIdentity,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -56,6 +61,10 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ("/reef.api.v1.SymbolService/UploadScipDocuments", Rule::None),
     ("/reef.api.v1.EvidenceService/AddEvidence", Rule::None),
     ("/reef.api.v1.ArtifactService/UploadArtifact", Rule::None),
+    (
+        "/reef.api.v1.IdentityService/IssueSessionKey",
+        Rule::LinkedIdentity,
+    ),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

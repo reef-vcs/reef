@@ -45,16 +45,17 @@ Reef stores every envelope in one canonical form: compact JSON with exactly `pay
 
 ## Keys
 
-`reef evidence key generate <path>` writes an ed25519 private key to `<path>` (PKCS#8 PEM, mode 0600, never overwriting a file) and its public key to `<path>.pub` (SPKI PEM), and prints the key id. It is a local key for scripts and trials until session keys bound to identities arrive (R3.03). `reef evidence add --key` also reads OpenSSL 3's `openssl genpkey -algorithm ed25519` keys, and refuses a key file its group or others can read. macOS's `/usr/bin/openssl` is LibreSSL, which cannot make ed25519 keys; Homebrew's `openssl@3` can.
+By default `reef evidence add` signs with a session key (R3.03): a fresh ed25519 key, generated in the command, certified by the daemon for an operator identity (yours by default, `--identity`, or through a remote daemon its token's) as `--actor` (`agent` by default, `executor`, or `human`), valid five minutes, used for the one envelope and never written anywhere. Evidence signed so reads `bound` to that identity. [docs/identity.md](identity.md) has identities, session keys, what each status means, and how a script in another language gets a key.
+
+`reef evidence key generate <path>` writes a bare ed25519 key instead, for scripts and trials: a private key to `<path>` (PKCS#8 PEM, mode 0600, never overwriting a file) and its public key to `<path>.pub` (SPKI PEM), and prints the key id. Evidence signed with `--key` reads `unbound`: no identity answers for it. `reef evidence add --key` also reads OpenSSL 3's `openssl genpkey -algorithm ed25519` keys, and refuses a key file its group or others can read. macOS's `/usr/bin/openssl` is LibreSSL, which cannot make ed25519 keys; Homebrew's `openssl@3` can.
 
 ## Adding evidence
 
 From a workspace, `reef evidence add` reads the revision (`@` by default, snapshotting first), builds the claim about its tree, signs it, and sends it with the commit id it read:
 
 ```sh
-reef evidence key generate ~/.config/reef/ci.pem
 cargo test 2>&1 | tee test.log
-reef evidence add --kind test --result pass --key ~/.config/reef/ci.pem --artifact test.log
+reef evidence add --kind test --result pass --actor executor --artifact test.log
 reef evidence list -r @
 ```
 
@@ -81,6 +82,7 @@ printf '{"payload":"%s","payloadType":"%s","signatures":[{"keyid":"%s","sig":"%s
 ```
 
 ```sh
+reef evidence key generate ~/.config/reef/ci.pem
 tree=$(reef show -o json | jq -r .tree_id)
 sh sign.sh ~/.config/reef/ci.pem "$tree" lint pass > envelope.json
 reef evidence add --envelope envelope.json --public-key ~/.config/reef/ci.pem.pub -r @
@@ -90,7 +92,7 @@ With `-r`, the evidence is linked to that change as well as to its tree, and Ree
 
 ## Reading evidence
 
-`reef evidence list` lists the repository's evidence, newest first; `-r <rev>` the evidence on a revision's tree, `--tree <id>` on a tree, and `--change <id>` the evidence added for a change on any tree it had, each marked `(not current)` once the change's tree has moved on. `reef evidence show <id>` prints one object, its statement exactly as signed, and `signature: valid` or `invalid`, checked as it is read. Every field Reef reports is read from the signed payload, so a stored row changed behind the daemon reads `invalid` with what was signed; adding the genuine envelope again repairs it. `--key` filters take the full 64-digit key id. It exits 0 either way: `invalid` means the stored object was changed, and is data about it.
+`reef evidence list` lists the repository's evidence, newest first; `-r <rev>` the evidence on a revision's tree, `--tree <id>` on a tree, and `--change <id>` the evidence added for a change on any tree it had, each marked `(not current)` once the change's tree has moved on. `reef evidence show <id>` prints one object, its statement exactly as signed, `signature: valid` or `invalid`, checked as it is read, and `identity:`, whom the key is bound to and its status when the daemon first saw the object ([docs/identity.md](identity.md#what-a-verifier-sees)). `--identity <name>` lists the evidence of keys certified for that identity. Every field Reef reports is read from the signed payload, so a stored row changed behind the daemon reads `invalid` with what was signed; adding the genuine envelope again repairs it. `--key` filters take the full 64-digit key id. It exits 0 either way: `invalid` means the stored object was changed, and is data about it.
 
 Evidence binds to the tree, so it stays on a change across a describe, or a rebase that keeps the tree, and two changes with the same tree share it. Abandon and undo leave it alone; garbage collection deletes it only once it is off live work and past its retention ([Retention](#retention)); backups carry it; `reef repo forget` deletes it.
 
@@ -101,7 +103,7 @@ An artifact is a file a check produced, such as a log, a report or a build outpu
 `reef evidence add --artifact <file>` hashes each file for the claim, uploads it, and only then adds the evidence, so evidence Reef's own producer adds never names bytes the store lacks. A file that changes between the hash and the upload is refused (`ARTIFACT_DIGEST_MISMATCH`) and nothing is added. `--no-upload` records the digest only. With `--envelope`, each `--artifact` file must be one the envelope names, or nothing is sent. `reef evidence artifact upload <file>...` uploads files without evidence, for a script that signs elsewhere, and prints one line per file: its digest's first 12 digits, its size, and `stored` or `already stored`. An upload resumes where an interrupted one stopped, and bytes already stored are not sent again.
 
 ```sh
-reef evidence add --kind test --result pass --key ~/.config/reef/ci.pem --artifact test.log
+reef evidence add --kind test --result pass --artifact test.log
 reef evidence show <id>                        # artifact test.log sha256:… stored 41 KiB
 reef evidence artifact read <sha256> > test.log
 reef evidence artifact show <sha256>           # its state, size, times, and the evidence naming it

@@ -32,7 +32,10 @@
 //!    set to the backup's time (so GC's retention floor follows it),
 //!    `restored_from`, `restored_at`, and `rematerialize_pending`, which
 //!    makes the next daemon start rematerialize every active workspace
-//!    (rebuilding a directory that is gone instead of reclaiming it).
+//!    (rebuilding a directory that is gone instead of reclaiming it); and
+//!    the restored identity authority retired (R3.03), since its private
+//!    key is not in the backup: the next start makes a new one, and every
+//!    certificate the old one issued still verifies.
 
 use std::fs;
 use std::io;
@@ -454,6 +457,11 @@ fn finish_db(
     }
     db.set_meta(META_RESTORED_FROM, &src.display().to_string())?;
     db.set_meta(META_RESTORED_AT, &Timestamp::now().0.to_string())?;
+    // The authority's private key is never in a backup (R3.03): the
+    // restored authority is retired, so the next start makes a new one,
+    // whatever key file the state directory holds.
+    let retired = db.retire_authorities(Timestamp::now())?;
+    tracing::debug!(authority_count = retired, "retired the restored authority");
     db.set_meta(META_REMATERIALIZE_PENDING, "1")?;
     Ok((workspaces_kept, leases_extended))
 }

@@ -1,7 +1,7 @@
 //! The gRPC router: every service the daemon serves, behind
 //! [`CompatLayer`].
 //!
-//! The daemon serves the sixteen `reef.api.v1` services and, frozen,
+//! The daemon serves the seventeen `reef.api.v1` services and, frozen,
 //! `reef.daemon.v0.Daemon/Status` (R2.01, ADR 0029). A request for a method
 //! it does not serve gets tonic's bare `UNIMPLEMENTED`, which a client
 //! cannot tell from a bug; [`CompatLayer`] rewrites that answer so every
@@ -28,6 +28,7 @@ use reef_api::v1::diff_service_server::DiffServiceServer;
 use reef_api::v1::evidence_service_server::EvidenceServiceServer;
 use reef_api::v1::file_service_server::FileServiceServer;
 use reef_api::v1::history_service_server::HistoryServiceServer;
+use reef_api::v1::identity_service_server::IdentityServiceServer;
 use reef_api::v1::maintenance_service_server::MaintenanceServiceServer;
 use reef_api::v1::operation_service_server::OperationServiceServer;
 use reef_api::v1::presence_service_server::PresenceServiceServer;
@@ -58,6 +59,7 @@ use crate::service::diff::DiffHandler;
 use crate::service::evidence::EvidenceHandler;
 use crate::service::files::FilesHandler;
 use crate::service::history::HistoryHandler;
+use crate::service::identity::IdentityHandler;
 use crate::service::maintenance::MaintenanceHandler;
 use crate::service::operations::OperationsHandler;
 use crate::service::presence::PresenceHandler;
@@ -70,7 +72,7 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 17] = [
+pub const SERVED: [&str; 18] = [
     "reef.api.v1.ArtifactService",
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
@@ -78,6 +80,7 @@ pub const SERVED: [&str; 17] = [
     "reef.api.v1.EvidenceService",
     "reef.api.v1.FileService",
     "reef.api.v1.HistoryService",
+    "reef.api.v1.IdentityService",
     "reef.api.v1.MaintenanceService",
     "reef.api.v1.OperationService",
     "reef.api.v1.PresenceService",
@@ -125,6 +128,9 @@ pub fn routes(state: &Arc<AppState>) -> Routes {
         Arc::clone(state),
     )))
     .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(state))))
+    .add_service(IdentityServiceServer::new(IdentityHandler::new(
+        Arc::clone(state),
+    )))
     .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
         Arc::clone(state),
     )))

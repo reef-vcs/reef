@@ -62,6 +62,7 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 rusqlite.workspace = true
 rand.workspace = true
+zeroize.workspace = true         # the authority key file's text, wiped after it is parsed (R3.03)
 serde.workspace = true
 serde_json.workspace = true      # `watchman get-sockname` (R1.14)
 time.workspace = true

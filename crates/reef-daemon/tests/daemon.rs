@@ -336,8 +336,9 @@ fn log_file_is_json_lines() {
     // its inotify limits (R1.13), with `watchman` installed the socket it
     // found (R1.14), a tightened state directory, the uids registration
     // accepts and, as root, a warning (RX.01), the open-file limit (R2.22),
-    // and the GC timer (#95); nothing else at info comes before the start
-    // event.
+    // the GC timer (#95), and the default operator identity and authority
+    // key with their audit lines (R3.03); nothing else at info comes before
+    // the start event.
     let started = events
         .iter()
         .position(|event| event["message"] == "daemon started")
@@ -352,6 +353,10 @@ fn log_file_is_json_lines() {
         "open file limit",
         "GC timer started",
         "GC timer off",
+        "created the default operator identity, named after the login user",
+        "operator identity changed",
+        "made the daemon's authority key",
+        "authority key changed",
         // The temporary directory may be created 0755.
         "a private directory had group or other permissions; changed it to 0700",
         reef_daemon::daemon::ROOT_WARNING,

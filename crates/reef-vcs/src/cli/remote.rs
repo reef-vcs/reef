@@ -75,6 +75,9 @@ enum TokenCommand {
         /// How long it lives (30d, 12h), or `never`.
         #[arg(long, value_name = "DURATION", default_value = "30d")]
         expires: String,
+        /// Link it to this operator identity: it then gets session keys for that identity alone (a ci identity's only way to get any).
+        #[arg(long, value_name = "NAME")]
+        identity: Option<String>,
     },
     /// List live tokens (with --all, revoked and expired ones too).
     List {
@@ -497,6 +500,7 @@ impl TextRow for RemoteToken {
         "EXPIRES",
         "LAST USED",
         "FROM",
+        "IDENTITY",
         "ID",
     ];
 
@@ -510,6 +514,7 @@ impl TextRow for RemoteToken {
                 .unwrap_or_else(|| "never".to_owned()),
             self.last_used_at.clone().unwrap_or_default(),
             self.last_used_from.clone().unwrap_or_default(),
+            self.identity.clone().unwrap_or_default(),
             self.id.clone(),
         ]
     }
@@ -524,6 +529,12 @@ impl TextRender for CreatedRemoteToken {
             "This is token {} ({} scope); it is shown once.",
             self.token_info.name, self.token_info.scope
         )?;
+        if let Some(identity) = &self.token_info.identity {
+            writeln!(
+                w,
+                "It is linked to identity {identity}: it gets session keys for {identity} alone."
+            )?;
+        }
         if self.token_info.expires_at.is_none() {
             writeln!(w, "It never expires: revoke it when it is no longer used.")?;
         }
@@ -622,16 +633,19 @@ async fn token(ctx: &Ctx, command: TokenCommand) -> Result<(), CliError> {
             name,
             scope,
             expires,
+            identity,
         } => {
             let scope = match scope {
                 Scope::Read => RemoteScope::Read,
                 Scope::Write => RemoteScope::Write,
             };
             let response = ctx
-                .call(
-                    ctx.client
-                        .create_remote_token(&name, scope, expiry(&expires)?),
-                )
+                .call(ctx.client.create_remote_token_for(
+                    &name,
+                    scope,
+                    expiry(&expires)?,
+                    identity.as_deref().unwrap_or_default(),
+                ))
                 .await?;
             let token = response.token.unwrap_or_default();
             let created = created(ctx, &token, response.secret).await?;

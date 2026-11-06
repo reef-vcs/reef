@@ -1,7 +1,12 @@
 //! `reef.api.v1.RemoteService` (R2.08, ADR 0049): issuing and ending the
 //! remote listener's tokens. Every RPC is ADMIN, so only the socket serves
 //! them; a token cannot mint, rotate or revoke tokens, itself included.
+//!
+//! A token may be linked to one live operator identity when it is created
+//! (R3.03, ADR 0057): the only identity it then gets session keys for.
+//! Rotation keeps the link, and no RPC changes it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +23,7 @@ use super::page::{PageRequest, newest_first};
 use crate::daemon::AppState;
 use crate::db::{RemoteTokenRow, TokenScope};
 use crate::error::status;
+use crate::identity::IdentityError;
 use crate::model::Timestamp;
 use crate::remote::{RemoteError, audit, tokens};
 
@@ -36,10 +42,55 @@ impl RemoteTokensService {
     fn tokens(&self) -> &Arc<tokens::Tokens> {
         self.state.remote.tokens()
     }
+
+    /// Each identity's name, by id, for the tokens' links.
+    fn identity_names(&self) -> Result<HashMap<String, String>, Status> {
+        Ok(self
+            .state
+            .db
+            .identities()
+            .map_err(status)?
+            .into_iter()
+            .map(|row| (row.id, row.name))
+            .collect())
+    }
+
+    /// The live identity `name` links a new token to; `None` for an empty
+    /// one.
+    fn linked_identity(&self, name: &str) -> Result<Option<String>, Status> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        if !reef_evidence::session::is_name(name) {
+            return Err(status(IdentityError::InvalidName {
+                name: name.to_owned(),
+            }));
+        }
+        let row = self
+            .state
+            .db
+            .identity(name)
+            .map_err(status)?
+            .filter(|row| row.name == name)
+            .ok_or_else(|| {
+                status(IdentityError::NotFound {
+                    name: name.to_owned(),
+                })
+            })?;
+        if let Some(revocation) = &row.revocation {
+            return Err(status(IdentityError::Revoked {
+                name: row.name,
+                revoked_at: revocation.revoked_at,
+            }));
+        }
+        Ok(Some(row.id))
+    }
 }
 
-/// A row as a message, without its secret.
-fn token_message(row: &RemoteTokenRow) -> v1::RemoteToken {
+/// A row as a message, without its secret; `names` gives its linked
+/// identity's name.
+fn token_message(row: &RemoteTokenRow, names: &HashMap<String, String>) -> v1::RemoteToken {
     let now = Timestamp::now();
     v1::RemoteToken {
         id: row.id.clone(),
@@ -61,6 +112,12 @@ fn token_message(row: &RemoteTokenRow) -> v1::RemoteToken {
             .last_used_at
             .map(|at| timestamp(Timestamp(at.0 - at.0 % 60_000))),
         last_used_from: row.last_used_from.clone().unwrap_or_default(),
+        identity: row
+            .identity_id
+            .as_ref()
+            .and_then(|id| names.get(id))
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -102,13 +159,14 @@ impl RemoteService for RemoteTokensService {
                     .unwrap_or(tokens::DEFAULT_EXPIRY),
             )
         };
+        let identity_id = self.linked_identity(&request.identity)?;
         let (row, secret) = self
             .tokens()
-            .create(&request.name, scope, expires_in)
+            .create(&request.name, scope, expires_in, identity_id)
             .map_err(status)?;
         audit::token_changed("create", &row.id, &row.name, row.scope.as_str());
         Ok(Response::new(CreateRemoteTokenResponse {
-            token: Some(token_message(&row)),
+            token: Some(token_message(&row, &self.identity_names()?)),
             secret,
         }))
     }
@@ -139,8 +197,9 @@ impl RemoteService for RemoteTokensService {
             .collect();
         let (rows, next_page_token) =
             page.page(rows, |row| newest_first(row.created_at.0, &row.id));
+        let names = self.identity_names()?;
         Ok(Response::new(ListRemoteTokensResponse {
-            tokens: rows.iter().map(token_message).collect(),
+            tokens: rows.iter().map(|row| token_message(row, &names)).collect(),
             next_page_token,
         }))
     }
@@ -157,7 +216,7 @@ impl RemoteService for RemoteTokensService {
             .map_err(status)?;
         audit::token_changed("rotate", &row.id, &row.name, row.scope.as_str());
         Ok(Response::new(RotateRemoteTokenResponse {
-            token: Some(token_message(&row)),
+            token: Some(token_message(&row, &self.identity_names()?)),
             secret,
         }))
     }
@@ -170,7 +229,7 @@ impl RemoteService for RemoteTokensService {
         let row = self.tokens().revoke(&request.name).map_err(status)?;
         audit::token_changed("revoke", &row.id, &row.name, row.scope.as_str());
         Ok(Response::new(RevokeRemoteTokenResponse {
-            token: Some(token_message(&row)),
+            token: Some(token_message(&row, &self.identity_names()?)),
         }))
     }
 }

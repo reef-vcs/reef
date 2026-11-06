@@ -580,3 +580,92 @@ async fn daemon_start_serve_remote() {
         "{error}"
     );
 }
+
+// R3.03 test 15, remote mode: a token linked to a ci identity gets keys
+// for it alone, so `evidence add` through it binds to that identity; the
+// identity's ADMIN commands are refused before anything is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn evidence_add_through_a_linked_token() {
+    let (daemon, repo, url, fingerprint) = remote_daemon().await;
+    daemon
+        .client
+        .create_identity(reef_api::v1::CreateIdentityRequest {
+            name: "ci-main".into(),
+            kind: reef_api::v1::IdentityKind::Ci.into(),
+            ..reef_api::v1::CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let secret = daemon
+        .client
+        .create_remote_token_for("ci", RemoteScope::Write, None, "ci-main")
+        .await
+        .unwrap()
+        .secret;
+    let (_tmp, state) = profile(&url, &fingerprint, &secret).await;
+    let remote = |args: &[&str]| {
+        let mut all = vec!["--remote", "vm", "-o", "json"];
+        all.extend_from_slice(args);
+        let all: Vec<String> = all.iter().map(|arg| (*arg).to_owned()).collect();
+        let state = state.clone();
+        async move {
+            let refs: Vec<&str> = all.iter().map(String::as_str).collect();
+            run(client(&state), &refs, None).await
+        }
+    };
+    let created = json(&remote(&["ws", "create", "--repo", &repo.id]).await);
+    let ws = created["id"].as_str().unwrap().to_owned();
+    let added = json(
+        &remote(&[
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--actor",
+            "executor",
+            "--workspace",
+            &ws,
+        ])
+        .await,
+    );
+    let identity = &added["evidence"]["identity"];
+    assert_eq!(identity["status"], "bound", "{added}");
+    assert_eq!(identity["key"]["identity"], "ci-main");
+    assert_eq!(identity["key"]["identity_kind"], "ci");
+    // A human sign-off is never issued remotely.
+    let output = remote(&[
+        "evidence",
+        "add",
+        "--kind",
+        "manual",
+        "--result",
+        "pass",
+        "--actor",
+        "human",
+        "--workspace",
+        &ws,
+    ])
+    .await;
+    let error = failed(&output, 7);
+    assert_eq!(error["reason"], "SESSION_KEY_REFUSED", "{error}");
+    assert!(
+        error["hint"].as_str().unwrap().contains("daemon's machine"),
+        "{error}"
+    );
+    // ADMIN commands are this machine's.
+    let output = remote(&["identity", "create", "x", "--kind", "person"]).await;
+    let error = failed(&output, 9);
+    assert!(error["hint"].is_string(), "{error}");
+    // READ commands are served.
+    let listed = json(&remote(&["identity", "list"]).await);
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["name"] == "ci-main")
+    );
+    daemon.stop().await;
+}

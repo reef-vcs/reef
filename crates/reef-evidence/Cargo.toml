@@ -30,6 +30,7 @@ ring.workspace = true            # ed25519 and SHA-256: the tree's only crypto p
 humantime.workspace = true       # RFC 3339 times, parsed as `reef history`'s are
 schemars.workspace = true        # the format as JSON Schema, which `reef schema evidence` prints
 thiserror.workspace = true
+zeroize.workspace = true         # a private key's DER, wiped once ring has parsed it (R3.03)
 
 [dev-dependencies]
 jsonschema.workspace = true      # test 7: the schema against real payloads

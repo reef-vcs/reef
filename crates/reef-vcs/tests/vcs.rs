@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use assert_cmd::assert::OutputAssertExt as _;
-use reef_api::v1::{self, CreateWorkspaceRequest, create_workspace_request};
+use reef_api::v1::{self, CreateWorkspaceRequest, RemoteScope, create_workspace_request};
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
 use serde_json::Value;
@@ -3407,5 +3407,516 @@ async fn evidence_cli_artifacts() {
         reports[0]["artifact_bytes"].as_u64().unwrap() > 3 << 20,
         "{reports}"
     );
+    daemon.stop().await;
+}
+
+/// Every file under `dir`, recursively, for a scan before and after.
+fn files_under(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    files.insert(entry.path());
+                }
+                _ => {}
+            }
+        }
+    }
+    files
+}
+
+// R3.03 test 14: every `reef identity` command, its JSON, brief and piped
+// output checked against `reef schema` by `run`; a private key that signs
+// and a certificate that checks; no private key in the text form.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one identity through every command")]
+async fn identity_cli() {
+    use reef_daemon::client::evidence::session::{Authority, IssuerKind, check_certificate};
+    use reef_daemon::client::evidence::{PAYLOAD_TYPE, PublicKey, SigningKey, Verified};
+
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let login = reef_daemon::identity::default_name(&reef_daemon::client::os_username());
+
+    let created = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "identity", "create", "ci-main", "--kind", "ci",
+        ],
+    )
+    .await;
+    assert_eq!(created["kind"], "ci");
+    ok(
+        &daemon,
+        &dir,
+        &["identity", "create", "dana", "--kind", "person"],
+    )
+    .await;
+    let listed = ok(&daemon, &dir, &["-o", "json", "identity", "list"]).await;
+    assert_eq!(listed.as_array().unwrap().len(), 3);
+    let brief = run_in(&daemon, &dir, &["identity", "list"]).await;
+    assert!(
+        stdout(&brief).contains("\"name\":\"ci-main\""),
+        "{}",
+        stdout(&brief)
+    );
+    let shown = ok(&daemon, &dir, &["-o", "json", "identity", "show"]).await;
+    assert_eq!(shown["name"], login.as_str());
+    assert_eq!(shown["is_default"], true);
+    run_in(&daemon, &dir, &["-o", "brief", "identity", "show", "dana"]).await;
+    let text = run_in(&daemon, &dir, &["-o", "text", "identity", "show"]).await;
+    assert!(stdout(&text).contains("default"), "{}", stdout(&text));
+
+    // The authority: a PEM that parses.
+    let authorities = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "authority", "show"],
+    )
+    .await;
+    let current = &authorities[0];
+    assert_eq!(current["current"], true);
+    let authority = PublicKey::from_pem(current["public_key"].as_str().unwrap()).unwrap();
+    assert_eq!(authority.id().as_str(), current["key_id"]);
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "identity", "authority", "show"],
+    )
+    .await;
+    assert!(stdout(&text).contains("-----BEGIN PUBLIC KEY-----"));
+
+    // A key issued as JSON: its private key signs, its certificate checks.
+    let issued = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "identity", "session", "issue", "--actor", "executor",
+        ],
+    )
+    .await;
+    assert_eq!(issued["key"]["identity"], login.as_str());
+    assert_eq!(issued["key"]["actor"], "executor");
+    let private = issued["private_key"].as_str().unwrap();
+    assert!(private.starts_with("-----BEGIN PRIVATE KEY-----"));
+    let key = SigningKey::from_pkcs8_pem(private).unwrap();
+    assert_eq!(key.public_key().id().as_str(), issued["key"]["key_id"]);
+    let signed = key.sign(PAYLOAD_TYPE, b"x").to_bytes();
+    assert!(Verified::check(&signed, key.public_key().spki()).is_err());
+    let certificate = serde_json::to_vec(&issued["certificate"]).unwrap();
+    let known = |_: &reef_daemon::client::evidence::KeyId| {
+        Some(Authority {
+            key: authority.clone(),
+            kind: IssuerKind::ReefDaemon,
+            revocation: None,
+        })
+    };
+    let certified = check_certificate(&certificate, &known).unwrap();
+    assert_eq!(certified.binding.public_key, *key.public_key());
+    let session = issued["key"]["session_id"].as_str().unwrap().to_owned();
+    // Piped, brief: the private key too, for a script in another language.
+    let piped = ok(&daemon, &dir, &["identity", "session", "issue"]).await;
+    assert!(piped["private_key"].is_string(), "{piped}");
+    // On a terminal, the text form: refused before a key is issued, since
+    // its private key could not be printed (review finding 10).
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "identity", "session", "issue"],
+    )
+    .await;
+    assert!(!text.status.success());
+    assert!(!stdout(&text).contains("PRIVATE KEY"), "{}", stdout(&text));
+    assert!(
+        format!("{}{}", stdout(&text), stderr(&text)).contains("-o json"),
+        "{} {}",
+        stdout(&text),
+        stderr(&text)
+    );
+
+    let keys = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "session", "list"],
+    )
+    .await;
+    assert_eq!(
+        keys.as_array().unwrap().len(),
+        2,
+        "the text form issued none"
+    );
+    run_in(&daemon, &dir, &["identity", "session", "list", "--all"]).await;
+    let key_id = issued["key"]["key_id"].as_str().unwrap();
+    let one = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "session", "show", &key_id[..8]],
+    )
+    .await;
+    assert_eq!(one["certificate_valid"], true);
+    run_in(&daemon, &dir, &["identity", "session", "show", key_id]).await;
+    let revoked = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "identity",
+            "session",
+            "revoke",
+            "--session",
+            &session,
+            "--since-issued",
+        ],
+    )
+    .await;
+    assert_eq!(revoked.as_array().unwrap().len(), 1);
+    assert!(revoked[0]["revocation"].is_object());
+    let live = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "session", "list"],
+    )
+    .await;
+    assert_eq!(live.as_array().unwrap().len(), 1);
+
+    // Revoking an identity prints its linked tokens.
+    daemon
+        .client
+        .create_remote_token_for("ci", RemoteScope::Write, None, "ci-main")
+        .await
+        .unwrap();
+    let text = run_in(
+        &daemon,
+        &dir,
+        &[
+            "-o", "text", "identity", "revoke", "ci-main", "--reason", "rotated",
+        ],
+    )
+    .await;
+    text.clone().assert().success();
+    assert!(
+        stdout(&text).contains("reef remote token revoke ci"),
+        "{}",
+        stdout(&text)
+    );
+    let gone = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "show", "ci-main"],
+    )
+    .await;
+    assert_eq!(gone["revocation"]["reason"], "rotated");
+    let error = err(
+        &daemon,
+        &dir,
+        &["identity", "create", "ci-main", "--kind", "ci"],
+        4,
+        "IDENTITY_EXISTS",
+    )
+    .await;
+    assert!(
+        error["hint"].as_str().unwrap().contains("never reused"),
+        "{error}"
+    );
+
+    // The authority, rotated and revoked.
+    let rotated = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "authority", "rotate", "--revoke"],
+    )
+    .await;
+    assert_eq!(rotated["retired"]["key_id"], current["key_id"]);
+    assert!(rotated["retired"]["revocation"].is_object());
+    let second = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "authority", "rotate"],
+    )
+    .await;
+    let all = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "authority", "show"],
+    )
+    .await;
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    // A retired authority, revoked by key id prefix (review finding 4).
+    let retired = second["retired"]["key_id"].as_str().unwrap();
+    let revoked = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "identity",
+            "authority",
+            "revoke",
+            &retired[..8],
+            "--since-created",
+            "--reason",
+            "restored",
+        ],
+    )
+    .await;
+    assert_eq!(revoked["key_id"], retired);
+    assert_eq!(revoked["revocation"]["reason"], "restored");
+    let current = all[0]["key_id"].as_str().unwrap();
+    err(
+        &daemon,
+        &dir,
+        &["identity", "authority", "revoke", current],
+        5,
+        "AUTHORITY_IS_CURRENT",
+    )
+    .await;
+    daemon.stop().await;
+}
+
+// R3.03 test 15: `evidence add` with no key signs with a session key and
+// leaves no key file; `--actor human`; `--key` still works, unbound;
+// `evidence list --identity`; and a remote token linked to a ci identity.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one claim through each signer")]
+async fn evidence_cli_session() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let login = reef_daemon::identity::default_name(&reef_daemon::client::os_username());
+    let tmp_dir = std::env::temp_dir();
+    let before = (files_under(&dir), files_under(&tmp_dir));
+
+    let added = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "evidence", "add", "--kind", "test", "--result", "pass",
+        ],
+    )
+    .await;
+    let evidence = &added["evidence"];
+    assert_eq!(evidence["identity"]["status"], "bound", "{evidence}");
+    assert_eq!(evidence["identity"]["key"]["identity"], login.as_str());
+    assert_eq!(evidence["identity"]["key"]["actor"], "agent");
+    let window = |key: &Value| {
+        let at = |field: &str| {
+            humantime::parse_rfc3339(key[field].as_str().unwrap())
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        at("not_after") - at("not_before")
+    };
+    assert_eq!(window(&evidence["identity"]["key"]), 300, "five minutes");
+    let id = evidence["id"].as_str().unwrap().to_owned();
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &id]).await;
+    let shown = stdout(&text);
+    assert!(
+        shown.lines().any(|line| line.starts_with("identity:")
+            && line.contains(&format!(" {login} (person) as agent"))),
+        "{shown}"
+    );
+    assert!(shown.contains("policy decides whom to trust"), "{shown}");
+
+    let human = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "evidence", "add", "--kind", "manual", "--result", "pass", "--actor",
+            "human",
+        ],
+    )
+    .await;
+    let human_id = human["evidence"]["id"].as_str().unwrap().to_owned();
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "evidence", "show", &human_id],
+    )
+    .await;
+    assert!(
+        stdout(&text).contains("presence none (not verified)"),
+        "{}",
+        stdout(&text)
+    );
+    assert!(stdout(&text).contains("as human"), "{}", stdout(&text));
+
+    // No session key file was left anywhere. A daemon's own authority key
+    // (`<state>/identity/authority.pem`) is expected: this daemon's, or that of
+    // another test's daemon running in parallel under the same temp dir.
+    let after = (files_under(&dir), files_under(&tmp_dir));
+    let is_authority = |path: &PathBuf| {
+        path.file_name().is_some_and(|name| name == "authority.pem")
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "identity")
+    };
+    let new_files: Vec<&PathBuf> = after
+        .0
+        .difference(&before.0)
+        .chain(after.1.difference(&before.1))
+        .filter(|path| !is_authority(path))
+        .filter(|path| std::fs::read_to_string(path).is_ok_and(|text| text.contains("PRIVATE KEY")))
+        .collect();
+    assert!(new_files.is_empty(), "{new_files:?}");
+
+    // `--key` still works, and reads unbound; --identity conflicts with it.
+    let keys = daemon.tmp.path().join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    let key = keys.join("k.pem");
+    let key_text = key.to_str().unwrap();
+    ok(&daemon, &dir, &["evidence", "key", "generate", key_text]).await;
+    let bare = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "evidence", "add", "--kind", "lint", "--result", "pass", "--key",
+            key_text,
+        ],
+    )
+    .await;
+    assert_eq!(bare["evidence"]["identity"]["status"], "unbound");
+    let bare_id = bare["evidence"]["id"].as_str().unwrap().to_owned();
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &bare_id]).await;
+    assert!(stdout(&text).contains("unbound key"), "{}", stdout(&text));
+    let conflict = run_in(
+        &daemon,
+        &dir,
+        &[
+            "evidence",
+            "add",
+            "--kind",
+            "lint",
+            "--result",
+            "pass",
+            "--key",
+            key_text,
+            "--identity",
+            "x",
+        ],
+    )
+    .await;
+    conflict.clone().assert().code(2);
+
+    // The list: `name:actor` for a bound key; the filter by identity.
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "list"]).await;
+    assert!(
+        stdout(&text).contains(&format!("{login}:agent")),
+        "{}",
+        stdout(&text)
+    );
+    let brief = run_in(&daemon, &dir, &["evidence", "list"]).await;
+    assert!(
+        stdout(&brief).contains(&format!("\"identity\":\"{login}\"")),
+        "{}",
+        stdout(&brief)
+    );
+    let mine = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "list", "--identity", &login],
+    )
+    .await;
+    assert_eq!(mine.as_array().unwrap().len(), 2);
+    let nobody = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "list", "--identity", "nobody"],
+    )
+    .await;
+    assert_eq!(nobody.as_array().unwrap().len(), 0);
+
+    // A ci identity's key over the socket is refused, with the rule's
+    // advice.
+    ok(
+        &daemon,
+        &dir,
+        &["identity", "create", "ci-main", "--kind", "ci"],
+    )
+    .await;
+    let error = err(
+        &daemon,
+        &dir,
+        &[
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--identity",
+            "ci-main",
+        ],
+        7,
+        "SESSION_KEY_REFUSED",
+    )
+    .await;
+    assert!(
+        error["hint"].as_str().unwrap().contains("remote token"),
+        "{error}"
+    );
+    // With artifacts to upload, a refusal is found before any upload, so
+    // nothing is stored for evidence that is never added (review finding 9).
+    let log = daemon.tmp.path().join("refused.log");
+    std::fs::write(&log, "never uploaded\n").unwrap();
+    let artifacts_before = daemon.handle.state().db.artifact_counts().unwrap();
+    for (identity, code, reason) in [
+        ("ci-main", 7, "SESSION_KEY_REFUSED"),
+        ("nobody", 3, "IDENTITY_NOT_FOUND"),
+    ] {
+        err(
+            &daemon,
+            &dir,
+            &[
+                "evidence",
+                "add",
+                "--kind",
+                "test",
+                "--result",
+                "pass",
+                "--identity",
+                identity,
+                "--artifact",
+                log.to_str().unwrap(),
+            ],
+            code,
+            reason,
+        )
+        .await;
+        assert_eq!(
+            daemon.handle.state().db.artifact_counts().unwrap(),
+            artifacts_before,
+            "{identity}: nothing was uploaded"
+        );
+    }
+    let linked = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "remote",
+            "token",
+            "create",
+            "ci",
+            "--scope",
+            "write",
+            "--identity",
+            "ci-main",
+        ],
+    )
+    .await;
+    assert_eq!(linked["identity"], "ci-main");
     daemon.stop().await;
 }

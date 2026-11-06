@@ -17,6 +17,7 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod history;
+pub mod identity;
 pub mod lease;
 pub mod limits;
 pub mod lock;

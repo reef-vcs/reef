@@ -65,6 +65,7 @@ impl From<&GcReport> for v1::GcReport {
             artifact_bytes_freed: report.retention.artifact_bytes_freed,
             artifact_bytes: report.retention.artifact_bytes,
             evidence_error: report.evidence_error.clone().unwrap_or_default(),
+            session_keys_removed: report.session_keys_removed,
         }
     }
 }

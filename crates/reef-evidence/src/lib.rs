@@ -10,6 +10,10 @@
 //!   and the checks that close the gap between ring and strict verification.
 //! - [`verify`]: [`Verified::check`], the one checking order the daemon (at
 //!   add and at every read), the CLI and executors share.
+//! - [`session`]: session-key certificates (R3.03, ADR 0057): a second
+//!   predicate type in the same envelope, by which an issuing authority
+//!   binds a short-lived key to an operator identity, and what a verifier
+//!   reports for evidence that key signed.
 //!
 //! A signature that verifies says that the holder of a key signed the
 //! claim. It does not say who holds the key, that anyone should believe it,
@@ -23,6 +27,7 @@ use reef_error::{Classify, ErrorKind};
 
 pub mod envelope;
 pub mod keys;
+pub mod session;
 pub mod statement;
 pub mod verify;
 
@@ -118,6 +123,13 @@ pub enum Invalid {
         /// What is wrong with it.
         message: String,
     },
+    /// A session-key certificate whose `keyid` names no authority the
+    /// verifier knows (R3.03).
+    #[error("the certificate's keyid {key_id:?} names no known issuing authority")]
+    UnknownAuthority {
+        /// The envelope's `keyid`.
+        key_id: String,
+    },
 }
 
 impl Invalid {
@@ -136,6 +148,7 @@ impl Invalid {
             Invalid::Subject(_) => "subject",
             Invalid::PredicateType(_) => "predicate_type",
             Invalid::Predicate { .. } => "predicate",
+            Invalid::UnknownAuthority { .. } => "authority",
         })
     }
 
@@ -180,6 +193,9 @@ impl Invalid {
             Invalid::PredicateType(_) => "Set predicateType to urn:reef-vcs:evidence:v1.",
             Invalid::Predicate { .. } => {
                 "See docs/evidence.md for the predicate's fields: kind, result (pass, fail or error), startedOn and finishedOn in RFC 3339 UTC, and the optional target, artifacts and annotations."
+            }
+            Invalid::UnknownAuthority { .. } => {
+                "A session key's certificate verifies only against an authority the verifier holds: `reef identity authority show` prints this daemon's."
             }
         }
     }

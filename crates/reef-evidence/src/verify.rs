@@ -85,11 +85,24 @@ struct RawSignature {
     sig: String,
 }
 
-impl Verified {
-    /// Checks `envelope` (a DSSE envelope as JSON) against `public_key` (the
-    /// signer's DER `SubjectPublicKeyInfo`), in the order of the module
-    /// documentation.
-    pub fn check(envelope: &[u8], public_key: &[u8]) -> Result<Verified, Invalid> {
+/// The first half of every check, shared by evidence and session-key
+/// certificates (R3.03): an envelope within its bounds, decoded, whose
+/// signature is yet to be verified.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    /// The payload's bytes.
+    pub(crate) payload: Vec<u8>,
+    /// The signature's bytes.
+    sig: Vec<u8>,
+    /// The signature's `keyid`; empty when it has none.
+    pub(crate) keyid: String,
+}
+
+impl Opened {
+    /// Step 1 of the module documentation: the size, the JSON (no duplicate
+    /// key, at most [`MAX_DEPTH`] levels), the payload type, exactly one
+    /// signature, and base64 that decodes.
+    pub(crate) fn parse(envelope: &[u8]) -> Result<Opened, Invalid> {
         if envelope.len() > MAX_ENVELOPE_BYTES {
             return Err(Invalid::Size(envelope.len()));
         }
@@ -105,26 +118,51 @@ impl Verified {
             .ok_or_else(|| Invalid::Envelope("the payload is not base64".into()))?;
         let sig = decode_base64(&signature.sig)
             .ok_or_else(|| Invalid::Envelope("the signature is not base64".into()))?;
-        let key = PublicKey::from_spki(public_key)?;
-        let found = signature.keyid.unwrap_or_default();
-        if found != key.id().as_str() {
+        Ok(Opened {
+            payload,
+            sig,
+            keyid: signature.keyid.unwrap_or_default(),
+        })
+    }
+
+    /// Steps 2 and 3: the `keyid` is `key`'s id, and the signature over
+    /// [`pae`]`(payloadType, payload)` verifies with it.
+    pub(crate) fn verify(&self, key: &PublicKey) -> Result<(), Invalid> {
+        if self.keyid != key.id().as_str() {
             return Err(Invalid::KeyId {
-                found,
+                found: self.keyid.clone(),
                 expected: key.id().to_string(),
             });
         }
-        if !key.verify(&pae(PAYLOAD_TYPE, &payload), &sig) {
+        if !key.verify(&pae(PAYLOAD_TYPE, &self.payload), &self.sig) {
             return Err(Invalid::Signature {
                 key_id: key.id().to_string(),
             });
         }
-        let statement = parse_statement(&payload)?;
+        Ok(())
+    }
+
+    /// The envelope in canonical form, signed by `key`.
+    pub(crate) fn canonical(&self, key: &PublicKey) -> Vec<u8> {
+        Envelope::new(PAYLOAD_TYPE, &self.payload, key.id().as_str(), &self.sig).to_bytes()
+    }
+}
+
+impl Verified {
+    /// Checks `envelope` (a DSSE envelope as JSON) against `public_key` (the
+    /// signer's DER `SubjectPublicKeyInfo`), in the order of the module
+    /// documentation.
+    pub fn check(envelope: &[u8], public_key: &[u8]) -> Result<Verified, Invalid> {
+        let opened = Opened::parse(envelope)?;
+        let key = PublicKey::from_spki(public_key)?;
+        opened.verify(&key)?;
+        let statement = parse_statement(&opened.payload)?;
         let index = index_of(&statement)?;
-        let canonical = Envelope::new(PAYLOAD_TYPE, &payload, key.id().as_str(), &sig).to_bytes();
+        let canonical = opened.canonical(&key);
         Ok(Verified {
             id: crate::sha256_hex(&canonical),
             canonical,
-            payload,
+            payload: opened.payload,
             statement,
             key,
             index,
@@ -139,6 +177,36 @@ impl Verified {
 
 /// The payload as a Statement, checked field by field.
 pub(crate) fn parse_statement(payload: &[u8]) -> Result<Statement, Invalid> {
+    let value = statement_value(payload)?;
+    let Value::Object(root) = &value else {
+        return Err(Invalid::Statement("it is not a JSON object".into()));
+    };
+    match root.get("predicateType") {
+        Some(Value::String(t)) if t == PREDICATE_TYPE => {}
+        Some(Value::String(t)) => return Err(Invalid::PredicateType(t.clone())),
+        _ => {
+            return Err(Invalid::Statement(
+                "predicateType is missing or not a string".into(),
+            ));
+        }
+    }
+    check_subject(root.get("subject"))?;
+    match root.get("predicate") {
+        Some(Value::Object(predicate)) => check_predicate(predicate)?,
+        _ => {
+            return Err(Invalid::Predicate {
+                field: String::new(),
+                message: "the predicate is missing or not a JSON object".into(),
+            });
+        }
+    }
+    serde_json::from_value(value).map_err(|error| Invalid::Statement(error.to_string()))
+}
+
+/// A payload as a Statement v1's JSON object: no duplicate key, at most
+/// [`MAX_DEPTH`] levels, and `_type` [`STATEMENT_TYPE`]. A problem inside
+/// `predicate` is [`Invalid::Predicate`] for the field it is under.
+pub(crate) fn statement_value(payload: &[u8]) -> Result<Value, Invalid> {
     strict_json(payload).map_err(|problem| match problem.predicate_field() {
         Some(field) => Invalid::Predicate {
             field,
@@ -164,26 +232,7 @@ pub(crate) fn parse_statement(payload: &[u8]) -> Result<Statement, Invalid> {
             ));
         }
     }
-    match root.get("predicateType") {
-        Some(Value::String(t)) if t == PREDICATE_TYPE => {}
-        Some(Value::String(t)) => return Err(Invalid::PredicateType(t.clone())),
-        _ => {
-            return Err(Invalid::Statement(
-                "predicateType is missing or not a string".into(),
-            ));
-        }
-    }
-    check_subject(root.get("subject"))?;
-    match root.get("predicate") {
-        Some(Value::Object(predicate)) => check_predicate(predicate)?,
-        _ => {
-            return Err(Invalid::Predicate {
-                field: String::new(),
-                message: "the predicate is missing or not a JSON object".into(),
-            });
-        }
-    }
-    serde_json::from_value(value).map_err(|error| Invalid::Statement(error.to_string()))
+    Ok(value)
 }
 
 fn check_subject(subject: Option<&Value>) -> Result<(), Invalid> {
@@ -227,7 +276,7 @@ fn check_subject(subject: Option<&Value>) -> Result<(), Invalid> {
     }
 }
 
-fn predicate_error(field: &str, message: impl Into<String>) -> Invalid {
+pub(crate) fn predicate_error(field: &str, message: impl Into<String>) -> Invalid {
     Invalid::Predicate {
         field: field.to_owned(),
         message: message.into(),

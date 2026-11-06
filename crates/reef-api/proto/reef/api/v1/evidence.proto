@@ -23,6 +23,7 @@ package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
 import "reef/api/v1/artifacts.proto";
+import "reef/api/v1/identity.proto";
 import "reef/api/v1/options.proto";
 
 // Storing evidence about trees, and reading it back.
@@ -162,7 +163,8 @@ message Evidence {
   string target = 5;
   // The id of the key that signed it: SHA-256 of its DER
   // SubjectPublicKeyInfo, lowercase hex. The attestor is this key; a name
-  // in the claim is never the attestor.
+  // in the claim is never the attestor. R3.03: `identity` says which
+  // operator identity this key is bound to.
   string key_id = 6;
   // When the check started, as the attestor claims, to the millisecond.
   google.protobuf.Timestamp started_at = 7;
@@ -192,6 +194,13 @@ message Evidence {
   // The remote token of the request that first added it (R2.08); empty
   // when it came through the socket.
   string remote_token_id = 17;
+  // Which operator identity the signing key is bound to (R3.03, ADR 0057),
+  // and its status when the daemon first witnessed this object
+  // (`added_at`): UNBOUND for a bare key, BOUND, EXPIRED, REVOKED, or
+  // INVALID for a certificate that does not verify. Filled at every read,
+  // each certificate checked again. Beside `signature`, never instead of
+  // it, and never a trust decision: policy decides whom to trust (R3.07).
+  KeyIdentity identity = 18;
 }
 
 // Add evidence.
@@ -273,6 +282,10 @@ message ListEvidenceRequest {
   // token sent with different fields is INVALID_ARGUMENT, reason
   // INVALID_PAGE_TOKEN.
   string page_token = 13;
+  // Only evidence whose key is certified for one of these identities, by
+  // name, whatever its identity status (R3.03); empty for any. The
+  // certificate decides, not the stored columns.
+  repeated string identities = 14;
 }
 
 // A page of evidence.

@@ -588,3 +588,25 @@ The protocol tests print medians too, as trend data (release, the same machine):
 cargo nextest run --release -p reef-daemon --test artifacts --run-ignored only --success-output immediate -E 'test(=bench_upload_dedup_read)'
 cargo nextest run --release -p reef-daemon --test artifacts --run-ignored only --success-output immediate -E 'test(=bench_gc_step)'
 ```
+
+## Identity (R3.03)
+
+`crates/reef-evidence/benches/evidence.rs` measures session-key certificates ([ADR 0057](adr/0057-operator-identities-and-session-keys.md)): `cargo bench -p reef-evidence --bench evidence -- session`. Release build on the M2 Max, run on 2026-11-06. Trend data, not gates.
+
+| Measurement | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| `session/certify` | build a binding's statement, check it as `check_certificate` would, and sign it into a canonical envelope | 19.9 µs | < 100 µs |
+| `session/check` | `check_certificate` of that envelope: the envelope's walks, the authority by `keyid`, the signature, the statement and predicate checks, the canonical form | 42.8 µs | < 100 µs |
+| issue | `Client::issue_session_key` over the socket: key generation, `ListAuthorities` for the proof's audience, the proof, the RPC (the proof's check, the rules, signing, one transaction with the cap's count), and the read back with its certificate checked | 0.50 ms | < 3 ms |
+| `evidence add` by session | the CLI end to end against a release daemon, median of 25 runs, three runs: a session key issued, signing, and the add, against R3.01's `--key` path | 12.2 ms against 12.2 ms (+0.04 ms) | < 5 ms more |
+| list page | a `ListEvidence` page of 50 objects, each by its own session key, every signature and certificate checked again | 5.2 ms | < 15 ms (R3.01's, unbound, 2.6 ms) |
+
+- **A page costs one certificate check per key**: 50 checks at about 43 µs are the 2.5 ms between R3.01's page and this one; the key lookup is one `IN` query.
+- **The proof's audience costs one READ call.** Since the review, `issue` reads the current authority (`ListAuthorities`) before it signs the proof: 0.46 ms became 0.50 ms.
+- **`evidence add` by session costs no more than a key file.** The extra RPC and the key generation, about half a millisecond, are lost in the command's process start, connection and snapshot; reading and checking a key file costs about as much.
+- A debug build, as `cargo nextest` runs the daemon tests by default, is about eight times slower: 3.9 ms per issue and 45 ms per page. Nothing changes on an existing path but one migration and the authority check at start, the key lookup per evidence page, and the issuing RPC per `evidence add`.
+
+```sh
+cargo bench -p reef-evidence --bench evidence -- session
+cargo nextest run --release -p reef-daemon --test identity --success-output immediate -E 'test(issue_over_the_socket) | test(evidence_reports_identity)'
+```

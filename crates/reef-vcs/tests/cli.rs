@@ -165,6 +165,7 @@ fn help_lists_every_command() {
         "op",
         "file",
         "evidence",
+        "identity",
         "guide",
         "init",
         "mcp",
@@ -1790,6 +1791,11 @@ fn root_help_names_every_command() {
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
         .collect();
     for command in help_commands(&state, &[]) {
+        // R3.03: `completions` left the first screen for `identity`; it is
+        // in `--help-all`.
+        if command == "completions" {
+            continue;
+        }
         assert!(words.contains(&command.as_str()), "{command}: {text}");
     }
     let lower = text.to_lowercase();

@@ -4,15 +4,20 @@
 //! bytes evidence names by digest.
 //!
 //! `add` signs locally: it reads the revision (snapshotting `@` first),
-//! builds the claim about its tree, signs it with the caller's ed25519 key
-//! file, and sends the envelope with the commit id it read, so the link
-//! cannot name another tree than the one signed. `add --envelope` sends an
-//! envelope signed elsewhere. Either way `--artifact` files are uploaded
+//! builds the claim about its tree, signs it, and sends the envelope with
+//! the commit id it read, so the link cannot name another tree than the one
+//! signed. It signs with a session key (R3.03, ADR 0057): generated in this
+//! process, certified by the daemon for `--identity` (the default identity,
+//! or through a remote daemon the token's) as `--actor`, valid five
+//! minutes, used for the one envelope and dropped, never written anywhere.
+//! `--key` signs with a key file instead, whose evidence reads unbound.
+//! `add --envelope` sends an envelope signed elsewhere. Either way `--artifact` files are uploaded
 //! before the evidence is added, unless `--no-upload`, so evidence Reef's
 //! own producer adds never names bytes the store lacks. `key generate`
 //! writes a key pair and talks to no daemon. `show` prints `signature: valid` or `invalid` and exits 0
 //! either way: valid means the signature checks out, never that the key is
-//! trusted.
+//! trusted. Under it, `identity:` says which operator identity the key is
+//! bound to and its status when the daemon first saw the object.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -21,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use reef_api::v1::{AddEvidenceRequest, GetChangeRequest, ListEvidenceRequest};
+use reef_client::evidence::session::Actor;
 use reef_client::evidence::{self as format, Artifact, Claim, Outcome, PublicKey, SigningKey};
 use reef_client::json::{self, Evidence, EvidenceAdded, EvidenceKey};
 use reef_client::json::{ArtifactUploaded, EvidenceArtifact};
@@ -51,9 +57,9 @@ pub(crate) struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum EvidenceCommand {
-    /// Sign a claim about a revision's tree and store it.
+    /// Sign a claim about a revision's tree with a session key; store it.
     #[command(
-        after_help = "Example: reef evidence add --kind test --result pass --key ci.pem --artifact test.log"
+        after_help = "Example: reef evidence add --kind test --result pass --actor executor --artifact test.log"
     )]
     Add(AddArgs),
     /// List evidence: of the repository, on a revision's tree, or linked to a change.
@@ -124,7 +130,7 @@ struct ReadArgs {
 
 #[derive(Debug, clap::Subcommand)]
 enum KeyCommand {
-    /// Write a new ed25519 key to PATH (PKCS#8, mode 0600) and PATH.pub; a local key until session keys.
+    /// Write a new ed25519 key to PATH (PKCS#8, mode 0600) and PATH.pub: a bare key, for scripts and trials.
     #[command(after_help = "Example: reef evidence key generate ~/.config/reef/ci.pem")]
     Generate {
         /// Where to write the private key; the public key goes to PATH.pub. Never overwritten.
@@ -142,9 +148,15 @@ struct AddArgs {
     /// How it came out: pass, fail, or error (no verdict).
     #[arg(long, value_name = "RESULT", value_parser = ["pass", "fail", "error"])]
     result: Option<String>,
-    /// The ed25519 private key to sign with, PKCS#8 PEM, readable only by you.
+    /// Sign with this key file, not a session key; it reads unbound.
     #[arg(long, value_name = "PEM")]
     key: Option<PathBuf>,
+    /// The identity to sign as: the default one, or a remote token's, if left out.
+    #[arg(long, value_name = "NAME", conflicts_with = "key")]
+    identity: Option<String>,
+    /// agent (the default), executor, or human: declared, not verified.
+    #[arg(long, value_parser = ["agent", "executor", "human"], conflicts_with = "key")]
+    actor: Option<String>,
     /// The change the evidence is for, whose tree it is about [default: the workspace's change].
     #[arg(short = 'r', long, value_name = "REV")]
     revision: Option<String>,
@@ -157,20 +169,20 @@ struct AddArgs {
     /// When it finished [default: now].
     #[arg(long, value_name = "TIME")]
     finished: Option<String>,
-    /// A file the check produced, recorded by SHA-256 and uploaded first; repeatable. With --envelope, a file the envelope names.
+    /// A file the check produced, hashed and uploaded first; repeatable (with --envelope, one it names).
     #[arg(long, value_name = "PATH")]
     artifact: Vec<PathBuf>,
-    /// Record --artifact files by digest only, without uploading them.
+    /// Record --artifact files by digest, without uploading.
     #[arg(long, conflicts_with_all = ["envelope", "public_key"])]
     no_upload: bool,
-    /// A KEY=VALUE note in the claim's annotations; repeatable.
+    /// A note in the claim's annotations; repeatable.
     #[arg(long, value_name = "KEY=VALUE")]
     annotation: Vec<String>,
     /// Send this DSSE envelope, signed elsewhere, instead of signing.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "annotation"], requires = "public_key")]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "target", "started", "finished", "annotation"], requires = "public_key")]
     envelope: Option<PathBuf>,
-    /// The envelope signer's public key, SPKI PEM (`-----BEGIN PUBLIC KEY-----`).
-    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "annotation"])]
+    /// The envelope signer's public key, SPKI PEM.
+    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "target", "started", "finished", "annotation"])]
     public_key: Option<PathBuf>,
     #[command(flatten)]
     scope: ScopeArgs,
@@ -200,6 +212,9 @@ struct ListArgs {
     /// Only evidence signed by this key id; repeatable.
     #[arg(long = "key", value_name = "KEY_ID")]
     key: Vec<String>,
+    /// Only evidence whose key is certified for this identity, whatever its status; repeatable.
+    #[arg(long, value_name = "NAME")]
+    identity: Vec<String>,
     /// Show at most this many; 0 for all. A cut is noted on stderr.
     #[arg(long, value_name = "N", default_value_t = LIST_LIMIT)]
     limit: usize,
@@ -552,10 +567,21 @@ fn claim_of(args: &AddArgs) -> Result<Claim, CliError> {
 /// envelope and public key to send; and the artifact files to upload, each
 /// with the digest the evidence names.
 struct Prepared {
-    signing: Option<(SigningKey, Claim)>,
+    signing: Option<(Signer, Claim)>,
     given: Option<(Vec<u8>, Vec<u8>)>,
     uploads: Vec<(PathBuf, String)>,
 }
+
+/// What signs a claim: a key file, or a session key issued at the add.
+enum Signer {
+    /// `--key`: a bare key.
+    File(SigningKey),
+    /// A session key for `identity` (empty: the default) as `actor`.
+    Session { identity: String, actor: Actor },
+}
+
+/// How long `add`'s session key lives: it signs one envelope.
+const SESSION_KEY_LIFETIME: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// The artifact digests an envelope's payload names, read without checking
 /// its signature (the daemon checks it); empty when it does not parse.
@@ -591,16 +617,22 @@ fn file_digest(path: &Path) -> Result<String, CliError> {
 /// the claim (checked as the daemon would, on a placeholder tree), the
 /// artifacts' digests, or the envelope and public key files.
 fn prepare(args: &AddArgs) -> Result<Prepared, CliError> {
-    if args.envelope.is_none()
-        && (args.kind.is_none() || args.result.is_none() || args.key.is_none())
-    {
+    if args.envelope.is_none() && (args.kind.is_none() || args.result.is_none()) {
         return Err(CliError::Usage(
-            "give --kind, --result and --key to sign a claim, or --envelope and --public-key to send one signed elsewhere".into(),
+            "give --kind and --result to sign a claim, or --envelope and --public-key to send one signed elsewhere".into(),
         ));
     }
     // The key and the claim before any call: a bad key sends nothing.
     let signing = match (&args.envelope, &args.key) {
-        (None, Some(key)) => Some((load_key(key)?, claim_of(args)?)),
+        (None, Some(key)) => Some((Signer::File(load_key(key)?), claim_of(args)?)),
+        (None, None) => Some((
+            Signer::Session {
+                identity: args.identity.clone().unwrap_or_default(),
+                actor: Actor::parse(args.actor.as_deref().unwrap_or("agent"))
+                    .unwrap_or(Actor::Agent),
+            },
+            claim_of(args)?,
+        )),
         _ => None,
     };
     let given = match &args.envelope {
@@ -783,6 +815,7 @@ async fn read_artifact(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
 }
 
 /// `reef evidence add`, once [`prepare`] has read its files.
+#[expect(clippy::too_many_lines, reason = "add's steps, in their order")]
 async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliError> {
     let Prepared {
         signing,
@@ -826,16 +859,50 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
             ),
         });
     }
+    // The bytes first: evidence never names an artifact this add meant to
+    // store and did not. Before signing, too, so a long upload cannot
+    // outlive the session key; but after checking, as far as a client can,
+    // that the key will be issued, so a refusal leaves no orphan artifacts.
+    if !uploads.is_empty()
+        && let Some((Signer::Session { identity, actor }, _)) = &signing
+    {
+        precheck_session(ctx, identity, *actor)
+            .await
+            .map_err(|error| advice.refine(error))?;
+    }
+    for (path, sha256) in &uploads {
+        upload(ctx, &scope.repo_id, path, Some(sha256))
+            .await
+            .map_err(|error| advice.refine(error))?;
+    }
     let (envelope, public_key) = match (signing, given) {
-        (Some((key, claim)), _) => {
+        (Some((signer, claim)), _) => {
             let tree_id = change
                 .as_ref()
                 .map(|c| c.tree_id.as_str())
                 .unwrap_or_default();
             let tree = format::TreeDigest::git(tree_id)
                 .map_err(|error| invalid_claim(error.to_string()))?;
+            // A session key lives in this function only: it signs the one
+            // envelope and is dropped, its PKCS#8 text wiped.
+            let issued;
+            let key = match &signer {
+                Signer::File(key) => key,
+                Signer::Session { identity, actor } => {
+                    issued = super::identity::issue_key(
+                        ctx,
+                        identity,
+                        *actor,
+                        Some(SESSION_KEY_LIFETIME),
+                        "",
+                    )
+                    .await
+                    .map_err(|error| advice.refine(error))?;
+                    &issued.signing_key
+                }
+            };
             let envelope = claim
-                .sign(&tree, &key)
+                .sign(&tree, key)
                 .map_err(|error| invalid_claim(error.to_string()))?
                 .to_bytes();
             (envelope, key.public_key().spki().to_vec())
@@ -843,17 +910,10 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
         (None, Some(given)) => given,
         (None, None) => {
             return Err(CliError::Usage(
-                "give --kind, --result and --key, or --envelope and --public-key".into(),
+                "give --kind and --result, or --envelope and --public-key".into(),
             ));
         }
     };
-    // The bytes first: evidence never names an artifact this add meant to
-    // store and did not.
-    for (path, sha256) in &uploads {
-        upload(ctx, &scope.repo_id, path, Some(sha256))
-            .await
-            .map_err(|error| advice.refine(error))?;
-    }
     let response = ctx
         .call(ctx.client.add_evidence(AddEvidenceRequest {
             repo: scope.repo_id.clone(),
@@ -869,6 +929,74 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
         created: response.created,
     };
     ctx.out.object(&Added(added))
+}
+
+/// What a client can check before `add` uploads anything that the session
+/// key it will ask for is issuable: the identity exists and is live
+/// (`GetIdentity`; on the socket an empty one is the default), a `ci`
+/// identity is not asked for over the socket, and `human` is asked for
+/// neither through a remote daemon nor for a `ci` identity. Through a
+/// remote daemon the token's own link cannot be read (`ListRemoteTokens`
+/// is ADMIN), so an empty identity, and whether a named one is the token's,
+/// are left to the daemon.
+async fn precheck_session(ctx: &Ctx, identity: &str, actor: Actor) -> Result<(), CliError> {
+    let remote = ctx.client.remote().is_some();
+    let refused = |rule: &str, message: String, hint: &str| CliError::Precheck {
+        kind: ErrorKind::PermissionDenied,
+        reason: reef_api::error::SESSION_KEY_REFUSED,
+        message: format!("{message} ({rule}); nothing was uploaded"),
+        advice: Advice::hint(hint),
+    };
+    if remote && actor == Actor::Human {
+        return Err(refused(
+            "human_over_remote",
+            "a key declared human is never issued through a remote daemon".into(),
+            "--actor human is issued only on the daemon's machine; through a remote daemon, use --actor agent or executor.",
+        ));
+    }
+    if remote && identity.is_empty() {
+        return Ok(());
+    }
+    let found = ctx
+        .call(ctx.client.get_identity(identity))
+        .await?
+        .identity
+        .unwrap_or_default();
+    if let Some(revocation) = &found.revocation {
+        let at = revocation
+            .revoked_at
+            .as_ref()
+            .map(json::rfc3339)
+            .unwrap_or_default();
+        return Err(CliError::Precheck {
+            kind: ErrorKind::Conflict,
+            reason: reef_api::error::IDENTITY_REVOKED,
+            message: format!(
+                "identity {} was revoked at {at}; nothing was uploaded",
+                found.name
+            ),
+            advice: Advice::hint("A revoked identity gets no keys: use another identity."),
+        });
+    }
+    let ci = found.kind() == reef_api::v1::IdentityKind::Ci;
+    if ci && actor == Actor::Human {
+        return Err(refused(
+            "human_for_ci",
+            format!("a ci identity's keys are never human: {}", found.name),
+            "A ci identity's keys are agent or executor: drop --actor human.",
+        ));
+    }
+    if ci && !remote {
+        return Err(refused(
+            "ci_over_socket",
+            format!(
+                "ci identity {}'s keys are never issued over the socket",
+                found.name
+            ),
+            "A ci identity's keys are issued only to a remote token linked to it (`reef remote token create <name> --scope write --identity <ci>`); on this machine, use a person identity.",
+        ));
+    }
+    Ok(())
 }
 
 /// A change id for `--change`: a full one as given, else what the
@@ -917,6 +1045,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<(), CliError> {
             .collect(),
         target: args.target.unwrap_or_default(),
         key_ids: args.key,
+        identities: args.identity,
         skip_snapshot: args.no_snapshot,
         ..ListEvidenceRequest::default()
     };
@@ -979,7 +1108,7 @@ fn line(evidence: &Evidence, by_change: bool) -> String {
     if let Some(target) = &evidence.target {
         words.push(target.clone());
     }
-    words.push(format!("key {}", short(&evidence.key_id)));
+    words.push(signer_word(evidence));
     words.push(duration_text(evidence.duration_ms));
     let added = evidence
         .added_at
@@ -998,6 +1127,86 @@ fn line(evidence: &Evidence, by_change: bool) -> String {
         words.push("(signature invalid)".into());
     }
     words.join(" ")
+}
+
+/// Who signed, as a list line says it: `alice:agent` for a bound key,
+/// with its status when it is not bound and not unbound; else `key <id>`.
+fn signer_word(evidence: &Evidence) -> String {
+    let identity = evidence.identity.as_ref();
+    let status = identity.and_then(|identity| identity.status.as_deref());
+    match identity.and_then(|identity| identity.key.as_ref()) {
+        Some(key) => {
+            let bound = format!("{}:{}", key.identity, key.actor.as_deref().unwrap_or("-"));
+            match status.filter(|status| *status != "bound") {
+                Some(status) => format!("{bound} ({status})"),
+                None => bound,
+            }
+        }
+        None => format!("key {} (unbound)", short(&evidence.key_id)),
+    }
+}
+
+/// The `identity:` line of `show`: whom the key is bound to and its status
+/// when the daemon first saw the object.
+fn identity_line(evidence: &Evidence) -> String {
+    use std::fmt::Write as _;
+    let Some(identity) = &evidence.identity else {
+        return "-".to_owned();
+    };
+    let Some(key) = &identity.key else {
+        return format!("unbound key {}", short(&evidence.key_id));
+    };
+    let actor = key.actor.as_deref().unwrap_or("-");
+    let mut who = format!(
+        "{} ({}) as {actor}",
+        key.identity,
+        key.identity_kind.as_deref().unwrap_or("-")
+    );
+    if let Some(agent) = &key.agent {
+        let _ = write!(who, " {agent:?}");
+    }
+    let date = |at: Option<&str>| {
+        at.map_or_else(
+            || "-".to_owned(),
+            |at| at.get(..16).unwrap_or(at).replace('T', " "),
+        )
+    };
+    let revocation = key.revocation.as_ref();
+    let revoked = |revocation: &json::Revocation| {
+        let from = revocation.invalid_from.as_deref().unwrap_or("-");
+        match &revocation.reason {
+            Some(reason) => format!("revoked from {from} ({reason})"),
+            None => format!("revoked from {from}"),
+        }
+    };
+    match identity.status.as_deref() {
+        Some("bound") => {
+            let mut line = format!(
+                "{who}, session {}, presence {} (not verified), certified by {} (this daemon)",
+                key.session_id,
+                key.presence.as_deref().unwrap_or("-"),
+                short(&key.authority_key_id)
+            );
+            if let Some(revocation) = revocation {
+                let _ = write!(
+                    line,
+                    " (key revoked later, {})",
+                    revocation.revoked_at.as_deref().unwrap_or("-")
+                );
+            }
+            line
+        }
+        Some("expired") => format!(
+            "{who}, expired (added {}, key valid until {})",
+            date(identity.witnessed_at.as_deref()),
+            date(key.not_after.as_deref())
+        ),
+        Some("revoked") => format!(
+            "{who}, {}",
+            revocation.map_or_else(|| "revoked".to_owned(), revoked)
+        ),
+        _ => format!("{who}, invalid certificate"),
+    }
 }
 
 /// `evidence list`'s objects: a JSON array, one line each in text.
@@ -1055,6 +1264,7 @@ impl TextRender for Shown {
             pairs.push(("artifact", artifact_line(artifact)));
         }
         pairs.push(("signature", or_dash(e.signature.as_deref())));
+        pairs.push(("identity", identity_line(e)));
         block(w, &pairs)?;
         if let Some(payload) = signed_payload(e) {
             // The payload exactly as signed: re-printing it through a JSON
@@ -1064,7 +1274,7 @@ impl TextRender for Shown {
         }
         writeln!(
             w,
-            "A valid signature says this key signed the claim, not that the key is trusted."
+            "A valid signature says this key signed the claim, and identity says whom the key answers to; policy decides whom to trust."
         )
     }
 }

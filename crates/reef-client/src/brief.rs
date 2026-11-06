@@ -907,10 +907,11 @@ mod tests {
 
 /// An evidence object (R3.01). Always `id`, `kind`, `result` and `key_id`;
 /// `target` when set; `signature` only when it is not `valid`, so a row
-/// changed behind the daemon still shows. Dropped: `tree_id`, the times,
-/// `duration_ms`, `added_by_agent`, `remote_token_id`, `artifacts`,
-/// `change_ids`, `predicate_type`, `current`, `statement`, `envelope`;
-/// `evidence show <id>` has them.
+/// changed behind the daemon still shows; `identity` when its key is
+/// certified (R3.03, [`KeyIdentity`]), so an unbound key costs nothing.
+/// Dropped: `tree_id`, the times, `duration_ms`, `added_by_agent`,
+/// `remote_token_id`, `artifacts`, `change_ids`, `predicate_type`,
+/// `current`, `statement`, `envelope`; `evidence show <id>` has them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Evidence")]
 pub struct Evidence<'a> {
@@ -923,6 +924,8 @@ pub struct Evidence<'a> {
     key_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     signature: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<KeyIdentity<'a>>,
 }
 
 impl<'a> From<&'a json::Evidence> for Evidence<'a> {
@@ -934,7 +937,40 @@ impl<'a> From<&'a json::Evidence> for Evidence<'a> {
             target: evidence.target.as_deref(),
             key_id: &evidence.key_id,
             signature: evidence.signature.as_deref().filter(|s| *s != "valid"),
+            identity: evidence.identity.as_ref().and_then(KeyIdentity::of),
         }
+    }
+}
+
+/// The identity of an evidence object's key (R3.03): `status` only when it
+/// is not `bound` (`expired`, `revoked` or `invalid`), and `key`, the
+/// session key's view, unless its certificate is invalid (nothing then
+/// vouches for it). Left out for an unbound key. Dropped: `witnessed_at`;
+/// `evidence show <id> -o json` has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.KeyIdentity")]
+pub struct KeyIdentity<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<SessionKey<'a>>,
+}
+
+impl<'a> KeyIdentity<'a> {
+    /// The view of `identity`; `None` for an unbound key.
+    fn of(identity: &'a json::KeyIdentity) -> Option<Self> {
+        let status = identity.status.as_deref();
+        if identity.key.is_none() && status != Some("invalid") {
+            return None;
+        }
+        Some(Self {
+            status: status.filter(|status| *status != "bound"),
+            key: identity
+                .key
+                .as_ref()
+                .filter(|key| key.certificate_valid)
+                .map(SessionKey::from),
+        })
     }
 }
 
@@ -962,6 +998,72 @@ impl<'a> From<&'a json::Artifact> for Artifact<'a> {
             size: artifact.size,
             collected_at: artifact.collected_at.as_deref(),
             evidence_count: artifact.evidence_count,
+        }
+    }
+}
+
+/// An operator identity (R3.03). Always `name`, `kind` and
+/// `live_session_keys`, even 0; `is_default` when it is the default, and
+/// `revocation` when it is revoked. Dropped: `id`, `display_name`,
+/// `email`, `created_at`, `remote_token_names`; `identity show <name> -o
+/// json` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Identity")]
+pub struct Identity<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_false")]
+    is_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revocation: Option<&'a json::Revocation>,
+    live_session_keys: u32,
+}
+
+impl<'a> From<&'a json::Identity> for Identity<'a> {
+    fn from(identity: &'a json::Identity) -> Self {
+        Self {
+            name: &identity.name,
+            kind: identity.kind.as_deref(),
+            is_default: identity.is_default,
+            revocation: identity.revocation.as_ref(),
+            live_session_keys: identity.live_session_keys,
+        }
+    }
+}
+
+/// A session key (R3.03): the identity's name and kind, the actor, and
+/// its validity: `not_after`, `revocation` when one applies, and
+/// `certificate_valid` whatever its value, so an invalid certificate (whose
+/// other fields are unset) shows. Dropped: `key_id`, `identity_id`,
+/// `agent`, `session_id`, `presence`, `custody`, `issuer_kind`,
+/// `authority_key_id`, `not_before`, `issued_at`, `remote_token_id`;
+/// `identity session list -o json` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.SessionKey")]
+pub struct SessionKey<'a> {
+    #[serde(skip_serializing_if = "str::is_empty")]
+    identity: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    not_after: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revocation: Option<&'a json::Revocation>,
+    certificate_valid: bool,
+}
+
+impl<'a> From<&'a json::SessionKey> for SessionKey<'a> {
+    fn from(key: &'a json::SessionKey) -> Self {
+        Self {
+            identity: &key.identity,
+            identity_kind: key.identity_kind.as_deref(),
+            actor: key.actor.as_deref(),
+            not_after: key.not_after.as_deref(),
+            revocation: key.revocation.as_ref(),
+            certificate_valid: key.certificate_valid,
         }
     }
 }

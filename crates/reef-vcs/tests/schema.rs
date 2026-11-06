@@ -156,6 +156,8 @@ fn schema_evidence_part() {
         ("statement", "evidence.Statement"),
         ("predicate", "evidence.Predicate"),
         ("envelope", "evidence.Envelope"),
+        ("session_key_statement", "evidence.SessionKeyStatement"),
+        ("session_key_predicate", "evidence.SessionKeyPredicate"),
     ] {
         assert_eq!(evidence[member]["$ref"], format!("#/$defs/{name}"));
         assert!(defs.contains_key(name), "{name}: {defs:?}");
@@ -164,6 +166,10 @@ fn schema_evidence_part() {
         defs.keys().all(|name| name.starts_with("evidence.")),
         "{:?}",
         defs.keys()
+    );
+    assert_eq!(
+        evidence["session_key_predicate_type"],
+        "urn:reef-vcs:session-key:v1"
     );
     // One member by name.
     let output = reef_in(&state)
@@ -448,6 +454,56 @@ async fn outputs_match_their_schemas() {
         .await;
     script
         .run(&a_dir, &["evidence", "artifact", "read", &sha])
+        .await;
+    // Identities and session keys (R3.03): the ten commands, and
+    // evidence signed with a session key.
+    script
+        .json(&root, &["identity", "create", "schema-ci", "--kind", "ci"])
+        .await;
+    script
+        .run(
+            &root,
+            &["identity", "create", "schema-person", "--kind", "person"],
+        )
+        .await;
+    script.both(&root, &["identity", "list"]).await;
+    script.both(&root, &["identity", "show"]).await;
+    let issued = script
+        .both(
+            &root,
+            &["identity", "session", "issue", "--actor", "executor"],
+        )
+        .await;
+    let key_id = text(&issued["key"]["key_id"]);
+    script.both(&root, &["identity", "session", "list"]).await;
+    script
+        .both(&root, &["identity", "session", "show", &key_id[..8]])
+        .await;
+    script
+        .both(&root, &["identity", "session", "revoke", &key_id])
+        .await;
+    script.both(&root, &["identity", "authority", "show"]).await;
+    let rotated = script
+        .json(&root, &["identity", "authority", "rotate"])
+        .await;
+    let retired = text(&rotated["retired"]["key_id"]);
+    script
+        .both(&root, &["identity", "authority", "revoke", &retired])
+        .await;
+    script
+        .both(&root, &["identity", "revoke", "schema-ci"])
+        .await;
+    let signed = script
+        .both(
+            &a_dir,
+            &["evidence", "add", "--kind", "build", "--result", "pass"],
+        )
+        .await;
+    script
+        .both(
+            &a_dir,
+            &["evidence", "show", &text(&signed["evidence"]["id"])[..8]],
+        )
         .await;
     script.both(&a_dir, &["here"]).await;
     script.both(&root, &["here"]).await;

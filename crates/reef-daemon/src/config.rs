@@ -132,6 +132,10 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ),
     ("evidence", &["retention"]),
     ("artifacts", &["retention", "max_size", "max_object_size"]),
+    (
+        "session_keys",
+        &["lifetime", "max_lifetime", "default_identity"],
+    ),
     ("ui", &["enabled", "listen"]),
     (
         "remote",
@@ -170,6 +174,9 @@ pub struct Paths {
     /// The remote listener's generated key and certificate, `<state>/remote`
     /// (R2.08).
     pub remote: PathBuf,
+    /// The daemon's issuing authority key, `<state>/identity` (R3.03): never
+    /// in a backup.
+    pub identity: PathBuf,
 }
 
 /// `config.toml` as written, every absent key at its default. The `Option`
@@ -210,6 +217,8 @@ pub struct FileConfig {
     pub evidence: EvidenceSection,
     /// `[artifacts]` (R3.02).
     pub artifacts: ArtifactsSection,
+    /// `[session_keys]` (R3.03).
+    pub session_keys: SessionKeysSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -708,6 +717,37 @@ impl Default for ArtifactsSection {
     }
 }
 
+/// `[session_keys]`: the session keys the daemon's authority certifies
+/// (R3.03, ADR 0057). Unrelated to `[identity]`, which names the daemon as
+/// a committer: operator identities are `reef identity`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SessionKeysSection {
+    /// A session key's life when the request names none. Default 1 hour;
+    /// from 5 minutes to `max_lifetime`.
+    #[serde(with = "duration")]
+    pub lifetime: Duration,
+    /// The longest life a request may ask for. Default 24 hours; from 5
+    /// minutes (what `reef evidence add` asks for) to 7 days.
+    #[serde(with = "duration")]
+    pub max_lifetime: Duration,
+    /// The operator identity socket requests use when they name none: a
+    /// live `person` identity's name. Empty, the default, means the one
+    /// the daemon created at its first start. One that names no live
+    /// person identity stops the daemon from starting.
+    pub default_identity: String,
+}
+
+impl Default for SessionKeysSection {
+    fn default() -> Self {
+        Self {
+            lifetime: Duration::from_hours(1),
+            max_lifetime: Duration::from_hours(24),
+            default_identity: String::new(),
+        }
+    }
+}
+
 /// `[status_index]`: the incremental status index (R2.23, ADR 0048).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -1170,6 +1210,7 @@ fn paths_from(
         repos: state_dir.join("repos"),
         ui: state_dir.join("ui"),
         remote: state_dir.join("remote"),
+        identity: state_dir.join("identity"),
         socket: settled.socket,
         state_dir,
     };
@@ -1574,6 +1615,14 @@ impl Config {
                 ],
             ),
             (
+                "session_keys",
+                vec![
+                    ("lifetime", d(f.session_keys.lifetime)),
+                    ("max_lifetime", d(f.session_keys.max_lifetime)),
+                    ("default_identity", s(&f.session_keys.default_identity)),
+                ],
+            ),
+            (
                 "ui",
                 vec![
                     ("enabled", f.ui.enabled.to_string()),
@@ -1890,6 +1939,27 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             (1 << 10..=64 << 30).contains(&file.artifacts.max_object_size.0),
             "artifacts.max_object_size",
             "must be from 1KiB to 64GiB".to_owned(),
+        ),
+        (
+            (Duration::from_mins(5)..=Duration::from_hours(7 * 24))
+                .contains(&file.session_keys.max_lifetime),
+            "session_keys.max_lifetime",
+            "must be from 5m to 7d".to_owned(),
+        ),
+        (
+            (Duration::from_mins(5)..=file.session_keys.max_lifetime)
+                .contains(&file.session_keys.lifetime),
+            "session_keys.lifetime",
+            format!(
+                "must be from 5m to session_keys.max_lifetime ({})",
+                fd(file.session_keys.max_lifetime)
+            ),
+        ),
+        (
+            file.session_keys.default_identity.is_empty()
+                || reef_evidence::session::is_name(&file.session_keys.default_identity),
+            "session_keys.default_identity",
+            "must be empty or an identity name, [a-z0-9][a-z0-9._-]{0,62}".to_owned(),
         ),
         (
             file.ui.listen_addr().is_some(),

@@ -12,10 +12,14 @@ import "reef/api/v1/options.proto";
 // Issuing and ending remote tokens.
 service RemoteService {
   // Issues a token. Its secret is in the response and nowhere else: the
-  // daemon keeps only a digest. Errors: INVALID_ARGUMENT with reason
-  // INVALID_REMOTE_TOKEN_NAME; ALREADY_EXISTS with reason
-  // REMOTE_TOKEN_EXISTS (a live token has the name); FAILED_PRECONDITION
-  // with reason TOO_MANY_REMOTE_TOKENS (256 live).
+  // daemon keeps only a digest. A token linked to an operator identity
+  // (R3.03) gets session keys for that identity alone. Errors:
+  // INVALID_ARGUMENT with reason INVALID_REMOTE_TOKEN_NAME, or
+  // INVALID_IDENTITY_NAME (metadata `name`) for `identity`; ALREADY_EXISTS
+  // with reason REMOTE_TOKEN_EXISTS (a live token has the name);
+  // FAILED_PRECONDITION with reason TOO_MANY_REMOTE_TOKENS (256 live), or
+  // IDENTITY_REVOKED (metadata `name`, `revoked_at`); NOT_FOUND with reason
+  // IDENTITY_NOT_FOUND (metadata `name`).
   rpc CreateRemoteToken(CreateRemoteTokenRequest) returns (CreateRemoteTokenResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
@@ -75,6 +79,9 @@ message RemoteToken {
   google.protobuf.Timestamp last_used_at = 9;
   // The peer address of that use, such as `203.0.113.7:51522`.
   string last_used_from = 10;
+  // The operator identity it is linked to (R3.03), by name: the only
+  // identity it gets session keys for. Empty for none. Rotation keeps it.
+  string identity = 11;
 }
 
 // Ask for a new token.
@@ -87,6 +94,10 @@ message CreateRemoteTokenRequest {
   google.protobuf.Duration expires_in = 3;
   // It lives until revoked.
   bool never_expires = 4;
+  // A live operator identity to link it to, by name (R3.03): the token
+  // gets session keys for it alone. Empty for none. A link is never
+  // changed: revoke the token and create another.
+  string identity = 5;
 }
 
 // A new token.

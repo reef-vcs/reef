@@ -46,7 +46,11 @@
 //!    max_size`, then the store's leftovers
 //!    ([`crate::artifacts::retention`]). A failure is logged and the run
 //!    goes on, but is reported in [`GcReport::evidence_error`]: evidence and
-//!    artifacts are authoritative, not a cache.
+//!    artifacts are authoritative, not a cache. Session keys are
+//!    machine-wide, so the first report of a run then also sweeps the ones
+//!    that ended over a week ago, and before `keep_newer`, that no evidence
+//!    names, with their emptied sessions (R3.03,
+//!    [`crate::identity::retention`]); a failure is logged.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -122,6 +126,8 @@ pub struct GcReport {
     pub retention: crate::artifacts::retention::Retention,
     /// Why step 7 stopped short, if it did.
     pub evidence_error: Option<String>,
+    /// Session keys swept (R3.03): in the first report of a run only.
+    pub session_keys_removed: u32,
 }
 
 /// Failure of a GC run, other than the jj step's (which is reported).
@@ -484,6 +490,29 @@ async fn run_repo(
         }
     };
 
+    // Session keys are machine-wide: the first report sweeps them, after
+    // step 7 has deleted the evidence that named them (R3.03).
+    let session_keys_removed = if store_leftovers {
+        let db = Arc::clone(&state.db);
+        match tokio::task::spawn_blocking(move || {
+            crate::identity::retention::sweep(&db, keep_newer, dry_run)
+        })
+        .await
+        {
+            Ok(Ok(swept)) => swept.keys,
+            Ok(Err(error)) => {
+                tracing::warn!(error = %ErrorChain(&error), "the session key sweep of GC failed");
+                0
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "the session key sweep of GC panicked");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
     // Whatever steps 2 to 5 came to: the jj step has rewritten the
     // operation ids the index names.
     if !dry_run && let Some(handle) = &handle {
@@ -509,6 +538,7 @@ async fn run_repo(
         dry_run,
         retention,
         evidence_error,
+        session_keys_removed,
     };
     tracing::info!(
         keep_newer = %report.keep_newer,
@@ -526,6 +556,7 @@ async fn run_repo(
         evidence_removed_count = report.retention.evidence_removed,
         artifacts_collected_count = report.retention.artifacts_collected,
         artifact_freed_bytes = report.retention.artifact_bytes_freed,
+        session_keys_removed_count = report.session_keys_removed,
         elapsed_ms = report.elapsed_ms,
         "garbage collection finished"
     );

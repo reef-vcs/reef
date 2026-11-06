@@ -824,6 +824,9 @@ pub struct RemoteToken {
     pub last_used_at: Option<String>,
     /// The address it was last used from.
     pub last_used_from: Option<String>,
+    /// The operator identity it is linked to (R3.03): the only one it gets
+    /// session keys for; `null` for none.
+    pub identity: Option<String>,
 }
 
 impl From<&v1::RemoteToken> for RemoteToken {
@@ -860,6 +863,7 @@ impl From<&v1::RemoteToken> for RemoteToken {
             revoked_at: time(token.revoked_at.as_ref()),
             last_used_at: time(token.last_used_at.as_ref()),
             last_used_from: text(&token.last_used_from),
+            identity: text(&token.identity),
         }
     }
 }
@@ -3360,6 +3364,10 @@ pub struct Evidence {
     /// The canonical DSSE envelope, as JSON (`show` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envelope: Option<serde_json::Value>,
+    /// Which operator identity the signing key is bound to, and its status
+    /// when the daemon first witnessed the object (R3.03). Beside
+    /// `signature`, never a trust decision: policy decides whom to trust.
+    pub identity: Option<KeyIdentity>,
 }
 
 impl From<&v1::Evidence> for Evidence {
@@ -3413,6 +3421,7 @@ impl From<&v1::Evidence> for Evidence {
             current: evidence.current,
             statement,
             envelope,
+            identity: evidence.identity.as_ref().map(KeyIdentity::from),
         }
     }
 }
@@ -3436,4 +3445,320 @@ pub struct EvidenceKey {
     pub path: String,
     /// The public key, SPKI PEM: `<path>.pub`.
     pub public_key_path: String,
+}
+
+/// An identity kind's name: `person` or `ci` (R3.03); `None` when
+/// unspecified.
+pub fn identity_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::IdentityKind::try_from(kind) {
+        Ok(v1::IdentityKind::Unspecified) => return None,
+        Ok(v1::IdentityKind::Person) => "person",
+        Ok(v1::IdentityKind::Ci) => "ci",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A session actor's name: `human`, `agent` or `executor` (R3.03); `None`
+/// when unspecified.
+pub fn session_actor_name(actor: i32) -> Option<&'static str> {
+    let name = match v1::SessionActor::try_from(actor) {
+        Ok(v1::SessionActor::Unspecified) => return None,
+        Ok(v1::SessionActor::Human) => "human",
+        Ok(v1::SessionActor::Agent) => "agent",
+        Ok(v1::SessionActor::Executor) => "executor",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// The actor a name from [`session_actor_name`] stands for.
+pub fn session_actor_of(name: &str) -> Option<v1::SessionActor> {
+    (1..=3)
+        .filter_map(|n| v1::SessionActor::try_from(n).ok())
+        .find(|actor| session_actor_name(*actor as i32) == Some(name))
+}
+
+/// A presence's name: `none` (R3.03); `None` when unspecified.
+pub fn session_presence_name(presence: i32) -> Option<&'static str> {
+    let name = match v1::SessionPresence::try_from(presence) {
+        Ok(v1::SessionPresence::Unspecified) => return None,
+        Ok(v1::SessionPresence::None) => "none",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A key custody's name: `client` or `daemon` (R3.03); `None` when
+/// unspecified.
+pub fn key_custody_name(custody: i32) -> Option<&'static str> {
+    let name = match v1::KeyCustody::try_from(custody) {
+        Ok(v1::KeyCustody::Unspecified) => return None,
+        Ok(v1::KeyCustody::Client) => "client",
+        Ok(v1::KeyCustody::Daemon) => "daemon",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// An issuer kind's name: `reef-daemon` (R3.03); `None` when unspecified.
+pub fn issuer_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::IssuerKind::try_from(kind) {
+        Ok(v1::IssuerKind::Unspecified) => return None,
+        Ok(v1::IssuerKind::ReefDaemon) => "reef-daemon",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// An identity status's name: `unbound`, `bound`, `expired`, `revoked` or
+/// `invalid` (R3.03); `None` when unspecified.
+pub fn identity_status_name(status: i32) -> Option<&'static str> {
+    let name = match v1::IdentityStatus::try_from(status) {
+        Ok(v1::IdentityStatus::Unspecified) => return None,
+        Ok(v1::IdentityStatus::Unbound) => "unbound",
+        Ok(v1::IdentityStatus::Bound) => "bound",
+        Ok(v1::IdentityStatus::Expired) => "expired",
+        Ok(v1::IdentityStatus::Revoked) => "revoked",
+        Ok(v1::IdentityStatus::Invalid) => "invalid",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+names_schema! {
+    identity_kind_name_schema_or_null = identity_kind_name, true;
+    session_actor_name_schema_or_null = session_actor_name, true;
+    session_presence_name_schema_or_null = session_presence_name, true;
+    key_custody_name_schema_or_null = key_custody_name, true;
+    issuer_kind_name_schema_or_null = issuer_kind_name, true;
+    identity_status_name_schema_or_null = identity_status_name, true;
+}
+
+/// A revocation (R3.03): when it was made, and from when signatures stop
+/// counting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Revocation {
+    /// When it was made.
+    pub revoked_at: Option<String>,
+    /// From when signatures stop counting; never after `revoked_at`.
+    pub invalid_from: Option<String>,
+    /// Why, as the revoker said.
+    pub reason: Option<String>,
+}
+
+impl From<&v1::Revocation> for Revocation {
+    fn from(revocation: &v1::Revocation) -> Self {
+        Self {
+            revoked_at: time(revocation.revoked_at.as_ref()),
+            invalid_from: time(revocation.invalid_from.as_ref()),
+            reason: text(&revocation.reason),
+        }
+    }
+}
+
+/// An operator identity (R3.03): the person or CI pipeline a key answers
+/// to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Identity {
+    /// `idn_` and 16 hex digits, never reused.
+    pub id: String,
+    /// Its name, never reused.
+    pub name: String,
+    /// `person` or `ci`.
+    #[schemars(schema_with = "identity_kind_name_schema_or_null")]
+    pub kind: Option<String>,
+    /// For display, unverified.
+    pub display_name: Option<String>,
+    /// For display, checked for its form only.
+    pub email: Option<String>,
+    /// When it was created.
+    pub created_at: Option<String>,
+    /// Its revocation; `null` while live.
+    pub revocation: Option<Revocation>,
+    /// Whether socket requests that name no identity use it.
+    pub is_default: bool,
+    /// Its session keys neither expired nor revoked.
+    pub live_session_keys: u32,
+    /// The live remote tokens linked to it.
+    pub remote_token_names: Vec<String>,
+}
+
+impl From<&v1::Identity> for Identity {
+    fn from(identity: &v1::Identity) -> Self {
+        Self {
+            id: identity.id.clone(),
+            name: identity.name.clone(),
+            kind: name(identity_kind_name(identity.kind)),
+            display_name: text(&identity.display_name),
+            email: text(&identity.email),
+            created_at: time(identity.created_at.as_ref()),
+            revocation: identity.revocation.as_ref().map(Revocation::from),
+            is_default: identity.is_default,
+            live_session_keys: identity.live_session_keys,
+            remote_token_names: identity.remote_token_names.clone(),
+        }
+    }
+}
+
+/// A session key and what its certificate binds it to (R3.03).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SessionKey {
+    /// The key's id: the `key_id` of evidence it signs.
+    pub key_id: String,
+    /// The identity it answers to; empty, as every certificate field is,
+    /// when `certificate_valid` is false.
+    pub identity: String,
+    /// That identity's id.
+    pub identity_id: String,
+    /// That identity's kind: `person` or `ci`.
+    #[schemars(schema_with = "identity_kind_name_schema_or_null")]
+    pub identity_kind: Option<String>,
+    /// What the requester declared it for: `human`, `agent` or `executor`.
+    #[schemars(schema_with = "session_actor_name_schema_or_null")]
+    pub actor: Option<String>,
+    /// The issuing request's agent label: declared, unverified.
+    pub agent: Option<String>,
+    /// Its session; successive keys of one session share it.
+    pub session_id: String,
+    /// How a human's presence was established: `none` (not verified).
+    #[schemars(schema_with = "session_presence_name_schema_or_null")]
+    pub presence: Option<String>,
+    /// Where its private half lives: `client` or `daemon`.
+    #[schemars(schema_with = "key_custody_name_schema_or_null")]
+    pub custody: Option<String>,
+    /// Who issued its certificate: `reef-daemon`.
+    #[schemars(schema_with = "issuer_kind_name_schema_or_null")]
+    pub issuer_kind: Option<String>,
+    /// The issuing authority's key id.
+    pub authority_key_id: String,
+    /// The start of its validity window.
+    pub not_before: Option<String>,
+    /// Its end, inclusive.
+    pub not_after: Option<String>,
+    /// When the daemon issued it.
+    pub issued_at: Option<String>,
+    /// The remote token of the issuing request (R2.08).
+    pub remote_token_id: Option<String>,
+    /// The earliest applicable revocation: the key's, its session's, its
+    /// identity's or its authority's.
+    pub revocation: Option<Revocation>,
+    /// Whether its certificate verified at this read.
+    pub certificate_valid: bool,
+}
+
+impl From<&v1::SessionKey> for SessionKey {
+    fn from(key: &v1::SessionKey) -> Self {
+        Self {
+            key_id: key.key_id.clone(),
+            identity: key.identity.clone(),
+            identity_id: key.identity_id.clone(),
+            identity_kind: name(identity_kind_name(key.identity_kind)),
+            actor: name(session_actor_name(key.actor)),
+            agent: text(&key.agent),
+            session_id: key.session_id.clone(),
+            presence: name(session_presence_name(key.presence)),
+            custody: name(key_custody_name(key.custody)),
+            issuer_kind: name(issuer_kind_name(key.issuer_kind)),
+            authority_key_id: key.authority_key_id.clone(),
+            not_before: time(key.not_before.as_ref()),
+            not_after: time(key.not_after.as_ref()),
+            issued_at: time(key.issued_at.as_ref()),
+            remote_token_id: text(&key.remote_token_id),
+            revocation: key.revocation.as_ref().map(Revocation::from),
+            certificate_valid: key.certificate_valid,
+        }
+    }
+}
+
+/// A session key `reef identity session issue` made (R3.03): its record,
+/// its private key, and its certificate. A credential: the private key is
+/// printed once, here, and Reef keeps it nowhere.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct SessionKeyIssued {
+    /// The key's record.
+    pub key: SessionKey,
+    /// The private key, PKCS#8 PEM (`-----BEGIN PRIVATE KEY-----`).
+    pub private_key: String,
+    /// The certificate: the DSSE envelope the daemon's authority signed, as
+    /// JSON.
+    pub certificate: serde_json::Value,
+}
+
+impl Drop for SessionKeyIssued {
+    /// The private key's text is wiped as the value goes; copies a caller
+    /// made of it, such as a serialized buffer, are the caller's to wipe.
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.private_key);
+    }
+}
+
+/// One of the daemon's issuing authority keys (R3.03).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Authority {
+    /// Its key id: the certificates' `keyid`.
+    pub key_id: String,
+    /// `ed25519`.
+    pub algorithm: String,
+    /// Its public key, SPKI PEM: what another party pins.
+    pub public_key: String,
+    /// The host it was made on.
+    pub host: String,
+    /// When it was made.
+    pub created_at: Option<String>,
+    /// When it stopped issuing; `null` for the current one.
+    pub retired_at: Option<String>,
+    /// Its revocation, which applies to everything it issued.
+    pub revocation: Option<Revocation>,
+    /// Whether it is the one that issues now.
+    pub current: bool,
+}
+
+impl From<&v1::Authority> for Authority {
+    fn from(authority: &v1::Authority) -> Self {
+        let public_key = reef_evidence::keys::pem_encode("PUBLIC KEY", &authority.public_key);
+        Self {
+            key_id: authority.key_id.clone(),
+            algorithm: authority.algorithm.clone(),
+            public_key,
+            host: authority.host.clone(),
+            created_at: time(authority.created_at.as_ref()),
+            retired_at: time(authority.retired_at.as_ref()),
+            revocation: authority.revocation.as_ref().map(Revocation::from),
+            current: authority.current,
+        }
+    }
+}
+
+/// What a verifier sees of the key that signed an evidence object
+/// (R3.03).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct KeyIdentity {
+    /// `unbound` (a bare key), `bound`, `expired`, `revoked`, or `invalid`
+    /// (the certificate does not verify), at `witnessed_at`.
+    #[schemars(schema_with = "identity_status_name_schema_or_null")]
+    pub status: Option<String>,
+    /// The certified key; `null` when unbound.
+    pub key: Option<SessionKey>,
+    /// When the daemon first witnessed the object: its `added_at`.
+    pub witnessed_at: Option<String>,
+}
+
+impl From<&v1::KeyIdentity> for KeyIdentity {
+    fn from(identity: &v1::KeyIdentity) -> Self {
+        Self {
+            status: name(identity_status_name(identity.status)),
+            key: identity.key.as_ref().map(SessionKey::from),
+            witnessed_at: time(identity.witnessed_at.as_ref()),
+        }
+    }
+}
+
+/// What `reef identity authority rotate` did (R3.03).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct AuthorityRotated {
+    /// The key that stopped issuing, revoked when asked.
+    pub retired: Authority,
+    /// The key that issues now.
+    pub current: Authority,
 }

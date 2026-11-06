@@ -13,11 +13,17 @@
 //! its transaction, and every read reports each artifact's state from that
 //! index: stored, collected, or absent.
 //!
+//! Every read also reports `identity` (R3.03, ADR 0057): the operator
+//! identity the signing key is certified for, if any, and its status at the
+//! object's `added_at`. The page's key ids are looked up in one query, and
+//! each certificate is checked again in the blocking job that checks the
+//! envelopes ([`crate::identity::read`]).
+//!
 //! A listing is newest added first; its page token's cursor is the last
 //! object's `(added_at, id)`, and it pins the tree a `revision` resolved to
 //! on the first page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,6 +46,7 @@ use crate::db::{
     MIN_PREFIX_LEN, StoredEvidence,
 };
 use crate::error::{Advice, Advise, status};
+use crate::identity::read::{ReadKey, key_identity, read_keys, unverified_identity};
 use crate::model::Timestamp;
 
 const LIST_EVIDENCE: &str = "/reef.api.v1.EvidenceService/ListEvidence";
@@ -279,8 +286,10 @@ fn unchecked_statement(envelope: &[u8]) -> Option<Statement> {
     serde_json::from_slice(&envelope.payload_bytes()?).ok()
 }
 
-/// What a read reports of `stored`, its signature checked again, and the
-/// index its payload gives (`None` when the envelope does not decode).
+/// What a read reports of `stored`, its signature checked again, the index
+/// its payload gives (`None` when the envelope does not decode), the key id
+/// it reports, and that key id again only when the signature is valid: the
+/// one an identity may be looked up by (review finding 1).
 ///
 /// Every field comes from the payload: from the verified one when the
 /// signature checks out, else from the payload as stored, else from the
@@ -293,7 +302,7 @@ fn evidence_message(
     change_ids: Vec<String>,
     with_envelope: bool,
     current: Option<&BTreeSet<String>>,
-) -> (v1::Evidence, Option<Index>, String) {
+) -> (v1::Evidence, Option<Index>, String, Option<String>) {
     let row = &stored.row;
     let checked = stored
         .public_key
@@ -387,8 +396,10 @@ fn evidence_message(
         },
         current: now,
         remote_token_id: row.remote_token_id.clone().unwrap_or_default(),
+        identity: None,
     };
-    (message, index, key_id)
+    let verified_key = valid.then(|| key_id.clone());
+    (message, index, key_id, verified_key)
 }
 
 /// Whether the row's index columns are what the verified payload says.
@@ -422,9 +433,11 @@ fn payload_matches(filter: &EvidenceFilter, index: &Index, key_id: &str) -> bool
 }
 
 /// [`evidence_message`] of each of `found` on the blocking pool, with its
-/// links; `current` says, for a listing by change, which trees are the
-/// change's now. With `filter`, an object whose payload does not match it
-/// is left out, and logged: its index columns were changed.
+/// links and its key's identity (R3.03); `current` says, for a listing by
+/// change, which trees are the change's now. With `filter`, an object whose
+/// payload does not match it is left out, and logged: its index columns
+/// were changed; and one whose certificate names none of the filter's
+/// identities is left out too.
 async fn messages(
     state: &AppState,
     repo: crate::model::RepoId,
@@ -442,27 +455,59 @@ async fn messages(
             (stored, changes)
         })
         .collect();
+    let key_ids: BTreeSet<&str> = with_links
+        .iter()
+        .map(|(stored, _)| stored.row.key_id.as_str())
+        .collect();
+    let key_rows = state
+        .db
+        .session_keys_by_id(&key_ids.into_iter().collect::<Vec<_>>())
+        .map_err(status)?;
+    let db = Arc::clone(&state.db);
     let mut messages: Vec<v1::Evidence> = tokio::task::spawn_blocking(move || {
-        with_links
+        let keys: HashMap<String, ReadKey> = read_keys(&db, key_rows)
+            .map_err(status)?
             .into_iter()
-            .filter_map(|(stored, changes)| {
-                let (message, index, key_id) =
-                    evidence_message(&stored, changes, with_envelope, current.as_ref());
-                if let (Some(filter), Some(index)) = (&filter, &index)
-                    && !payload_matches(filter, index, &key_id)
-                {
-                    tracing::warn!(
-                        evidence_id = %message.evidence_id,
-                        "a stored evidence row's index columns differ from its payload; left out of a filtered listing"
-                    );
-                    return None;
-                }
-                Some(message)
-            })
-            .collect()
+            .map(|read| (read.row.key_id.clone(), read))
+            .collect();
+        Ok::<_, Status>(
+            with_links
+                .into_iter()
+                .filter_map(|(stored, changes)| {
+                    let (mut message, index, key_id, verified_key) =
+                        evidence_message(&stored, changes, with_envelope, current.as_ref());
+                    // Identity only for a key whose signature verified here: a
+                    // `key_id` column changed behind the daemon must not borrow
+                    // another key's certificate.
+                    let key = verified_key.as_ref().and_then(|id| keys.get(id));
+                    message.identity = Some(match verified_key {
+                        Some(_) => key_identity(key, stored.row.added_at),
+                        None => unverified_identity(stored.row.added_at),
+                    });
+                    if let (Some(filter), Some(index)) = (&filter, &index)
+                        && !payload_matches(filter, index, &key_id)
+                    {
+                        tracing::warn!(
+                            evidence_id = %message.evidence_id,
+                            "a stored evidence row's index columns differ from its payload; left out of a filtered listing"
+                        );
+                        return None;
+                    }
+                    if let Some(filter) = &filter
+                        && !filter.identities.is_empty()
+                        && !key
+                            .and_then(ReadKey::identity_name)
+                            .is_some_and(|name| filter.identities.iter().any(|n| n == name))
+                    {
+                        return None;
+                    }
+                    Some(message)
+                })
+                .collect(),
+        )
     })
     .await
-    .map_err(|error| task(&error))?;
+    .map_err(|error| task(&error))??;
     artifact_states(state, repo, &mut messages)?;
     Ok(messages)
 }
@@ -840,6 +885,12 @@ impl EvidenceService for EvidenceHandler {
             results,
             target: Some(request.target.clone()).filter(|target| !target.is_empty()),
             key_ids: request.key_ids.clone(),
+            identities: request
+                .identities
+                .iter()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .collect(),
         };
         let mut found = state
             .db

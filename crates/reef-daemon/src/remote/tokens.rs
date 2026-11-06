@@ -210,13 +210,15 @@ impl Tokens {
             .find(|entry| entry.row.name == name && entry.row.is_live(now))
     }
 
-    /// Issues a token; `expires_in` `None` is never. Returns its row and
-    /// its bearer token.
+    /// Issues a token; `expires_in` `None` is never. `identity_id` links it
+    /// to an operator identity (R3.03), which the caller has checked is
+    /// live. Returns its row and its bearer token.
     pub fn create(
         &self,
         name: &str,
         scope: TokenScope,
         expires_in: Option<Duration>,
+        identity_id: Option<String>,
     ) -> Result<(RemoteTokenRow, String), RemoteError> {
         if !valid_name(name) {
             return Err(RemoteError::InvalidTokenName {
@@ -262,6 +264,7 @@ impl Tokens {
             revoked_at: None,
             last_used_at: None,
             last_used_from: None,
+            identity_id,
         };
         self.db.insert_remote_token(&row)?;
         entries.insert(
@@ -522,7 +525,9 @@ mod tests {
     #[test]
     fn format_and_verify() {
         let tokens = tokens(&Limits::default());
-        let (row, token) = tokens.create("laptop", TokenScope::Read, None).unwrap();
+        let (row, token) = tokens
+            .create("laptop", TokenScope::Read, None, None)
+            .unwrap();
         assert_eq!(token.len(), 65, "{token}");
         assert!(token.starts_with(&format!("reef_{}_", row.id)));
         assert_eq!(parse(&token).map(|(id, _)| id), Some(row.id.as_str()));
@@ -548,7 +553,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            tokens.create("laptop", TokenScope::Write, None),
+            tokens.create("laptop", TokenScope::Write, None, None),
             Err(RemoteError::TokenExists { .. })
         ));
     }
@@ -556,7 +561,9 @@ mod tests {
     #[test]
     fn rotate_and_revoke() {
         let tokens = tokens(&Limits::default());
-        let (_, old) = tokens.create("laptop", TokenScope::Write, None).unwrap();
+        let (_, old) = tokens
+            .create("laptop", TokenScope::Write, None, None)
+            .unwrap();
         let (_, new) = tokens.rotate("laptop", Duration::ZERO).unwrap();
         assert!(tokens.verify(Some(&new), peer()).is_ok());
         assert!(matches!(
@@ -578,7 +585,9 @@ mod tests {
             Err(RemoteError::TokenNotFound { .. })
         ));
         // The name is free again.
-        tokens.create("laptop", TokenScope::Read, None).unwrap();
+        tokens
+            .create("laptop", TokenScope::Read, None, None)
+            .unwrap();
         assert!(matches!(
             tokens.rotate("laptop", MAX_OVERLAP + Duration::from_secs(1)),
             Err(RemoteError::InvalidDuration { .. })
@@ -593,9 +602,9 @@ mod tests {
             max_streams_per_token: 1,
             ..Limits::default()
         });
-        let (row, _) = tokens.create("a", TokenScope::Read, None).unwrap();
+        let (row, _) = tokens.create("a", TokenScope::Read, None, None).unwrap();
         assert!(matches!(
-            tokens.create("b", TokenScope::Read, None),
+            tokens.create("b", TokenScope::Read, None, None),
             Err(RemoteError::TooManyTokens { limit: 1 })
         ));
         let stream = tokens.hold(&row.id, true).unwrap();
@@ -617,14 +626,21 @@ mod tests {
         let db = Arc::new(Db::open_in_memory().unwrap());
         let tokens = Arc::new(Tokens::load(Arc::clone(&db), Limits::default()).unwrap());
         let (_, token) = tokens
-            .create("short", TokenScope::Read, Some(Duration::from_millis(1)))
+            .create(
+                "short",
+                TokenScope::Read,
+                Some(Duration::from_millis(1)),
+                None,
+            )
             .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert!(matches!(
             tokens.verify(Some(&token), peer()),
             Err(Refusal::Expired)
         ));
-        let (_, kept) = tokens.create("kept", TokenScope::Write, None).unwrap();
+        let (_, kept) = tokens
+            .create("kept", TokenScope::Write, None, None)
+            .unwrap();
         tokens.verify(Some(&kept), peer()).unwrap();
         tokens.flush().unwrap();
         let reloaded = Tokens::load(db, Limits::default()).unwrap();

@@ -9,7 +9,7 @@ use super::{Db, DbError};
 use crate::model::Timestamp;
 
 const COLUMNS: &str = "id, name, scope, digest, previous_digest, previous_until, created_at, \
-     expires_at, rotated_at, revoked_at, last_used_at, last_used_from";
+     expires_at, rotated_at, revoked_at, last_used_at, last_used_from, identity_id";
 
 /// What a remote token allows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +80,9 @@ pub struct RemoteTokenRow {
     pub last_used_at: Option<Timestamp>,
     /// The peer address of that use.
     pub last_used_from: Option<String>,
+    /// The operator identity it is linked to (R3.03): the only one it gets
+    /// session keys for.
+    pub identity_id: Option<String>,
 }
 
 impl RemoteTokenRow {
@@ -118,6 +121,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<RemoteTokenRow> {
         revoked_at: row.get(9)?,
         last_used_at: row.get(10)?,
         last_used_from: row.get(11)?,
+        identity_id: row.get(12)?,
     })
 }
 
@@ -138,7 +142,7 @@ impl Db {
             conn.execute(
                 &format!(
                     "INSERT INTO remote_tokens ({COLUMNS}) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
                 ),
                 params![
                     row.id,
@@ -153,6 +157,7 @@ impl Db {
                     row.revoked_at,
                     row.last_used_at,
                     row.last_used_from,
+                    row.identity_id,
                 ],
             )
             .map(drop)
@@ -224,6 +229,7 @@ mod tests {
             revoked_at: None,
             last_used_at: None,
             last_used_from: None,
+            identity_id: None,
         }
     }
 
