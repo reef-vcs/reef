@@ -1,7 +1,7 @@
 //! The gRPC router: every service the daemon serves, behind
 //! [`CompatLayer`].
 //!
-//! The daemon serves the twelve `reef.api.v1` services and, frozen,
+//! The daemon serves the fifteen `reef.api.v1` services and, frozen,
 //! `reef.daemon.v0.Daemon/Status` (R2.01, ADR 0029). A request for a method
 //! it does not serve gets tonic's bare `UNIMPLEMENTED`, which a client
 //! cannot tell from a bug; [`CompatLayer`] rewrites that answer so every
@@ -24,6 +24,7 @@ use reef_api::v0::daemon_server::DaemonServer as V0DaemonServer;
 use reef_api::v1::change_service_server::ChangeServiceServer;
 use reef_api::v1::daemon_service_server::DaemonServiceServer;
 use reef_api::v1::diff_service_server::DiffServiceServer;
+use reef_api::v1::evidence_service_server::EvidenceServiceServer;
 use reef_api::v1::file_service_server::FileServiceServer;
 use reef_api::v1::history_service_server::HistoryServiceServer;
 use reef_api::v1::maintenance_service_server::MaintenanceServiceServer;
@@ -52,6 +53,7 @@ use crate::service::changes::ChangesHandler;
 use crate::service::compat::V0DaemonService;
 use crate::service::daemon::DaemonStatusService;
 use crate::service::diff::DiffHandler;
+use crate::service::evidence::EvidenceHandler;
 use crate::service::files::FilesHandler;
 use crate::service::history::HistoryHandler;
 use crate::service::maintenance::MaintenanceHandler;
@@ -66,10 +68,11 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 15] = [
+pub const SERVED: [&str; 16] = [
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
+    "reef.api.v1.EvidenceService",
     "reef.api.v1.FileService",
     "reef.api.v1.HistoryService",
     "reef.api.v1.MaintenanceService",
@@ -112,6 +115,9 @@ pub fn routes(state: &Arc<AppState>) -> Routes {
         Arc::clone(state),
     )))
     .add_service(DiffServiceServer::new(DiffHandler::new(Arc::clone(state))))
+    .add_service(EvidenceServiceServer::new(EvidenceHandler::new(
+        Arc::clone(state),
+    )))
     .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(state))))
     .add_service(MaintenanceServiceServer::new(MaintenanceHandler::new(
         Arc::clone(state),

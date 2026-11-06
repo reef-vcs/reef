@@ -16,6 +16,7 @@ pub mod changes;
 pub mod compat;
 pub mod daemon;
 pub mod diff;
+pub mod evidence;
 pub mod files;
 pub mod history;
 pub mod maintenance;

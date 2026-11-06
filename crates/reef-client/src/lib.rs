@@ -32,6 +32,10 @@ pub mod schema;
 pub mod scip;
 pub mod symbol_text;
 
+/// The evidence format (R3.01, ADR 0055), which `reef evidence` signs and
+/// checks with.
+pub use reef_evidence as evidence;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
@@ -43,6 +47,7 @@ use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
+use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
@@ -59,6 +64,10 @@ use reef_api::v1::{
     EditFilesRequest, EditFilesResponse, ListFilesRequest, ListFilesResponse, ReadFileRequest,
     ReadFileResponse, SubscribeOperationsRequest, SubscribeOperationsResponse,
     UndoOperationRequest, UndoOperationResponse,
+};
+use reef_api::v1::{
+    AddEvidenceRequest, AddEvidenceResponse, Evidence, GetEvidenceRequest, GetEvidenceResponse,
+    ListEvidenceRequest, ListEvidenceResponse,
 };
 use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
@@ -1491,6 +1500,68 @@ impl Client {
         }
         Ok(whole)
     }
+
+    /// `EvidenceService.AddEvidence` (R3.01): stores an envelope the
+    /// caller signed.
+    pub async fn add_evidence(
+        &self,
+        request: AddEvidenceRequest,
+    ) -> Result<AddEvidenceResponse, ClientError> {
+        let mut client =
+            EvidenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("AddEvidence", client.add_evidence(request)).await
+    }
+
+    /// `EvidenceService.GetEvidence` (R3.01): one object of `repo` by its
+    /// id or a unique prefix, with its envelope.
+    pub async fn get_evidence(
+        &self,
+        repo: &str,
+        evidence_id: &str,
+    ) -> Result<GetEvidenceResponse, ClientError> {
+        let mut client =
+            EvidenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        let request = GetEvidenceRequest {
+            repo: repo.to_owned(),
+            evidence_id: evidence_id.to_owned(),
+        };
+        self.call("GetEvidence", client.get_evidence(request)).await
+    }
+
+    /// One page of `EvidenceService.ListEvidence` (R3.01).
+    pub async fn list_evidence_page(
+        &self,
+        request: ListEvidenceRequest,
+    ) -> Result<ListEvidenceResponse, ClientError> {
+        let mut client =
+            EvidenceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ListEvidence", client.list_evidence(request))
+            .await
+    }
+
+    /// The first `limit` objects the listing `request` asks for (all when
+    /// 0), newest added first, and whether more exist; `request`'s page
+    /// fields are ignored.
+    pub async fn list_evidence(
+        &self,
+        request: ListEvidenceRequest,
+        limit: usize,
+    ) -> Result<Limited<Evidence>, ClientError> {
+        let mut request = ListEvidenceRequest {
+            page_size: limited_page_size(limit).min(EVIDENCE_PAGE_SIZE),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_evidence_page(request.clone()).await?;
+            limited.items.extend(response.evidence);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
 }
 
 /// The first items of a list read up to a limit (R2.27).
@@ -1526,6 +1597,9 @@ impl<T> Limited<T> {
         next.is_empty()
     }
 }
+
+/// The largest page of `ListEvidence` (R3.01).
+const EVIDENCE_PAGE_SIZE: i32 = 200;
 
 /// The page size for reading `limit` items (0 for all): the limit, at most
 /// the largest page a daemon serves.

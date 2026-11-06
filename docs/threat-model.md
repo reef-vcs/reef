@@ -21,6 +21,7 @@ In Phase 1, one user id is one trust domain. The daemon runs as the user, and an
 | The remote listener (R2.08) | A TLS port, `[remote] listen` (`0.0.0.0:7470` by default), off unless `[remote] enabled` or `--remote` | Any host that routes to it can attempt it; with a token it serves the API and the web UI |
 | Remote tokens | blake3 digests in `reef.sqlite3`'s `remote_tokens`; secrets in clients' `remotes.toml` (`0600`), their environment, and browsers' `localStorage` | A `write` token describes, abandons, undoes and edits changes in every registered repository until it expires or is revoked |
 | The remote listener's generated key | `<state>/remote/key.pem` (`0600`, in a `0700` directory), not in backups | Whoever holds it can impersonate the daemon to a client that pinned it |
+| Evidence (R3.01) | `reef.sqlite3`'s `evidence` (canonical DSSE envelopes and their index columns), `evidence_keys` (signers' public keys) and `evidence_links` (which changes evidence was added for); in backups; signing keys in files the caller names | What the landing gate will weigh (R3.13): a row changed or deleted behind the daemon, or a key file read by someone else, changes what Reef believes was tested |
 
 ## Actors
 
@@ -35,7 +36,7 @@ In Phase 1, one user id is one trust domain. The daemon runs as the user, and an
 | A remote client with a token (R2.08) | Yes | It calls the scopes its token allows through the remote listener |
 | Any host that can route to the remote port (R2.08) | Yes | It reaches the TLS handshake and the token check without a token |
 | A network attacker between a remote client and the daemon (R2.08) | Yes | It sees or alters traffic, or impersonates the daemon to collect a token |
-| Forged evidence, keys, executors | No | RX.02, Phase 3 |
+| Forged evidence, keys, executors | Partly: R3.01 checks signatures and parses envelopes; trust is R3.03 and R3.07; RX.02 reviews | Evidence from any writer is stored, so the parser and the signature check are the boundary until policy decides whom to believe |
 
 ## Boundaries and what each component trusts
 
@@ -131,6 +132,12 @@ Status is *fixed in RX.01* with the tests, *verified* (the test shows Reef alrea
 | S-45 | Generated key | Another local user | High | Reading the listener's private key. | Bounded in R2.08: `0600` in a `0700` directory; not in backups, so a restore makes a new key and clients re-pin. Tests: `remote::generated_certificate` |
 | S-46 | Remote listener | Any host | Low | The public assets and the certificate reveal a Reef daemon; `GetDaemonStatus` and lists reveal the daemon host's paths to a token holder, and a repository or workspace named by an absolute path is resolved on the daemon's host, so a token holder can tell whether a path exists there. | Documented. Open: resolve remote callers' paths against registered roots without touching the filesystem (a follow-up issue). |
 | S-47 | Remote tokens | The daemon's user | Low | A token issued with `--expires never` lives until revoked. | Documented: the CLI says so at creation, and `remote token list` shows it. |
+| S-48 | Evidence | A same-uid agent or a `write` token | Medium | Any key's signature verifies, so an agent can attest its own tests: `AddEvidence` stores what any key signed, and reads say `SIGNATURE_CHECK_VALID`. | Documented: the format records the signing key, never a self-declared name, and nothing in the API says "trusted"; R3.07's policy decides which keys count, and the design's policy "excludes the submitting agent signing its own test run". `reef evidence show` says that a valid signature is not trust ([ADR 0055](adr/0055-evidence-object-format.md)). Tests: `evidence::add_and_get`, `vcs::evidence_cli` |
+| S-49 | Evidence parsing | A `write` token or a local client | Medium | The daemon parses envelopes from any writer: a large or deeply nested document, duplicate keys that two parsers read differently, or a parser bug reached by unsigned junk. | Fixed in R3.01: envelopes over 64 KiB and JSON nested deeper than 32 levels are refused; a duplicate key at any depth of the envelope or the payload is refused; the signature is checked before the payload is parsed, so unsigned or malformed-key input never reaches the statement parser; checking runs on the blocking pool. Tests: `reef-evidence` `format::refusals_each_have_their_check`, `format::signature_before_parse`, `evidence::add_refusals_through_the_api` |
+| S-50 | Evidence keys | Anyone who supplies a key | Low | ring accepts small-order and non-canonically encoded ed25519 public keys, which verify signatures no private key made. | Fixed in R3.01: the eight small-order points and non-canonical encodings (y at or above p, or x = 0 with the sign bit set) are refused before any signature is checked, closing the gap to strict verification. Tests: `reef-evidence` `format::keys` |
+| S-51 | Evidence key ids | Anyone who writes an envelope | Low | DSSE's `keyid` is an unauthenticated hint. | Verified in R3.01: an envelope's `keyid` must equal the SHA-256 of the public key sent with it, and verification uses that key, never the hint. Tests: `reef-evidence` `format::refusals_each_have_their_check` (`key-id`) |
+| S-52 | Evidence storage | A `write` token | Low | Nothing bounds how many evidence objects a writer adds, so `reef.sqlite3` and every backup grow. | Documented: about 1 to 2 KiB per object; R3.02 gives evidence a retention rule. |
+| S-53 | Evidence signing keys | Another local user | Low | `reef evidence add --key` reads a private key file. | Fixed in R3.01: a key file its group or others can read is refused, with `chmod 600 <file>` as the hint, before anything is sent; `reef evidence key generate` creates keys with mode `0600` and never overwrites one. Tests: `vcs::evidence_cli` |
 
 ## Not boundaries in Phase 1
 
@@ -177,5 +184,7 @@ A browser reaching it gets R2.18's protections from a non-loopback origin (S-41)
 ## Reviews
 
 R2.08's remote listener was reviewed by its own brief against the requirements above, as RX.01 decided ("R2.08 is in scope as requirements, out as a review"), with a high-effort code review on its pull request; it had no external review. RX.02 remains the first, and its scope includes this listener (rows S-35 to S-47).
+
+R3.01's evidence format (rows S-48 to S-53) had a high-effort code review on its pull request and no external review. RX.02 reviews it: the envelope parser, the key checks, and what `SIGNATURE_CHECK_VALID` is taken to mean.
 
 RX.01 had no external review. The pre-release has no users to protect yet, the one-uid model leaves a reviewer little that the tests here do not assert, and the budget is better spent on RX.02, where identity and signatures appear. RX.02 is the first external review.

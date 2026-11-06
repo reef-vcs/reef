@@ -4,6 +4,7 @@
 - Date: 2026-10-25
 - Ticket: R2.01
 - Supersedes: [0017](0017-daemon-api-v0-and-error-mapping.md)
+- Amended by: [0055](0055-evidence-object-format.md) (decision 12's exceptions)
 
 ## Context
 
@@ -24,7 +25,7 @@ An abandoned first attempt at R2.01 sketched the read and write services loosely
 9. **Enums for closed sets the daemon defines** (workspace state, backend, watcher, attention, lease state and end reason, snapshot kind, mount mode, backup step); free text and open sets stay strings. A scalar is `optional` only where zero is meaningful and distinct from the default.
 10. **Every List RPC is paginated from the first revision**: `int32 page_size` (0 means 100, above 1,000 is 1,000, negative is `INVALID_ARGUMENT`), `string page_token`, `string next_page_token` (empty on the last page). Tokens are opaque base64url, bound to the request's other fields (`INVALID_ARGUMENT`, reason `INVALID_PAGE_TOKEN`, when sent with others), and walk items in a fixed key order so pages hold when items are added or removed between them.
 11. **Typed filters, no field masks.** Filters are typed fields, ORed within a field and ANDed across fields, except `ListChanges.revset`, which is jj's language. Heavy parts of a response are opt-in flags; updates are explicit RPCs.
-12. **Writes return their operation.** A response reports an operation it created as a full `Operation` message (`operation`, or a role such as `final_snapshot`), unset when nothing was recorded, and refers to one it did not create by id. Every `ACCESS_WRITE` RPC's response has `Operation operation`, except `RenewLease`, `ReportPresence` and `ClearPresence`, which record none.
+12. **Writes return their operation.** A response reports an operation it created as a full `Operation` message (`operation`, or a role such as `final_snapshot`), unset when nothing was recorded, and refers to one it did not create by id. Every `ACCESS_WRITE` RPC's response has `Operation operation`, except `RenewLease`, `ReportPresence` and `ClearPresence`, which record none, and, as [0055](0055-evidence-object-format.md) amends this list, `UploadScipDocuments` (derived data, [0042](0042-symbol-index.md)) and `AddEvidence` (an immutable object, with nothing for undo to revert).
 13. **Streaming is server-side only**: subscriptions and long operations. The web UI reaches the API over gRPC-web, which carries no client streaming.
 14. **The error model is `google.rpc.Status` with one `reef.api.v1.ErrorDetail`** (`kind`, `reason`, `chain`, `hint`, `next`, `metadata`) packed as an `Any` in `grpc-status-details-bin`, which Python's `grpcio-status`, Connect-ES and `tonic-types` decode with stock tooling. `reason` is an UPPER_SNAKE constant documented on the RPCs that return it. The gRPC code comes from the kind as in 0017, plus a ninth kind.
 15. **A ninth error kind, `Unsupported`**: the daemon cannot serve the request as asked (a declared RPC it does not implement, a method it does not know, a version mismatch). It maps to `UNIMPLEMENTED`, is a caller error, has exit code 9 and kind text `unsupported`. This adds to [0009](0009-error-and-logging-conventions.md)'s kinds and [0025](0025-agent-facing-cli-contract.md)'s exit codes; the CLI's JSON error object gains `reason` when it is not empty.

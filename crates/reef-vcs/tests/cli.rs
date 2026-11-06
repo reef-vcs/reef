@@ -164,6 +164,7 @@ fn help_lists_every_command() {
         "undo",
         "op",
         "file",
+        "evidence",
         "guide",
         "init",
         "mcp",

@@ -24,6 +24,7 @@ bench = false
 [dependencies]
 reef-api.workspace = true
 reef-error.workspace = true
+reef-evidence.workspace = true   # the evidence format: signing and checking it (R3.01)
 tonic.workspace = true
 prost.workspace = true           # request sizes, checked before sending (R2.04)
 prost-types.workspace = true     # google.protobuf.Timestamp and Duration in the messages

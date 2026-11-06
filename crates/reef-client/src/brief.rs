@@ -904,3 +904,36 @@ mod tests {
         assert_eq!(value(&Diff::read_at(&diff)), value(&Diff::from(&diff)));
     }
 }
+
+/// An evidence object (R3.01). Always `id`, `kind`, `result` and `key_id`;
+/// `target` when set; `signature` only when it is not `valid`, so a row
+/// changed behind the daemon still shows. Dropped: `tree_id`, the times,
+/// `duration_ms`, `added_by_agent`, `remote_token_id`, `artifacts`,
+/// `change_ids`, `predicate_type`, `current`, `statement`, `envelope`;
+/// `evidence show <id>` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Evidence")]
+pub struct Evidence<'a> {
+    id: &'a str,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a str>,
+    key_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<&'a str>,
+}
+
+impl<'a> From<&'a json::Evidence> for Evidence<'a> {
+    fn from(evidence: &'a json::Evidence) -> Self {
+        Self {
+            id: &evidence.id,
+            kind: &evidence.kind,
+            result: evidence.result.as_deref(),
+            target: evidence.target.as_deref(),
+            key_id: &evidence.key_id,
+            signature: evidence.signature.as_deref().filter(|s| *s != "valid"),
+        }
+    }
+}

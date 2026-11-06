@@ -6,7 +6,8 @@
 //!
 //! `$defs` holds `reef_client::json`'s types by their Rust name, the brief
 //! views as `brief.<Name>`, the CLI's own types as `cli.<Name>`, the MCP
-//! results as `mcp.<Name>`, and the API's messages and enums by full name
+//! results as `mcp.<Name>`, the evidence format's types as
+//! `evidence.<Name>` (R3.01), and the API's messages and enums by full name
 //! (`reef.api.v1.Workspace`). One generator builds the Rust types, so each
 //! is defined once. Keys print sorted and lists in a fixed order, so two
 //! runs print the same bytes.
@@ -32,11 +33,12 @@ pub(crate) fn document() -> Result<Value, String> {
     let mcp = crate::mcp::schema_part();
     let pool = api::pool().ok_or("the API's descriptor set does not decode")?;
     let api = api::part(&pool, &mut defs);
+    let evidence = evidence_part(&mut defs);
     let version = env!("CARGO_PKG_VERSION");
     let mut document = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": format!("urn:reef-vcs:schema:{version}"),
-        "description": "Reef's commands, MCP tools and API as JSON Schema (`reef schema`, ADR 0050). Each `cli.commands[]` entry gives an input schema, the `argv` that turns an input into words, and the output with -o json, -o brief and on a pipe; `mcp.tools` are the MCP tools with output schemas; `api.services` are the gRPC services, whose messages are described as canonical proto3 JSON.",
+        "description": "Reef's commands, MCP tools and API as JSON Schema (`reef schema`, ADR 0050). Each `cli.commands[]` entry gives an input schema, the `argv` that turns an input into words, and the output with -o json, -o brief and on a pipe; `mcp.tools` are the MCP tools with output schemas; `api.services` are the gRPC services, whose messages are described as canonical proto3 JSON; `evidence` is the format of evidence objects, for executors (ADR 0055).",
         "reef": {
             "version": version,
             "commit": env!("REEF_BUILD_COMMIT"),
@@ -49,17 +51,63 @@ pub(crate) fn document() -> Result<Value, String> {
         "cli": cli,
         "mcp": mcp,
         "api": api,
+        "evidence": evidence,
         "$defs": defs,
     });
     reef_client::schema::strip_doc_links(&mut document);
     Ok(document)
 }
 
+/// The document's parts.
+const PARTS: [&str; 4] = ["cli", "mcp", "api", "evidence"];
+
+/// The `evidence` part (R3.01, ADR 0055): the evidence object format as
+/// JSON Schema, from `reef-evidence`'s types, so an executor in any
+/// language gets the format from the binary it targets. The schema
+/// describes the format; the daemon's checks stay the authority.
+fn evidence_part(defs: &mut Map<String, Value>) -> Value {
+    use reef_client::evidence::{self as format, Envelope, Predicate, Statement};
+    // The deserialize contract: what a producer writes and Reef reads.
+    let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
+    let statement = generator.subschema_for::<Statement>();
+    let predicate = generator.subschema_for::<Predicate>();
+    let envelope = generator.subschema_for::<Envelope>();
+    defs.extend(generator.take_definitions(true));
+    json!({
+        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds.",
+        "format": format::FORMAT,
+        "payload_type": format::PAYLOAD_TYPE,
+        "statement_type": format::STATEMENT_TYPE,
+        "predicate_type": format::PREDICATE_TYPE,
+        "max_envelope_bytes": format::MAX_ENVELOPE_BYTES,
+        "statement": Value::from(statement),
+        "predicate": Value::from(predicate),
+        "envelope": Value::from(envelope),
+    })
+}
+
+/// Keeps one member of the `evidence` part: `statement`, `predicate` or
+/// `envelope`.
+fn keep_evidence(evidence: &mut Value, name: &[String]) -> Option<()> {
+    let [name] = name else {
+        return None;
+    };
+    let name = name.to_ascii_lowercase();
+    let object = evidence.as_object_mut()?;
+    if !["statement", "predicate", "envelope"].contains(&name.as_str()) {
+        return None;
+    }
+    object.retain(|key, _| {
+        *key == name || !["statement", "predicate", "envelope"].contains(&key.as_str())
+    });
+    Some(())
+}
+
 /// The document with only `part`, or one name in it, and the definitions
 /// that reaches; `None` when `name` matches nothing.
 pub(crate) fn select(mut document: Value, part: Part, name: &[String]) -> Option<Value> {
     let object = document.as_object_mut()?;
-    for other in ["cli", "mcp", "api"] {
+    for other in PARTS {
         if other != crate::cli::schema::part_name(part) {
             object.remove(other);
         }
@@ -69,6 +117,7 @@ pub(crate) fn select(mut document: Value, part: Part, name: &[String]) -> Option
             Part::Cli => keep_command(object.get_mut("cli")?, name)?,
             Part::Mcp => keep_tool(object.get_mut("mcp")?, name)?,
             Part::Api => keep_api(object, name)?,
+            Part::Evidence => keep_evidence(object.get_mut("evidence")?, name)?,
         }
     }
     prune(object);
@@ -434,7 +483,7 @@ mod tests {
             .keys()
             .filter(|name| name.starts_with("brief."))
             .collect();
-        assert_eq!(views.len(), 8, "{views:?}");
+        assert_eq!(views.len(), 9, "{views:?}");
         for name in views {
             let view = &defs[name];
             let full = &defs[name.trim_start_matches("brief.")];

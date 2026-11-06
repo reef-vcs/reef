@@ -190,6 +190,43 @@ impl AdviceCtx {
                 hint: "It is not a directory; read it instead.".to_owned(),
                 next: self.scoped(&["file", "read", get("path"), "-r", get("commit_id")]),
             },
+            // Evidence (R3.01).
+            reason::INVALID_EVIDENCE | reason::SIGNATURE_INVALID => Advice::hint(or(
+                daemon_hint,
+                "docs/evidence.md gives the format: one ed25519 signature over the DSSE encoding of an in-toto Statement about one tree.",
+            )),
+            reason::TREE_NOT_FOUND => Advice {
+                hint: format!(
+                    "This repository holds no tree {}; evidence is about a tree of a revision here, as `reef show` prints it.",
+                    short(get("tree_id"))
+                ),
+                next: self.scoped(&["show"]),
+            },
+            reason::EVIDENCE_TREE_MISMATCH if !get("commit_id").is_empty() => Advice {
+                hint: format!(
+                    "Commit {} has tree {}, not the envelope's {}; add it without -r, or sign a claim about that tree.",
+                    short(get("commit_id")),
+                    short(get("commit_tree_id")),
+                    short(get("tree_id"))
+                ),
+                next: self.scoped(&["show", get("commit_id")]),
+            },
+            reason::CONFLICTED_REVISION => Advice {
+                hint: "Resolve the conflict first; a conflicted change has no single tree to hold evidence.".to_owned(),
+                next: self.scoped(&["status"]),
+            },
+            reason::INVALID_TREE_ID => Advice {
+                hint: "--tree takes a full tree id in lowercase hex, as `reef show` prints it.".to_owned(),
+                next: self.scoped(&["show"]),
+            },
+            reason::INVALID_EVIDENCE_ID | reason::EVIDENCE_NOT_FOUND => Advice {
+                hint: "Name evidence by its id or a unique prefix of at least 4 hex digits; `reef evidence list` prints them.".to_owned(),
+                next: self.scoped(&["evidence", "list"]),
+            },
+            reason::AMBIGUOUS_EVIDENCE_ID => Advice::hint(format!(
+                "That prefix matches {}; give more of the id.",
+                get("evidence_ids").replace(',', ", ")
+            )),
             reason::SNAPSHOT_FAILED if self.snapshots_first => Advice {
                 hint: "The workspace could not be snapshotted; --no-snapshot reads its last snapshot."
                     .to_owned(),

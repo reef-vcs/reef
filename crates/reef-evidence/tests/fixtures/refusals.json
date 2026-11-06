@@ -1,0 +1,261 @@
+{
+  "refusals": [
+    {
+      "check": "size",
+      "field": null,
+      "file": "size.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "not-json.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "depth-envelope.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "annotations",
+      "file": "depth-payload.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "duplicate-envelope.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "statement",
+      "field": null,
+      "file": "duplicate-statement.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "annotations",
+      "file": "duplicate-predicate.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "payload_type",
+      "field": null,
+      "file": "payload-type.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "signatures",
+      "field": null,
+      "file": "no-signatures.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "signatures",
+      "field": null,
+      "file": "two-signatures.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "key_id",
+      "field": null,
+      "file": "key-id.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": null,
+      "field": null,
+      "file": "bad-signature.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": true
+    },
+    {
+      "check": "statement",
+      "field": null,
+      "file": "not-statement.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "no-subject.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "two-subjects.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "sha256-subject.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "uppercase-tree.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "short-tree.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-no-name.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-other-name.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-uri-number.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-annotations-string.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate_type",
+      "field": null,
+      "file": "predicate-type.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "kind",
+      "file": "kind-uppercase.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "result",
+      "file": "result-passed.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "finishedOn",
+      "file": "finished-before-started.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "startedOn",
+      "file": "time-without-z.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "startedOn",
+      "file": "time-offset-before-z.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "startedOn",
+      "file": "time-empty-fraction.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "finishedOn",
+      "file": "time-leap-second.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "artifacts",
+      "file": "artifacts-65.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "artifacts",
+      "file": "artifact-no-sha256.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "target",
+      "file": "target-513.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "target",
+      "file": "target-control.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "annotations",
+      "file": "annotations-not-object.json",
+      "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "signature_invalid": false
+    },
+    {
+      "check": "public_key",
+      "field": null,
+      "file": "public-key.json",
+      "public_key": "MCowBQYDK2VwAyEAxxdqcD1N2E+6PAt2DRBnDyogU/osOczGTsf9d5KsA3o=",
+      "signature_invalid": false
+    }
+  ],
+  "valid": {
+    "file": "valid.json",
+    "key_id": "a050837d85070582ccf7394b0988847cc312cb88259b894899f6f239cf1791a5",
+    "public_key": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg="
+  }
+}

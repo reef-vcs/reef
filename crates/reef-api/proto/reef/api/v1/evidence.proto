@@ -1,0 +1,270 @@
+// Evidence (R3.01, ADR 0055): signed in-toto statements in DSSE envelopes
+// about a tree, stored content-addressed by the daemon. A signature that
+// verifies says who signed, not that the claim is true or the signer
+// trusted; policy decides that (R3.07).
+//
+// An evidence object is a DSSE envelope with exactly one ed25519 signature
+// whose payload is an in-toto Statement v1 with one subject, `{"name":
+// "tree", "digest": {"gitTree": <tree id>}}`, and predicate type
+// `urn:reef-vcs:evidence:v1`. Its id is the SHA-256, in lowercase hex, of
+// the envelope in canonical form: compact JSON with exactly `payload`,
+// `payloadType` and `signatures` (`keyid`, `sig`), padded standard base64,
+// and no trailing newline. A key id is the SHA-256 of the signer's DER
+// SubjectPublicKeyInfo, in lowercase hex. docs/evidence.md has the format.
+//
+// Evidence binds to the tree, not the commit, so it stays true across a
+// describe or a rebase that keeps the tree, and two changes with one tree
+// share it. Adding evidence records no operation: there is nothing for
+// undo to revert. `revision`, `at_operation` and `skip_snapshot` are as in
+// changes.proto, whose revision errors these RPCs also return.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Storing evidence about trees, and reading it back.
+service EvidenceService {
+  // Stores an evidence object the caller signed. The daemon checks, in
+  // order: the envelope (at most 64 KiB, JSON nested at most 32 levels
+  // with no duplicate key, `payloadType` `application/vnd.in-toto+json`,
+  // exactly one signature); the key (`public_key` an ed25519
+  // SubjectPublicKeyInfo, neither small-order nor non-canonical, whose id
+  // is the signature's `keyid`); the signature over the DSSE
+  // pre-authentication encoding of the payload; and only then the payload
+  // (a Statement v1 with one `gitTree` subject, Reef's predicate type, and
+  // the predicate's fields within their bounds). Then the subject's tree
+  // must be in the repository, and `revision`, when set, must resolve to a
+  // commit with that tree. The envelope is stored in canonical form with
+  // its key and, when `revision` is set, a link to the revision's change,
+  // in one transaction. Adding an object already stored changes nothing
+  // and returns it with `created` false. Records no operation.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_EVIDENCE (metadata
+  // `check`: `size`, `envelope`, `payload_type`, `signatures`,
+  // `public_key`, `key_id`, `statement`, `subject`, `predicate_type` or
+  // `predicate`, and `field` for a predicate field), SIGNATURE_INVALID
+  // (metadata `key_id`), or a revision reason for `revision`; NOT_FOUND
+  // with reason TREE_NOT_FOUND (metadata `tree_id`) when the repository
+  // holds no tree with the subject's id; FAILED_PRECONDITION with reason
+  // EVIDENCE_TREE_MISMATCH (metadata `tree_id`, `commit_id`,
+  // `commit_tree_id`) when `revision`'s tree is not the subject, or
+  // CONFLICTED_REVISION (metadata `commit_id`) when it is conflicted.
+  rpc AddEvidence(AddEvidenceRequest) returns (AddEvidenceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // One evidence object, by its full id or a unique prefix of at least 4
+  // hex digits, with its canonical envelope. Its signature is checked again
+  // at this read.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_EVIDENCE_ID (metadata
+  // `evidence_id`) for an id that is not 4 to 64 hex digits, or
+  // AMBIGUOUS_EVIDENCE_ID (metadata `evidence_id`, and `evidence_ids`, up
+  // to ten, comma-separated) for a prefix of several; NOT_FOUND with
+  // reason EVIDENCE_NOT_FOUND (metadata `evidence_id`).
+  rpc GetEvidence(GetEvidenceRequest) returns (GetEvidenceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Every field of each object is read from its payload; an object whose
+  // stored index no longer matches its payload reads SIGNATURE_CHECK_INVALID,
+  // and one whose payload does not match the filters is left out.
+  // Evidence of a repository, newest added first, paged: on `revision`'s
+  // tree, on `tree_id`, linked to `change_id`, or, with none of them, all
+  // of it. The filters AND across fields and OR within one. Each object's
+  // signature is checked again at this read. A revision whose tree is
+  // conflicted has no evidence: the page is empty.
+  //
+  // Errors: INVALID_ARGUMENT for both `revision` and `tree_id`, an
+  // unknown `results` value, or a `key_ids` value that is not a full key
+  // id (64 lowercase hex digits); with reason INVALID_TREE_ID (metadata
+  // `tree_id`) for a `tree_id` that is not lowercase hex of the
+  // repository's object id length; INVALID_CHANGE_ID (metadata `change`)
+  // for a `change_id` that is not a full change id in hex or reverse hex;
+  // INVALID_PAGE_TOKEN; a revision reason; and a failed snapshot's own
+  // error, with reason SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc ListEvidence(ListEvidenceRequest) returns (ListEvidenceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// How a check came out.
+enum EvidenceResult {
+  // Not set; in a filter, never valid.
+  EVIDENCE_RESULT_UNSPECIFIED = 0;
+  // The check passed: the predicate's `pass`.
+  EVIDENCE_RESULT_PASS = 1;
+  // The check failed: `fail`.
+  EVIDENCE_RESULT_FAIL = 2;
+  // The check reached no verdict (a crash of the runner, a timeout, an
+  // exhausted budget): `error`. Not a failure of the tree.
+  EVIDENCE_RESULT_ERROR = 3;
+}
+
+// Whether a stored object's signature verified when it was read.
+enum SignatureCheck {
+  // Not set.
+  SIGNATURE_CHECK_UNSPECIFIED = 0;
+  // Its id is the SHA-256 of its canonical envelope, its one signature
+  // verifies over the payload with the recorded public key, and its
+  // `keyid` is that key's id, and the stored index matches the payload.
+  // Integrity and signature only: it says nothing of whether the key is
+  // trusted.
+  SIGNATURE_CHECK_VALID = 1;
+  // One of those does not hold: the stored row was changed.
+  SIGNATURE_CHECK_INVALID = 2;
+}
+
+// An artifact a check produced, recorded by digest. Reef does not store
+// its bytes in this revision.
+message EvidenceArtifact {
+  // Its name, such as `test.log`.
+  string name = 1;
+  // SHA-256 of its bytes, 64 lowercase hex digits.
+  string sha256 = 2;
+  // Where it can be fetched; empty when the claim gives none.
+  string uri = 3;
+  // Its media type; empty when the claim gives none.
+  string media_type = 4;
+}
+
+// One evidence object. Its fields are read from the stored envelope's
+// payload, never from what a client sent beside it.
+message Evidence {
+  // The SHA-256 of `envelope`, 64 lowercase hex digits.
+  string evidence_id = 1;
+  // The tree the claim is about: the subject's `gitTree`, lowercase hex.
+  string tree_id = 2;
+  // What was checked: `test`, `build`, `lint`, `policy`, or another kind
+  // of the open vocabulary `^[a-z][a-z0-9-]{0,62}$`.
+  string kind = 3;
+  // How it came out.
+  EvidenceResult result = 4;
+  // The test or build target covered, in the producer's naming; empty for
+  // the whole check of `kind` on the tree.
+  string target = 5;
+  // The id of the key that signed it: SHA-256 of its DER
+  // SubjectPublicKeyInfo, lowercase hex. The attestor is this key; a name
+  // in the claim is never the attestor.
+  string key_id = 6;
+  // When the check started, as the attestor claims, to the millisecond.
+  google.protobuf.Timestamp started_at = 7;
+  // When it finished, as the attestor claims.
+  google.protobuf.Timestamp finished_at = 8;
+  // When it was first added in this repository.
+  google.protobuf.Timestamp added_at = 9;
+  // The `reef-agent` of the request that first added it; empty when it
+  // named none. Who uploaded it, not who attested it.
+  string added_by_agent = 10;
+  // What the check produced, in the claim's order.
+  repeated EvidenceArtifact artifacts = 11;
+  // The changes it was added for (`AddEvidenceRequest.revision`), in hex,
+  // oldest link first; empty when it was added by tree alone.
+  repeated string change_ids = 12;
+  // Whether its signature verified at this read.
+  SignatureCheck signature = 13;
+  // The payload's predicate type: `urn:reef-vcs:evidence:v1`.
+  string predicate_type = 14;
+  // The canonical envelope, whose SHA-256 is `evidence_id`; set by
+  // GetEvidence only.
+  bytes envelope = 15;
+  // ListEvidence with `change_id` only: whether the evidence is on the
+  // change's tree now. False once the change's tree has moved on, or when
+  // it has no visible commit. Always false otherwise.
+  bool current = 16;
+  // The remote token of the request that first added it (R2.08); empty
+  // when it came through the socket.
+  string remote_token_id = 17;
+}
+
+// Add evidence.
+message AddEvidenceRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to in `revision`; empty for none.
+  string workspace = 2;
+  // A DSSE envelope as JSON, at most 64 KiB.
+  bytes envelope = 3;
+  // The signer's public key: an ed25519 DER SubjectPublicKeyInfo (44
+  // bytes). Recorded once per machine when it first signs evidence.
+  bytes public_key = 4;
+  // Optional: the change the evidence was produced for, resolved at the
+  // head without a snapshot (`@` is the workspace's commit as last
+  // snapshotted). Its tree must be the subject's. Empty adds by tree
+  // alone, with no link.
+  string revision = 5;
+}
+
+// What an add stored.
+message AddEvidenceResponse {
+  // The object, as stored; `envelope` is left empty.
+  Evidence evidence = 1;
+  // Whether this call stored it; false when it was already stored in the
+  // repository.
+  bool created = 2;
+}
+
+// Get one evidence object.
+message GetEvidenceRequest {
+  // The repository.
+  string repo = 1;
+  // Its full id, or a unique prefix of at least 4 hex digits.
+  string evidence_id = 2;
+}
+
+// One evidence object.
+message GetEvidenceResponse {
+  // The object, with `envelope`.
+  Evidence evidence = 1;
+}
+
+// List evidence.
+message ListEvidenceRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // Evidence on this revision's tree; `@` snapshots the workspace first
+  // unless `skip_snapshot` or `at_operation` is set. At most one of
+  // `revision` and `tree_id`.
+  string revision = 3;
+  // Evidence on this tree, lowercase hex of the repository's object id
+  // length; it need not still be in the repository.
+  string tree_id = 4;
+  // Evidence linked to this change, on any tree: a full change id in hex
+  // or reverse hex. Each object's `current` says whether it is on the
+  // change's tree now.
+  string change_id = 5;
+  // Only these kinds; empty for all.
+  repeated string kinds = 6;
+  // Only these results; empty for all.
+  repeated EvidenceResult results = 7;
+  // Only this target; empty for any.
+  string target = 8;
+  // Only evidence signed by these keys, by full key id; empty for any.
+  repeated string key_ids = 9;
+  // Resolve `revision`, and `change_id`'s current tree, at this operation;
+  // empty for the head.
+  string at_operation = 10;
+  // Resolve `revision` from the last recorded snapshot instead of
+  // snapshotting first.
+  bool skip_snapshot = 11;
+  // Objects per page: 0 means 50, more than 200 means 200, and a negative
+  // value is INVALID_ARGUMENT.
+  int32 page_size = 12;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 13;
+}
+
+// A page of evidence.
+message ListEvidenceResponse {
+  // Newest added first, then by id. `envelope` is left empty.
+  repeated Evidence evidence = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}

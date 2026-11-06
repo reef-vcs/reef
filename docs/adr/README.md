@@ -66,3 +66,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0052](0052-harness-packages.md) | Harness packages | accepted |
 | [0053](0053-workspace-provider-contract.md) | Workspace provider contract | accepted |
 | [0054](0054-sdks.md) | SDKs | accepted |
+| [0055](0055-evidence-object-format.md) | Evidence object format | accepted |

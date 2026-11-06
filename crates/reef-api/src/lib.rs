@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 14;
+pub const API_REVISION: u32 = 15;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -84,6 +84,8 @@ pub const API_DIGESTS: &[&str] = &[
     // R2.08: `RemoteService`, `GetDaemonStatusResponse.remote`,
     // `Operation.remote`, `Workspace.remote_token_id`.
     "127d60b512f656ba88cf67963472e0e0ffe65cc918c48bd2dda77a8ba375233a",
+    // R3.01: `EvidenceService`.
+    "651c2e424481a697a801df990ec6df666219e36d9d28571682af12a3b821c6c5",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -343,6 +345,37 @@ pub mod error {
     /// Metadata: `name`.
     pub const INVALID_REMOTE_TOKEN_NAME: &str = "INVALID_REMOTE_TOKEN_NAME";
 
+    /// An envelope that is not Reef evidence (R3.01). Metadata: `check`,
+    /// one of `size`, `envelope`, `payload_type`, `signatures`,
+    /// `public_key`, `key_id`, `statement`, `subject`, `predicate_type` or
+    /// `predicate`; and `field`, the predicate field, for `predicate`.
+    pub const INVALID_EVIDENCE: &str = "INVALID_EVIDENCE";
+    /// An evidence envelope whose signature does not verify with the key
+    /// sent (R3.01). Metadata: `key_id`.
+    pub const SIGNATURE_INVALID: &str = "SIGNATURE_INVALID";
+    /// Evidence about a tree the repository does not hold, or an object
+    /// there that is not a tree (R3.01). Metadata: `tree_id`.
+    pub const TREE_NOT_FOUND: &str = "TREE_NOT_FOUND";
+    /// A `tree_id` that is not lowercase hex of the repository's object id
+    /// length (R3.01). Metadata: `tree_id`.
+    pub const INVALID_TREE_ID: &str = "INVALID_TREE_ID";
+    /// Evidence added for a revision whose tree is not the evidence's
+    /// subject (R3.01). Metadata: `tree_id` (the subject), `commit_id`,
+    /// `commit_tree_id`.
+    pub const EVIDENCE_TREE_MISMATCH: &str = "EVIDENCE_TREE_MISMATCH";
+    /// Evidence added for a revision whose tree is conflicted, which has no
+    /// single tree id (R3.01). Metadata: `commit_id`.
+    pub const CONFLICTED_REVISION: &str = "CONFLICTED_REVISION";
+    /// An evidence id that is not 4 to 64 hex digits (R3.01). Metadata:
+    /// `evidence_id`.
+    pub const INVALID_EVIDENCE_ID: &str = "INVALID_EVIDENCE_ID";
+    /// An evidence id prefix shared by several objects (R3.01). Metadata:
+    /// `evidence_id`, `evidence_ids` (up to ten, comma-separated).
+    pub const AMBIGUOUS_EVIDENCE_ID: &str = "AMBIGUOUS_EVIDENCE_ID";
+    /// No evidence of the repository has the id or prefix (R3.01).
+    /// Metadata: `evidence_id`.
+    pub const EVIDENCE_NOT_FOUND: &str = "EVIDENCE_NOT_FOUND";
+
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
         let envelope = tonic_types::Status {
@@ -472,13 +505,15 @@ mod tests {
 
     #[test]
     fn writes_return_operations() {
-        // ADR 0029 decision 12's exceptions, and the symbol index's upload,
-        // which stores derived data and records no operation (ADR 0042).
-        const EXCEPT: [&str; 4] = [
+        // ADR 0029 decision 12's exceptions, as ADR 0055 amends it: the
+        // symbol index's upload, which stores derived data (ADR 0042), and
+        // evidence, an immutable object with nothing for undo to revert.
+        const EXCEPT: [&str; 5] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
             "UploadScipDocuments",
+            "AddEvidence",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

@@ -550,3 +550,19 @@ A page re-matches the whole diff's definitions, and that costs less than the 200
 REEF_BENCH_PRESET=large cargo bench -p reef-daemon --features testing --bench status
 ```
 
+
+## Evidence (R3.01)
+
+`crates/reef-evidence/benches/evidence.rs` measures the evidence format ([ADR 0055](adr/0055-evidence-object-format.md)): `cargo bench -p reef-evidence --bench evidence`. Release build on the M2 Max, run on 2026-11-05.
+
+| Benchmark | Timed | M2 Max, median | Target |
+| --- | --- | ---: | --- |
+| `evidence/sign` | build a claim with three artifacts, write its payload, check it as `Verified::check` would, and sign it into a canonical envelope | 21.5 µs | < 100 µs |
+| `evidence/check` | `Verified::check` of that envelope: the duplicate-key and depth walks, base64, the key checks, the signature, the statement's checks, the canonical form and its SHA-256 | 44.2 µs | < 150 µs |
+| `evidence/check_64k` | `Verified::check` of an envelope just under 64 KiB, most of it in `annotations` | 182 µs | < 2 ms |
+
+Through the daemon, `tests/evidence.rs` prints medians as trend data, not gates (release build, the same machine, two tests running at once): `AddEvidence` 0.47 ms and `GetEvidence` 0.21 ms over 50 calls (`add_and_get`; expected under 3 ms and 1 ms), and a `ListEvidence` page of 50 with every signature checked again 2.6 ms (`list_filters_and_pages`; expected under 10 ms). A debug build, as `cargo nextest` runs them by default, is about ten times slower: 3.7 ms, 0.93 ms and 23 ms. Nothing changes on an existing path: one migration at start, and a repository's forget deletes two more tables' rows.
+
+```sh
+cargo nextest run --release -p reef-daemon --test evidence --success-output immediate -E 'test(add_and_get) | test(list_filters_and_pages)'
+```

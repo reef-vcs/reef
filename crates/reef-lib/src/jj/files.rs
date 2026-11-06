@@ -16,7 +16,7 @@ use std::sync::Arc;
 use bstr::ByteSlice as _;
 use futures::{AsyncReadExt as _, StreamExt as _};
 use jj_lib::backend::{
-    BackendError, CopyId, FileId, MergedTreeValue, MergedTreeValueExt as _, TreeValue,
+    BackendError, CopyId, FileId, MergedTreeValue, MergedTreeValueExt as _, TreeId, TreeValue,
 };
 use jj_lib::commit::Commit;
 use jj_lib::conflicts::{
@@ -34,7 +34,7 @@ use jj_lib::tree::TreeMergeExt as _;
 
 use super::diff::{self, DiffError, EntryKind, PathError};
 use super::oplog::OpMeta;
-use super::repo::{CommitIdHex, OperationIdHex, Repo};
+use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, Repo};
 use super::rewrite::{RewriteError, normalize_description};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 use crate::spec::{SPEC_FILE, Spec};
@@ -1397,6 +1397,88 @@ pub fn working_copy_commits(repo: &ReadonlyRepo) -> Vec<CommitIdHex> {
         .map(CommitIdHex::of)
         .collect();
     ids.into_iter().collect()
+}
+
+/// What the store holds under a tree id (R3.01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreePresence {
+    /// A tree the repository can read.
+    Present,
+    /// No object has the id.
+    Missing,
+    /// An object has the id, but it is not a tree: a blob or a commit.
+    NotATree,
+}
+
+/// The length of the store's tree ids in hex: 40 for SHA-1 git, 64 for
+/// SHA-256 git.
+pub fn tree_id_hex_len(repo: &ReadonlyRepo) -> usize {
+    repo.store().empty_tree_id().hex().len()
+}
+
+/// `commit`'s change, and its git tree id in hex: what
+/// `git rev-parse <commit>^{tree}` prints, or `None` when its tree is
+/// conflicted and so has no single id (R3.01).
+pub async fn commit_tree_id(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+) -> Result<(ChangeIdHex, Option<String>), FileError> {
+    let commit = commit_of(repo, commit).await?;
+    Ok((
+        ChangeIdHex::of(commit.change_id()),
+        commit.tree_ids().as_resolved().map(ObjectId::hex),
+    ))
+}
+
+/// The tree ids, as [`commit_tree_id`] gives them, of the visible commits
+/// of the change `change` (full lowercase hex) in `repo`'s view: one for a
+/// change, several for a divergent one, none for an abandoned or unknown
+/// one (R3.01).
+pub async fn change_tree_ids(
+    repo: &ReadonlyRepo,
+    change: &str,
+) -> Result<Vec<Option<String>>, FileError> {
+    let Some(id) = jj_lib::backend::ChangeId::try_from_hex(change) else {
+        return Ok(Vec::new());
+    };
+    let targets = repo
+        .resolve_change_id(&id)
+        .await
+        .map_err(|error| BackendError::Other(error.into()))?;
+    let Some(visible) = targets.and_then(jj_lib::index::ResolvedChangeTargets::into_visible) else {
+        return Ok(Vec::new());
+    };
+    let mut trees = Vec::with_capacity(visible.len());
+    for commit in visible {
+        let commit = repo.store().get_commit_async(&commit).await?;
+        trees.push(commit.tree_ids().as_resolved().map(ObjectId::hex));
+    }
+    Ok(trees)
+}
+
+/// Whether the store holds the tree `hex`, lowercase hex of
+/// [`tree_id_hex_len`] digits; any other text is [`TreePresence::Missing`].
+/// An object that is there but cannot be read as a tree, with no I/O error
+/// in the way, is [`TreePresence::NotATree`].
+pub async fn tree_presence(repo: &ReadonlyRepo, hex: &str) -> Result<TreePresence, FileError> {
+    if hex.len() != tree_id_hex_len(repo) {
+        return Ok(TreePresence::Missing);
+    }
+    let Some(id) = TreeId::try_from_hex(hex) else {
+        return Ok(TreePresence::Missing);
+    };
+    match repo.store().get_tree(RepoPathBuf::root(), &id).await {
+        Ok(_) => Ok(TreePresence::Present),
+        Err(BackendError::ObjectNotFound { .. }) => Ok(TreePresence::Missing),
+        Err(error @ BackendError::ReadObject { .. }) => {
+            if classify_by_source(&error) == ErrorKind::Internal {
+                Ok(TreePresence::NotATree)
+            } else {
+                Err(error.into())
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// A tree's identity: its tree ids in hex, joined by `+` when it is

@@ -22,6 +22,7 @@ pub(crate) mod daemon;
 mod diff;
 mod env;
 mod error;
+mod evidence;
 mod file;
 pub(crate) mod guide;
 pub(crate) mod heartbeat;
@@ -335,6 +336,9 @@ enum Command {
     /// Index and list symbols: definitions and references by file or name.
     #[command(visible_alias = "sym", infer_subcommands = true)]
     Symbols(symbols::Args),
+    /// Add and list evidence: signed claims, such as test results, about a revision's tree.
+    #[command(infer_subcommands = true)]
+    Evidence(evidence::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -348,7 +352,7 @@ enum Command {
     Mcp,
     /// Print the commands, MCP tools and API as JSON Schema, to generate tool definitions.
     #[command(
-        after_help = "Example: reef schema cli ws create   # or mcp, or api; --descriptor-set"
+        after_help = "Example: reef schema cli ws create   # or mcp, api, evidence; --descriptor-set"
     )]
     Schema(schema::Args),
     /// Register and forget repositories.
@@ -787,6 +791,8 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Remote(args) => remote::run(&global, out, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
+        Command::Evidence(args) if args.is_offline() => args.run_offline(out),
+        Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

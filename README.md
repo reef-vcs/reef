@@ -118,6 +118,7 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 - `crates/reef-client`: the thin client of the API, its stable JSON, and how to find the daemon, with no jj-lib ([ADR 0033](docs/adr/0033-thin-client.md)).
 - `crates/reef-broker`: bounded in-memory rings that read a log once and fan it out to the streams that follow it, with no jj-lib ([ADR 0038](docs/adr/0038-subscription-broker.md)).
 - `crates/reef-symbols`: tree-sitter tag extraction and SCIP normalization for the symbol index ([ADR 0042](docs/adr/0042-symbol-index.md)).
+- `crates/reef-evidence`: the evidence format: signed in-toto statements about a tree in DSSE envelopes, with signing and checking, and no jj-lib ([ADR 0055](docs/adr/0055-evidence-object-format.md)).
 - `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC services.
 - `crates/reef-vcs`: the `reef` binary, built on `reef-client` alone, and an umbrella library re-exporting the API and the client.
 - `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.

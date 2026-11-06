@@ -79,6 +79,7 @@ fn full_types() -> Map<String, Value> {
     generator.subschema_for::<json::Workspace>();
     generator.subschema_for::<json::Diff>();
     generator.subschema_for::<json::RepoStatus>();
+    generator.subschema_for::<json::Evidence>();
     generator.take_definitions(true)
 }
 

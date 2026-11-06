@@ -3164,3 +3164,178 @@ impl From<&v1::QueryChangesResponse> for History {
         }
     }
 }
+
+/// An evidence result's name: `pass`, `fail` or `error` (R3.01); `None`
+/// when unspecified.
+pub fn evidence_result_name(result: i32) -> Option<&'static str> {
+    let name = match v1::EvidenceResult::try_from(result) {
+        Ok(v1::EvidenceResult::Unspecified) => return None,
+        Ok(v1::EvidenceResult::Pass) => "pass",
+        Ok(v1::EvidenceResult::Fail) => "fail",
+        Ok(v1::EvidenceResult::Error) => "error",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// The result a name from [`evidence_result_name`] stands for.
+pub fn evidence_result_of(name: &str) -> Option<v1::EvidenceResult> {
+    (1..=3)
+        .filter_map(|n| v1::EvidenceResult::try_from(n).ok())
+        .find(|r| evidence_result_name(*r as i32) == Some(name))
+}
+
+/// A signature check's name: `valid` or `invalid` (R3.01); `None` when
+/// unspecified.
+pub fn signature_check_name(check: i32) -> Option<&'static str> {
+    let name = match v1::SignatureCheck::try_from(check) {
+        Ok(v1::SignatureCheck::Unspecified) => return None,
+        Ok(v1::SignatureCheck::Valid) => "valid",
+        Ok(v1::SignatureCheck::Invalid) => "invalid",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+names_schema! {
+    evidence_result_name_schema_or_null = evidence_result_name, true;
+    signature_check_name_schema_or_null = signature_check_name, true;
+}
+
+/// An artifact an evidence object records, by digest (R3.01).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct EvidenceArtifact {
+    /// Its name, such as `test.log`.
+    pub name: String,
+    /// SHA-256 of its bytes, lowercase hex.
+    pub sha256: String,
+    /// Where it can be fetched.
+    pub uri: Option<String>,
+    /// Its media type.
+    pub media_type: Option<String>,
+}
+
+/// An evidence object, as `reef evidence list` and `show` print it (R3.01,
+/// ADR 0055): a signed claim about a tree. `signature` says whether its
+/// signature verified when it was read, never whether its key is trusted.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct Evidence {
+    /// The SHA-256 of the canonical envelope, lowercase hex.
+    pub id: String,
+    /// The tree the claim is about.
+    pub tree_id: String,
+    /// What was checked: `test`, `build`, `lint`, `policy`, or another kind.
+    pub kind: String,
+    /// `pass`, `fail`, or `error` (no verdict).
+    #[schemars(schema_with = "evidence_result_name_schema_or_null")]
+    pub result: Option<String>,
+    /// The target covered; `null` for the whole check.
+    pub target: Option<String>,
+    /// The id of the key that signed it: SHA-256 of its DER
+    /// `SubjectPublicKeyInfo`. The attestor is this key.
+    pub key_id: String,
+    /// When the check started, as the attestor claims.
+    pub started_at: Option<String>,
+    /// When it finished, as the attestor claims.
+    pub finished_at: Option<String>,
+    /// How long it ran, in milliseconds, by the claim's times.
+    pub duration_ms: Option<u64>,
+    /// When it was first added in this repository.
+    pub added_at: Option<String>,
+    /// The `reef-agent` that first added it: who uploaded it, not who
+    /// attested it.
+    pub added_by_agent: Option<String>,
+    /// The remote token that first added it (R2.08).
+    pub remote_token_id: Option<String>,
+    /// What the check produced.
+    pub artifacts: Vec<EvidenceArtifact>,
+    /// The changes it was added for, in hex.
+    pub change_ids: Vec<String>,
+    /// `valid` when its id, signature and key id check out at this read;
+    /// `invalid` when the stored object was changed.
+    #[schemars(schema_with = "signature_check_name_schema_or_null")]
+    pub signature: Option<String>,
+    /// The payload's predicate type.
+    pub predicate_type: String,
+    /// In a listing by change: whether it is on the change's tree now.
+    pub current: bool,
+    /// The payload, an in-toto Statement, as JSON (`show` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<serde_json::Value>,
+    /// The canonical DSSE envelope, as JSON (`show` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<serde_json::Value>,
+}
+
+impl From<&v1::Evidence> for Evidence {
+    fn from(evidence: &v1::Evidence) -> Self {
+        let envelope: Option<serde_json::Value> = (!evidence.envelope.is_empty())
+            .then(|| serde_json::from_slice(&evidence.envelope).ok())
+            .flatten();
+        let statement = envelope
+            .as_ref()
+            .and_then(|value| value.get("payload"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|payload| STANDARD.decode(payload).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let millis = |at: Option<&prost_types::Timestamp>| at.map(millis_of);
+        let duration_ms = match (
+            millis(evidence.started_at.as_ref()),
+            millis(evidence.finished_at.as_ref()),
+        ) {
+            (Some(start), Some(end)) => u64::try_from(end - start).ok(),
+            _ => None,
+        };
+        Self {
+            id: evidence.evidence_id.clone(),
+            tree_id: evidence.tree_id.clone(),
+            kind: evidence.kind.clone(),
+            result: name(evidence_result_name(evidence.result)),
+            target: text(&evidence.target),
+            key_id: evidence.key_id.clone(),
+            started_at: time(evidence.started_at.as_ref()),
+            finished_at: time(evidence.finished_at.as_ref()),
+            duration_ms,
+            added_at: time(evidence.added_at.as_ref()),
+            added_by_agent: text(&evidence.added_by_agent),
+            remote_token_id: text(&evidence.remote_token_id),
+            artifacts: evidence
+                .artifacts
+                .iter()
+                .map(|artifact| EvidenceArtifact {
+                    name: artifact.name.clone(),
+                    sha256: artifact.sha256.clone(),
+                    uri: text(&artifact.uri),
+                    media_type: text(&artifact.media_type),
+                })
+                .collect(),
+            change_ids: evidence.change_ids.clone(),
+            signature: name(signature_check_name(evidence.signature)),
+            predicate_type: evidence.predicate_type.clone(),
+            current: evidence.current,
+            statement,
+            envelope,
+        }
+    }
+}
+
+/// What `reef evidence add` stored (R3.01).
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct EvidenceAdded {
+    /// The object as stored.
+    pub evidence: Evidence,
+    /// Whether this add stored it; false when it was already stored.
+    pub created: bool,
+}
+
+/// A key `reef evidence key generate` wrote (R3.01).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct EvidenceKey {
+    /// SHA-256 of the public key's DER `SubjectPublicKeyInfo`, lowercase
+    /// hex: the id evidence it signs carries.
+    pub key_id: String,
+    /// The private key, PKCS#8 PEM, mode 0600.
+    pub path: String,
+    /// The public key, SPKI PEM: `<path>.pub`.
+    pub public_key_path: String,
+}

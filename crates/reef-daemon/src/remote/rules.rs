@@ -20,7 +20,8 @@ pub(crate) enum Rule {
     /// The workspace must have been created by the caller's token.
     OwnWorkspace,
     /// Nothing beyond the scope: a write token writes changes, snapshots,
-    /// presence and symbol uploads in every registered repository.
+    /// presence, symbol uploads and evidence in every registered
+    /// repository.
     None,
 }
 
@@ -53,6 +54,7 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ("/reef.api.v1.PresenceService/ReportPresence", Rule::None),
     ("/reef.api.v1.PresenceService/ClearPresence", Rule::None),
     ("/reef.api.v1.SymbolService/UploadScipDocuments", Rule::None),
+    ("/reef.api.v1.EvidenceService/AddEvidence", Rule::None),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.
