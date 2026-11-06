@@ -17,7 +17,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | ID | File | Size | Depends on | Unblocks |
 | --- | --- | --- | --- | --- |
 | R3.01 | [R3.01-evidence-object-format.md](R3.01-evidence-object-format.md) | M | R2.03 | R3.02, R3.03, R3.05, R3.07, R3.19 |
-| R3.02 | not yet briefed (Evidence artifact store) | M | R3.01 | none listed |
+| R3.02 | [R3.02-evidence-artifact-store.md](R3.02-evidence-artifact-store.md) | M | R3.01 | none listed |
 | R3.03 | not yet briefed (Session keys and operator identity) | L | R3.01 | R3.04, R3.06, R4.09, R4.10 |
 | R3.04 | not yet briefed (Provenance records) | M | R3.03 | R3.25, R3.37 |
 | R3.05 | not yet briefed (Executor protocol) | M | R3.01, R2.01 | R3.06, R6.03 |

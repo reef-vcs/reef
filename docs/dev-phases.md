@@ -200,7 +200,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
 | R3.01 | Evidence object format | in-toto attestation in a DSSE envelope: the snapshot's tree hash, kind, result, artifact hashes, signed by the attestor's key (R3.03 binds keys to identities). Stored content-addressed, linked from the change. Brief in `dev-tickets/phase-3/`. | M | R2.03 |
-| R3.02 | Evidence artifact store | Separate store for logs and build artifacts with a retention policy, and the retention of evidence objects themselves, which R3.01 never deletes. Local implementation first. | M | R3.01 |
+| R3.02 | Evidence artifact store | Separate store for logs and build artifacts with a retention policy, and the retention of evidence objects themselves, which R3.01 never deletes. Local implementation first. Brief in `dev-tickets/phase-3/`. | M | R3.01 |
 | R3.03 | Session keys and operator identity | Daemon issues short-lived ed25519 session keys bound to an operator or CI identity. Revocation. Sigstore keyless as an identity option. | L | R3.01 |
 | R3.04 | Provenance records | Agent identity, model, session, task reference, instruction hash, signed with the session key, attached to snapshots. API and CLI to read them. | M | R3.03 |
 | R3.05 | Executor protocol | The contract between the landing gate and an executor, written down before the reference implementation: a request names a tree hash, the check targets to run, the evidence kinds expected, and a budget; a response is a set of signed evidence objects plus artifacts; progress streams over the presence channel. Protobuf messages in the daemon schema. This is the protocol the design says Reef must get right so that sandboxing and remote execution stay outside Reef. | M | R3.01, R2.01 |
@@ -221,7 +221,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.13 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. | L | R3.07, R3.09 |
+| R3.13 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. Pins the evidence a landing used, so R3.02's retention never deletes it. | L | R3.07, R3.09 |
 | R3.14 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.13, R3.06 |
 | R3.15 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.14 |
 | R3.16 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.13 |
