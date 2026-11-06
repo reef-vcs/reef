@@ -260,7 +260,7 @@ ci: fmt-check api doc-links lint build agent-files installer test doc deny
 preflight: fmt-check doc-links
     if command -v shellcheck >/dev/null; then {{just_executable()}} installer-lint; else echo "preflight: shellcheck is not installed, so the installer was not linted" >&2; fi
     if command -v buf >/dev/null; then {{just_executable()}} api; else echo "preflight: buf is not installed, so the API schema was not checked (brew install bufbuild/buf/buf)" >&2; fi
-    {{just_executable()}} deny lint agent-files
+    {{just_executable()}} deny lint doc agent-files
 
 clean:
     cargo clean
