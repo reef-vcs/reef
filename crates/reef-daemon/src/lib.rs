@@ -10,6 +10,7 @@
 //!
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
 
+pub mod artifacts;
 pub mod backend;
 pub mod config;
 pub mod daemon;

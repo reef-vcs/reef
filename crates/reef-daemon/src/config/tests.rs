@@ -417,6 +417,57 @@ fn gc_interval_is_off_or_at_least_an_hour() {
     assert_eq!(reason, "must be 0s (off) or at least 1h");
 }
 
+// R3.02 test 16: `[evidence]` and `[artifacts]` parse, print, keep their
+// defaults, and refuse values out of range.
+#[test]
+fn evidence_and_artifact_keys() {
+    let days = |n: u64| Duration::from_hours(n * 24);
+    let defaults = load_file("").unwrap().file;
+    assert_eq!(defaults.evidence.retention, days(90));
+    assert_eq!(defaults.artifacts.retention, days(30));
+    assert_eq!(defaults.artifacts.max_size, ByteSize(10 << 30));
+    assert_eq!(defaults.artifacts.max_object_size, ByteSize(1 << 30));
+    let set = load_file(
+        "[evidence]\nretention = \"0s\"\n[artifacts]\nretention = \"7d\"\nmax_size = \"64MiB\"\nmax_object_size = \"64GiB\"\n",
+    )
+    .unwrap();
+    assert_eq!(set.file.evidence.retention, Duration::ZERO);
+    assert_eq!(set.file.artifacts.retention, days(7));
+    assert_eq!(set.file.artifacts.max_size, ByteSize(64 << 20));
+    assert_eq!(set.file.artifacts.max_object_size, ByteSize(64 << 30));
+    let shown = set.to_effective_toml();
+    let evidence = shown.split("[evidence]").nth(1).unwrap();
+    assert!(evidence.starts_with("\nretention = \"0s\""), "{shown}");
+    let artifacts = shown.split("[artifacts]").nth(1).unwrap();
+    for line in [
+        "retention = \"7d\"",
+        "max_size = \"64MiB\"",
+        "max_object_size = \"64GiB\"",
+    ] {
+        assert!(artifacts.contains(line), "{line:?} in {shown}");
+    }
+    for (text, expected) in [
+        ("[evidence]\nretention = \"12h\"\n", "evidence.retention"),
+        ("[evidence]\nretention = \"3651d\"\n", "evidence.retention"),
+        ("[artifacts]\nretention = \"12h\"\n", "artifacts.retention"),
+        ("[artifacts]\nmax_size = \"1MiB\"\n", "artifacts.max_size"),
+        (
+            "[artifacts]\nmax_object_size = \"128GiB\"\n",
+            "artifacts.max_object_size",
+        ),
+        (
+            "[artifacts]\nmax_object_size = 512\n",
+            "artifacts.max_object_size",
+        ),
+    ] {
+        let err = load_file(text).unwrap_err();
+        let ConfigError::Invalid { key, .. } = &err else {
+            panic!("{text:?}: {err:?}");
+        };
+        assert_eq!(key, expected, "{text:?}");
+    }
+}
+
 // R2.18 12: the web UI listens on a loopback IP with a port, nowhere else.
 #[test]
 fn listen_must_be_loopback() {

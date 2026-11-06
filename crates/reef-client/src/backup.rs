@@ -59,6 +59,13 @@ pub struct RepoManifest {
     pub bytes: u64,
     /// How long the repository thread was paused for step 3.
     pub pause_ms: u64,
+    /// Stored artifact files copied (R3.02), into `artifacts/`; 0 in a
+    /// backup from before R3.02.
+    #[serde(default)]
+    pub artifact_files: u64,
+    /// Their bytes.
+    #[serde(default)]
+    pub artifact_bytes: u64,
 }
 
 /// The database copy in the manifest.

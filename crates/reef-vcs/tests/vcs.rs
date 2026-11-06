@@ -3075,3 +3075,337 @@ async fn evidence_cli() {
     assert_eq!(error["hint"], format!("chmod 600 {key_text}"), "{error}");
     daemon.stop().await;
 }
+
+// R3.02 test 17: `add --artifact` uploads before it adds; `--no-upload`
+// records the digest only; an envelope's artifacts are checked and
+// uploaded; `artifact upload`, `show` and `read`; and `ws gc --dry-run`'s
+// counts. Every run's output is checked against `reef schema`.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one artifact through every command")]
+async fn evidence_cli_artifacts() {
+    use reef_daemon::client::evidence::{self as format, SigningKey};
+
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let files = daemon.tmp.path().join("files");
+    std::fs::create_dir(&files).unwrap();
+    let key = files.join("k.pem");
+    let key_text = key.to_str().unwrap();
+    ok(&daemon, &dir, &["evidence", "key", "generate", key_text]).await;
+    let log = files.join("log.txt");
+    let log_bytes = b"ok 1 - uploads\n".repeat(1000);
+    std::fs::write(&log, &log_bytes).unwrap();
+    let log_sha = format::sha256_hex(&log_bytes);
+    let add = |extra: &'static [&'static str]| {
+        let mut args = vec![
+            "-o", "json", "evidence", "add", "--kind", "test", "--result", "pass", "--key",
+        ];
+        args.push(key_text);
+        args.extend_from_slice(extra);
+        args
+    };
+
+    // Uploaded, then added: `show` prints it stored.
+    let mut args = add(&["--target", "uploaded"]);
+    args.extend(["--artifact", log.to_str().unwrap()]);
+    let added = ok(&daemon, &dir, &args).await;
+    let artifact = &added["evidence"]["artifacts"][0];
+    assert_eq!(artifact["state"], "stored", "{added}");
+    assert_eq!(artifact["size"], log_bytes.len());
+    let id = added["evidence"]["id"].as_str().unwrap().to_owned();
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &id]).await;
+    let line = format!("log.txt sha256:{} stored 15 KiB", &log_sha[..12]);
+    assert!(stdout(&text).contains(&line), "{}", stdout(&text));
+
+    // `--no-upload`: the digest only.
+    let other = files.join("other.txt");
+    std::fs::write(&other, "not uploaded\n").unwrap();
+    let mut args = add(&["--target", "digest-only", "--no-upload"]);
+    args.extend(["--artifact", other.to_str().unwrap()]);
+    let added = ok(&daemon, &dir, &args).await;
+    assert_eq!(added["evidence"]["artifacts"][0]["state"], "absent");
+    let text = run_in(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "text",
+            "evidence",
+            "show",
+            added["evidence"]["id"].as_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(
+        stdout(&text).contains("other.txt sha256:"),
+        "{}",
+        stdout(&text)
+    );
+    assert!(stdout(&text).contains(" absent"), "{}", stdout(&text));
+
+    // Bytes that are not what the claim's digest was hashed from, as a file
+    // changed during its upload leaves (here a partial upload of other bytes
+    // under its digest, which the upload resumes): ARTIFACT_DIGEST_MISMATCH,
+    // and no evidence is added.
+    let changed = files.join("changed.txt");
+    let changed_bytes = b"the bytes the claim names\n".repeat(10);
+    std::fs::write(&changed, &changed_bytes).unwrap();
+    let incoming = daemon
+        .handle
+        .state()
+        .artifacts
+        .dir(repo.id.parse().unwrap())
+        .join("incoming");
+    std::fs::create_dir_all(&incoming).unwrap();
+    let partial = incoming.join(format!(
+        "{}.{}",
+        format::sha256_hex(&changed_bytes),
+        changed_bytes.len()
+    ));
+    std::fs::write(&partial, b"other bytes").unwrap();
+    let counts = daemon.handle.state().db.evidence_counts().unwrap();
+    let mut args = add(&["--target", "changed"]);
+    args.extend(["--artifact", changed.to_str().unwrap()]);
+    let output = run_in(&daemon, &dir, &args).await;
+    failed(&output, 2, "ARTIFACT_DIGEST_MISMATCH");
+    assert_eq!(
+        daemon.handle.state().db.evidence_counts().unwrap(),
+        counts,
+        "nothing was added"
+    );
+    assert!(!partial.exists(), "the partial upload was deleted");
+
+    // An envelope signed elsewhere, naming one file: that file uploads, and
+    // a file it does not name is refused with nothing sent.
+    let shown = ok(&daemon, &dir, &["-o", "json", "show"]).await;
+    let tree = shown["tree_id"].as_str().unwrap().to_owned();
+    let report = files.join("report.xml");
+    std::fs::write(&report, "<report/>\n").unwrap();
+    let signer = SigningKey::from_seed(&[11; 32]).unwrap();
+    let claim = format::Claim {
+        kind: "build".into(),
+        result: format::Outcome::Pass,
+        target: None,
+        started_on: std::time::SystemTime::now(),
+        finished_on: std::time::SystemTime::now(),
+        artifacts: vec![format::Artifact {
+            name: "report.xml".into(),
+            sha256: format::sha256_hex(b"<report/>\n"),
+            uri: None,
+            media_type: None,
+        }],
+        annotations: serde_json::Map::new(),
+    };
+    let envelope = claim
+        .sign(&format::TreeDigest::git(&tree).unwrap(), &signer)
+        .unwrap();
+    let envelope_file = files.join("e.json");
+    std::fs::write(&envelope_file, envelope.to_bytes()).unwrap();
+    let signer_pem = files.join("signer.pub.pem");
+    std::fs::write(&signer_pem, signer.public_key().to_pem()).unwrap();
+    let counts = daemon.handle.state().db.evidence_counts().unwrap();
+    let artifacts_before = daemon.handle.state().db.artifact_counts().unwrap();
+    let refused_add = run_in(
+        &daemon,
+        &dir,
+        &[
+            "evidence",
+            "add",
+            "--envelope",
+            envelope_file.to_str().unwrap(),
+            "--public-key",
+            signer_pem.to_str().unwrap(),
+            "--artifact",
+            other.to_str().unwrap(),
+        ],
+    )
+    .await;
+    let error = refused(&refused_add, 2);
+    assert!(
+        error["message"].as_str().unwrap().contains("other.txt"),
+        "{error}"
+    );
+    assert_eq!(daemon.handle.state().db.evidence_counts().unwrap(), counts);
+    assert_eq!(
+        daemon.handle.state().db.artifact_counts().unwrap(),
+        artifacts_before,
+        "nothing was sent"
+    );
+    let elsewhere = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "evidence",
+            "add",
+            "--envelope",
+            envelope_file.to_str().unwrap(),
+            "--public-key",
+            signer_pem.to_str().unwrap(),
+            "--artifact",
+            report.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(elsewhere["evidence"]["artifacts"][0]["state"], "stored");
+
+    // `artifact upload`: a line each, then `already stored`.
+    let second = files.join("second.bin");
+    std::fs::write(&second, vec![7u8; 3 << 20]).unwrap();
+    let paths = [log.to_str().unwrap(), second.to_str().unwrap()];
+    let first = run_in(
+        &daemon,
+        &dir,
+        &[
+            "-o", "text", "evidence", "artifact", "upload", paths[0], paths[1],
+        ],
+    )
+    .await;
+    let lines: Vec<String> = stdout(&first).lines().map(str::to_owned).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].ends_with("already stored"), "{lines:?}");
+    assert!(lines[1].starts_with(&format::sha256_hex(&vec![7u8; 3 << 20])[..12]));
+    assert!(lines[1].ends_with(" 3.0 MiB stored"), "{lines:?}");
+    let again = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "evidence", "artifact", "upload", paths[1]],
+    )
+    .await;
+    assert!(stdout(&again).trim_end().ends_with("already stored"));
+    let listed = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "artifact", "upload", paths[1]],
+    )
+    .await;
+    assert_eq!(listed[0]["created"], false);
+    assert_eq!(listed[0]["path"], paths[1]);
+    run_in(&daemon, &dir, &["evidence", "artifact", "upload", paths[1]]).await;
+
+    // `artifact read <prefix>` is the bytes; with -o json, the record.
+    let read = run_in(
+        &daemon,
+        &dir,
+        &["evidence", "artifact", "read", &log_sha[..8]],
+    )
+    .await;
+    assert!(read.status.success(), "{}", stderr(&read));
+    assert_eq!(format::sha256_hex(&read.stdout), log_sha);
+    let ranged = run_in(
+        &daemon,
+        &dir,
+        &[
+            "evidence", "artifact", "read", &log_sha, "--offset", "15", "--length", "15",
+        ],
+    )
+    .await;
+    assert_eq!(ranged.stdout, &log_bytes[15..30]);
+    let record = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "artifact", "read", &log_sha],
+    )
+    .await;
+    assert_eq!(record["sha256"], log_sha.as_str());
+    assert_eq!(record["state"], "stored");
+    run_in(
+        &daemon,
+        &dir,
+        &["-o", "brief", "evidence", "artifact", "read", &log_sha],
+    )
+    .await;
+
+    // `artifact show` lists the evidence naming it.
+    let shown = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "artifact", "show", &log_sha[..8]],
+    )
+    .await;
+    assert_eq!(shown["evidence_count"], 1);
+    assert_eq!(shown["evidence_ids"][0], id.as_str());
+    let brief = ok(&daemon, &dir, &["evidence", "artifact", "show", &log_sha]).await;
+    assert!(brief.get("evidence_ids").is_none(), "{brief}");
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "evidence", "artifact", "show", &log_sha],
+    )
+    .await;
+    assert!(stdout(&text).contains(&id[..12]), "{}", stdout(&text));
+    // `read -o json` prints the record as `show` reads it, absent too;
+    // reading the bytes of one never uploaded is ARTIFACT_NOT_FOUND.
+    let absent_sha = format::sha256_hex(b"not uploaded\n");
+    let record = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "artifact", "read", &absent_sha],
+    )
+    .await;
+    assert_eq!(record["state"], "absent", "{record}");
+    let absent = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "evidence", "artifact", "read", &absent_sha],
+    )
+    .await;
+    absent.clone().assert().code(3);
+    assert!(
+        stderr(&absent).contains("never stored"),
+        "{}",
+        stderr(&absent)
+    );
+
+    // A damaged read: the bytes, then the error, and stderr says so.
+    let stored = daemon
+        .handle
+        .state()
+        .artifacts
+        .dir(repo.id.parse().unwrap())
+        .join("sha256")
+        .join(&log_sha[..2])
+        .join(&log_sha[2..]);
+    std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut tampered = log_bytes.clone();
+    tampered[100] ^= 1;
+    std::fs::write(&stored, &tampered).unwrap();
+    let damaged = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "evidence", "artifact", "read", &log_sha],
+    )
+    .await;
+    assert!(!damaged.status.success());
+    assert_eq!(damaged.stdout, tampered);
+    assert!(
+        stderr(&damaged).contains("not the artifact"),
+        "{}",
+        stderr(&damaged)
+    );
+    // Dropped as damaged: it now reads as collected.
+    let record = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "artifact", "show", &log_sha],
+    )
+    .await;
+    assert_eq!(record["state"], "collected", "{record}");
+
+    // `ws gc --dry-run` prints the new counts.
+    let gc = run_in(&daemon, &dir, &["-o", "text", "ws", "gc", "--dry-run"]).await;
+    assert!(gc.status.success(), "{}", stderr(&gc));
+    assert!(
+        stdout(&gc).contains("evidence 0 removed, artifacts 0 collected (0 B)"),
+        "{}",
+        stdout(&gc)
+    );
+    let reports = ok(&daemon, &dir, &["-o", "json", "ws", "gc", "--dry-run"]).await;
+    assert!(
+        reports[0]["artifact_bytes"].as_u64().unwrap() > 3 << 20,
+        "{reports}"
+    );
+    daemon.stop().await;
+}

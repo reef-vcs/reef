@@ -200,6 +200,28 @@ def test_files_without_a_workspace(client: reef.Client, repo: str) -> None:
     assert read.content == b"by the API\n"
 
 
+def test_artifact_reads_back_through_the_stream(client: reef.Client, repo: str) -> None:
+    # R3.02: an upload in two chunks, then ReadArtifact's server stream.
+    import hashlib
+
+    data = bytes(range(256)) * 6000
+    sha = hashlib.sha256(data).hexdigest()
+    chunk = 1 << 20
+    probe = client.upload_artifact(repo=repo, sha256=sha, size=len(data), offset=0, data=b"")
+    assert probe.received == 0
+    first = client.upload_artifact(
+        repo=repo, sha256=sha, size=len(data), offset=0, data=data[:chunk]
+    )
+    assert first.received == chunk
+    last = client.upload_artifact(
+        repo=repo, sha256=sha, size=len(data), offset=chunk, data=data[chunk:]
+    )
+    assert last.created
+    frames = list(client.read_artifact(repo=repo, sha256=sha[:12]))
+    assert frames[0].artifact.size == len(data)
+    assert b"".join(frame.data for frame in frames) == data
+
+
 def test_subscription_streams_and_cancels(client: reef.Client, repo: str) -> None:
     with client.workspace(repo, purpose="stream", report_presence=False) as ws:
         stream = client.subscribe_operations(repos=[repo])

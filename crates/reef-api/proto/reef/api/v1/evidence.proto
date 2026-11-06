@@ -22,6 +22,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/artifacts.proto";
 import "reef/api/v1/options.proto";
 
 // Storing evidence about trees, and reading it back.
@@ -38,8 +39,10 @@ service EvidenceService {
   // must be in the repository, and `revision`, when set, must resolve to a
   // commit with that tree. The envelope is stored in canonical form with
   // its key and, when `revision` is set, a link to the revision's change,
-  // in one transaction. Adding an object already stored changes nothing
-  // and returns it with `created` false. Records no operation.
+  // in one transaction, with an index of the artifacts its predicate names
+  // (by digest), each of which already stored is marked used. Adding an
+  // object already stored changes nothing but those marks and returns it
+  // with `created` false. Records no operation.
   //
   // Errors: INVALID_ARGUMENT with reason INVALID_EVIDENCE (metadata
   // `check`: `size`, `envelope`, `payload_type`, `signatures`,
@@ -57,7 +60,8 @@ service EvidenceService {
   }
   // One evidence object, by its full id or a unique prefix of at least 4
   // hex digits, with its canonical envelope. Its signature is checked again
-  // at this read.
+  // at this read. Evidence that is not on live work is deleted by garbage
+  // collection `[evidence] retention` after it was first added.
   //
   // Errors: INVALID_ARGUMENT with reason INVALID_EVIDENCE_ID (metadata
   // `evidence_id`) for an id that is not 4 to 64 hex digits, or
@@ -118,8 +122,10 @@ enum SignatureCheck {
   SIGNATURE_CHECK_INVALID = 2;
 }
 
-// An artifact a check produced, recorded by digest. Reef does not store
-// its bytes in this revision.
+// An artifact a check produced, recorded by digest. Its bytes, when
+// uploaded, are in ArtifactService (artifacts.proto); `state`, `size` and
+// `collected_at` are read from the artifact store's index at every read,
+// not from the signed claim.
 message EvidenceArtifact {
   // Its name, such as `test.log`.
   string name = 1;
@@ -129,6 +135,14 @@ message EvidenceArtifact {
   string uri = 3;
   // Its media type; empty when the claim gives none.
   string media_type = 4;
+  // Whether the repository holds its bytes: stored, collected by
+  // retention, or absent (never uploaded, or deleted when no evidence
+  // named it).
+  ArtifactState state = 5;
+  // Its length in bytes when stored or collected; 0 when absent.
+  uint64 size = 6;
+  // When retention removed its bytes; set when collected only.
+  google.protobuf.Timestamp collected_at = 7;
 }
 
 // One evidence object. Its fields are read from the stored envelope's

@@ -9,11 +9,11 @@
 use reef_client::backup::Manifest;
 use reef_client::brief;
 use reef_client::json::{
-    Abandoned, BuiltStore, ChangeSummary, Created, CreatedRemoteToken, Described, Diff, Evidence,
-    EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History, Inspected, LogEntry, Moved,
-    Operation, Presence, PresenceEvent, Released, RemoteListener, RemoteToken, RepoStatus,
-    Repository, Restored, Snapshotted, Status, Store, SymbolOccurrence, SymbolStatus, SymbolUpload,
-    Undone, WebSession, Workspace,
+    Abandoned, Artifact, ArtifactUploaded, BuiltStore, ChangeSummary, Created, CreatedRemoteToken,
+    Described, Diff, Evidence, EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History,
+    Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent, Released, RemoteListener,
+    RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status, Store, SymbolOccurrence,
+    SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
@@ -219,7 +219,9 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         )
     },
     OutputRow {
-        note: Some("exits 8 (io), with the reports, when the jj step of a repository's GC failed"),
+        note: Some(
+            "exits 8 (io), with the reports, when the jj step or the evidence and artifacts step of a repository's GC failed",
+        ),
         result_on_failure: true,
         ..row(&["ws", "gc"], list::<GcReport>)
     },
@@ -285,6 +287,23 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         ..row(&["evidence", "show"], object::<Evidence>)
     },
     row(&["evidence", "key", "generate"], object::<EvidenceKey>),
+    row(
+        &["evidence", "artifact", "upload"],
+        list::<ArtifactUploaded>,
+    ),
+    view(
+        &["evidence", "artifact", "show"],
+        object::<Artifact>,
+        object::<brief::Artifact<'static>>,
+    ),
+    OutputRow {
+        brief: Brief::View(object::<brief::Artifact<'static>>),
+        ..text(
+            &["evidence", "artifact", "read"],
+            object::<Artifact>,
+            "the artifact's bytes unless -o json or -o brief; a whole read whose bytes no longer match the digest fails after them, and stderr says to discard them",
+        )
+    },
     text(
         &["guide"],
         object::<guide::GuideJson>,

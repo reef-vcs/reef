@@ -60,6 +60,11 @@ impl From<&GcReport> for v1::GcReport {
             elapsed_ms: report.elapsed_ms,
             dry_run: report.dry_run,
             base_bytes_unshared: report.base_bytes_unshared,
+            evidence_removed: report.retention.evidence_removed,
+            artifacts_collected: report.retention.artifacts_collected,
+            artifact_bytes_freed: report.retention.artifact_bytes_freed,
+            artifact_bytes: report.retention.artifact_bytes,
+            evidence_error: report.evidence_error.clone().unwrap_or_default(),
         }
     }
 }

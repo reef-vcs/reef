@@ -590,6 +590,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.EvidenceService/ListEvidence",
         "read in the proposal flow (R3.31); tools/list is at its budget (#116)",
     ),
+    (
+        "/reef.api.v1.ArtifactService/UploadArtifact",
+        "artifacts come from executors and scripts with the evidence they sign (R3.02)",
+    ),
+    (
+        "/reef.api.v1.ArtifactService/GetArtifact",
+        "read in the proposal flow (R3.31); bytes do not belong in a tool result; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ArtifactService/ReadArtifact",
+        "read in the proposal flow (R3.31); bytes do not belong in a tool result; tools/list is at its budget (#116)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.
@@ -1336,13 +1348,17 @@ mod tests {
         assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
     }
 
-    /// R3.01 test 18: evidence has no tools, and each method says why.
+    /// R3.01 test 18 and R3.02 test 18: evidence and artifacts have no
+    /// tools, and each method says why.
     #[test]
     fn evidence_is_not_a_tool() {
         let evidence: Vec<&str> = reef_api::methods()
-            .filter(|path| path.starts_with("/reef.api.v1.EvidenceService/"))
+            .filter(|path| {
+                path.starts_with("/reef.api.v1.EvidenceService/")
+                    || path.starts_with("/reef.api.v1.ArtifactService/")
+            })
             .collect();
-        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence.len(), 6);
         for path in evidence {
             assert!(NOT_TOOLS.iter().any(|(rpc, _)| *rpc == path), "{path}");
             assert!(!TOOLS.iter().any(|tool| tool.rpc == path), "{path}");

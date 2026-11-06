@@ -7,6 +7,8 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 ### Upgrading
 
 - The daemon's database becomes schema 7 (`0007_evidence`, R3.01) the first time this daemon opens it. An older daemon then refuses the database, as with every migration: restore a backup taken before the upgrade to go back.
+- The daemon's database becomes schema 8 (`0008_artifacts`, R3.02) the first time this daemon opens it, and the same start indexes, once, the artifact digests of the evidence already stored.
+- Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
 ### Added
 
@@ -15,6 +17,12 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `reef evidence add`, `list`, `show` and `key generate`: sign a claim about a revision's tree with an ed25519 key file and store it, or send an envelope signed elsewhere (`--envelope`); list a revision's, a tree's or a change's evidence; show one object, its statement and whether its signature verifies, or its canonical envelope's bytes (`--envelope`); and make a key pair. A key file that others can read is refused.
 - `reef schema evidence`: the evidence format as JSON Schema (`evidence.Statement`, `evidence.Predicate`, `evidence.Envelope`), from the binary, for executors in any language.
 - `reef-evidence`, the format crate: building, signing and checking evidence, with no jj-lib, gRPC, tokio or SQLite dependency.
+- An artifact store for evidence (R3.02, [ADR 0056](docs/adr/0056-evidence-artifact-store-and-retention.md), [docs/evidence.md](docs/evidence.md#artifacts)): the logs, reports and build outputs evidence names by SHA-256, stored once per repository under the daemon's state directory, with their index in `reef.sqlite3`. Evidence reads now report each artifact as `stored` (with its size), `collected` (with its date) or `absent`.
+- `ArtifactService` (API revision 16): `UploadArtifact` stores an artifact in chunks of at most 1 MiB, keyed by its digest and size, so an upload resumes after a lost response or a daemon restart and bytes already stored are never sent again; `GetArtifact` reads an artifact's record and the evidence naming it; `ReadArtifact` streams the bytes, and a read of a whole artifact whose stored bytes no longer match the digest ends in `ARTIFACT_DAMAGED`. Uploads record no operation.
+- `reef evidence artifact upload`, `show` and `read`: upload files without evidence, show an artifact's state, size and evidence, and write its bytes to stdout (`--offset`, `--length`; the record with `-o json`). `reef evidence add --artifact` now uploads each file before adding the evidence; `--no-upload` records the digest only, and with `--envelope`, `--artifact` uploads the files the envelope names.
+- Evidence and artifact retention, as garbage collection's seventh step: evidence that is not on live work (`trunk() | bookmarks() | working_copies() | mutable()`, or a change it was added for that is still live) is deleted after `[evidence] retention`; artifacts no evidence names are deleted, those named only by such evidence are collected after `[artifacts] retention`, and the least recently used go while the store passes `[artifacts] max_size`. Nothing newer than the undo window, or the last backup's retention, is deleted. `GcReport` gains `evidence_removed`, `artifacts_collected`, `artifact_bytes_freed`, `artifact_bytes` and `evidence_error`; `reef ws gc` prints `evidence <n> removed, artifacts <n> collected (<size>), <size> kept`, and exits 8 when the step stopped short.
+- `[evidence] retention` (`"90d"`), and `[artifacts] retention` (`"30d"`), `max_size` (`"10GiB"`) and `max_object_size` (`"1GiB"`) in the daemon's configuration; `0s` turns a retention off.
+- Backups include each repository's stored artifacts (`repos/<id>/artifacts/`, a `BACKUP_STEP_ARTIFACTS` progress message, and `artifact_files` and `artifact_bytes` in the manifest), and restore puts them back. A backup from before this release restores without artifacts.
 
 ### Fixed
 

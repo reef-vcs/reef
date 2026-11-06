@@ -145,6 +145,8 @@ pub struct AppState {
     pub web: crate::web::WebUi,
     /// The remote listener and its tokens (R2.08).
     pub remote: crate::remote::RemoteListener,
+    /// Each repository's artifact store and lock (R3.02).
+    pub artifacts: crate::artifacts::Artifacts,
 }
 
 impl fmt::Debug for AppState {
@@ -395,6 +397,7 @@ impl Daemon {
             history,
             web: crate::web::WebUi::new(config_web),
             remote,
+            artifacts: crate::artifacts::Artifacts::new(paths.repos.clone()),
         });
 
         // Before any snapshot can run (R2.10).
@@ -491,8 +494,10 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         .map_err(StartError::RestartGrace)?;
     let records = state.db.repositories()?;
 
-    // 3. Sweep base cache leftovers.
+    // 3. Sweep base cache leftovers, making each repository's state
+    // directory first (registered before R3.02 made it at registration).
     for record in &records {
+        crate::workspace::ensure_repo_dir(&paths.repo_dir(record.id)).await;
         let cache = BaseCache::new(Arc::clone(&state.db), &paths.repo_dir(record.id), record.id);
         let repo = record.id;
         match tokio::task::spawn_blocking(move || cache.sweep_incomplete()).await {

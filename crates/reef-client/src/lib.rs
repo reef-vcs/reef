@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use hyper_util::rt::TokioIo;
 use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
+use reef_api::v1::artifact_service_client::ArtifactServiceClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
@@ -68,6 +69,10 @@ use reef_api::v1::{
 use reef_api::v1::{
     AddEvidenceRequest, AddEvidenceResponse, Evidence, GetEvidenceRequest, GetEvidenceResponse,
     ListEvidenceRequest, ListEvidenceResponse,
+};
+use reef_api::v1::{
+    Artifact, GetArtifactRequest, GetArtifactResponse, ReadArtifactRequest, ReadArtifactResponse,
+    UploadArtifactRequest, UploadArtifactResponse,
 };
 use reef_api::v1::{
     BackupRequest, BackupResponse, BuildStoreRequest, BuildStoreResponse, CollectGarbageRequest,
@@ -721,6 +726,10 @@ impl Client {
 
     fn workspaces(&self) -> WorkspaceServiceClient<Svc> {
         WorkspaceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    fn artifacts(&self) -> ArtifactServiceClient<Svc> {
+        ArtifactServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
 
     fn maintenance(&self) -> MaintenanceServiceClient<Svc> {
@@ -1562,6 +1571,201 @@ impl Client {
             request.page_token = response.next_page_token;
         }
     }
+}
+
+impl Client {
+    /// `ArtifactService.UploadArtifact` (R3.02): one chunk of an upload, or
+    /// a probe (offset 0, no data).
+    pub async fn upload_artifact(
+        &self,
+        request: UploadArtifactRequest,
+    ) -> Result<UploadArtifactResponse, ClientError> {
+        let mut client = self.artifacts();
+        self.call("UploadArtifact", client.upload_artifact(request))
+            .await
+    }
+
+    /// Uploads the file at `path` as an artifact of `repo` (R3.02): hashes
+    /// it, probes, then sends 1 MiB chunks from the bytes the daemon holds,
+    /// following `ARTIFACT_OFFSET_MISMATCH`'s `received`. Bytes already
+    /// stored are not sent again. A file that changes after it is hashed
+    /// ends in `ARTIFACT_DIGEST_MISMATCH`, or in [`UploadError::Changed`].
+    pub async fn upload_artifact_file(
+        &self,
+        repo: &str,
+        path: &Path,
+    ) -> Result<ArtifactUpload, UploadError> {
+        self.upload_artifact_file_as(repo, path, None).await
+    }
+
+    /// [`Client::upload_artifact_file`] naming the file by `sha256` when the
+    /// caller hashed it already (a claim it signed names it): the daemon
+    /// then refuses bytes that changed since with
+    /// `ARTIFACT_DIGEST_MISMATCH`, and the file is read once.
+    pub async fn upload_artifact_file_as(
+        &self,
+        repo: &str,
+        path: &Path,
+        sha256: Option<&str>,
+    ) -> Result<ArtifactUpload, UploadError> {
+        use std::os::unix::fs::FileExt as _;
+        let io = |source| UploadError::Io {
+            path: path.to_owned(),
+            source,
+        };
+        let file = std::sync::Arc::new(std::fs::File::open(path).map_err(io)?);
+        let size = file.metadata().map_err(io)?.len();
+        let sha256 = if let Some(sha256) = sha256 {
+            sha256.to_owned()
+        } else {
+            let hashed = std::sync::Arc::clone(&file);
+            tokio::task::spawn_blocking(move || reef_evidence::sha256_hex_of(&*hashed))
+                .await
+                .map_err(|error| io(io::Error::other(error)))?
+                .map_err(io)?
+        };
+        let request = |offset: u64, data: Vec<u8>| UploadArtifactRequest {
+            repo: repo.to_owned(),
+            sha256: sha256.clone(),
+            size,
+            offset,
+            data,
+        };
+        let mut sent = 0u64;
+        let mut response = self.upload_artifact(request(0, Vec::new())).await?;
+        // A bound on the loop: every chunk, then some for another uploader
+        // of the same bytes moving the offset.
+        let chunk = u64::try_from(ARTIFACT_CHUNK).unwrap_or(u64::MAX);
+        let mut calls = size / chunk + 64;
+        loop {
+            if let Some(artifact) = response.artifact {
+                return Ok(ArtifactUpload {
+                    artifact,
+                    created: response.created,
+                    sent,
+                });
+            }
+            calls = calls.checked_sub(1).ok_or(UploadError::Changed {
+                path: path.to_owned(),
+            })?;
+            let offset = response.received;
+            let want =
+                usize::try_from((size - offset.min(size)).min(chunk)).unwrap_or(ARTIFACT_CHUNK);
+            let reading = std::sync::Arc::clone(&file);
+            let data = tokio::task::spawn_blocking(move || {
+                let mut data = vec![0; want];
+                reading.read_exact_at(&mut data, offset).map(|()| data)
+            })
+            .await
+            .map_err(|error| io(io::Error::other(error)))?
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::UnexpectedEof {
+                    UploadError::Changed {
+                        path: path.to_owned(),
+                    }
+                } else {
+                    io(error)
+                }
+            })?;
+            let length = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            response = match self.upload_artifact(request(offset, data)).await {
+                Ok(response) => {
+                    sent += length;
+                    response
+                }
+                Err(error) if error.reason() == reef_api::error::ARTIFACT_OFFSET_MISMATCH => {
+                    let received = error
+                        .metadata()
+                        .get("received")
+                        .and_then(|text| text.parse().ok())
+                        .ok_or(error)?;
+                    UploadArtifactResponse {
+                        received,
+                        artifact: None,
+                        created: false,
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            };
+        }
+    }
+
+    /// `ArtifactService.GetArtifact` (R3.02): one artifact's record of
+    /// `repo`, by its digest or a unique prefix.
+    pub async fn get_artifact(
+        &self,
+        repo: &str,
+        sha256: &str,
+    ) -> Result<GetArtifactResponse, ClientError> {
+        let mut client = self.artifacts();
+        let request = GetArtifactRequest {
+            repo: repo.to_owned(),
+            sha256: sha256.to_owned(),
+        };
+        self.call("GetArtifact", client.get_artifact(request)).await
+    }
+
+    /// `ArtifactService.ReadArtifact` (R3.02): a stored artifact's bytes
+    /// from `offset`, `length` of them (0 for all), as a stream whose first
+    /// message carries the record. An error item after data means the bytes
+    /// sent are not the artifact.
+    pub async fn read_artifact(
+        &self,
+        repo: &str,
+        sha256: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<tonic::Streaming<ReadArtifactResponse>, ClientError> {
+        let mut client = self.artifacts();
+        let request = ReadArtifactRequest {
+            repo: repo.to_owned(),
+            sha256: sha256.to_owned(),
+            offset,
+            length,
+        };
+        self.call("ReadArtifact", client.read_artifact(request))
+            .await
+    }
+}
+
+/// The chunk [`Client::upload_artifact_file`] sends: 1 MiB, the most a
+/// daemon accepts.
+pub const ARTIFACT_CHUNK: usize = 1 << 20;
+
+/// What [`Client::upload_artifact_file`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtifactUpload {
+    /// The artifact as stored.
+    pub artifact: Artifact,
+    /// Whether this upload stored it; false when it was stored already.
+    pub created: bool,
+    /// The bytes this upload sent: 0 when they were stored already.
+    pub sent: u64,
+}
+
+/// Failure of [`Client::upload_artifact_file`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum UploadError {
+    /// The file could not be read.
+    #[error("read {}", path.display())]
+    Io {
+        /// The file.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// The file changed while it was uploaded: shorter than when it was
+    /// hashed.
+    #[error("{} changed while it was uploaded", path.display())]
+    Changed {
+        /// The file.
+        path: PathBuf,
+    },
+    /// The daemon refused a call.
+    #[error(transparent)]
+    Client(#[from] ClientError),
 }
 
 /// The first items of a list read up to a limit (R2.27).

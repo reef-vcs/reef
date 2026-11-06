@@ -566,3 +566,25 @@ Through the daemon, `tests/evidence.rs` prints medians as trend data, not gates 
 ```sh
 cargo nextest run --release -p reef-daemon --test evidence --success-output immediate -E 'test(add_and_get) | test(list_filters_and_pages)'
 ```
+
+## Artifacts (R3.02)
+
+`crates/reef-daemon/tests/artifacts.rs` holds two ignored tests that time the artifact store ([ADR 0056](adr/0056-evidence-artifact-store-and-retention.md)) through a test daemon over its socket. Release build on the M2 Max, run on 2026-11-06, three runs each, one test at a time; the table gives the median run. They are trend data, not gates.
+
+| Measurement | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| upload | a 256 MiB file through `Client::upload_artifact_file`: hash, probe, 256 chunks of 1 MiB, and the daemon's hash at commit | 488 ms (525 MiB/s) | > 200 MiB/s |
+| dedup | the same file again: the client's hash, then one probe that answers "stored" | 124 ms, of which the probe 0.45 ms | hashing time + < 2 ms |
+| read | `ReadArtifact` of the whole file, every message drained, re-hashed by the daemon as it sends | 178 ms (1,441 MiB/s) | > 300 MiB/s |
+| gc step | GC's seventh step (`artifacts::retention::run`) over 100,000 evidence objects, 20,000 artifacts and 2,004 live commits: 65,000 objects deleted, 5,000 artifacts collected | 4.62 s, of which `live_set` 60 ms | < 3 s, of which `live_set` < 1 s |
+
+- **The GC step is 1.5 times its expectation, and its commits are why.** A profile of the step (`sample`) put about 1.6 s in committing: 65 transactions of 1,000 objects each (decision 5), and each commit's WAL grows past SQLite's auto-checkpoint, which then copies and syncs the pages (`synchronous = NORMAL` syncs only at checkpoints). The per-object deletes, four indexed statements each, take about 0.6 s. Preparing those four once per transaction rather than once per object took the median from 5.02 s to 4.62 s. Larger transactions would cut the checkpoints but hold the database's write lock longer; the 1,000 stays. The fixture's 65,000 deletions are a worst case: a timed GC deletes only what aged out since the last run.
+- **`live_set` is not the cost**: 2,004 commits evaluated in 60 ms.
+- **Dedup costs the hash**: the probe is under a millisecond, so a repeated upload costs reading the file once.
+
+The protocol tests print medians too, as trend data (release, the same machine): `UploadArtifact` 1.0 ms per 1 MiB chunk (`upload_protocol`), `ReadArtifact` of 5 MiB in 4.6 ms (`read_stream`), and a GC dry run with the new step in 16 ms on the small fixture (`retention_pins`). A debug build, as `cargo nextest` runs them by default, takes 3.7 ms and 16 ms for the first two. Nothing changes on an existing path but one migration and its backfill at start, and one more table in `AddEvidence`'s insert.
+
+```sh
+cargo nextest run --release -p reef-daemon --test artifacts --run-ignored only --success-output immediate -E 'test(=bench_upload_dedup_read)'
+cargo nextest run --release -p reef-daemon --test artifacts --run-ignored only --success-output immediate -E 'test(=bench_gc_step)'
+```

@@ -1,8 +1,9 @@
 //! Queries on `evidence`, `evidence_keys` and `evidence_links` (R3.01, ADR
 //! 0055). An evidence row holds the canonical envelope; every other column
 //! is an index over its verified payload, written once at insert. Keys are
-//! machine-wide; evidence and links are per repository, and only
-//! [`Db::delete_repository`] deletes them.
+//! machine-wide; evidence and links are per repository, and are deleted by
+//! [`Db::delete_repository`] and by GC's retention (R3.02, ADR 0056), which
+//! keeps what live work pins ([`PINNED`]).
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension as _, Row, Transaction, params, params_from_iter};
@@ -15,6 +16,18 @@ pub const EVIDENCE_ID_LEN: usize = 64;
 
 /// The record kind errors name.
 const WHAT: &str = "evidence";
+
+/// Evidence objects GC's retention deletes per transaction (R3.02).
+const SWEEP_BATCH: usize = 1000;
+
+/// When the evidence row `e` is pinned by live work (R3.02): its tree is a
+/// live commit's, or it is linked to a live change. Needs the temporary
+/// tables [`Db::create_live_tables`] fills. R3.13's landing pin extends
+/// this condition.
+pub const PINNED: &str = "(e.tree_id IN (SELECT tree_id FROM temp.gc_live_trees)
+      OR EXISTS (SELECT 1 FROM evidence_links l
+                 WHERE l.repo_id = e.repo_id AND l.evidence_id = e.id
+                   AND l.change_id IN (SELECT change_id FROM temp.gc_live_changes)))";
 
 /// One row of `evidence_keys`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +299,32 @@ pub fn insert_evidence_in(
     Ok(Inserted { created: !exists })
 }
 
+/// The artifact digests the payload of the stored envelope `envelope`
+/// names, without checking its signature: `None` when the envelope or its
+/// payload does not parse as Reef evidence (R3.02's backfill).
+pub(super) fn payload_artifacts(envelope: &[u8]) -> Option<Vec<String>> {
+    let envelope: reef_evidence::Envelope = serde_json::from_slice(envelope).ok()?;
+    let statement: reef_evidence::Statement =
+        serde_json::from_slice(&envelope.payload_bytes()?).ok()?;
+    let index = reef_evidence::verify::index_of(&statement).ok()?;
+    Some(index.artifacts.into_iter().map(|a| a.sha256).collect())
+}
+
+/// The evidence `id` of `repo` in `tx`, with its key.
+fn evidence_in(
+    tx: &Transaction<'_>,
+    repo: RepoId,
+    id: &str,
+) -> Result<Option<StoredEvidence>, DbError> {
+    Ok(tx
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM {FROM} WHERE e.repo_id = ?1 AND e.id = ?2"),
+            params![repo, id],
+            from_row,
+        )
+        .optional()?)
+}
+
 impl Db {
     /// [`insert_evidence_in`] in its own transaction.
     pub fn insert_evidence(
@@ -295,6 +334,153 @@ impl Db {
         link: Option<&EvidenceLinkRow>,
     ) -> Result<Inserted, DbError> {
         self.in_transaction(|tx| insert_evidence_in(tx, key, row, link))
+    }
+
+    /// [`insert_evidence_in`] and the index of the artifacts its payload
+    /// names (`artifacts`, digests; R3.02), in one transaction, which also
+    /// reads the row back: a GC deleting it meanwhile can neither split the
+    /// add nor make its answer fail.
+    pub fn add_evidence(
+        &self,
+        key: &EvidenceKeyRow,
+        row: &EvidenceRow,
+        link: Option<&EvidenceLinkRow>,
+        artifacts: &[String],
+    ) -> Result<(Inserted, StoredEvidence), DbError> {
+        self.in_transaction(|tx| {
+            let inserted = insert_evidence_in(tx, key, row, link)?;
+            super::artifacts::index_artifacts_in(
+                tx,
+                row.repo_id,
+                &row.id,
+                artifacts,
+                row.added_at,
+            )?;
+            let stored =
+                evidence_in(tx, row.repo_id, &row.id)?.ok_or_else(|| DbError::NotFound {
+                    what: WHAT,
+                    id: row.id.clone(),
+                })?;
+            Ok((inserted, stored))
+        })
+    }
+
+    /// Fills GC's temporary tables of live work (R3.02), replacing what
+    /// they held: `temp.gc_live_trees`, `temp.gc_live_changes`, and an
+    /// empty `temp.gc_doomed`. They live on the connection until
+    /// [`Db::drop_live_tables`].
+    pub fn create_live_tables<'a>(
+        &self,
+        trees: impl IntoIterator<Item = &'a String>,
+        changes: impl IntoIterator<Item = &'a String>,
+    ) -> Result<(), DbError> {
+        self.in_transaction(|tx| {
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS gc_live_trees(tree_id TEXT PRIMARY KEY) WITHOUT ROWID;
+                 CREATE TEMP TABLE IF NOT EXISTS gc_live_changes(change_id TEXT PRIMARY KEY) WITHOUT ROWID;
+                 CREATE TEMP TABLE IF NOT EXISTS gc_doomed(id TEXT PRIMARY KEY) WITHOUT ROWID;
+                 DELETE FROM temp.gc_live_trees;
+                 DELETE FROM temp.gc_live_changes;
+                 DELETE FROM temp.gc_doomed;",
+            )?;
+            let mut tree = tx.prepare(
+                "INSERT INTO temp.gc_live_trees(tree_id) VALUES (?1) ON CONFLICT DO NOTHING",
+            )?;
+            for id in trees {
+                tree.execute([id])?;
+            }
+            let mut change = tx.prepare(
+                "INSERT INTO temp.gc_live_changes(change_id) VALUES (?1) ON CONFLICT DO NOTHING",
+            )?;
+            for id in changes {
+                change.execute([id])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Drops GC's temporary tables.
+    pub fn drop_live_tables(&self) -> Result<(), DbError> {
+        self.with(|conn| {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS temp.gc_live_trees;
+                 DROP TABLE IF EXISTS temp.gc_live_changes;
+                 DROP TABLE IF EXISTS temp.gc_doomed;",
+            )
+        })
+    }
+
+    /// Records in `temp.gc_doomed` the evidence of `repo` GC's retention
+    /// deletes: added before `before` and not [`PINNED`]. Returns how many.
+    pub fn doom_evidence(&self, repo: RepoId, before: Timestamp) -> Result<u64, DbError> {
+        self.in_transaction(|tx| {
+            tx.execute("DELETE FROM temp.gc_doomed", [])?;
+            let doomed = tx.execute(
+                &format!(
+                    "INSERT INTO temp.gc_doomed(id)
+                     SELECT e.id FROM evidence e
+                     WHERE e.repo_id = ?1 AND e.added_at < ?2 AND NOT {PINNED}"
+                ),
+                params![repo, before],
+            )?;
+            Ok(u64::try_from(doomed).unwrap_or(u64::MAX))
+        })
+    }
+
+    /// Deletes the evidence in `temp.gc_doomed`, with its links and
+    /// artifact index rows, 1,000 objects per transaction, each
+    /// checked again (added before `before`, not pinned) in its
+    /// transaction; then empties `temp.gc_doomed`. Returns how many went.
+    pub fn delete_doomed_evidence(&self, repo: RepoId, before: Timestamp) -> Result<u64, DbError> {
+        let mut deleted = 0u64;
+        loop {
+            let batch = self.in_transaction(|tx| {
+                let ids: Vec<String> = {
+                    let mut stmt = tx.prepare(&format!(
+                        "SELECT e.id FROM temp.gc_doomed d
+                         JOIN evidence e ON e.repo_id = ?1 AND e.id = d.id
+                         WHERE e.added_at < ?2 AND NOT {PINNED}
+                         LIMIT {SWEEP_BATCH}"
+                    ))?;
+                    stmt.query_map(params![repo, before], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()?
+                };
+                let mut artifacts = tx.prepare_cached(
+                    "DELETE FROM evidence_artifacts WHERE repo_id = ?1 AND evidence_id = ?2",
+                )?;
+                let mut links = tx.prepare_cached(
+                    "DELETE FROM evidence_links WHERE repo_id = ?1 AND evidence_id = ?2",
+                )?;
+                let mut evidence =
+                    tx.prepare_cached("DELETE FROM evidence WHERE repo_id = ?1 AND id = ?2")?;
+                let mut doomed = tx.prepare_cached("DELETE FROM temp.gc_doomed WHERE id = ?1")?;
+                for id in &ids {
+                    artifacts.execute(params![repo, id])?;
+                    links.execute(params![repo, id])?;
+                    evidence.execute(params![repo, id])?;
+                    doomed.execute([id])?;
+                }
+                Ok(ids.len())
+            })?;
+            deleted += u64::try_from(batch).unwrap_or(u64::MAX);
+            if batch < SWEEP_BATCH {
+                break;
+            }
+        }
+        self.with(|conn| conn.execute("DELETE FROM temp.gc_doomed", []).map(drop))?;
+        Ok(deleted)
+    }
+
+    /// Sets the `added_at` of `repo`'s evidence `id`, for tests that age it.
+    #[doc(hidden)]
+    pub fn age_evidence(&self, repo: RepoId, id: &str, at: Timestamp) -> Result<(), DbError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE evidence SET added_at = ?3 WHERE repo_id = ?1 AND id = ?2",
+                params![repo, id, at],
+            )
+            .map(drop)
+        })
     }
 
     /// The evidence of `repo` whose id starts with `prefix` (4 to 64 hex

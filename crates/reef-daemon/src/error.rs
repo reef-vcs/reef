@@ -29,6 +29,7 @@ use reef_lib::jj::rewrite::RewriteError;
 use reef_lib::jj::undo::UndoError;
 use tonic::{Code, Status};
 
+use crate::artifacts::retention::RetentionError;
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
 use crate::history::HistoryError;
@@ -41,6 +42,7 @@ use crate::presence::PresenceError;
 use crate::remote::RemoteError;
 use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
+use crate::service::artifacts::ArtifactError;
 use crate::service::at_operation::ReplayError;
 use crate::service::evidence::EvidenceError;
 use crate::service::operations::InvalidChangeFilter;
@@ -114,6 +116,13 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<RetentionError>() {
+            match error {
+                RetentionError::Db(error) => error.advice(),
+                _ => None,
+            }
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<WebError>() {
@@ -661,6 +670,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             history_reason(error)
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)

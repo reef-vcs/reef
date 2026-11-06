@@ -1163,7 +1163,7 @@ async fn ws_gc_dry_run() {
     output.clone().assert().success();
     assert_eq!(
         stdout(&output),
-        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0\n"
+        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0, evidence 0 removed, artifacts 0 collected (0 B), 0 B kept\n"
     );
     daemon.stop().await;
 

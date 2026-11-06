@@ -47,6 +47,7 @@ pub use create::ROOT_CHECKOUT;
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
+pub(crate) use manager::ensure_repo_dir;
 pub use rewrite::{EditTarget, Rewritten, Write, WriteRequest};
 pub use snapshot::{REEFIGNORE, ReadAnswer, ReadSnapshot, ReadSource};
 pub(crate) use stores::StoreTarget;

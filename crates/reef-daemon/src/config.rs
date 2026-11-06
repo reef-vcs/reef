@@ -130,6 +130,8 @@ pub const KEYS: &[(&str, &[&str])] = &[
         "history",
         &["enabled", "retention", "max_size", "backfill_operations"],
     ),
+    ("evidence", &["retention"]),
+    ("artifacts", &["retention", "max_size", "max_object_size"]),
     ("ui", &["enabled", "listen"]),
     (
         "remote",
@@ -204,6 +206,10 @@ pub struct FileConfig {
     pub symbols: SymbolsSection,
     /// `[history]`.
     pub history: HistorySection,
+    /// `[evidence]` (R3.02).
+    pub evidence: EvidenceSection,
+    /// `[artifacts]` (R3.02).
+    pub artifacts: ArtifactsSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -647,6 +653,57 @@ impl Default for HistorySection {
             retention: Duration::from_hours(90 * 24),
             max_size: ByteSize(512 << 20),
             backfill_operations: 100_000,
+        }
+    }
+}
+
+/// `[evidence]`: evidence retention (R3.02, ADR 0056).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EvidenceSection {
+    /// Evidence that is not on live work (`trunk() | bookmarks() |
+    /// working_copies() | mutable()`, or a change linked to it) is deleted
+    /// by GC this long after it was first added, and never before
+    /// `keep_newer`. `0s` keeps all evidence. Default 90 days; `0s`, or
+    /// from 1 day to 10 years.
+    #[serde(with = "duration")]
+    pub retention: Duration,
+}
+
+impl Default for EvidenceSection {
+    fn default() -> Self {
+        Self {
+            retention: Duration::from_hours(90 * 24),
+        }
+    }
+}
+
+/// `[artifacts]`: the artifact store (R3.02, ADR 0056).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ArtifactsSection {
+    /// Artifacts named only by evidence that is not on live work are
+    /// collected this long after they were last used, and never before
+    /// `keep_newer`. `0s`: never by age. Default 30 days; `0s`, or from 1
+    /// day to 10 years.
+    #[serde(with = "duration")]
+    pub retention: Duration,
+    /// The store's size per repository that GC collects down to, never
+    /// collecting what evidence on live work names or what is newer than
+    /// the undo window. A target, not a quota: uploads are never refused
+    /// for it. Default 10 GiB; at least 64 MiB.
+    pub max_size: ByteSize,
+    /// The largest artifact an upload accepts. Default 1 GiB; from 1 KiB to
+    /// 64 GiB.
+    pub max_object_size: ByteSize,
+}
+
+impl Default for ArtifactsSection {
+    fn default() -> Self {
+        Self {
+            retention: Duration::from_hours(30 * 24),
+            max_size: ByteSize(10 << 30),
+            max_object_size: ByteSize(1 << 30),
         }
     }
 }
@@ -1504,6 +1561,18 @@ impl Config {
                     ),
                 ],
             ),
+            ("evidence", vec![("retention", d(f.evidence.retention))]),
+            (
+                "artifacts",
+                vec![
+                    ("retention", d(f.artifacts.retention)),
+                    ("max_size", s(&f.artifacts.max_size.to_string())),
+                    (
+                        "max_object_size",
+                        s(&f.artifacts.max_object_size.to_string()),
+                    ),
+                ],
+            ),
             (
                 "ui",
                 vec![
@@ -1712,6 +1781,12 @@ fn lease_rules(lease: &LeaseSection) -> [(bool, &'static str, String); 8] {
     ]
 }
 
+/// Whether `retention` is `0s` or from 1 day to 10 years (R3.02).
+fn retention_ok(retention: Duration) -> bool {
+    retention.is_zero()
+        || (Duration::from_hours(24)..=Duration::from_hours(10 * 365 * 24)).contains(&retention)
+}
+
 /// The rules values must keep beyond their types.
 #[expect(clippy::too_many_lines, reason = "one row per bound")]
 fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
@@ -1795,6 +1870,26 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.history.max_size.0 >= 16 << 20,
             "history.max_size",
             "must be at least 16MiB".to_owned(),
+        ),
+        (
+            retention_ok(file.evidence.retention),
+            "evidence.retention",
+            "must be 0s (keep all) or from 1d to 10 years".to_owned(),
+        ),
+        (
+            retention_ok(file.artifacts.retention),
+            "artifacts.retention",
+            "must be 0s (never by age) or from 1d to 10 years".to_owned(),
+        ),
+        (
+            file.artifacts.max_size.0 >= 64 << 20,
+            "artifacts.max_size",
+            "must be at least 64MiB".to_owned(),
+        ),
+        (
+            (1 << 10..=64 << 30).contains(&file.artifacts.max_object_size.0),
+            "artifacts.max_object_size",
+            "must be from 1KiB to 64GiB".to_owned(),
         ),
         (
             file.ui.listen_addr().is_some(),

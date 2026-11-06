@@ -164,8 +164,9 @@ impl Db {
     /// Forgets a repository with its workspace and lease rows, which the
     /// foreign keys require, its base cache rows, whose directories go
     /// with the repository's state directory, and its evidence and evidence
-    /// links (R3.01; the keys that signed them stay, machine-wide). Its
-    /// `reclaims` rows are kept:
+    /// links (R3.01; the keys that signed them stay, machine-wide), and its
+    /// artifact index rows (R3.02), whose files go with the repository's
+    /// state directory. Its `reclaims` rows are kept:
     /// they are the audit log R1.17 keeps, and `reclaims.repo_id` has no
     /// foreign key.
     /// [`DbError::Conflict`] while any of its workspaces is `active` or
@@ -203,6 +204,8 @@ impl Db {
             tx.execute("DELETE FROM leases WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM workspaces WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM base_cache WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM evidence_artifacts WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM artifacts WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM evidence_links WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM evidence WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;

@@ -39,6 +39,7 @@ fn step_name(step: BackupStep) -> &'static str {
         BackupStep::Objects => "objects",
         BackupStep::Heads => "heads",
         BackupStep::Done => "done",
+        BackupStep::Artifacts => "artifacts",
         BackupStep::Unspecified => "unknown",
     }
 }

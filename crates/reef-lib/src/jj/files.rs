@@ -1456,6 +1456,60 @@ pub async fn change_tree_ids(
     Ok(trees)
 }
 
+/// The work evidence retention keeps (R3.02, ADR 0056): the revset
+/// [`LIVE_SET`], `reef log`'s default set plus every local bookmark's
+/// target.
+pub const LIVE_SET: &str = "trunk() | bookmarks() | working_copies() | mutable()";
+
+/// The commits of [`LIVE_SET`] in a view: their resolved trees and their
+/// changes, in lowercase hex.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveSet {
+    /// Each live commit's tree id, as [`commit_tree_id`] gives it;
+    /// conflicted trees, which carry no evidence, are left out.
+    pub trees: BTreeSet<String>,
+    /// Each live commit's change id.
+    pub changes: BTreeSet<String>,
+    /// How many commits the revset named.
+    pub commit_count: usize,
+}
+
+/// [`LIVE_SET`] evaluated once on `repo`'s view with Reef's aliases, so it
+/// does not depend on the user's jj configuration, and each commit read for
+/// its tree and change. When `trunk()` is the root, `mutable()` is every
+/// visible commit. Reads every commit it names: run it on a read pool.
+pub async fn live_set(repo: &ReadonlyRepo) -> Result<LiveSet, super::revset::RevisionError> {
+    use super::revset::{self, RevisionError, RevsetScope};
+    let scope = RevsetScope {
+        workspace: None,
+        user_email: "",
+        root: std::path::Path::new(""),
+    };
+    let parsed = revset::parse(repo, LIVE_SET, &scope)?;
+    let ids: Vec<jj_lib::backend::CommitId> = {
+        let evaluated = revset::evaluate(repo, &parsed)?;
+        let mut stream = evaluated.stream();
+        let mut ids = Vec::new();
+        while let Some(id) = stream.next().await {
+            ids.push(id.map_err(RevisionError::Evaluation)?);
+        }
+        ids
+    };
+    let mut live = LiveSet {
+        commit_count: ids.len(),
+        ..LiveSet::default()
+    };
+    for id in &ids {
+        let commit = repo.store().get_commit_async(id).await?;
+        live.changes
+            .insert(ChangeIdHex::of(commit.change_id()).to_string());
+        if let Some(tree) = commit.tree_ids().as_resolved() {
+            live.trees.insert(tree.hex());
+        }
+    }
+    Ok(live)
+}
+
 /// Whether the store holds the tree `hex`, lowercase hex of
 /// [`tree_id_hex_len`] digits; any other text is [`TreePresence::Missing`].
 /// An object that is there but cannot be read as a tree, with no I/O error

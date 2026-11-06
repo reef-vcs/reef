@@ -1,12 +1,16 @@
 //! `reef evidence add`, `list`, `show` and `key generate` (R3.01, ADR
-//! 0055): signed claims about a tree, such as a test run's result.
+//! 0055): signed claims about a tree, such as a test run's result; and
+//! `reef evidence artifact upload`, `show` and `read` (R3.02, ADR 0056): the
+//! bytes evidence names by digest.
 //!
 //! `add` signs locally: it reads the revision (snapshotting `@` first),
 //! builds the claim about its tree, signs it with the caller's ed25519 key
 //! file, and sends the envelope with the commit id it read, so the link
 //! cannot name another tree than the one signed. `add --envelope` sends an
-//! envelope signed elsewhere. `key generate` writes a key pair and talks to
-//! no daemon. `show` prints `signature: valid` or `invalid` and exits 0
+//! envelope signed elsewhere. Either way `--artifact` files are uploaded
+//! before the evidence is added, unless `--no-upload`, so evidence Reef's
+//! own producer adds never names bytes the store lacks. `key generate`
+//! writes a key pair and talks to no daemon. `show` prints `signature: valid` or `invalid` and exits 0
 //! either way: valid means the signature checks out, never that the key is
 //! trusted.
 
@@ -17,16 +21,17 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use reef_api::v1::{AddEvidenceRequest, GetChangeRequest, ListEvidenceRequest};
-use reef_client::brief;
 use reef_client::evidence::{self as format, Artifact, Claim, Outcome, PublicKey, SigningKey};
 use reef_client::json::{self, Evidence, EvidenceAdded, EvidenceKey};
+use reef_client::json::{ArtifactUploaded, EvidenceArtifact};
+use reef_client::{ArtifactUpload, ClientError, UploadError, brief};
 use reef_error::{Advice, ErrorKind};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::advice::AdviceCtx;
 use super::out::{Out, TextRender, block};
-use super::render::{now_ms, span};
+use super::render::{now_ms, size, span};
 use super::scope::{self, ScopeArgs};
 use super::{CliError, Ctx};
 
@@ -63,6 +68,58 @@ enum EvidenceCommand {
     /// Make signing keys.
     #[command(subcommand)]
     Key(KeyCommand),
+    /// Store, show and read the files evidence names by digest.
+    #[command(subcommand)]
+    Artifact(ArtifactCommand),
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ArtifactCommand {
+    /// Upload files as artifacts, without evidence; resumes and skips bytes already stored.
+    #[command(after_help = "Example: reef evidence artifact upload test.log coverage.xml")]
+    Upload(UploadArgs),
+    /// Show an artifact: whether its bytes are stored, its size, and the evidence naming it.
+    #[command(after_help = "Example: reef evidence artifact show 3f9a")]
+    Show(ArtifactArgs),
+    /// Write an artifact's bytes to stdout, checking a whole read against its digest.
+    #[command(after_help = "Example: reef evidence artifact read 3f9a > test.log")]
+    Read(ReadArgs),
+}
+
+/// `reef evidence artifact upload`.
+#[derive(Debug, clap::Args)]
+struct UploadArgs {
+    /// The files to upload.
+    #[arg(value_name = "PATH", required = true)]
+    paths: Vec<PathBuf>,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+/// `reef evidence artifact show`.
+#[derive(Debug, clap::Args)]
+struct ArtifactArgs {
+    /// The artifact's SHA-256, or a unique prefix of at least 4 hex digits.
+    #[arg(value_name = "SHA256")]
+    sha256: String,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+/// `reef evidence artifact read`.
+#[derive(Debug, clap::Args)]
+struct ReadArgs {
+    /// The artifact's SHA-256, or a unique prefix of at least 4 hex digits.
+    #[arg(value_name = "SHA256")]
+    sha256: String,
+    /// The first byte to write; 0 by default.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    offset: u64,
+    /// How many bytes to write; 0, the default, writes to the end.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    length: u64,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -100,17 +157,20 @@ struct AddArgs {
     /// When it finished [default: now].
     #[arg(long, value_name = "TIME")]
     finished: Option<String>,
-    /// A file the check produced, recorded by SHA-256 (not uploaded); repeatable.
+    /// A file the check produced, recorded by SHA-256 and uploaded first; repeatable. With --envelope, a file the envelope names.
     #[arg(long, value_name = "PATH")]
     artifact: Vec<PathBuf>,
+    /// Record --artifact files by digest only, without uploading them.
+    #[arg(long, conflicts_with_all = ["envelope", "public_key"])]
+    no_upload: bool,
     /// A KEY=VALUE note in the claim's annotations; repeatable.
     #[arg(long, value_name = "KEY=VALUE")]
     annotation: Vec<String>,
     /// Send this DSSE envelope, signed elsewhere, instead of signing.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "artifact", "annotation"], requires = "public_key")]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "annotation"], requires = "public_key")]
     envelope: Option<PathBuf>,
     /// The envelope signer's public key, SPKI PEM (`-----BEGIN PUBLIC KEY-----`).
-    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "artifact", "annotation"])]
+    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "target", "started", "finished", "annotation"])]
     public_key: Option<PathBuf>,
     #[command(flatten)]
     scope: ScopeArgs,
@@ -169,6 +229,15 @@ impl Args {
         matches!(self.command, EvidenceCommand::Key(_))
     }
 
+    /// Whether the command is `artifact read`, whose stdout is the bytes
+    /// unless `-o` asks for JSON.
+    pub(crate) fn is_artifact_read(&self) -> bool {
+        matches!(
+            self.command,
+            EvidenceCommand::Artifact(ArtifactCommand::Read(_))
+        )
+    }
+
     /// Runs an offline command.
     pub(crate) fn run_offline(self, out: &Out) -> Result<(), CliError> {
         match self.command {
@@ -193,6 +262,22 @@ pub(crate) async fn run(global: &super::Global, out: &Out, args: Args) -> Result
         }
         EvidenceCommand::Show(args) => show(&super::connect(global, out).await?, args).await,
         EvidenceCommand::Key(KeyCommand::Generate { path }) => generate(out, &path),
+        EvidenceCommand::Artifact(ArtifactCommand::Upload(args)) => {
+            for path in &args.paths {
+                std::fs::metadata(path).map_err(|source| CliError::Io {
+                    op: "read",
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            upload_files(&super::connect(global, out).await?, args).await
+        }
+        EvidenceCommand::Artifact(ArtifactCommand::Show(args)) => {
+            show_artifact(&super::connect(global, out).await?, args).await
+        }
+        EvidenceCommand::Artifact(ArtifactCommand::Read(args)) => {
+            read_artifact(&super::connect(global, out).await?, args).await
+        }
     }
 }
 
@@ -463,12 +548,43 @@ fn claim_of(args: &AddArgs) -> Result<Claim, CliError> {
     })
 }
 
-/// `reef evidence add`.
 /// What `add` reads before it connects: the key and claim to sign, or the
-/// envelope and public key to send.
+/// envelope and public key to send; and the artifact files to upload, each
+/// with the digest the evidence names.
 struct Prepared {
     signing: Option<(SigningKey, Claim)>,
     given: Option<(Vec<u8>, Vec<u8>)>,
+    uploads: Vec<(PathBuf, String)>,
+}
+
+/// The artifact digests an envelope's payload names, read without checking
+/// its signature (the daemon checks it); empty when it does not parse.
+fn envelope_digests(envelope: &[u8]) -> Vec<String> {
+    let Ok(envelope) = serde_json::from_slice::<format::Envelope>(envelope) else {
+        return Vec::new();
+    };
+    envelope
+        .payload_bytes()
+        .and_then(|payload| serde_json::from_slice::<format::Statement>(&payload).ok())
+        .map(|statement| {
+            statement
+                .predicate
+                .artifacts
+                .iter()
+                .filter_map(|artifact| artifact.digest.get("sha256").cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The SHA-256 of the file at `path`.
+fn file_digest(path: &Path) -> Result<String, CliError> {
+    let io = |source| CliError::Io {
+        op: "read",
+        path: path.to_owned(),
+        source,
+    };
+    format::sha256_hex_of(std::fs::File::open(path).map_err(io)?).map_err(io)
 }
 
 /// `add`'s local work, before any call: the key file's mode and contents,
@@ -504,6 +620,33 @@ fn prepare(args: &AddArgs) -> Result<Prepared, CliError> {
         }
         None => None,
     };
+    // Each file with the digest the evidence names: the claim's, hashed
+    // above, or the envelope's, which must name it.
+    let uploads = match (&signing, &given) {
+        _ if args.no_upload => Vec::new(),
+        (Some((_, claim)), _) => args
+            .artifact
+            .iter()
+            .cloned()
+            .zip(claim.artifacts.iter().map(|a| a.sha256.clone()))
+            .collect(),
+        (None, Some((envelope, _))) => {
+            let named = envelope_digests(envelope);
+            let mut uploads = Vec::with_capacity(args.artifact.len());
+            for path in &args.artifact {
+                let digest = file_digest(path)?;
+                if !named.contains(&digest) {
+                    return Err(CliError::Usage(format!(
+                        "--artifact {}: its sha256 {digest} is not among the envelope's artifacts; nothing was sent",
+                        path.display()
+                    )));
+                }
+                uploads.push((path.clone(), digest));
+            }
+            uploads
+        }
+        (None, None) => Vec::new(),
+    };
     if let Some((_, claim)) = &signing {
         let placeholder = format::TreeDigest::git(&"0".repeat(40))
             .map_err(|error| invalid_claim(error.to_string()))?;
@@ -511,12 +654,141 @@ fn prepare(args: &AddArgs) -> Result<Prepared, CliError> {
             .statement(&placeholder)
             .map_err(|error| invalid_claim(error.to_string()))?;
     }
-    Ok(Prepared { signing, given })
+    Ok(Prepared {
+        signing,
+        given,
+        uploads,
+    })
+}
+
+/// Uploads the file at `path` as an artifact of `repo`, naming it by
+/// `sha256` when the evidence already does (the daemon then refuses bytes
+/// that changed since with `ARTIFACT_DIGEST_MISMATCH`), else hashing it.
+/// Each chunk is one call within the RPC deadline.
+async fn upload(
+    ctx: &Ctx,
+    repo: &str,
+    path: &Path,
+    sha256: Option<&str>,
+) -> Result<ArtifactUpload, CliError> {
+    let chunks = std::fs::metadata(path).map_or(2, |metadata| metadata.len() / (1 << 20) + 2);
+    let deadline = ctx
+        .timeout
+        .saturating_mul(u32::try_from(chunks).unwrap_or(u32::MAX));
+    let uploading = ctx.client.upload_artifact_file_as(repo, path, sha256);
+    match tokio::time::timeout(deadline, uploading).await {
+        Ok(Ok(upload)) => Ok(upload),
+        Ok(Err(UploadError::Client(error))) => Err(CliError::Daemon(error)),
+        Ok(Err(UploadError::Io { path, source })) => Err(CliError::Io {
+            op: "read",
+            path,
+            source,
+        }),
+        Ok(Err(UploadError::Changed { path })) => Err(refused(
+            ErrorKind::Conflict,
+            format!("{} changed while it was uploaded", path.display()),
+            Advice::hint("Upload it again once whatever writes it has finished."),
+        )),
+        Ok(Err(error)) => Err(refused(
+            ErrorKind::Internal,
+            error.to_string(),
+            Advice::default(),
+        )),
+        Err(_) => Err(CliError::Timeout { after: deadline }),
+    }
+}
+
+/// `reef evidence artifact upload`.
+async fn upload_files(ctx: &Ctx, args: UploadArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let mut uploaded = Vec::with_capacity(args.paths.len());
+    for path in &args.paths {
+        let done = upload(ctx, &scope.repo_id, path, None)
+            .await
+            .map_err(|error| advice.refine(error))?;
+        uploaded.push(ArtifactUploaded {
+            artifact: json::Artifact::from(&done.artifact),
+            created: done.created,
+            path: path.display().to_string(),
+        });
+    }
+    ctx.out.object(&Uploaded(uploaded))
+}
+
+/// `reef evidence artifact show`.
+async fn show_artifact(ctx: &Ctx, args: ArtifactArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let response = ctx
+        .call(ctx.client.get_artifact(&scope.repo_id, &args.sha256))
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let artifact = json::Artifact::from(&response.artifact.unwrap_or_default());
+    ctx.out.object_with(&ShownArtifact(artifact), |shown| {
+        brief::Artifact::from(&shown.0)
+    })
+}
+
+/// `reef evidence artifact read`: the bytes on stdout as they stream, or
+/// with `-o json` or `-o brief`, the record, read with `GetArtifact` as
+/// `show` reads it, so no bytes are streamed for it. A stream that ends in
+/// an error after data (`ARTIFACT_DAMAGED`) has written bytes that are not
+/// the artifact: stderr says so, and the command fails.
+async fn read_artifact(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
+    if ctx.out.is_json() {
+        let ReadArgs { sha256, scope, .. } = args;
+        return show_artifact(ctx, ArtifactArgs { sha256, scope }).await;
+    }
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let mut stream = ctx
+        .call(
+            ctx.client
+                .read_artifact(&scope.repo_id, &args.sha256, args.offset, args.length),
+        )
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let first = ctx
+        .call(async { stream.message().await.map_err(ClientError::from) })
+        .await
+        .map_err(|error| advice.refine(error))?
+        .unwrap_or_default();
+    if !ctx.out.raw_open(&first.data)? {
+        return Ok(());
+    }
+    let mut written = first.data.len();
+    loop {
+        match ctx
+            .call(async { stream.message().await.map_err(ClientError::from) })
+            .await
+        {
+            Ok(Some(message)) => {
+                if !ctx.out.raw_open(&message.data)? {
+                    return Ok(());
+                }
+                written += message.data.len();
+            }
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                if written > 0 {
+                    ctx.out.note(&format!(
+                        "reef: the {written} bytes written are not the artifact: discard them"
+                    ));
+                }
+                return Err(advice.refine(error));
+            }
+        }
+    }
 }
 
 /// `reef evidence add`, once [`prepare`] has read its files.
 async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliError> {
-    let Prepared { signing, given } = prepared;
+    let Prepared {
+        signing,
+        given,
+        uploads,
+    } = prepared;
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx::new(&scope);
     let revision = args
@@ -575,6 +847,13 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
             ));
         }
     };
+    // The bytes first: evidence never names an artifact this add meant to
+    // store and did not.
+    for (path, sha256) in &uploads {
+        upload(ctx, &scope.repo_id, path, Some(sha256))
+            .await
+            .map_err(|error| advice.refine(error))?;
+    }
     let response = ctx
         .call(ctx.client.add_evidence(AddEvidenceRequest {
             repo: scope.repo_id.clone(),
@@ -773,10 +1052,7 @@ impl TextRender for Shown {
             ),
         ];
         for artifact in &e.artifacts {
-            pairs.push((
-                "artifact",
-                format!("{} sha256:{}", artifact.name, artifact.sha256),
-            ));
+            pairs.push(("artifact", artifact_line(artifact)));
         }
         pairs.push(("signature", or_dash(e.signature.as_deref())));
         block(w, &pairs)?;
@@ -789,6 +1065,86 @@ impl TextRender for Shown {
         writeln!(
             w,
             "A valid signature says this key signed the claim, not that the key is trusted."
+        )
+    }
+}
+
+/// An evidence artifact as `show` prints it: `<name> sha256:<12> stored
+/// <size>`, `collected <date>` or `absent`.
+fn artifact_line(artifact: &EvidenceArtifact) -> String {
+    let state = match artifact.state.as_deref() {
+        Some("stored") => format!("stored {}", size(artifact.size)),
+        Some("collected") => format!(
+            "collected {}",
+            artifact
+                .collected_at
+                .as_deref()
+                .map_or("-", |at| at.get(..10).unwrap_or(at))
+        ),
+        Some(state) => state.to_owned(),
+        None => "-".to_owned(),
+    };
+    format!(
+        "{} sha256:{} {state}",
+        artifact.name,
+        short(&artifact.sha256)
+    )
+}
+
+/// `evidence artifact upload`'s files: a JSON array; a line each in text.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct Uploaded(Vec<ArtifactUploaded>);
+
+impl TextRender for Uploaded {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        for uploaded in &self.0 {
+            writeln!(
+                w,
+                "{} {} {}",
+                short(&uploaded.artifact.sha256),
+                size(uploaded.artifact.size),
+                if uploaded.created {
+                    "stored"
+                } else {
+                    "already stored"
+                }
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// `evidence artifact show`'s, and `read -o json`'s, record.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct ShownArtifact(json::Artifact);
+
+impl TextRender for ShownArtifact {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let a = &self.0;
+        let or_dash = |value: Option<&str>| value.unwrap_or("-").to_owned();
+        let evidence = if a.evidence_ids.is_empty() {
+            "-".to_owned()
+        } else {
+            let mut ids: Vec<&str> = a.evidence_ids.iter().map(|id| short(id)).collect();
+            if usize::try_from(a.evidence_count).unwrap_or(usize::MAX) > ids.len() {
+                ids.push("…");
+            }
+            format!("{} ({})", a.evidence_count, ids.join(" "))
+        };
+        block(
+            w,
+            &[
+                ("sha256", a.sha256.clone()),
+                ("state", or_dash(a.state.as_deref())),
+                ("size", size(a.size)),
+                ("stored", or_dash(a.stored_at.as_deref())),
+                ("used", or_dash(a.used_at.as_deref())),
+                ("collected", or_dash(a.collected_at.as_deref())),
+                ("added by", or_dash(a.added_by_agent.as_deref())),
+                ("evidence", evidence),
+            ],
         )
     }
 }

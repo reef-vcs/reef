@@ -1040,6 +1040,17 @@ pub struct GcReport {
     pub elapsed_ms: u64,
     /// Nothing was deleted; the counts are what would have gone.
     pub dry_run: bool,
+    /// Evidence objects deleted: not on live work, and past `[evidence]
+    /// retention` (R3.02).
+    pub evidence_removed: u32,
+    /// Artifacts whose bytes were deleted, a record kept or not.
+    pub artifacts_collected: u32,
+    /// What their files had allocated; in a dry run, their sizes.
+    pub artifact_bytes_freed: u64,
+    /// The sizes of the artifacts stored after the step.
+    pub artifact_bytes: u64,
+    /// Why the evidence and artifacts step stopped short.
+    pub evidence_error: Option<String>,
 }
 
 impl From<&v1::GcReport> for GcReport {
@@ -1060,6 +1071,11 @@ impl From<&v1::GcReport> for GcReport {
             store_bytes_freed: report.store_bytes_freed,
             elapsed_ms: report.elapsed_ms,
             dry_run: report.dry_run,
+            evidence_removed: report.evidence_removed,
+            artifacts_collected: report.artifacts_collected,
+            artifact_bytes_freed: report.artifact_bytes_freed,
+            artifact_bytes: report.artifact_bytes,
+            evidence_error: text(&report.evidence_error),
         }
     }
 }
@@ -3197,12 +3213,27 @@ pub fn signature_check_name(check: i32) -> Option<&'static str> {
     Some(name)
 }
 
+/// An artifact state's name: `stored`, `collected` or `absent` (R3.02);
+/// `None` when unspecified.
+pub fn artifact_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::ArtifactState::try_from(state) {
+        Ok(v1::ArtifactState::Unspecified) => return None,
+        Ok(v1::ArtifactState::Stored) => "stored",
+        Ok(v1::ArtifactState::Collected) => "collected",
+        Ok(v1::ArtifactState::Absent) => "absent",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
 names_schema! {
+    artifact_state_name_schema_or_null = artifact_state_name, true;
     evidence_result_name_schema_or_null = evidence_result_name, true;
     signature_check_name_schema_or_null = signature_check_name, true;
 }
 
-/// An artifact an evidence object records, by digest (R3.01).
+/// An artifact an evidence object records, by digest (R3.01), with what the
+/// artifact store holds of it (R3.02).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct EvidenceArtifact {
     /// Its name, such as `test.log`.
@@ -3213,6 +3244,70 @@ pub struct EvidenceArtifact {
     pub uri: Option<String>,
     /// Its media type.
     pub media_type: Option<String>,
+    /// `stored`, `collected` (retention removed the bytes), or `absent`
+    /// (never uploaded, or deleted when no evidence named it).
+    #[schemars(schema_with = "artifact_state_name_schema_or_null")]
+    pub state: Option<String>,
+    /// Its length in bytes; 0 when absent.
+    pub size: u64,
+    /// When retention removed its bytes.
+    pub collected_at: Option<String>,
+}
+
+/// An artifact's record (R3.02): `reef evidence artifact show`, and `read`
+/// with `-o json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Artifact {
+    /// SHA-256 of its bytes, lowercase hex.
+    pub sha256: String,
+    /// `stored`, `collected` (retention removed the bytes), or `absent`
+    /// (named by evidence, never stored or deleted when nothing named it).
+    #[schemars(schema_with = "artifact_state_name_schema_or_null")]
+    pub state: Option<String>,
+    /// Its length in bytes; 0 when absent.
+    pub size: u64,
+    /// When its bytes were last stored.
+    pub stored_at: Option<String>,
+    /// When it was last stored, uploaded again, or named by evidence added.
+    pub used_at: Option<String>,
+    /// When retention removed its bytes.
+    pub collected_at: Option<String>,
+    /// The `reef-agent` of the upload that last stored its bytes.
+    pub added_by_agent: Option<String>,
+    /// That upload's remote token (R2.08).
+    pub remote_token_id: Option<String>,
+    /// How many evidence objects name it.
+    pub evidence_count: u32,
+    /// The newest 20 of them, newest added first.
+    pub evidence_ids: Vec<String>,
+}
+
+impl From<&v1::Artifact> for Artifact {
+    fn from(artifact: &v1::Artifact) -> Self {
+        Self {
+            sha256: artifact.sha256.clone(),
+            state: name(artifact_state_name(artifact.state)),
+            size: artifact.size,
+            stored_at: time(artifact.stored_at.as_ref()),
+            used_at: time(artifact.used_at.as_ref()),
+            collected_at: time(artifact.collected_at.as_ref()),
+            added_by_agent: text(&artifact.added_by_agent),
+            remote_token_id: text(&artifact.remote_token_id),
+            evidence_count: artifact.evidence_count,
+            evidence_ids: artifact.evidence_ids.clone(),
+        }
+    }
+}
+
+/// One file `reef evidence artifact upload` sent (R3.02).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ArtifactUploaded {
+    /// The artifact as stored.
+    pub artifact: Artifact,
+    /// Whether this upload stored it; false when it was stored already.
+    pub created: bool,
+    /// The file, as given.
+    pub path: String,
 }
 
 /// An evidence object, as `reef evidence list` and `show` print it (R3.01,
@@ -3307,6 +3402,9 @@ impl From<&v1::Evidence> for Evidence {
                     sha256: artifact.sha256.clone(),
                     uri: text(&artifact.uri),
                     media_type: text(&artifact.media_type),
+                    state: name(artifact_state_name(artifact.state)),
+                    size: artifact.size,
+                    collected_at: time(artifact.collected_at.as_ref()),
                 })
                 .collect(),
             change_ids: evidence.change_ids.clone(),

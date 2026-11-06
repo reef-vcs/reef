@@ -227,6 +227,48 @@ impl AdviceCtx {
                 "That prefix matches {}; give more of the id.",
                 get("evidence_ids").replace(',', ", ")
             )),
+            // Artifacts (R3.02).
+            reason::INVALID_ARTIFACT_DIGEST | reason::ARTIFACT_NOT_FOUND
+                if get("sha256").len() < 64 =>
+            {
+                Advice {
+                    hint: "Name an artifact by its SHA-256, or a unique prefix of at least 4 hex digits of a stored one; `reef evidence show <id>` prints the digests evidence names.".to_owned(),
+                    next: self.scoped(&["evidence", "list"]),
+                }
+            }
+            reason::ARTIFACT_NOT_FOUND => Advice::hint(or(
+                daemon_hint,
+                "Nothing here stores or names that digest; upload the file with `reef evidence artifact upload <file>`.",
+            )),
+            reason::AMBIGUOUS_ARTIFACT_DIGEST => Advice::hint(format!(
+                "That prefix matches {}; give more of the digest.",
+                get("sha256s").replace(',', ", ")
+            )),
+            reason::ARTIFACT_COLLECTED => Advice::hint(format!(
+                "Retention removed the bytes, or Reef dropped them as damaged or missing, at {}; run the check again, or upload the same file with `reef evidence artifact upload <file>`, which stores it again.",
+                get("collected_at")
+            )),
+            reason::ARTIFACT_DAMAGED => Advice::hint(
+                "The stored file was changed, truncated or removed behind the daemon; upload the genuine file with `reef evidence artifact upload <file>` to repair it.",
+            ),
+            reason::ARTIFACT_TOO_LARGE => Advice::hint(format!(
+                "The daemon stores artifacts of at most {} bytes: compress or trim the file, or raise [artifacts] max_object_size in its config.toml.",
+                get("max_object_size")
+            )),
+            reason::ARTIFACT_DIGEST_MISMATCH => Advice::hint(
+                "The file changed after it was hashed; run the command again once whatever writes it has finished.",
+            ),
+            reason::INVALID_ARTIFACT_RANGE => Advice::hint(format!(
+                "--offset is past the artifact's {} bytes; `reef evidence artifact show` prints its size.",
+                get("size")
+            )),
+            reason::ARTIFACT_OFFSET_MISMATCH => Advice {
+                hint: format!(
+                    "Another upload of the same bytes moved on to byte {}; run the command again, which resumes from there.",
+                    get("received")
+                ),
+                next: self.argv.clone(),
+            },
             reason::SNAPSHOT_FAILED if self.snapshots_first => Advice {
                 hint: "The workspace could not be snapshotted; --no-snapshot reads its last snapshot."
                     .to_owned(),
