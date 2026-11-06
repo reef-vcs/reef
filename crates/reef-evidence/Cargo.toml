@@ -1,0 +1,40 @@
+[package]
+name = "reef-evidence"
+description = "Reef evidence: the format of Reef's evidence objects, signed in-toto statements in DSSE envelopes, with signing and checking. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "in-toto", "dsse"]
+categories = ["development-tools", "cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+# No Reef crate but `reef-error`, no jj-lib, no gRPC, no SQLite, no tokio: the daemon, the client,
+# executors and the phase-four store all read the format, and an executor should not have to link
+# the client to get it (R3.01, ADR 0055). `reef-testing`'s crate_graph test keeps it that way.
+[dependencies]
+reef-error.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true          # the envelope's payload and signature
+ring.workspace = true            # ed25519 and SHA-256: the tree's only crypto provider
+humantime.workspace = true       # RFC 3339 times, parsed as `reef history`'s are
+schemars.workspace = true        # the format as JSON Schema, which `reef schema evidence` prints
+thiserror.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true      # test 7: the schema against real payloads
+criterion.workspace = true
+
+[[bench]]
+name = "evidence"
+harness = false

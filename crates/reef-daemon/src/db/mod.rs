@@ -1,6 +1,6 @@
 //! The daemon's metadata database (ADR 0003): registered repositories,
-//! workspaces, leases, the reclaim log, the base cache, and shared stores,
-//! in one SQLite file per machine.
+//! workspaces, leases, the reclaim log, the base cache, shared stores,
+//! remote tokens, and evidence (ADR 0055), in one SQLite file per machine.
 //!
 //! [`Db`] owns one connection behind a [`std::sync::Mutex`]; every method
 //! takes the lock for one short statement or transaction, so `&Db` can be
@@ -25,6 +25,7 @@ use crate::error::{Advice, Advise};
 use crate::model::{Timestamp, ids::ID_HEX_LEN};
 
 mod base_cache;
+mod evidence;
 mod leases;
 mod reclaims;
 mod remote_tokens;
@@ -32,6 +33,10 @@ mod repositories;
 mod stores;
 mod workspaces;
 
+pub use evidence::{
+    EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow, Inserted,
+    StoredEvidence, insert_evidence_in,
+};
 pub use remote_tokens::{Digest, RemoteTokenRow, TokenScope};
 
 pub use leases::Renewal;
@@ -39,7 +44,7 @@ pub use leases::Renewal;
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14),
-/// then `0006_remote_tokens` (R2.08).
+/// then `0006_remote_tokens` (R2.08) and `0007_evidence` (R3.01).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -60,6 +65,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0006_remote_tokens",
         include_str!("migrations/0006_remote_tokens.sql"),
+    ),
+    (
+        "0007_evidence",
+        include_str!("migrations/0007_evidence.sql"),
     ),
 ];
 
@@ -564,7 +573,16 @@ fn applied_migrations(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 
 /// Lowercases and checks an id prefix for a lookup of `what`.
 pub(crate) fn normalize_prefix(what: &'static str, prefix: &str) -> Result<String, DbError> {
-    let valid = (MIN_PREFIX_LEN..=ID_HEX_LEN).contains(&prefix.len())
+    normalize_prefix_up_to(what, prefix, ID_HEX_LEN)
+}
+
+/// [`normalize_prefix`] for ids of `max` hex digits.
+pub(crate) fn normalize_prefix_up_to(
+    what: &'static str,
+    prefix: &str,
+    max: usize,
+) -> Result<String, DbError> {
+    let valid = (MIN_PREFIX_LEN..=max).contains(&prefix.len())
         && prefix.bytes().all(|byte| byte.is_ascii_hexdigit());
     if !valid {
         return Err(DbError::InvalidPrefix {
@@ -630,8 +648,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
-        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(SCHEMA_VERSION, 7);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -639,7 +657,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -682,7 +700,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 6
+                    supported: 7
                 }
             ),
             "{error:?}"
@@ -704,7 +722,8 @@ mod tests {
                 "0003_snapshots",
                 "0004_stores",
                 "0005_watchman",
-                "0006_remote_tokens"
+                "0006_remote_tokens",
+                "0007_evidence"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -730,7 +749,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -739,7 +758,8 @@ mod tests {
                 "0003_snapshots",
                 "0004_stores",
                 "0005_watchman",
-                "0006_remote_tokens"
+                "0006_remote_tokens",
+                "0007_evidence"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -784,11 +804,62 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
             crate::model::WatcherKind::Notify
+        );
+    }
+
+    // R3.01 test 8: a schema 6 database gains the evidence tables with its
+    // rows intact; one at 8 is refused.
+    #[test]
+    fn migration_7() {
+        use crate::db::repositories::tests::repo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        for (index, (name, sql)) in MIGRATIONS[..6].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        let record = repo("aaaa000000000001", "/src/app");
+        conn.execute(
+            "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at)
+             VALUES (?1, '/src/app', '/src/app/.jj/repo', 0, 1000)",
+            [record.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(db.repository(record.id).unwrap().root, record.root);
+        assert_eq!(db.evidence_counts().unwrap(), (0, 0, 0));
+        drop(db);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        drop(conn);
+        let error = Db::open(&path).err().unwrap();
+        assert!(
+            matches!(
+                error,
+                DbError::TooNew {
+                    found: 8,
+                    supported: 7
+                }
+            ),
+            "{error:?}"
         );
     }
 

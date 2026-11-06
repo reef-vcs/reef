@@ -491,6 +491,16 @@ mod tests {
                     crate::snapshot::SnapshotKind::as_str,
                 ),
             ),
+            // R3.01: the evidence predicate's results, and the one key
+            // algorithm.
+            (
+                "result".to_owned(),
+                names(&reef_evidence::Outcome::ALL, reef_evidence::Outcome::as_str),
+            ),
+            (
+                "algorithm".to_owned(),
+                BTreeSet::from(["ed25519".to_owned()]),
+            ),
         ]);
         assert_eq!(sets, expected);
     }

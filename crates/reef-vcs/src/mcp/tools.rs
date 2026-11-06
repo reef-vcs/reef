@@ -578,6 +578,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.SymbolService/ListSymbols",
         "tools/list is at its budget; R2.15 decides symbol tools (R2.14)",
     ),
+    (
+        "/reef.api.v1.EvidenceService/AddEvidence",
+        "evidence comes from executors and scripts, signed with a key a tool call should not hold (R3.01)",
+    ),
+    (
+        "/reef.api.v1.EvidenceService/GetEvidence",
+        "read in the proposal flow (R3.31); tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.EvidenceService/ListEvidence",
+        "read in the proposal flow (R3.31); tools/list is at its budget (#116)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.
@@ -1322,6 +1334,19 @@ mod tests {
         }
         assert_eq!(edit_path(&scope, "./src/a.rs".to_owned()), "src/a.rs");
         assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
+    }
+
+    /// R3.01 test 18: evidence has no tools, and each method says why.
+    #[test]
+    fn evidence_is_not_a_tool() {
+        let evidence: Vec<&str> = reef_api::methods()
+            .filter(|path| path.starts_with("/reef.api.v1.EvidenceService/"))
+            .collect();
+        assert_eq!(evidence.len(), 3);
+        for path in evidence {
+            assert!(NOT_TOOLS.iter().any(|(rpc, _)| *rpc == path), "{path}");
+            assert!(!TOOLS.iter().any(|tool| tool.rpc == path), "{path}");
+        }
     }
 
     /// R2.13 test 2: the annotations follow the schema, and every v1

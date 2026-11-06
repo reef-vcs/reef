@@ -4,6 +4,18 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+### Upgrading
+
+- The daemon's database becomes schema 7 (`0007_evidence`, R3.01) the first time this daemon opens it. An older daemon then refuses the database, as with every migration: restore a backup taken before the upgrade to go back.
+
+### Added
+
+- Evidence objects (R3.01, [ADR 0055](docs/adr/0055-evidence-object-format.md), [docs/evidence.md](docs/evidence.md)): a signed claim that a check (test, build, lint, policy, or another kind) passed, failed, or reached no verdict on one git tree. The claim is an in-toto Statement v1 with the predicate `urn:reef-vcs:evidence:v1`, signed once with ed25519 in a DSSE envelope; its id is the SHA-256 of the envelope in canonical form, and the signer is its key, named by the SHA-256 of the key's DER SubjectPublicKeyInfo. Evidence binds to the tree, so it stays on a change across a describe or a rebase that keeps the tree, and survives garbage collection; `reef repo forget` deletes a repository's evidence. A valid signature says which key signed, not that the key is trusted; policy decides that in a later release (R3.07).
+- `EvidenceService` (API revision 15): `AddEvidence` checks an envelope (the envelope, the key, the signature, then the payload) and stores it with its key and, optionally, a link to the change it was produced for; `GetEvidence` and `ListEvidence` read it back, checking each signature again, by id, by revision or tree, or by change. Adding evidence records no operation.
+- `reef evidence add`, `list`, `show` and `key generate`: sign a claim about a revision's tree with an ed25519 key file and store it, or send an envelope signed elsewhere (`--envelope`); list a revision's, a tree's or a change's evidence; show one object, its statement and whether its signature verifies, or its canonical envelope's bytes (`--envelope`); and make a key pair. A key file that others can read is refused.
+- `reef schema evidence`: the evidence format as JSON Schema (`evidence.Statement`, `evidence.Predicate`, `evidence.Envelope`), from the binary, for executors in any language.
+- `reef-evidence`, the format crate: building, signing and checking evidence, with no jj-lib, gRPC, tokio or SQLite dependency.
+
 ### Fixed
 
 - The web UI's workspaces page shows a released workspace as `released`. When the release's last operation reached the page before the workspace's final state, the row kept reading `releasing` until the next operation in the repository. The page now reads a releasing workspace again until it ends, and also shows a release that failed as active again ([#212](https://github.com/reef-vcs/reef/issues/212)).

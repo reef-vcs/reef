@@ -3453,6 +3453,7 @@ dependencies = [
  "rcgen",
  "reef-api",
  "reef-error",
+ "reef-evidence",
  "ring",
  "rustls",
  "rustls-native-certs",
@@ -3505,6 +3506,7 @@ dependencies = [
  "reef-client",
  "reef-daemon",
  "reef-error",
+ "reef-evidence",
  "reef-lib",
  "reef-symbols",
  "reef-testing",
@@ -3539,6 +3541,22 @@ dependencies = [
 name = "reef-error"
 version = "0.4.2"
 dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "reef-evidence"
+version = "0.4.2"
+dependencies = [
+ "base64 0.23.1",
+ "criterion",
+ "humantime",
+ "jsonschema",
+ "reef-error",
+ "ring",
+ "schemars",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

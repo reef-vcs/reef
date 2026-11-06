@@ -26,7 +26,7 @@ pub(crate) const SCHEMA_NAME_NOT_FOUND: &str = "SCHEMA_NAME_NOT_FOUND";
 /// `reef schema`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
-    /// Only one part: `cli`, `mcp` or `api`.
+    /// Only one part: `cli`, `mcp`, `api` or `evidence`.
     #[arg(value_enum, value_name = "PART")]
     part: Option<Part>,
     /// One command's words, one tool, or one API service or message.
@@ -46,6 +46,8 @@ pub(crate) enum Part {
     Mcp,
     // The API's services and messages.
     Api,
+    // The evidence object format, for executors.
+    Evidence,
 }
 
 /// Prints the document, a part of it, or the descriptor set.
@@ -75,6 +77,7 @@ pub(crate) fn part_name(part: Part) -> &'static str {
         Part::Cli => "cli",
         Part::Mcp => "mcp",
         Part::Api => "api",
+        Part::Evidence => "evidence",
     }
 }
 
@@ -85,6 +88,9 @@ fn not_found(part: Part, name: &[String]) -> CliError {
             "Name a command by its words, as `reef schema cli ws list`; `reef schema cli` lists them all."
         }
         "mcp" => "Name a tool, as `reef schema mcp get_status`; `reef schema mcp` lists them all.",
+        "evidence" => {
+            "Name statement, predicate or envelope, as `reef schema evidence statement`; `reef schema evidence` prints all three."
+        }
         _ => {
             "Name a service or a message, as `reef schema api WorkspaceService`; `reef schema api` lists them all."
         }

@@ -87,6 +87,8 @@ pub(crate) fn global(root: &clap::Command) -> Result<Value, String> {
 pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["diff"], "call_sites", &["symbols", "expand"]),
     (&["diff"], "source", &["symbols", "expand"]),
+    (&["evidence", "add"], "envelope", &["public_key"]),
+    (&["evidence", "add"], "public_key", &["envelope"]),
     (&["history"], "change_kind", &["symbol"]),
     (&["ws", "renew"], "while_pid", &["follow"]),
 ];

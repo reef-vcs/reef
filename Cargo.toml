@@ -8,6 +8,7 @@ default-members = [
     "crates/reef-client",
     "crates/reef-broker",
     "crates/reef-symbols",
+    "crates/reef-evidence",
     "crates/reef-web",
     "crates/reef-daemon",
     "crates/reef-vcs",
@@ -30,6 +31,7 @@ reef-api = { path = "crates/reef-api", version = "0.4.2" }
 reef-client = { path = "crates/reef-client", version = "0.4.2" }
 reef-broker = { path = "crates/reef-broker", version = "0.4.2" }
 reef-symbols = { path = "crates/reef-symbols", version = "0.4.2" }
+reef-evidence = { path = "crates/reef-evidence", version = "0.4.2" }
 reef-web = { path = "crates/reef-web", version = "0.4.2" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.4.2" }
 reef-testing = { path = "crates/reef-testing", version = "0.4.2" }   # unpublished; see reef-daemon's `testing` feature

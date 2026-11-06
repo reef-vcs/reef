@@ -199,8 +199,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.01 | Evidence object format | in-toto attestation in a DSSE envelope: snapshot hash, attestor, kind, result, artifact hash. Stored content-addressed, linked from the change. | M | R2.03 |
-| R3.02 | Evidence artifact store | Separate store for logs and build artifacts with a retention policy. Local implementation first. | M | R3.01 |
+| R3.01 | Evidence object format | in-toto attestation in a DSSE envelope: the snapshot's tree hash, kind, result, artifact hashes, signed by the attestor's key (R3.03 binds keys to identities). Stored content-addressed, linked from the change. Brief in `dev-tickets/phase-3/`. | M | R2.03 |
+| R3.02 | Evidence artifact store | Separate store for logs and build artifacts with a retention policy, and the retention of evidence objects themselves, which R3.01 never deletes. Local implementation first. | M | R3.01 |
 | R3.03 | Session keys and operator identity | Daemon issues short-lived ed25519 session keys bound to an operator or CI identity. Revocation. Sigstore keyless as an identity option. | L | R3.01 |
 | R3.04 | Provenance records | Agent identity, model, session, task reference, instruction hash, signed with the session key, attached to snapshots. API and CLI to read them. | M | R3.03 |
 | R3.05 | Executor protocol | The contract between the landing gate and an executor, written down before the reference implementation: a request names a tree hash, the check targets to run, the evidence kinds expected, and a budget; a response is a set of signed evidence objects plus artifacts; progress streams over the presence channel. Protobuf messages in the daemon schema. This is the protocol the design says Reef must get right so that sandboxing and remote execution stay outside Reef. | M | R3.01, R2.01 |

@@ -42,6 +42,7 @@ use crate::remote::RemoteError;
 use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
 use crate::service::at_operation::ReplayError;
+use crate::service::evidence::EvidenceError;
 use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
 use crate::snapshot::index::ReindexError;
@@ -110,6 +111,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
                 error => error.advice(),
             }
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             error.advice()
@@ -657,6 +660,8 @@ fn reason_and_metadata(
             symbol_reason(error)
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             history_reason(error)
+        } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)
         } else if let Some(error) = error.downcast_ref::<WebError>() {

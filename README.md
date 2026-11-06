@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-2/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-3/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -118,13 +118,14 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 - `crates/reef-client`: the thin client of the API, its stable JSON, and how to find the daemon, with no jj-lib ([ADR 0033](docs/adr/0033-thin-client.md)).
 - `crates/reef-broker`: bounded in-memory rings that read a log once and fan it out to the streams that follow it, with no jj-lib ([ADR 0038](docs/adr/0038-subscription-broker.md)).
 - `crates/reef-symbols`: tree-sitter tag extraction and SCIP normalization for the symbol index ([ADR 0042](docs/adr/0042-symbol-index.md)).
+- `crates/reef-evidence`: the evidence format: signed in-toto statements about a tree in DSSE envelopes, with signing and checking, and no jj-lib ([ADR 0055](docs/adr/0055-evidence-object-format.md)).
 - `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC services.
 - `crates/reef-vcs`: the `reef` binary, built on `reef-client` alone, and an umbrella library re-exporting the API and the client.
 - `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.
 
 ## Design
 
-The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and each phase's tickets have implementation briefs under [docs/dev-tickets](docs/dev-tickets/phase-2/README.md), written so that an agent can pick one up and build it.
+The full design document is at [docs/design.md](docs/design.md). The work is broken into phases and tickets in [docs/dev-phases.md](docs/dev-phases.md), and each phase's tickets have implementation briefs under [docs/dev-tickets](docs/dev-tickets/phase-3/README.md), written so that an agent can pick one up and build it.
 
 Architecture decisions are recorded in [docs/adr](docs/adr/README.md).
 

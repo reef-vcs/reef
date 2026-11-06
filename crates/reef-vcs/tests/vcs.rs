@@ -2792,3 +2792,286 @@ async fn ui_command() {
     assert!(!log.exists(), "the browser was run");
     daemon.stop().await;
 }
+
+/// Stdout's JSON error object, after asserting the exit code.
+fn refused(output: &Output, code: i32) -> Value {
+    output.clone().assert().code(code);
+    let value: Value = serde_json::from_str(&stdout(output))
+        .unwrap_or_else(|e| panic!("{e}: {:?} {}", stdout(output), stderr(output)));
+    value["error"].clone()
+}
+
+// R3.01 test 16: keys, adds signed here and elsewhere, listing, showing,
+// the envelope's bytes, and a key file others can read.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one key through every command")]
+async fn evidence_cli() {
+    use reef_daemon::client::evidence::{self as format, PublicKey, SigningKey};
+
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let keys = daemon.tmp.path().join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    let key = keys.join("k.pem");
+    let key_text = key.to_str().unwrap();
+    let public = keys.join("k.pem.pub");
+
+    // A key pair: the private key 0600, the public key beside it.
+    let generated = ok(&daemon, &dir, &["evidence", "key", "generate", key_text]).await;
+    assert_eq!(
+        std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let public_pem = std::fs::read_to_string(&public).unwrap();
+    let key_id = PublicKey::from_pem(&public_pem).unwrap().id().to_string();
+    assert_eq!(generated["key_id"], key_id.as_str());
+    assert_eq!(generated["public_key_path"], public.to_str().unwrap());
+    // Never overwritten.
+    let before = (std::fs::read(&key).unwrap(), public_pem.clone());
+    let again = run_in(&daemon, &dir, &["evidence", "key", "generate", key_text]).await;
+    let error = refused(&again, 4);
+    assert!(
+        error["message"].as_str().unwrap().contains("exists"),
+        "{error}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(&key).unwrap(),
+            std::fs::read_to_string(&public).unwrap()
+        ),
+        before
+    );
+
+    // Add on `@`'s tree, with an artifact recorded by SHA-256.
+    let log = keys.join("test.log");
+    std::fs::write(&log, "ok 1 - parses\n").unwrap();
+    let added = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--key",
+            key_text,
+            "--artifact",
+            log.to_str().unwrap(),
+            "--annotation",
+            "runner=local",
+        ],
+    )
+    .await;
+    assert_eq!(added["created"], true);
+    let evidence = &added["evidence"];
+    let id = evidence["id"].as_str().unwrap().to_owned();
+    assert_eq!(evidence["key_id"], key_id.as_str());
+    assert_eq!(evidence["signature"], "valid");
+    assert_eq!(evidence["artifacts"][0]["name"], "test.log");
+    assert_eq!(
+        evidence["artifacts"][0]["sha256"],
+        format::sha256_hex(b"ok 1 - parses\n").as_str()
+    );
+    let shown = ok(&daemon, &dir, &["-o", "json", "show"]).await;
+    let tree = shown["tree_id"].as_str().unwrap().to_owned();
+    assert_eq!(evidence["tree_id"], tree.as_str());
+    assert_eq!(evidence["change_ids"][0], shown["change_id"]);
+    // The piped default.
+    let brief_add = ok(
+        &daemon,
+        &dir,
+        &[
+            "evidence", "add", "--kind", "lint", "--result", "fail", "--key", key_text,
+        ],
+    )
+    .await;
+    assert_eq!(brief_add["created"], true);
+
+    // List the change's tree, in each form.
+    let listed = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "list", "-r", "@"],
+    )
+    .await;
+    let ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&id.as_str()), "{listed}");
+    let brief = ok(&daemon, &dir, &["evidence", "list", "-r", "@"]).await;
+    assert_eq!(brief.as_array().unwrap().len(), 2, "{brief}");
+    assert!(brief[0].get("tree_id").is_none(), "{brief}");
+    run_in(
+        &daemon,
+        &dir,
+        &["-o", "brief", "evidence", "list", "-r", "@"],
+    )
+    .await;
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "list"]).await;
+    let text = stdout(&text);
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with(&id[..12])
+                && line.contains(&format!("key {}", &key_id[..12]))),
+        "{text}"
+    );
+
+    // Show by prefix: text says the signature verifies, exit 0.
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &id[..8]]).await;
+    assert!(text.status.success());
+    assert!(
+        stdout(&text).contains("signature: valid"),
+        "{}",
+        stdout(&text)
+    );
+    // Review F11: the statement as signed, keys in the payload's order.
+    assert!(
+        stdout(&text)
+            .contains(r#"{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"tree""#),
+        "{}",
+        stdout(&text)
+    );
+    let full = ok(&daemon, &dir, &["-o", "json", "evidence", "show", &id[..8]]).await;
+    assert_eq!(full["statement"]["predicate"]["kind"], "test");
+    assert_eq!(
+        full["statement"]["predicate"]["annotations"]["runner"],
+        "local"
+    );
+    assert_eq!(full["envelope"]["payloadType"], format::PAYLOAD_TYPE);
+    // `--envelope` is the bytes whose SHA-256 is the id.
+    let raw = run_in(&daemon, &dir, &["evidence", "show", &id, "--envelope"]).await;
+    assert!(raw.status.success());
+    assert_eq!(format::sha256_hex(&raw.stdout), id);
+
+    // An envelope signed elsewhere.
+    let signer = SigningKey::from_seed(&[9; 32]).unwrap();
+    let claim = format::Claim {
+        kind: "build".into(),
+        result: format::Outcome::Error,
+        target: Some("//app:bin".into()),
+        started_on: std::time::SystemTime::now(),
+        finished_on: std::time::SystemTime::now(),
+        artifacts: Vec::new(),
+        annotations: serde_json::Map::new(),
+    };
+    let envelope = claim
+        .sign(&format::TreeDigest::git(&tree).unwrap(), &signer)
+        .unwrap();
+    let envelope_file = keys.join("e.json");
+    std::fs::write(&envelope_file, envelope.to_bytes()).unwrap();
+    let signer_pem = keys.join("signer.pub.pem");
+    std::fs::write(&signer_pem, signer.public_key().to_pem()).unwrap();
+    let elsewhere = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "evidence",
+            "add",
+            "--envelope",
+            envelope_file.to_str().unwrap(),
+            "--public-key",
+            signer_pem.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(elsewhere["created"], true);
+    assert_eq!(
+        elsewhere["evidence"]["key_id"],
+        signer.public_key().id().as_str()
+    );
+    assert_eq!(elsewhere["evidence"]["result"], "error");
+    assert_eq!(
+        elsewhere["evidence"]["change_ids"],
+        serde_json::json!([]),
+        "no -r: added by tree alone"
+    );
+
+    // Review F2: a time before 1970 is refused with a hint, not a panic.
+    let early = run_in(
+        &daemon,
+        &dir,
+        &[
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--key",
+            key_text,
+            "--started",
+            "100y",
+        ],
+    )
+    .await;
+    let error = refused(&early, 2);
+    assert!(error["hint"].as_str().unwrap().contains("1970"), "{error}");
+    // Review F7: a key id as the text prints it (12 digits) is refused.
+    let short = run_in(&daemon, &dir, &["evidence", "list", "--key", &key_id[..12]]).await;
+    let error = refused(&short, 2);
+    assert!(
+        error["hint"].as_str().unwrap().contains("full key id"),
+        "{error}"
+    );
+    let full = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "evidence", "list", "--key", &key_id],
+    )
+    .await;
+    assert_eq!(full.as_array().unwrap().len(), 2, "{full}");
+
+    // A key others can read is refused before anything is sent.
+    let counts = daemon.handle.state().db.evidence_counts().unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let open = run_in(
+        &daemon,
+        &dir,
+        &[
+            "evidence", "add", "--kind", "test", "--result", "pass", "--key", key_text,
+        ],
+    )
+    .await;
+    let error = refused(&open, 7);
+    assert_eq!(
+        error["hint"].as_str().unwrap(),
+        format!("chmod 600 {key_text}"),
+        "{error}"
+    );
+    assert_eq!(daemon.handle.state().db.evidence_counts().unwrap(), counts);
+    // Review F12: the key is checked before connecting, so with no daemon
+    // the refusal is the key's, not "daemon is not running".
+    let nowhere = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
+    command
+        .env_remove("REEF_SOCKET")
+        .env("REEF_STATE_DIR", nowhere.path().join("state"))
+        .current_dir(&dir)
+        .args([
+            "--no-autostart",
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--key",
+            key_text,
+        ]);
+    let offline = tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap();
+    let error = refused(&offline, 7);
+    assert_eq!(error["hint"], format!("chmod 600 {key_text}"), "{error}");
+    daemon.stop().await;
+}

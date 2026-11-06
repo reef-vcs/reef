@@ -9,10 +9,11 @@
 use reef_client::backup::Manifest;
 use reef_client::brief;
 use reef_client::json::{
-    Abandoned, BuiltStore, ChangeSummary, Created, CreatedRemoteToken, Described, Diff, FileEntry,
-    FileRead, GcReport, History, Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent,
-    Released, RemoteListener, RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status,
-    Store, SymbolOccurrence, SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
+    Abandoned, BuiltStore, ChangeSummary, Created, CreatedRemoteToken, Described, Diff, Evidence,
+    EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History, Inspected, LogEntry, Moved,
+    Operation, Presence, PresenceEvent, Released, RemoteListener, RemoteToken, RepoStatus,
+    Repository, Restored, Snapshotted, Status, Store, SymbolOccurrence, SymbolStatus, SymbolUpload,
+    Undone, WebSession, Workspace,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
@@ -272,6 +273,18 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     },
     row(&["symbols", "upload"], object::<SymbolUpload>),
     row(&["symbols", "list"], list::<SymbolOccurrence>),
+    row(&["evidence", "add"], object::<EvidenceAdded>),
+    view(
+        &["evidence", "list"],
+        list::<Evidence>,
+        list::<brief::Evidence<'static>>,
+    ),
+    OutputRow {
+        note: Some("`--envelope` prints the canonical envelope's bytes, whose SHA-256 is the id"),
+        bytes_with: &["envelope"],
+        ..row(&["evidence", "show"], object::<Evidence>)
+    },
+    row(&["evidence", "key", "generate"], object::<EvidenceKey>),
     text(
         &["guide"],
         object::<guide::GuideJson>,

@@ -8,6 +8,9 @@
 //! depends on none either and links neither jj-lib nor gRPC (R2.22, ADR
 //! 0038). `reef-web`, the web UI's embedded assets, depends on nothing, and
 //! only the daemon links it, so the `reef` binary does not carry them (R2.18).
+//! `reef-evidence`, the evidence format, depends on no Reef crate but
+//! `reef-error` and links neither jj-lib, gRPC, tokio nor SQLite; the
+//! daemon and the client depend on it (R3.01, ADR 0055).
 
 #![allow(
     clippy::expect_used,
@@ -20,12 +23,13 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 10] = [
+const MEMBERS: [&str; 11] = [
     "reef-api",
     "reef-broker",
     "reef-client",
     "reef-daemon",
     "reef-error",
+    "reef-evidence",
     "reef-lib",
     "reef-symbols",
     "reef-testing",
@@ -158,8 +162,26 @@ const NOT_IN_SYMBOLS: [&str; 11] = [
     "tokio",
 ];
 
+/// What the evidence format must not link (R3.01, ADR 0055): executors and
+/// the phase-four store read it without the client, the daemon, or jj.
+const NOT_IN_EVIDENCE: [&str; 13] = [
+    "jj-lib",
+    "jj-core",
+    "jj-default-index",
+    "jj-dsl",
+    "jj-git-backend",
+    "jj-local-util",
+    "tonic",
+    "prost",
+    "rusqlite",
+    "gix",
+    "hyper",
+    "tokio",
+    "reef-api",
+];
+
 #[test]
-fn workspace_members_are_the_ten_crates() {
+fn workspace_members_are_the_eleven_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -194,7 +216,7 @@ fn crate_edges() {
     );
     assert_eq!(
         reef_dependencies(&metadata, "reef-client", &shipped),
-        ["reef-api", "reef-error"]
+        ["reef-api", "reef-error", "reef-evidence"]
     );
     assert_eq!(
         reef_dependencies(&metadata, "reef-lib", &shipped),
@@ -219,6 +241,16 @@ fn crate_edges() {
     assert!(
         reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-symbols".to_owned()),
         "the daemon extracts symbols"
+    );
+    // R3.01: the evidence format depends on reef-error alone, and the
+    // daemon and the client on it.
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-evidence", &shipped),
+        ["reef-error"]
+    );
+    assert!(
+        reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-evidence".to_owned()),
+        "the daemon checks evidence"
     );
     // R2.18: the assets crate depends on nothing at all, and the daemon
     // embeds it.
@@ -260,6 +292,23 @@ fn reef_symbols_links_no_jj_grpc_or_sqlite() {
     assert!(reached > 5, "reef-symbols: only {reached} packages reached");
 }
 
+/// R3.01: the evidence format links nothing of jj, gRPC, tokio or SQLite,
+/// and no Reef crate but `reef-error`.
+#[test]
+fn reef_evidence_links_no_jj_grpc_or_sqlite() {
+    let metadata = resolved_metadata();
+    let reached = assert_unreachable_but(
+        &metadata,
+        "reef-evidence",
+        &NOT_IN_EVIDENCE,
+        &["reef-error"],
+    );
+    assert!(
+        reached > 5,
+        "reef-evidence: only {reached} packages reached"
+    );
+}
+
 #[test]
 fn reef_broker_links_no_jj_or_grpc() {
     let metadata = resolved_metadata();
@@ -277,6 +326,26 @@ fn assert_unreachable(
     forbidden: &[&str],
     no_reef_crates: bool,
 ) -> usize {
+    if no_reef_crates {
+        assert_unreachable_but(metadata, root, forbidden, &[])
+    } else {
+        walk(metadata, root, forbidden, None)
+    }
+}
+
+/// [`assert_unreachable`] with no Reef crate but those in `allowed`.
+fn assert_unreachable_but(
+    metadata: &Value,
+    root: &str,
+    forbidden: &[&str],
+    allowed: &[&str],
+) -> usize {
+    walk(metadata, root, forbidden, Some(allowed))
+}
+
+/// The walk of [`assert_unreachable`]: with `reef_allowed`, every Reef
+/// crate not in it is forbidden too.
+fn walk(metadata: &Value, root: &str, forbidden: &[&str], reef_allowed: Option<&[&str]>) -> usize {
     let names: BTreeMap<&str, &str> = metadata["packages"]
         .as_array()
         .expect("packages is an array")
@@ -308,7 +377,9 @@ fn assert_unreachable(
     while let Some(id) = queue.pop_front() {
         let name = names[id];
         let reef_crate = id != start && name.starts_with("reef-");
-        if forbidden.contains(&name) || (no_reef_crates && reef_crate) {
+        let reef_forbidden =
+            reef_crate && reef_allowed.is_some_and(|allowed| !allowed.contains(&name));
+        if forbidden.contains(&name) || reef_forbidden {
             let mut path = vec![name];
             let mut at = id;
             while via[at] != at {

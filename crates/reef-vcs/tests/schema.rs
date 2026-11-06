@@ -130,6 +130,59 @@ fn schema_runs_offline() {
     assert!(!state.exists());
 }
 
+// R3.01 test 17: the evidence format, offline, from the binary.
+#[test]
+fn schema_evidence_part() {
+    let tmp = tempfile::Builder::new()
+        .prefix("reef-")
+        .tempdir_in(short_tmp())
+        .unwrap();
+    let state = tmp.path().join("state");
+    let output = reef_in(&state)
+        .args(["--no-autostart", "schema", "evidence"])
+        .output()
+        .unwrap();
+    let document = json(&output);
+    assert!(!state.exists(), "offline");
+    for part in ["cli", "mcp", "api"] {
+        assert!(document.get(part).is_none(), "{part}");
+    }
+    let evidence = &document["evidence"];
+    assert_eq!(evidence["predicate_type"], "urn:reef-vcs:evidence:v1");
+    assert_eq!(evidence["payload_type"], "application/vnd.in-toto+json");
+    assert_eq!(evidence["format"], 1);
+    let defs = document["$defs"].as_object().unwrap();
+    for (member, name) in [
+        ("statement", "evidence.Statement"),
+        ("predicate", "evidence.Predicate"),
+        ("envelope", "evidence.Envelope"),
+    ] {
+        assert_eq!(evidence[member]["$ref"], format!("#/$defs/{name}"));
+        assert!(defs.contains_key(name), "{name}: {defs:?}");
+    }
+    assert!(
+        defs.keys().all(|name| name.starts_with("evidence.")),
+        "{:?}",
+        defs.keys()
+    );
+    // One member by name.
+    let output = reef_in(&state)
+        .args(["--no-autostart", "schema", "evidence", "envelope"])
+        .output()
+        .unwrap();
+    let one = json(&output);
+    assert!(one["evidence"].get("statement").is_none());
+    assert!(one["$defs"].get("evidence.Envelope").is_some());
+    assert!(one["$defs"].get("evidence.Predicate").is_none());
+    // The whole document carries the part too.
+    let output = reef_in(&state)
+        .args(["--no-autostart", "schema"])
+        .output()
+        .unwrap();
+    let whole = json(&output);
+    assert_eq!(whole["evidence"], document["evidence"]);
+}
+
 /// Commands test 9 does not run, and why. Each is still covered by the
 /// unit tests of its inputs and row, and some by other tests' checks.
 const NOT_RUN: &[(&[&str], &str)] = &[
@@ -342,6 +395,35 @@ async fn outputs_match_their_schemas() {
         .await;
     script.both(&a_dir, &["symbols", "list", "py/a.py"]).await;
     script.both(&a_dir, &["diff", "--symbols"]).await;
+    // Evidence (R3.01): keys, then evidence on the workspace's tree.
+    let key = daemon.tmp.path().join("evidence.pem");
+    let key_text = key.to_str().unwrap();
+    script
+        .json(&root, &["evidence", "key", "generate", key_text])
+        .await;
+    let second_key = daemon.tmp.path().join("evidence-2.pem");
+    script
+        .run(
+            &root,
+            &["evidence", "key", "generate", second_key.to_str().unwrap()],
+        )
+        .await;
+    let added = script
+        .both(
+            &a_dir,
+            &[
+                "evidence", "add", "--kind", "test", "--result", "pass", "--key", key_text,
+            ],
+        )
+        .await;
+    let evidence_id = text(&added["evidence"]["id"]);
+    script.both(&a_dir, &["evidence", "list", "-r", "@"]).await;
+    script
+        .both(&a_dir, &["evidence", "show", &evidence_id[..8]])
+        .await;
+    script
+        .run(&a_dir, &["evidence", "show", &evidence_id, "--envelope"])
+        .await;
     script.both(&a_dir, &["here"]).await;
     script.both(&root, &["here"]).await;
 
