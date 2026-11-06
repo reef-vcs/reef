@@ -156,6 +156,9 @@ jobs:
         with:
           just-version: "1"
       - run: just lint
+      # rustdoc with warnings denied, as the check jobs' Docs step: here it fails the quick gate
+      # in a couple of minutes instead of 13 or more into a check job.
+      - run: just doc
 
   # On the self-hosted Mac (see `plan`), checkout keeps target/ (mac-runner-hook.sh removes every
   # other untracked file before the job), and rustup installs the toolchain in place of
@@ -584,7 +587,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "a quick gate (rustfmt, API schema, cargo deny or clippy) failed; cancelling the rest of the run"
+          echo "a quick gate (rustfmt, API schema, cargo deny, or clippy and rustdoc) failed; cancelling the rest of the run"
           gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" || echo "::warning::could not cancel run $GITHUB_RUN_ID"
 
   ci-ok:
