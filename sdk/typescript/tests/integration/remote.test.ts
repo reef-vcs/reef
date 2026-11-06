@@ -3,6 +3,12 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  X509Certificate,
+} from "node:crypto";
+import {
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -27,10 +33,6 @@ import {
   UnavailableError,
 } from "../../src/index.js";
 import { BASE_CONFIG, binDir, Daemon, freePort, makeRepo } from "./harness.js";
-
-// LibreSSL (macOS /usr/bin/openssl) writes explicit curve parameters unless told
-// otherwise, and OpenSSL 3 refuses to verify a chain with such a key.
-const P256 = ["-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve"];
 
 // The test CA's own configuration, not the system's: OpenSSL 1.1.1 (Homebrew's openssl@1.1, first
 // on PATH on the macOS runners) applies the system file's v3_ca section and appends `-addext`'s
@@ -133,6 +135,58 @@ function openssl(cwd: string, ...args: string[]): void {
   execFileSync("openssl", args, { cwd, stdio: "ignore" });
 }
 
+/** The length of a PKCS#8 EC key's private scalar (RFC 5915: 32 bytes for P-256). */
+function scalarLength(pkcs8: Buffer): number {
+  let at = 0;
+  // One DER element at `at`: its tag, and where its content starts and ends.
+  const read = (): { tag: number; start: number; end: number } => {
+    const tag = pkcs8[at];
+    let length = pkcs8[at + 1];
+    let start = at + 2;
+    if (tag === undefined || length === undefined) throw new Error("truncated DER");
+    if (length & 0x80) {
+      const count = length & 0x7f;
+      if (count === 0 || count > 4) throw new Error(`bad DER length: ${count} bytes`);
+      length = 0;
+      for (let i = 0; i < count; i++) {
+        const byte = pkcs8[start + i];
+        if (byte === undefined) throw new Error("truncated DER");
+        length = length * 256 + byte;
+      }
+      start += count;
+    }
+    if (start + length > pkcs8.length) throw new Error("truncated DER");
+    return { tag, start, end: start + length };
+  };
+  const enter = (): void => {
+    at = read().start;
+  };
+  const skip = (): void => {
+    at = read().end;
+  };
+  enter(); // PrivateKeyInfo
+  skip(); // version
+  skip(); // privateKeyAlgorithm
+  enter(); // privateKey
+  enter(); // ECPrivateKey
+  skip(); // version
+  const scalar = read(); // privateKey
+  if (scalar.tag !== 0x04) throw new Error(`not an OCTET STRING: ${scalar.tag}`);
+  return scalar.end - scalar.start;
+}
+
+/** A P-256 key, PKCS#8 PEM, made by Node. LibreSSL (macOS's /usr/bin/openssl) writes a 31-byte
+ * scalar 1 time in 256, which rustls refuses, so no key the daemon loads comes from openssl
+ * (#216). */
+function p256Key(path: string): void {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const length = scalarLength(privateKey.export({ type: "pkcs8", format: "der" }));
+  if (length !== 32) {
+    throw new Error(`${path}: a ${length}-byte P-256 scalar (#216)`);
+  }
+  writeFileSync(path, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+}
+
 function selfSigned(
   dir: string,
   key: string,
@@ -141,7 +195,7 @@ function selfSigned(
   names = "DNS:reefvm.test",
 ): void {
   if (!existsSync(join(dir, key))) {
-    openssl(dir, "genpkey", "-algorithm", "EC", ...P256, "-out", key);
+    p256Key(join(dir, key));
   }
   openssl(
     dir,
@@ -382,6 +436,8 @@ describe("remote daemon with supplied certificates", () => {
     const tls = join(dir, "tls");
     mkdirSync(tls);
     writeFileSync(join(tls, "ca.cnf"), CA_CONFIG);
+    p256Key(join(tls, "ca.key"));
+    p256Key(join(tls, "leaf.key"));
     openssl(
       tls,
       "req",
@@ -389,11 +445,7 @@ describe("remote daemon with supplied certificates", () => {
       "-x509",
       "-config",
       "ca.cnf",
-      "-newkey",
-      "ec",
-      ...P256,
-      "-nodes",
-      "-keyout",
+      "-key",
       "ca.key",
       "-out",
       "ca.pem",
@@ -401,21 +453,7 @@ describe("remote daemon with supplied certificates", () => {
       "30",
       "-sha256",
     );
-    openssl(
-      tls,
-      "req",
-      "-new",
-      "-newkey",
-      "ec",
-      ...P256,
-      "-nodes",
-      "-keyout",
-      "leaf.key",
-      "-out",
-      "leaf.csr",
-      "-subj",
-      "/CN=reefvm.test",
-    );
+    openssl(tls, "req", "-new", "-key", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=reefvm.test");
     writeFileSync(
       join(tls, "ext.cnf"),
       // OpenSSL 1.1.1 and LibreSSL add no AKID, which strict verifiers (Python 3.13+) require.
@@ -524,5 +562,57 @@ describe("remote daemon with supplied certificates", () => {
     } finally {
       await daemon.remove();
     }
+  });
+});
+
+describe("test keys", () => {
+  /** One short-form DER element. */
+  function tlv(tag: number, ...content: Buffer[]): Buffer {
+    const body = Buffer.concat(content);
+    return Buffer.concat([Buffer.from([tag, body.length]), body]);
+  }
+
+  /** A PKCS#8 P-256 key around a scalar of `length` 0x01 bytes, with no public key. */
+  function syntheticKey(length: number): Buffer {
+    const ecPublicKey = Buffer.from("2a8648ce3d0201", "hex");
+    const prime256v1 = Buffer.from("2a8648ce3d030107", "hex");
+    const ecPrivateKey = tlv(0x30, tlv(0x02, Buffer.from([1])), tlv(0x04, Buffer.alloc(length, 1)));
+    return tlv(
+      0x30,
+      tlv(0x02, Buffer.from([0])),
+      tlv(0x30, tlv(0x06, ecPublicKey), tlv(0x06, prime256v1)),
+      tlv(0x04, ecPrivateKey),
+    );
+  }
+
+  let dir: string;
+  beforeEach(() => {
+    dir = shortTmp();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #216 test 1
+  it("p256Key writes a P-256 PKCS#8 key with a 32-byte scalar", () => {
+    expect(scalarLength(syntheticKey(31))).toBe(31);
+    expect(scalarLength(syntheticKey(32))).toBe(32);
+    expect(() => scalarLength(syntheticKey(32).subarray(0, 40))).toThrow("truncated DER");
+
+    p256Key(join(dir, "key.pem"));
+    const pem = readFileSync(join(dir, "key.pem"), "utf8");
+    expect(pem.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
+    const key = createPrivateKey(pem);
+    expect(key.asymmetricKeyDetails?.namedCurve).toBe("prime256v1");
+    // The file's own bytes: Node's export of a key pads a short scalar, so it would hide one.
+    const der = Buffer.from(pem.replace(/-----[^-]+-----|\s/g, ""), "base64");
+    expect(scalarLength(der)).toBe(32);
+
+    // The leg's openssl (LibreSSL on the self-hosted Mac) signs with it.
+    selfSigned(dir, "key.pem", "cert.pem");
+    const certificate = new X509Certificate(readFileSync(join(dir, "cert.pem")));
+    expect(certificate.publicKey.export({ type: "spki", format: "der" })).toEqual(
+      createPublicKey(key).export({ type: "spki", format: "der" }),
+    );
   });
 });

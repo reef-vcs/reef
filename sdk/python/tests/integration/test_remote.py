@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from harness import BASE_CONFIG, Daemon, bin_dir, free_port, make_daemon, make_r
 
 import reef
 import reef.aio
+from reef import _tls
 from reef.api.v1 import FileEdit, WorkspaceState
 
 # LibreSSL (macOS /usr/bin/openssl) writes explicit curve parameters unless told
@@ -189,14 +191,45 @@ def openssl(*args: str, cwd: Path) -> None:
     subprocess.run(["openssl", *args], cwd=cwd, check=True, capture_output=True)
 
 
+def scalar_length(pem: bytes) -> int:
+    """The private scalar's length in a PKCS#8 EC key: 32 for P-256 (RFC 5915)."""
+    body = [line for line in pem.splitlines() if not line.startswith(b"-----")]
+    der = base64.b64decode(b"".join(body))
+    _, at, _ = _tls._read(der, 0)  # PrivateKeyInfo
+    _, _, at = _tls._read(der, at)  # version
+    _, _, at = _tls._read(der, at)  # privateKeyAlgorithm
+    _, at, _ = _tls._read(der, at)  # privateKey
+    _, at, _ = _tls._read(der, at)  # ECPrivateKey
+    _, _, at = _tls._read(der, at)  # version
+    tag, start, end = _tls._read(der, at)  # privateKey
+    assert tag == 0x04, f"not an OCTET STRING: {tag:#x}"
+    return end - start
+
+
+def genpkey(directory: Path, name: str) -> None:
+    openssl("genpkey", "-algorithm", "EC", *P256, "-out", name, cwd=directory)
+
+
+def p256_key(
+    directory: Path,
+    name: str,
+    attempts: int = 8,
+    generate: Callable[[Path, str], None] = genpkey,
+) -> None:
+    """A P-256 key with a 32-byte scalar. LibreSSL (macOS's /usr/bin/openssl) writes 31 bytes
+    1 time in 256, which rustls refuses (#216), so such a key is made again."""
+    for _ in range(attempts):
+        generate(directory, name)
+        if scalar_length((directory / name).read_bytes()) == 32:
+            return
+    raise AssertionError(f"{name}: {attempts} short P-256 keys in a row (#216)")
+
+
 def self_signed(
     directory: Path, key: str, cert: str, days: str = "30", names: str = "DNS:reefvm.test"
 ) -> None:
     if not (directory / key).exists():
-        openssl(
-            "genpkey", "-algorithm", "EC", *P256, "-out", key,
-            cwd=directory,
-        )  # fmt: skip
+        p256_key(directory, key)
     openssl(
         "req", "-new", "-x509", "-key", key, "-out", cert, "-days", days,
         "-subj", "/CN=reefvm.test", "-addext", f"subjectAltName={names},IP:127.0.0.1",
@@ -209,14 +242,15 @@ def test_remote_ca_verified(no_remote_env: pytest.MonkeyPatch, short_tmp: Path) 
     tls = short_tmp / "tls"
     tls.mkdir()
     (tls / "ca.cnf").write_text(CA_CONFIG)
+    p256_key(tls, "ca.key")
+    p256_key(tls, "leaf.key")
     openssl(
-        "req", "-new", "-x509", "-config", "ca.cnf", "-newkey", "ec", *P256, "-nodes",
-        "-keyout", "ca.key", "-out", "ca.pem", "-days", "30", "-sha256",
+        "req", "-new", "-x509", "-config", "ca.cnf", "-key", "ca.key",
+        "-out", "ca.pem", "-days", "30", "-sha256",
         cwd=tls,
     )  # fmt: skip
     openssl(
-        "req", "-new", "-newkey", "ec", *P256, "-nodes",
-        "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=reefvm.test",
+        "req", "-new", "-key", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=reefvm.test",
         cwd=tls,
     )  # fmt: skip
     (tls / "ext.cnf").write_text(
@@ -325,3 +359,64 @@ def test_remote_misdirected(no_remote_env: pytest.MonkeyPatch, short_tmp: Path) 
     finally:
         daemon.stop()
         shutil.rmtree(daemon.root, ignore_errors=True)
+
+
+def tlv(tag: int, *content: bytes) -> bytes:
+    """One short-form DER element."""
+    body = b"".join(content)
+    return bytes([tag, len(body)]) + body
+
+
+def synthetic_key(length: int) -> bytes:
+    """A PKCS#8 P-256 key, PEM, around a scalar of ``length`` 0x01 bytes, with no public key."""
+    ec_private_key = tlv(0x30, tlv(0x02, b"\x01"), tlv(0x04, b"\x01" * length))
+    der = tlv(
+        0x30,
+        tlv(0x02, b"\x00"),
+        tlv(
+            0x30,
+            tlv(0x06, bytes.fromhex("2a8648ce3d0201")),
+            tlv(0x06, bytes.fromhex("2a8648ce3d030107")),
+        ),
+        tlv(0x04, ec_private_key),
+    )
+    return (
+        b"-----BEGIN PRIVATE KEY-----\n" + base64.b64encode(der) + b"\n-----END PRIVATE KEY-----\n"
+    )
+
+
+# #216 test 2
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_scalar_length(tmp_path: Path) -> None:
+    assert scalar_length(synthetic_key(31)) == 31
+    assert scalar_length(synthetic_key(32)) == 32
+    p256_key(tmp_path, "key.pem")
+    assert scalar_length((tmp_path / "key.pem").read_bytes()) == 32
+
+
+# #216 test 3
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_p256_key_makes_a_short_key_again(tmp_path: Path) -> None:
+    calls = 0
+
+    def short_first(directory: Path, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            (directory / name).write_bytes(synthetic_key(31))
+        else:
+            genpkey(directory, name)
+
+    p256_key(tmp_path, "key.pem", generate=short_first)
+    assert calls == 2
+    assert scalar_length((tmp_path / "key.pem").read_bytes()) == 32
+
+    def always_short(directory: Path, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        (directory / name).write_bytes(synthetic_key(31))
+
+    calls = 0
+    with pytest.raises(AssertionError, match="#216"):
+        p256_key(tmp_path, "short.pem", attempts=3, generate=always_short)
+    assert calls == 3

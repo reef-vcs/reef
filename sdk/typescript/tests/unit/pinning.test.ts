@@ -16,8 +16,8 @@ import { RemoteUrl, type RemoteTarget } from "../../src/remote.js";
 import { parseLeaf } from "../../src/tls.js";
 import { caSession, pinnedSession, type Session } from "../../src/transport.js";
 
-// Named-curve parameters, as the integration tests need (LibreSSL, macOS's /usr/bin/openssl,
-// writes explicit ones by default).
+// Named-curve parameters: LibreSSL (macOS's /usr/bin/openssl) writes explicit ones by default,
+// and OpenSSL 3 refuses to verify a chain with such a key.
 const P256 = ["-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve"];
 
 let dir: string;

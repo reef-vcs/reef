@@ -197,7 +197,7 @@ The 32-byte variant is `30 41 … 04 27 30 25 02 01 01 04 20 <32 × 01>`. Both p
 
 ## Acceptance criteria
 
-- [ ] No key the daemon loads in the SDKs' remote tests comes from `openssl` unchecked. `grep -nE 'genpkey|-newkey' sdk/typescript/tests/integration/remote.test.ts` finds nothing, and in `sdk/python/tests/integration/test_remote.py` it finds only `p256_key`'s `genpkey`.
+- [ ] No key the daemon loads in the SDKs' remote tests comes from `openssl` unchecked. `grep -nE 'genpkey|-newkey' sdk/typescript/tests/integration/remote.test.ts` finds nothing, and in `sdk/python/tests/integration/test_remote.py` its one `openssl genpkey` call is the default generator `genpkey()`, which only `p256_key` (and test 3, through it) calls.
 - [ ] Both helpers check that every key they write has a 32-byte scalar, and Python's makes a short key again (tests 1-3).
 - [ ] `remote ca verified` / `test_remote_ca_verified` sign Node or helper keys with `openssl req -key` and `x509 -req`, and pass under LibreSSL locally (see "Verification").
 - [ ] `just typescript-check`, `just typescript-test`, `just python-check` and `just python-test` pass, with Homebrew's `openssl` and with the LibreSSL shim.
@@ -233,7 +233,7 @@ Then loop each of the last two commands 25 times under the shim and report the c
 These were the brief's open questions.
 
 1. **The daemon and short scalars:** this ticket stays tests-only. A follow-up issue (Phase 3) asks the daemon to left-pad a short P-256/P-384 scalar in `load_pair` (`remote/tls.rs`), as described below. With that fix planned, the quickstart gets no warning.
-2. **Who files it:** the implementer files the follow-up issue with the PR and links it there.
+2. **Who files it:** the implementer files the follow-up issue with the PR and links it there. Filed as #219.
 3. **Python:** make the key again if it is short (the design above). No `cryptography` dev dependency.
 
 ### The daemon fix, for the follow-up issue
