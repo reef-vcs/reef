@@ -67,7 +67,7 @@ describe("codegen", () => {
         .filter((r) => r.kind === "server_streaming")
         .map((r) => r.name)
         .sort(),
-    ).toEqual(["Backup", "BuildStore", "SubscribeOperations", "SubscribePresence"]);
+    ).toEqual(["Backup", "BuildStore", "ReadArtifact", "SubscribeOperations", "SubscribePresence"]);
     expect(RPCS.QueryChanges.paged).toBe(true);
     expect(RPCS.QueryChanges.items).toBeNull();
     expect(RPCS.GetDiff.items).toBe("files");

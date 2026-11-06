@@ -1,6 +1,7 @@
 //! The daemon's metadata database (ADR 0003): registered repositories,
 //! workspaces, leases, the reclaim log, the base cache, shared stores,
-//! remote tokens, and evidence (ADR 0055), in one SQLite file per machine.
+//! remote tokens, evidence (ADR 0055), and the artifact store's index (ADR
+//! 0056), in one SQLite file per machine.
 //!
 //! [`Db`] owns one connection behind a [`std::sync::Mutex`]; every method
 //! takes the lock for one short statement or transaction, so `&Db` can be
@@ -10,8 +11,11 @@
 //!
 //! The schema is a list of numbered migrations. `PRAGMA user_version`
 //! counts the ones applied, and `meta` records which. A database with
-//! migrations this binary does not know is refused, never downgraded. Records are defined in [`crate::model`]; the queries are in
-//! this module's submodules, one per table.
+//! migrations this binary does not know is refused, never downgraded. One
+//! step after the migrations is Rust, not SQL: `index_evidence_artifacts`
+//! (R3.02), which reads stored envelopes once. Records are defined in
+//! [`crate::model`]; the queries are in this module's submodules, one per
+//! table.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -24,6 +28,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension as _, Transaction, Trans
 use crate::error::{Advice, Advise};
 use crate::model::{Timestamp, ids::ID_HEX_LEN};
 
+mod artifacts;
 mod base_cache;
 mod evidence;
 mod leases;
@@ -33,9 +38,13 @@ mod repositories;
 mod stores;
 mod workspaces;
 
+pub use artifacts::{
+    ARTIFACT_DIGEST_LEN, ARTIFACT_EVIDENCE_IDS, ArtifactRow, ArtifactState, PlannedArtifact,
+    index_artifacts_in,
+};
 pub use evidence::{
     EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow, Inserted,
-    StoredEvidence, insert_evidence_in,
+    PINNED, StoredEvidence, insert_evidence_in,
 };
 pub use remote_tokens::{Digest, RemoteTokenRow, TokenScope};
 
@@ -44,7 +53,8 @@ pub use leases::Renewal;
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14),
-/// then `0006_remote_tokens` (R2.08) and `0007_evidence` (R3.01).
+/// then `0006_remote_tokens` (R2.08), `0007_evidence` (R3.01) and
+/// `0008_artifacts` (R3.02).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -69,6 +79,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0007_evidence",
         include_str!("migrations/0007_evidence.sql"),
+    ),
+    (
+        "0008_artifacts",
+        include_str!("migrations/0008_artifacts.sql"),
     ),
 ];
 
@@ -106,6 +120,10 @@ pub const META_REMATERIALIZE_PENDING: &str = "rematerialize_pending";
 pub const META_RESTORED_FROM: &str = "restored_from";
 /// `meta` key of when the restore ran, as decimal unix milliseconds.
 pub const META_RESTORED_AT: &str = "restored_at";
+/// `meta` key set once the database's first open under schema 8 has indexed the
+/// artifacts of the evidence stored before `0008_artifacts` (R3.02), as
+/// decimal unix milliseconds.
+pub const META_EVIDENCE_ARTIFACTS_INDEXED_AT: &str = "evidence_artifacts_indexed_at";
 /// Prefix of the `meta` keys recording applied migrations, such as
 /// `migration:0001_initial`; the value is when it was applied, as decimal
 /// unix milliseconds.
@@ -359,6 +377,7 @@ impl Db {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(open)?;
         migrate(&mut conn, path)?;
+        index_evidence_artifacts(&mut conn)?;
         let db = Db {
             conn: Mutex::new(conn),
         };
@@ -543,6 +562,87 @@ fn migrate(conn: &mut Connection, path: &Path) -> Result<(), DbError> {
     Ok(())
 }
 
+/// The one Rust step after the migrations (R3.02): while the `meta` key
+/// [`META_EVIDENCE_ARTIFACTS_INDEXED_AT`] is unset, reads every stored
+/// evidence envelope's payload, records the artifact digests it names in
+/// `evidence_artifacts`, and sets the key, in one `IMMEDIATE` transaction.
+/// Evidence stored under schema 7 has no index rows, and SQL cannot read the
+/// base64 payloads. The signature is not checked: the index only steers
+/// retention. A row whose payload does not parse indexes nothing, and is
+/// logged.
+fn index_evidence_artifacts(conn: &mut Connection) -> Result<(), DbError> {
+    let failed = |source| DbError::Migrate {
+        name: META_EVIDENCE_ARTIFACTS_INDEXED_AT.to_owned(),
+        source,
+    };
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    let done = tx
+        .query_row(
+            "SELECT 1 FROM meta WHERE key = ?1",
+            [META_EVIDENCE_ARTIFACTS_INDEXED_AT],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(failed)?
+        .is_some();
+    if done {
+        return Ok(());
+    }
+    let (mut indexed, mut skipped) = (0u64, 0u64);
+    {
+        // One row at a time: the envelopes are never all in memory.
+        let mut select = tx
+            .prepare("SELECT repo_id, id, envelope FROM evidence")
+            .map_err(failed)?;
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO evidence_artifacts(repo_id, evidence_id, sha256) VALUES (?1, ?2, ?3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .map_err(failed)?;
+        let mut rows = select.query([]).map_err(failed)?;
+        while let Some(row) = rows.next().map_err(failed)? {
+            let (repo, id, envelope): (String, String, Vec<u8>) = (
+                row.get(0).map_err(failed)?,
+                row.get(1).map_err(failed)?,
+                row.get(2).map_err(failed)?,
+            );
+            let Some(digests) = evidence::payload_artifacts(&envelope) else {
+                tracing::warn!(
+                    repo = %repo,
+                    evidence_id = %id,
+                    "a stored evidence payload does not parse; its artifacts are not indexed"
+                );
+                skipped += 1;
+                continue;
+            };
+            for digest in digests {
+                insert.execute((&repo, &id, digest)).map_err(failed)?;
+            }
+            indexed += 1;
+        }
+    }
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+        (
+            META_EVIDENCE_ARTIFACTS_INDEXED_AT,
+            Timestamp::now().0.to_string(),
+        ),
+    )
+    .map_err(failed)?;
+    tx.commit().map_err(failed)?;
+    if indexed + skipped > 0 {
+        tracing::info!(
+            evidence_count = indexed,
+            skipped_count = skipped,
+            "indexed the artifacts of stored evidence"
+        );
+    }
+    Ok(())
+}
+
 /// Names of the migrations recorded in `meta`; none before `0001_initial`
 /// has created the table.
 fn applied_migrations(conn: &Connection) -> rusqlite::Result<Vec<String>> {
@@ -641,6 +741,8 @@ pub(crate) fn path_text(path: &Path) -> Result<&str, DbError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -648,8 +750,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
+        assert_eq!(SCHEMA_VERSION, 8);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -657,7 +759,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -700,7 +802,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 7
+                    supported: 8
                 }
             ),
             "{error:?}"
@@ -723,7 +825,8 @@ mod tests {
                 "0004_stores",
                 "0005_watchman",
                 "0006_remote_tokens",
-                "0007_evidence"
+                "0007_evidence",
+                "0008_artifacts"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -749,7 +852,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -759,7 +862,8 @@ mod tests {
                 "0004_stores",
                 "0005_watchman",
                 "0006_remote_tokens",
-                "0007_evidence"
+                "0007_evidence",
+                "0008_artifacts"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -804,7 +908,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
@@ -841,25 +945,143 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
+        assert_eq!(SCHEMA_VERSION, 8);
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.evidence_counts().unwrap(), (0, 0, 0));
         drop(db);
 
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.pragma_update(None, "user_version", 9).unwrap();
         drop(conn);
         let error = Db::open(&path).err().unwrap();
         assert!(
             matches!(
                 error,
                 DbError::TooNew {
-                    found: 8,
-                    supported: 7
+                    found: 9,
+                    supported: 8
                 }
             ),
             "{error:?}"
+        );
+    }
+
+    /// A stored envelope naming `artifacts`, for [`migration_8`]: unsigned,
+    /// since the backfill does not check signatures.
+    fn envelope_naming(artifacts: &[&str]) -> Vec<u8> {
+        use base64::Engine as _;
+        let statement = serde_json::json!({
+            "_type": reef_evidence::STATEMENT_TYPE,
+            "subject": [{"name": "tree", "digest": {"gitTree": "0".repeat(40)}}],
+            "predicateType": reef_evidence::PREDICATE_TYPE,
+            "predicate": {
+                "kind": "test",
+                "result": "pass",
+                "startedOn": "2026-11-05T10:00:00Z",
+                "finishedOn": "2026-11-05T10:01:00Z",
+                "artifacts": artifacts
+                    .iter()
+                    .map(|sha| serde_json::json!({"name": "a.log", "digest": {"sha256": sha}}))
+                    .collect::<Vec<_>>(),
+            },
+        });
+        let payload = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&statement).unwrap());
+        serde_json::to_vec(&serde_json::json!({
+            "payload": payload,
+            "payloadType": reef_evidence::PAYLOAD_TYPE,
+            "signatures": [{"keyid": "k1", "sig": "AAAA"}],
+        }))
+        .unwrap()
+    }
+
+    // R3.02 test 1: a schema 7 database with evidence migrates to 8, and the
+    // backfill indexes what the stored payloads name, once.
+    #[test]
+    fn migration_8() {
+        use crate::db::repositories::tests::repo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        for (index, (name, sql)) in MIGRATIONS[..7].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        let record = repo("aaaa000000000001", "/src/app");
+        conn.execute(
+            "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at)
+             VALUES (?1, '/src/app', '/src/app/.jj/repo', 0, 1000)",
+            [record.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO evidence_keys(id, algorithm, public_key, first_seen_at)
+             VALUES ('k1', 'ed25519', x'00', 1)",
+            [],
+        )
+        .unwrap();
+        let (a, b, c) = ("aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+        for (id, envelope) in [
+            ("e1", envelope_naming(&[&a, &b])),
+            ("e2", envelope_naming(&[&b, &c])),
+            ("e3", b"not an envelope".to_vec()),
+        ] {
+            conn.execute(
+                "INSERT INTO evidence(repo_id, id, envelope, format, tree_id, kind, result, key_id,
+                                      started_at, finished_at, added_at)
+                 VALUES (?1, ?2, ?3, 1, 't', 'test', 'pass', 'k1', 1, 2, 3)",
+                rusqlite::params![record.id, id, envelope],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 8);
+        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(
+            db.artifacts_of_evidence(record.id, "e1").unwrap(),
+            [a.clone(), b.clone()]
+        );
+        assert_eq!(
+            db.artifacts_of_evidence(record.id, "e2").unwrap(),
+            [b.clone(), c.clone()]
+        );
+        assert_eq!(db.artifacts_of_evidence(record.id, "e3").unwrap().len(), 0);
+        let distinct: BTreeSet<String> = ["e1", "e2"]
+            .iter()
+            .flat_map(|id| db.artifacts_of_evidence(record.id, id).unwrap())
+            .collect();
+        assert_eq!(distinct, BTreeSet::from([a, b, c]));
+        let indexed_at = db
+            .meta(META_EVIDENCE_ARTIFACTS_INDEXED_AT)
+            .unwrap()
+            .unwrap();
+        // The next open does not run it again: an index row removed stays
+        // removed.
+        db.with(|conn| {
+            conn.execute(
+                "DELETE FROM evidence_artifacts WHERE evidence_id = 'e2'",
+                [],
+            )
+        })
+        .unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.artifacts_of_evidence(record.id, "e2").unwrap().len(), 0);
+        assert_eq!(
+            db.meta(META_EVIDENCE_ARTIFACTS_INDEXED_AT)
+                .unwrap()
+                .unwrap(),
+            indexed_at
         );
     }
 

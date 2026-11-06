@@ -417,6 +417,7 @@ impl Manager {
             repos.register(&db, &path, &settings, if_not_jj, agent.as_deref())
         })
         .await??;
+        ensure_repo_dir(&self.config.paths.repo_dir(registered.record.id)).await;
         Ok(Registered {
             record: self.prepare_watcher(registered.record).await,
             ..registered
@@ -427,8 +428,24 @@ impl Manager {
     /// stops its thread, and removes its state directory (base cache,
     /// leftover workspace trash) in the background.
     pub async fn forget_repository(&self, id: RepoId) -> Result<RepositoryRecord, ManagerError> {
+        self.forget_repository_holding(id, None).await
+    }
+
+    /// [`Manager::forget_repository`], holding `artifacts`, the
+    /// repository's artifact lock, from after the create lock until the
+    /// state directory is gone (R3.02): no upload commits a row and a file
+    /// that outlive the repository. The order is GC's, create lock first.
+    pub async fn forget_repository_holding(
+        &self,
+        id: RepoId,
+        artifacts: Option<Arc<crate::artifacts::ArtifactLock>>,
+    ) -> Result<RepositoryRecord, ManagerError> {
         let lock = self.repo_lock(id);
         let _exclusive = lock.write().await;
+        let _artifacts = match &artifacts {
+            Some(artifacts) => Some(artifacts.acquire(crate::artifacts::Holder::Forget).await),
+            None => None,
+        };
         let record = self.repos.forget(&self.db, id)?;
         self.presence.end_repository(id);
         self.bases
@@ -935,6 +952,21 @@ async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::Snap
         "no reef.toml readable for the workspace; its snapshots use no excludes"
     );
     super::SnapshotSpec::default()
+}
+
+/// Makes a registered repository's state directory, `<state>/repos/<id>`,
+/// at registration and at start (R3.02). The artifact store creates nothing
+/// above `artifacts/`, so once `ForgetRepository` has removed the directory
+/// an upload's append fails rather than recreate it. A failure is logged:
+/// the steps that need the directory report their own.
+pub(crate) async fn ensure_repo_dir(dir: &Path) {
+    if let Err(error) = tokio::fs::create_dir_all(dir).await {
+        tracing::warn!(
+            path = %dir.display(),
+            %error,
+            "cannot make the repository's state directory"
+        );
+    }
 }
 
 #[cfg(test)]

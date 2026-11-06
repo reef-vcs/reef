@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 15;
+pub const API_REVISION: u32 = 16;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -86,6 +86,9 @@ pub const API_DIGESTS: &[&str] = &[
     "127d60b512f656ba88cf67963472e0e0ffe65cc918c48bd2dda77a8ba375233a",
     // R3.01: `EvidenceService`.
     "651c2e424481a697a801df990ec6df666219e36d9d28571682af12a3b821c6c5",
+    // R3.02: `ArtifactService`, `EvidenceArtifact.state`, `size` and
+    // `collected_at`, `GcReport` fields 16 to 20, `BACKUP_STEP_ARTIFACTS`.
+    "8dd704ced8c0fbb29f359879aebb5a32648592eee27925c01e3de69c11ded3ce",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -376,6 +379,44 @@ pub mod error {
     /// Metadata: `evidence_id`.
     pub const EVIDENCE_NOT_FOUND: &str = "EVIDENCE_NOT_FOUND";
 
+    /// An artifact digest that is not 64 lowercase hex digits for an
+    /// upload, or not 4 to 64 hex digits for a lookup (R3.02). Metadata:
+    /// `sha256`.
+    pub const INVALID_ARTIFACT_DIGEST: &str = "INVALID_ARTIFACT_DIGEST";
+    /// An artifact digest prefix shared by several stored or collected
+    /// artifacts (R3.02). Metadata: `sha256`, `sha256s` (up to ten,
+    /// comma-separated).
+    pub const AMBIGUOUS_ARTIFACT_DIGEST: &str = "AMBIGUOUS_ARTIFACT_DIGEST";
+    /// An upload chunk over 1 MiB, or one reaching past the declared size
+    /// (R3.02). Metadata: `field` (`data` or `size`).
+    pub const INVALID_ARTIFACT_UPLOAD: &str = "INVALID_ARTIFACT_UPLOAD";
+    /// An upload declaring a size over `[artifacts] max_object_size`
+    /// (R3.02). Metadata: `size`, `max_object_size`.
+    pub const ARTIFACT_TOO_LARGE: &str = "ARTIFACT_TOO_LARGE";
+    /// An upload chunk at an offset other than the bytes received so far
+    /// (R3.02): resume from `received`. Metadata: `received`.
+    pub const ARTIFACT_OFFSET_MISMATCH: &str = "ARTIFACT_OFFSET_MISMATCH";
+    /// An upload whose complete bytes hash to another digest than declared
+    /// (R3.02); the partial upload is deleted. Metadata: `sha256`,
+    /// `actual_sha256`.
+    pub const ARTIFACT_DIGEST_MISMATCH: &str = "ARTIFACT_DIGEST_MISMATCH";
+    /// No artifact of the repository is stored or collected with the
+    /// digest or prefix, and, for a full digest, no evidence names it
+    /// (R3.02); or a read of one only evidence names. Metadata: `sha256`.
+    pub const ARTIFACT_NOT_FOUND: &str = "ARTIFACT_NOT_FOUND";
+    /// A read of an artifact retention collected, or whose bytes Reef found
+    /// damaged or missing and dropped (R3.02). Metadata: `sha256`,
+    /// `collected_at` (RFC 3339).
+    pub const ARTIFACT_COLLECTED: &str = "ARTIFACT_COLLECTED";
+    /// A read whose offset is beyond the artifact's size (R3.02). Metadata:
+    /// `offset`, `size`.
+    pub const INVALID_ARTIFACT_RANGE: &str = "INVALID_ARTIFACT_RANGE";
+    /// A stored artifact whose file is gone, is of another length than its
+    /// size, or whose bytes no longer hash to its digest (R3.02). Metadata:
+    /// `sha256`, `damage` (`missing`, `size` or `digest`), `actual_size`
+    /// for `size`, and `actual_sha256` for `digest`.
+    pub const ARTIFACT_DAMAGED: &str = "ARTIFACT_DAMAGED";
+
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
         let envelope = tonic_types::Status {
@@ -507,13 +548,15 @@ mod tests {
     fn writes_return_operations() {
         // ADR 0029 decision 12's exceptions, as ADR 0055 amends it: the
         // symbol index's upload, which stores derived data (ADR 0042), and
-        // evidence, an immutable object with nothing for undo to revert.
-        const EXCEPT: [&str; 5] = [
+        // evidence, an immutable object with nothing for undo to revert; and,
+        // as ADR 0056 amends it, an artifact's bytes, kept by retention.
+        const EXCEPT: [&str; 6] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
             "UploadScipDocuments",
             "AddEvidence",
+            "UploadArtifact",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

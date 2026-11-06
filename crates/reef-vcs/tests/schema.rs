@@ -424,6 +424,31 @@ async fn outputs_match_their_schemas() {
     script
         .run(&a_dir, &["evidence", "show", &evidence_id, "--envelope"])
         .await;
+    // Artifacts (R3.02): upload, show, and read in each form.
+    let log = daemon.tmp.path().join("schema.log");
+    std::fs::write(&log, "ok 1\n").unwrap();
+    let uploaded = script
+        .both(
+            &a_dir,
+            &["evidence", "artifact", "upload", log.to_str().unwrap()],
+        )
+        .await;
+    let sha = text(&uploaded[0]["artifact"]["sha256"]);
+    script
+        .both(&a_dir, &["evidence", "artifact", "show", &sha[..8]])
+        .await;
+    script
+        .json(&a_dir, &["evidence", "artifact", "read", &sha])
+        .await;
+    script
+        .run(
+            &a_dir,
+            &["-o", "brief", "evidence", "artifact", "read", &sha],
+        )
+        .await;
+    script
+        .run(&a_dir, &["evidence", "artifact", "read", &sha])
+        .await;
     script.both(&a_dir, &["here"]).await;
     script.both(&root, &["here"]).await;
 

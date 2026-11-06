@@ -937,3 +937,31 @@ impl<'a> From<&'a json::Evidence> for Evidence<'a> {
         }
     }
 }
+
+/// An artifact's record (R3.02). Always `sha256`, `state` and `size`;
+/// `collected_at` when collected, and `evidence_count`. Dropped: the other
+/// times, `added_by_agent`, `remote_token_id`, `evidence_ids`;
+/// `evidence artifact show -o json` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Artifact")]
+pub struct Artifact<'a> {
+    sha256: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a str>,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collected_at: Option<&'a str>,
+    evidence_count: u32,
+}
+
+impl<'a> From<&'a json::Artifact> for Artifact<'a> {
+    fn from(artifact: &'a json::Artifact) -> Self {
+        Self {
+            sha256: &artifact.sha256,
+            state: artifact.state.as_deref(),
+            size: artifact.size,
+            collected_at: artifact.collected_at.as_deref(),
+            evidence_count: artifact.evidence_count,
+        }
+    }
+}

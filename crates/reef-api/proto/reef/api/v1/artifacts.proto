@@ -1,0 +1,229 @@
+// Artifacts (R3.02, ADR 0056): the bytes evidence names by SHA-256 (logs,
+// reports, build outputs), stored once per repository and kept by
+// retention. Records no operation.
+//
+// An artifact is addressed by the SHA-256 of its bytes, 64 lowercase hex
+// digits: the digest an evidence predicate's `artifacts` already records
+// (evidence.proto). Bytes are stored per repository, so two repositories
+// holding the same bytes hold two copies, and `ForgetRepository` deletes a
+// repository's artifacts with it.
+//
+// Uploads are chunked unary calls keyed by the digest and size, so they
+// resume after a lost response or a daemon restart and deduplicate: bytes
+// already stored are never sent again. Downloads stream, and a read of a
+// whole artifact is hashed again as it is sent.
+//
+// Garbage collection keeps the artifacts evidence on live work names (the
+// changes `trunk() | bookmarks() | working_copies() | mutable()`), and
+// collects the rest after `[artifacts] retention` or to stay under
+// `[artifacts] max_size`; it never collects what was used within the undo
+// window, nor, by age of use alone, an upload no evidence names yet within
+// a day. A collected artifact keeps a record (`ARTIFACT_STATE_COLLECTED`)
+// while evidence still names it. Collected also covers bytes Reef found
+// damaged or missing and dropped: a whole read whose bytes fail their
+// digest, or garbage collection finding a stored artifact's file gone.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Storing artifacts' bytes, and reading them back.
+service ArtifactService {
+  // Uploads an artifact's bytes in chunks, keyed by its digest and size.
+  // The client hashes the bytes first, then sends chunks of at most 1 MiB
+  // in order. Each call: when the digest is stored, it returns at once with
+  // `received` equal to the size, the stored artifact and `created` false,
+  // whatever `data` holds, and marks the artifact used (dedup). An empty
+  // call at `offset` 0 is a probe: it returns the bytes received so far of
+  // a partial upload (0 for none), from which the client resumes, after a
+  // lost response or a daemon restart alike. Otherwise `offset` must equal
+  // the bytes received so far, and `data` is appended. A stored artifact
+  // whose file is gone or of another length than its size does not count
+  // as stored, so uploading it again repairs it. Once the bytes
+  // received reach `size`, the daemon hashes them: on a match the artifact
+  // is stored (a collected one becomes stored again) and returned with
+  // `created` true; otherwise the partial upload is deleted. A partial
+  // upload is kept for a day after its last chunk. Two clients uploading
+  // the same digest share one partial upload, each going on from what the
+  // other sent. A zero-byte artifact is one call with no data. Records no
+  // operation.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_ARTIFACT_DIGEST (metadata
+  // `sha256`) for a digest that is not 64 lowercase hex digits,
+  // INVALID_ARTIFACT_UPLOAD (metadata `field`: `data` for more than 1 MiB,
+  // `size` for `offset` plus the data's length beyond it),
+  // ARTIFACT_TOO_LARGE (metadata `size`, `max_object_size`) for a size
+  // over `[artifacts] max_object_size`, checked on every call after the
+  // dedup check (a stored artifact is still found stored once the limit is
+  // lowered) and before anything is written, or ARTIFACT_DIGEST_MISMATCH
+  // (metadata `sha256`,
+  // `actual_sha256`) when the complete bytes hash to another digest;
+  // FAILED_PRECONDITION with reason ARTIFACT_OFFSET_MISMATCH (metadata
+  // `received`) for an `offset` that is not the bytes received so far:
+  // resume from `received`; NOT_FOUND with reason REPOSITORY_NOT_FOUND
+  // when the repository was forgotten during the upload, which stores
+  // nothing. A full disk is the ordinary IO error, and the partial upload
+  // keeps what was written.
+  rpc UploadArtifact(UploadArtifactRequest) returns (UploadArtifactResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // One artifact's record, by its full digest or a unique prefix of at
+  // least 4 hex digits: stored or collected, or, by full digest only,
+  // absent (named by evidence but never stored, or deleted when nothing
+  // named it), with the evidence naming it.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_ARTIFACT_DIGEST (metadata
+  // `sha256`) for a digest that is not 4 to 64 hex digits, or
+  // AMBIGUOUS_ARTIFACT_DIGEST (metadata `sha256`, and `sha256s`, up to ten,
+  // comma-separated) for a prefix of several; NOT_FOUND with reason
+  // ARTIFACT_NOT_FOUND (metadata `sha256`) for a digest neither stored nor
+  // named by evidence, or a prefix of none stored or collected.
+  rpc GetArtifact(GetArtifactRequest) returns (GetArtifactResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // A stored artifact's bytes from `offset`, `length` of them (0 for to
+  // the end), in messages of at most 1 MiB; the first message carries the
+  // artifact's record. A read of the whole artifact is hashed as it is
+  // sent: bytes that no longer match the digest end the stream with
+  // ARTIFACT_DAMAGED after the data, and the client must discard what it
+  // received. The bytes travel as protobuf `bytes`, never as an HTTP
+  // resource with a content type.
+  //
+  // Read-only in what it returns, but not free of effects: when a whole
+  // read finds the bytes damaged, the daemon hashes the file again and, if
+  // it still fails its digest and no upload repaired it meanwhile, deletes
+  // it and records the artifact as collected. It only ever removes bytes
+  // that no longer match their own digest.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_ARTIFACT_DIGEST (metadata
+  // `sha256`), AMBIGUOUS_ARTIFACT_DIGEST (metadata `sha256`, `sha256s`), or
+  // INVALID_ARTIFACT_RANGE (metadata `offset`, `size`) for an `offset`
+  // beyond the size; NOT_FOUND with reason ARTIFACT_NOT_FOUND (metadata
+  // `sha256`) for one not stored and never collected, or ARTIFACT_COLLECTED
+  // (metadata `sha256`, `collected_at`, RFC 3339) for one retention
+  // collected or dropped as damaged; INTERNAL with reason ARTIFACT_DAMAGED
+  // (metadata `sha256`, `damage`: `missing` before any data when the stored
+  // file is gone, `size` before any data, with `actual_size`, when the
+  // file's length is not the artifact's size, or `digest` after the data,
+  // with `actual_sha256`). Uploading the genuine bytes again repairs a
+  // damaged artifact.
+  rpc ReadArtifact(ReadArtifactRequest) returns (stream ReadArtifactResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Whether an artifact's bytes are held.
+enum ArtifactState {
+  // Not set.
+  ARTIFACT_STATE_UNSPECIFIED = 0;
+  // The bytes are stored and can be read.
+  ARTIFACT_STATE_STORED = 1;
+  // Retention removed the bytes while evidence still named them, or Reef
+  // found them damaged or missing and dropped them; `collected_at` says
+  // when. Uploading the same bytes stores them again.
+  ARTIFACT_STATE_COLLECTED = 2;
+  // No bytes were ever stored, or they were deleted when no evidence named
+  // them. Not a failure: evidence may record a digest without its bytes.
+  ARTIFACT_STATE_ABSENT = 3;
+}
+
+// One artifact's record.
+message Artifact {
+  // SHA-256 of its bytes, 64 lowercase hex digits.
+  string sha256 = 1;
+  // Whether its bytes are held.
+  ArtifactState state = 2;
+  // Its length in bytes; 0 when absent.
+  uint64 size = 3;
+  // When its bytes were last stored; unset when absent.
+  google.protobuf.Timestamp stored_at = 4;
+  // When it was last stored, uploaded again, or named by evidence added;
+  // retention counts from this. Unset when absent.
+  google.protobuf.Timestamp used_at = 5;
+  // When retention removed its bytes, or Reef dropped them as damaged or
+  // missing; set when collected only.
+  google.protobuf.Timestamp collected_at = 6;
+  // The `reef-agent` of the upload that last stored its bytes; empty when
+  // it named none, or when absent.
+  string added_by_agent = 7;
+  // The remote token of the upload that last stored its bytes (R2.08);
+  // empty when it came through the socket, or when absent.
+  string remote_token_id = 8;
+  // How many evidence objects of the repository name it.
+  uint32 evidence_count = 9;
+  // The ids of the newest 20 of them, newest added first.
+  repeated string evidence_ids = 10;
+}
+
+// Upload a chunk of an artifact.
+message UploadArtifactRequest {
+  // The repository; a repo id, a unique id prefix of 4 or more hex
+  // digits, or an absolute path inside a registered root.
+  string repo = 1;
+  // SHA-256 of the whole artifact, 64 lowercase hex digits.
+  string sha256 = 2;
+  // The whole artifact's length in bytes, at most `[artifacts]
+  // max_object_size`. A partial upload is keyed by digest and size: one
+  // declaring another size never appends to it.
+  uint64 size = 3;
+  // Where `data` starts in the artifact; it must equal the bytes received
+  // so far. 0 with no data is a probe.
+  uint64 offset = 4;
+  // The next bytes, at most 1 MiB; empty to probe, or to finish a
+  // zero-byte artifact.
+  bytes data = 5;
+}
+
+// Where an upload stands.
+message UploadArtifactResponse {
+  // The bytes held: those of the partial upload, or `size` once stored.
+  uint64 received = 1;
+  // The artifact's record; set once it is stored.
+  Artifact artifact = 2;
+  // Whether this call stored it; false when it was stored already.
+  bool created = 3;
+}
+
+// Get one artifact's record.
+message GetArtifactRequest {
+  // The repository.
+  string repo = 1;
+  // The full digest, or a unique prefix of at least 4 hex digits of a
+  // stored or collected one.
+  string sha256 = 2;
+}
+
+// One artifact's record.
+message GetArtifactResponse {
+  // The artifact.
+  Artifact artifact = 1;
+}
+
+// Read an artifact's bytes.
+message ReadArtifactRequest {
+  // The repository.
+  string repo = 1;
+  // The full digest, or a unique prefix of at least 4 hex digits.
+  string sha256 = 2;
+  // The first byte to read; at most the size (at the size, the read is
+  // empty).
+  uint64 offset = 3;
+  // How many bytes to read; 0 for to the end. A range past the end stops
+  // at the end.
+  uint64 length = 4;
+}
+
+// Part of an artifact's bytes.
+message ReadArtifactResponse {
+  // The artifact's record; on the first message only.
+  Artifact artifact = 1;
+  // Where `data` starts in the artifact.
+  uint64 offset = 2;
+  // The bytes, at most 1 MiB.
+  bytes data = 3;
+}

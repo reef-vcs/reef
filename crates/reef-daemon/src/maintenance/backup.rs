@@ -7,6 +7,7 @@
 //! ```text
 //! <dest>/manifest.json            written first, rewritten with `complete` last
 //! <dest>/reef.sqlite3             SQLite's online backup of the whole database
+//! <dest>/repos/<id>/artifacts/    the stored artifacts, `sha256/` (R3.02)
 //! <dest>/repos/<id>/repo/         `.jj/repo` without the index's contents
 //! <dest>/repos/<id>/git/          a colocated repository's `.git`, without
 //!                                 `index`, `logs/`, `hooks/`, and `*.lock`
@@ -26,7 +27,17 @@
 //!    connection to the database file, `backup.sqlite_pages_per_step` pages
 //!    a step. Heartbeats go on meanwhile; SQLite restarts a step whose pages
 //!    changed.
-//! 3. Per repository: the immutable operation and view files and the git
+//! 3. Per repository, first its stored artifacts (R3.02, ADR 0056):
+//!    `repos/<id>/artifacts/sha256/` into `artifacts/`, partial uploads left
+//!    out. GC, the only thing that deletes genuine artifacts, cannot run
+//!    while the backup holds the maintenance lock, so every stored row of
+//!    the database copy has its file here; files stored after step 2 are
+//!    harmless extras the restored daemon's GC removes. Two other deletions
+//!    can still race the copy: a damaged read's quarantine, which removes
+//!    only bytes that already fail their digest (the restored daemon's tidy
+//!    makes such a row a tombstone), and `ForgetRepository`, which deletes
+//!    the repository whole. Then the immutable
+//!    operation and view files and the git
 //!    backend's extra-metadata tables are copied; then, with the
 //!    repository thread paused (the "write lock held briefly"), the op
 //!    heads and the extra-metadata heads are read, and the immutable files
@@ -425,7 +436,27 @@ async fn backup_repo(
     let jj = record.jj_repo_path.clone();
     let to = dir.join("repo");
 
-    // 3. The immutable operation files first, without the pause, so the
+    // 3. The stored artifacts, before the jj state (R3.02).
+    let (artifact_files, artifact_bytes) = {
+        let from = state.artifacts.dir(id).join("sha256");
+        let into = dir.join(crate::artifacts::ARTIFACTS_DIR).join("sha256");
+        tokio::task::spawn_blocking(move || {
+            if !from.is_dir() {
+                return Ok((0, 0));
+            }
+            copy_tree_with(&from, &into, &[], Existing::Keep)
+                .map_err(|source| BackupError::Io { path: from, source })
+        })
+        .await??
+    };
+    report(
+        BackupStep::Artifacts,
+        Some(id),
+        artifact_files,
+        artifact_bytes,
+    );
+
+    // The immutable operation files first, without the pause, so the
     // pause copies only those written since.
     let (mut files, mut bytes) = {
         let (jj, to) = (jj.clone(), to.clone());
@@ -479,6 +510,8 @@ async fn backup_repo(
         files,
         bytes,
         pause_ms,
+        artifact_files,
+        artifact_bytes,
     };
     Ok((entry, heads))
 }

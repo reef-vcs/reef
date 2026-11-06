@@ -18,17 +18,18 @@ import "reef/api/v1/options.proto";
 service MaintenanceService {
   // Garbage collection: jj's operations and git objects older than the
   // undo window, base cache entries no active workspace uses, ended
-  // workspace records, and unused stores. Refused with UNAVAILABLE while
+  // workspace records, unused stores, and evidence and artifacts past
+  // their retention that no live work keeps. Refused with UNAVAILABLE while
   // another maintenance task (GC, backup, quiesce) runs. The daemon also
   // runs it by itself every `gc.interval` (default a day); UNAVAILABLE
   // while that run is in progress too.
   rpc CollectGarbage(CollectGarbageRequest) returns (CollectGarbageResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
-  // A consistent copy of the daemon's state (the whole database and each
-  // repository's jj state) into a new or empty directory, while agents keep
-  // writing; each repository's thread is paused only while its operation
-  // files are copied. Progress as it goes; the last message has
+  // A consistent copy of the daemon's state (the whole database, and each
+  // repository's stored artifacts and jj state) into a new or empty
+  // directory, while agents keep writing; each repository's thread is
+  // paused only while its operation files are copied. Progress as it goes; the last message has
   // BACKUP_STEP_DONE and the manifest's path. UNAVAILABLE while another
   // maintenance task runs; ALREADY_EXISTS if `dest` is not empty.
   rpc Backup(BackupRequest) returns (stream BackupResponse) {
@@ -106,6 +107,21 @@ message GcReport {
   // holds alone now, a lower bound. Unset where the filesystem cannot tell
   // (measured on APFS only); 0 when nothing was removed.
   optional uint64 base_bytes_unshared = 15;
+  // Evidence objects deleted (R3.02): not on live work, and added before
+  // `[evidence] retention` and `keep_newer`.
+  uint32 evidence_removed = 16;
+  // Artifacts whose bytes were deleted, whether a record of them was kept
+  // (collected) or not.
+  uint32 artifacts_collected = 17;
+  // What their files had allocated; in a dry run, their sizes.
+  uint64 artifact_bytes_freed = 18;
+  // The sizes of the artifacts the repository stores after the step, or
+  // would store in a dry run. Above `[artifacts] max_size` when what live
+  // work or the undo window keeps passes it.
+  uint64 artifact_bytes = 19;
+  // Why the evidence and artifacts step stopped short; empty if it did
+  // not. The other steps still ran.
+  string evidence_error = 20;
 }
 
 // A step of a backup.
@@ -122,6 +138,8 @@ enum BackupStep {
   BACKUP_STEP_HEADS = 4;
   // The backup is complete.
   BACKUP_STEP_DONE = 5;
+  // A repository's stored artifacts (R3.02), before its jj state.
+  BACKUP_STEP_ARTIFACTS = 6;
 }
 
 // Back up the daemon's state.

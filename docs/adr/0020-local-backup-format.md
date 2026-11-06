@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-22
 - Ticket: R1.18
+- Amended by: [0056](0056-evidence-artifact-store-and-retention.md) (the layout gains `repos/<id>/artifacts/`, copied before each repository's jj state)
 
 ## Context
 
@@ -32,6 +33,7 @@ Reef writes every jj operation from the repository's thread (ADR 0012), so pausi
    ```text
    manifest.json                written first; rewritten last with "complete": true
    reef.sqlite3                 the whole database, through SQLite's online backup API
+   repos/<id>/artifacts/        the stored artifacts, sha256/ only (added by 0056)
    repos/<id>/repo/             .jj/repo, without the index's contents
    repos/<id>/git/              a colocated repository's .git, without index, logs/, hooks/, *.lock
    repos/<id>/heads.json        the operation heads, written last

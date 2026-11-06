@@ -275,6 +275,42 @@ describe("local daemon", () => {
     expect(Buffer.from(whole.content).equals(big)).toBe(true);
   });
 
+  // R3.02: an upload in two chunks, then ReadArtifact's server stream.
+  it("artifact reads back through the stream", async () => {
+    const { createHash } = await import("node:crypto");
+    const data = Buffer.alloc((1 << 20) + 4321, "artifact\n");
+    const sha256 = createHash("sha256").update(data).digest("hex");
+    const size = BigInt(data.length);
+    const chunk = 1 << 20;
+    const probe = await client.uploadArtifact({
+      repo,
+      sha256,
+      size,
+      offset: 0n,
+      data: new Uint8Array(),
+    });
+    expect(probe.received).toBe(0n);
+    await client.uploadArtifact({ repo, sha256, size, offset: 0n, data: data.subarray(0, chunk) });
+    const last = await client.uploadArtifact({
+      repo,
+      sha256,
+      size,
+      offset: BigInt(chunk),
+      data: data.subarray(chunk),
+    });
+    expect(last.created).toBe(true);
+    const parts: Uint8Array[] = [];
+    let recordSize = 0n;
+    for await (const frame of client.readArtifact({ repo, sha256: sha256.slice(0, 12) })) {
+      if (frame.artifact) {
+        recordSize = frame.artifact.size;
+      }
+      parts.push(frame.data);
+    }
+    expect(recordSize).toBe(size);
+    expect(Buffer.concat(parts).equals(data)).toBe(true);
+  });
+
   // 23
   it("subscription streams and cancels", async () => {
     const ws = await client.workspace({ repo, reportPresence: false });

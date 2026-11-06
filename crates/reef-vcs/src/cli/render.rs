@@ -380,12 +380,16 @@ fn gc_line(report: &GcReport) -> String {
         )
     };
     format!(
-        "jj {} -> {}, bases {} removed ({bases}), workspaces {} rows ({}), stores {stores}",
+        "jj {} -> {}, bases {} removed ({bases}), workspaces {} rows ({}), stores {stores}, evidence {} removed, artifacts {} collected ({}), {} kept",
         size(report.jj_bytes_before),
         size(report.jj_bytes_after),
         report.base_entries_removed,
         report.workspace_rows_removed,
         size(report.wc_bytes_freed),
+        report.evidence_removed,
+        report.artifacts_collected,
+        size(report.artifact_bytes_freed),
+        size(report.artifact_bytes),
     )
 }
 
@@ -426,6 +430,11 @@ impl TextRender for GcReports {
             store_bytes_freed: 0,
             elapsed_ms: 0,
             dry_run: self.dry_run,
+            evidence_removed: 0,
+            artifacts_collected: 0,
+            artifact_bytes_freed: 0,
+            artifact_bytes: 0,
+            evidence_error: None,
         };
         for report in &self.reports {
             writeln!(w, "repo {}{dry}: {}", report.repo_id, gc_line(report))?;
@@ -437,6 +446,10 @@ impl TextRender for GcReports {
             total.wc_bytes_freed += report.wc_bytes_freed;
             total.stores_removed += report.stores_removed;
             total.store_bytes_freed += report.store_bytes_freed;
+            total.evidence_removed += report.evidence_removed;
+            total.artifacts_collected += report.artifacts_collected;
+            total.artifact_bytes_freed += report.artifact_bytes_freed;
+            total.artifact_bytes += report.artifact_bytes;
         }
         writeln!(w, "total{dry}: {}", gc_line(&total))
     }
@@ -473,6 +486,11 @@ mod tests {
             store_bytes_freed: 0,
             elapsed_ms: 9,
             dry_run: false,
+            evidence_removed: 2,
+            artifacts_collected: 1,
+            artifact_bytes_freed: 3 << 20,
+            artifact_bytes: 5 << 20,
+            evidence_error: None,
         };
         let reports = GcReports {
             reports: vec![
@@ -485,9 +503,9 @@ mod tests {
         reports.render(&mut buffer).unwrap();
         assert_eq!(
             String::from_utf8(buffer).unwrap(),
-            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores 0\n\
-             repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0\n\
-             total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0\n"
+            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept\n\
+             repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept\n\
+             total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept\n"
         );
         let json = serde_json::to_value(&reports).unwrap();
         assert!(json.is_array(), "{json}");
@@ -506,7 +524,7 @@ mod tests {
         reports.render(&mut buffer).unwrap();
         let text = String::from_utf8(buffer).unwrap();
         assert!(
-            text.ends_with("total: jj 0 B -> 0 B, bases 6 removed (2.4 GiB; 120 MiB unshared), workspaces 14 rows (36 MiB), stores 0\n"),
+            text.ends_with("total: jj 0 B -> 0 B, bases 6 removed (2.4 GiB; 120 MiB unshared), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept\n"),
             "{text}"
         );
     }

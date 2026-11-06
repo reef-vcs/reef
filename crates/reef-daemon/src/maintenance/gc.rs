@@ -2,8 +2,8 @@
 //! and every `gc.interval` from the daemon's timer
 //! ([`super::timer`], #95, ADR 0041).
 //!
-//! Six steps per repository, in order, with creates of the repository held
-//! off throughout (its create lock, exclusively):
+//! Seven steps per repository, in order, with creates of the repository
+//! held off throughout (its create lock, exclusively):
 //!
 //! 1. **jj**: abandon the operations older than `keep_newer`, collect the
 //!    operation store, rebuild the index, and run `git gc`
@@ -38,6 +38,15 @@
 //!    (`history/gc.rs`). Logged on failure, as step 5. Its follower waits
 //!    from before step 1 until the operation ids step 1 rewrote are mapped
 //!    in the index.
+//! 7. **Evidence and artifacts** (R3.02, ADR 0056): evidence not on live
+//!    work past `[evidence] retention`, then artifacts no evidence names (a
+//!    day after their last use at the soonest, whatever `keep_newer` is),
+//!    or only evidence that is not on live work past `[artifacts]
+//!    retention`, then the least recently used down to `[artifacts]
+//!    max_size`, then the store's leftovers
+//!    ([`crate::artifacts::retention`]). A failure is logged and the run
+//!    goes on, but is reported in [`GcReport::evidence_error`]: evidence and
+//!    artifacts are authoritative, not a cache.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -109,6 +118,10 @@ pub struct GcReport {
     pub elapsed_ms: u64,
     /// Nothing was deleted; the counts are what would have gone.
     pub dry_run: bool,
+    /// What step 7 did (R3.02); zero when it stopped short.
+    pub retention: crate::artifacts::retention::Retention,
+    /// Why step 7 stopped short, if it did.
+    pub evidence_error: Option<String>,
 }
 
 /// Failure of a GC run, other than the jj step's (which is reported).
@@ -351,7 +364,7 @@ pub async fn run_timed(state: &AppState) -> TimedRun {
 }
 
 #[tracing::instrument(skip_all, fields(repo = %record.id, dry_run = dry_run, trigger = trigger.as_str()))]
-#[expect(clippy::too_many_lines, reason = "the six steps, in their order")]
+#[expect(clippy::too_many_lines, reason = "the seven steps, in their order")]
 async fn run_repo(
     state: &AppState,
     record: &RepositoryRecord,
@@ -445,6 +458,32 @@ async fn run_repo(
         Err(error) => tracing::warn!(error = %error, "the history step of GC panicked"),
     }
 
+    // 7.
+    let (retention, evidence_error) = match crate::artifacts::retention::run(
+        state, id, keep_newer, dry_run,
+    )
+    .await
+    {
+        Ok(retention) => (retention, None),
+        Err(error) => {
+            let text = ErrorChain(&error).to_string();
+            match trigger {
+                Trigger::Request => tracing::error!(
+                    error = %text,
+                    "the evidence and artifacts step of GC stopped short"
+                ),
+                Trigger::Timer => tracing::warn!(
+                    error = %text,
+                    "the evidence and artifacts step of timed GC stopped short; the next run retries"
+                ),
+            }
+            (
+                crate::artifacts::retention::Retention::default(),
+                Some(text),
+            )
+        }
+    };
+
     // Whatever steps 2 to 5 came to: the jj step has rewritten the
     // operation ids the index names.
     if !dry_run && let Some(handle) = &handle {
@@ -468,6 +507,8 @@ async fn run_repo(
         store_bytes_freed,
         elapsed_ms: elapsed_ms(begun),
         dry_run,
+        retention,
+        evidence_error,
     };
     tracing::info!(
         keep_newer = %report.keep_newer,
@@ -482,6 +523,9 @@ async fn run_repo(
         wc_bytes_freed = report.wc_bytes_freed,
         stores_removed = report.stores_removed,
         store_bytes_freed = report.store_bytes_freed,
+        evidence_removed_count = report.retention.evidence_removed,
+        artifacts_collected_count = report.retention.artifacts_collected,
+        artifact_freed_bytes = report.retention.artifact_bytes_freed,
         elapsed_ms = report.elapsed_ms,
         "garbage collection finished"
     );

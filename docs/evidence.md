@@ -30,7 +30,7 @@ An evidence object is a [DSSE](https://github.com/secure-systems-lab/dsse) v1 en
 - **`result`** (required): `pass`, `fail`, or `error`. `error` means the check reached no verdict (the runner crashed, timed out, or ran out of budget); it is not a failure of the tree.
 - **`target`** (optional): the test or build target covered, in your own naming, 1 to 512 bytes without control characters. Leave it out for the whole check of that kind.
 - **`startedOn`, `finishedOn`** (required): `YYYY-MM-DDTHH:MM:SS` with an optional fraction of one to nine digits and `Z`, such as `2026-11-05T10:00:00Z` or `2026-11-05T10:00:00.250Z`; no other offset, no leap second (`:60`), and a year from 1970 to 9999. The finish is not before the start.
-- **`artifacts`** (optional): at most 64 things the check produced, each with a `name` and a `sha256` digest, and optionally `uri`, `mediaType` and `annotations`. Reef records the digests; it does not need the bytes.
+- **`artifacts`** (optional): at most 64 things the check produced, each with a `name` and a `sha256` digest, and optionally `uri`, `mediaType` and `annotations`. Reef records the digests; it does not need the bytes, and stores them when they are uploaded ([Artifacts](#artifacts)).
 - **`annotations`** (optional): an object for your own data. Reef never reads it and never defines a field in it.
 
 There is no field for who attested: anyone can write any name. The attestor is the key that signed.
@@ -92,7 +92,60 @@ With `-r`, the evidence is linked to that change as well as to its tree, and Ree
 
 `reef evidence list` lists the repository's evidence, newest first; `-r <rev>` the evidence on a revision's tree, `--tree <id>` on a tree, and `--change <id>` the evidence added for a change on any tree it had, each marked `(not current)` once the change's tree has moved on. `reef evidence show <id>` prints one object, its statement exactly as signed, and `signature: valid` or `invalid`, checked as it is read. Every field Reef reports is read from the signed payload, so a stored row changed behind the daemon reads `invalid` with what was signed; adding the genuine envelope again repairs it. `--key` filters take the full 64-digit key id. It exits 0 either way: `invalid` means the stored object was changed, and is data about it.
 
-Evidence binds to the tree, so it stays on a change across a describe, or a rebase that keeps the tree, and two changes with the same tree share it. Abandon, undo and garbage collection leave it alone; backups carry it; `reef repo forget` deletes it.
+Evidence binds to the tree, so it stays on a change across a describe, or a rebase that keeps the tree, and two changes with the same tree share it. Abandon and undo leave it alone; garbage collection deletes it only once it is off live work and past its retention ([Retention](#retention)); backups carry it; `reef repo forget` deletes it.
+
+## Artifacts
+
+An artifact is a file a check produced, such as a log, a report or a build output, named in the predicate's `artifacts` by its SHA-256. The daemon stores the bytes once per repository, under `<state>/repos/<id>/artifacts/`, and keeps them by retention. [ADR 0056](adr/0056-evidence-artifact-store-and-retention.md) records why.
+
+`reef evidence add --artifact <file>` hashes each file for the claim, uploads it, and only then adds the evidence, so evidence Reef's own producer adds never names bytes the store lacks. A file that changes between the hash and the upload is refused (`ARTIFACT_DIGEST_MISMATCH`) and nothing is added. `--no-upload` records the digest only. With `--envelope`, each `--artifact` file must be one the envelope names, or nothing is sent. `reef evidence artifact upload <file>...` uploads files without evidence, for a script that signs elsewhere, and prints one line per file: its digest's first 12 digits, its size, and `stored` or `already stored`. An upload resumes where an interrupted one stopped, and bytes already stored are not sent again.
+
+```sh
+reef evidence add --kind test --result pass --key ~/.config/reef/ci.pem --artifact test.log
+reef evidence show <id>                        # artifact test.log sha256:… stored 41 KiB
+reef evidence artifact read <sha256> > test.log
+reef evidence artifact show <sha256>           # its state, size, times, and the evidence naming it
+```
+
+`reef evidence artifact read <sha256>` writes the bytes to stdout, from `--offset` for `--length` bytes (to the end by default); with `-o json` or `-o brief` it prints the artifact's record instead, as `show` does, without reading the bytes. A digest may be a unique prefix of at least 4 hex digits of a stored or collected artifact. When a whole read finds that the stored bytes no longer hash to the digest, the command fails after writing them and says on stderr that they are not the artifact: discard them.
+
+`reef evidence show` prints each artifact as `stored <size>`, `collected <date>` (retention removed the bytes, or Reef dropped them as damaged or missing) or `absent` (never uploaded, or deleted when no evidence named it), read from the store's index, not from the signed claim.
+
+### The upload protocol
+
+An executor in another language uploads through `ArtifactService.UploadArtifact`, one unary call per chunk (gRPC-web carries no client streaming). Every call names the repository, the whole artifact's `sha256` (64 lowercase hex digits) and `size`, an `offset`, and `data`:
+
+1. Hash the file.
+2. Probe: a call at `offset` 0 with no `data`. If the digest is stored, the answer has `received` equal to the size, the `artifact` record and `created: false`, and the upload is done: stored bytes are never sent again. Otherwise `received` is the bytes a partial upload of this digest and size holds (0 for none).
+3. Send the bytes from `received` in chunks of at most 1 MiB, each at the `offset` the previous answer's `received` gives. A chunk at another offset is refused with `ARTIFACT_OFFSET_MISMATCH`, whose `received` metadata says where to resume; this is how a client recovers from a lost response, or from another client uploading the same bytes, which shares the partial upload.
+4. The call whose bytes complete the size answers with the `artifact` record and `created: true`. If the bytes hash to another digest, it is refused with `ARTIFACT_DIGEST_MISMATCH` (`actual_sha256`) and the partial upload is deleted: start again from byte 0.
+
+A zero-byte artifact is one call with no data. A partial upload survives a daemon restart, so a client resumes from the probe's `received`, and is deleted a day after its last chunk. A size over `[artifacts] max_object_size` is refused with `ARTIFACT_TOO_LARGE` before anything is written; a chunk over 1 MiB, or one reaching past the size, with `INVALID_ARTIFACT_UPLOAD`. Uploads record no operation. `reef_client::Client::upload_artifact_file` is this loop in Rust.
+
+`ArtifactService.ReadArtifact` streams the bytes in messages of at most 1 MiB; the first carries the artifact's record. A read of the whole artifact is hashed as it is sent: if the bytes no longer match, the stream ends with `ARTIFACT_DAMAGED` (`damage` `digest`, `actual_sha256`) after the data, and the daemon drops the damaged bytes: the artifact reads as collected, and the next upload of the genuine bytes stores them again. A stored artifact whose file is gone is `ARTIFACT_DAMAGED` (`damage` `missing`), and one whose file's length is not its size `ARTIFACT_DAMAGED` (`damage` `size`, `actual_size`), before any data; an upload of the genuine bytes repairs either. A collected artifact is `ARTIFACT_COLLECTED`, and one evidence only names is `ARTIFACT_NOT_FOUND`. `GetArtifact` returns the record alone, with how many evidence objects name the artifact and the newest 20 of their ids.
+
+## Retention
+
+Garbage collection (`reef ws gc`, and the daemon every `[gc] interval`) deletes evidence and artifacts that no live work keeps. Live work is the revset `trunk() | bookmarks() | working_copies() | mutable()`, evaluated with Reef's aliases: `reef log`'s default set plus every local bookmark. Evidence is pinned, and never deleted, when its tree is a live commit's tree, or when it was added for a change (`-r`) that is still live, on any tree that change had.
+
+Evidence that is not pinned is deleted once it was first added longer ago than `[evidence] retention`. Re-adding it does not renew it. Then artifacts, by what names them:
+
+| The artifact is | It goes when | What remains |
+| --- | --- | --- |
+| Named by no evidence | a day after it was last used, at the soonest | nothing |
+| Named only by evidence that is not pinned | last used longer ago than `[artifacts] retention` | a record that reads `collected` |
+| Named by pinned evidence | never, by age | the bytes |
+
+An artifact is used when it is stored, uploaded again, or named by evidence added. While a repository's stored artifacts pass `[artifacts] max_size`, the least recently used of those not named by pinned evidence are collected too, except what was used within the last day. That day is a grace of its own, so an upload waiting for the evidence that names it is kept even with `[gc] undo_window = "0s"`. Every cutoff is floored at GC's `keep_newer`: nothing added or used within `[gc] undo_window`, or within `[backup] retention` while the last backup is that recent, is deleted, whatever the keys say. `reef ws gc --dry-run` reports what would go.
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `[evidence] retention` | `"90d"` | `0s`, or 1 day to 10 years | Evidence not on live work is deleted this long after it was added. `0s` keeps all evidence. |
+| `[artifacts] retention` | `"30d"` | `0s`, or 1 day to 10 years | Artifacts named only by evidence not on live work are collected this long after they were last used. `0s`: never by age. |
+| `[artifacts] max_size` | `"10GiB"` | at least 64 MiB | The store's size per repository that GC collects down to; a target, not a quota. |
+| `[artifacts] max_object_size` | `"1GiB"` | 1 KiB to 64 GiB | The largest artifact an upload accepts. |
+
+What a reader sees afterwards: deleted evidence is `EVIDENCE_NOT_FOUND`, with no record kept; an artifact whose bytes were collected reads `collected` with its date, and reading it is `ARTIFACT_COLLECTED`, until the same bytes are uploaded again. Collected also covers bytes Reef found damaged or missing and dropped: a whole read that found them failing their digest, or garbage collection finding a stored artifact's file gone. Evidence on an old trunk commit that no bookmark or live change keeps expires after `[evidence] retention`; the landing service (R3.13) will pin the evidence a landing used.
 
 ## Stability
 

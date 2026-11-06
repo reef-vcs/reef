@@ -106,7 +106,14 @@ impl RepositoryService for RepositoriesService {
         // Closed first: the directory holding it goes next.
         self.state.symbols.forget(record.id);
         self.state.history.forget(record.id);
-        let forgotten = manager.forget_repository(record.id).await.map_err(status)?;
+        // No upload commits meanwhile: its row and file would outlive the
+        // repository (R3.02).
+        let artifacts = self.state.artifacts.lock(record.id);
+        let forgotten = manager
+            .forget_repository_holding(record.id, Some(artifacts))
+            .await
+            .map_err(status)?;
+        self.state.artifacts.forget(record.id);
         Ok(Response::new(ForgetRepositoryResponse {
             repository: Some(Repository::from(&forgotten)),
         }))

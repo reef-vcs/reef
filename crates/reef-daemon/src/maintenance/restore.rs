@@ -11,10 +11,12 @@
 //!    heads are not all in the backup's `heads.json` (the live repository is
 //!    newer than the backup; restoring it goes back in time).
 //! 3. Each repository's `.jj/repo` copy staged beside its target (the
-//!    manifest's, or `<root>/.jj/repo` with `--root`), so a failed copy
-//!    changes nothing; then the database copy into place, the old database
-//!    renamed aside with its WAL and shared-memory files, so SQLite cannot
-//!    replay them over the copy.
+//!    manifest's, or `<root>/.jj/repo` with `--root`), and its stored
+//!    artifacts (R3.02) beside `<state>/repos/<id>/artifacts`, so a failed
+//!    copy changes nothing; then the database copy into place, the old
+//!    database renamed aside with its WAL and shared-memory files, so SQLite
+//!    cannot replay them over the copy. A backup from before R3.02 has no
+//!    artifacts, and its evidence reads them as absent.
 //! 4. Each staged copy renamed into place, the live one renamed aside first.
 //!    What was replaced is kept under `.replaced-<nanos>` names and listed
 //!    in the report: the way back from a `--force`. A colocated
@@ -288,6 +290,16 @@ struct Target<'a> {
     jj: PathBuf,
     /// The root it belongs to.
     root: PathBuf,
+    /// Where its artifacts go: `<into>/repos/<id>/artifacts` (R3.02).
+    artifacts: PathBuf,
+}
+
+/// A repository's staged copies.
+struct Staged {
+    /// `.jj/repo`'s.
+    jj: PathBuf,
+    /// The artifacts', when the backup has them.
+    artifacts: Option<PathBuf>,
 }
 
 /// Restores the backup at `src`; see the module docs. Blocks; no daemon may
@@ -331,13 +343,16 @@ pub fn restore(src: &Path, opts: &RestoreOptions) -> Result<RestoreReport, Resto
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_nanos();
-    let mut staged = Vec::with_capacity(targets.len());
+    let mut staged: Vec<Staged> = Vec::with_capacity(targets.len());
     for target in &targets {
         match stage_repo(src, target, stamp) {
-            Ok(path) => staged.push(path),
+            Ok(copies) => staged.push(copies),
             Err(error) => {
-                for path in &staged {
-                    let _ = crate::backend::fs_util::remove_all(path);
+                for copies in &staged {
+                    let _ = crate::backend::fs_util::remove_all(&copies.jj);
+                    if let Some(artifacts) = &copies.artifacts {
+                        let _ = crate::backend::fs_util::remove_all(artifacts);
+                    }
                 }
                 return Err(error);
             }
@@ -482,6 +497,11 @@ fn targets<'a>(
             id,
             jj,
             root,
+            artifacts: opts
+                .into
+                .join("repos")
+                .join(id.to_string())
+                .join(crate::artifacts::ARTIFACTS_DIR),
         });
     }
     Ok(targets)
@@ -557,33 +577,60 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Step 3 for one repository: its `.jj/repo` copied beside the target.
-/// Returns the staged copy.
-fn stage_repo(src: &Path, target: &Target<'_>, stamp: u128) -> Result<PathBuf, RestoreError> {
+/// Step 3 for one repository: its `.jj/repo` copied beside the target,
+/// and its artifacts beside theirs. Returns the staged copies.
+fn stage_repo(src: &Path, target: &Target<'_>, stamp: u128) -> Result<Staged, RestoreError> {
     let parent = target.jj.parent().unwrap_or(Path::new("/"));
     fs::create_dir_all(parent).map_err(io_at(parent))?;
     let staged = parent.join(format!("repo.restore-{stamp}"));
     copy_tree(&repo_dir(src, target.id).join("repo"), &staged, &[]).map_err(io_at(&staged))?;
-    Ok(staged)
-}
-
-/// Step 4 for one repository: the staged copy renamed into place, a live
-/// `.jj/repo` renamed aside (and returned) first; then a colocated
-/// repository's `.git`.
-fn swap_repo(
-    src: &Path,
-    target: &Target<'_>,
-    staged: &Path,
-    stamp: u128,
-) -> Result<Option<PathBuf>, RestoreError> {
-    let kept = if target.jj.exists() {
-        let aside = sibling(&target.jj, &format!("replaced-{stamp}"));
-        fs::rename(&target.jj, &aside).map_err(io_at(&target.jj))?;
-        Some(aside)
+    let backed_up = repo_dir(src, target.id).join(crate::artifacts::ARTIFACTS_DIR);
+    let artifacts = if backed_up.is_dir() {
+        let parent = target.artifacts.parent().unwrap_or(Path::new("/"));
+        fs::create_dir_all(parent).map_err(io_at(parent))?;
+        let copy = parent.join(format!(
+            "{}.restore-{stamp}",
+            crate::artifacts::ARTIFACTS_DIR
+        ));
+        if let Err(error) = copy_tree(&backed_up, &copy, &[]) {
+            let _ = crate::backend::fs_util::remove_all(&staged);
+            return Err(RestoreError::Io {
+                path: copy,
+                source: error,
+            });
+        }
+        Some(copy)
     } else {
         None
     };
-    fs::rename(staged, &target.jj).map_err(io_at(&target.jj))?;
+    Ok(Staged {
+        jj: staged,
+        artifacts,
+    })
+}
+
+/// Step 4 for one repository: each staged copy renamed into place, a live
+/// `.jj/repo` or artifacts directory renamed aside (and returned) first;
+/// then a colocated repository's `.git`.
+fn swap_repo(
+    src: &Path,
+    target: &Target<'_>,
+    staged: &Staged,
+    stamp: u128,
+) -> Result<Vec<PathBuf>, RestoreError> {
+    let mut kept = Vec::new();
+    let mut swap = |from: &Path, to: &Path| -> Result<(), RestoreError> {
+        if to.exists() {
+            let aside = sibling(to, &format!("replaced-{stamp}"));
+            fs::rename(to, &aside).map_err(io_at(to))?;
+            kept.push(aside);
+        }
+        fs::rename(from, to).map_err(io_at(to))
+    };
+    swap(&staged.jj, &target.jj)?;
+    if let Some(artifacts) = &staged.artifacts {
+        swap(artifacts, &target.artifacts)?;
+    }
     if target.entry.colocated {
         restore_git(
             &repo_dir(src, target.id).join("git"),

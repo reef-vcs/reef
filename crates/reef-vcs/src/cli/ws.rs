@@ -673,9 +673,10 @@ fn newest(mut listed: Vec<reef_api::v1::Workspace>, limit: usize) -> Vec<reef_ap
 /// and runs `git gc`, which takes minutes on a large repository.
 const GC_TIMEOUT: Duration = Duration::from_hours(1);
 
-/// `reef ws gc`: the report, then exit 8 (`Io`) if a repository's jj step
-/// stopped short, as the README's exit codes have it; the report is the
-/// command's one JSON value either way.
+/// `reef ws gc`: the report, then exit 8 (`Io`) if a repository's jj step,
+/// or its evidence and artifacts step (R3.02), stopped short, as the
+/// README's exit codes have it; the report is the command's one JSON value
+/// either way.
 async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, CliError> {
     let deadline = ctx.timeout_flag.unwrap_or(GC_TIMEOUT);
     let gc = |repo: String| async move { ctx.client.collect_garbage(&repo, dry_run).await };
@@ -691,15 +692,22 @@ async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, Cl
         dry_run,
     };
     ctx.out.object(&reports)?;
-    let failed: Vec<_> = reports
-        .reports
-        .iter()
-        .filter_map(|report| Some((&report.repo_id, report.jj_error.as_ref()?)))
-        .collect();
-    for (repo, error) in &failed {
-        ctx.out.error_line(&format!(
-            "error: repo {repo}: the jj step of GC stopped short: {error}"
-        ));
+    let mut failed = Vec::new();
+    for report in &reports.reports {
+        for (step, error) in [
+            ("jj", report.jj_error.as_ref()),
+            ("evidence and artifacts", report.evidence_error.as_ref()),
+        ] {
+            if let Some(error) = error {
+                failed.push(format!(
+                    "error: repo {}: the {step} step of GC stopped short: {error}",
+                    report.repo_id
+                ));
+            }
+        }
+    }
+    for line in &failed {
+        ctx.out.error_line(line);
     }
     if failed.is_empty() {
         Ok(ExitCode::SUCCESS)

@@ -1,7 +1,7 @@
 //! The gRPC router: every service the daemon serves, behind
 //! [`CompatLayer`].
 //!
-//! The daemon serves the fifteen `reef.api.v1` services and, frozen,
+//! The daemon serves the sixteen `reef.api.v1` services and, frozen,
 //! `reef.daemon.v0.Daemon/Status` (R2.01, ADR 0029). A request for a method
 //! it does not serve gets tonic's bare `UNIMPLEMENTED`, which a client
 //! cannot tell from a bug; [`CompatLayer`] rewrites that answer so every
@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
 use reef_api::v0::daemon_server::DaemonServer as V0DaemonServer;
+use reef_api::v1::artifact_service_server::ArtifactServiceServer;
 use reef_api::v1::change_service_server::ChangeServiceServer;
 use reef_api::v1::daemon_service_server::DaemonServiceServer;
 use reef_api::v1::diff_service_server::DiffServiceServer;
@@ -49,6 +50,7 @@ use crate::daemon::AppState;
 use crate::error::{unknown_method, v0_client};
 use crate::remote::gate::{Gate as RemoteGate, RemoteGateLayer};
 use crate::remote::streams::RemoteCallLayer;
+use crate::service::artifacts::ArtifactsHandler;
 use crate::service::changes::ChangesHandler;
 use crate::service::compat::V0DaemonService;
 use crate::service::daemon::DaemonStatusService;
@@ -68,7 +70,8 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 16] = [
+pub const SERVED: [&str; 17] = [
+    "reef.api.v1.ArtifactService",
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
@@ -108,7 +111,10 @@ pub(crate) type RemoteRouter = Router<
 /// for both listeners. Built here, not generically, so `Daemon::start`
 /// stays non-generic over tonic's layers.
 pub fn routes(state: &Arc<AppState>) -> Routes {
-    Routes::new(ChangeServiceServer::new(ChangesHandler::new(Arc::clone(
+    Routes::new(ArtifactServiceServer::new(ArtifactsHandler::new(
+        Arc::clone(state),
+    )))
+    .add_service(ChangeServiceServer::new(ChangesHandler::new(Arc::clone(
         state,
     ))))
     .add_service(DaemonServiceServer::new(DaemonStatusService::new(

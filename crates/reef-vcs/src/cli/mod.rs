@@ -598,6 +598,8 @@ pub(crate) fn main() -> ExitCode {
         Command::Init(args) if args.prints_text() => global.output.or(Some(Output::Text)),
         // `file read`'s bytes are its machine-readable form (R2.27).
         Command::File(args) if args.is_read() => global.output.or(Some(Output::Text)),
+        // So are `evidence artifact read`'s (R3.02).
+        Command::Evidence(args) if args.is_artifact_read() => global.output.or(Some(Output::Text)),
         _ => global.output,
     };
     let out = Out::detect(flag, global.quiet);

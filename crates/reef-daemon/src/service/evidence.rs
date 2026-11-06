@@ -9,6 +9,10 @@
 //! signature again, so a row changed behind the daemon reads as
 //! `SIGNATURE_CHECK_INVALID`. Nothing here records an operation.
 //!
+//! An add also indexes the artifact digests the payload names (R3.02), in
+//! its transaction, and every read reports each artifact's state from that
+//! index: stored, collected, or absent.
+//!
 //! A listing is newest added first; its page token's cursor is the last
 //! object's `(added_at, id)`, and it pins the tree a `revision` resolved to
 //! on the first page.
@@ -167,7 +171,7 @@ impl Advise for EvidenceError {
                 "Resolve the conflict first; a conflicted change has no tree to test.",
             )),
             Self::NotFound { .. } => Some(Advice::run(
-                "List the repository's evidence to find its id.",
+                "List the repository's evidence to find its id; evidence that is not on live work is deleted after [evidence] retention (`reef config show`).",
                 ["reef", "evidence", "list"],
             )),
             Self::InvalidKeyId { .. } => Some(Advice::hint(
@@ -327,6 +331,9 @@ fn evidence_message(
                     sha256: artifact.digest.get("sha256").cloned().unwrap_or_default(),
                     uri: artifact.uri.clone().unwrap_or_default(),
                     media_type: artifact.media_type.clone().unwrap_or_default(),
+                    state: v1::ArtifactState::Absent.into(),
+                    size: 0,
+                    collected_at: None,
                 })
                 .collect()
         })
@@ -435,7 +442,7 @@ async fn messages(
             (stored, changes)
         })
         .collect();
-    tokio::task::spawn_blocking(move || {
+    let mut messages: Vec<v1::Evidence> = tokio::task::spawn_blocking(move || {
         with_links
             .into_iter()
             .filter_map(|(stored, changes)| {
@@ -455,7 +462,40 @@ async fn messages(
             .collect()
     })
     .await
-    .map_err(|error| task(&error))
+    .map_err(|error| task(&error))?;
+    artifact_states(state, repo, &mut messages)?;
+    Ok(messages)
+}
+
+/// Sets each artifact's state, size and collection time from the artifact
+/// store's index (R3.02): one `IN` query for the page.
+fn artifact_states(
+    state: &AppState,
+    repo: crate::model::RepoId,
+    messages: &mut [v1::Evidence],
+) -> Result<(), Status> {
+    let digests: BTreeSet<&str> = messages
+        .iter()
+        .flat_map(|message| message.artifacts.iter().map(|a| a.sha256.as_str()))
+        .collect();
+    if digests.is_empty() {
+        return Ok(());
+    }
+    let digests: Vec<&str> = digests.into_iter().collect();
+    let states = state.db.artifact_states(repo, &digests).map_err(status)?;
+    for artifact in messages.iter_mut().flat_map(|m| m.artifacts.iter_mut()) {
+        if let Some(found) = states.get(&artifact.sha256) {
+            artifact.size = found.size;
+            match found.collected_at {
+                None => artifact.set_state(v1::ArtifactState::Stored),
+                Some(at) => {
+                    artifact.set_state(v1::ArtifactState::Collected);
+                    artifact.collected_at = Some(super::convert::timestamp(at));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A full change id in hex, from hex or reverse hex.
@@ -624,25 +664,24 @@ impl EvidenceService for EvidenceHandler {
             commit_id,
             linked_at: now,
         });
-        let inserted = state
+        let digests: Vec<String> = index
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.sha256.clone())
+            .collect();
+        // One transaction writes and reads it back: a GC deleting old
+        // evidence meanwhile either finds this row or never sees it.
+        let (inserted, stored) = state
             .db
-            .insert_evidence(&key, &row, link.as_ref())
+            .add_evidence(&key, &row, link.as_ref(), &digests)
             .map_err(status)?;
         tracing::info!(
             evidence_id = %verified.id,
             key_id = %key.id,
             created = inserted.created,
+            artifact_count = digests.len(),
             "evidence added"
         );
-        let stored = state
-            .db
-            .evidence_by_id(repo_id, &verified.id)
-            .map_err(status)?
-            .ok_or_else(|| {
-                status(EvidenceError::NotFound {
-                    evidence_id: verified.id.clone(),
-                })
-            })?;
         let mut evidence = messages(state, repo_id, vec![stored], false, None, None).await?;
         Ok(Response::new(AddEvidenceResponse {
             evidence: evidence.pop(),
