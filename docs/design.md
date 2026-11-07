@@ -88,7 +88,7 @@ Five object kinds, all content-addressed and stored in one Merkle structure. Thr
 
 **Proposals.** A proposal is a change or stack put forward for main with its evidence. It is not a separate object; it is the change in its proposed state. A change moves through draft, proposed, queued, landed, and one of declined, withdrawn, or superseded, and the operation log records each transition. The change ID identifies the proposal, so there is no second number to track.
 
-**Provenance.** Each snapshot carries a provenance record: agent identity, model and version, session ID, originating task reference, a hash of the instruction that produced the change, and a signature over all of it. This is what makes a thousand agent commits auditable after the fact.
+**Provenance.** Each snapshot carries a provenance record: agent identity, model and version, session ID, originating task reference, a hash of the instruction that produced the change, and a signature over all of it. The record is kept beside the snapshot, keyed by its commit and found by its change, never written into it, so git export does not carry it. This is what makes a thousand agent commits auditable after the fact.
 
 **Published versus working history.** The operation log keeps every agent step. Landed history is a curated projection that policy produces at landing time, so squashing is a rule rather than a chore and humans read a legible history without agents losing their undo trail.
 
@@ -200,7 +200,7 @@ History is a database. Agents ask structured questions such as which changes tou
 
 ### Provenance
 
-Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key. The daemon, or the store for a human acting from a device with no daemon, issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern (R3.03: the daemon's authority key certifies them; Sigstore keyless is R3.42), so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
+Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key (R3.04: one record per commit the daemon records for a workspace, signed by a key the daemon holds in memory for the workspace's session; the model, task and instruction hash are declared by the client and never verified, and the instruction's text never reaches Reef). The daemon, or the store for a human acting from a device with no daemon, issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern (R3.03: the daemon's authority key certifies them; Sigstore keyless is R3.42), so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
 
 ### API
 
@@ -215,7 +215,7 @@ Reef holds state in four places, and only two of them need protecting.
 | State | Where | Authoritative | Rebuilt from |
 | --- | --- | --- | --- |
 | Objects, snapshots, changes, operation log | The jj repository on the local machine, or the store | Yes | Nothing. This is the history. |
-| Reef metadata: workspace records, leases, evidence index, provenance | SQLite in the daemon state directory, every row keyed by repository, or Postgres on the store | Yes, except leases | Leases expire and are reissued |
+| Reef metadata: workspace records, leases, evidence index, provenance | SQLite in the daemon state directory, every row keyed by repository, or Postgres on the store | Yes, except leases; evidence and provenance within their retention | Leases expire and are reissued |
 | Evidence artifacts: logs and build outputs | The artifact store, with its own retention | Yes, within retention | Re-running the executor |
 | Workspaces, base caches, status index, symbol index | Local disk | No | The store, by materialization or re-indexing |
 
@@ -231,7 +231,7 @@ Workspaces are caches by design, so losing a machine's working directories loses
 
 **Git export is the backup of last resort.** The landed projection exported to git survives the loss of every Reef component, and it loses exactly what git cannot represent: conflicts, evidence, provenance, and the operation log. This is stated so nobody mistakes a git mirror for a full backup.
 
-**Keys.** Session private keys are never stored; a restore retires the daemon's authority key, so new keys come from a new one, while certificates already issued still verify. Operator identities are records, not keys. A store's own signing identity, used at landing, is the one key that must be backed up alongside the metadata.
+**Keys.** Session private keys are never stored; a restore retires the daemon's authority key, so new keys come from a new one, while certificates already issued still verify. The keys the daemon holds to sign a workspace's provenance live only in its memory: a restart or a restore starts a new key in the same session. Operator identities are records, not keys. A store's own signing identity, used at landing, is the one key that must be backed up alongside the metadata.
 
 ### Scale
 

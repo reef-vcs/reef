@@ -19,7 +19,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.01 | [R3.01-evidence-object-format.md](R3.01-evidence-object-format.md) | M | R2.03 | R3.02, R3.03, R3.05, R3.07, R3.19 |
 | R3.02 | [R3.02-evidence-artifact-store.md](R3.02-evidence-artifact-store.md) | M | R3.01 | none listed |
 | R3.03 | [R3.03-session-keys-and-operator-identity.md](R3.03-session-keys-and-operator-identity.md) | L | R3.01 | R3.04, R3.06, R3.42, R3.43, R4.09, R4.10 |
-| R3.04 | not yet briefed (Provenance records) | M | R3.03 | R3.25, R3.37 |
+| R3.04 | [R3.04-provenance-records.md](R3.04-provenance-records.md) | M | R3.03 | R3.25, R3.37, R3.44 |
 | R3.05 | not yet briefed (Executor protocol) | M | R3.01, R2.01 | R3.06, R6.03 |
 | R3.06 | not yet briefed (Trusted executor reference implementation) | L | R3.05, R3.03 | R3.14, R3.22 |
 | R3.07 | not yet briefed (Policy file and CEL evaluation) | M | R3.01 | R3.08, R3.13, R3.20, R3.24, R3.28, R6.03 |
@@ -59,6 +59,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.41 | not yet briefed (Desktop shell on Linux and Windows) | L | R3.39 | none listed |
 | R3.42 | not yet briefed (Sigstore keyless identity) | M | R3.03 | none listed |
 | R3.43 | not yet briefed (Verified human presence for sign-off keys) | M | R3.03, R2.18 | none listed |
+| R3.44 | not yet briefed (Provenance from harnesses and SDKs) | S | R3.04, R2.25, R2.26 | none listed |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 
@@ -69,3 +70,4 @@ These were decided while writing the briefs. `dev-phases.md` was edited to match
 - **R3.01's "attestor" is the signing key and its "snapshot hash" is the snapshot's tree hash** (2026-11-05). A field in which the producer names itself proves nothing, so the attestor is the key that signed the envelope, and R3.03 binds keys to identities. Evidence binds to the tree, as the design's Landing and CI load sections say, not to the commit, which the data model row's wording suggested. The design's data model row is reworded in R3.01's PR.
 - **R3.02 also owns the retention of evidence objects** (2026-11-05). R3.01 stores evidence with no deletion except `repo forget`, and a retention rule needs a walk over reachable trees that would push R3.01 past M.
 - **R3.03 leaves Sigstore keyless and verified human presence to two new rows, R3.42 and R3.43** (2026-11-06). Keyless (OIDC, Fulcio, Rekor, the trusted root) and passkey presence are each an M ticket; R3.03 defines their seams (`IssuerKind`, `presence`) in its certificate format. R3.43 answers #222's question of how a verifier knows a human signed. R1.01's row no longer says R3.03 replaces the workspace owner: R3.04's provenance ties a workspace's work to a session.
+- **R3.04 signs provenance with a daemon-held session key, one record per commit the daemon records for a workspace, and leaves harness, MCP and SDK declarations to a new row, R3.44** (2026-11-06). "Signed with the session key" is the key the daemon holds for the workspace's session (`custody: daemon`, as R3.03 reserved), since the watcher records commits with no client present. "Attached to snapshots" is a record per commit the daemon records for a workspace (each snapshot that commits, and `EditFiles` naming the workspace), kept in `reef.sqlite3`, found by change, and compacted and expired by GC, which the row did not mention. The instruction is a SHA-256 the client computes; its text never reaches Reef. Prompt hooks, `reef mcp`'s declaration and the SDK blocks would push R3.04 to L, so they become R3.44 (S).
