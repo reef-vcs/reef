@@ -286,6 +286,9 @@ message ListEvidenceRequest {
   // name, whatever its identity status (R3.03); empty for any. The
   // certificate decides, not the stored columns.
   repeated string identities = 14;
+  // Only evidence this executor job accepted (R3.05), by the job's full id;
+  // empty for any. Another value is INVALID_ARGUMENT, reason INVALID_JOB_ID.
+  string job_id = 15;
 }
 
 // A page of evidence.

@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 18;
+pub const API_REVISION: u32 = 19;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -96,6 +96,9 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.04: `ProvenanceService`, `Workspace.provenance`,
     // `CreateWorkspaceRequest.provenance`, and GC's provenance counts.
     "6895482eba371e90ca74c6fe87ca584770d06ab3b4249eeecc08e6b153536123",
+    // R3.05: `ExecutorService`, `PRESENCE_KIND_JOB` and `Presence.job`,
+    // `ListEvidenceRequest.job_id`, and GC's job counts.
+    "1e15d31ae485d878e9921bc2fc785818f8b4c952f19172e5b64f6107fef2ff26",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -124,6 +127,12 @@ pub fn access(path: &str) -> Option<v1::Access> {
 pub fn methods() -> impl Iterator<Item = &'static str> {
     ACCESS.iter().map(|(path, _)| *path)
 }
+
+/// The executor protocol version this build speaks (R3.05, ADR 0059;
+/// `docs/executor-protocol.md`). Separate from [`API_REVISION`]: it moves
+/// only when an executor speaking the old version would do the wrong thing
+/// with a new job. `ClaimJobResponse.protocol_version` reports it.
+pub const EXECUTOR_PROTOCOL: u32 = 1;
 
 /// The gRPC request metadata key naming the agent a write is for (R2.03):
 /// visible ASCII, at most [`AGENT_MAX_BYTES`] bytes. Every RPC that records
@@ -505,6 +514,52 @@ pub mod error {
     /// (R3.04).
     pub const PROVENANCE_DISABLED: &str = "PROVENANCE_DISABLED";
 
+    /// A job request out of its bounds (R3.05). Metadata: `field`
+    /// (`tree_id`, `kinds`, `targets`, `pairs`, `wall_time`, `cpu_time`,
+    /// `requirements` or `queue_timeout`).
+    pub const INVALID_JOB_SPEC: &str = "INVALID_JOB_SPEC";
+    /// A submission past `[executor] max_open_jobs` queued and running jobs
+    /// (R3.05). Metadata: `limit`.
+    pub const TOO_MANY_JOBS: &str = "TOO_MANY_JOBS";
+    /// A claim whose executor fields are out of their bounds (R3.05).
+    /// Metadata: `field` (`name`, `version`, `kinds`, `labels`,
+    /// `protocol_version`, `wait` or `lease`).
+    pub const INVALID_EXECUTOR: &str = "INVALID_EXECUTOR";
+    /// A remote claim the rules refuse (R3.05). Metadata: `rule`
+    /// (`token_not_linked`).
+    pub const EXECUTOR_REFUSED: &str = "EXECUTOR_REFUSED";
+    /// A job id that is not `job_` and 16 hex digits, or, where a prefix is
+    /// accepted, `job_` and 4 to 16 (R3.05). Metadata: `job_id`.
+    pub const INVALID_JOB_ID: &str = "INVALID_JOB_ID";
+    /// A job id prefix shared by several jobs (R3.05). Metadata: `job_id`,
+    /// `job_ids` (up to ten, comma-separated).
+    pub const AMBIGUOUS_JOB_ID: &str = "AMBIGUOUS_JOB_ID";
+    /// No job has the id or prefix (R3.05). Metadata: `job_id`.
+    pub const JOB_NOT_FOUND: &str = "JOB_NOT_FOUND";
+    /// A remote call on a job another token submitted or claimed (R3.05).
+    /// Metadata: `job_id`.
+    pub const JOB_NOT_OWNED: &str = "JOB_NOT_OWNED";
+    /// An update or completion whose claim token does not hold the job
+    /// (R3.05): stop work on it and do not retry. Metadata: `job_id`,
+    /// `state` (`wrong_token`, `lapsed`, `cancelled`, `completed` or
+    /// `expired`).
+    pub const JOB_NOT_CLAIMED: &str = "JOB_NOT_CLAIMED";
+    /// A cancellation of a completed or expired job (R3.05). Metadata:
+    /// `job_id`, `state`.
+    pub const JOB_FINISHED: &str = "JOB_FINISHED";
+    /// Evidence returned for a job about another tree, or of a kind the job
+    /// did not request (R3.05). Metadata: `index`, `field` (`tree` or
+    /// `kind`), `evidence_id`.
+    pub const JOB_EVIDENCE_MISMATCH: &str = "JOB_EVIDENCE_MISMATCH";
+    /// A `DONE` completion while a requested (kind, target) pair has no
+    /// evidence of exactly that kind and target (R3.05). Metadata: `missing`
+    /// (up to ten `kind:target`, comma-separated), `missing_count`.
+    pub const JOB_INCOMPLETE: &str = "JOB_INCOMPLETE";
+    /// An update, completion or cancellation out of its bounds (R3.05).
+    /// Metadata: `field` (`evidence`, `progress`, `message`, `usage`,
+    /// `outcome` or `reason`).
+    pub const INVALID_JOB_UPDATE: &str = "INVALID_JOB_UPDATE";
+
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
         let envelope = tonic_types::Status {
@@ -638,8 +693,10 @@ mod tests {
         // symbol index's upload, which stores derived data (ADR 0042), and
         // evidence, an immutable object with nothing for undo to revert; and,
         // as ADR 0056 amends it, an artifact's bytes, kept by retention; and,
-        // as ADR 0057 amends it, a session key, which changes no jj view.
-        const EXCEPT: [&str; 7] = [
+        // as ADR 0057 amends it, a session key, which changes no jj view;
+        // and, as ADR 0059 amends it, executor jobs, which are daemon
+        // metadata, not jj state.
+        const EXCEPT: [&str; 12] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
@@ -647,6 +704,11 @@ mod tests {
             "AddEvidence",
             "UploadArtifact",
             "IssueSessionKey",
+            "SubmitJob",
+            "CancelJob",
+            "ClaimJob",
+            "UpdateJob",
+            "CompleteJob",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())
@@ -664,6 +726,27 @@ mod tests {
                 "{}",
                 path(&method)
             );
+        }
+    }
+
+    // R3.05 test 2, S-75: a job request has no field that could carry a
+    // command; what runs for a kind and a target is the executor's.
+    #[test]
+    fn job_requests_carry_no_command() {
+        let pool = pool();
+        for message in ["reef.api.v1.JobSpec", "reef.api.v1.SubmitJobRequest"] {
+            let fields: Vec<String> = pool
+                .get_message_by_name(message)
+                .unwrap()
+                .fields()
+                .map(|field| field.name().to_owned())
+                .collect();
+            for word in ["command", "script", "image", "env", "shell", "args", "argv"] {
+                assert!(
+                    !fields.iter().any(|field| field.contains(word)),
+                    "{message} gained {fields:?}: a request never carries a command (S-75)"
+                );
+            }
         }
     }
 

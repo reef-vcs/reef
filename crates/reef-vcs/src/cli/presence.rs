@@ -160,6 +160,8 @@ enum KindArg {
     Editing,
     Lease,
     Progress,
+    /// Executor jobs (R3.05), reported by the daemon.
+    Job,
 }
 
 impl From<KindArg> for v1::PresenceKind {
@@ -169,6 +171,7 @@ impl From<KindArg> for v1::PresenceKind {
             KindArg::Editing => Self::Editing,
             KindArg::Lease => Self::Lease,
             KindArg::Progress => Self::Progress,
+            KindArg::Job => Self::Job,
         }
     }
 }

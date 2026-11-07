@@ -47,6 +47,7 @@ pub(crate) fn document() -> Result<Value, String> {
             "api_package": api::PACKAGE,
             "api_revision": reef_api::API_REVISION,
             "api_digest": reef_api::API_DIGEST,
+            "executor_protocol": reef_api::EXECUTOR_PROTOCOL,
         },
         "cli": cli,
         "mcp": mcp,
@@ -509,7 +510,7 @@ mod tests {
             .keys()
             .filter(|name| name.starts_with("brief."))
             .collect();
-        assert_eq!(views.len(), 14, "{views:?}");
+        assert_eq!(views.len(), 17, "{views:?}");
         for name in views {
             let view = &defs[name];
             let full = &defs[name.trim_start_matches("brief.")];

@@ -69,6 +69,8 @@ impl From<&GcReport> for v1::GcReport {
             provenance_compacted: u32::try_from(report.provenance.compacted).unwrap_or(u32::MAX),
             provenance_removed: u32::try_from(report.provenance.removed).unwrap_or(u32::MAX),
             provenance_error: report.provenance_error.clone().unwrap_or_default(),
+            jobs_removed: u32::try_from(report.jobs_removed).unwrap_or(u32::MAX),
+            jobs_error: report.jobs_error.clone().unwrap_or_default(),
         }
     }
 }

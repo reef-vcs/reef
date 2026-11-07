@@ -33,6 +33,7 @@ pub(crate) mod holder;
 mod hook;
 mod identity;
 mod init;
+mod job;
 mod log;
 mod op;
 mod out;
@@ -347,6 +348,9 @@ enum Command {
     /// Show who recorded each commit, in which session, under which declared model, task and instruction.
     #[command(infer_subcommands = true)]
     Provenance(provenance::Args),
+    /// Ask executors to check a tree, and follow the jobs: the executor protocol's requester side.
+    #[command(infer_subcommands = true)]
+    Job(job::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -808,6 +812,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,
         Command::Identity(args) => identity::run(&connect(&global, out).await?, args).await,
         Command::Provenance(args) => provenance::run(&connect(&global, out).await?, args).await,
+        Command::Job(args) => job::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

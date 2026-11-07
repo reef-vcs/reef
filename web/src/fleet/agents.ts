@@ -8,7 +8,11 @@
 // name, once under its owner. A daemon entry therefore belongs to every
 // agent with a client entry on the same workspace, and to its own `agent`
 // (the owner) only when no client entry names that workspace.
-import type { Presence } from "../gen/reef/api/v1/presence_pb";
+//
+// Executor jobs' entries (R3.05, kind JOB) are left out: they name the job's
+// requester and no workspace, and belong to the landing pipeline view
+// (R3.34), not to an agent's row.
+import { PresenceKind, type Presence } from "../gen/reef/api/v1/presence_pb";
 
 export interface FleetAgent {
   name: string;
@@ -33,7 +37,9 @@ function add(list: string[], value: string) {
 
 /** The agents of `entries` in repository `repoId` (a full id). Other entries are left out. */
 export function joinAgents(entries: Iterable<Presence>, repoId: string): AgentJoin {
-  const mine = [...entries].filter((p) => p.repoId !== "" && p.repoId === repoId);
+  const mine = [...entries].filter(
+    (p) => p.repoId !== "" && p.repoId === repoId && p.kind !== PresenceKind.JOB,
+  );
   // The client agents on each workspace.
   const clients = new Map<string, string[]>();
   for (const p of mine) {

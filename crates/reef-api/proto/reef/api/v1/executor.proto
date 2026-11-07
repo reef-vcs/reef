@@ -1,0 +1,566 @@
+// The executor protocol, version 1 (R3.05, ADR 0059; docs/executor-protocol.md).
+// A requester asks for checks on a tree. An executor, a process outside
+// Reef, claims the job under a lease, runs the checks however it likes, and
+// returns signed evidence (evidence.proto). Reef schedules; the executor
+// executes.
+//
+// Executors pull: they dial the daemon's socket or its remote listener and
+// claim jobs. The daemon never connects to an executor and never sends it
+// a command: a job names a tree, evidence kinds and targets, and what runs
+// for them is the executor's. A job is daemon metadata, not jj state, so no
+// RPC here records an operation.
+//
+// What a job's evidence proves is what any evidence proves: that a key
+// signed a claim about the tree. The daemon binds a job's evidence to the
+// job's tree and kinds and reports each object's signer; whom to trust is
+// policy's (R3.07).
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/evidence.proto";
+import "reef/api/v1/options.proto";
+
+// Requesting checks on a tree, and running them as an executor.
+service ExecutorService {
+  // Queues a job: checks of `kinds` (and `targets`) on a tree, named by
+  // `tree_id` or resolved from `revision` (`@` snapshots the workspace
+  // first). An open job (queued or running) of the repository with the same
+  // tree, kinds, targets and requirements, submitted by the same caller (the
+  // same remote token, or the socket), is returned instead, with `created`
+  // false and its priority raised to the higher of the two, unless
+  // `duplicate` is set. Records no operation. Through the remote
+  // listener, any `write` token may submit.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_JOB_SPEC (metadata `field`:
+  // `tree_id`, `kinds`, `targets`, `pairs` when kinds times targets passes
+  // 1,000, `wall_time`, `cpu_time`, `requirements` or `queue_timeout`);
+  // NOT_FOUND with reason TREE_NOT_FOUND (metadata `tree_id`);
+  // FAILED_PRECONDITION with reason CONFLICTED_REVISION; UNAVAILABLE with
+  // reason TOO_MANY_JOBS (metadata `limit`) past `[executor] max_open_jobs`;
+  // a revision reason; and a failed snapshot's own error, with reason
+  // SNAPSHOT_FAILED.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // One job, with its coverage: by its full id, or `job_` and a unique
+  // prefix of at least 4 hex digits. Coverage entries re-verify their
+  // evidence at this read.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_JOB_ID (metadata
+  // `job_id`), or AMBIGUOUS_JOB_ID (metadata `job_id`, and `job_ids`, up to
+  // ten, comma-separated); NOT_FOUND with reason JOB_NOT_FOUND (metadata
+  // `job_id`).
+  rpc GetJob(GetJobRequest) returns (GetJobResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Jobs, newest submitted first, paged; or, with `queue_order`, only open
+  // jobs in the order ClaimJob considers them. The filters are ANDed.
+  // `coverage` is left empty: GetJob reads it.
+  //
+  // Errors: INVALID_ARGUMENT for a negative `page_size`; with reason
+  // INVALID_PAGE_TOKEN; a repository reason.
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Ends a queued or running job as CANCELLED at once. A running executor
+  // learns of it on its next UpdateJob (JOB_NOT_CLAIMED, state
+  // `cancelled`); evidence it already returned stays stored and listed by
+  // the job. Cancelling a cancelled job returns it. Through the remote
+  // listener, only the token that submitted the job may cancel it.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_JOB_ID, AMBIGUOUS_JOB_ID,
+  // or INVALID_JOB_UPDATE (metadata `field` `reason`) for a reason over 256
+  // bytes; NOT_FOUND with reason JOB_NOT_FOUND; FAILED_PRECONDITION with
+  // reason JOB_FINISHED (metadata `job_id`, `state`) for a completed or
+  // expired job; PERMISSION_DENIED with reason JOB_NOT_OWNED (metadata
+  // `job_id`) remotely.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Claims the queued job that best matches the executor, waiting up to
+  // `wait` for one: the highest priority, then the oldest, among jobs whose
+  // kinds are all among the executor's, whose requirements are all among
+  // its labels, in `repos` when given, and needing at most its protocol
+  // version. The job becomes RUNNING under a lease of `lease`, extended by
+  // every UpdateJob, and the response carries the attempt's claim token,
+  // which UpdateJob and CompleteJob require and which is never shown again.
+  // With no match before `wait` runs out, `job` is unset. Not idempotent: a
+  // retried claim may claim a second job, and the first lapses after its
+  // lease. Through the remote listener, only a `write` token linked to an
+  // operator identity may claim, and at most 16 of a token's claims wait at
+  // once: past that, a claim answers at once.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_EXECUTOR (metadata
+  // `field`: `name`, `version`, `kinds`, `labels`, `protocol_version`,
+  // `wait` or `lease`); PERMISSION_DENIED with reason
+  // EXECUTOR_REFUSED (metadata `rule` `token_not_linked`) remotely; a
+  // repository reason for an entry of `repos`.
+  rpc ClaimJob(ClaimJobRequest) returns (ClaimJobResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Heartbeats a claim, extending its lease, and reports progress and
+  // evidence. Each envelope is checked as AddEvidence checks it and must be
+  // about the job's tree, of one of its kinds; if any is refused, nothing
+  // from the call is stored. With `release`, the claim ends after the call's
+  // evidence is stored: the job is queued again, or EXPIRED when that was
+  // its last attempt. On JOB_NOT_CLAIMED, an executor stops work on the job
+  // and does not retry. Through the remote listener, only the token that
+  // claimed the job may update it.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_JOB_ID; INVALID_JOB_UPDATE
+  // (metadata `field`: `evidence` for more than 50 envelopes, or
+  // `progress`); INVALID_EVIDENCE or SIGNATURE_INVALID with metadata
+  // `index`, the envelope's position in the call; NOT_FOUND with reason
+  // JOB_NOT_FOUND; FAILED_PRECONDITION with reason JOB_NOT_CLAIMED (metadata
+  // `job_id`, `state`: `wrong_token`, `lapsed`, `cancelled`, `completed` or
+  // `expired`), or JOB_EVIDENCE_MISMATCH (metadata `index`, `field` `tree`
+  // or `kind`, `evidence_id`); PERMISSION_DENIED with reason JOB_NOT_OWNED
+  // remotely.
+  rpc UpdateJob(UpdateJobRequest) returns (UpdateJobResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Completes a claimed job with an outcome and its last evidence, checked
+  // as UpdateJob checks it, in the transaction that completes the job.
+  // `DONE` is accepted only when the job holds, for every requested (kind,
+  // target) pair, an evidence object of exactly that kind and target (no
+  // target for the whole check). Repeating a completion that succeeded,
+  // with the same claim token and evidence the job already accepted,
+  // returns the completed job, so a lost response is safe to retry.
+  // Through the remote listener, only the token that claimed the job may
+  // complete it.
+  //
+  // Errors: as UpdateJob, and INVALID_JOB_UPDATE with `field` `outcome`
+  // (unspecified), `message` (over 1 KiB) or `usage`; FAILED_PRECONDITION
+  // with reason JOB_INCOMPLETE (metadata `missing`, up to ten `kind:target`
+  // pairs, comma-separated, and `missing_count`) for DONE; the job stays
+  // running.
+  rpc CompleteJob(CompleteJobRequest) returns (CompleteJobResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// Where a job is in its life.
+enum JobState {
+  // Not set; in a filter, never valid.
+  JOB_STATE_UNSPECIFIED = 0;
+  // Waiting for an executor to claim it.
+  JOB_STATE_QUEUED = 1;
+  // Claimed by an executor, under a lease.
+  JOB_STATE_RUNNING = 2;
+  // The executor completed it; `outcome` says how much it ran. Nothing
+  // about pass or fail: the evidence says that.
+  JOB_STATE_COMPLETED = 3;
+  // A requester cancelled it.
+  JOB_STATE_CANCELLED = 4;
+  // The daemon ended it; `end_reason` says why.
+  JOB_STATE_EXPIRED = 5;
+}
+
+// How much of a completed job ran.
+enum JobOutcome {
+  // Not set: the job has not completed.
+  JOB_OUTCOME_UNSPECIFIED = 0;
+  // Everything requested ran, and the evidence covers every requested
+  // (kind, target) pair.
+  JOB_OUTCOME_DONE = 1;
+  // The executor stopped at its budget, with whatever evidence it had.
+  JOB_OUTCOME_BUDGET_EXHAUSTED = 2;
+  // The executor could not run the checks (it could not get the tree, its
+  // runner broke); `message` says why. A check that ran and reached no
+  // verdict is evidence with result `error`, not this.
+  JOB_OUTCOME_FAILED = 3;
+}
+
+// Why the daemon ended a job.
+enum JobEndReason {
+  // Not set: the job is not EXPIRED.
+  JOB_END_REASON_UNSPECIFIED = 0;
+  // Nobody claimed it before `queue_expires_at`.
+  JOB_END_REASON_QUEUE_TIMEOUT = 1;
+  // Its last attempt's claim lapsed or was released.
+  JOB_END_REASON_ATTEMPTS = 2;
+  // Its wall time and the daemon's grace passed while it was running.
+  JOB_END_REASON_DEADLINE = 3;
+}
+
+// What one attempt of a job may use.
+message Budget {
+  // How long one attempt may run, from its claim: 1 second to `[executor]
+  // max_wall_time`. Unset is `[executor] default_wall_time`. The executor
+  // enforces it and completes with BUDGET_EXHAUSTED; the daemon expires the
+  // job 60 seconds after it, as a backstop.
+  google.protobuf.Duration wall_time = 1;
+  // CPU time one attempt may use, 1 second to 7 days; enforced only by the
+  // executor, which reports its use. Unset for no limit.
+  google.protobuf.Duration cpu_time = 2;
+}
+
+// A job's request, as recorded. Lists are sorted and deduplicated.
+message JobSpec {
+  // The tree to check: lowercase hex of the repository's object id, the
+  // `gitTree` value evidence about it names.
+  string tree_id = 1;
+  // The evidence kinds expected, 1 to 16: `^[a-z][a-z0-9-]{0,62}$`.
+  repeated string kinds = 2;
+  // The targets to check, 0 to 1,000, in the executor's own naming: 1 to
+  // 512 bytes with no control characters. Empty means the whole check of
+  // each kind. Targets are data: an executor matches them against what it
+  // knows how to run, never through a shell.
+  repeated string targets = 3;
+  // What one attempt may use, with defaults applied.
+  Budget budget = 4;
+  // Labels an executor must have to claim the job, 0 to 16, `key=value`:
+  // the key `[a-z0-9][a-z0-9._-]{0,62}`, the value 1 to 128 bytes of
+  // visible ASCII. By convention `os` and `arch`, as Rust's
+  // `std::env::consts` names them.
+  repeated string requirements = 5;
+  // Higher is claimed first; equal priorities go in submission order.
+  int32 priority = 6;
+  // A commit with `tree_id` as its tree, for executors whose tools check out
+  // commits; set when the job was submitted with a revision.
+  string commit_id = 7;
+  // The change the job is for, in hex; set when submitted with a revision.
+  // Context only: evidence binds to the tree.
+  string change_id = 8;
+}
+
+// An attempt's progress, as the executor last reported it.
+message JobProgress {
+  // What it is doing, such as `build` or `test`: at most 64 bytes of
+  // visible ASCII.
+  string phase = 1;
+  // Units done.
+  uint64 done = 2;
+  // Units in all; 0 when unknown.
+  uint64 total = 3;
+  // What a unit is, such as `targets`: at most 32 bytes of visible ASCII.
+  string unit = 4;
+}
+
+// What an executor says it is. Declared, never verified.
+message ExecutorInfo {
+  // What it calls itself, such as `ci-runner-7`: 1 to 256 bytes of visible
+  // ASCII and spaces.
+  string name = 1;
+  // Its version: at most 64 bytes of visible ASCII.
+  string version = 2;
+  // The evidence kinds it can produce, 1 to 64.
+  repeated string kinds = 3;
+  // Its labels, 0 to 32, `key=value`, as JobSpec's requirements.
+  repeated string labels = 4;
+}
+
+// The executor holding, or last holding, a job.
+message JobExecutor {
+  // What it declared at its claim.
+  ExecutorInfo info = 1;
+  // The highest protocol version it declared.
+  uint32 protocol_version = 2;
+  // The claim's `reef-agent`; declared.
+  string agent = 3;
+  // The remote token it claimed through; empty on the socket.
+  string remote_token_id = 4;
+  // The operator identity that token is linked to, by name; empty on the
+  // socket.
+  string identity = 5;
+}
+
+// What an attempt used, as the executor reports it. 0 is not reported.
+message JobUsage {
+  // Wall time, in milliseconds; 0 when not reported.
+  uint64 wall_time_ms = 1;
+  // CPU time, in milliseconds; 0 when not reported.
+  uint64 cpu_time_ms = 2;
+}
+
+// One evidence object an executor returns: AddEvidence's pair.
+message SignedEvidence {
+  // A DSSE envelope as JSON, at most 64 KiB.
+  bytes envelope = 1;
+  // The signer's public key: an ed25519 DER SubjectPublicKeyInfo.
+  bytes public_key = 2;
+}
+
+// One evidence object a job accepted, from its verified payload.
+message JobEvidence {
+  // The evidence id.
+  string evidence_id = 1;
+  // Its kind.
+  string kind = 2;
+  // Its target; empty for none.
+  string target = 3;
+  // Its result.
+  EvidenceResult result = 4;
+  // The attempt that sent it.
+  uint32 attempt = 5;
+  // Whether this call stored the object for the first time.
+  bool created = 6;
+  // Created by this job, and started no earlier than five minutes before
+  // the claim of the attempt that sent it. A re-sent old envelope is still
+  // evidence about the tree, but not fresh.
+  bool fresh = 7;
+  // When the job accepted it.
+  google.protobuf.Timestamp accepted_at = 8;
+}
+
+// One requested (kind, target) pair and the evidence that covers it.
+message JobCoverage {
+  // The kind.
+  string kind = 1;
+  // The target; empty for the whole check.
+  string target = 2;
+  // The latest accepted object of exactly this kind and target; empty when
+  // none has arrived, or when retention removed it.
+  string evidence_id = 3;
+  // Its result; unspecified when there is none.
+  EvidenceResult result = 4;
+  // Whether it is fresh (JobEvidence.fresh).
+  bool fresh = 5;
+  // Its signature, checked again at this read; unspecified when there is
+  // none.
+  SignatureCheck signature = 6;
+}
+
+// A job.
+message Job {
+  // Its id: `job_` and 16 hex digits, unique across the daemon.
+  string job_id = 1;
+  // Its repository.
+  string repo_id = 2;
+  // What was requested.
+  JobSpec spec = 3;
+  // Where it is.
+  JobState state = 4;
+  // How much ran, for COMPLETED.
+  JobOutcome outcome = 5;
+  // Why the daemon ended it, for EXPIRED.
+  JobEndReason end_reason = 6;
+  // The protocol version an executor needs to claim it.
+  uint32 protocol_version = 7;
+  // The current or last attempt, from 1; 0 before the first claim.
+  uint32 attempt = 8;
+  // Attempts before a lapsing claim expires the job.
+  uint32 max_attempts = 9;
+  // The submitter's `reef-agent`; empty when none was sent.
+  string requested_by_agent = 10;
+  // The remote token that submitted it; empty on the socket.
+  string requested_by_token = 11;
+  // When it was submitted.
+  google.protobuf.Timestamp submitted_at = 12;
+  // When it expires unless claimed, while queued.
+  google.protobuf.Timestamp queue_expires_at = 13;
+  // When the current or last attempt was claimed.
+  google.protobuf.Timestamp claimed_at = 14;
+  // When the current claim lapses unless updated, while running.
+  google.protobuf.Timestamp lease_expires_at = 15;
+  // When the daemon expires the running attempt: its claim, its wall time
+  // and 60 seconds.
+  google.protobuf.Timestamp deadline_at = 16;
+  // When it reached a terminal state.
+  google.protobuf.Timestamp finished_at = 17;
+  // The current or last attempt's executor.
+  JobExecutor executor = 18;
+  // The current or last attempt's progress.
+  JobProgress progress = 19;
+  // What the last completing attempt reported using.
+  JobUsage usage = 20;
+  // Observed by the daemon: the sum, over attempts, of each attempt's time
+  // from its claim to its end, in milliseconds.
+  uint64 elapsed_ms = 21;
+  // The executor's message with FAILED or BUDGET_EXHAUSTED, or the cancel
+  // reason.
+  string message = 22;
+  // Evidence objects the job accepted.
+  uint32 evidence_count = 23;
+  // One entry per requested pair, in the spec's order (kinds, then
+  // targets). GetJob only.
+  repeated JobCoverage coverage = 24;
+}
+
+// SubmitJob's request: the tree, by revision or id, and the spec.
+message SubmitJobRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to in `revision`; empty for none.
+  string workspace = 2;
+  // The tree to check.
+  oneof source {
+    // A revision whose commit's tree to check; `@` snapshots the workspace
+    // first. Fills the spec's `commit_id` and `change_id`.
+    string revision = 3;
+    // A tree by id, lowercase hex; it must be in the repository.
+    string tree_id = 4;
+  }
+  // The evidence kinds expected, 1 to 16.
+  repeated string kinds = 5;
+  // The targets, 0 to 1,000; kinds times targets at most 1,000.
+  repeated string targets = 6;
+  // What one attempt may use; unset fields take the defaults.
+  Budget budget = 7;
+  // Labels an executor must have, 0 to 16.
+  repeated string requirements = 8;
+  // Higher is claimed first.
+  int32 priority = 9;
+  // How long the job may wait unclaimed: 1 minute to 7 days. Unset is
+  // `[executor] queue_timeout`.
+  google.protobuf.Duration queue_timeout = 10;
+  // Queue a new job even when an identical one is open.
+  bool duplicate = 11;
+}
+
+// SubmitJob's response.
+message SubmitJobResponse {
+  // The job.
+  Job job = 1;
+  // False when an identical open job was returned instead.
+  bool created = 2;
+}
+
+// GetJob's request.
+message GetJobRequest {
+  // The repository; optional, since job ids are unique across the daemon.
+  string repo = 1;
+  // The job's id, or `job_` and a unique prefix of at least 4 hex digits.
+  string job_id = 2;
+}
+
+// GetJob's response.
+message GetJobResponse {
+  // The job, with its coverage.
+  Job job = 1;
+}
+
+// ListJobs' request: the filters, ANDed, and the page.
+message ListJobsRequest {
+  // The repository; empty for every repository.
+  string repo = 1;
+  // Only these states; empty for all.
+  repeated JobState states = 2;
+  // Only jobs on this tree.
+  string tree_id = 3;
+  // Only jobs for this change, a full change id in hex or reverse hex.
+  string change_id = 4;
+  // Only jobs whose current or last executor has this name.
+  string executor = 5;
+  // Only jobs submitted at or after this time.
+  google.protobuf.Timestamp since = 6;
+  // Only open jobs, in the order ClaimJob considers them (priority, then
+  // submission), instead of newest first.
+  bool queue_order = 7;
+  // Jobs per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 8;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 9;
+}
+
+// ListJobs' response: one page.
+message ListJobsResponse {
+  // The jobs, without coverage.
+  repeated Job jobs = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}
+
+// CancelJob's request.
+message CancelJobRequest {
+  // The repository; optional.
+  string repo = 1;
+  // The job's id, or `job_` and a unique prefix of at least 4 hex digits.
+  string job_id = 2;
+  // Why, at most 256 bytes with no control characters; kept as the
+  // job's message.
+  string reason = 3;
+}
+
+// CancelJob's response.
+message CancelJobResponse {
+  // The job, as cancelled.
+  Job job = 1;
+}
+
+// ClaimJob's request: what the executor is and can do, and how long to wait.
+message ClaimJobRequest {
+  // What the executor is and can do.
+  ExecutorInfo executor = 1;
+  // The highest protocol version it speaks, at least 1.
+  uint32 protocol_version = 2;
+  // Only jobs of these repositories; empty for every repository.
+  repeated string repos = 3;
+  // How long to wait for a job: 0 to 60 seconds. Unset or 0 returns at
+  // once.
+  google.protobuf.Duration wait = 4;
+  // How long the claim lasts without an UpdateJob: 15 seconds to 10
+  // minutes. Unset is 60 seconds. Send UpdateJob at least every third of
+  // it.
+  google.protobuf.Duration lease = 5;
+}
+
+// ClaimJob's response: the job and its claim token, or neither.
+message ClaimJobResponse {
+  // The claimed job, running; unset when none matched in time.
+  Job job = 1;
+  // The attempt's claim token, for UpdateJob and CompleteJob. Returned only
+  // here; worthless once the attempt ends.
+  string claim_token = 2;
+  // The highest protocol version the daemon speaks, set with or without a
+  // job.
+  uint32 protocol_version = 3;
+}
+
+// UpdateJob's request: a heartbeat with optional progress and evidence.
+message UpdateJobRequest {
+  // The job's full id.
+  string job_id = 1;
+  // The claim token ClaimJob returned.
+  string claim_token = 2;
+  // The attempt's progress; unset keeps the last.
+  JobProgress progress = 3;
+  // Evidence to accept, at most 50.
+  repeated SignedEvidence evidence = 4;
+  // Give the claim back now, after storing the evidence.
+  bool release = 5;
+}
+
+// UpdateJob's response.
+message UpdateJobResponse {
+  // The job, after the call.
+  Job job = 1;
+  // The evidence this call accepted, in the call's order.
+  repeated JobEvidence accepted = 2;
+}
+
+// CompleteJob's request: the outcome and the last evidence.
+message CompleteJobRequest {
+  // The job's full id.
+  string job_id = 1;
+  // The claim token ClaimJob returned.
+  string claim_token = 2;
+  // How much ran; required.
+  JobOutcome outcome = 3;
+  // The last evidence to accept, at most 50.
+  repeated SignedEvidence evidence = 4;
+  // What the attempt used.
+  JobUsage usage = 5;
+  // Why, with FAILED or BUDGET_EXHAUSTED: at most 1 KiB, with no control
+  // characters but newlines.
+  string message = 6;
+}
+
+// CompleteJob's response.
+message CompleteJobResponse {
+  // The job, completed.
+  Job job = 1;
+  // The evidence this call accepted, in the call's order.
+  repeated JobEvidence accepted = 2;
+}

@@ -137,6 +137,13 @@ message GcReport {
   // Why the provenance step stopped short; empty if it did not. The other
   // steps still ran.
   string provenance_error = 24;
+  // Executor jobs deleted (R3.05): finished before `[executor]
+  // job_retention` and `keep_newer`, with the record of the evidence they
+  // accepted. The evidence itself stays, under its own retention.
+  uint32 jobs_removed = 25;
+  // Why the jobs step stopped short; empty if it did not. The other steps
+  // still ran.
+  string jobs_error = 26;
 }
 
 // A step of a backup.

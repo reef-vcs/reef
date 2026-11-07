@@ -50,6 +50,7 @@ use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
+use reef_api::v1::executor_service_client::ExecutorServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
@@ -1749,6 +1750,100 @@ impl Client {
             length,
         };
         self.call("ReadArtifact", client.read_artifact(request))
+            .await
+    }
+}
+
+impl Client {
+    fn executor(&self) -> ExecutorServiceClient<Svc> {
+        ExecutorServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `ExecutorService.SubmitJob` (R3.05): queues checks on a tree, or
+    /// returns the identical open job (`created` false).
+    pub async fn submit_job(
+        &self,
+        request: v1::SubmitJobRequest,
+    ) -> Result<v1::SubmitJobResponse, ClientError> {
+        self.call("SubmitJob", self.executor().submit_job(request))
+            .await
+    }
+
+    /// `ExecutorService.GetJob` (R3.05): one job, with its coverage.
+    pub async fn get_job(
+        &self,
+        request: v1::GetJobRequest,
+    ) -> Result<v1::GetJobResponse, ClientError> {
+        self.call("GetJob", self.executor().get_job(request)).await
+    }
+
+    /// One page of `ExecutorService.ListJobs` (R3.05).
+    pub async fn list_jobs_page(
+        &self,
+        request: v1::ListJobsRequest,
+    ) -> Result<v1::ListJobsResponse, ClientError> {
+        self.call("ListJobs", self.executor().list_jobs(request))
+            .await
+    }
+
+    /// The first `limit` jobs the listing `request` asks for (all when 0),
+    /// and whether more exist; `request`'s page fields are ignored.
+    pub async fn list_jobs(
+        &self,
+        request: v1::ListJobsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::Job>, ClientError> {
+        let mut request = v1::ListJobsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_jobs_page(request.clone()).await?;
+            limited.items.extend(response.jobs);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// `ExecutorService.CancelJob` (R3.05).
+    pub async fn cancel_job(
+        &self,
+        request: v1::CancelJobRequest,
+    ) -> Result<v1::CancelJobResponse, ClientError> {
+        self.call("CancelJob", self.executor().cancel_job(request))
+            .await
+    }
+
+    /// `ExecutorService.ClaimJob` (R3.05): claims a matching job, waiting
+    /// up to the request's `wait` for one.
+    pub async fn claim_job(
+        &self,
+        request: v1::ClaimJobRequest,
+    ) -> Result<v1::ClaimJobResponse, ClientError> {
+        self.call("ClaimJob", self.executor().claim_job(request))
+            .await
+    }
+
+    /// `ExecutorService.UpdateJob` (R3.05): a claim's heartbeat, progress
+    /// and evidence.
+    pub async fn update_job(
+        &self,
+        request: v1::UpdateJobRequest,
+    ) -> Result<v1::UpdateJobResponse, ClientError> {
+        self.call("UpdateJob", self.executor().update_job(request))
+            .await
+    }
+
+    /// `ExecutorService.CompleteJob` (R3.05).
+    pub async fn complete_job(
+        &self,
+        request: v1::CompleteJobRequest,
+    ) -> Result<v1::CompleteJobResponse, ClientError> {
+        self.call("CompleteJob", self.executor().complete_job(request))
             .await
     }
 }

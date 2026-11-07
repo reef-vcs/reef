@@ -1165,7 +1165,7 @@ async fn ws_gc_dry_run() {
     output.clone().assert().success();
     assert_eq!(
         stdout(&output),
-        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0, evidence 0 removed, artifacts 0 collected (0 B), 0 B kept, provenance 0 compacted, 0 removed\n"
+        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0, evidence 0 removed, artifacts 0 collected (0 B), 0 B kept, provenance 0 compacted, 0 removed, jobs 0 removed\n"
     );
     daemon.stop().await;
 
@@ -1794,8 +1794,9 @@ fn root_help_names_every_command() {
     for command in help_commands(&state, &[]) {
         // R3.03: `completions` left the first screen for `identity`, and
         // R3.04 `restore` for `provenance`; both are in `--help-all`, and
-        // `reef backup --help` names `restore`.
-        if command == "completions" || command == "restore" {
+        // `reef backup --help` names `restore`. R3.05's `job` never joined
+        // it: agents do not schedule checks, the landing service will.
+        if command == "completions" || command == "restore" || command == "job" {
             continue;
         }
         assert!(words.contains(&command.as_str()), "{command}: {text}");

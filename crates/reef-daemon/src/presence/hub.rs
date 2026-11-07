@@ -37,6 +37,8 @@ pub enum DaemonKey {
     Editing(WorkspaceId),
     /// One long-running operation's progress.
     Progress(u64),
+    /// An executor job (R3.05), by the 64 bits of its id.
+    Job(u64),
 }
 
 /// What an entry says, as a report gives it: validated and resolved.
@@ -60,6 +62,8 @@ pub struct Report {
     pub progress: Option<v1::Progress>,
     /// For `LEASE`.
     pub lease: Option<v1::Lease>,
+    /// For `JOB` (R3.05).
+    pub job: Option<v1::JobPresence>,
     /// How long it lasts unless reported again, already clamped.
     pub ttl: Duration,
 }
@@ -255,8 +259,8 @@ impl PresenceHub {
         replace: Option<PresenceId>,
         report: Report,
     ) -> Result<v1::Presence, PresenceError> {
-        if report.kind == PresenceKind::Lease {
-            return Err(PresenceError::DaemonKind);
+        if matches!(report.kind, PresenceKind::Lease | PresenceKind::Job) {
+            return Err(PresenceError::DaemonKind(report.kind));
         }
         let mut inner = self.lock();
         if inner.names_gone(&report) {
@@ -480,6 +484,7 @@ impl PresenceHub {
             )))),
             lease: report.lease,
             by_daemon: daemon.is_some(),
+            job: report.job,
         };
         if daemon.is_none() && presence.encoded_len() > MAX_ENTRY_BYTES {
             return Err(PresenceError::TooLarge {
@@ -746,7 +751,7 @@ mod tests {
         lease.kind = PresenceKind::Lease;
         assert!(matches!(
             hub.report(None, lease).unwrap_err(),
-            PresenceError::DaemonKind
+            PresenceError::DaemonKind(PresenceKind::Lease)
         ));
         let daemon = hub.publish_daemon(DaemonKey::Progress(1), |_| activity("d", "x"));
         assert!(matches!(

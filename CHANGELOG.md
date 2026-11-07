@@ -13,6 +13,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - The root help's "Also:" line lists `identity` and no longer `completions`, which `--help-all` still lists.
 - The daemon's database becomes schema 10 (`0010_provenance`, R3.04) the first time this daemon opens it. From then on every committing snapshot and every `EditFiles` naming a workspace records a signed provenance record; `[provenance] enabled = false` turns that off.
 - The root help's "Also:" line lists `provenance` and no longer `restore`, which `--help-all` and `reef backup --help` still name.
+- The daemon's database becomes schema 11 (`0011_jobs`, R3.05) the first time this daemon opens it.
 - Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
 ### Added
@@ -41,6 +42,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `[provenance]` in the daemon's configuration: `enabled` (`true`), `compact_after` (`"7d"`) and `retention` (`"90d"`). Garbage collection's eighth step keeps the first and last record of each run under one context once records are older than `compact_after`, and deletes records of changes with no visible commit after `retention` (`GcReport.provenance_compacted`, `provenance_removed`, `provenance_error`).
 - `reef schema evidence` includes `evidence.ProvenanceStatement` and `evidence.ProvenancePredicate`.
 - Backups include each repository's stored artifacts (`repos/<id>/artifacts/`, a `BACKUP_STEP_ARTIFACTS` progress message, and `artifact_files` and `artifact_bytes` in the manifest), and restore puts them back. A backup from before this release restores without artifacts.
+
+- The executor protocol (R3.05, [ADR 0059](docs/adr/0059-executor-protocol.md), [docs/executor-protocol.md](docs/executor-protocol.md)): a job asks for checks of some evidence kinds (and targets) on a tree; an executor, a process outside Reef, dials the daemon, claims the job under a lease, and returns signed evidence. Executors pull; the daemon never connects to one and never sends a command. Jobs are kept in `reef.sqlite3`, so they survive a restart; a lapsed lease requeues a job up to three attempts, and the daemon enforces a deadline and a queue timeout. Returned evidence goes through `AddEvidence`'s checks, must be about the job's tree and of its kinds, and is stored all or nothing per call; `DONE` needs a summary object for every requested (kind, target) pair. Freshness is reported, not enforced, and whether a signer is trusted is policy's (R3.07). Protocol version 1, separate from the API revision.
+- `ExecutorService` (API revision 19): `SubmitJob`, `GetJob`, `ListJobs` and `CancelJob` for requesters; `ClaimJob` (a long poll of up to 60 s), `UpdateJob` (heartbeat, progress, evidence, release) and `CompleteJob` for executors. Through the remote listener, only a token linked to an operator identity may claim, a job is updated and completed only through the token that claimed it, and cancelled only through the one that submitted it. None records an operation.
+- `reef job submit`, `show`, `list` and `cancel`: the requester's side. `submit --wait` follows the job's presence until it finishes and prints its coverage; `--for` gives up with exit 6, leaving the job open. Not on the root help's first screen; `--help-all` lists it. `reef evidence list --job` lists the evidence a job accepted (`ListEvidenceRequest.job_id`).
+- A presence kind, `job` (`PRESENCE_KIND_JOB`, `Presence.job`), reported by the daemon only: one entry per open job, ended with its final state. `reef presence watch --kind job` follows it; the web UI's workspaces page leaves it out.
+- `[executor]` in the daemon's configuration: `default_wall_time` (`"30m"`), `max_wall_time` (`"6h"`), `queue_timeout` (`"1h"`), `max_attempts` (`3`), `max_open_jobs` (`1000`) and `job_retention` (`"30d"`). Garbage collection deletes finished jobs after `job_retention` (`GcReport.jobs_removed`, `jobs_error`); their evidence stays.
+- `reef schema` reports `executor_protocol`.
 
 ### Fixed
 

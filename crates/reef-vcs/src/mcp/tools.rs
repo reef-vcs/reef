@@ -658,6 +658,34 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.ProvenanceService/ListProvenance",
         "read by `reef provenance list` and R3.37's explain; tools/list is at its budget (#116)",
     ),
+    (
+        "/reef.api.v1.ExecutorService/SubmitJob",
+        "checks are requested by the landing service (R3.13, R3.14) and `reef job submit`; an agent proposes, it does not schedule (R3.05)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/CancelJob",
+        "checks are requested by the landing service (R3.13, R3.14) and `reef job`; an agent proposes, it does not schedule (R3.05)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/ClaimJob",
+        "executors speak the protocol directly, with a key a tool call should not hold (R3.05)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/UpdateJob",
+        "executors speak the protocol directly, with a key a tool call should not hold (R3.05)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/CompleteJob",
+        "executors speak the protocol directly, with a key a tool call should not hold (R3.05)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/GetJob",
+        "read by `reef job` and the pipeline view (R3.34); tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ExecutorService/ListJobs",
+        "read by `reef job` and the pipeline view (R3.34); tools/list is at its budget (#116)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.

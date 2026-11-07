@@ -438,6 +438,27 @@ async fn outputs_match_their_schemas() {
         .both(&a_dir, &["provenance", "list", "--change", "@"])
         .await;
     script.both(&a_dir, &["provenance", "show"]).await;
+    // R3.05: a job, deduplicated, listed, shown and cancelled.
+    let submitted = script
+        .json(
+            &a_dir,
+            &["job", "submit", "--kind", "test", "--target", "a"],
+        )
+        .await;
+    script
+        .run(
+            &a_dir,
+            &["job", "submit", "--kind", "test", "--target", "a"],
+        )
+        .await;
+    let job_id = text(&submitted["job"]["id"]);
+    script.both(&a_dir, &["job", "list"]).await;
+    script.both(&a_dir, &["job", "list", "--queue"]).await;
+    script.both(&a_dir, &["job", "show", &job_id]).await;
+    script.both(&a_dir, &["job", "cancel", &job_id]).await;
+    script
+        .both(&a_dir, &["evidence", "list", "--job", &job_id])
+        .await;
     script
         .run(&a_dir, &["evidence", "show", &evidence_id, "--envelope"])
         .await;

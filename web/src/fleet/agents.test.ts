@@ -38,6 +38,19 @@ describe("joinAgents", () => {
     expect(byEntry.get("l")).toEqual(["reviewer"]);
   });
 
+  // R3.05 test 16: a job's entry adds no agent row.
+  it("leaves executor jobs' entries out", () => {
+    const { agents, byEntry } = joinAgents(
+      [
+        entry({ id: "a", agent: "ann", workspaceId: "w1", kind: PresenceKind.ACTIVITY }),
+        entry({ id: "j", agent: "builder", byDaemon: true, kind: PresenceKind.JOB }),
+      ],
+      REPO,
+    );
+    expect([...agents.keys()]).toEqual(["ann"]);
+    expect(byEntry.has("j")).toBe(false);
+  });
+
   it("gives daemon entries alone to the owner they name", () => {
     const { agents } = joinAgents(
       [entry({ id: "l", agent: "ann@host:42", workspaceId: "w1", byDaemon: true })],

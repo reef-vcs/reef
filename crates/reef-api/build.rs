@@ -36,6 +36,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/identity.proto",
     "proto/reef/api/v1/evidence.proto",
     "proto/reef/api/v1/provenance.proto",
+    "proto/reef/api/v1/executor.proto",
 ];
 
 /// Frozen at 0.1.0 and served only for version detection.

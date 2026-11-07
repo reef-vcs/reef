@@ -123,6 +123,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::provenance::ProvenanceError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::executor::ExecutorError>() {
+            error.advice()
         } else if let Some(error) = error.downcast_ref::<RetentionError>() {
             match error {
                 RetentionError::Db(error) => error.advice(),
@@ -296,9 +298,9 @@ fn presence_reason(error: &PresenceError) -> Option<(&'static str, BTreeMap<Stri
             reason::PRESENCE_MISMATCH,
             meta(&[id(presence), ("field", (*field).to_owned())]),
         ),
-        PresenceError::DaemonKind => (
+        PresenceError::DaemonKind(kind) => (
             reason::DAEMON_PRESENCE,
-            meta(&[("kind", "PRESENCE_KIND_LEASE".to_owned())]),
+            meta(&[("kind", kind.as_str_name().to_owned())]),
         ),
         PresenceError::DaemonEntry(presence) => (reason::DAEMON_PRESENCE, meta(&[id(presence)])),
         PresenceError::TooLarge { field, limit } => (
@@ -681,6 +683,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<IdentityError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::provenance::ProvenanceError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::executor::ExecutorError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)

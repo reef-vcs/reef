@@ -92,6 +92,7 @@ pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["history"], "change_kind", &["symbol"]),
     (&["identity", "authority", "rotate"], "since", &["revoke"]),
     (&["identity", "authority", "rotate"], "reason", &["revoke"]),
+    (&["job", "submit"], "wait_for", &["wait"]),
     (&["ws", "renew"], "while_pid", &["follow"]),
 ];
 

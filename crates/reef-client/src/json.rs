@@ -1070,6 +1070,10 @@ pub struct GcReport {
     pub provenance_removed: u32,
     /// Why the provenance step stopped short.
     pub provenance_error: Option<String>,
+    /// Finished executor jobs deleted (R3.05).
+    pub jobs_removed: u32,
+    /// Why the jobs step stopped short.
+    pub jobs_error: Option<String>,
 }
 
 impl From<&v1::GcReport> for GcReport {
@@ -1098,6 +1102,8 @@ impl From<&v1::GcReport> for GcReport {
             provenance_compacted: report.provenance_compacted,
             provenance_removed: report.provenance_removed,
             provenance_error: text(&report.provenance_error),
+            jobs_removed: report.jobs_removed,
+            jobs_error: text(&report.jobs_error),
         }
     }
 }
@@ -2608,7 +2614,7 @@ pub struct Presence {
     pub workspace_id: Option<String>,
     /// The change it is about, in hex.
     pub change_id: Option<String>,
-    /// `activity`, `editing`, `lease`, or `progress`.
+    /// `activity`, `editing`, `lease`, `progress`, or `job`.
     #[schemars(schema_with = "presence_kind_schema")]
     pub kind: String,
     /// For `activity`.
@@ -2619,6 +2625,8 @@ pub struct Presence {
     pub progress: Option<Progress>,
     /// For `lease`: the lease as of the heartbeat.
     pub lease: Option<Lease>,
+    /// For `job` (R3.05): the job as of this report.
+    pub job: Option<JobPresence>,
     /// Reported by the daemon itself.
     pub by_daemon: bool,
     /// When it was last reported.
@@ -2637,6 +2645,7 @@ pub fn presence_kind(kind: i32) -> &'static str {
         Ok(v1::PresenceKind::Editing) => "editing",
         Ok(v1::PresenceKind::Lease) => "lease",
         Ok(v1::PresenceKind::Progress) => "progress",
+        Ok(v1::PresenceKind::Job) => "job",
         _ => UNKNOWN,
     }
 }
@@ -2659,6 +2668,7 @@ impl From<&v1::Presence> for Presence {
                 unit: text(&progress.unit),
             }),
             lease: presence.lease.as_ref().map(Lease::from),
+            job: presence.job.as_ref().map(JobPresence::from),
             by_daemon: presence.by_daemon,
             updated_at: time(presence.updated_at.as_ref()),
             expires_at: time(presence.expires_at.as_ref()),
@@ -3942,6 +3952,326 @@ impl From<&v1::ProvenanceRecord> for ProvenanceRecord {
             identity: record.identity.as_ref().map(KeyIdentity::from),
             statement,
             envelope,
+        }
+    }
+}
+
+/// A job state's name: `queued`, `running`, `completed`, `cancelled` or
+/// `expired` (R3.05).
+pub fn job_state_name(state: i32) -> &'static str {
+    match v1::JobState::try_from(state) {
+        Ok(v1::JobState::Queued) => "queued",
+        Ok(v1::JobState::Running) => "running",
+        Ok(v1::JobState::Completed) => "completed",
+        Ok(v1::JobState::Cancelled) => "cancelled",
+        Ok(v1::JobState::Expired) => "expired",
+        _ => UNKNOWN,
+    }
+}
+
+/// A job outcome's name: `done`, `budget_exhausted` or `failed`; `None`
+/// when unspecified (R3.05).
+pub fn job_outcome_name(outcome: i32) -> Option<&'static str> {
+    let name = match v1::JobOutcome::try_from(outcome) {
+        Ok(v1::JobOutcome::Unspecified) => return None,
+        Ok(v1::JobOutcome::Done) => "done",
+        Ok(v1::JobOutcome::BudgetExhausted) => "budget_exhausted",
+        Ok(v1::JobOutcome::Failed) => "failed",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A job end reason's name: `queue_timeout`, `attempts` or `deadline`;
+/// `None` when unspecified (R3.05).
+pub fn job_end_reason_name(reason: i32) -> Option<&'static str> {
+    let name = match v1::JobEndReason::try_from(reason) {
+        Ok(v1::JobEndReason::Unspecified) => return None,
+        Ok(v1::JobEndReason::QueueTimeout) => "queue_timeout",
+        Ok(v1::JobEndReason::Attempts) => "attempts",
+        Ok(v1::JobEndReason::Deadline) => "deadline",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// The state a name from [`job_state_name`] stands for.
+pub fn job_state_of(name: &str) -> Option<v1::JobState> {
+    (1..=5)
+        .filter_map(|value| v1::JobState::try_from(value).ok())
+        .find(|state| job_state_name(*state as i32) == name)
+}
+
+names_schema! {
+    job_state_name_schema = job_state_name, false;
+    job_outcome_name_schema_or_null = job_outcome_name, true;
+    job_end_reason_name_schema_or_null = job_end_reason_name, true;
+}
+
+fn duration_ms(value: Option<&prost_types::Duration>) -> Option<u64> {
+    let value = value?;
+    let ms = i128::from(value.seconds) * 1000 + i128::from(value.nanos) / 1_000_000;
+    u64::try_from(ms).ok()
+}
+
+fn job_progress(progress: Option<&v1::JobProgress>) -> Option<Progress> {
+    progress.map(|progress| Progress {
+        phase: text(&progress.phase),
+        done: progress.done,
+        total: (progress.total > 0).then_some(progress.total),
+        unit: text(&progress.unit),
+    })
+}
+
+/// What a job requested (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobSpec {
+    /// The tree to check.
+    pub tree_id: String,
+    /// The evidence kinds expected.
+    pub kinds: Vec<String>,
+    /// The targets; empty for the whole check of each kind.
+    pub targets: Vec<String>,
+    /// One attempt's wall time, in milliseconds.
+    pub wall_time_ms: Option<u64>,
+    /// One attempt's CPU time, in milliseconds; `null` for no limit.
+    pub cpu_time_ms: Option<u64>,
+    /// Labels an executor must have, `key=value`.
+    pub requirements: Vec<String>,
+    /// Higher is claimed first.
+    pub priority: i32,
+    /// A commit with the tree, when submitted by revision.
+    pub commit_id: Option<String>,
+    /// The change, in hex, when submitted by revision.
+    pub change_id: Option<String>,
+}
+
+/// The executor holding, or last holding, a job (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobExecutor {
+    /// Its declared name.
+    pub name: String,
+    /// Its declared version.
+    pub version: Option<String>,
+    /// The kinds it declared.
+    pub kinds: Vec<String>,
+    /// The labels it declared.
+    pub labels: Vec<String>,
+    /// The highest protocol version it declared.
+    pub protocol_version: u32,
+    /// The claim's `reef-agent`.
+    pub agent: Option<String>,
+    /// The remote token it claimed through; `null` on the socket.
+    pub remote_token_id: Option<String>,
+    /// The operator identity that token is linked to.
+    pub identity: Option<String>,
+}
+
+/// What an attempt reported using (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobUsage {
+    /// Wall time, in milliseconds.
+    pub wall_time_ms: u64,
+    /// CPU time, in milliseconds.
+    pub cpu_time_ms: u64,
+}
+
+/// One requested (kind, target) pair and the evidence that covers it
+/// (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobCoverage {
+    /// The kind.
+    pub kind: String,
+    /// The target; `null` for the whole check.
+    pub target: Option<String>,
+    /// The latest accepted object of exactly this kind and target; `null`
+    /// when none has arrived, or retention removed it.
+    pub evidence_id: Option<String>,
+    /// Its result.
+    #[schemars(schema_with = "evidence_result_name_schema_or_null")]
+    pub result: Option<String>,
+    /// Whether it is fresh: stored by this job, and started no earlier than
+    /// five minutes before the claim that sent it.
+    pub fresh: bool,
+    /// Its signature, checked again at this read.
+    #[schemars(schema_with = "signature_check_name_schema_or_null")]
+    pub signature: Option<String>,
+}
+
+/// An executor job (R3.05, ADR 0059): checks requested on a tree, claimed
+/// by an executor outside Reef. Its state says nothing of pass or fail;
+/// `coverage` and the evidence do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Job {
+    /// `job_` and 16 hex digits.
+    pub id: String,
+    /// Its repository.
+    pub repo_id: String,
+    /// Where it is.
+    #[schemars(schema_with = "job_state_name_schema")]
+    pub state: String,
+    /// How much ran, once completed.
+    #[schemars(schema_with = "job_outcome_name_schema_or_null")]
+    pub outcome: Option<String>,
+    /// Why the daemon ended it, once expired.
+    #[schemars(schema_with = "job_end_reason_name_schema_or_null")]
+    pub end_reason: Option<String>,
+    /// What was requested.
+    pub spec: JobSpec,
+    /// The protocol version an executor needs.
+    pub protocol_version: u32,
+    /// The current or last attempt; 0 before the first claim.
+    pub attempt: u32,
+    /// Attempts before a lapsing claim expires it.
+    pub max_attempts: u32,
+    /// The submitter's `reef-agent`.
+    pub requested_by_agent: Option<String>,
+    /// The remote token that submitted it.
+    pub requested_by_token: Option<String>,
+    /// When it was submitted.
+    pub submitted_at: Option<String>,
+    /// When it expires unless claimed, while queued.
+    pub queue_expires_at: Option<String>,
+    /// When the current or last attempt was claimed.
+    pub claimed_at: Option<String>,
+    /// When the current claim lapses unless updated.
+    pub lease_expires_at: Option<String>,
+    /// When the daemon expires the running attempt.
+    pub deadline_at: Option<String>,
+    /// When it finished.
+    pub finished_at: Option<String>,
+    /// The current or last executor.
+    pub executor: Option<JobExecutor>,
+    /// The current or last attempt's progress.
+    pub progress: Option<Progress>,
+    /// What the completing attempt reported using.
+    pub usage: Option<JobUsage>,
+    /// Observed by the daemon over attempts, in milliseconds.
+    pub elapsed_ms: u64,
+    /// The executor's message, or the cancel reason.
+    pub message: Option<String>,
+    /// Evidence objects the job accepted.
+    pub evidence_count: u32,
+    /// One entry per requested pair (`job show` only).
+    pub coverage: Vec<JobCoverage>,
+}
+
+impl From<&v1::Job> for Job {
+    fn from(job: &v1::Job) -> Self {
+        let spec = job.spec.clone().unwrap_or_default();
+        let budget = spec.budget.unwrap_or_default();
+        Self {
+            id: job.job_id.clone(),
+            repo_id: job.repo_id.clone(),
+            state: job_state_name(job.state).to_owned(),
+            outcome: name(job_outcome_name(job.outcome)),
+            end_reason: name(job_end_reason_name(job.end_reason)),
+            spec: JobSpec {
+                tree_id: spec.tree_id,
+                kinds: spec.kinds,
+                targets: spec.targets,
+                wall_time_ms: duration_ms(budget.wall_time.as_ref()),
+                cpu_time_ms: duration_ms(budget.cpu_time.as_ref()),
+                requirements: spec.requirements,
+                priority: spec.priority,
+                commit_id: text(&spec.commit_id),
+                change_id: text(&spec.change_id),
+            },
+            protocol_version: job.protocol_version,
+            attempt: job.attempt,
+            max_attempts: job.max_attempts,
+            requested_by_agent: text(&job.requested_by_agent),
+            requested_by_token: text(&job.requested_by_token),
+            submitted_at: time(job.submitted_at.as_ref()),
+            queue_expires_at: time(job.queue_expires_at.as_ref()),
+            claimed_at: time(job.claimed_at.as_ref()),
+            lease_expires_at: time(job.lease_expires_at.as_ref()),
+            deadline_at: time(job.deadline_at.as_ref()),
+            finished_at: time(job.finished_at.as_ref()),
+            executor: job.executor.as_ref().map(|executor| {
+                let info = executor.info.clone().unwrap_or_default();
+                JobExecutor {
+                    name: info.name,
+                    version: text(&info.version),
+                    kinds: info.kinds,
+                    labels: info.labels,
+                    protocol_version: executor.protocol_version,
+                    agent: text(&executor.agent),
+                    remote_token_id: text(&executor.remote_token_id),
+                    identity: text(&executor.identity),
+                }
+            }),
+            progress: job_progress(job.progress.as_ref()),
+            usage: job.usage.as_ref().map(|usage| JobUsage {
+                wall_time_ms: usage.wall_time_ms,
+                cpu_time_ms: usage.cpu_time_ms,
+            }),
+            elapsed_ms: job.elapsed_ms,
+            message: text(&job.message),
+            evidence_count: job.evidence_count,
+            coverage: job
+                .coverage
+                .iter()
+                .map(|entry| JobCoverage {
+                    kind: entry.kind.clone(),
+                    target: text(&entry.target),
+                    evidence_id: text(&entry.evidence_id),
+                    result: name(evidence_result_name(entry.result)),
+                    fresh: entry.fresh,
+                    signature: name(signature_check_name(entry.signature)),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What `reef job submit` did (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobSubmitted {
+    /// The job; with `--wait`, as it finished.
+    pub job: Job,
+    /// False when an identical open job was returned instead.
+    pub created: bool,
+}
+
+/// A job as its `job` presence entry reports it (R3.05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JobPresence {
+    /// The job's id.
+    pub job_id: String,
+    /// Its state.
+    #[schemars(schema_with = "job_state_name_schema")]
+    pub state: String,
+    /// How much ran, once completed.
+    #[schemars(schema_with = "job_outcome_name_schema_or_null")]
+    pub outcome: Option<String>,
+    /// Why the daemon ended it, once expired.
+    #[schemars(schema_with = "job_end_reason_name_schema_or_null")]
+    pub end_reason: Option<String>,
+    /// The current or last attempt.
+    pub attempt: u32,
+    /// The current or last executor's name.
+    pub executor: Option<String>,
+    /// The kinds requested.
+    pub kinds: Vec<String>,
+    /// The tree.
+    pub tree_id: String,
+    /// The executor's last progress report.
+    pub progress: Option<Progress>,
+}
+
+impl From<&v1::JobPresence> for JobPresence {
+    fn from(job: &v1::JobPresence) -> Self {
+        Self {
+            job_id: job.job_id.clone(),
+            state: job_state_name(job.state).to_owned(),
+            outcome: name(job_outcome_name(job.outcome)),
+            end_reason: name(job_end_reason_name(job.end_reason)),
+            attempt: job.attempt,
+            executor: text(&job.executor),
+            kinds: job.kinds.clone(),
+            tree_id: job.tree_id.clone(),
+            progress: job_progress(job.progress.as_ref()),
         }
     }
 }

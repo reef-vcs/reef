@@ -634,3 +634,24 @@ cargo nextest run --release -p reef-daemon --test identity --success-output imme
 cargo bench -p reef-evidence --bench evidence -- provenance
 cargo nextest run --release -p reef-daemon --test provenance --success-output immediate -E 'test(timings)'
 ```
+
+## Executor protocol (R3.05)
+
+`crates/reef-daemon/tests/executor.rs`'s `timings` (ignored by default) measures the job queue's paths against an in-process daemon, and `claims_match_and_order` prints a long-polling claim's latency after a submit ([ADR 0059](adr/0059-executor-protocol.md)). Release build on the M2 Max, run on 2026-11-07. All trend data; none is a gate.
+
+| Measurement | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| submit | `SubmitJob` by `tree_id`, end to end, 1,000 jobs | 1.07 ms | < 5 ms |
+| claim latency | a waiting `ClaimJob`'s return after a `SubmitJob` starts, including the submit | 14.7 ms | < 50 ms |
+| claim selection | `ClaimJob` with `wait` 0 over 1,000 open jobs, none matching | 1.61 ms | < 5 ms |
+| heartbeat | `UpdateJob` with no evidence | 1.88 ms | < 3 ms |
+| update with evidence | `UpdateJob` with 50 envelopes, each verified and stored | 6.2 ms | < 50 ms |
+| `GetJob` | a job with 500 accepted objects and one coverage entry, re-verified | 27.1 ms | < 150 ms (1,000 entries) |
+
+- **No existing path changed** but `AddEvidence`'s split (its tests and benchmarks unchanged), presence's added kind, and GC's added step.
+- The claim latency is mostly the submit's own round trip and transaction: a waiting claim wakes on the submit's `Notify` and claims in one more transaction.
+
+```sh
+cargo nextest run --release -p reef-daemon --test executor --run-ignored ignored-only --no-capture -E 'test(timings)'
+cargo nextest run --release -p reef-daemon --test executor --no-capture -E 'test(claims_match)'
+```

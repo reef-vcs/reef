@@ -1,8 +1,8 @@
 //! The daemon's metadata database (ADR 0003): registered repositories,
 //! workspaces, leases, the reclaim log, the base cache, shared stores,
 //! remote tokens, evidence (ADR 0055), the artifact store's index (ADR
-//! 0056), and operator identities and session keys (ADR 0057), in one
-//! SQLite file per machine.
+//! 0056), operator identities and session keys (ADR 0057), provenance (ADR
+//! 0058), and executor jobs (ADR 0059), in one SQLite file per machine.
 //!
 //! [`Db`] owns one connection behind a [`std::sync::Mutex`]; every method
 //! takes the lock for one short statement or transaction, so `&Db` can be
@@ -33,6 +33,7 @@ mod artifacts;
 mod base_cache;
 mod evidence;
 mod identity;
+pub(crate) mod jobs;
 mod leases;
 mod provenance;
 mod reclaims;
@@ -47,11 +48,16 @@ pub use artifacts::{
 };
 pub use evidence::{
     EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow, Inserted,
-    PINNED, StoredEvidence, insert_evidence_in,
+    PINNED, StoredEvidence, add_evidence_in, insert_evidence_in,
 };
 pub use identity::{
     AuthorityRow, IdentityRow, Inserted as KeyInserted, KeyRecords, RevocationRow,
     SessionKeyFilter, SessionKeyRow, SessionRow,
+};
+pub use jobs::{
+    ExecutorColumns, JobCursor, JobEvidenceRow, JobFilter, JobRow, JobState,
+    insert_job_evidence_in, insert_job_in, job_evidence_in, job_in, next_job_evidence_seq_in,
+    open_job_by_spec_in, open_job_count_in, queued_jobs_in, repository_exists_in, update_job_in,
 };
 pub use provenance::{
     DeclaredColumns, ProvenanceFilter, ProvenanceRow, ProvenanceSessionRow, StoredProvenance,
@@ -64,8 +70,8 @@ pub use leases::Renewal;
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14),
 /// then `0006_remote_tokens` (R2.08), `0007_evidence` (R3.01),
-/// `0008_artifacts` (R3.02), `0009_identity` (R3.03) and `0010_provenance`
-/// (R3.04).
+/// `0008_artifacts` (R3.02), `0009_identity` (R3.03), `0010_provenance`
+/// (R3.04) and `0011_jobs` (R3.05).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -103,6 +109,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_provenance",
         include_str!("migrations/0010_provenance.sql"),
     ),
+    ("0011_jobs", include_str!("migrations/0011_jobs.sql")),
 ];
 
 /// The schema version (`user_version`) of a fully migrated database: the
@@ -773,8 +780,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -782,7 +789,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -825,7 +832,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 10
+                    supported: 11
                 }
             ),
             "{error:?}"
@@ -851,7 +858,8 @@ mod tests {
                 "0007_evidence",
                 "0008_artifacts",
                 "0009_identity",
-                "0010_provenance"
+                "0010_provenance",
+                "0011_jobs"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -877,7 +885,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -890,7 +898,8 @@ mod tests {
                 "0007_evidence",
                 "0008_artifacts",
                 "0009_identity",
-                "0010_provenance"
+                "0010_provenance",
+                "0011_jobs"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -935,7 +944,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
@@ -972,22 +981,22 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.evidence_counts().unwrap(), (0, 0, 0));
         drop(db);
 
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 11).unwrap();
+        conn.pragma_update(None, "user_version", 12).unwrap();
         drop(conn);
         let error = Db::open(&path).err().unwrap();
         assert!(
             matches!(
                 error,
                 DbError::TooNew {
-                    found: 11,
-                    supported: 10
+                    found: 12,
+                    supported: 11
                 }
             ),
             "{error:?}"
@@ -1072,8 +1081,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
         assert_eq!(
             db.artifacts_of_evidence(record.id, "e1").unwrap(),
             [a.clone(), b.clone()]
@@ -1160,8 +1169,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         let tokens = db.remote_tokens().unwrap();
         assert_eq!(tokens.len(), 1);
@@ -1218,11 +1227,73 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 10);
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         assert_eq!(db.identities().unwrap().len(), 1);
         assert_eq!(db.provenance_counts().unwrap(), (0, 0));
+    }
+
+    // R3.05 test 1: a schema 10 database with evidence, provenance and
+    // workspaces migrates to 11 with its rows intact.
+    #[test]
+    fn migration_11() {
+        use crate::db::repositories::tests::repo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        for (index, (name, sql)) in MIGRATIONS[..10].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        let record = repo("aaaa000000000001", "/src/app");
+        conn.execute(
+            "INSERT INTO repositories(id, root, jj_repo_path, colocated, registered_at)
+             VALUES (?1, '/src/app', '/src/app/.jj/repo', 0, 1000)",
+            [record.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO evidence_keys(id, algorithm, public_key, first_seen_at)
+             VALUES ('k1', 'ed25519', x'00', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO evidence(repo_id, id, envelope, format, tree_id, kind, result, key_id,
+                                  started_at, finished_at, added_at)
+             VALUES (?1, 'e1', x'7b7d', 1, 't', 'test', 'pass', 'k1', 1, 2, 3)",
+            [record.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provenance_sessions(session_id, repo_id, workspace_id, actor, channel,
+                                             started_at)
+             VALUES ('ses_0000000000000001', ?1, 'w1', 'agent', 'socket', 1)",
+            [record.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
+        assert_eq!(db.repository(record.id).unwrap().root, record.root);
+        assert_eq!(db.open_jobs().unwrap(), Vec::new());
+        let sessions: i64 = db
+            .with(|conn| {
+                conn.query_row("SELECT count(*) FROM provenance_sessions", [], |r| r.get(0))
+            })
+            .unwrap();
+        assert_eq!(sessions, 1);
     }
 
     // R1.18: a restore into another state directory moves every path under

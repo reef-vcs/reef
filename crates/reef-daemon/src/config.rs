@@ -137,6 +137,17 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["lifetime", "max_lifetime", "default_identity"],
     ),
     ("provenance", &["enabled", "compact_after", "retention"]),
+    (
+        "executor",
+        &[
+            "default_wall_time",
+            "max_wall_time",
+            "queue_timeout",
+            "max_attempts",
+            "max_open_jobs",
+            "job_retention",
+        ],
+    ),
     ("ui", &["enabled", "listen"]),
     (
         "remote",
@@ -222,6 +233,8 @@ pub struct FileConfig {
     pub session_keys: SessionKeysSection,
     /// `[provenance]` (R3.04).
     pub provenance: ProvenanceSection,
+    /// `[executor]` (R3.05).
+    pub executor: ExecutorSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -778,6 +791,51 @@ impl Default for ProvenanceSection {
             enabled: true,
             compact_after: Duration::from_hours(7 * 24),
             retention: Duration::from_hours(90 * 24),
+        }
+    }
+}
+
+/// `[executor]`: the executor protocol's job queue (R3.05, ADR 0059).
+/// Nothing turns it off: the daemon runs nothing, and an idle queue costs
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ExecutorSection {
+    /// A job's wall time per attempt when its request sets none. Default 30
+    /// minutes; from 1 second to `max_wall_time`.
+    #[serde(with = "duration")]
+    pub default_wall_time: Duration,
+    /// The longest wall time a request may ask for. Default 6 hours; from 1
+    /// minute to 7 days.
+    #[serde(with = "duration")]
+    pub max_wall_time: Duration,
+    /// How long a job may wait unclaimed when its request sets no timeout.
+    /// Default 1 hour; from 1 minute to 7 days.
+    #[serde(with = "duration")]
+    pub queue_timeout: Duration,
+    /// Attempts before a job whose claims keep lapsing expires. Default 3;
+    /// from 1 to 10.
+    pub max_attempts: u32,
+    /// Queued and running jobs across the daemon; a submission past it is
+    /// refused, never evicting. Default 1,000; from 1 to 100,000.
+    pub max_open_jobs: u32,
+    /// Finished jobs are deleted by GC this long after they finished,
+    /// never before `[gc] keep_newer`; their evidence stays, under its own
+    /// retention. `0s` keeps them. Default 30 days; `0s`, or from 1 day to
+    /// 10 years.
+    #[serde(with = "duration")]
+    pub job_retention: Duration,
+}
+
+impl Default for ExecutorSection {
+    fn default() -> Self {
+        Self {
+            default_wall_time: Duration::from_mins(30),
+            max_wall_time: Duration::from_hours(6),
+            queue_timeout: Duration::from_hours(1),
+            max_attempts: 3,
+            max_open_jobs: 1000,
+            job_retention: Duration::from_hours(30 * 24),
         }
     }
 }
@@ -1665,6 +1723,17 @@ impl Config {
                 ],
             ),
             (
+                "executor",
+                vec![
+                    ("default_wall_time", d(f.executor.default_wall_time)),
+                    ("max_wall_time", d(f.executor.max_wall_time)),
+                    ("queue_timeout", d(f.executor.queue_timeout)),
+                    ("max_attempts", f.executor.max_attempts.to_string()),
+                    ("max_open_jobs", f.executor.max_open_jobs.to_string()),
+                    ("job_retention", d(f.executor.job_retention)),
+                ],
+            ),
+            (
                 "ui",
                 vec![
                     ("enabled", f.ui.enabled.to_string()),
@@ -2005,6 +2074,42 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
         (
             retention_ok(file.provenance.retention),
             "provenance.retention",
+            "must be 0s (keep all) or from 1d to 10 years".to_owned(),
+        ),
+        (
+            (Duration::from_mins(1)..=Duration::from_hours(7 * 24))
+                .contains(&file.executor.max_wall_time),
+            "executor.max_wall_time",
+            "must be from 1m to 7d".to_owned(),
+        ),
+        (
+            (Duration::from_secs(1)..=file.executor.max_wall_time)
+                .contains(&file.executor.default_wall_time),
+            "executor.default_wall_time",
+            format!(
+                "must be from 1s to executor.max_wall_time ({})",
+                fd(file.executor.max_wall_time)
+            ),
+        ),
+        (
+            (Duration::from_mins(1)..=Duration::from_hours(7 * 24))
+                .contains(&file.executor.queue_timeout),
+            "executor.queue_timeout",
+            "must be from 1m to 7d".to_owned(),
+        ),
+        (
+            (1..=10).contains(&file.executor.max_attempts),
+            "executor.max_attempts",
+            "must be from 1 to 10".to_owned(),
+        ),
+        (
+            (1..=100_000).contains(&file.executor.max_open_jobs),
+            "executor.max_open_jobs",
+            "must be from 1 to 100000".to_owned(),
+        ),
+        (
+            retention_ok(file.executor.job_retention),
+            "executor.job_retention",
             "must be 0s (keep all) or from 1d to 10 years".to_owned(),
         ),
         (

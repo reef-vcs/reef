@@ -151,6 +151,8 @@ pub struct AppState {
     pub identity: Arc<crate::identity::Identities>,
     /// Provenance records: held keys, sessions and declarations (R3.04).
     pub provenance: Arc<crate::provenance::Provenance>,
+    /// The executor protocol's job queue (R3.05).
+    pub executor: Arc<crate::executor::Executor>,
 }
 
 impl fmt::Debug for AppState {
@@ -407,6 +409,11 @@ impl Daemon {
             config.file.provenance.clone(),
         ));
         manager.set_provenance(Arc::clone(&provenance));
+        let executor = Arc::new(crate::executor::Executor::new(
+            Arc::clone(&db),
+            Arc::clone(manager.presence()),
+            config.file.executor.clone(),
+        ));
         let state = Arc::new(AppState {
             config,
             db,
@@ -431,6 +438,7 @@ impl Daemon {
             artifacts: crate::artifacts::Artifacts::new(paths.repos.clone()),
             identity,
             provenance,
+            executor,
         });
 
         // Before any snapshot can run (R2.10).
@@ -455,6 +463,8 @@ impl Daemon {
         Arc::clone(&state.events).poll(state.config.subscribe.outside_poll, state.shutdown.clone());
         crate::subscribe::broker::supervise(&state);
         state.presence.start(state.shutdown.clone());
+        // After presence starts: it republishes the open jobs' entries.
+        state.executor.start(state.shutdown.clone());
         let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),

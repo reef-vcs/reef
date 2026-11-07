@@ -172,8 +172,8 @@ impl PresenceService for PresenceHandler {
         if kind == PresenceKind::Unspecified {
             return Err(invalid("kind is required"));
         }
-        if kind == PresenceKind::Lease {
-            return Err(status(PresenceError::DaemonKind));
+        if matches!(kind, PresenceKind::Lease | PresenceKind::Job) {
+            return Err(status(PresenceError::DaemonKind(kind)));
         }
         check_report(&request, kind)?;
         let change_id = change_id(&request)?;
@@ -188,6 +188,7 @@ impl PresenceService for PresenceHandler {
             paths: request.paths,
             progress: request.progress,
             lease: None,
+            job: None,
             ttl: clamp_ttl(convert::request_duration(request.ttl.as_ref())),
         };
         let presence = self
