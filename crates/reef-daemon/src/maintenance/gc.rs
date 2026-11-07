@@ -51,6 +51,13 @@
 //!    that ended over a week ago, and before `keep_newer`, that no evidence
 //!    names, with their emptied sessions (R3.03,
 //!    [`crate::identity::retention`]); a failure is logged.
+//! 8. **Provenance** (R3.04, ADR 0058): records past `[provenance]
+//!    compact_after` compacted to the first and last of each run under one
+//!    context, records of changes with no visible commit past `[provenance]
+//!    retention` deleted, and ended sessions with no record left
+//!    ([`crate::provenance::retention`]). Before the session key sweep, so
+//!    keys only the deleted records named go with it. A failure is logged
+//!    and reported in [`GcReport::provenance_error`], as step 7's is.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -128,6 +135,10 @@ pub struct GcReport {
     pub evidence_error: Option<String>,
     /// Session keys swept (R3.03): in the first report of a run only.
     pub session_keys_removed: u32,
+    /// What step 8 did (R3.04); zero when it stopped short.
+    pub provenance: crate::provenance::retention::Swept,
+    /// Why step 8 stopped short, if it did.
+    pub provenance_error: Option<String>,
 }
 
 /// Failure of a GC run, other than the jj step's (which is reported).
@@ -490,8 +501,28 @@ async fn run_repo(
         }
     };
 
+    // 8.
+    let (provenance, provenance_error) =
+        match crate::provenance::retention::run(state, id, keep_newer, dry_run).await {
+            Ok(swept) => (swept, None),
+            Err(error) => {
+                let text = ErrorChain(&error).to_string();
+                match trigger {
+                    Trigger::Request => {
+                        tracing::error!(error = %text, "the provenance step of GC stopped short");
+                    }
+                    Trigger::Timer => tracing::warn!(
+                        error = %text,
+                        "the provenance step of timed GC stopped short; the next run retries"
+                    ),
+                }
+                (crate::provenance::retention::Swept::default(), Some(text))
+            }
+        };
+
     // Session keys are machine-wide: the first report sweeps them, after
-    // step 7 has deleted the evidence that named them (R3.03).
+    // steps 7 and 8 have deleted the evidence and provenance that named
+    // them (R3.03).
     let session_keys_removed = if store_leftovers {
         let db = Arc::clone(&state.db);
         match tokio::task::spawn_blocking(move || {
@@ -539,6 +570,8 @@ async fn run_repo(
         retention,
         evidence_error,
         session_keys_removed,
+        provenance,
+        provenance_error,
     };
     tracing::info!(
         keep_newer = %report.keep_newer,
@@ -557,6 +590,8 @@ async fn run_repo(
         artifacts_collected_count = report.retention.artifacts_collected,
         artifact_freed_bytes = report.retention.artifact_bytes_freed,
         session_keys_removed_count = report.session_keys_removed,
+        provenance_compacted_count = report.provenance.compacted,
+        provenance_removed_count = report.provenance.removed,
         elapsed_ms = report.elapsed_ms,
         "garbage collection finished"
     );

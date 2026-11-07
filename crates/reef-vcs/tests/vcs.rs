@@ -100,6 +100,8 @@ fn reef(daemon: &TestDaemon, dir: &Path) -> Command {
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
     ] {
         command.env_remove(var);
     }
@@ -3919,4 +3921,115 @@ async fn evidence_cli_session() {
     .await;
     assert_eq!(linked["identity"], "ci-main");
     daemon.stop().await;
+}
+
+/// R3.04 test 16: `ws run` declares a model, a task and an instruction, its
+/// command sees them and declares the next instruction, and `provenance
+/// show`, `list` and `ws inspect` read them back. No instruction text
+/// reaches the daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn provenance_cli() {
+    use reef_daemon::client::evidence::sha256_hex;
+
+    let (daemon, repo) = fixture().await;
+    let files = daemon.tmp.path().join("prompts");
+    std::fs::create_dir(&files).unwrap();
+    let prompt = files.join("prompt.txt");
+    let next = files.join("next.txt");
+    std::fs::write(&prompt, "add a parser test\n").unwrap();
+    std::fs::write(&next, "now make it pass\n").unwrap();
+    let reef_bin = env!("CARGO_BIN_EXE_reef");
+    let script = format!(
+        "echo \"$REEF_MODEL $REEF_TASK\" > env.txt && {reef_bin} --no-autostart provenance declare -o json --instruction-file {} > /dev/null && echo y > g.txt",
+        next.display()
+    );
+    let report = ok(
+        &daemon,
+        &repo.root,
+        &[
+            "-o",
+            "json",
+            "ws",
+            "run",
+            "--keep",
+            "--model",
+            "example/model-x",
+            "--task",
+            "T-1",
+            "--instruction-file",
+            prompt.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
+    )
+    .await;
+    assert_eq!(report["exit_code"], 0, "{report}");
+    let ws_id = report["workspace_id"].as_str().unwrap().to_owned();
+    let ws_dir = PathBuf::from(report["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(ws_dir.join("env.txt")).unwrap(),
+        "example/model-x T-1\n"
+    );
+
+    // Two records at least: env.txt under the first instruction (the
+    // declaration's snapshot), g.txt under the second (the final one).
+    let listed = ok(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "provenance", "list", "--mine", "--limit", "0"],
+    )
+    .await;
+    let records = listed.as_array().unwrap();
+    assert!(records.len() >= 2, "{listed}");
+    let first = sha256_hex(b"add a parser test\n");
+    let second = sha256_hex(b"now make it pass\n");
+    let instructions: Vec<&str> = records
+        .iter()
+        .map(|record| record["context"]["instruction_sha256"].as_str().unwrap())
+        .collect();
+    assert_eq!(instructions.first(), Some(&second.as_str()), "{listed}");
+    assert_eq!(instructions.last(), Some(&first.as_str()), "{listed}");
+    for record in records {
+        assert_eq!(record["context"]["model"], "example/model-x");
+        assert_eq!(record["context"]["task"], "T-1");
+        assert_eq!(record["signature"], "valid");
+        assert_eq!(record["identity"]["status"], "bound");
+        assert_eq!(record["identity"]["key"]["custody"], "daemon");
+    }
+
+    // `show` of `@`, in text and JSON; and of a describe-only commit, the
+    // change's latest record.
+    let shown = ok(&daemon, &ws_dir, &["-o", "json", "provenance", "show"]).await;
+    assert_eq!(shown["context"]["instruction_sha256"], second.as_str());
+    let text = stdout(&run_in(&daemon, &ws_dir, &["-o", "text", "provenance", "show"]).await);
+    for line in [
+        "signature: valid",
+        "key held by the daemon",
+        "declared: model example/model-x",
+        "policy decides whom to trust",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    ok(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "describe", "-m", "described"],
+    )
+    .await;
+    let latest = ok(&daemon, &ws_dir, &["-o", "json", "provenance", "show"]).await;
+    assert_eq!(latest["latest_of"], shown["change_id"], "{latest}");
+    let brief = ok(&daemon, &ws_dir, &["provenance", "list", "--change", "@"]).await;
+    assert!(brief[0]["context"]["model"].is_string(), "{brief}");
+
+    // `ws inspect` names the session.
+    let inspect = stdout(&run_in(&daemon, &ws_dir, &["-o", "text", "ws", "inspect", &ws_id]).await);
+    assert!(inspect.contains("model example/model-x"), "{inspect}");
+
+    // No instruction text in the daemon's database.
+    let db = std::fs::read(daemon.state_dir().join("reef.sqlite3")).unwrap();
+    for text in [&b"add a parser test"[..], &b"now make it pass"[..]] {
+        assert!(!db.windows(text.len()).any(|w| w == text));
+    }
 }

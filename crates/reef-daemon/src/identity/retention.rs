@@ -14,10 +14,9 @@ use crate::model::Timestamp;
 pub const FLOOR: Duration = Duration::from_hours(7 * 24);
 
 /// The SQL condition, on a `session_keys` row `k`, under which GC keeps a
-/// key whatever its age: evidence names it. R3.04 extends it to keys that
-/// provenance names.
+/// key whatever its age: evidence or a provenance record (R3.04) names it.
 pub fn pinned() -> &'static str {
-    "k.key_id IN (SELECT key_id FROM evidence)"
+    "(k.key_id IN (SELECT key_id FROM evidence) OR k.key_id IN (SELECT key_id FROM provenance))"
 }
 
 /// What the sweep removed, or would have in a dry run.

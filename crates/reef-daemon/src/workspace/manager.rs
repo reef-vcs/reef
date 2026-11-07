@@ -65,6 +65,9 @@ pub struct Manager {
     pub(super) stores: Arc<StoreManager>,
     /// The live presence entries (R2.10).
     pub(super) presence: Arc<PresenceHub>,
+    /// Provenance records (R3.04), set once the identity state is up,
+    /// before any snapshot can run.
+    pub(super) provenance: std::sync::OnceLock<Arc<crate::provenance::Provenance>>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -120,8 +123,19 @@ impl Manager {
                 leases,
                 stores,
                 presence,
+                provenance: std::sync::OnceLock::new(),
             }
         })
+    }
+
+    /// Records provenance for this manager's snapshots from now on (R3.04).
+    pub fn set_provenance(&self, provenance: Arc<crate::provenance::Provenance>) {
+        let _ = self.provenance.set(provenance);
+    }
+
+    /// The provenance state, once set.
+    pub fn provenance(&self) -> Option<&Arc<crate::provenance::Provenance>> {
+        self.provenance.get()
     }
 
     /// The snapshot scheduler.
@@ -857,6 +871,9 @@ impl Manager {
             tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
         }
         self.presence.end_workspace(id);
+        if let Some(provenance) = self.provenance.get() {
+            provenance.end(id);
+        }
     }
 }
 

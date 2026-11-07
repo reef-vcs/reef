@@ -1,12 +1,15 @@
 //! The evidence format's cost (R3.01): building and signing a claim with
 //! three artifacts, checking that envelope, and checking one of about
 //! 64 KiB (large `annotations`); and a session key's certificate (R3.03):
-//! building and signing one, and checking it. Results are in
-//! `docs/benchmarks.md`, "Evidence (R3.01)" and "Identity (R3.03)".
+//! building and signing one, and checking it; and a provenance record
+//! (R3.04): building and signing one, and checking it. Results are in
+//! `docs/benchmarks.md`, "Evidence (R3.01)", "Identity (R3.03)" and
+//! "Provenance (R3.04)".
 //!
 //! ```sh
 //! cargo bench -p reef-evidence --bench evidence
 //! cargo bench -p reef-evidence --bench evidence -- session
+//! cargo bench -p reef-evidence --bench evidence -- provenance
 //! ```
 
 #![allow(missing_docs, reason = "a criterion harness")]
@@ -121,5 +124,39 @@ fn session(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, evidence, session);
+fn provenance(c: &mut Criterion) {
+    use reef_evidence::provenance::{Context, Record, check, sign};
+    let key = SigningKey::from_seed(&[4; 32]).unwrap();
+    let spki = key.public_key().spki().to_vec();
+    let record = Record {
+        commit_id: "5d41402abc4b2a76b9719d911017c592ae2b6a3e".into(),
+        change_id: "8f3a0c2d91e4b6751c2d0e9f4a7b3c18".into(),
+        tree_id: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
+        workspace: "0123456789abcdef".into(),
+        kind: "watcher".into(),
+        session: "ses_41c9e07ab2d35f18".into(),
+        sequence: 42,
+        agent: Some("builder-3".into()),
+        recorded_on_ms: 1_793_959_923_418,
+        context: Context {
+            model: Some("example-provider/model-x-2026-10".into()),
+            harness: Some("example-harness/2.1.0".into()),
+            task: Some("https://tracker.example/T-123".into()),
+            instruction_sha256: Some(reef_evidence::sha256_hex(b"add a parser test")),
+            client_session: Some("c0ffee00-1234".into()),
+            declared_on_ms: Some(1_793_959_918_002),
+        },
+    };
+    let mut group = c.benchmark_group("provenance");
+    group.bench_function("sign", |b| {
+        b.iter(|| black_box(sign(&key, &record).unwrap().to_bytes()));
+    });
+    let envelope = sign(&key, &record).unwrap().to_bytes();
+    group.bench_function("check", |b| {
+        b.iter(|| black_box(check(&envelope, &spki).unwrap()));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, evidence, session, provenance);
 criterion_main!(benches);

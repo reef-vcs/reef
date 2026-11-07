@@ -1430,6 +1430,34 @@ pub async fn commit_tree_id(
     ))
 }
 
+/// The visible commits, in lowercase hex, of each of `changes` (full
+/// lowercase hex) in `repo`'s view: an index lookup per change, no revset
+/// walk. A change with none (abandoned, undone away, or unknown) maps to an
+/// empty list; a text that is not a change id is left out (R3.04's GC).
+pub async fn visible_commits_of_changes(
+    repo: &ReadonlyRepo,
+    changes: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, FileError> {
+    let mut visible = BTreeMap::new();
+    for change in changes {
+        let Some(id) = jj_lib::backend::ChangeId::try_from_hex(change) else {
+            continue;
+        };
+        let targets = repo
+            .resolve_change_id(&id)
+            .await
+            .map_err(|error| BackendError::Other(error.into()))?;
+        let commits = targets
+            .and_then(jj_lib::index::ResolvedChangeTargets::into_visible)
+            .unwrap_or_default()
+            .iter()
+            .map(ObjectId::hex)
+            .collect();
+        visible.insert(change.clone(), commits);
+    }
+    Ok(visible)
+}
+
 /// The tree ids, as [`commit_tree_id`] gives them, of the visible commits
 /// of the change `change` (full lowercase hex) in `repo`'s view: one for a
 /// change, several for a divergent one, none for an abandoned or unknown

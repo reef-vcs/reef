@@ -32,6 +32,7 @@ use reef_api::v1::identity_service_server::IdentityServiceServer;
 use reef_api::v1::maintenance_service_server::MaintenanceServiceServer;
 use reef_api::v1::operation_service_server::OperationServiceServer;
 use reef_api::v1::presence_service_server::PresenceServiceServer;
+use reef_api::v1::provenance_service_server::ProvenanceServiceServer;
 use reef_api::v1::remote_service_server::RemoteServiceServer;
 use reef_api::v1::repository_service_server::RepositoryServiceServer;
 use reef_api::v1::status_service_server::StatusServiceServer;
@@ -72,7 +73,7 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 18] = [
+pub const SERVED: [&str; 19] = [
     "reef.api.v1.ArtifactService",
     "reef.api.v1.ChangeService",
     "reef.api.v1.DaemonService",
@@ -84,6 +85,7 @@ pub const SERVED: [&str; 18] = [
     "reef.api.v1.MaintenanceService",
     "reef.api.v1.OperationService",
     "reef.api.v1.PresenceService",
+    "reef.api.v1.ProvenanceService",
     "reef.api.v1.RemoteService",
     "reef.api.v1.RepositoryService",
     "reef.api.v1.StatusService",
@@ -128,6 +130,9 @@ pub fn routes(state: &Arc<AppState>) -> Routes {
         Arc::clone(state),
     )))
     .add_service(FileServiceServer::new(FilesHandler::new(Arc::clone(state))))
+    .add_service(ProvenanceServiceServer::new(
+        crate::service::provenance::ProvenanceHandler::new(Arc::clone(state)),
+    ))
     .add_service(IdentityServiceServer::new(IdentityHandler::new(
         Arc::clone(state),
     )))

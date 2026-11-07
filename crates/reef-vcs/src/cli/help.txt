@@ -8,5 +8,5 @@ Usage: reef <command> [--help]
   history   who changed a file or symbol, landed or open
 
 Also: status log show diff describe abandon undo op presence file
-symbols evidence identity guide init mcp schema ui remote repo store
-daemon config backup restore. `--help-all` has more.
+symbols evidence identity provenance guide init mcp schema ui remote
+repo store daemon config backup. `--help-all` has more.

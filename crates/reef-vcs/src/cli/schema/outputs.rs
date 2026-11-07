@@ -16,6 +16,7 @@ use reef_client::json::{
     SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
+use reef_client::json::{ProvenanceDeclared, ProvenanceRecord};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
@@ -338,6 +339,22 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         &["identity", "authority", "rotate"],
         object::<AuthorityRotated>,
     ),
+    OutputRow {
+        note: Some(
+            "`latest_of` is set when the commit has no record of its own and this is its change's newest; `statement` and `envelope` only with --envelope",
+        ),
+        ..view(
+            &["provenance", "show"],
+            object::<ProvenanceRecord>,
+            object::<brief::ProvenanceRecord<'static>>,
+        )
+    },
+    view(
+        &["provenance", "list"],
+        list::<ProvenanceRecord>,
+        list::<brief::ProvenanceRecord<'static>>,
+    ),
+    row(&["provenance", "declare"], object::<ProvenanceDeclared>),
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

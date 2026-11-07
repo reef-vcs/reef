@@ -1,6 +1,6 @@
 # Evidence
 
-An evidence object is a signed claim that a check ran on one tree and how it came out: a test suite passed, a build failed, a linter could not finish. Reef stores evidence beside the changes it is about, and later tickets gate landing on it. This page is for someone writing an executor or a script that produces evidence. [ADR 0055](adr/0055-evidence-object-format.md) records why the format is what it is.
+An evidence object is a signed claim that a check ran on one tree and how it came out: a test suite passed, a build failed, a linter could not finish. Reef stores evidence beside the changes it is about, and later tickets gate landing on it. This page is for someone writing an executor or a script that produces evidence. [ADR 0055](adr/0055-evidence-object-format.md) records why the format is what it is. The same envelope carries session-key certificates ([docs/identity.md](identity.md)) and provenance records ([docs/provenance.md](provenance.md)).
 
 A signature that verifies says that the holder of a key signed the claim. It does not say who holds the key, that anyone should trust it, or that the claim is true. Until repository policy decides which keys count (R3.07), any key's evidence is stored and none of it decides anything.
 
