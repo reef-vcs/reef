@@ -367,9 +367,11 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     })
     .await;
     // Kept, not reclaimed. Each retry marks the workspace `releasing` for
-    // its final snapshot and rolls it back to `active` when that fails, so
-    // either state can be read here (`releasing` on macos-15, 2026-11-07).
-    // The reclaim row's time, checked below, shows it waited for space.
+    // its final snapshot and rolls it back to `active` when that fails; if
+    // the rollback cannot be written either (SQLite on the full disk), it
+    // stays `releasing` until the next tick finishes going back (leases.rs
+    // 8a). So either state can be read here. The reclaim row's time,
+    // checked below, shows it waited for space.
     let kept = inspect(&daemon, &ws.id).await;
     assert!(
         matches!(

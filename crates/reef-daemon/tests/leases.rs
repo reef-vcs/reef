@@ -543,6 +543,35 @@ async fn final_snapshot_failure_keeps_directory() {
     );
 }
 
+// 8a (not in the brief): a reclaim whose failed final snapshot could not
+// be rolled back (SQLite cannot write on a full disk) left the workspace
+// `releasing`, and every later tick refused it as such, even once there
+// was room (PR #226's disk_full run on macos-15, 2026-11-07). The next
+// tick now finishes the rollback and reclaims it.
+#[tokio::test(flavor = "multi_thread")]
+async fn release_left_releasing_is_reclaimed() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    daemon
+        .handle
+        .state()
+        .manager
+        .strand_releasing(id_of(&ws))
+        .await
+        .unwrap();
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Releasing
+    );
+
+    wait_for_state(&daemon.client, &ws, v1::WorkspaceState::Reclaimed).await;
+    let reclaims = reclaims_of(&daemon, &ws);
+    assert_eq!(reclaims.len(), 1, "{reclaims:?}");
+    assert_eq!(reclaims[0].reason, ReclaimReason::Expired);
+    assert!(reclaims[0].snapshot_taken);
+    assert!(!Path::new(&ws.path).exists());
+}
+
 // 9
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_root_is_reclaimed_without_snapshot() {
