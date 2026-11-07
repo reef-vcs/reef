@@ -1,0 +1,267 @@
+// Provenance (R3.04, ADR 0058): one signed record per commit the daemon
+// records for a workspace, saying which session recorded it and what
+// context a client declared for that session. The daemon signs each record
+// with a key it holds in memory for the workspace's session, certified by
+// its authority with custody `daemon` (R3.03). Model, harness, task and
+// instruction hash are declared, never verified; whom to trust is policy's
+// (R3.07).
+//
+// A record is an in-toto Statement v1 with predicate type
+// `urn:reef-vcs:provenance:v1` about one git commit (`gitCommit`), in the
+// same DSSE envelope as evidence (evidence.proto). Records are found by
+// change: a describe, rebase or squash writes a new commit with no record
+// of its own, so "who produced this change" is every record of its change
+// id. Nothing is written into the commit, so a git push carries none.
+//
+// On one uid, a record shows what the daemon saw and what it was told, not
+// who typed what: any process of the daemon's user can write into a
+// workspace or declare a context (docs/threat-model.md, S-67, S-68).
+// docs/provenance.md has the details.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/evidence.proto";
+import "reef/api/v1/identity.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+
+// Declaring a workspace's context, and reading its provenance records.
+service ProvenanceService {
+  // Replaces fields of a workspace's declared context: a set field
+  // replaces the old value, an empty string clears it, and an unset one
+  // keeps it. The workspace is snapshotted first, so edits already on disk
+  // are recorded under the context they were made under; `no_snapshot`
+  // skips that. Records no operation of its own: `operation` is the
+  // snapshot's. Through the remote listener, only the token that created
+  // the workspace may declare for it.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_PROVENANCE (metadata
+  // `field`: `model`, `harness`, `task`, `instruction_sha256`,
+  // `client_session`, or `identity` and `actor`, which are fixed for the
+  // session); FAILED_PRECONDITION with reason PROVENANCE_DISABLED when
+  // `[provenance] enabled` is false; the reasons SnapshotWorkspace returns
+  // for a workspace that is not active, and a failed snapshot's own error.
+  rpc DeclareProvenance(DeclareProvenanceRequest) returns (DeclareProvenanceResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // One record: that of a revision's commit, of a commit by its full id
+  // (which may be hidden), or by its record id or a unique prefix of at
+  // least 8 hex digits. Its signature and its key's certificate are
+  // checked again at this read, and every field is read from its payload.
+  //
+  // Errors: NOT_FOUND with reason PROVENANCE_NOT_FOUND (metadata
+  // `commit_id` and `change_id`, or `id`): the commit was written by
+  // something other than a workspace's snapshot or edit, such as a
+  // describe, a rebase or the jj CLI; ListProvenance with the change lists
+  // its change's records. INVALID_ARGUMENT with reason
+  // AMBIGUOUS_PROVENANCE_ID (metadata `id`, and `ids`, up to ten,
+  // comma-separated) for a prefix of several; a revision reason; and a
+  // failed snapshot's own error, with reason SNAPSHOT_FAILED (metadata
+  // `workspace_id`).
+  rpc GetProvenance(GetProvenanceRequest) returns (GetProvenanceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // A repository's records, newest recorded first, paged: of `change_ids`,
+  // of a workspace, of a session, and since a time, the filters ANDed.
+  // Every record is checked again at this read.
+  //
+  // Errors: INVALID_ARGUMENT for a negative `page_size`; with reason
+  // INVALID_PROVENANCE (metadata `field` `change_ids`) for more than 100
+  // change ids or one that is not 32 lowercase hex digits; with reason
+  // INVALID_PAGE_TOKEN.
+  rpc ListProvenance(ListProvenanceRequest) returns (ListProvenanceResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// What a client declares for a workspace's provenance session: at
+// CreateWorkspace, and with DeclareProvenance. Every field is a claim the
+// daemon records and signs but never verifies.
+message ProvenanceDeclaration {
+  // The model and its version, in the client's own naming: 1 to 128 bytes
+  // of visible ASCII. Unset keeps it; empty clears it.
+  optional string model = 1;
+  // The agent runtime and its version, `name/version`: 1 to 128 bytes of
+  // visible ASCII. Unset keeps it; empty clears it.
+  optional string harness = 2;
+  // The originating task: a URI or an opaque reference, 1 to 512 bytes
+  // with no control characters. Unset keeps it; empty clears it.
+  optional string task = 3;
+  // The SHA-256, as 64 lowercase hex digits, of the instruction's exact
+  // bytes, as delivered to the agent. The text is never sent. Unset keeps
+  // it; empty clears it.
+  optional string instruction_sha256 = 4;
+  // The harness's own session id, which groups the workspaces of one
+  // harness session: 1 to 128 bytes of visible ASCII. Unset keeps it; empty
+  // clears it.
+  optional string client_session = 5;
+  // CreateWorkspace only: the person identity the session's keys are
+  // certified for, by name or id; empty for the issuance rules' choice (the
+  // default identity over the socket, the token's linked one remotely).
+  string identity = 6;
+  // CreateWorkspace only: the session's declared actor; unspecified is
+  // `agent`. `human` is never allowed through the remote listener.
+  SessionActor actor = 7;
+}
+
+// A session's declared context, as recorded.
+message ProvenanceContext {
+  // The model; empty when not declared.
+  string model = 1;
+  // The harness; empty when not declared.
+  string harness = 2;
+  // The task; empty when not declared.
+  string task = 3;
+  // The instruction's SHA-256; empty when not declared.
+  string instruction_sha256 = 4;
+  // The harness's session id; empty when not declared.
+  string client_session = 5;
+  // When the context was last declared; unset when never.
+  google.protobuf.Timestamp declared_at = 6;
+}
+
+// A workspace's provenance session, on `Workspace.provenance`: who its
+// records are bound to, and the context in effect now.
+message ProvenanceSession {
+  // `ses_` and 16 lowercase hex digits: the R3.03 session its held keys are
+  // certified for.
+  string session_id = 1;
+  // The identity's name; empty when no identity can be bound (`problem`).
+  string identity = 2;
+  // The identity's kind.
+  IdentityKind identity_kind = 3;
+  // The declared actor.
+  SessionActor actor = 4;
+  // The agent label: the creating request's `reef-agent`, else the
+  // workspace's owner.
+  string agent = 5;
+  // The context in effect now.
+  ProvenanceContext context = 6;
+  // When the session started.
+  google.protobuf.Timestamp started_at = 7;
+  // When it ended; unset while it is live.
+  google.protobuf.Timestamp ended_at = 8;
+  // How many records it has.
+  uint64 records = 9;
+  // How many commits were recorded with no record, by a failure to sign or
+  // store one; the daemon's log has a warning for each.
+  uint64 missing_records = 10;
+  // Why its records are unbound, if they are: `no_default_identity`,
+  // `token_not_linked`, `token_revoked` or `identity_revoked`; empty when
+  // they are bound.
+  string problem = 11;
+}
+
+// One provenance record, as read: every field from its verified payload.
+message ProvenanceRecord {
+  // SHA-256 of the canonical envelope, 64 lowercase hex digits.
+  string id = 1;
+  // The commit the daemon recorded: the subject.
+  string commit_id = 2;
+  // Its change id, 32 lowercase hex digits.
+  string change_id = 3;
+  // Its tree; empty when the tree is conflicted.
+  string tree_id = 4;
+  // The workspace it was recorded in.
+  string workspace_id = 5;
+  // The workspace's provenance session.
+  string session_id = 6;
+  // The record's number in its session, from 1. GC's compaction leaves
+  // gaps.
+  uint64 sequence = 7;
+  // What recorded it: a snapshot kind (`watcher`, `explicit`, `final`,
+  // `move`, `shutdown`) or `edit`. A later Reef may add kinds.
+  string kind = 8;
+  // The session's agent label, declared.
+  string agent = 9;
+  // When the daemon recorded the commit.
+  google.protobuf.Timestamp recorded_at = 10;
+  // The declared context in effect then.
+  ProvenanceContext context = 11;
+  // The signing key's id.
+  string key_id = 12;
+  // Whether the envelope, its signature and the stored index check out.
+  // INVALID reads the payload's values where it parsed.
+  SignatureCheck signature = 13;
+  // The signing key's identity at `recorded_at`. INVALID also when its
+  // certificate's custody is not `daemon`, or certifies another session
+  // than the record's.
+  KeyIdentity identity = 14;
+  // The canonical envelope; set by GetProvenance only.
+  bytes envelope = 15;
+}
+
+// DeclareProvenance's request.
+message DeclareProvenanceRequest {
+  // The repository; empty for the workspace's.
+  string repo = 1;
+  // The workspace, by id or unique prefix.
+  string workspace = 2;
+  // The fields to replace. `identity` and `actor` are refused.
+  ProvenanceDeclaration declaration = 3;
+  // Do not snapshot first: for a client that has just snapshotted.
+  bool no_snapshot = 4;
+}
+
+// DeclareProvenance's response.
+message DeclareProvenanceResponse {
+  // The session, with its new context.
+  ProvenanceSession session = 1;
+  // The snapshot's operation; unset when nothing changed or with
+  // `no_snapshot`.
+  Operation operation = 2;
+}
+
+// GetProvenance's request.
+message GetProvenanceRequest {
+  // The repository; empty for the workspace's.
+  string repo = 1;
+  // The workspace `@` in `revision` refers to.
+  string workspace = 2;
+  // Which record.
+  oneof target {
+    // A revision resolving to one commit; `@` is snapshotted first.
+    string revision = 3;
+    // A commit's full id, which may be hidden.
+    string commit_id = 4;
+    // A record id, or a unique prefix of at least 8 hex digits.
+    string id = 5;
+  }
+}
+
+// GetProvenance's response.
+message GetProvenanceResponse {
+  // The record, with its envelope.
+  ProvenanceRecord record = 1;
+}
+
+// ListProvenance's request.
+message ListProvenanceRequest {
+  // The repository.
+  string repo = 1;
+  // Only records of these changes, as 32 lowercase hex digits
+  // (`Change.change_id`); at most 100.
+  repeated string change_ids = 2;
+  // Only records of this workspace, by full id.
+  string workspace_id = 3;
+  // Only records of this session.
+  string session_id = 4;
+  // Only records recorded at or after this time.
+  google.protobuf.Timestamp since = 5;
+  // At most this many; 0 for 100, capped at 1,000.
+  int32 page_size = 6;
+  // The previous response's `next_page_token`.
+  string page_token = 7;
+}
+
+// ListProvenance's response.
+message ListProvenanceResponse {
+  // The records, newest recorded first.
+  repeated ProvenanceRecord records = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}

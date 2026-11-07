@@ -120,7 +120,24 @@ Operator identities and session keys (`identity/`, `service/identity.rs`, `db/id
 
 **Revocation** sets `revoked_at` and `invalid_from` on a key, a session, an identity or an authority (`RevokeAuthority` for a retired one, `RotateAuthority` with `revoke` for the current one); a later revocation keeps the first `revoked_at` and only moves `invalid_from` earlier. The current default identity cannot be revoked. A key is live (`ListSessionKeys`, `live_session_keys`) while it, its session, its identity and its authority are all unrevoked.
 
-**GC** (`identity::retention`) sweeps, in the first report of a run, keys whose `not_after` is before `min(now - 7 days, keep_newer)` and that no evidence names (`pinned()`), then sessions left with no key; `GcReport.session_keys_removed` counts them. `ForgetRepository` touches none of these tables.
+**GC** (`identity::retention`) sweeps, in the first report of a run, keys whose `not_after` is before `min(now - 7 days, keep_newer)` and that no evidence or provenance record names (`pinned()`), then sessions left with no key; `GcReport.session_keys_removed` counts them. `ForgetRepository` touches none of these tables.
+
+## Provenance
+
+Provenance records (`provenance/`, `service/provenance.rs`, `db/provenance.rs`, [ADR 0058](../../docs/adr/0058-provenance-records.md), [docs/provenance.md](../../docs/provenance.md)) are the daemon's signed statements that it recorded a commit for a workspace. Migration `0010_provenance` (schema 10) adds two tables, per repository, in backups, deleted by `ForgetRepository`.
+
+| Table | Key | Holds |
+| --- | --- | --- |
+| `provenance` | `(repo_id, id)`, `id` the SHA-256 of `envelope` | One canonical DSSE envelope per recorded commit (unique by `commit_id`), and columns indexing its payload: change, tree, workspace, session, sequence, kind, key, agent, the declared context and its digest, `recorded_at` |
+| `provenance_sessions` | `session_id`, `ses_<16 hex>` | Each workspace's session: its identity (none when unbound), actor, agent label and channel, fixed; the context declared last; `next_sequence`, `missing_records`, `problem`, `started_at`, `ended_at` (one live per workspace) |
+
+**Recording** (`provenance::record`). Each snapshot that commits calls `Provenance::record` on its blocking half after `record_commit`; `EditFiles` naming an active workspace calls it after the write. Under the workspace's lock it finds the live session (starting one by the rules for a workspace without one), renews the held key when there is none, it is for another session, or it is within five minutes of its end (a new session when R3.03 revoked this one; an uncertified key, with `problem`, when no identity binds), builds the record with `recordedOn` the signing time, signs it with `reef_evidence::provenance::sign`, and inserts it with its key's `evidence_keys` row in one transaction that moves `next_sequence` past it. A failure is logged at `warn` and counted in `missing_records`; the snapshot's outcome never changes. `identity::issue::issue_held` certifies held keys with `custody: daemon`, without a proof, for `[session_keys] max_lifetime`; they live only in `Provenance`'s memory and every revocation handler drops them (`Provenance::revoked`).
+
+**Sessions** (`provenance::session`). `CreateWorkspace` plans the session before creating anything (an identity or actor the rules refuse fails the creation), then starts it with the workspace; release and reclaim end it after the final snapshot. `DeclareProvenance` snapshots first unless `no_snapshot`, then replaces fields of the context under the workspace's lock. Declarations are logged under `reef_daemon::provenance::audit`, naming fields, never values.
+
+**Reads** (`provenance::read`) check every record: the envelope, the key from `evidence_keys`, the signature, the statement, then every index column against the payload; then the key's certificate with R3.03's `read_keys` and `key_identity` at `recorded_at`. A certificate whose custody is not `daemon`, or whose session is not the record's, reads `INVALID`.
+
+**GC** (`provenance::retention`), step 8: resolves each change of the old records in the head's view (`files::visible_commits_of_changes`), compacts records older than `[provenance] compact_after` to the first and last of each run by context digest (and any of a visible commit), deletes records of changes with no visible commit older than `retention`, and ended sessions with no record, 1,000 per transaction; `GcReport.provenance_compacted`, `provenance_removed` and `provenance_error`.
 
 ## Web UI
 

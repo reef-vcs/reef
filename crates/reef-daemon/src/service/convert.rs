@@ -266,6 +266,8 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             watch_state: watch_state.into(),
             changed_file_count: None,
             remote_token_id: record.remote_token_id.clone().unwrap_or_default(),
+            // Joined by the services that report it (R3.04).
+            provenance: None,
         }
     }
 }

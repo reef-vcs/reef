@@ -208,6 +208,8 @@ impl Db {
             tx.execute("DELETE FROM artifacts WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM evidence_links WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM evidence WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM provenance WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM provenance_sessions WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })

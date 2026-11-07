@@ -121,6 +121,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<IdentityError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::provenance::ProvenanceError>() {
+            error.advice()
         } else if let Some(error) = error.downcast_ref::<RetentionError>() {
             match error {
                 RetentionError::Db(error) => error.advice(),
@@ -677,6 +679,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<IdentityError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::provenance::ProvenanceError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)

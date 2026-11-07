@@ -136,6 +136,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         "session_keys",
         &["lifetime", "max_lifetime", "default_identity"],
     ),
+    ("provenance", &["enabled", "compact_after", "retention"]),
     ("ui", &["enabled", "listen"]),
     (
         "remote",
@@ -219,6 +220,8 @@ pub struct FileConfig {
     pub artifacts: ArtifactsSection,
     /// `[session_keys]` (R3.03).
     pub session_keys: SessionKeysSection,
+    /// `[provenance]` (R3.04).
+    pub provenance: ProvenanceSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -744,6 +747,37 @@ impl Default for SessionKeysSection {
             lifetime: Duration::from_hours(1),
             max_lifetime: Duration::from_hours(24),
             default_identity: String::new(),
+        }
+    }
+}
+
+/// `[provenance]`: provenance records (R3.04, ADR 0058).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProvenanceSection {
+    /// Record signed provenance for every commit the daemon records for a
+    /// workspace. False records nothing, issues no held key, and refuses
+    /// declarations; records already stored stay readable. Default true.
+    pub enabled: bool,
+    /// Records older than this are compacted by GC: of each run of a
+    /// session's records of one change under one context, only the first
+    /// and the last are kept, and any of a visible commit. `0s` never
+    /// compacts. Default 7 days; `0s`, or from 1 day to 10 years.
+    #[serde(with = "duration")]
+    pub compact_after: Duration,
+    /// Records of a change with no visible commit are deleted by GC this
+    /// long after they were recorded; a visible change's are kept. `0s`
+    /// keeps them all. Default 90 days; `0s`, or from 1 day to 10 years.
+    #[serde(with = "duration")]
+    pub retention: Duration,
+}
+
+impl Default for ProvenanceSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            compact_after: Duration::from_hours(7 * 24),
+            retention: Duration::from_hours(90 * 24),
         }
     }
 }
@@ -1623,6 +1657,14 @@ impl Config {
                 ],
             ),
             (
+                "provenance",
+                vec![
+                    ("enabled", f.provenance.enabled.to_string()),
+                    ("compact_after", d(f.provenance.compact_after)),
+                    ("retention", d(f.provenance.retention)),
+                ],
+            ),
+            (
                 "ui",
                 vec![
                     ("enabled", f.ui.enabled.to_string()),
@@ -1954,6 +1996,16 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
                 "must be from 5m to session_keys.max_lifetime ({})",
                 fd(file.session_keys.max_lifetime)
             ),
+        ),
+        (
+            retention_ok(file.provenance.compact_after),
+            "provenance.compact_after",
+            "must be 0s (never compact) or from 1d to 10 years".to_owned(),
+        ),
+        (
+            retention_ok(file.provenance.retention),
+            "provenance.retention",
+            "must be 0s (keep all) or from 1d to 10 years".to_owned(),
         ),
         (
             file.session_keys.default_identity.is_empty()

@@ -166,6 +166,7 @@ fn help_lists_every_command() {
         "file",
         "evidence",
         "identity",
+        "provenance",
         "guide",
         "init",
         "mcp",
@@ -1164,7 +1165,7 @@ async fn ws_gc_dry_run() {
     output.clone().assert().success();
     assert_eq!(
         stdout(&output),
-        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0, evidence 0 removed, artifacts 0 collected (0 B), 0 B kept\n"
+        "total (dry run): jj 0 B -> 0 B, bases 0 removed (0 B), workspaces 0 rows (0 B), stores 0, evidence 0 removed, artifacts 0 collected (0 B), 0 B kept, provenance 0 compacted, 0 removed\n"
     );
     daemon.stop().await;
 
@@ -1791,9 +1792,10 @@ fn root_help_names_every_command() {
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
         .collect();
     for command in help_commands(&state, &[]) {
-        // R3.03: `completions` left the first screen for `identity`; it is
-        // in `--help-all`.
-        if command == "completions" {
+        // R3.03: `completions` left the first screen for `identity`, and
+        // R3.04 `restore` for `provenance`; both are in `--help-all`, and
+        // `reef backup --help` names `restore`.
+        if command == "completions" || command == "restore" {
             continue;
         }
         assert!(words.contains(&command.as_str()), "{command}: {text}");

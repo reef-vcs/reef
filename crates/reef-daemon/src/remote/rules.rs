@@ -65,6 +65,10 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         "/reef.api.v1.IdentityService/IssueSessionKey",
         Rule::LinkedIdentity,
     ),
+    (
+        "/reef.api.v1.ProvenanceService/DeclareProvenance",
+        Rule::OwnWorkspace,
+    ),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

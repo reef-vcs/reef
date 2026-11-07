@@ -176,6 +176,10 @@ impl Manager {
         };
         self.db.finish_workspace(id, state, lease_end, &reclaim)?;
         self.presence.end_workspace(id);
+        // After the final snapshot recorded (R3.04).
+        if let Some(provenance) = self.provenance.get() {
+            provenance.end(id);
+        }
         entry.update_record(|record| {
             record.state = state;
             record.lease_id = None;

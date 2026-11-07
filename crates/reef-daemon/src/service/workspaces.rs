@@ -340,6 +340,33 @@ fn non_empty(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Sets each of `workspaces`' `provenance` to its live session (R3.04), in
+/// one query; nothing when provenance is disabled.
+async fn attach_provenance(state: &AppState, workspaces: &mut [Workspace]) -> Result<(), Status> {
+    if !state.provenance.enabled() || workspaces.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = workspaces.iter().map(|w| w.id.clone()).collect();
+    let provenance = Arc::clone(&state.provenance);
+    let db = Arc::clone(&state.db);
+    let sessions = tokio::task::spawn_blocking(move || {
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        db.live_provenance_sessions(&ids)?
+            .into_iter()
+            .map(|(workspace, (row, records))| {
+                Ok((workspace, provenance.session_message(&row, records)?))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, crate::db::DbError>>()
+    })
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .map_err(status)?;
+    for workspace in workspaces {
+        workspace.provenance = sessions.get(&workspace.id).cloned().map(Box::new);
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl WorkspaceService for WorkspacesService {
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -349,8 +376,16 @@ impl WorkspaceService for WorkspacesService {
     ) -> Result<Response<CreateWorkspaceResponse>, Status> {
         let agent = super::caller_of(&request)?;
         let remote = super::remote_of(&request).cloned();
+        let channel = super::identity::channel_of(&self.state, &request);
         let request = request.into_inner();
         crate::remote::rules::check_create(remote.as_ref(), &request.path)?;
+        // Before anything is created: an identity or actor the rules refuse
+        // fails the creation (R3.04).
+        let plan = self
+            .state
+            .provenance
+            .plan(&channel, request.provenance.as_ref())
+            .map_err(status)?;
         let manager = &self.state.manager;
         let repo = manager.resolve_repo(&request.repo).map_err(status)?;
         let missing_stores =
@@ -381,6 +416,43 @@ impl WorkspaceService for WorkspacesService {
             .await
             .map_err(status)?;
         record_ids(repo.id, created.record.id);
+        let session = match &plan {
+            Some(plan) => {
+                let provenance = Arc::clone(&self.state.provenance);
+                let (plan, record, agent) = (plan.clone(), created.record.clone(), agent.clone());
+                let begun = tokio::task::spawn_blocking(move || {
+                    let row = provenance.begin(
+                        &plan,
+                        crate::provenance::session::For {
+                            repo_id: record.repo_id,
+                            workspace_id: record.id,
+                            owner: &record.owner,
+                            remote_token_id: record.remote_token_id.as_deref(),
+                        },
+                        agent.as_deref(),
+                    )?;
+                    Ok::<_, crate::provenance::ProvenanceError>(
+                        provenance.session_message(&row, 0)?,
+                    )
+                })
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+                match begun {
+                    Ok(session) => Some(session),
+                    Err(error) => {
+                        // The workspace stands; its first record starts a
+                        // session by the rules.
+                        tracing::warn!(
+                            workspace_id = %created.record.id,
+                            error = %reef_lib::error::ErrorChain(&error),
+                            "could not start the workspace's provenance session"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let workspace_id = created.record.id.as_hex();
         let operation = written_operation(
             &self.state,
@@ -394,15 +466,17 @@ impl WorkspaceService for WorkspacesService {
             },
         )
         .await?;
+        let mut workspace = Workspace::from(WorkspaceView {
+            record: &created.record,
+            lease: self.lease_message(Some(&created.lease), Timestamp::now()),
+            local_snapshot_count: 0,
+            stores: &created.stores,
+            watch_pending: manager.scheduler().watch_pending(created.record.id),
+            loaded: true,
+        });
+        workspace.provenance = session.map(Box::new);
         Ok(Response::new(CreateWorkspaceResponse {
-            workspace: Some(Workspace::from(WorkspaceView {
-                record: &created.record,
-                lease: self.lease_message(Some(&created.lease), Timestamp::now()),
-                local_snapshot_count: 0,
-                stores: &created.stores,
-                watch_pending: manager.scheduler().watch_pending(created.record.id),
-                loaded: true,
-            })),
+            workspace: Some(workspace),
             operation,
             shared_change: created.shared_change,
             base_was_cached: created.base_was_cached,
@@ -457,6 +531,7 @@ impl WorkspaceService for WorkspacesService {
             |(record, _)| newest_first(record.created_at.0, &record.id.as_hex()),
         );
         let mut workspaces = listed(&self.state, repo, &rows)?;
+        attach_provenance(&self.state, &mut workspaces).await?;
         if request.changed_file_counts {
             count_changed_files(&self.state, &rows, &mut workspaces).await;
         }
@@ -507,15 +582,17 @@ impl WorkspaceService for WorkspacesService {
             },
         )
         .await?;
+        let mut workspace = vec![Workspace::from(WorkspaceView {
+            record: &inspected.record,
+            lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
+            local_snapshot_count: inspected.local_snapshot_count,
+            stores: &inspected.stores,
+            watch_pending: manager.scheduler().watch_pending(inspected.record.id),
+            loaded: manager.entry(inspected.record.id).is_some(),
+        })];
+        attach_provenance(&self.state, &mut workspace).await?;
         Ok(Response::new(GetWorkspaceResponse {
-            workspace: Some(Workspace::from(WorkspaceView {
-                record: &inspected.record,
-                lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
-                local_snapshot_count: inspected.local_snapshot_count,
-                stores: &inspected.stores,
-                watch_pending: manager.scheduler().watch_pending(inspected.record.id),
-                loaded: manager.entry(inspected.record.id).is_some(),
-            })),
+            workspace: workspace.pop(),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
             other_workspaces_on_change: inspected
                 .other_workspaces_on_change

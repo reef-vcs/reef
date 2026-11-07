@@ -158,6 +158,8 @@ fn schema_evidence_part() {
         ("envelope", "evidence.Envelope"),
         ("session_key_statement", "evidence.SessionKeyStatement"),
         ("session_key_predicate", "evidence.SessionKeyPredicate"),
+        ("provenance_statement", "evidence.ProvenanceStatement"),
+        ("provenance_predicate", "evidence.ProvenancePredicate"),
     ] {
         assert_eq!(evidence[member]["$ref"], format!("#/$defs/{name}"));
         assert!(defs.contains_key(name), "{name}: {defs:?}");
@@ -427,6 +429,15 @@ async fn outputs_match_their_schemas() {
     script
         .both(&a_dir, &["evidence", "show", &evidence_id[..8]])
         .await;
+    // R3.04: an edit on disk, declared over, so `@` has a record.
+    std::fs::write(a_dir.join("provenance.txt"), "p\n").unwrap();
+    script
+        .both(&a_dir, &["provenance", "declare", "--task", "T-1"])
+        .await;
+    script
+        .both(&a_dir, &["provenance", "list", "--change", "@"])
+        .await;
+    script.both(&a_dir, &["provenance", "show"]).await;
     script
         .run(&a_dir, &["evidence", "show", &evidence_id, "--envelope"])
         .await;

@@ -148,7 +148,9 @@ pub struct AppState {
     /// Each repository's artifact store and lock (R3.02).
     pub artifacts: crate::artifacts::Artifacts,
     /// Operator identities, the authority key, and session keys (R3.03).
-    pub identity: crate::identity::Identities,
+    pub identity: Arc<crate::identity::Identities>,
+    /// Provenance records: held keys, sessions and declarations (R3.04).
+    pub provenance: Arc<crate::provenance::Provenance>,
 }
 
 impl fmt::Debug for AppState {
@@ -393,12 +395,18 @@ impl Daemon {
                 .and_then(|started| started.map_err(StartError::Identity))
         };
         let identity = match identity {
-            Ok(identity) => identity,
+            Ok(identity) => Arc::new(identity),
             Err(error) => {
                 remove_if_present(&paths.pid);
                 return Err(error);
             }
         };
+        let provenance = Arc::new(crate::provenance::Provenance::new(
+            Arc::clone(&db),
+            Arc::clone(&identity),
+            config.file.provenance.clone(),
+        ));
+        manager.set_provenance(Arc::clone(&provenance));
         let state = Arc::new(AppState {
             config,
             db,
@@ -422,6 +430,7 @@ impl Daemon {
             remote,
             artifacts: crate::artifacts::Artifacts::new(paths.repos.clone()),
             identity,
+            provenance,
         });
 
         // Before any snapshot can run (R2.10).

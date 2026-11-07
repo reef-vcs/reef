@@ -14,6 +14,10 @@
 //!   predicate type in the same envelope, by which an issuing authority
 //!   binds a short-lived key to an operator identity, and what a verifier
 //!   reports for evidence that key signed.
+//! - [`provenance`]: provenance records (R3.04, ADR 0058): a third
+//!   predicate type, by which a daemon signs, with a key it holds for a
+//!   workspace's session, that it recorded a commit and what context a
+//!   client declared.
 //!
 //! A signature that verifies says that the holder of a key signed the
 //! claim. It does not say who holds the key, that anyone should believe it,
@@ -27,6 +31,7 @@ use reef_error::{Classify, ErrorKind};
 
 pub mod envelope;
 pub mod keys;
+pub mod provenance;
 pub mod session;
 pub mod statement;
 pub mod verify;
@@ -108,8 +113,10 @@ pub enum Invalid {
     /// The payload is not an in-toto Statement v1 as JSON.
     #[error("the payload is not an in-toto Statement v1: {0}")]
     Statement(String),
-    /// Not exactly one subject with a `gitTree` digest of lowercase hex.
-    #[error("the subject is not one git tree: {0}")]
+    /// Not exactly one subject as the predicate type requires: one
+    /// `gitTree` for evidence, one session key for a certificate, one
+    /// `gitCommit` for a provenance record.
+    #[error("the subject is not as the format requires: {0}")]
     Subject(String),
     /// A `predicateType` other than [`PREDICATE_TYPE`].
     #[error("the predicate type is {0:?}; this Reef reads {PREDICATE_TYPE:?}")]

@@ -16,10 +16,21 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/provenance.proto";
 
 // Creating, inspecting, snapshotting, moving, and releasing workspaces.
 service WorkspaceService {
-  // Materializes a new workspace on a change and leases it.
+  // Materializes a new workspace on a change and leases it. Its provenance
+  // session (R3.04) starts with it: `provenance` declares its initial
+  // context, and names its identity and actor.
+  //
+  // Errors (provenance): INVALID_ARGUMENT with reason INVALID_PROVENANCE
+  // (metadata `field`); FAILED_PRECONDITION with reason
+  // PROVENANCE_DISABLED for a non-empty declaration while `[provenance]
+  // enabled` is false; for an identity or actor the issuance rules refuse
+  // (R3.03), NOT_FOUND with reason IDENTITY_NOT_FOUND, FAILED_PRECONDITION
+  // with reason IDENTITY_REVOKED, or PERMISSION_DENIED with reason
+  // SESSION_KEY_REFUSED (metadata `rule`).
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -292,6 +303,11 @@ message Workspace {
   // The remote token that created it (R2.08); empty if created over the
   // socket.
   string remote_token_id = 21;
+  // Its live provenance session (R3.04): the identity its records are
+  // bound to and the context declared now. Set by GetWorkspace,
+  // ListWorkspaces and CreateWorkspace; unset when `[provenance] enabled`
+  // is false, or read at an operation.
+  ProvenanceSession provenance = 22;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).
@@ -390,6 +406,10 @@ message CreateWorkspaceRequest {
   google.protobuf.Duration lease_length = 8;
   // What to do about a declared shared store with no sealed build.
   MissingStores missing_stores = 9;
+  // The provenance session's initial context, identity and actor (R3.04);
+  // unset for the issuance rules' identity, actor `agent`, and nothing
+  // declared. An identity or actor the rules refuse fails the creation.
+  ProvenanceDeclaration provenance = 10;
 }
 
 // A created workspace.
