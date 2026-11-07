@@ -2343,10 +2343,18 @@ async fn history_text_names_authors() {
                 .as_array()
                 .is_some_and(|c| !c.is_empty() && c.iter().all(|c| c["touches_state"] == "current"))
         };
-        if current(&landed) && current(&agent) {
+        // And bot-1's snapshot in the activity: once failed on ubuntu with
+        // the change current but only the owner listed (2026-11-07).
+        let by_bot = agent["changes"][0]["activity"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|a| a["agent"] == "bot-1"));
+        if current(&landed) && current(&agent) && by_bot {
             break landed;
         }
-        assert!(std::time::Instant::now() < deadline, "{landed}\n{agent}");
+        if std::time::Instant::now() >= deadline {
+            let ops = stdout(&run_in(&daemon, &plain, &["op", "log", "-o", "json"]).await);
+            panic!("{landed}\n{agent}\noperations: {ops}");
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let change = &landed["changes"][0];
