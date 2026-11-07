@@ -269,6 +269,19 @@ impl SpawnedDaemon {
         json_lines(&out.path().join("daemon.stderr"), pattern)
     }
 
+    /// The last `n` lines of the processes' stderr as written, JSON or not:
+    /// a panic's message is plain text, which [`SpawnedDaemon::stderr_lines`]
+    /// drops.
+    pub fn stderr_tail(&self, n: usize) -> Vec<String> {
+        let out = self.dirs.out.as_ref().unwrap();
+        let text = std::fs::read_to_string(out.path().join("daemon.stderr")).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(n)..]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect()
+    }
+
     /// Generates a `preset` tree at `<root>/<preset>`, makes it a jj
     /// repository snapshotted once, and registers it.
     pub async fn register_synth(&self, preset: Preset) -> SyntheticRepo {

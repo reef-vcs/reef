@@ -197,15 +197,34 @@ async fn inspect(daemon: &SpawnedDaemon, id: &str) -> Workspace {
         .unwrap()
 }
 
-/// Polls `check` every 100 ms until it holds, failing after [`BOUND`].
-async fn wait_for<F, Fut>(what: &str, mut check: F)
+/// Polls `check` every 100 ms until it holds, failing after [`BOUND`] with
+/// the daemon's last warnings and errors and its last stderr lines (any
+/// level, and a panic's plain text), which say why: a reclaim that never
+/// came on macos-15 left nothing else to go on (2026-11-07).
+async fn wait_for<F, Fut>(daemon: &SpawnedDaemon, what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
     let begun = Instant::now();
     while !check().await {
-        assert!(begun.elapsed() < BOUND, "{what}: not within {BOUND:?}");
+        if begun.elapsed() >= BOUND {
+            let logged = daemon.stderr_lines("");
+            let notable: Vec<String> = logged
+                .iter()
+                .filter(|event| event["level"] == "WARN" || event["level"] == "ERROR")
+                .map(ToString::to_string)
+                .collect();
+            let shown = &notable[notable.len().saturating_sub(40)..];
+            panic!(
+                "{what}: not within {BOUND:?}; the daemon's last {} of {} warnings and \
+                 errors:\n{}\nits last stderr lines:\n{}",
+                shown.len(),
+                notable.len(),
+                shown.join("\n"),
+                daemon.stderr_tail(20).join("\n")
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -268,7 +287,7 @@ async fn enospc_does_not_corrupt_or_crash() {
     fill_around(volume.path(), || {
         std::fs::write(path.join("while-full.txt"), "written while full\n").unwrap();
     });
-    wait_for("an ENOSPC snapshot failure logged", || {
+    wait_for(&daemon, "an ENOSPC snapshot failure logged", || {
         let found = !enospc_errors(&daemon).is_empty();
         async move { found }
     })
@@ -281,13 +300,17 @@ async fn enospc_does_not_corrupt_or_crash() {
     );
 
     free(volume.path());
-    wait_for("the edit snapshotted once space is free", || async {
-        let commit = inspect(&daemon, &ws.id).await.commit_id;
-        file_at(&repo.root, &commit, "while-full.txt")
-            .await
-            .as_deref()
-            == Some(&b"written while full\n"[..])
-    })
+    wait_for(
+        &daemon,
+        "the edit snapshotted once space is free",
+        || async {
+            let commit = inspect(&daemon, &ws.id).await.commit_id;
+            file_at(&repo.root, &commit, "while-full.txt")
+                .await
+                .as_deref()
+                == Some(&b"written while full\n"[..])
+        },
+    )
     .await;
     check_sound(&daemon, &repo.root).await;
     daemon.kill();
@@ -336,7 +359,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     // there is no attention to record; the lease loop logs that (at `error`
     // on the first failed tick and every tenth) and retries every tick.
     // The reclaim once space is free shows the retry.
-    wait_for("the reclaim refused", || async {
+    wait_for(&daemon, "the reclaim refused", || async {
         inspect(&daemon, &ws.id).await.attention() == Attention::FinalSnapshotFailed
             || !daemon
                 .stderr_lines("cannot reclaim the workspace")
@@ -371,7 +394,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
 
     let freed_at = Timestamp::now();
     free(volume.path());
-    wait_for("reclaimed once space is free", || async {
+    wait_for(&daemon, "reclaimed once space is free", || async {
         inspect(&daemon, &ws.id).await.state() == WorkspaceState::Reclaimed
     })
     .await;
