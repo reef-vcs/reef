@@ -175,11 +175,7 @@ impl Manager {
             detail: (!details.is_empty()).then(|| details.join("; ")),
         };
         self.db.finish_workspace(id, state, lease_end, &reclaim)?;
-        self.presence.end_workspace(id);
-        // After the final snapshot recorded (R3.04).
-        if let Some(provenance) = self.provenance.get() {
-            provenance.end(id);
-        }
+        self.end_sessions(id);
         entry.update_record(|record| {
             record.state = state;
             record.lease_id = None;
@@ -352,6 +348,15 @@ impl Manager {
                     tracing::error!(error = %ErrorChain(&error), "cannot mark the workspace");
                 }
             }
+        }
+    }
+
+    /// Ends the reclaimed workspace `id`'s presence and its provenance
+    /// session (R3.04), after its final snapshot recorded.
+    fn end_sessions(&self, id: WorkspaceId) {
+        self.presence.end_workspace(id);
+        if let Some(provenance) = self.provenance.get() {
+            provenance.end(id);
         }
     }
 
