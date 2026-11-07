@@ -574,11 +574,21 @@ async fn write_right_after_create_is_snapshotted() {
 /// what is written meanwhile is in its first snapshot; a workspace loaded
 /// at daemon start does not wait.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario, in its order")]
 async fn watchman_waits_for_a_quiet_window() {
     require_watchman!();
     let _serial = SERIAL.lock().await;
-    let quiet = Duration::from_secs(1);
+    // 2 s, not 1: with 1 s, A's create plus the 500 ms sleep plus B's
+    // request reached 1 s, A's quiet window closed before B's create
+    // started, and A left the waiting state (it reports `attached` from
+    // then, while Watchman still crawls and before "established" is logged)
+    // by the 900 ms check (main, ubuntu, 2026-11-07). Creates usually take
+    // 70-200 ms on CI, occasionally over 500 ms while the first create's
+    // crawl and snapshot overlap A's. The checks below need `cap >= 2 *
+    // quiet`, so the cap cannot end A's wait inside them.
+    let quiet = Duration::from_secs(2);
     let cap = Duration::from_secs(5);
+    assert!(cap >= 2 * quiet);
     let (daemon, repo) = fixture(Preset::Small, |config| {
         let watcher = &mut config.file.watcher;
         watcher.fallback_interval = Duration::from_mins(10);
@@ -592,17 +602,35 @@ async fn watchman_waits_for_a_quiet_window() {
     // quiet window; a create that did has nothing left to wait for.
     create(&daemon, &repo).await;
 
-    // A, then B 500 ms later: A waits for B's create to be 1 s old.
+    // A, then B 500 ms later: A waits for B's create to be `quiet` old.
+    let a_sent = Instant::now();
     let a = create(&daemon, &repo).await;
     assert_eq!(a.watch_state(), WatchState::Waiting);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let b_started = Instant::now();
     let b = create(&daemon, &repo).await;
+    let b_returned = Instant::now();
     write(&a, "during-the-wait.txt", "x\n");
     tokio::time::sleep_until((b_started + Duration::from_millis(900)).into()).await;
-    assert_eq!(established(&a), 0, "A subscribed within 1 s of B's create");
+    let early = established(&a);
     let inspected = inspect(&daemon, &repo, &a).await;
-    assert_eq!(inspected.watch_state(), WatchState::Waiting);
+    // Both creates started within [a_sent, b_returned], so if that span is
+    // under `quiet`, B's create started inside A's quiet window and A
+    // cannot subscribe before `b_started + quiet`; a check that returned
+    // before then must find A waiting. A runner too slow for either bound
+    // proves nothing here, so it is reported, not failed.
+    let checked = b_started.elapsed();
+    let b_in_window = b_returned - a_sent < quiet;
+    if b_in_window && checked < quiet {
+        assert_eq!(early, 0, "A subscribed within {quiet:?} of B's create");
+        assert_eq!(inspected.watch_state(), WatchState::Waiting);
+    } else {
+        eprintln!(
+            "skipped the waiting checks: the creates spanned {:.2?} and the check \
+             returned {checked:.2?} after B's create started (quiet window {quiet:?})",
+            b_returned - a_sent
+        );
+    }
     assert_eq!(
         inspected.attention(),
         Attention::Unspecified,
@@ -611,7 +639,9 @@ async fn watchman_waits_for_a_quiet_window() {
     subscribed(&a, 1).await;
     let subscribed_after = b_started.elapsed();
     eprintln!("A subscribed {subscribed_after:.2?} after B's create started");
-    assert!(subscribed_after >= quiet);
+    if b_in_window {
+        assert!(subscribed_after >= quiet);
+    }
     assert!(is_watched(&inspect(&daemon, &repo, &a).await));
     // No fallback timer (10 minutes): the subscription's first result took
     // the snapshot. That one is a full scan, after jj's own first Watchman
@@ -637,10 +667,10 @@ async fn watchman_waits_for_a_quiet_window() {
     assert!(is_watched(&inspect(&daemon, &repo, &c).await));
     subscribed(&c, before + 1).await;
 
-    // Creates starting every 500 ms never leave a quiet second; D subscribes
+    // Creates starting every 500 ms never leave a quiet window; D subscribes
     // by the cap anyway. They start on the cadence side by side, D's first.
-    // One after another, a create slower than 500 ms opened a quiet second:
-    // on loaded CI runners D (the first create after the restart) then
+    // Run one after another with a 1 s window, a create slower than 500 ms
+    // opened one: on loaded CI runners D (the first create after the restart) then
     // subscribed about 1 s in, with one create done meanwhile.
     // The cap counts from D's tracking, at the end of its create, so the
     // wait is measured from D's reply, checked every 50 ms.
