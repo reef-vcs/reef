@@ -6,7 +6,7 @@
 
 Reef keeps git's content-addressed storage and replaces git's working model with one suited to many concurrent, speculative, token-constrained authors. The name is the metaphor: a durable structure built by countless small organisms.
 
-> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-3/README.md); see [What runs today](#what-runs-today) and the roadmap below.
+> Status: Phase 1 (leased copy-on-write workspaces) is complete and was released as 0.1.0 (2026-10-25). Phase 2 (typed API, MCP server, and live state) is complete and was released as 0.4.0 (2026-11-03); the latest release is [0.4.2](https://github.com/reef-vcs/reef/releases/tag/v0.4.2), with prebuilt binaries for macOS and Linux and Python and TypeScript SDKs. Phase 3 (evidence, proposals, and landing) is under way: signed evidence, its artifact store, operator identities with session keys, and provenance records are on `main`, not yet in a release. Start with the [quickstart](docs/quickstart.md). The CLI is not stable yet. The work is tracked in [docs/dev-tickets](docs/dev-tickets/phase-3/README.md); see [What runs today](#what-runs-today) and the roadmap below.
 
 ## Why
 
@@ -36,7 +36,7 @@ A **proposal** is the unit of review: a change or stack of changes, with its evi
 
 ## What runs today
 
-Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositories. Release 0.1.0 was Phase 1, which replaces git worktrees for agents, and 0.2.0 to 0.4.0 add Phase 2. Coming from 0.3, read [Upgrading from 0.3](CHANGELOG.md#upgrading-from-03); from 0.2, [Upgrading from 0.2](CHANGELOG.md#upgrading-from-02) as well, and from 0.1, [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) too.
+Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositories. Release 0.1.0 was Phase 1, which replaces git worktrees for agents, and 0.2.0 to 0.4.0 add Phase 2. Phase 3's first tickets are on `main` and in no release yet. Coming from 0.3, read [Upgrading from 0.3](CHANGELOG.md#upgrading-from-03); from 0.2, [Upgrading from 0.2](CHANGELOG.md#upgrading-from-02) as well, and from 0.1, [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) too.
 
 ### Phase 1 (0.1.0)
 
@@ -69,6 +69,15 @@ Reef works on existing git and [Jujutsu](https://github.com/jj-vcs/jj) repositor
 
 - **Python and TypeScript SDKs.** `pip install reef-vcs` (`import reef`) and `npm install reef-vcs`: every API call as a typed method, generated from the schema, with page iterators, streams, the daemon's errors by kind with `hint` and `next`, remote access with the daemon's key pinned, and a workspace block that holds a lease and reports presence as `reef ws run` does ([ADR 0054](docs/adr/0054-sdks.md), [Python](docs/python-sdk.md), [TypeScript](docs/typescript-sdk.md)).
 
+### Phase 3 so far (on `main`, unreleased)
+
+The groundwork for the landing gate: what a check claims, who signed it, and where each commit came from. A build from `main` has it. Its daemon migrates the database to schema 10, which an older daemon then refuses, and serves API revision 18; [Unreleased](CHANGELOG.md#unreleased) has the upgrade notes.
+
+- **Evidence objects.** A signed claim that a check (test, build, lint, policy, or another kind) passed, failed, or reached no verdict on one git tree: an in-toto statement in a DSSE envelope, signed with ed25519 and addressed by the hash of its envelope. Evidence binds to the tree, so it stays on a change across a describe or a rebase that keeps the tree, and every read checks the signature again. `reef evidence add`, `list` and `show` add and read it (`key generate` makes a key pair), and `reef schema evidence` prints the format for executors in other languages ([ADR 0055](docs/adr/0055-evidence-object-format.md), [docs/evidence.md](docs/evidence.md)). The format is its own crate, `reef-evidence`, with no jj-lib. Which keys a repository trusts is policy, a later ticket (R3.07).
+- **An artifact store.** The logs, reports and build outputs evidence names by digest, uploaded in resumable chunks and stored once per repository. Garbage collection deletes evidence off live work after `[evidence] retention` (90 days), and artifacts no evidence names; it collects artifacts named only by such evidence after `[artifacts] retention` (30 days), and the least recently used while the store passes `[artifacts] max_size` ([ADR 0056](docs/adr/0056-evidence-artifact-store-and-retention.md), [docs/evidence.md](docs/evidence.md#artifacts)). `reef evidence add --artifact` and `reef evidence artifact upload` upload them; backups include them.
+- **Operator identities and session keys.** An identity is the person or CI pipeline a key answers to. The daemon's authority certifies short-lived ed25519 session keys that the signing process generates, and every evidence read reports the identity beside the signature (`bound`, `expired`, `revoked`, `invalid`, or `unbound` for a bare key, as of when the daemon first saw it). `reef evidence add` signs with a session key by default, and `reef identity` creates and revokes identities, issues and revokes session keys, and rotates the daemon's authority; a remote token can be linked to one identity ([ADR 0057](docs/adr/0057-operator-identities-and-session-keys.md), [docs/identity.md](docs/identity.md)).
+- **Provenance records.** Every commit the daemon records for a workspace gets a signed record (unless `[provenance] enabled = false`) of its change, tree, workspace and session, and of the model, harness, task and instruction hash a client declared, which Reef reports but never verifies. A client declares that context with `--model`, `--task` and `--instruction-file` on `reef ws create` and `reef ws run`, or with `reef provenance declare`, and `reef provenance show` and `list` read the records. Records live in the daemon's database, never in the commit; GC compacts them after a week and deletes those of changes with no visible commit after 90 days ([ADR 0058](docs/adr/0058-provenance-records.md), [docs/provenance.md](docs/provenance.md)).
+
 ## Install
 
 **Ask your agent.** In the repository you want to use Reef in, give your coding agent (Claude Code, Codex, Cursor, or any agent with a shell) this prompt:
@@ -89,7 +98,7 @@ cargo binstall --git https://github.com/reef-vcs/reef reef-vcs reef-daemon
 
 The installer checks the tarball against the release's `SHA256SUMS` and never prompts. The binaries are not signed or notarized yet (R4.17). The [quickstart](docs/quickstart.md#install) has the installer's options, the system requirements, and how to verify a tarball's provenance.
 
-To build from source, with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. It builds `main`, which can be ahead of the release; `reef --version` names the commit. From a checkout, `cargo build --release` builds both into `target/release`. A build from source has no web UI unless you run `just web-build` (Node 24) first; `reef ui` says so. Coming from 0.2, read [Upgrading from 0.2](CHANGELOG.md#upgrading-from-02) first, and from 0.1, [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) as well.
+To build from source, with Rust 1.97.1 or later: `cargo install --locked --git https://github.com/reef-vcs/reef reef-vcs reef-daemon` installs `reef` and `reef-daemon`, the daemon it runs. It builds `main`, which can be ahead of the release; `reef --version` names the commit. `main` now carries Phase 3's unreleased migrations: read [Unreleased](CHANGELOG.md#unreleased) before running its daemon on an existing state directory. From a checkout, `cargo build --release` builds both into `target/release`. A build from source has no web UI unless you run `just web-build` (Node 24) first; `reef ui` says so. Coming from 0.3, read [Upgrading from 0.3](CHANGELOG.md#upgrading-from-03) first; from 0.2, [Upgrading from 0.2](CHANGELOG.md#upgrading-from-02) as well, and from 0.1, [Upgrading from 0.1](CHANGELOG.md#upgrading-from-01) too.
 
 Once installed, in a git or jj repository, `reef ws run -- <your agent command>` runs an agent in a fresh workspace. `reef` alone prints the [agent guide](docs/agent-guide.md), `reef here` says which workspace you are in and what to do next, and `reef --help` lists the rest. `reef init --check` in CI keeps the files `reef init` wrote current. Output is brief JSON when stdout is not a terminal (`-o json` for every field), and an error with a known fix carries it as `hint` and `next`, a command to run.
 
@@ -99,7 +108,7 @@ Reef builds on Jujutsu's data model and Rust crates rather than starting clean. 
 
 1. **Leased copy-on-write workspaces** (complete, released as 0.1.0). A daemon that creates workspaces via overlayfs or APFS clones, snapshots on a filesystem watcher, heartbeats leases, and reclaims expired workspaces with a final snapshot. Shared dependency store mounting. Ships as a standalone tool against existing git and jj repositories. This alone removes the worktree problem.
 2. **Typed API, MCP server, and live state** (complete, released as 0.4.0). Structured status, snapshot, diff, log, and undo over a local socket, with the CLI as a client. Live operation and presence streams. Symbol-level diffs for the first supported languages. A local web UI showing the fleet live.
-3. **Evidence objects and landing gate.** The attestation format, trusted attestor policy, and a landing service that batches rebased proposals, runs checks on the batch head, and bisects on failure. The triage inbox ships here as a web UI, then as a desktop app and as iOS and Android apps, so a human can steer and approve agents from anywhere.
+3. **Evidence objects and landing gate** (in progress: evidence, artifacts, identities and provenance are on `main`). The attestation format, trusted attestor policy, and a landing service that batches rebased proposals, runs checks on the batch head, and bisects on failure. The triage inbox ships here as a web UI, then as a desktop app and as iOS and Android apps, so a human can steer and approve agents from anywhere.
 4. **Shared lazy object store.** A store server speaking the native protocol, with lazy fetch into the local cache and federation between stores.
 5. **Structural merge.** Tree-sitter based merge, starting from [Mergiraf](https://mergiraf.org), for Python, TypeScript, Go, and Rust.
 6. **Protocol specification and conformance suite.** Published once the first four phases have stabilized, so alternative implementations can exist.
@@ -118,10 +127,13 @@ Non-goals: replacing GitHub or any review platform, running builds or tests, or 
 - `crates/reef-client`: the thin client of the API, its stable JSON, and how to find the daemon, with no jj-lib ([ADR 0033](docs/adr/0033-thin-client.md)).
 - `crates/reef-broker`: bounded in-memory rings that read a log once and fan it out to the streams that follow it, with no jj-lib ([ADR 0038](docs/adr/0038-subscription-broker.md)).
 - `crates/reef-symbols`: tree-sitter tag extraction and SCIP normalization for the symbol index ([ADR 0042](docs/adr/0042-symbol-index.md)).
-- `crates/reef-evidence`: the evidence format: signed in-toto statements about a tree in DSSE envelopes, with signing and checking, and no jj-lib ([ADR 0055](docs/adr/0055-evidence-object-format.md)).
-- `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, and the gRPC services.
+- `crates/reef-evidence`: the evidence format: signed in-toto statements in DSSE envelopes (evidence about a tree, session-key certificates, provenance records), with signing and checking, and no jj-lib ([ADR 0055](docs/adr/0055-evidence-object-format.md)).
+- `crates/reef-web`: the web UI's built assets, embedded in the daemon, or a placeholder page when the UI was not built ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md)).
+- `crates/reef-daemon`: the local service and the `reef-daemon` binary. Workspaces, materialization backends, watchers, leases, garbage collection, shared stores, evidence and artifacts, identities and session keys, provenance records, and the gRPC services.
 - `crates/reef-vcs`: the `reef` binary, built on `reef-client` alone, and an umbrella library re-exporting the API and the client.
 - `crates/reef-testing`: unpublished test fixtures and the synthetic repository generator.
+- `web/`: the web UI app, built into `crates/reef-web` ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md)).
+- `sdk/python` and `sdk/typescript`: the Python and TypeScript SDKs, generated from the API schema ([ADR 0054](docs/adr/0054-sdks.md)).
 
 ## Design
 
@@ -135,7 +147,7 @@ The [quickstart](docs/quickstart.md) takes you from installing Reef to an agent'
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, and the DCO sign-off every commit needs. Open work is the Phase 2 rows in [docs/dev-phases.md](docs/dev-phases.md#phase-2-typed-api-mcp-server-and-live-state) not yet done and the issues labeled [`phase-2`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-2).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, and the DCO sign-off every commit needs. Open work is the Phase 3 rows after R3.04 in [docs/dev-phases.md](docs/dev-phases.md#phase-3-evidence-proposals-and-landing), with briefs in [docs/dev-tickets/phase-3](docs/dev-tickets/phase-3/README.md), and the issues labeled [`phase-3`](https://github.com/reef-vcs/reef/issues?q=is%3Aissue+is%3Aopen+label%3Aphase-3).
 
 ## License
 

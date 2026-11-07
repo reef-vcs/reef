@@ -44,6 +44,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- A workspace whose release failed on a full disk is reclaimed once there is room. When the final snapshot failed and the daemon could not record the workspace as active again either (SQLite cannot write on a full disk), it stayed `releasing`, and every later release or lease expiry refused it until the daemon restarted. The next attempt now puts it back to active and reclaims it ([#229](https://github.com/reef-vcs/reef/pull/229)).
 - The web UI's workspaces page shows a released workspace as `released`. When the release's last operation reached the page before the workspace's final state, the row kept reading `releasing` until the next operation in the repository. The page now reads a releasing workspace again until it ends, and also shows a release that failed as active again ([#212](https://github.com/reef-vcs/reef/issues/212)).
 
 ## [0.4.2] - 2026-11-05
