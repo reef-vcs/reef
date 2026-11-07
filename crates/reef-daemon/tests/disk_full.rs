@@ -25,7 +25,7 @@ use common::spawned::{SpawnedDaemon, file_at};
 use common::{proto_millis, short_tempdir};
 use reef_api::v1::{Attention, CreateWorkspaceRequest, Workspace, WorkspaceState};
 use reef_daemon::config::FileConfig;
-use reef_daemon::model::{ReclaimReason, WorkspaceId};
+use reef_daemon::model::{ReclaimReason, Timestamp, WorkspaceId};
 use reef_lib::jj::Repo;
 use reef_testing::synth::Preset;
 use serde_json::Value;
@@ -343,8 +343,19 @@ async fn enospc_during_final_snapshot_keeps_directory() {
                 .is_empty()
     })
     .await;
+    // Kept, not reclaimed. Each retry marks the workspace `releasing` for
+    // its final snapshot and rolls it back to `active` when that fails, so
+    // either state can be read here (`releasing` on macos-15, 2026-11-07).
+    // The reclaim row's time, checked below, shows it waited for space.
     let kept = inspect(&daemon, &ws.id).await;
-    assert_eq!(kept.state(), WorkspaceState::Active);
+    assert!(
+        matches!(
+            kept.state(),
+            WorkspaceState::Active | WorkspaceState::Releasing
+        ),
+        "{:?}",
+        kept.state()
+    );
     assert!(path.is_dir());
     let id: WorkspaceId = ws.id.parse().unwrap();
     let reclaimed = || {
@@ -358,6 +369,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     };
     assert_eq!(reclaimed(), []);
 
+    let freed_at = Timestamp::now();
     free(volume.path());
     wait_for("reclaimed once space is free", || async {
         inspect(&daemon, &ws.id).await.state() == WorkspaceState::Reclaimed
@@ -367,6 +379,7 @@ async fn enospc_during_final_snapshot_keeps_directory() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].reason, ReclaimReason::Expired);
     assert!(rows[0].snapshot_taken);
+    assert!(rows[0].at >= freed_at, "reclaimed while full: {rows:?}");
     assert!(!path.exists());
     let commit = inspect(&daemon, &ws.id).await.commit_id;
     assert_eq!(
