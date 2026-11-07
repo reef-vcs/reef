@@ -127,6 +127,16 @@ message GcReport {
   // machine-wide, so only the first report of a run sweeps them; 0 in the
   // others.
   uint32 session_keys_removed = 21;
+  // Provenance records compacted away (R3.04): recorded before
+  // `[provenance] compact_after` and `keep_newer`, neither the first nor the
+  // last of their run under one context, and not of a visible commit.
+  uint32 provenance_compacted = 22;
+  // Provenance records expired: of changes with no visible commit,
+  // recorded before `[provenance] retention` and `keep_newer`.
+  uint32 provenance_removed = 23;
+  // Why the provenance step stopped short; empty if it did not. The other
+  // steps still ran.
+  string provenance_error = 24;
 }
 
 // A step of a backup.

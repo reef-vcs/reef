@@ -66,6 +66,9 @@ impl From<&GcReport> for v1::GcReport {
             artifact_bytes: report.retention.artifact_bytes,
             evidence_error: report.evidence_error.clone().unwrap_or_default(),
             session_keys_removed: report.session_keys_removed,
+            provenance_compacted: u32::try_from(report.provenance.compacted).unwrap_or(u32::MAX),
+            provenance_removed: u32::try_from(report.provenance.removed).unwrap_or(u32::MAX),
+            provenance_error: report.provenance_error.clone().unwrap_or_default(),
         }
     }
 }

@@ -66,6 +66,7 @@ const PARTS: [&str; 4] = ["cli", "mcp", "api", "evidence"];
 /// language gets the format from the binary it targets. The schema
 /// describes the format; the daemon's checks stay the authority.
 fn evidence_part(defs: &mut Map<String, Value>) -> Value {
+    use reef_client::evidence::provenance::{ProvenancePredicate, ProvenanceStatement};
     use reef_client::evidence::session::{SessionKeyPredicate, SessionKeyStatement};
     use reef_client::evidence::{self as format, Envelope, Predicate, Statement};
     // The deserialize contract: what a producer writes and Reef reads.
@@ -76,9 +77,12 @@ fn evidence_part(defs: &mut Map<String, Value>) -> Value {
     // R3.03: a session key's certificate, in the same envelope.
     let session_key_statement = generator.subschema_for::<SessionKeyStatement>();
     let session_key_predicate = generator.subschema_for::<SessionKeyPredicate>();
+    // R3.04: a provenance record, in the same envelope.
+    let provenance_statement = generator.subschema_for::<ProvenanceStatement>();
+    let provenance_predicate = generator.subschema_for::<ProvenancePredicate>();
     defs.extend(generator.take_definitions(true));
     json!({
-        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds. A session key's certificate (ADR 0057, docs/identity.md) is a second predicate type, urn:reef-vcs:session-key:v1, in the same envelope, signed by an issuing authority.",
+        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds. A session key's certificate (ADR 0057, docs/identity.md) is a second predicate type, urn:reef-vcs:session-key:v1, in the same envelope, signed by an issuing authority. A provenance record (ADR 0058, docs/provenance.md) is a third, urn:reef-vcs:provenance:v1, about one git commit (gitCommit), signed by a key the daemon holds for a workspace's session.",
         "format": format::FORMAT,
         "payload_type": format::PAYLOAD_TYPE,
         "statement_type": format::STATEMENT_TYPE,
@@ -90,22 +94,28 @@ fn evidence_part(defs: &mut Map<String, Value>) -> Value {
         "session_key_predicate_type": format::session::SESSION_KEY_PREDICATE_TYPE,
         "session_key_statement": Value::from(session_key_statement),
         "session_key_predicate": Value::from(session_key_predicate),
+        "provenance_predicate_type": format::provenance::PROVENANCE_PREDICATE_TYPE,
+        "provenance_statement": Value::from(provenance_statement),
+        "provenance_predicate": Value::from(provenance_predicate),
     })
 }
 
 /// The `evidence` part's schema members, which `reef schema evidence
 /// <member>` selects one of.
-const EVIDENCE_MEMBERS: [&str; 5] = [
+const EVIDENCE_MEMBERS: [&str; 7] = [
     "statement",
     "predicate",
     "envelope",
     "session_key_statement",
     "session_key_predicate",
+    "provenance_statement",
+    "provenance_predicate",
 ];
 
 /// Keeps one member of the `evidence` part: `statement`, `predicate`,
-/// `envelope`, or a session key certificate's `session_key_statement` or
-/// `session_key_predicate` (R3.03).
+/// `envelope`, a session key certificate's `session_key_statement` or
+/// `session_key_predicate` (R3.03), or a provenance record's
+/// `provenance_statement` or `provenance_predicate` (R3.04).
 fn keep_evidence(evidence: &mut Value, name: &[String]) -> Option<()> {
     let [name] = name else {
         return None;
@@ -499,7 +509,7 @@ mod tests {
             .keys()
             .filter(|name| name.starts_with("brief."))
             .collect();
-        assert_eq!(views.len(), 13, "{views:?}");
+        assert_eq!(views.len(), 14, "{views:?}");
         for name in views {
             let view = &defs[name];
             let full = &defs[name.trim_start_matches("brief.")];

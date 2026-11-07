@@ -37,7 +37,7 @@ enum WsCommand {
     /// Create a workspace and print its path.
     #[command(
         visible_alias = "new",
-        after_help = "Example: cd \"$(reef ws create -o text --purpose 'fix the parser')\""
+        after_help = "Example: cd \"$(reef ws create -o text --purpose 'fix the parser')\"\nProvenance (R3.04): --model, --task, --instruction-file, --identity, --actor; see `reef provenance declare --help`."
     )]
     Create(CreateArgs),
     /// List active workspaces, newest first, with how many files each changed.
@@ -105,7 +105,9 @@ enum WsCommand {
     #[command(after_help = "Example: cd \"$(reef ws move -o text \"$PWD\" --new-on main)\"")]
     Move(ws_move::Args),
     /// Run a command in a new workspace, then release it.
-    #[command(after_help = "Example: reef ws run -- cargo test")]
+    #[command(
+        after_help = "Example: reef ws run -- cargo test\nProvenance (R3.04): --model, --task, --instruction-file, --identity, --actor; see `reef provenance declare --help`."
+    )]
     Run(ws_run::Args),
     /// Create, attach and release workspaces for a program, JSON in and out.
     Provider(provider::Args),
@@ -203,6 +205,8 @@ pub(crate) struct CreateArgs {
     /// The lease length [default: the daemon's lease.default].
     #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
     lease: Option<Duration>,
+    #[command(flatten)]
+    provenance: super::provenance::SessionFlags,
 }
 
 impl Args {
@@ -697,6 +701,7 @@ async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, Cl
         for (step, error) in [
             ("jj", report.jj_error.as_ref()),
             ("evidence and artifacts", report.evidence_error.as_ref()),
+            ("provenance", report.provenance_error.as_ref()),
         ] {
             if let Some(error) = error {
                 failed.push(format!(
@@ -774,14 +779,39 @@ pub(crate) async fn create_noted(
     .await
 }
 
+/// [`create_noted`], dropping a provenance declaration that came only from
+/// `REEF_MODEL` and `REEF_TASK` when the daemon records no provenance: the
+/// environment's defaults never fail a creation (R3.04).
+pub(crate) async fn create_declared(
+    ctx: &Ctx,
+    repo: &RepoArg,
+    request: CreateWorkspaceRequest,
+    flags: &super::provenance::SessionFlags,
+) -> Result<CreateWorkspaceResponse, CliError> {
+    let retry = request.provenance.is_some() && flags.only_from_env();
+    match create_noted(ctx, repo, request.clone()).await {
+        Err(CliError::Daemon(error))
+            if retry && error.reason() == reef_api::error::PROVENANCE_DISABLED =>
+        {
+            let request = CreateWorkspaceRequest {
+                provenance: None,
+                ..request
+            };
+            create_noted(ctx, repo, request).await
+        }
+        created => created,
+    }
+}
+
 async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
     let request = CreateWorkspaceRequest {
         owner: args.owner.unwrap_or_else(default_owner),
         purpose: args.purpose.unwrap_or_default(),
         lease_length: lease_length(args.lease)?,
+        provenance: args.provenance.declaration()?,
         ..args.target.request()?
     };
-    let response = create_noted(ctx, &args.target.repo()?, request).await?;
+    let response = create_declared(ctx, &args.target.repo()?, request, &args.provenance).await?;
     let created = Created::from_response(&response).ok_or_else(|| missing("workspace"))?;
     note_default_start(ctx, &response.start);
     ctx.out.object(&created)

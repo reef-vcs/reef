@@ -1,0 +1,195 @@
+{
+  "refusals": [
+    {
+      "check": "size",
+      "field": null,
+      "file": "size.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "not-json.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "depth-envelope.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "pad",
+      "file": "depth-payload.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "duplicate-envelope.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "payload_type",
+      "field": null,
+      "file": "payload-type.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "signatures",
+      "field": null,
+      "file": "two-signatures.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "key_id",
+      "field": null,
+      "file": "other-key-id.json",
+      "signature_invalid": false
+    },
+    {
+      "check": null,
+      "field": null,
+      "file": "other-signer.json",
+      "signature_invalid": true
+    },
+    {
+      "check": "statement",
+      "field": null,
+      "file": "predicate-type.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-name.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "two-subjects.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-other-digest.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-short-commit.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-uppercase-commit.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "change",
+      "file": "change.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "tree",
+      "file": "tree.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "workspace",
+      "file": "workspace.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "kind",
+      "file": "kind.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "session",
+      "file": "session.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "sequence",
+      "file": "sequence-zero.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "sequence",
+      "file": "sequence-over.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "recordedOn",
+      "file": "recorded-on.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "no-context.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "instruction-text.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "instruction-other-digest.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "model-oversize.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "harness-space.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "task-control.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "context",
+      "file": "client-session-empty.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "kind",
+      "file": "duplicate-predicate.json",
+      "signature_invalid": false
+    }
+  ],
+  "valid": {
+    "file": "valid.json",
+    "key": "key.pub.pem",
+    "key_id": "b7930d6b9678bddad0fd0b7e641c42882e70fa8591bb311c75286e6913042c91"
+  }
+}

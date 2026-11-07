@@ -4,7 +4,7 @@
 - Date: 2026-11-05
 - Ticket: R3.01
 - Amends: [0003](0003-sqlite-for-daemon-metadata.md) (evidence envelopes in `reef.sqlite3`), [0029](0029-daemon-api-v1.md) (decision 12's exceptions)
-- Amended by: [0056](0056-evidence-artifact-store-and-retention.md) (decision 5: GC's retention deletes evidence that is not on live work), [0057](0057-operator-identities-and-session-keys.md) (`Evidence.identity` beside the signature; a second predicate type, `urn:reef-vcs:session-key:v1`, in the format crate)
+- Amended by: [0056](0056-evidence-artifact-store-and-retention.md) (decision 5: GC's retention deletes evidence that is not on live work), [0057](0057-operator-identities-and-session-keys.md) (`Evidence.identity` beside the signature; a second predicate type, `urn:reef-vcs:session-key:v1`, in the format crate), [0058](0058-provenance-records.md) (a third predicate type, `urn:reef-vcs:provenance:v1`; `evidence_keys` also holds the keys that sign provenance)
 
 ## Context
 

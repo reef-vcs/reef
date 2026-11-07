@@ -38,7 +38,7 @@ use super::env::reef_env;
 use super::error::kind_text;
 use super::heartbeat::{Heartbeater, heartbeats};
 use super::repo::missing;
-use super::ws::{CreateTarget, create_noted, lease_length, note_default_start};
+use super::ws::{CreateTarget, lease_length, note_default_start};
 use super::{CliError, Ctx, Out};
 
 /// A second SIGINT or SIGTERM within this long of the first kills the
@@ -82,6 +82,8 @@ pub(crate) struct Args {
     /// Add KEY=VALUE to the command's environment, as given (repeatable).
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_key_val)]
     env: Vec<(String, String)>,
+    #[command(flatten)]
+    provenance: super::provenance::SessionFlags,
     /// The command and its arguments; put `--` before a command that starts
     /// with a dash.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -171,6 +173,17 @@ struct Outcome {
 }
 
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
+    // A session's identity and actor are fixed when its workspace is made;
+    // an existing one's context is `reef provenance declare`'s (R3.04).
+    if args.workspace.is_some()
+        && (args.provenance.identity.is_some()
+            || args.provenance.actor.is_some()
+            || args.provenance.instruction_file.is_some())
+    {
+        return Err(CliError::Usage(
+            "--identity, --actor and --instruction-file apply to a new workspace; for an existing one, run `reef provenance declare --workspace <ws>`".into(),
+        ));
+    }
     let (ws, start) = match &args.workspace {
         Some(workspace) => (
             attach_rule(ctx, workspace, args.owner.as_deref()).await?,
@@ -285,9 +298,11 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), C
             .clone()
             .unwrap_or_else(|| purpose_of(&args.command)),
         lease_length: lease_length(args.lease)?,
+        provenance: args.provenance.declaration()?,
         ..args.target.request()?
     };
-    let response = create_noted(ctx, &args.target.repo()?, request).await?;
+    let response =
+        super::ws::create_declared(ctx, &args.target.repo()?, request, &args.provenance).await?;
     note_default_start(ctx, &response.start);
     let start = (!response.start.is_empty()).then_some(response.start);
     let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
@@ -375,6 +390,7 @@ fn spawn(ctx: &Ctx, args: &Args, ws: &Workspace) -> io::Result<Child> {
         .args(rest)
         .current_dir(&ws.path)
         .envs(reef_env(ws, ctx.client.socket(), ctx.agent.as_deref()))
+        .envs(args.provenance.env())
         .envs(args.env.iter().map(|(key, value)| (key, value)))
         // A panic in `ws run` must not kill an agent mid-write.
         .kill_on_drop(false)

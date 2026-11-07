@@ -188,7 +188,7 @@ fn counts(daemon: &TestDaemon) -> (u64, u64, u64) {
 // 9
 #[tokio::test(flavor = "multi_thread")]
 async fn add_and_get() {
-    let (daemon, repo) = fixture().await;
+    let (daemon, repo) = fixture_with(|config| config.file.provenance.enabled = false).await;
     let client = daemon.client.clone().with_agent("tester-agent").unwrap();
     let ws = create(&client, &repo.id).await;
     let at = edit(&client, &ws, "a.txt", "a\n").await;
@@ -1001,7 +1001,9 @@ async fn tampering_shows_invalid() {
 // 14
 #[tokio::test(flavor = "multi_thread")]
 async fn survives_gc_backup_and_forget() {
-    let (daemon, repo) = fixture().await;
+    // The counts below are evidence's own: provenance's held keys (R3.04),
+    // which edits naming the workspace record, would join `evidence_keys`.
+    let (daemon, repo) = fixture_with(|config| config.file.provenance.enabled = false).await;
     let client = &daemon.client;
     let ws = create(client, &repo.id).await;
     let c = edit(client, &ws, "unique.txt", "only here\n").await;

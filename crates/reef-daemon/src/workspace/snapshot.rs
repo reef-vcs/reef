@@ -520,6 +520,7 @@ impl Manager {
             let reefignore = entry.paths.root.join(REEFIGNORE);
             let spec = entry.spec();
             let prefixes = trigger.prefixes().map(<[PathBuf]>::to_vec);
+            let provenance = self.provenance.get().cloned();
             tokio::task::spawn_blocking(move || {
                 refuse_symlinked_root(&entry.paths.root)?;
                 // An overlay whose mount is gone would scan as empty.
@@ -543,6 +544,7 @@ impl Manager {
                     carry: carry.as_ref(),
                     committed: Cell::new(false),
                     fail_check_out,
+                    provenance: provenance.as_deref(),
                 };
                 let ran = match scan_failure {
                     Some(source) => Err(BackendError::Io {
@@ -768,6 +770,8 @@ struct Pipeline<'a> {
     committed: Cell<bool>,
     /// `Scheduler::fail_check_outs` (a test hook).
     fail_check_out: bool,
+    /// Records each committed snapshot's provenance (R3.04).
+    provenance: Option<&'a crate::provenance::Provenance>,
 }
 
 impl Pipeline<'_> {
@@ -931,6 +935,8 @@ impl Pipeline<'_> {
             }
         }
         let row = record_commit(self.db, self.entry, self.kind, &committed, recovered);
+        // The commit exists whether or not its row was written.
+        self.record_provenance(&committed);
         let finished = pollster::block_on(pending.finish(&committed.op_id));
         let ran = row.and(finished.map_err(ManagerError::from)).map(|()| Ran {
             recorded: Recorded::Committed(committed),
@@ -951,6 +957,28 @@ impl Pipeline<'_> {
 }
 
 impl Pipeline<'_> {
+    /// Records `committed`'s provenance (R3.04), which never fails the
+    /// snapshot.
+    fn record_provenance(&self, committed: &SnapshotCommit) {
+        let Some(provenance) = self.provenance else {
+            return;
+        };
+        let record = self.entry.record();
+        provenance.record(&crate::provenance::record::Commit {
+            at: crate::provenance::session::For {
+                repo_id: record.repo_id,
+                workspace_id: self.id,
+                owner: &record.owner,
+                remote_token_id: record.remote_token_id.as_deref(),
+            },
+            commit_id: committed.commit_id.as_str(),
+            change_id: committed.change_id.as_str(),
+            tree_id: committed.tree_id.as_deref(),
+            kind: self.kind.as_str(),
+            recorded_at: Timestamp::from(committed.end_time),
+        });
+    }
+
     /// A carried snapshot's check-out of `committed`, between its commit and
     /// its row (ADR 0039). When it fails, the workspace's next snapshot
     /// merges again over `base`, the tree this one took, which gives this

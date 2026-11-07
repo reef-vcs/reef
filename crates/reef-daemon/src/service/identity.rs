@@ -118,7 +118,7 @@ fn parse_cursor(cursor: &str) -> Result<(Timestamp, String), Status> {
 
 /// The channel of a request: the socket, or the remote listener with its
 /// token's linked identity.
-fn channel_of<T>(state: &AppState, request: &Request<T>) -> Channel {
+pub(crate) fn channel_of<T>(state: &AppState, request: &Request<T>) -> Channel {
     match super::remote_of(request) {
         None => Channel::Socket,
         Some(caller) => {
@@ -255,6 +255,10 @@ impl IdentityService for IdentityHandler {
                 &request.reason,
             )
             .map_err(status)?;
+        // Held provenance keys of the identity go now (R3.04).
+        self.state
+            .provenance
+            .revoked(&crate::provenance::Revoked::Identity(row.id.clone()));
         Ok(Response::new(RevokeIdentityResponse {
             identity: Some(self.identity_message(&row)?),
         }))
@@ -376,6 +380,18 @@ impl IdentityService for IdentityHandler {
             }),
         }
         .map_err(status)?;
+        // Held provenance keys of the session, or the key, go now (R3.04).
+        let scope = match &request.target {
+            Some(revoke_session_keys_request::Target::SessionId(session_id)) => {
+                crate::provenance::Revoked::Session(session_id.trim().to_owned())
+            }
+            _ => crate::provenance::Revoked::Key(
+                read.first()
+                    .map(|key| key.row.key_id.clone())
+                    .unwrap_or_default(),
+            ),
+        };
+        self.state.provenance.revoked(&scope);
         Ok(Response::new(RevokeSessionKeysResponse {
             keys: read
                 .iter()
@@ -420,6 +436,11 @@ impl IdentityService for IdentityHandler {
             )
             .await
             .map_err(status)?;
+        if request.revoke {
+            self.state
+                .provenance
+                .revoked(&crate::provenance::Revoked::Authority(retired.id.clone()));
+        }
         tracing::info!(
             retired_key_id = %retired.id,
             key_id = %current.id,
@@ -447,6 +468,9 @@ impl IdentityService for IdentityHandler {
                 &request.reason,
             )
             .map_err(status)?;
+        self.state
+            .provenance
+            .revoked(&crate::provenance::Revoked::Authority(row.id.clone()));
         Ok(Response::new(RevokeAuthorityResponse {
             authority: Some(authority_message(&row)),
         }))
