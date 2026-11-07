@@ -147,6 +147,8 @@ pub struct AppState {
     pub remote: crate::remote::RemoteListener,
     /// Each repository's artifact store and lock (R3.02).
     pub artifacts: crate::artifacts::Artifacts,
+    /// Operator identities, the authority key, and session keys (R3.03).
+    pub identity: crate::identity::Identities,
 }
 
 impl fmt::Debug for AppState {
@@ -274,6 +276,10 @@ pub enum StartError {
     /// The remote tokens could not be loaded (R2.08).
     #[error("load the remote listener's tokens")]
     Remote(#[source] crate::remote::RemoteError),
+    /// The identity state could not be set up (R3.03): the authority key,
+    /// the default identity, or `[session_keys] default_identity`.
+    #[error("set up operator identities")]
+    Identity(#[source] crate::identity::IdentityError),
     /// The server failed while running.
     #[error("the server failed")]
     Serve(#[source] tonic::transport::Error),
@@ -291,6 +297,7 @@ impl Classify for StartError {
             Self::RestartGrace(error) => error.kind(),
             Self::Settings(error) => error.kind(),
             Self::Remote(error) => error.kind(),
+            Self::Identity(error) => error.kind(),
             Self::SocketInUse { .. } => ErrorKind::Unavailable,
             Self::NotOwned { .. } => ErrorKind::PermissionDenied,
             Self::CreateDir { source, .. }
@@ -376,6 +383,22 @@ impl Daemon {
                 return Err(StartError::Remote(error));
             }
         };
+        // The default identity and the authority key, after the migrations
+        // and before the socket serves (R3.03).
+        let identity = {
+            let (config, db) = (config.clone(), Arc::clone(&db));
+            tokio::task::spawn_blocking(move || crate::identity::Identities::start(&config, db))
+                .await
+                .map_err(StartError::Task)
+                .and_then(|started| started.map_err(StartError::Identity))
+        };
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err(error) => {
+                remove_if_present(&paths.pid);
+                return Err(error);
+            }
+        };
         let state = Arc::new(AppState {
             config,
             db,
@@ -398,6 +421,7 @@ impl Daemon {
             web: crate::web::WebUi::new(config_web),
             remote,
             artifacts: crate::artifacts::Artifacts::new(paths.repos.clone()),
+            identity,
         });
 
         // Before any snapshot can run (R2.10).

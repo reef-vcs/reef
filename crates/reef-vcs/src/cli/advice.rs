@@ -46,6 +46,17 @@ impl AdviceCtx {
         }
     }
 
+    /// For a command with no repository scope (`reef identity`): its
+    /// advice names no `--repo` or `--workspace`.
+    pub(crate) fn unscoped() -> Self {
+        Self::new(&Scope {
+            repo_id: String::new(),
+            workspace: None,
+            dir: std::path::PathBuf::new(),
+            from_flags: false,
+        })
+    }
+
     /// `error` with the CLI's advice when the table has some for its reason.
     pub(crate) fn refine(&self, error: CliError) -> CliError {
         let CliError::Daemon(error) = error else {
@@ -269,6 +280,90 @@ impl AdviceCtx {
                 ),
                 next: self.argv.clone(),
             },
+            // Operator identities and session keys (R3.03).
+            reason::IDENTITY_NOT_FOUND if get("name").is_empty() => Advice {
+                hint: "This daemon has no default identity: name one with --identity, or set [session_keys] default_identity.".to_owned(),
+                next: vec!["reef".into(), "identity".into(), "list".into()],
+            },
+            reason::IDENTITY_NOT_FOUND => Advice {
+                hint: format!("No identity is named {}; `reef identity list` shows them.", get("name")),
+                next: vec!["reef".into(), "identity".into(), "list".into()],
+            },
+            reason::IDENTITY_REVOKED => Advice::hint(format!(
+                "Identity {} was revoked at {}: it gets no keys and links no tokens. Use another identity.",
+                get("name"),
+                get("revoked_at")
+            )),
+            reason::IDENTITY_EXISTS => Advice::hint(if get("revoked") == "true" {
+                "A revoked identity has that name, and names are never reused: pick another."
+            } else {
+                "An identity has that name; pick another, or use it."
+            }),
+            reason::INVALID_IDENTITY_NAME => Advice::hint(
+                "Identity names are lowercase letters, digits, '.', '_' and '-', starting with a letter or digit, at most 63.",
+            ),
+            reason::SESSION_KEY_REFUSED => Advice::hint(match get("rule") {
+                "ci_over_socket" => "A ci identity's keys are issued only to a remote token linked to it (`reef remote token create <name> --scope write --identity <ci>`); on this machine, use a person identity.",
+                "human_over_remote" => "--actor human is issued only on the daemon's machine; through a remote daemon, use --actor agent or executor.",
+                "human_for_ci" => "A ci identity's keys are agent or executor: drop --actor human.",
+                "token_not_linked" => "This remote's token is linked to no identity; ask the daemon's owner for one made with `reef remote token create <name> --scope write --identity <identity>`.",
+                "token_identity_mismatch" => "Through a remote daemon, keys are issued only for the token's identity: drop --identity.",
+                "session_revoked" => "That session is revoked: leave --session out to start a new one.",
+                _ => "Renew a session with its first key's identity and actor, or leave --session out.",
+            }),
+            reason::TOO_MANY_SESSION_KEYS => Advice {
+                hint: format!(
+                    "Identity {} holds {} unexpired keys; revoke unused sessions, or wait for keys to expire.",
+                    get("identity"),
+                    get("limit")
+                ),
+                next: vec![
+                    "reef".into(),
+                    "identity".into(),
+                    "session".into(),
+                    "list".into(),
+                    "--identity".into(),
+                    get("identity").to_owned(),
+                ],
+            },
+            reason::INVALID_SESSION_KEY_REQUEST if get("field") == "lifetime" => Advice::hint(
+                "--lifetime is from 5m to the daemon's [session_keys] max_lifetime (`reef config show`).",
+            ),
+            reason::SESSION_KEY_NOT_FOUND | reason::AMBIGUOUS_SESSION_KEY_ID => Advice {
+                hint: "Name a key by its id or a unique prefix of at least 4 hex digits, and a session by its full id.".to_owned(),
+                next: vec![
+                    "reef".into(),
+                    "identity".into(),
+                    "session".into(),
+                    "list".into(),
+                    "--all".into(),
+                ],
+            },
+            reason::INVALID_REVOCATION => Advice::hint(
+                "--since takes a time at or before now; give it or --since-issued (--since-created), not both.",
+            ),
+            reason::DEFAULT_IDENTITY_UNAVAILABLE => Advice {
+                hint: format!(
+                    "The daemon has no default identity ({}): pass --identity, or fix [session_keys] default_identity in its config.toml and restart it.",
+                    get("problem")
+                ),
+                next: vec!["reef".into(), "identity".into(), "list".into()],
+            },
+            reason::IDENTITY_IS_DEFAULT => Advice::hint(format!(
+                "{} is the default identity: set [session_keys] default_identity to another live person identity and restart the daemon, then revoke it.",
+                get("name")
+            )),
+            reason::AUTHORITY_NOT_FOUND | reason::AMBIGUOUS_AUTHORITY_ID => Advice {
+                hint: "Name an authority by its key id or a unique prefix of at least 4 hex digits.".to_owned(),
+                next: vec!["reef".into(), "identity".into(), "authority".into(), "show".into()],
+            },
+            reason::AUTHORITY_IS_CURRENT => Advice::hint(
+                "That is the current authority: `reef identity authority rotate --revoke` retires and revokes it.",
+            ),
+            reason::AUTHORITY_UNAVAILABLE => Advice::hint(format!(
+                "The daemon cannot write its authority key at {}; make that directory writable by the daemon's user.",
+                get("path")
+            )),
             reason::SNAPSHOT_FAILED if self.snapshots_first => Advice {
                 hint: "The workspace could not be snapshotted; --no-snapshot reads its last snapshot."
                     .to_owned(),

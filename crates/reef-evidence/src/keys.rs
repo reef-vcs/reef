@@ -101,6 +101,12 @@ impl KeyId {
         KeyId(crate::sha256_hex(spki_der))
     }
 
+    /// `text` as a key id, when it is 64 lowercase hex digits: a `keyid`
+    /// hint read from an envelope, to look a key up by (R3.03).
+    pub fn parse(text: &str) -> Option<KeyId> {
+        crate::is_lower_hex(text, KEY_ID_LEN).then(|| KeyId(text.to_owned()))
+    }
+
     /// The id, 64 lowercase hex digits.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -311,8 +317,10 @@ pub fn pem_encode(label: &str, der: &[u8]) -> String {
     text
 }
 
-/// The DER of the first PEM block labelled `label` in `text`.
-pub fn pem_decode(text: &str, label: &str) -> Result<Vec<u8>, KeyError> {
+/// The DER of the first PEM block labelled `label` in `text`, wiped from
+/// memory when dropped: it may be a private key's. The base64 text it was
+/// read from is the caller's to wipe.
+pub fn pem_decode(text: &str, label: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, KeyError> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
     let Some(start) = text.find(&begin) else {
@@ -333,10 +341,13 @@ pub fn pem_decode(text: &str, label: &str) -> Result<Vec<u8>, KeyError> {
             "the PEM {label} block has no end line"
         )));
     };
-    let base64: String = body[..stop]
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
+    let base64: zeroize::Zeroizing<String> = zeroize::Zeroizing::new(
+        body[..stop]
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect(),
+    );
     crate::envelope::decode_base64(&base64)
+        .map(zeroize::Zeroizing::new)
         .ok_or_else(|| KeyError::Pem(format!("the PEM {label} block is not base64")))
 }

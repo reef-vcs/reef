@@ -602,6 +602,50 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.ArtifactService/ReadArtifact",
         "read in the proposal flow (R3.31); bytes do not belong in a tool result; tools/list is at its budget (#116)",
     ),
+    (
+        "/reef.api.v1.IdentityService/CreateIdentity",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/GetIdentity",
+        "read in the proposal flow (R3.31) and by `reef identity`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/ListIdentities",
+        "read in the proposal flow (R3.31) and by `reef identity`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RevokeIdentity",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/IssueSessionKey",
+        "keys are issued to the process that signs, never to a tool call (R3.03)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/GetSessionKey",
+        "read in the proposal flow (R3.31) and by `reef identity`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/ListSessionKeys",
+        "read in the proposal flow (R3.31) and by `reef identity`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RevokeSessionKeys",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/ListAuthorities",
+        "read in the proposal flow (R3.31) and by `reef identity`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RevokeAuthority",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RotateAuthority",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.
@@ -1348,17 +1392,18 @@ mod tests {
         assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
     }
 
-    /// R3.01 test 18 and R3.02 test 18: evidence and artifacts have no
-    /// tools, and each method says why.
+    /// R3.01 test 18, R3.02 test 18 and R3.03 test 16: evidence,
+    /// artifacts and identities have no tools, and each method says why.
     #[test]
     fn evidence_is_not_a_tool() {
         let evidence: Vec<&str> = reef_api::methods()
             .filter(|path| {
                 path.starts_with("/reef.api.v1.EvidenceService/")
                     || path.starts_with("/reef.api.v1.ArtifactService/")
+                    || path.starts_with("/reef.api.v1.IdentityService/")
             })
             .collect();
-        assert_eq!(evidence.len(), 6);
+        assert_eq!(evidence.len(), 17);
         for path in evidence {
             assert!(NOT_TOOLS.iter().any(|(rpc, _)| *rpc == path), "{path}");
             assert!(!TOOLS.iter().any(|tool| tool.rpc == path), "{path}");

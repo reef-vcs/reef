@@ -90,6 +90,8 @@ pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["evidence", "add"], "envelope", &["public_key"]),
     (&["evidence", "add"], "public_key", &["envelope"]),
     (&["history"], "change_kind", &["symbol"]),
+    (&["identity", "authority", "rotate"], "since", &["revoke"]),
+    (&["identity", "authority", "rotate"], "reason", &["revoke"]),
     (&["ws", "renew"], "while_pid", &["follow"]),
 ];
 

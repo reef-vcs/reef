@@ -33,6 +33,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/history.proto",
     "proto/reef/api/v1/remote.proto",
     "proto/reef/api/v1/artifacts.proto",
+    "proto/reef/api/v1/identity.proto",
     "proto/reef/api/v1/evidence.proto",
 ];
 

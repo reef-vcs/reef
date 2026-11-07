@@ -1,0 +1,160 @@
+{
+  "refusals": [
+    {
+      "check": "size",
+      "field": null,
+      "file": "size.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "not-json.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "depth-envelope.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "pad",
+      "file": "depth-payload.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "envelope",
+      "field": null,
+      "file": "duplicate-envelope.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "payload_type",
+      "field": null,
+      "file": "payload-type.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "signatures",
+      "field": null,
+      "file": "two-signatures.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "authority",
+      "field": null,
+      "file": "unknown-authority.json",
+      "signature_invalid": false
+    },
+    {
+      "check": null,
+      "field": null,
+      "file": "other-signer.json",
+      "signature_invalid": true
+    },
+    {
+      "check": "statement",
+      "field": null,
+      "file": "predicate-type.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-digest.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "subject",
+      "field": null,
+      "file": "subject-name.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "issuer",
+      "file": "issuer-key-id.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "notAfter",
+      "file": "not-after.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "actor",
+      "file": "human-for-ci.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "presence",
+      "file": "unknown-presence.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "custody",
+      "file": "unknown-custody.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "actor",
+      "file": "unknown-actor.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "identity",
+      "file": "unknown-kind.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "identity",
+      "file": "identity-id.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "identity",
+      "file": "identity-name.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "publicKey",
+      "file": "small-order-key.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "publicKey",
+      "file": "non-canonical-key.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "issuer",
+      "file": "unknown-issuer-kind.json",
+      "signature_invalid": false
+    },
+    {
+      "check": "predicate",
+      "field": "actor",
+      "file": "duplicate-predicate.json",
+      "signature_invalid": false
+    }
+  ],
+  "valid": {
+    "authority": "authority.pub.pem",
+    "authority_key_id": "9064b45b3e0fb33b851a2e994e8bbf6f60ef5c1579301e88719cc13ae3153aec",
+    "file": "valid.json",
+    "session_key_id": "c15835b2bd83ae4dc55dfaad2d8286c301a166680ab648099fa672e95f6d6ac0"
+  }
+}

@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 16;
+pub const API_REVISION: u32 = 17;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -89,6 +89,10 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.02: `ArtifactService`, `EvidenceArtifact.state`, `size` and
     // `collected_at`, `GcReport` fields 16 to 20, `BACKUP_STEP_ARTIFACTS`.
     "8dd704ced8c0fbb29f359879aebb5a32648592eee27925c01e3de69c11ded3ce",
+    // R3.03: `IdentityService`, `Evidence.identity`,
+    // `ListEvidenceRequest.identities`, `CreateRemoteTokenRequest.identity`,
+    // `RemoteToken.identity`, `GcReport.session_keys_removed`.
+    "10d9dd1a5ed4f69142a5c0a5c675f23899a2dad6956e824a3fab2a2edee23ca4",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -417,6 +421,73 @@ pub mod error {
     /// for `size`, and `actual_sha256` for `digest`.
     pub const ARTIFACT_DAMAGED: &str = "ARTIFACT_DAMAGED";
 
+    /// An operator identity name that is not `[a-z0-9][a-z0-9._-]{0,62}`
+    /// (R3.03). Metadata: `name`.
+    pub const INVALID_IDENTITY_NAME: &str = "INVALID_IDENTITY_NAME";
+    /// An identity's other fields out of their bounds (R3.03): no kind, a
+    /// display name over 128 bytes or with control characters, or an email
+    /// that is not `local@domain`. Metadata: `field` (`kind`,
+    /// `display_name` or `email`).
+    pub const INVALID_IDENTITY: &str = "INVALID_IDENTITY";
+    /// An identity already has the name (R3.03); names are never reused.
+    /// Metadata: `name`, `revoked` (`true` when the name belongs to a
+    /// revoked identity).
+    pub const IDENTITY_EXISTS: &str = "IDENTITY_EXISTS";
+    /// No identity has the name or id (R3.03). Metadata: `name`.
+    pub const IDENTITY_NOT_FOUND: &str = "IDENTITY_NOT_FOUND";
+    /// A revoked identity named for issuance or a token link (R3.03).
+    /// Metadata: `name`, `revoked_at` (RFC 3339).
+    pub const IDENTITY_REVOKED: &str = "IDENTITY_REVOKED";
+    /// A session key request out of its bounds (R3.03): a key that is not a
+    /// usable ed25519 `SubjectPublicKeyInfo`, a proof that does not verify
+    /// for the request's identity, actor and session, no actor, a lifetime
+    /// out of range, or a malformed session id. Metadata: `field`
+    /// (`public_key`, `proof`, `actor`, `lifetime` or `session_id`); for
+    /// `proof`, also `key_id` and the current `authority_key_id`, the proof's
+    /// audience.
+    pub const INVALID_SESSION_KEY_REQUEST: &str = "INVALID_SESSION_KEY_REQUEST";
+    /// A session key the issuance rules refuse (R3.03). Metadata: `rule`
+    /// (`ci_over_socket`, `human_over_remote`, `human_for_ci`,
+    /// `token_not_linked`, `token_identity_mismatch`, `session_mismatch`,
+    /// `session_revoked` or `session_channel_mismatch`).
+    pub const SESSION_KEY_REFUSED: &str = "SESSION_KEY_REFUSED";
+    /// A key already certified, or one that already signed evidence as a
+    /// bare key (R3.03): a session key is always fresh. Metadata: `key_id`,
+    /// `state` (`certified` or `used`).
+    pub const SESSION_KEY_EXISTS: &str = "SESSION_KEY_EXISTS";
+    /// An identity with its limit of unexpired session keys (R3.03).
+    /// Metadata: `identity`, `limit`.
+    pub const TOO_MANY_SESSION_KEYS: &str = "TOO_MANY_SESSION_KEYS";
+    /// No session key has the id or prefix, or no session the id (R3.03).
+    /// Metadata: `key_id` or `session_id`.
+    pub const SESSION_KEY_NOT_FOUND: &str = "SESSION_KEY_NOT_FOUND";
+    /// A session key id prefix shared by several keys (R3.03). Metadata:
+    /// `key_id`, `key_ids` (up to ten, comma-separated).
+    pub const AMBIGUOUS_SESSION_KEY_ID: &str = "AMBIGUOUS_SESSION_KEY_ID";
+    /// A revocation's time in the future, or given with `since_*` (field
+    /// `invalid_from`), or one with nothing to revoke (field `target`)
+    /// (R3.03). Metadata: `field`.
+    pub const INVALID_REVOCATION: &str = "INVALID_REVOCATION";
+    /// The daemon's authority key file cannot be written (R3.03). Metadata:
+    /// `path`.
+    pub const AUTHORITY_UNAVAILABLE: &str = "AUTHORITY_UNAVAILABLE";
+    /// A request for the default identity when the daemon has no usable one
+    /// (R3.03): none is recorded, or `[session_keys] default_identity` names
+    /// no live person identity. Metadata: `configured` (the setting, empty
+    /// when unset), `problem`.
+    pub const DEFAULT_IDENTITY_UNAVAILABLE: &str = "DEFAULT_IDENTITY_UNAVAILABLE";
+    /// A revocation of the identity socket requests use by default (R3.03):
+    /// change `[session_keys] default_identity` first. Metadata: `name`.
+    pub const IDENTITY_IS_DEFAULT: &str = "IDENTITY_IS_DEFAULT";
+    /// No authority has the key id or prefix (R3.03). Metadata: `key_id`.
+    pub const AUTHORITY_NOT_FOUND: &str = "AUTHORITY_NOT_FOUND";
+    /// An authority key id prefix shared by several (R3.03). Metadata:
+    /// `key_id`, `key_ids` (comma-separated).
+    pub const AMBIGUOUS_AUTHORITY_ID: &str = "AMBIGUOUS_AUTHORITY_ID";
+    /// A revocation of the current authority, which would go on issuing
+    /// (R3.03): rotate it with `revoke`. Metadata: `key_id`.
+    pub const AUTHORITY_IS_CURRENT: &str = "AUTHORITY_IS_CURRENT";
+
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
         let envelope = tonic_types::Status {
@@ -549,14 +620,16 @@ mod tests {
         // ADR 0029 decision 12's exceptions, as ADR 0055 amends it: the
         // symbol index's upload, which stores derived data (ADR 0042), and
         // evidence, an immutable object with nothing for undo to revert; and,
-        // as ADR 0056 amends it, an artifact's bytes, kept by retention.
-        const EXCEPT: [&str; 6] = [
+        // as ADR 0056 amends it, an artifact's bytes, kept by retention; and,
+        // as ADR 0057 amends it, a session key, which changes no jj view.
+        const EXCEPT: [&str; 7] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
             "UploadScipDocuments",
             "AddEvidence",
             "UploadArtifact",
+            "IssueSessionKey",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

@@ -124,6 +124,10 @@ pub struct EvidenceFilter {
     pub target: Option<String>,
     /// Only evidence signed by these keys.
     pub key_ids: Vec<String>,
+    /// Only evidence whose key is certified for one of these identities, by
+    /// name (R3.03), as the session keys' columns say; reads check the
+    /// certificates.
+    pub identities: Vec<String>,
 }
 
 const COLUMNS: &str = "e.repo_id, e.id, e.envelope, e.format, e.tree_id, e.kind, e.result, \
@@ -135,7 +139,7 @@ const FROM: &str = "evidence e LEFT JOIN evidence_keys k ON k.id = e.key_id";
 
 /// Column `idx` as text, whatever was stored: a number as its digits, a
 /// blob as lossy UTF-8, NULL as `None`.
-fn text_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
+pub(super) fn text_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
     Ok(match row.get::<_, SqlValue>(idx)? {
         SqlValue::Null => None,
         SqlValue::Integer(n) => Some(n.to_string()),
@@ -146,7 +150,7 @@ fn text_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
 }
 
 /// Column `idx` as an integer; 0 when it holds something else.
-fn integer_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
+pub(super) fn integer_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
     Ok(match row.get::<_, SqlValue>(idx)? {
         SqlValue::Integer(n) => n,
         _ => 0,
@@ -154,7 +158,7 @@ fn integer_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<i64> {
 }
 
 /// Column `idx` as bytes; text as its UTF-8, anything else empty.
-fn bytes_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Vec<u8>>> {
+pub(super) fn bytes_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Vec<u8>>> {
     Ok(match row.get::<_, SqlValue>(idx)? {
         SqlValue::Blob(bytes) => Some(bytes),
         SqlValue::Text(text) => Some(text.into_bytes()),
@@ -566,6 +570,16 @@ impl Db {
             sql.push_str(&vec!["?"; wanted.len()].join(", "));
             sql.push(')');
             values.extend(wanted.iter().map(|value| text(value)));
+        }
+        if !filter.identities.is_empty() {
+            sql.push_str(
+                " AND e.key_id IN (SELECT k.key_id FROM session_keys k
+                                   JOIN identities i ON i.id = k.identity_id
+                                   WHERE i.name IN (",
+            );
+            sql.push_str(&vec!["?"; filter.identities.len()].join(", "));
+            sql.push_str("))");
+            values.extend(filter.identities.iter().map(|name| text(name)));
         }
         if let Some((at, id)) = cursor {
             sql.push_str(" AND (e.added_at < ? OR (e.added_at = ? AND e.id > ?))");

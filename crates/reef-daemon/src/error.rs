@@ -33,6 +33,7 @@ use crate::artifacts::retention::RetentionError;
 use crate::backend::BaseCacheError;
 use crate::db::DbError;
 use crate::history::HistoryError;
+use crate::identity::IdentityError;
 use crate::lease::LeaseError;
 use crate::maintenance::backup::{BackupError, ManifestError};
 use crate::maintenance::gc::GcRunError;
@@ -117,6 +118,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<IdentityError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<RetentionError>() {
             match error {
@@ -672,6 +675,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<IdentityError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)

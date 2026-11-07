@@ -468,6 +468,73 @@ fn evidence_and_artifact_keys() {
     }
 }
 
+// R3.03 test 13: `[session_keys]` parses, prints, keeps its defaults, and
+// refuses values out of range. A default_identity naming a ci or unknown
+// identity is refused at start (`tests/identity.rs`), where the identities
+// are.
+#[test]
+fn session_key_keys() {
+    let defaults = load_file("").unwrap().file;
+    assert_eq!(defaults.session_keys.lifetime, Duration::from_hours(1));
+    assert_eq!(defaults.session_keys.max_lifetime, Duration::from_hours(24));
+    assert_eq!(defaults.session_keys.default_identity, "");
+    let set = load_file(
+        "[session_keys]\nlifetime = \"10m\"\nmax_lifetime = \"7d\"\ndefault_identity = \"alice\"\n",
+    )
+    .unwrap();
+    assert_eq!(set.file.session_keys.lifetime, Duration::from_mins(10));
+    assert_eq!(
+        set.file.session_keys.max_lifetime,
+        Duration::from_hours(7 * 24)
+    );
+    assert_eq!(set.file.session_keys.default_identity, "alice");
+    let shown = set.to_effective_toml();
+    let section = shown.split("[session_keys]").nth(1).unwrap();
+    for line in [
+        "lifetime = \"10m\"",
+        "max_lifetime = \"7d\"",
+        "default_identity = \"alice\"",
+    ] {
+        assert!(section.contains(line), "{line:?} in {shown}");
+    }
+    for (text, expected) in [
+        (
+            "[session_keys]\nlifetime = \"30s\"\n",
+            "session_keys.lifetime",
+        ),
+        (
+            "[session_keys]\nlifetime = \"4m\"\n",
+            "session_keys.lifetime",
+        ),
+        (
+            "[session_keys]\nmax_lifetime = \"4m\"\nlifetime = \"4m\"\n",
+            "session_keys.max_lifetime",
+        ),
+        (
+            "[session_keys]\nlifetime = \"25h\"\n",
+            "session_keys.lifetime",
+        ),
+        (
+            "[session_keys]\nmax_lifetime = \"8d\"\n",
+            "session_keys.max_lifetime",
+        ),
+        (
+            "[session_keys]\nmax_lifetime = \"30s\"\n",
+            "session_keys.max_lifetime",
+        ),
+        (
+            "[session_keys]\ndefault_identity = \"Alice\"\n",
+            "session_keys.default_identity",
+        ),
+    ] {
+        let err = load_file(text).unwrap_err();
+        let ConfigError::Invalid { key, .. } = &err else {
+            panic!("{text:?}: {err:?}");
+        };
+        assert_eq!(key, expected, "{text:?}");
+    }
+}
+
 // R2.18 12: the web UI listens on a loopback IP with a port, nowhere else.
 #[test]
 fn listen_must_be_loopback() {

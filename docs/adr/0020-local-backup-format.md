@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-22
 - Ticket: R1.18
-- Amended by: [0056](0056-evidence-artifact-store-and-retention.md) (the layout gains `repos/<id>/artifacts/`, copied before each repository's jj state)
+- Amended by: [0056](0056-evidence-artifact-store-and-retention.md) (the layout gains `repos/<id>/artifacts/`, copied before each repository's jj state), [0057](0057-operator-identities-and-session-keys.md) (the identity authority's key, `<state>/identity/authority.pem`, is never in a backup, and a restore retires the restored authority)
 
 ## Context
 

@@ -4,6 +4,7 @@
 - Date: 2026-10-31
 - Ticket: R2.08
 - Amends: [0027](0027-trust-boundaries-in-phase-1.md), [0031](0031-writes-over-jj-state.md)
+- Amended by: [0057](0057-operator-identities-and-session-keys.md) (a token may be linked to an operator identity at creation; `IssueSessionKey`'s rule is `Rule::LinkedIdentity`)
 
 ## Context
 

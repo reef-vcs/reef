@@ -122,6 +122,11 @@ message GcReport {
   // Why the evidence and artifacts step stopped short; empty if it did
   // not. The other steps still ran.
   string evidence_error = 20;
+  // Session keys swept (R3.03): ended over a week ago and before
+  // `keep_newer`, and named by no evidence in any repository. They are
+  // machine-wide, so only the first report of a run sweeps them; 0 in the
+  // others.
+  uint32 session_keys_removed = 21;
 }
 
 // A step of a backup.

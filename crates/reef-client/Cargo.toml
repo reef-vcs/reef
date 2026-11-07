@@ -28,6 +28,7 @@ reef-evidence.workspace = true   # the evidence format: signing and checking it 
 tonic.workspace = true
 prost.workspace = true           # request sizes, checked before sending (R2.04)
 prost-types.workspace = true     # google.protobuf.Timestamp and Duration in the messages
+zeroize.workspace = true         # a session key's PKCS#8 bytes, wiped on drop (R3.03)
 hyper-util.workspace = true      # the Unix socket connector
 tower.workspace = true
 tokio.workspace = true

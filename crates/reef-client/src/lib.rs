@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use hyper_util::rt::TokioIo;
 use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
+use reef_api::v1;
 use reef_api::v1::artifact_service_client::ArtifactServiceClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
@@ -51,6 +52,7 @@ use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::history_service_client::HistoryServiceClient;
+use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
@@ -90,6 +92,13 @@ use reef_api::v1::{
 use reef_api::v1::{
     ClearPresenceRequest, ReportPresenceRequest, ReportPresenceResponse, SubscribePresenceRequest,
     SubscribePresenceResponse,
+};
+use reef_api::v1::{
+    CreateIdentityRequest, CreateIdentityResponse, GetIdentityRequest, GetIdentityResponse,
+    GetSessionKeyRequest, GetSessionKeyResponse, Identity, IssueSessionKeyRequest,
+    IssueSessionKeyResponse, ListAuthoritiesRequest, ListIdentitiesRequest, ListSessionKeysRequest,
+    RevokeIdentityRequest, RevokeIdentityResponse, RevokeSessionKeysRequest,
+    RevokeSessionKeysResponse, RotateAuthorityRequest, RotateAuthorityResponse,
 };
 use reef_api::v1::{
     CreateRemoteTokenRequest, CreateRemoteTokenResponse, ListRemoteTokensRequest, RemoteScope,
@@ -637,11 +646,26 @@ impl Client {
         scope: RemoteScope,
         expires_in: Option<std::time::Duration>,
     ) -> Result<CreateRemoteTokenResponse, ClientError> {
+        self.create_remote_token_for(name, scope, expires_in, "")
+            .await
+    }
+
+    /// [`Client::create_remote_token`] linked to the operator identity
+    /// `identity` (R3.03), the only one it then gets session keys for;
+    /// empty for none.
+    pub async fn create_remote_token_for(
+        &self,
+        name: &str,
+        scope: RemoteScope,
+        expires_in: Option<std::time::Duration>,
+        identity: &str,
+    ) -> Result<CreateRemoteTokenResponse, ClientError> {
         let request = CreateRemoteTokenRequest {
             name: name.to_owned(),
             scope: scope.into(),
             never_expires: expires_in.is_none(),
             expires_in: expires_in.map(proto_duration),
+            identity: identity.to_owned(),
         };
         self.call(
             "CreateRemoteToken",
@@ -1728,6 +1752,303 @@ impl Client {
     }
 }
 
+impl Client {
+    fn identities(&self) -> IdentityServiceClient<Svc> {
+        IdentityServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `IdentityService.CreateIdentity` (R3.03): a new operator identity.
+    pub async fn create_identity(
+        &self,
+        request: CreateIdentityRequest,
+    ) -> Result<CreateIdentityResponse, ClientError> {
+        self.call("CreateIdentity", self.identities().create_identity(request))
+            .await
+    }
+
+    /// `IdentityService.GetIdentity` (R3.03): one identity by name or id;
+    /// the default for an empty `name`.
+    pub async fn get_identity(&self, name: &str) -> Result<GetIdentityResponse, ClientError> {
+        let request = GetIdentityRequest {
+            name: name.to_owned(),
+        };
+        self.call("GetIdentity", self.identities().get_identity(request))
+            .await
+    }
+
+    /// `IdentityService.ListIdentities` (R3.03), every page.
+    pub async fn list_identities_all(
+        &self,
+        include_revoked: bool,
+    ) -> Result<Vec<Identity>, ClientError> {
+        let mut request = ListIdentitiesRequest {
+            include_revoked,
+            page_size: 0,
+            page_token: String::new(),
+        };
+        let mut identities = Vec::new();
+        loop {
+            let page = self
+                .call(
+                    "ListIdentities",
+                    self.identities().list_identities(request.clone()),
+                )
+                .await?;
+            identities.extend(page.identities);
+            if page.next_page_token.is_empty() {
+                return Ok(identities);
+            }
+            request.page_token = page.next_page_token;
+        }
+    }
+
+    /// `IdentityService.RevokeIdentity` (R3.03).
+    pub async fn revoke_identity(
+        &self,
+        request: RevokeIdentityRequest,
+    ) -> Result<RevokeIdentityResponse, ClientError> {
+        self.call("RevokeIdentity", self.identities().revoke_identity(request))
+            .await
+    }
+
+    /// `IdentityService.IssueSessionKey` (R3.03) with a request built by the
+    /// caller, its key and proof included. [`Client::issue_session_key`]
+    /// makes both.
+    pub async fn issue_session_key_request(
+        &self,
+        request: IssueSessionKeyRequest,
+    ) -> Result<IssueSessionKeyResponse, ClientError> {
+        self.call(
+            "IssueSessionKey",
+            self.identities().issue_session_key(request),
+        )
+        .await
+    }
+
+    /// A session key, generated here and certified by the daemon (R3.03,
+    /// ADR 0057): a fresh ed25519 key, its proof of possession addressed to
+    /// the daemon's current authority (read with `ListAuthorities`) over
+    /// `identity`, `actor` and `session`, and the call. A refusal of the
+    /// proof that names another current authority (a rotation in between)
+    /// is retried once, signed for that one. `identity` empty is the
+    /// default identity on the socket, or the token's linked identity
+    /// remotely; `lifetime` `None` is the daemon's `[session_keys]
+    /// lifetime`; `session` continues a session (renewal), empty for a new
+    /// one. The private key never leaves this process: the returned
+    /// [`SessionKey`] holds it in memory, and its PKCS#8 PEM is wiped on
+    /// drop (ring's own key schedule is not). It signs with
+    /// [`reef_evidence::Claim::sign`] unchanged.
+    pub async fn issue_session_key(
+        &self,
+        identity: &str,
+        actor: reef_evidence::session::Actor,
+        lifetime: Option<std::time::Duration>,
+        session: &str,
+    ) -> Result<SessionKey, IssueError> {
+        let (private_key_pem, _) =
+            reef_evidence::SigningKey::generate().map_err(IssueError::Key)?;
+        let private_key_pem = zeroize::Zeroizing::new(private_key_pem);
+        let signing_key =
+            reef_evidence::SigningKey::from_pkcs8_pem(&private_key_pem).map_err(IssueError::Key)?;
+        let mut audience = self
+            .list_authorities_all()
+            .await?
+            .into_iter()
+            .find(|authority| authority.current)
+            .map(|authority| authority.key_id)
+            .unwrap_or_default();
+        let mut retried = false;
+        let mut record = loop {
+            let authority = reef_evidence::KeyId::parse(&audience)
+                .unwrap_or_else(|| reef_evidence::KeyId::of(&[]));
+            let proof = reef_evidence::session::sign_proof(
+                &signing_key,
+                &reef_evidence::session::ProofFor {
+                    authority: &authority,
+                    identity,
+                    actor,
+                    session,
+                },
+            );
+            let request = IssueSessionKeyRequest {
+                public_key: signing_key.public_key().spki().to_vec(),
+                proof,
+                identity: identity.to_owned(),
+                actor: session_actor(actor).into(),
+                lifetime: lifetime.map(proto_duration),
+                session_id: session.to_owned(),
+            };
+            match self.issue_session_key_request(request).await {
+                Ok(response) => break response.key.unwrap_or_default(),
+                Err(error)
+                    if !retried
+                        && error.reason() == reef_api::error::INVALID_SESSION_KEY_REQUEST
+                        && error.metadata().get("field").map(String::as_str) == Some("proof")
+                        && error
+                            .metadata()
+                            .get("authority_key_id")
+                            .is_some_and(|current| *current != audience) =>
+                {
+                    retried = true;
+                    audience.clone_from(&error.metadata()["authority_key_id"]);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let certificate = std::mem::take(&mut record.certificate);
+        Ok(SessionKey {
+            signing_key,
+            private_key_pem,
+            certificate,
+            record,
+        })
+    }
+
+    /// `IdentityService.GetSessionKey` (R3.03): one key by its id or a
+    /// unique prefix, with its certificate.
+    pub async fn get_session_key(
+        &self,
+        key_id: &str,
+    ) -> Result<GetSessionKeyResponse, ClientError> {
+        let request = GetSessionKeyRequest {
+            key_id: key_id.to_owned(),
+        };
+        self.call("GetSessionKey", self.identities().get_session_key(request))
+            .await
+    }
+
+    /// `IdentityService.ListSessionKeys` (R3.03), every page; `request`'s
+    /// page fields are ignored.
+    pub async fn list_session_keys_all(
+        &self,
+        request: ListSessionKeysRequest,
+    ) -> Result<Vec<v1::SessionKey>, ClientError> {
+        let mut request = ListSessionKeysRequest {
+            page_size: 0,
+            page_token: String::new(),
+            ..request
+        };
+        let mut keys = Vec::new();
+        loop {
+            let page = self
+                .call(
+                    "ListSessionKeys",
+                    self.identities().list_session_keys(request.clone()),
+                )
+                .await?;
+            keys.extend(page.keys);
+            if page.next_page_token.is_empty() {
+                return Ok(keys);
+            }
+            request.page_token = page.next_page_token;
+        }
+    }
+
+    /// `IdentityService.RevokeSessionKeys` (R3.03): one key, or a session's.
+    pub async fn revoke_session_keys(
+        &self,
+        request: RevokeSessionKeysRequest,
+    ) -> Result<RevokeSessionKeysResponse, ClientError> {
+        self.call(
+            "RevokeSessionKeys",
+            self.identities().revoke_session_keys(request),
+        )
+        .await
+    }
+
+    /// `IdentityService.ListAuthorities` (R3.03), every page: newest first.
+    pub async fn list_authorities_all(&self) -> Result<Vec<v1::Authority>, ClientError> {
+        let mut request = ListAuthoritiesRequest::default();
+        let mut authorities = Vec::new();
+        loop {
+            let page = self
+                .call(
+                    "ListAuthorities",
+                    self.identities().list_authorities(request.clone()),
+                )
+                .await?;
+            authorities.extend(page.authorities);
+            if page.next_page_token.is_empty() {
+                return Ok(authorities);
+            }
+            request.page_token = page.next_page_token;
+        }
+    }
+
+    /// `IdentityService.RevokeAuthority` (R3.03): a retired authority.
+    pub async fn revoke_authority(
+        &self,
+        request: v1::RevokeAuthorityRequest,
+    ) -> Result<v1::RevokeAuthorityResponse, ClientError> {
+        self.call(
+            "RevokeAuthority",
+            self.identities().revoke_authority(request),
+        )
+        .await
+    }
+
+    /// `IdentityService.RotateAuthority` (R3.03).
+    pub async fn rotate_authority(
+        &self,
+        request: RotateAuthorityRequest,
+    ) -> Result<RotateAuthorityResponse, ClientError> {
+        self.call(
+            "RotateAuthority",
+            self.identities().rotate_authority(request),
+        )
+        .await
+    }
+}
+
+/// `actor` in the API.
+pub fn session_actor(actor: reef_evidence::session::Actor) -> v1::SessionActor {
+    use reef_evidence::session::Actor;
+    match actor {
+        Actor::Human => v1::SessionActor::Human,
+        Actor::Agent => v1::SessionActor::Agent,
+        Actor::Executor => v1::SessionActor::Executor,
+    }
+}
+
+/// A session key this process generated and the daemon certified (R3.03).
+/// Its private half lives only here: Reef never writes it anywhere, and
+/// its PKCS#8 text is wiped from memory on drop.
+pub struct SessionKey {
+    /// The private key, which signs claims ([`reef_evidence::Claim::sign`]).
+    pub signing_key: reef_evidence::SigningKey,
+    /// The private key as PKCS#8 PEM, for a caller that hands the key on
+    /// (`reef identity session issue -o json`). A credential, wiped from
+    /// memory on drop; `signing_key`'s own copy, inside ring, is not.
+    pub private_key_pem: zeroize::Zeroizing<String>,
+    /// The certificate: the canonical DSSE envelope the daemon's authority
+    /// signed.
+    pub certificate: Vec<u8>,
+    /// The daemon's record of the key, without the certificate's bytes.
+    pub record: v1::SessionKey,
+}
+
+impl std::fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionKey")
+            .field("key_id", &self.record.key_id)
+            .field("identity", &self.record.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Failure of [`Client::issue_session_key`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum IssueError {
+    /// No key could be generated: the system's random number generator
+    /// failed.
+    #[error(transparent)]
+    Key(reef_evidence::KeyError),
+    /// The daemon refused the call.
+    #[error(transparent)]
+    Client(#[from] ClientError),
+}
+
 /// The chunk [`Client::upload_artifact_file`] sends: 1 MiB, the most a
 /// daemon accepts.
 pub const ARTIFACT_CHUNK: usize = 1 << 20;
@@ -2025,9 +2346,9 @@ mod tests {
         assert!(is_unserved(&tonic::Status::unimplemented("")));
         assert!(!is_unserved(&tonic::Status::not_found("x")));
         let with_reason = |code, reason: &str| {
-            let detail = reef_api::v1::ErrorDetail {
+            let detail = v1::ErrorDetail {
                 reason: reason.to_owned(),
-                ..reef_api::v1::ErrorDetail::default()
+                ..v1::ErrorDetail::default()
             };
             reef_api::error::status(code, "x".to_owned(), &detail)
         };

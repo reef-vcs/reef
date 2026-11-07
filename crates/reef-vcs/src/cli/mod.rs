@@ -31,6 +31,7 @@ mod here;
 mod history;
 pub(crate) mod holder;
 mod hook;
+mod identity;
 mod init;
 mod log;
 mod op;
@@ -339,6 +340,9 @@ enum Command {
     /// Add and list evidence: signed claims, such as test results, about a revision's tree.
     #[command(infer_subcommands = true)]
     Evidence(evidence::Args),
+    /// Operator identities, and the session keys the daemon certifies for them.
+    #[command(infer_subcommands = true)]
+    Identity(identity::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -740,6 +744,9 @@ fn local_only(command: &Command) -> Option<&'static str> {
         Command::Restore(_) => "restore",
         Command::Store(args) if args.is_build() => "store build",
         Command::Repo(args) if args.is_admin() => "repo register and forget",
+        Command::Identity(args) if args.is_admin() => {
+            "identity create, revoke, session revoke and authority rotate"
+        }
         Command::Remote(args) => return args.local_only(),
         _ => return None,
     })
@@ -795,6 +802,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Evidence(args) if args.is_offline() => args.run_offline(out),
         Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,
+        Command::Identity(args) => identity::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

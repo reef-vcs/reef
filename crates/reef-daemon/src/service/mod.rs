@@ -20,6 +20,7 @@ pub mod diff;
 pub mod evidence;
 pub mod files;
 pub mod history;
+pub mod identity;
 pub mod maintenance;
 pub mod operations;
 pub mod page;

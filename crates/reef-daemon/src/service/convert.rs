@@ -28,7 +28,7 @@ use crate::watcher::PendingWatch;
 use crate::workspace::{CreateTimings, MissingStores};
 
 /// Unix milliseconds as a `google.protobuf.Timestamp`.
-pub(super) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
+pub(crate) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: time.0.div_euclid(1000),
         // In 0..1000 ms, so the product fits in an i32.

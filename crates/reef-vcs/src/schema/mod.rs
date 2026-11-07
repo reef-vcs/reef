@@ -66,15 +66,19 @@ const PARTS: [&str; 4] = ["cli", "mcp", "api", "evidence"];
 /// language gets the format from the binary it targets. The schema
 /// describes the format; the daemon's checks stay the authority.
 fn evidence_part(defs: &mut Map<String, Value>) -> Value {
+    use reef_client::evidence::session::{SessionKeyPredicate, SessionKeyStatement};
     use reef_client::evidence::{self as format, Envelope, Predicate, Statement};
     // The deserialize contract: what a producer writes and Reef reads.
     let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
     let statement = generator.subschema_for::<Statement>();
     let predicate = generator.subschema_for::<Predicate>();
     let envelope = generator.subschema_for::<Envelope>();
+    // R3.03: a session key's certificate, in the same envelope.
+    let session_key_statement = generator.subschema_for::<SessionKeyStatement>();
+    let session_key_predicate = generator.subschema_for::<SessionKeyPredicate>();
     defs.extend(generator.take_definitions(true));
     json!({
-        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds.",
+        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds. A session key's certificate (ADR 0057, docs/identity.md) is a second predicate type, urn:reef-vcs:session-key:v1, in the same envelope, signed by an issuing authority.",
         "format": format::FORMAT,
         "payload_type": format::PAYLOAD_TYPE,
         "statement_type": format::STATEMENT_TYPE,
@@ -83,23 +87,35 @@ fn evidence_part(defs: &mut Map<String, Value>) -> Value {
         "statement": Value::from(statement),
         "predicate": Value::from(predicate),
         "envelope": Value::from(envelope),
+        "session_key_predicate_type": format::session::SESSION_KEY_PREDICATE_TYPE,
+        "session_key_statement": Value::from(session_key_statement),
+        "session_key_predicate": Value::from(session_key_predicate),
     })
 }
 
-/// Keeps one member of the `evidence` part: `statement`, `predicate` or
-/// `envelope`.
+/// The `evidence` part's schema members, which `reef schema evidence
+/// <member>` selects one of.
+const EVIDENCE_MEMBERS: [&str; 5] = [
+    "statement",
+    "predicate",
+    "envelope",
+    "session_key_statement",
+    "session_key_predicate",
+];
+
+/// Keeps one member of the `evidence` part: `statement`, `predicate`,
+/// `envelope`, or a session key certificate's `session_key_statement` or
+/// `session_key_predicate` (R3.03).
 fn keep_evidence(evidence: &mut Value, name: &[String]) -> Option<()> {
     let [name] = name else {
         return None;
     };
-    let name = name.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase().replace('-', "_");
     let object = evidence.as_object_mut()?;
-    if !["statement", "predicate", "envelope"].contains(&name.as_str()) {
+    if !EVIDENCE_MEMBERS.contains(&name.as_str()) {
         return None;
     }
-    object.retain(|key, _| {
-        *key == name || !["statement", "predicate", "envelope"].contains(&key.as_str())
-    });
+    object.retain(|key, _| *key == name || !EVIDENCE_MEMBERS.contains(&key.as_str()));
     Some(())
 }
 
@@ -483,7 +499,7 @@ mod tests {
             .keys()
             .filter(|name| name.starts_with("brief."))
             .collect();
-        assert_eq!(views.len(), 10, "{views:?}");
+        assert_eq!(views.len(), 13, "{views:?}");
         for name in views {
             let view = &defs[name];
             let full = &defs[name.trim_start_matches("brief.")];

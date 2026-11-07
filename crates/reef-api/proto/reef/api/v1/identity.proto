@@ -1,0 +1,602 @@
+// Operator identities and session keys (R3.03, ADR 0057). An identity is the
+// person or CI pipeline a key answers to; the daemon's authority key
+// certifies short-lived ed25519 session keys for it. A certificate says
+// which identity a key is bound to and what the requester declared it for;
+// it does not say the identity should be trusted (R3.07).
+//
+// A certificate is an in-toto Statement v1 with predicate type
+// `urn:reef-vcs:session-key:v1`, in the same DSSE envelope as evidence
+// (evidence.proto), signed once by the authority. A session key's private
+// half is generated in the process that signs with it and never reaches
+// the daemon: issuance takes the public key and a proof of possession.
+// Validity is judged at the time the daemon first witnessed the evidence
+// (its `added_at`), and a revocation sets the time from which signatures
+// stop counting (`invalid_from`). docs/identity.md has the details.
+//
+// Identities, sessions, keys and authorities are machine-wide, as remote
+// tokens are. Issuing or revoking records no operation: no jj view changes.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/options.proto";
+
+// Operator identities, the daemon's issuing authorities, and the session
+// keys they certify.
+service IdentityService {
+  // Creates an operator identity. Names are unique among all identities,
+  // revoked ones included, and never reused.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_IDENTITY_NAME (metadata
+  // `name`) for a name that is not `[a-z0-9][a-z0-9._-]{0,62}` or starts
+  // with `idn_` or `ses_` (reserved for ids), or
+  // INVALID_IDENTITY (metadata `field`: `kind`, `display_name` or `email`);
+  // ALREADY_EXISTS with reason IDENTITY_EXISTS (metadata `name`, and
+  // `revoked`, `true` when the name belongs to a revoked identity).
+  rpc CreateIdentity(CreateIdentityRequest) returns (CreateIdentityResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // One identity, by name or id (a text starting with `idn_` is an id); an
+  // empty name is the default identity.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // FAILED_PRECONDITION with reason DEFAULT_IDENTITY_UNAVAILABLE (metadata
+  // `configured`, `problem`) for an empty name when the daemon has no usable
+  // default identity.
+  rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Identities, newest first; live ones unless `include_revoked`.
+  //
+  // Errors: INVALID_ARGUMENT for a negative `page_size`, or with reason
+  // INVALID_PAGE_TOKEN.
+  rpc ListIdentities(ListIdentitiesRequest) returns (ListIdentitiesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Revokes an identity: no key is issued for it again, and signatures by
+  // its keys stop counting from `invalid_from` (default now). Revoking
+  // again may move `invalid_from` earlier, never later. Linked remote
+  // tokens are left alone and listed in `remote_token_names`.
+  //
+  // The default identity cannot be revoked while it is the default: set
+  // `[session_keys] default_identity` to another and restart first.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // INVALID_ARGUMENT with reason INVALID_REVOCATION (metadata `field`
+  // `invalid_from`) for a time in the future or with `since_created`;
+  // FAILED_PRECONDITION with reason IDENTITY_IS_DEFAULT (metadata `name`).
+  rpc RevokeIdentity(RevokeIdentityRequest) returns (RevokeIdentityResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Certifies a session key the caller generated. The daemon checks the
+  // key and the proof (the session key's signature over the DSSE
+  // pre-authentication encoding, payload type
+  // `application/vnd.reef-vcs.session-key-proof`, of
+  // `"reef-session-key-proof/v1\n" + authority_key_id + "\n" + key_id +
+  // "\n" + identity + "\n" + actor + "\n" + session_id + "\n"`, with the
+  // current authority's key id (ListAuthorities) as its audience,
+  // `identity` and `session_id` as sent and `actor` lowercase); then the
+  // issuance rules: on the socket, any live `person` identity (empty: the
+  // default) and never a `ci` one; through the remote listener, only the
+  // caller's token's linked identity, and never `human`. A renewal must
+  // come through the channel (the socket, or the same remote token) that
+  // started its session. A key already certified, or that already signed
+  // evidence as a bare key, is refused, so a session key is always fresh.
+  // Records no operation.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_SESSION_KEY_REQUEST
+  // (metadata `field`: `public_key`, `proof`, `actor`, `lifetime` or
+  // `session_id`; a `proof` refusal also carries the current
+  // `authority_key_id`, so a client that raced a rotation can sign again);
+  // NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // FAILED_PRECONDITION with reason IDENTITY_REVOKED (metadata `name`,
+  // `revoked_at`), or DEFAULT_IDENTITY_UNAVAILABLE (metadata `configured`,
+  // `problem`); PERMISSION_DENIED with reason SESSION_KEY_REFUSED (metadata
+  // `rule`: `ci_over_socket`, `human_over_remote`, `human_for_ci`,
+  // `token_not_linked`, `token_identity_mismatch`, `session_mismatch`,
+  // `session_revoked` or `session_channel_mismatch`);
+  // ALREADY_EXISTS with reason SESSION_KEY_EXISTS (metadata `key_id`, and
+  // `state`: `certified` or `used`); FAILED_PRECONDITION with reason
+  // TOO_MANY_SESSION_KEYS (metadata `identity`, `limit`) when the
+  // identity has 10,000 unexpired keys; UNAVAILABLE with
+  // reason AUTHORITY_UNAVAILABLE (metadata `path`).
+  rpc IssueSessionKey(IssueSessionKeyRequest) returns (IssueSessionKeyResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // One session key, by its full key id or a unique prefix of at least 4
+  // hex digits, with its certificate, checked again at this read.
+  //
+  // Errors: NOT_FOUND with reason SESSION_KEY_NOT_FOUND (metadata
+  // `key_id`); INVALID_ARGUMENT with reason AMBIGUOUS_SESSION_KEY_ID
+  // (metadata `key_id`, and `key_ids`, up to ten, comma-separated), or for
+  // an id that is not 4 to 64 hex digits.
+  rpc GetSessionKey(GetSessionKeyRequest) returns (GetSessionKeyResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Session keys, newest issued first; unexpired and unrevoked ones
+  // unless `include_ended`. Each certificate is checked again at this
+  // read.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // INVALID_ARGUMENT for a negative `page_size`, or with reason
+  // INVALID_PAGE_TOKEN.
+  rpc ListSessionKeys(ListSessionKeysRequest) returns (ListSessionKeysResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Revokes one key, or every key of a session (which also refuses its
+  // renewal). Signatures stop counting from `invalid_from` (default now);
+  // `since_issued` makes it the key's or the session's start, so
+  // everything it signed reads REVOKED. Revoking again may move
+  // `invalid_from` earlier, never later.
+  //
+  // Errors: NOT_FOUND with reason SESSION_KEY_NOT_FOUND (metadata `key_id`
+  // or `session_id`); INVALID_ARGUMENT with reason
+  // AMBIGUOUS_SESSION_KEY_ID (metadata `key_id`, `key_ids`), or
+  // INVALID_REVOCATION (metadata `field`: `invalid_from` for a time in the
+  // future or one with `since_issued`, `target` for no target).
+  rpc RevokeSessionKeys(RevokeSessionKeysRequest) returns (RevokeSessionKeysResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // The daemon's issuing authorities, newest first: the current one and
+  // every retired one, whose public keys are kept for good so their
+  // certificates still verify.
+  //
+  // Errors: INVALID_ARGUMENT for a negative `page_size`, or with reason
+  // INVALID_PAGE_TOKEN.
+  rpc ListAuthorities(ListAuthoritiesRequest) returns (ListAuthoritiesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Retires the current authority key and makes a new one, which issues
+  // from then on. With `revoke`, the retired key is also revoked from
+  // `invalid_from` (default: its creation, meaning everything it issued),
+  // so every certificate it issued reads REVOKED.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_REVOCATION (metadata
+  // `field` `invalid_from`) for a time in the future, or one without
+  // `revoke`; UNAVAILABLE with reason AUTHORITY_UNAVAILABLE (metadata
+  // `path`) when the new key file cannot be written.
+  rpc RotateAuthority(RotateAuthorityRequest) returns (RotateAuthorityResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // Revokes a retired authority (one a restore, a replaced key file, or a
+  // rotation without `revoke` retired): every certificate it issued stops
+  // counting from `invalid_from` (default now; `since_created`: from its
+  // creation). Revoking again may move `invalid_from` earlier, never later.
+  // The current authority is refused: RotateAuthority with `revoke` retires
+  // and revokes it.
+  //
+  // Errors: NOT_FOUND with reason AUTHORITY_NOT_FOUND (metadata `key_id`);
+  // INVALID_ARGUMENT with reason AMBIGUOUS_AUTHORITY_ID (metadata `key_id`,
+  // `key_ids`), or INVALID_REVOCATION (metadata `field` `invalid_from`) for
+  // a time in the future or one with `since_created`; FAILED_PRECONDITION
+  // with reason AUTHORITY_IS_CURRENT (metadata `key_id`).
+  rpc RevokeAuthority(RevokeAuthorityRequest) returns (RevokeAuthorityResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// What an operator identity is.
+enum IdentityKind {
+  // Not set; on create, never valid.
+  IDENTITY_KIND_UNSPECIFIED = 0;
+  // A human operator: the daemon's user, or someone reaching it with a
+  // token linked to the identity.
+  IDENTITY_KIND_PERSON = 1;
+  // A CI pipeline, whose keys are issued only to a remote token linked to
+  // it, and never with the actor `human`.
+  IDENTITY_KIND_CI = 2;
+}
+
+// What the requester declared a session key is for. Declared, never
+// proven.
+enum SessionActor {
+  // Not set; on issue, never valid.
+  SESSION_ACTOR_UNSPECIFIED = 0;
+  // The person signs directly, such as a sign-off. Only for `person`
+  // identities, and only on the socket.
+  SESSION_ACTOR_HUMAN = 1;
+  // An agent acting for the operator.
+  SESSION_ACTOR_AGENT = 2;
+  // An automated check runner.
+  SESSION_ACTOR_EXECUTOR = 3;
+}
+
+// How a human's presence was established when a key was issued.
+enum SessionPresence {
+  // Not reported.
+  SESSION_PRESENCE_UNSPECIFIED = 0;
+  // Not established: the daemon's user, or anything running as that user,
+  // asked for the key. Every key R3.03 issues has it; R3.43 adds
+  // USER_VERIFIED.
+  SESSION_PRESENCE_NONE = 1;
+}
+
+// Where a session key's private half lives.
+enum KeyCustody {
+  // Not reported.
+  KEY_CUSTODY_UNSPECIFIED = 0;
+  // In the process that requested the key, which generated it.
+  KEY_CUSTODY_CLIENT = 1;
+  // In the daemon's memory (R3.04).
+  KEY_CUSTODY_DAEMON = 2;
+}
+
+// Who issued a certificate.
+enum IssuerKind {
+  // Not reported.
+  ISSUER_KIND_UNSPECIFIED = 0;
+  // A Reef daemon's authority key.
+  ISSUER_KIND_REEF_DAEMON = 1;
+}
+
+// What a verifier reports about the key that signed an evidence object, at
+// the time the daemon first witnessed the object.
+enum IdentityStatus {
+  // Not reported.
+  IDENTITY_STATUS_UNSPECIFIED = 0;
+  // No certificate for the key on this daemon: a bare key.
+  IDENTITY_STATUS_UNBOUND = 1;
+  // The certificate verifies against a known authority, the evidence was
+  // first witnessed within its window, and before every applicable
+  // `invalid_from` (the key's, its session's, its identity's and its
+  // authority's). A revocation made later is still reported beside it.
+  IDENTITY_STATUS_BOUND = 2;
+  // The certificate verifies, but the evidence was first witnessed outside
+  // its window.
+  IDENTITY_STATUS_EXPIRED = 3;
+  // The certificate verifies, but the evidence was first witnessed at or
+  // after an applicable `invalid_from`.
+  IDENTITY_STATUS_REVOKED = 4;
+  // The certificate does not verify: a stored row was changed, its
+  // authority is unknown, or it names a value this reader does not know.
+  IDENTITY_STATUS_INVALID = 5;
+}
+
+// A revocation: when it was made, and from when signatures stop counting.
+message Revocation {
+  // When it was made.
+  google.protobuf.Timestamp revoked_at = 1;
+  // From when signatures stop counting; never after `revoked_at`.
+  google.protobuf.Timestamp invalid_from = 2;
+  // Why, as the revoker said; empty for none.
+  string reason = 3;
+}
+
+// An operator identity: the person or pipeline a key answers to.
+message Identity {
+  // `idn_` and 16 lowercase hex digits; never reused.
+  string id = 1;
+  // `[a-z0-9][a-z0-9._-]{0,62}`, not starting with `idn_` or `ses_`; never
+  // reused within this daemon's database, even once revoked (a restore of
+  // an older backup can bring back an old name with a new id: pin the id).
+  string name = 2;
+  // A person or a CI pipeline.
+  IdentityKind kind = 3;
+  // For display, unverified; empty for none.
+  string display_name = 4;
+  // For display, checked for its form only; empty for none.
+  string email = 5;
+  // When it was created.
+  google.protobuf.Timestamp created_at = 6;
+  // Its revocation; unset while live.
+  Revocation revocation = 7;
+  // Whether socket requests that name no identity use it.
+  bool is_default = 8;
+  // Its session keys neither expired nor revoked.
+  uint32 live_session_keys = 9;
+  // The live remote tokens linked to it.
+  repeated string remote_token_names = 10;
+}
+
+// One of the daemon's issuing authority keys.
+message Authority {
+  // The SHA-256 of `public_key`, lowercase hex: the certificates' `keyid`.
+  string key_id = 1;
+  // `ed25519`.
+  string algorithm = 2;
+  // The DER SubjectPublicKeyInfo.
+  bytes public_key = 3;
+  // The host it was made on, for display.
+  string host = 4;
+  // When it was made.
+  google.protobuf.Timestamp created_at = 5;
+  // When it stopped issuing; unset for the current one.
+  google.protobuf.Timestamp retired_at = 6;
+  // Its revocation, which applies to everything it issued; unset when not
+  // revoked.
+  Revocation revocation = 7;
+  // Whether it is the one that issues now.
+  bool current = 8;
+}
+
+// A session key and what its certificate binds it to. Every field but the
+// daemon's records (`issued_at`, `issued_by_agent`, `remote_token_id` and
+// `revocation`) is read from the certificate at this read.
+message SessionKey {
+  // The key's id: SHA-256 of its DER SubjectPublicKeyInfo, lowercase hex.
+  // Evidence it signs carries it as `key_id`.
+  string key_id = 1;
+  // The identity it answers to: its id.
+  string identity_id = 2;
+  // That identity's name.
+  string identity = 3;
+  // That identity's kind.
+  IdentityKind identity_kind = 4;
+  // What the requester declared it for.
+  SessionActor actor = 5;
+  // The issuing request's `reef-agent`: declared, unverified; empty for
+  // none.
+  string agent = 6;
+  // The session, `ses_` and 16 hex digits; successive keys of one session
+  // share it.
+  string session_id = 7;
+  // How a human's presence was established.
+  SessionPresence presence = 8;
+  // Where its private half lives.
+  KeyCustody custody = 9;
+  // Who issued its certificate.
+  IssuerKind issuer_kind = 10;
+  // The issuing authority's key id.
+  string authority_key_id = 11;
+  // The start of its validity window.
+  google.protobuf.Timestamp not_before = 12;
+  // Its end, inclusive.
+  google.protobuf.Timestamp not_after = 13;
+  // When the daemon issued it.
+  google.protobuf.Timestamp issued_at = 14;
+  // The issuing request's `reef-agent`, as the daemon recorded it; empty
+  // for none.
+  string issued_by_agent = 15;
+  // The remote token of the issuing request (R2.08); empty for the socket.
+  string remote_token_id = 16;
+  // The earliest applicable revocation: the key's, its session's, its
+  // identity's or its authority's; unset when none.
+  Revocation revocation = 17;
+  // Whether its certificate verified at this read. False: a stored row was
+  // changed, and only `key_id`, this field and the daemon's records
+  // (`issued_at`, `issued_by_agent`, `remote_token_id`, and the key's own
+  // `revocation`) are set; nothing vouches for the rest.
+  bool certificate_valid = 18;
+  // Its DER SubjectPublicKeyInfo; set by GetSessionKey and
+  // IssueSessionKey only.
+  bytes public_key = 19;
+  // Its certificate, the canonical DSSE envelope; set by GetSessionKey and
+  // IssueSessionKey only.
+  bytes certificate = 20;
+}
+
+// What a verifier sees about the key that signed an evidence object.
+message KeyIdentity {
+  // The key's status at `witnessed_at`.
+  IdentityStatus status = 1;
+  // The certified key; unset when UNBOUND. Without the certificate's
+  // bytes.
+  SessionKey key = 2;
+  // When the daemon first witnessed the evidence (its `added_at`), which
+  // the status is judged at.
+  google.protobuf.Timestamp witnessed_at = 3;
+}
+
+// Create an identity.
+message CreateIdentityRequest {
+  // `[a-z0-9][a-z0-9._-]{0,62}`, unique among all identities, revoked
+  // ones included.
+  string name = 1;
+  // A person or a CI pipeline; required.
+  IdentityKind kind = 2;
+  // For display: at most 128 bytes, no control characters; empty for none.
+  string display_name = 3;
+  // For display: `local@domain`, checked for its form only; empty for
+  // none.
+  string email = 4;
+}
+
+// A created identity.
+message CreateIdentityResponse {
+  // The identity.
+  Identity identity = 1;
+}
+
+// Get one identity.
+message GetIdentityRequest {
+  // A name or an id; empty for the default identity.
+  string name = 1;
+}
+
+// One identity.
+message GetIdentityResponse {
+  // The identity.
+  Identity identity = 1;
+}
+
+// List identities.
+message ListIdentitiesRequest {
+  // Also revoked identities.
+  bool include_revoked = 1;
+  // Identities per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 2;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 3;
+}
+
+// A page of identities.
+message ListIdentitiesResponse {
+  // Newest first.
+  repeated Identity identities = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// Revoke an identity.
+message RevokeIdentityRequest {
+  // Its name or id.
+  string name = 1;
+  // From when its keys' signatures stop counting; unset: now. Not in the
+  // future.
+  google.protobuf.Timestamp invalid_from = 2;
+  // From its creation: everything its keys ever signed reads REVOKED.
+  // Not with `invalid_from`.
+  bool since_created = 3;
+  // Why, recorded with the revocation; empty for none.
+  string reason = 4;
+}
+
+// A revoked identity.
+message RevokeIdentityResponse {
+  // The identity, with `revocation` set, and the linked tokens to revoke
+  // in `remote_token_names`.
+  Identity identity = 1;
+}
+
+// Certify a session key.
+message IssueSessionKeyRequest {
+  // DER SubjectPublicKeyInfo of a fresh ed25519 key the caller generated.
+  bytes public_key = 1;
+  // The key's signature over the proof's pre-authentication encoding (see
+  // IssueSessionKey).
+  bytes proof = 2;
+  // The identity's name; empty for the default identity on the socket, or
+  // the token's linked identity remotely.
+  string identity = 3;
+  // What the key is for; required.
+  SessionActor actor = 4;
+  // How long it is valid, from 5 minutes to `[session_keys] max_lifetime`;
+  // unset: `[session_keys] lifetime`.
+  google.protobuf.Duration lifetime = 5;
+  // A session to continue (renewal), whose identity, actor and channel this
+  // request must have; empty for a new session.
+  string session_id = 6;
+}
+
+// A certified session key.
+message IssueSessionKeyResponse {
+  // The key, with its public key and certificate.
+  SessionKey key = 1;
+}
+
+// Get one session key.
+message GetSessionKeyRequest {
+  // Its full key id, or a unique prefix of at least 4 hex digits.
+  string key_id = 1;
+}
+
+// One session key.
+message GetSessionKeyResponse {
+  // The key, with its public key and certificate.
+  SessionKey key = 1;
+}
+
+// List session keys.
+message ListSessionKeysRequest {
+  // Only this identity's keys, by name or id; empty for all.
+  string identity = 1;
+  // Only this session's keys; empty for all.
+  string session_id = 2;
+  // Also expired and revoked keys.
+  bool include_ended = 3;
+  // Keys per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 4;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 5;
+}
+
+// A page of session keys.
+message ListSessionKeysResponse {
+  // Newest issued first, without public keys or certificates.
+  repeated SessionKey keys = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// Revoke one session key, or a session's keys.
+message RevokeSessionKeysRequest {
+  // What to revoke; required.
+  oneof target {
+    // One key, by its full id or a unique prefix of at least 4 hex digits.
+    string key_id = 1;
+    // Every key of a session, which then refuses renewal.
+    string session_id = 2;
+  }
+  // From when signatures stop counting; unset: now. Not in the future.
+  google.protobuf.Timestamp invalid_from = 3;
+  // From the key's issue, or the session's start: everything it signed
+  // reads REVOKED. Not with `invalid_from`.
+  bool since_issued = 4;
+  // Why, recorded with the revocation; empty for none.
+  string reason = 5;
+}
+
+// What a revocation covered.
+message RevokeSessionKeysResponse {
+  // Every key the revocation covers, with its revocation.
+  repeated SessionKey keys = 1;
+}
+
+// List the daemon's issuing authorities.
+message ListAuthoritiesRequest {
+  // Authorities per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT. A daemon has few: one more per
+  // rotation or restore.
+  int32 page_size = 1;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 2;
+}
+
+// The daemon's issuing authorities.
+message ListAuthoritiesResponse {
+  // Newest first: the current one, then the retired ones.
+  repeated Authority authorities = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// Retire the current authority key and make a new one.
+message RotateAuthorityRequest {
+  // Also revoke the retired key from `invalid_from`.
+  bool revoke = 1;
+  // With `revoke`: from when its certificates stop counting; unset: its
+  // creation. Not in the future.
+  google.protobuf.Timestamp invalid_from = 2;
+  // Why, recorded with the revocation; empty for none.
+  string reason = 3;
+}
+
+// A rotated authority.
+message RotateAuthorityResponse {
+  // The key that stopped issuing.
+  Authority retired = 1;
+  // The key that issues now.
+  Authority current = 2;
+}
+
+// Revoke a retired authority.
+message RevokeAuthorityRequest {
+  // Its full key id, or a unique prefix of at least 4 hex digits.
+  string key_id = 1;
+  // From when its certificates stop counting; unset: now. Not in the
+  // future.
+  google.protobuf.Timestamp invalid_from = 2;
+  // From its creation: everything it issued reads REVOKED. Not with
+  // `invalid_from`.
+  bool since_created = 3;
+  // Why, recorded with the revocation; empty for none.
+  string reason = 4;
+}
+
+// A revoked authority.
+message RevokeAuthorityResponse {
+  // The authority, with its revocation.
+  Authority authority = 1;
+}

@@ -200,7 +200,7 @@ History is a database. Agents ask structured questions such as which changes tou
 
 ### Provenance
 
-Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key. The daemon, or the store for a human acting from a device with no daemon, issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern, so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
+Each snapshot carries the agent identity, model, session, originating task, and a hash of the instruction that produced it, signed by a short-lived session key. The daemon, or the store for a human acting from a device with no daemon, issues session keys bound to a longer-lived operator or CI identity in the keyless Sigstore pattern (R3.03: the daemon's authority key certifies them; Sigstore keyless is R3.42), so provenance chains to a person or pipeline without long-lived agent secrets, and a session key can be revoked without touching anything else. Policy can require provenance for landing, and the query layer can filter and aggregate on it.
 
 ### API
 
@@ -231,7 +231,7 @@ Workspaces are caches by design, so losing a machine's working directories loses
 
 **Git export is the backup of last resort.** The landed projection exported to git survives the loss of every Reef component, and it loses exactly what git cannot represent: conflicts, evidence, provenance, and the operation log. This is stated so nobody mistakes a git mirror for a full backup.
 
-**Keys.** Session keys are short-lived and never backed up; a restore invalidates them and agents re-request. Operator identity in the keyless Sigstore pattern has no long-lived key to lose. A store's own signing identity, used at landing, is the one key that must be backed up alongside the metadata.
+**Keys.** Session private keys are never stored; a restore retires the daemon's authority key, so new keys come from a new one, while certificates already issued still verify. Operator identities are records, not keys. A store's own signing identity, used at landing, is the one key that must be backed up alongside the metadata.
 
 ### Scale
 
@@ -285,7 +285,7 @@ Rust end to end for the core, reusing existing open source components for the he
 | Symbol model for queries and diffs | [SCIP](https://github.com/sourcegraph/scip), tree-sitter tags as fallback | Cross-language symbol identity that survives moves. Indexers exist for the main languages. |
 | Daemon API | gRPC over a Unix socket with [tonic](https://github.com/hyperium/tonic), protobuf schemas | Typed, streaming, and codegen produces the Python and TypeScript SDKs from one schema. Server streaming carries subscriptions to native clients; the web UI gets the same streams over gRPC-web or a WebSocket bridge. |
 | MCP server | [rmcp](https://github.com/modelcontextprotocol/rust-sdk), the official Rust MCP SDK | A thin client of the gRPC API so agents and humans see the same state. |
-| Evidence and provenance | [in-toto](https://in-toto.io) attestations in DSSE envelopes; ed25519 through ring; sigstore for keyless identity when R3.03 adds it ([ADR 0055](adr/0055-evidence-object-format.md)) | Standard formats that existing supply chain tooling already verifies. |
+| Evidence and provenance | [in-toto](https://in-toto.io) attestations in DSSE envelopes; ed25519 through ring; session keys certified by the daemon's authority ([ADR 0057](adr/0057-operator-identities-and-session-keys.md)); sigstore for keyless identity in R3.42 ([ADR 0055](adr/0055-evidence-object-format.md)) | Standard formats that existing supply chain tooling already verifies. |
 | Policy language | [CEL](https://cel.dev) via cel-rust | Non-Turing-complete, auditable, fast to evaluate at landing. Rego is the fallback if policies grow large. |
 | Remote store | Rust service, Postgres for metadata, S3-compatible object storage for blobs, the same gRPC protocol as the daemon | Mononoke's shape. Postgres suffices for an open ecosystem store; FoundationDB only if one store must serve a Google-scale monorepo. |
 | Web UI | React and TypeScript, one codebase served by the daemon and by remote stores | The same application renders local and shared views, so the two cannot drift. Generated gRPC-web client from the protobuf schemas. |
