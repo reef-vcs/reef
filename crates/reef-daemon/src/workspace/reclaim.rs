@@ -71,7 +71,10 @@ impl Manager {
     ///    `active` with `attention = final-snapshot-failed` (an overlay left
     ///    unmounted keeps `mount-failed`, which says more), its directory
     ///    and lease intact, unless `spec.force`. So does failing to forget
-    ///    the jj workspace.
+    ///    the jj workspace. If going back cannot be recorded (a full disk),
+    ///    the workspace stays `releasing` until the next reclaim of it,
+    ///    which puts it back to `active`, as a start does, then reclaims it
+    ///    (`finish_going_back`).
     /// 4. The disk usage measured; `forget_workspace` on the repository
     ///    thread (`reef: release workspace <id>`); the shared stores
     ///    unmounted (R1.20); backend tear-down; the state directory removed;
@@ -92,8 +95,8 @@ impl Manager {
         spec: ReleaseSpec,
     ) -> Result<ReclaimOutcome, ManagerError> {
         let begun = Instant::now();
-        let entry = self.active_entry(id)?;
-        let _scan = entry.scan_lock.lock().await;
+        let entry = self.loaded_entry(id, true)?;
+        let (_scan, went_back) = self.lock_for_reclaim(&entry).await?;
         let record = entry.record();
         if record.state != WorkspaceState::Active {
             return Err(ManagerError::NotActive {
@@ -106,6 +109,11 @@ impl Manager {
         // 1.
         let expired_by = (reason == ReclaimReason::Expired).then(Timestamp::now);
         if !self.db.begin_reclaim(id, expired_by)? {
+            if went_back {
+                // Untracked when it was left `releasing`; no failure path
+                // below runs to track it again.
+                self.scheduler.track(id, TrackReason::Restored).await;
+            }
             let state = self.db.workspace(id)?.state;
             return Err(if state == WorkspaceState::Active {
                 ManagerError::LeaseNotExpired(id)
@@ -322,8 +330,9 @@ impl Manager {
     }
 
     /// Rolls an aborted release or reclaim back to `active`, setting
-    /// `attention` if given. Failures are logged; the next daemon start
-    /// also reverts a `releasing` row.
+    /// `attention` if given. Failures are logged; the next reclaim of the
+    /// workspace ([`Manager::finish_going_back`]) or the next daemon start
+    /// reverts a `releasing` row.
     async fn back_to_active(&self, entry: &WorkspaceEntry, attention: Option<Attention>) {
         let id = entry.paths.id;
         if let Err(error) = self.db.set_workspace_state(id, WorkspaceState::Active) {
@@ -340,6 +349,70 @@ impl Manager {
                 }
             }
         }
+    }
+
+    /// The scan lock for [`Manager::reclaim`], and whether the workspace had
+    /// to go back to `active` first ([`Manager::finish_going_back`]). A
+    /// reclaim in flight holds the lock while the workspace is `releasing`:
+    /// refused at once then, rather than queued behind it.
+    async fn lock_for_reclaim<'a>(
+        &self,
+        entry: &'a WorkspaceEntry,
+    ) -> Result<(tokio::sync::MutexGuard<'a, ()>, bool), ManagerError> {
+        let scan = if entry.record().state == WorkspaceState::Releasing {
+            entry
+                .scan_lock
+                .try_lock()
+                .map_err(|_| ManagerError::NotActive {
+                    id: entry.paths.id,
+                    repo: entry.record().repo_id,
+                    state: WorkspaceState::Releasing,
+                })?
+        } else {
+            entry.scan_lock.lock().await
+        };
+        let went_back = entry.record().state == WorkspaceState::Releasing;
+        if went_back {
+            self.finish_going_back(entry)?;
+        }
+        Ok((scan, went_back))
+    }
+
+    /// Puts a workspace an earlier reclaim left `releasing` back to
+    /// `active`, as a daemon start does (`load_active`), before reclaiming
+    /// it. Left that way when [`Manager::back_to_active`] could not record
+    /// `active` (on a full disk, SQLite cannot), when `finish_workspace`
+    /// failed at the end, or when a reclaim panicked; until this, every
+    /// later reclaim refused it as `releasing`, even once the disk had room.
+    /// Called with the scan lock held: only a reclaim in flight holds it
+    /// while the workspace is `releasing`, so one found `releasing` under it
+    /// was left. Not tracked again here: the reclaim untracks it at once,
+    /// and the paths that stop it track it.
+    fn finish_going_back(&self, entry: &WorkspaceEntry) -> Result<(), ManagerError> {
+        let id = entry.paths.id;
+        self.db.set_workspace_state(id, WorkspaceState::Active)?;
+        entry.update_record(|record| record.state = WorkspaceState::Active);
+        tracing::info!("an earlier reclaim left the workspace releasing; it is active again");
+        Ok(())
+    }
+
+    /// Leaves `id` as a reclaim whose [`Manager::back_to_active`] failed
+    /// does: `releasing` in the database and in memory, and untracked.
+    /// For tests of [`Manager::finish_going_back`].
+    #[cfg(feature = "testing")]
+    pub async fn strand_releasing(&self, id: WorkspaceId) -> Result<(), ManagerError> {
+        let entry = self.active_entry(id)?;
+        let _scan = entry.scan_lock.lock().await;
+        if !self.db.begin_reclaim(id, None)? {
+            return Err(ManagerError::NotActive {
+                id,
+                repo: entry.record().repo_id,
+                state: self.db.workspace(id)?.state,
+            });
+        }
+        entry.update_record(|record| record.state = WorkspaceState::Releasing);
+        self.scheduler.untrack(id);
+        Ok(())
     }
 
     /// The bytes the workspace has allocated, estimated before tear-down:
