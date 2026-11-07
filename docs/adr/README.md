@@ -69,3 +69,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0055](0055-evidence-object-format.md) | Evidence object format | accepted |
 | [0056](0056-evidence-artifact-store-and-retention.md) | Evidence artifact store and retention | accepted |
 | [0057](0057-operator-identities-and-session-keys.md) | Operator identities and session keys | accepted |
+| [0058](0058-provenance-records.md) | Provenance records | accepted |

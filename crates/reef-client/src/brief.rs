@@ -437,6 +437,7 @@ mod tests {
             stores: Vec::new(),
             changed_file_count: Some(3),
             remote_token_id: None,
+            provenance: None,
         }
     }
 
@@ -1064,6 +1065,48 @@ impl<'a> From<&'a json::SessionKey> for SessionKey<'a> {
             not_after: key.not_after.as_deref(),
             revocation: key.revocation.as_ref(),
             certificate_valid: key.certificate_valid,
+        }
+    }
+}
+
+/// A provenance record (R3.04). Always `commit_id`, `change_id`, `kind`
+/// and `recorded_at`; `context` when anything is declared; `signature`
+/// only when it is not `valid`; `identity` as [`KeyIdentity`] (left out for
+/// an unbound key). Dropped: `id`, `tree_id`, `workspace_id`, `session_id`,
+/// `sequence`, `agent`, `key_id`, `statement`, `envelope`; `provenance show
+/// -o json` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.ProvenanceRecord")]
+pub struct ProvenanceRecord<'a> {
+    commit_id: &'a str,
+    change_id: &'a str,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_at: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'a json::ProvenanceContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<KeyIdentity<'a>>,
+}
+
+impl<'a> From<&'a json::ProvenanceRecord> for ProvenanceRecord<'a> {
+    fn from(record: &'a json::ProvenanceRecord) -> Self {
+        let context = &record.context;
+        let declared = context.model.is_some()
+            || context.harness.is_some()
+            || context.task.is_some()
+            || context.instruction_sha256.is_some()
+            || context.client_session.is_some();
+        Self {
+            commit_id: &record.commit_id,
+            change_id: &record.change_id,
+            kind: &record.kind,
+            recorded_at: record.recorded_at.as_deref(),
+            context: declared.then_some(context),
+            signature: record.signature.as_deref().filter(|s| *s != "valid"),
+            identity: record.identity.as_ref().and_then(KeyIdentity::of),
         }
     }
 }

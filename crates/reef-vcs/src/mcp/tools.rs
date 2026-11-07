@@ -646,6 +646,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "/reef.api.v1.IdentityService/RotateAuthority",
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
     ),
+    (
+        "/reef.api.v1.ProvenanceService/DeclareProvenance",
+        "declared by the harness's hooks and by the server from its environment (R3.44), not by a tool call",
+    ),
+    (
+        "/reef.api.v1.ProvenanceService/GetProvenance",
+        "read by `reef provenance show` and R3.37's explain; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ProvenanceService/ListProvenance",
+        "read by `reef provenance list` and R3.37's explain; tools/list is at its budget (#116)",
+    ),
 ];
 
 /// A tool body: `$body` with `$args` parsed as `$ty`.

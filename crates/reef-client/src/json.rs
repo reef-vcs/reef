@@ -378,6 +378,11 @@ pub struct Workspace {
     /// did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_token_id: Option<String>,
+    /// Its live provenance session (R3.04): the identity its records are
+    /// bound to, and the declared context now. Absent when provenance is
+    /// disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Box<ProvenanceSession>>,
 }
 
 /// A shared store mounted in a workspace (R1.20).
@@ -437,6 +442,10 @@ impl From<&v1::Workspace> for Workspace {
             stores: ws.stores.iter().map(MountedStore::from).collect(),
             changed_file_count: ws.changed_file_count,
             remote_token_id: text(&ws.remote_token_id),
+            provenance: ws
+                .provenance
+                .as_deref()
+                .map(|session| Box::new(ProvenanceSession::from(session))),
         }
     }
 }
@@ -1055,6 +1064,12 @@ pub struct GcReport {
     pub artifact_bytes: u64,
     /// Why the evidence and artifacts step stopped short.
     pub evidence_error: Option<String>,
+    /// Provenance records compacted away (R3.04).
+    pub provenance_compacted: u32,
+    /// Provenance records of changes with no visible commit, expired.
+    pub provenance_removed: u32,
+    /// Why the provenance step stopped short.
+    pub provenance_error: Option<String>,
 }
 
 impl From<&v1::GcReport> for GcReport {
@@ -1080,6 +1095,9 @@ impl From<&v1::GcReport> for GcReport {
             artifact_bytes_freed: report.artifact_bytes_freed,
             artifact_bytes: report.artifact_bytes,
             evidence_error: text(&report.evidence_error),
+            provenance_compacted: report.provenance_compacted,
+            provenance_removed: report.provenance_removed,
+            provenance_error: text(&report.provenance_error),
         }
     }
 }
@@ -3761,4 +3779,179 @@ pub struct AuthorityRotated {
     pub retired: Authority,
     /// The key that issues now.
     pub current: Authority,
+}
+
+/// A declared provenance context (R3.04): every field a client's claim,
+/// which Reef records and signs but never verifies.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProvenanceContext {
+    /// The model and its version.
+    pub model: Option<String>,
+    /// The agent runtime and its version.
+    pub harness: Option<String>,
+    /// The originating task.
+    pub task: Option<String>,
+    /// The SHA-256 of the instruction's exact bytes; the text is never
+    /// sent.
+    pub instruction_sha256: Option<String>,
+    /// The harness's own session id.
+    pub client_session: Option<String>,
+    /// When it was last declared.
+    pub declared_at: Option<String>,
+}
+
+impl From<&v1::ProvenanceContext> for ProvenanceContext {
+    fn from(context: &v1::ProvenanceContext) -> Self {
+        Self {
+            model: text(&context.model),
+            harness: text(&context.harness),
+            task: text(&context.task),
+            instruction_sha256: text(&context.instruction_sha256),
+            client_session: text(&context.client_session),
+            declared_at: time(context.declared_at.as_ref()),
+        }
+    }
+}
+
+/// A workspace's provenance session (R3.04).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProvenanceSession {
+    /// `ses_` and 16 hex digits.
+    pub session_id: String,
+    /// The identity its records are bound to; `null` when none can be.
+    pub identity: Option<String>,
+    /// That identity's kind: `person` or `ci`.
+    #[schemars(schema_with = "identity_kind_name_schema_or_null")]
+    pub identity_kind: Option<String>,
+    /// Its declared actor: `agent`, `executor` or `human`.
+    #[schemars(schema_with = "session_actor_name_schema_or_null")]
+    pub actor: Option<String>,
+    /// Its agent label.
+    pub agent: Option<String>,
+    /// The context declared now.
+    pub context: ProvenanceContext,
+    /// When it started.
+    pub started_at: Option<String>,
+    /// When it ended; `null` while live.
+    pub ended_at: Option<String>,
+    /// How many records it has.
+    pub records: u64,
+    /// Commits recorded with no record, by a failure.
+    pub missing_records: u64,
+    /// Why its records are unbound: `no_default_identity`,
+    /// `token_not_linked`, `token_revoked` or `identity_revoked`; `null`
+    /// when they are bound.
+    pub problem: Option<String>,
+}
+
+impl From<&v1::ProvenanceSession> for ProvenanceSession {
+    fn from(session: &v1::ProvenanceSession) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            identity: text(&session.identity),
+            identity_kind: name(identity_kind_name(session.identity_kind)),
+            actor: name(session_actor_name(session.actor)),
+            agent: text(&session.agent),
+            context: session
+                .context
+                .as_ref()
+                .map(ProvenanceContext::from)
+                .unwrap_or_default(),
+            started_at: time(session.started_at.as_ref()),
+            ended_at: time(session.ended_at.as_ref()),
+            records: session.records,
+            missing_records: session.missing_records,
+            problem: text(&session.problem),
+        }
+    }
+}
+
+/// A provenance record (R3.04, ADR 0058): the daemon's signed statement
+/// that it recorded a commit in a workspace's session, under a declared
+/// context. `signature` says whether it checked out at this read; the
+/// declared fields are claims; policy decides whom to trust.
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+pub struct ProvenanceRecord {
+    /// SHA-256 of the canonical envelope.
+    pub id: String,
+    /// The commit the daemon recorded.
+    pub commit_id: String,
+    /// Its change, in hex.
+    pub change_id: String,
+    /// Its tree; `null` when conflicted.
+    pub tree_id: Option<String>,
+    /// The workspace.
+    pub workspace_id: String,
+    /// The provenance session.
+    pub session_id: String,
+    /// Its number in the session.
+    pub sequence: u64,
+    /// What recorded it: a snapshot kind, or `edit`.
+    pub kind: String,
+    /// The session's agent label, declared.
+    pub agent: Option<String>,
+    /// When the daemon recorded it.
+    pub recorded_at: Option<String>,
+    /// The declared context in effect then.
+    pub context: ProvenanceContext,
+    /// The signing key's id.
+    pub key_id: String,
+    /// `valid` when the envelope, its signature and the stored index check
+    /// out at this read.
+    #[schemars(schema_with = "signature_check_name_schema_or_null")]
+    pub signature: Option<String>,
+    /// The signing key's identity at `recorded_at`.
+    pub identity: Option<KeyIdentity>,
+    /// The payload, an in-toto Statement, as JSON (`show --envelope` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<serde_json::Value>,
+    /// The canonical DSSE envelope, as JSON (`show --envelope` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<serde_json::Value>,
+}
+
+impl From<&v1::ProvenanceRecord> for ProvenanceRecord {
+    fn from(record: &v1::ProvenanceRecord) -> Self {
+        let envelope: Option<serde_json::Value> = (!record.envelope.is_empty())
+            .then(|| serde_json::from_slice(&record.envelope).ok())
+            .flatten();
+        let statement = envelope
+            .as_ref()
+            .and_then(|value| value.get("payload"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|payload| STANDARD.decode(payload).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        Self {
+            id: record.id.clone(),
+            commit_id: record.commit_id.clone(),
+            change_id: record.change_id.clone(),
+            tree_id: text(&record.tree_id),
+            workspace_id: record.workspace_id.clone(),
+            session_id: record.session_id.clone(),
+            sequence: record.sequence,
+            kind: record.kind.clone(),
+            agent: text(&record.agent),
+            recorded_at: time(record.recorded_at.as_ref()),
+            context: record
+                .context
+                .as_ref()
+                .map(ProvenanceContext::from)
+                .unwrap_or_default(),
+            key_id: record.key_id.clone(),
+            signature: name(signature_check_name(record.signature)),
+            identity: record.identity.as_ref().map(KeyIdentity::from),
+            statement,
+            envelope,
+        }
+    }
+}
+
+/// What `reef provenance declare` did (R3.04).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProvenanceDeclared {
+    /// The session, with its new context.
+    pub session: ProvenanceSession,
+    /// The snapshot taken first; `null` when nothing changed or with
+    /// `--no-snapshot`.
+    pub snapshot_op: Option<String>,
 }

@@ -17,6 +17,11 @@
 //! | A remote token with no link | `token_not_linked` | `token_not_linked` | refused |
 //!
 //! and `human` for a `ci` identity is `human_for_ci`.
+//!
+//! [`Identities::issue_held`] issues the daemon's own keys for provenance
+//! (R3.04, ADR 0058): the same rules and certificate, with `custody:
+//! daemon`, no proof of possession (the daemon generated the key), and no
+//! RPC that reaches it.
 
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
@@ -206,6 +211,48 @@ pub fn invalid_from(
             }
             Ok(at)
         }
+    }
+}
+
+/// A key the daemon holds in memory for a workspace's provenance session
+/// (R3.04). Never written anywhere: the private key lives only here.
+pub struct HeldKey {
+    /// The private key.
+    pub key: reef_evidence::SigningKey,
+    /// Its id.
+    pub key_id: String,
+    /// The end of its certificate's window; `None` for an uncertified key.
+    pub not_after: Option<Timestamp>,
+    /// The identity it is certified for; `None` for an uncertified key.
+    pub identity_id: Option<String>,
+    /// The authority that certified it; `None` for an uncertified key.
+    pub authority_id: Option<String>,
+}
+
+impl std::fmt::Debug for HeldKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeldKey")
+            .field("key_id", &self.key_id)
+            .field("not_after", &self.not_after)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeldKey {
+    /// A fresh ed25519 key from the operating system's random source
+    /// (ring's), with its PKCS#8 text wiped once ring holds it.
+    pub fn generate() -> Result<HeldKey, IdentityError> {
+        let key_error = |error: reef_evidence::KeyError| IdentityError::Task(error.to_string());
+        let (pem, _) = reef_evidence::SigningKey::generate().map_err(key_error)?;
+        let pem = zeroize::Zeroizing::new(pem);
+        let key = reef_evidence::SigningKey::from_pkcs8_pem(&pem).map_err(key_error)?;
+        Ok(HeldKey {
+            key_id: key.public_key().id().to_string(),
+            key,
+            not_after: None,
+            identity_id: None,
+            authority_id: None,
+        })
     }
 }
 
@@ -489,6 +536,143 @@ impl Identities {
                 field: "key_id",
                 id: key_id,
             })
+    }
+
+    /// Issues a key the daemon holds for provenance session `session_id`
+    /// (R3.04): a fresh key certified for `identity` and `actor` with
+    /// `custody: daemon`, for `lifetime`, through the session's `channel`
+    /// (`socket`, or the creating token's id). The session's `sessions` row
+    /// is written with its first key. Refused by R3.03's rules, a revoked
+    /// session (`session_revoked`), a revoked identity, and the identity's
+    /// key limit. Blocking.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the issuance steps, in their order, as `issue`'s"
+    )]
+    pub fn issue_held(
+        &self,
+        identity: &IdentityRow,
+        actor: Actor,
+        agent: Option<&str>,
+        session_id: &str,
+        channel: &str,
+        lifetime: Duration,
+    ) -> Result<HeldKey, IdentityError> {
+        if let Some(revocation) = &identity.revocation {
+            return Err(IdentityError::Revoked {
+                name: identity.name.clone(),
+                revoked_at: revocation.revoked_at,
+            });
+        }
+        let rules_channel = if channel == "socket" {
+            Channel::Socket
+        } else {
+            Channel::Remote {
+                token_id: channel.to_owned(),
+                token_name: String::new(),
+                linked: Some(identity.id.clone()),
+            }
+        };
+        check_rules(&rules_channel, identity, actor)
+            .map_err(|rule| IdentityError::Refused { rule })?;
+        let now = Timestamp::now();
+        let new_session = match self.db.session(session_id)? {
+            Some(session) => {
+                if session.revocation.is_some() {
+                    return Err(IdentityError::Refused {
+                        rule: Refusal::SessionRevoked,
+                    });
+                }
+                if session.identity_id != identity.id || session.actor != actor.as_str() {
+                    return Err(IdentityError::Refused {
+                        rule: Refusal::SessionMismatch,
+                    });
+                }
+                None
+            }
+            None => Some(SessionRow {
+                id: session_id.to_owned(),
+                identity_id: identity.id.clone(),
+                actor: actor.as_str().to_owned(),
+                agent: agent.map(str::to_owned),
+                created_at: now,
+                channel: channel.to_owned(),
+                revocation: None,
+            }),
+        };
+        let mut held = HeldKey::generate()?;
+        let not_after = Timestamp(
+            now.0
+                .saturating_add(crate::model::duration_millis(lifetime)),
+        );
+        let kind = IdentityKind::parse(&identity.kind).unwrap_or(IdentityKind::Person);
+        let (certificate, authority_id) = {
+            let current = self
+                .authority
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            let binding = Binding {
+                public_key: held.key.public_key().clone(),
+                identity: IdentityRef {
+                    id: identity.id.clone(),
+                    name: identity.name.clone(),
+                    kind,
+                },
+                actor,
+                agent: agent.map(str::to_owned),
+                session: session_id.to_owned(),
+                presence: Presence::None,
+                custody: Custody::Daemon,
+                not_before_ms: now.0,
+                not_after_ms: not_after.0,
+                issuer: Issuer {
+                    kind: IssuerKind::ReefDaemon,
+                    key_id: current.key.public_key().id().clone(),
+                    host: self.host.clone(),
+                },
+            };
+            let envelope = certify(&current.key, &binding).map_err(|invalid| {
+                IdentityError::InvalidRequest {
+                    field: "agent",
+                    message: invalid.to_string(),
+                }
+            })?;
+            (envelope.to_bytes(), current.row.id.clone())
+        };
+        let row = SessionKeyRow {
+            key_id: held.key_id.clone(),
+            session_id: session_id.to_owned(),
+            identity_id: identity.id.clone(),
+            authority_id,
+            actor: actor.as_str().to_owned(),
+            presence: Presence::None.as_str().to_owned(),
+            custody: Custody::Daemon.as_str().to_owned(),
+            certificate,
+            not_before: now,
+            not_after,
+            issued_at: now,
+            issued_by_agent: agent.map(str::to_owned),
+            remote_token_id: (channel != "socket").then(|| channel.to_owned()),
+            revocation: None,
+        };
+        let limit = self.limit();
+        match self
+            .db
+            .insert_session_key(new_session.as_ref(), &row, limit)?
+        {
+            KeyInserted::Stored => {}
+            KeyInserted::Full => {
+                return Err(IdentityError::TooMany {
+                    identity: identity.name.clone(),
+                    limit,
+                });
+            }
+        }
+        audit::issued(&row, &identity.name, None);
+        held.not_after = Some(not_after);
+        held.identity_id = Some(row.identity_id.clone());
+        held.authority_id = Some(row.authority_id.clone());
+        Ok(held)
     }
 
     /// `rows` read on the blocking pool ([`read_keys`]).

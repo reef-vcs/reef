@@ -56,6 +56,7 @@ use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
+use reef_api::v1::provenance_service_client::ProvenanceServiceClient;
 use reef_api::v1::remote_service_client::RemoteServiceClient;
 use reef_api::v1::repository_service_client::RepositoryServiceClient;
 use reef_api::v1::status_service_client::StatusServiceClient;
@@ -1753,6 +1754,69 @@ impl Client {
 }
 
 impl Client {
+    fn provenance(&self) -> ProvenanceServiceClient<Svc> {
+        ProvenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `ProvenanceService.DeclareProvenance` (R3.04): replaces fields of a
+    /// workspace's declared context, snapshotting it first unless
+    /// `no_snapshot`.
+    pub async fn declare_provenance(
+        &self,
+        request: v1::DeclareProvenanceRequest,
+    ) -> Result<v1::DeclareProvenanceResponse, ClientError> {
+        self.call(
+            "DeclareProvenance",
+            self.provenance().declare_provenance(request),
+        )
+        .await
+    }
+
+    /// `ProvenanceService.GetProvenance` (R3.04): one record, by revision,
+    /// commit id or record id, with its envelope.
+    pub async fn get_provenance(
+        &self,
+        request: v1::GetProvenanceRequest,
+    ) -> Result<v1::GetProvenanceResponse, ClientError> {
+        self.call("GetProvenance", self.provenance().get_provenance(request))
+            .await
+    }
+
+    /// One page of `ProvenanceService.ListProvenance` (R3.04).
+    pub async fn list_provenance_page(
+        &self,
+        request: v1::ListProvenanceRequest,
+    ) -> Result<v1::ListProvenanceResponse, ClientError> {
+        self.call("ListProvenance", self.provenance().list_provenance(request))
+            .await
+    }
+
+    /// The first `limit` records the listing `request` asks for (all when
+    /// 0), newest recorded first, and whether more exist; `request`'s page
+    /// fields are ignored.
+    pub async fn list_provenance(
+        &self,
+        request: v1::ListProvenanceRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::ProvenanceRecord>, ClientError> {
+        let mut request = v1::ListProvenanceRequest {
+            page_size: limited_page_size(limit).min(PROVENANCE_PAGE_SIZE),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_provenance_page(request.clone()).await?;
+            limited.items.extend(response.records);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+}
+
+impl Client {
     fn identities(&self) -> IdentityServiceClient<Svc> {
         IdentityServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }
@@ -2125,6 +2189,9 @@ impl<T> Limited<T> {
 
 /// The largest page of `ListEvidence` (R3.01).
 const EVIDENCE_PAGE_SIZE: i32 = 200;
+
+/// The largest page of `ListProvenance` (R3.04).
+const PROVENANCE_PAGE_SIZE: i32 = 1000;
 
 /// The page size for reading `limit` items (0 for all): the limit, at most
 /// the largest page a daemon serves.

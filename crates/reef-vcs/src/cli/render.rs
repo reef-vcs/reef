@@ -156,6 +156,13 @@ fn workspace_pairs(ws: &Workspace) -> Vec<(&'static str, String)> {
             or_dash(ws.lease.as_ref().and_then(|l| l.expires_at.as_deref())),
         ),
         ("stores", stores_text(ws)),
+        (
+            "provenance",
+            ws.provenance.as_ref().map_or_else(
+                || "-".to_owned(),
+                |session| super::provenance::session_line(session),
+            ),
+        ),
     ]
 }
 
@@ -380,7 +387,7 @@ fn gc_line(report: &GcReport) -> String {
         )
     };
     format!(
-        "jj {} -> {}, bases {} removed ({bases}), workspaces {} rows ({}), stores {stores}, evidence {} removed, artifacts {} collected ({}), {} kept",
+        "jj {} -> {}, bases {} removed ({bases}), workspaces {} rows ({}), stores {stores}, evidence {} removed, artifacts {} collected ({}), {} kept, provenance {} compacted, {} removed",
         size(report.jj_bytes_before),
         size(report.jj_bytes_after),
         report.base_entries_removed,
@@ -390,6 +397,8 @@ fn gc_line(report: &GcReport) -> String {
         report.artifacts_collected,
         size(report.artifact_bytes_freed),
         size(report.artifact_bytes),
+        report.provenance_compacted,
+        report.provenance_removed,
     )
 }
 
@@ -435,6 +444,9 @@ impl TextRender for GcReports {
             artifact_bytes_freed: 0,
             artifact_bytes: 0,
             evidence_error: None,
+            provenance_compacted: 0,
+            provenance_removed: 0,
+            provenance_error: None,
         };
         for report in &self.reports {
             writeln!(w, "repo {}{dry}: {}", report.repo_id, gc_line(report))?;
@@ -450,6 +462,8 @@ impl TextRender for GcReports {
             total.artifacts_collected += report.artifacts_collected;
             total.artifact_bytes_freed += report.artifact_bytes_freed;
             total.artifact_bytes += report.artifact_bytes;
+            total.provenance_compacted += report.provenance_compacted;
+            total.provenance_removed += report.provenance_removed;
         }
         writeln!(w, "total{dry}: {}", gc_line(&total))
     }
@@ -491,6 +505,9 @@ mod tests {
             artifact_bytes_freed: 3 << 20,
             artifact_bytes: 5 << 20,
             evidence_error: None,
+            provenance_compacted: 4,
+            provenance_removed: 1,
+            provenance_error: None,
         };
         let reports = GcReports {
             reports: vec![
@@ -503,9 +520,9 @@ mod tests {
         reports.render(&mut buffer).unwrap();
         assert_eq!(
             String::from_utf8(buffer).unwrap(),
-            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept\n\
-             repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept\n\
-             total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept\n"
+            "repo aaaa: jj 120 MiB -> 41 MiB, bases 3 removed (1.2 GiB; 110 MiB unshared), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept, provenance 4 compacted, 1 removed\n\
+             repo bbbb: jj 0 B -> 0 B, bases 3 removed (1.2 GiB), workspaces 7 rows (18 MiB), stores 0, evidence 2 removed, artifacts 1 collected (3.0 MiB), 5.0 MiB kept, provenance 4 compacted, 1 removed\n\
+             total: jj 120 MiB -> 41 MiB, bases 6 removed (2.4 GiB), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept, provenance 8 compacted, 2 removed\n"
         );
         let json = serde_json::to_value(&reports).unwrap();
         assert!(json.is_array(), "{json}");
@@ -524,7 +541,7 @@ mod tests {
         reports.render(&mut buffer).unwrap();
         let text = String::from_utf8(buffer).unwrap();
         assert!(
-            text.ends_with("total: jj 0 B -> 0 B, bases 6 removed (2.4 GiB; 120 MiB unshared), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept\n"),
+            text.ends_with("total: jj 0 B -> 0 B, bases 6 removed (2.4 GiB; 120 MiB unshared), workspaces 14 rows (36 MiB), stores 0, evidence 4 removed, artifacts 2 collected (6.0 MiB), 10 MiB kept, provenance 8 compacted, 2 removed\n"),
             "{text}"
         );
     }

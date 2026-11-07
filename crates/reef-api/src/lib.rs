@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 17;
+pub const API_REVISION: u32 = 18;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -93,6 +93,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `ListEvidenceRequest.identities`, `CreateRemoteTokenRequest.identity`,
     // `RemoteToken.identity`, `GcReport.session_keys_removed`.
     "10d9dd1a5ed4f69142a5c0a5c675f23899a2dad6956e824a3fab2a2edee23ca4",
+    // R3.04: `ProvenanceService`, `Workspace.provenance`,
+    // `CreateWorkspaceRequest.provenance`, and GC's provenance counts.
+    "6895482eba371e90ca74c6fe87ca584770d06ab3b4249eeecc08e6b153536123",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -487,6 +490,20 @@ pub mod error {
     /// A revocation of the current authority, which would go on issuing
     /// (R3.03): rotate it with `revoke`. Metadata: `key_id`.
     pub const AUTHORITY_IS_CURRENT: &str = "AUTHORITY_IS_CURRENT";
+    /// A provenance declaration, or a provenance listing's filter, out of
+    /// its bounds (R3.04). Metadata: `field` (`model`, `harness`, `task`,
+    /// `instruction_sha256`, `client_session`, `identity`, `actor` or
+    /// `change_ids`).
+    pub const INVALID_PROVENANCE: &str = "INVALID_PROVENANCE";
+    /// No provenance record for the commit or id (R3.04). Metadata:
+    /// `commit_id` and `change_id`, or `id`.
+    pub const PROVENANCE_NOT_FOUND: &str = "PROVENANCE_NOT_FOUND";
+    /// A provenance record id prefix shared by several (R3.04). Metadata:
+    /// `id`, `ids` (up to ten, comma-separated).
+    pub const AMBIGUOUS_PROVENANCE_ID: &str = "AMBIGUOUS_PROVENANCE_ID";
+    /// A provenance declaration while `[provenance] enabled` is false
+    /// (R3.04).
+    pub const PROVENANCE_DISABLED: &str = "PROVENANCE_DISABLED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

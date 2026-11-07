@@ -227,6 +227,7 @@ impl FileService for FilesHandler {
         request: Request<EditFilesRequest>,
     ) -> Result<Response<EditFilesResponse>, Status> {
         let agent = super::caller_of(&request)?;
+        let remote = super::remote_of(&request).cloned();
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
         let edit_target = match request.target {
@@ -248,6 +249,39 @@ impl FileService for FilesHandler {
             self.state
                 .symbols
                 .notice(target.repo.id, None, change.commit_id.clone());
+        }
+        // An edit naming a workspace that wrote the workspace's own change
+        // is its work (R3.04): its record, signed in the workspace's
+        // session. An edit of another change only names the workspace, and
+        // through the remote listener only the workspace's own token's edits
+        // are its work (`Rule::OwnWorkspace`'s test).
+        let own = |workspace: &&crate::model::WorkspaceRecord| {
+            rewritten
+                .change
+                .as_ref()
+                .is_some_and(|change| change.change_id.as_str() == workspace.change_id)
+                && crate::remote::rules::check_owned(remote.as_ref(), workspace).is_ok()
+        };
+        if let (Some(change), Some(workspace)) = (&rewritten.change, target.active().filter(own)) {
+            let provenance = Arc::clone(&self.state.provenance);
+            let (workspace, change) = (workspace.clone(), change.clone());
+            let recorded_at = crate::model::Timestamp::now();
+            let _ = tokio::task::spawn_blocking(move || {
+                provenance.record(&crate::provenance::record::Commit {
+                    at: crate::provenance::session::For {
+                        repo_id: workspace.repo_id,
+                        workspace_id: workspace.id,
+                        owner: &workspace.owner,
+                        remote_token_id: workspace.remote_token_id.as_deref(),
+                    },
+                    commit_id: change.commit_id.as_str(),
+                    change_id: change.change_id.as_str(),
+                    tree_id: change.tree_id.as_deref(),
+                    kind: "edit",
+                    recorded_at,
+                });
+            })
+            .await;
         }
         Ok(Response::new(EditFilesResponse {
             change: rewritten.change.as_ref().map(convert::change),

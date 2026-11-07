@@ -37,6 +37,7 @@ mod log;
 mod op;
 mod out;
 mod presence;
+mod provenance;
 mod provider;
 mod remote;
 mod render;
@@ -343,6 +344,9 @@ enum Command {
     /// Operator identities, and the session keys the daemon certifies for them.
     #[command(infer_subcommands = true)]
     Identity(identity::Args),
+    /// Show who recorded each commit, in which session, under which declared model, task and instruction.
+    #[command(infer_subcommands = true)]
+    Provenance(provenance::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -803,6 +807,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Evidence(args) if args.is_offline() => args.run_offline(out),
         Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,
         Command::Identity(args) => identity::run(&connect(&global, out).await?, args).await,
+        Command::Provenance(args) => provenance::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

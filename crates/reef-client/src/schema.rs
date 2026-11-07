@@ -85,6 +85,7 @@ fn full_types() -> Map<String, Value> {
     generator.subschema_for::<json::SessionKey>();
     generator.subschema_for::<json::Authority>();
     generator.subschema_for::<json::KeyIdentity>();
+    generator.subschema_for::<json::ProvenanceRecord>();
     generator.take_definitions(true)
 }
 

@@ -25,6 +25,7 @@ pub mod maintenance;
 pub mod operations;
 pub mod page;
 pub mod presence;
+pub mod provenance;
 pub mod remote;
 pub mod repositories;
 pub mod status;

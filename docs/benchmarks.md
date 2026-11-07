@@ -610,3 +610,27 @@ cargo nextest run --release -p reef-daemon --test artifacts --run-ignored only -
 cargo bench -p reef-evidence --bench evidence -- session
 cargo nextest run --release -p reef-daemon --test identity --success-output immediate -E 'test(issue_over_the_socket) | test(evidence_reports_identity)'
 ```
+
+## Provenance (R3.04)
+
+`crates/reef-evidence/benches/evidence.rs` measures a provenance record's format ([ADR 0058](adr/0058-provenance-records.md)), and `crates/reef-daemon/tests/provenance.rs`'s `timings` the daemon's paths against two in-process daemons, one with `[provenance] enabled = false`. Release build on the M2 Max, run on 2026-11-06.
+
+| Measurement | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| `provenance/sign` | build a record's statement, check it as `check` would, and sign it into a canonical envelope | 19.4 µs | < 50 µs |
+| `provenance/check` | `provenance::check` of that envelope | 42.1 µs | < 100 µs |
+| record (gate) | `Provenance::record` as a snapshot's blocking half calls it: the session read, the held key's check, signing, and the insert with its key row, 200 times | 0.12 ms; p99 1.75 ms | < 0.5 ms; p99 < 2 ms |
+| snapshot of a one-file edit | an explicit snapshot, 60 each with provenance and without, interleaved | 42.0 ms against 39.3 ms (a second run: 39.9 against 41.9) | within noise |
+| `DeclareProvenance` | end to end, nothing to snapshot | 2.6 ms | < 5 ms |
+| list page | `ListProvenance` page of 50, every record and certificate checked again | 2.8 ms | < 10 ms |
+| storage | `reef.sqlite3`'s growth over 200 records | about 5.7 KB per record | about 1.3 KiB |
+| load (gate) | `load.rs` `medium` × 200, release, every snapshot recording | passed: steady write-to-snapshot p50 / p95 770 / 878 ms, no write unsnapshotted after 30 s | the existing 5 s gate (R1.30: p95 729 ms) |
+
+- **The snapshot gate is the record's own cost.** An explicit snapshot of the synthetic repository scans it whole and takes about 40 ms, so two runs put provenance 2.7 ms slower and 2 ms faster: noise. The record path alone is 0.12 ms at the median; its p99 is the renewal, which certifies a new key.
+- **Storage is four times the estimate.** A record's envelope is about 1 KiB of base64, and the table has five indexes, one over the envelope's row. At one record per committing watcher snapshot, a workspace that commits every 10 s for 8 hours writes about 16 MB; compaction after `[provenance] compact_after` keeps two records per run. The load test (`load.rs` medium × 200) is the gate on fleet-wide cost.
+- A debug build, as `cargo nextest` runs the daemon tests by default, is about eight times slower.
+
+```sh
+cargo bench -p reef-evidence --bench evidence -- provenance
+cargo nextest run --release -p reef-daemon --test provenance --success-output immediate -E 'test(timings)'
+```
