@@ -9,6 +9,7 @@ default-members = [
     "crates/reef-broker",
     "crates/reef-symbols",
     "crates/reef-evidence",
+    "crates/reef-policy",
     "crates/reef-web",
     "crates/reef-daemon",
     "crates/reef-executor",
@@ -33,6 +34,7 @@ reef-client = { path = "crates/reef-client", version = "0.4.2" }
 reef-broker = { path = "crates/reef-broker", version = "0.4.2" }
 reef-symbols = { path = "crates/reef-symbols", version = "0.4.2" }
 reef-evidence = { path = "crates/reef-evidence", version = "0.4.2" }
+reef-policy = { path = "crates/reef-policy", version = "0.4.2" }
 reef-web = { path = "crates/reef-web", version = "0.4.2" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.4.2" }
 reef-executor = { path = "crates/reef-executor", version = "0.4.2" }
@@ -170,6 +172,12 @@ prost-build = "0.14"
 sha1dc = "0.1"
 globset = "0.4"
 regex = "1"
+
+# Repository policy (R3.07, ADR 0061): CEL through cel-rust's `cel`. Pinned exactly: each minor
+# release has broken its API and could change what an expression evaluates to, so an upgrade is
+# its own PR that runs reef-policy's corpus. No default features: no `chrono` (times are integers
+# in the policy input) and no extensions; `regex` for `matches`, which runs in linear time.
+cel = { version = "=0.15.0", default-features = false, features = ["regex"] }
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

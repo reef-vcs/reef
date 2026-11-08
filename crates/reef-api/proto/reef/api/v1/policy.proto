@@ -1,0 +1,247 @@
+// Repository policy (R3.07, ADR 0061): `reef-policy.toml` at the root of a
+// revision's tree, evaluated over one change. A policy declares trusted
+// attestors, required evidence, size limits, forbidden paths, sign-off
+// areas and conflict tiers, with CEL conditions and free CEL rules; the
+// format is docs/policy.md's.
+//
+// Evaluation reads; it never refuses anything. The landing service
+// enforces a decision (R3.13). The policy in force is the one on the
+// destination's tree (`trunk()` by default), never the change's own, and a
+// change to `reef-policy.toml` or `reef-checks.toml` needs the policy's
+// owners' sign-off.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/options.proto";
+
+// Evaluating a repository's policy.
+service PolicyService {
+  // Evaluates the policy at `policy_revision` (or `policy` text) over the
+  // change at `revision`: every rule, with the evidence still missing and
+  // the sign-offs still needed. A missing policy (`NO_POLICY`), one that
+  // does not load (`INVALID_POLICY`) and a blocked change (`BLOCK`) are
+  // decisions, not errors: the call succeeded, and the answer is that the
+  // change would not land.
+  //
+  // The input is the change's commit and diff against its parents, the
+  // evidence on its tree whose signature verifies at this read, with each
+  // signer's identity at witness time, and every provenance record of its
+  // change. Evaluation is bounded: by the file's limits, a cost bound
+  // computed before any expression runs, and caps on the input
+  // (docs/policy.md).
+  //
+  // Errors: the revision reasons of ChangeService for `revision` and
+  // `policy_revision`; INVALID_ARGUMENT with reason POLICY_SOURCE_CONFLICT
+  // when both `policy` and `policy_revision` are set, and POLICY_TOO_LARGE
+  // (metadata `bytes`, `max`) when `policy` is over 256 KiB; a failed
+  // snapshot's own error, with reason SNAPSHOT_FAILED (metadata
+  // `workspace_id`).
+  rpc EvaluatePolicy(EvaluatePolicyRequest) returns (EvaluatePolicyResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// What a policy decides about a change.
+enum PolicyDecision {
+  POLICY_DECISION_UNSPECIFIED = 0;
+  // Every rule is satisfied or does not apply.
+  POLICY_DECISION_ALLOW = 1;
+  // Some rule is unsatisfied or errored.
+  POLICY_DECISION_BLOCK = 2;
+  // The policy revision's tree has no `reef-policy.toml`: nothing lands
+  // automatically.
+  POLICY_DECISION_NO_POLICY = 3;
+  // The policy file does not load: nothing lands automatically.
+  POLICY_DECISION_INVALID_POLICY = 4;
+}
+
+// Which kind of rule a result is for.
+enum PolicyRuleKind {
+  POLICY_RULE_KIND_UNSPECIFIED = 0;
+  // `builtin:input`, `builtin:conflicts`, `builtin:policy-file` or
+  // `builtin:owners`.
+  POLICY_RULE_KIND_BUILTIN = 1;
+  // A `[[require]]` entry.
+  POLICY_RULE_KIND_REQUIRE = 2;
+  // `[limits]`.
+  POLICY_RULE_KIND_LIMITS = 3;
+  // A `[[forbid]]` entry.
+  POLICY_RULE_KIND_FORBID = 4;
+  // A `[[signoff]]` entry.
+  POLICY_RULE_KIND_SIGNOFF = 5;
+  // A `[[rule]]` entry.
+  POLICY_RULE_KIND_RULE = 6;
+}
+
+// A rule's outcome.
+enum PolicyRuleStatus {
+  POLICY_RULE_STATUS_UNSPECIFIED = 0;
+  // The rule holds.
+  POLICY_RULE_STATUS_SATISFIED = 1;
+  // The rule does not hold: it blocks.
+  POLICY_RULE_STATUS_UNSATISFIED = 2;
+  // The rule does not apply to this change.
+  POLICY_RULE_STATUS_NOT_APPLICABLE = 3;
+  // The rule could not be evaluated: it blocks.
+  POLICY_RULE_STATUS_ERROR = 4;
+}
+
+// Which policy bytes were evaluated.
+message PolicySource {
+  // The policy revision as requested (`trunk()` when none was); empty for
+  // request text.
+  string revision = 1;
+  // The commit it resolved to; empty for request text.
+  string commit_id = 2;
+  // `reef-policy.toml`; empty for request text.
+  string path = 3;
+  // The file's blob id at that commit; empty for request text or no file.
+  string blob_id = 4;
+  // The SHA-256 of the bytes evaluated, as hex; empty for no file.
+  string sha256 = 5;
+  // The format version the evaluator read: 1.
+  uint32 version = 6;
+  // The policy came from the request's `policy` text.
+  bool from_request = 7;
+}
+
+// One problem with a policy file.
+message PolicyDiagnostic {
+  // The rule or table it is in, or empty for the file.
+  string rule = 1;
+  // The key it is about, or empty.
+  string field = 2;
+  // The line, from 1; 0 when not known.
+  uint32 line = 3;
+  // The column, from 1, in characters; 0 when not known.
+  uint32 column = 4;
+  // What is wrong.
+  string message = 5;
+}
+
+// Evidence a requirement needs, by kind and target.
+message PolicyEvidenceNeed {
+  // The evidence kind.
+  string kind = 1;
+  // The target; empty for the whole check.
+  string target = 2;
+  // The attestor sets whose evidence counts.
+  repeated string attestors = 3;
+  // For a failed need, the failing object.
+  repeated string evidence_ids = 4;
+}
+
+// A sign-off a rule needs, and what it has.
+message PolicySignoff {
+  // The groups whose members may sign.
+  repeated string groups = 1;
+  // The identities that may sign.
+  repeated string identities = 2;
+  // Distinct identities needed.
+  uint32 count = 3;
+  // Distinct identities that have signed.
+  uint32 have = 4;
+  // Who has, by identity name.
+  repeated string signed_by = 5;
+  // The least presence a sign-off's key needs: `none` or `user_verified`.
+  string presence = 6;
+  // The evidence kinds that count as a sign-off.
+  repeated string kinds = 7;
+}
+
+// One rule's result.
+message PolicyRuleResult {
+  // The rule's name.
+  string name = 1;
+  // Its kind.
+  PolicyRuleKind kind = 2;
+  // Its outcome.
+  PolicyRuleStatus status = 3;
+  // Why, for a rule that is not satisfied.
+  string message = 4;
+  // The touched paths the rule is about, at most 20.
+  repeated string paths = 5;
+  // How many there are.
+  uint32 paths_total = 6;
+  // Evidence missing.
+  repeated PolicyEvidenceNeed missing = 7;
+  // Evidence whose newest trusted verdict is a failure.
+  repeated PolicyEvidenceNeed failed = 8;
+  // For a sign-off rule, what it needs and has.
+  PolicySignoff signoff = 9;
+  // The evidence that satisfied it.
+  repeated string evidence_ids = 10;
+}
+
+// What the evaluation saw, in counts.
+message PolicyInputSummary {
+  // Touched paths.
+  uint32 paths = 1;
+  // Lines added.
+  uint64 lines_added = 2;
+  // Lines removed.
+  uint64 lines_removed = 3;
+  // Evidence objects the policy saw.
+  uint32 evidence = 4;
+  // Evidence objects left out: not verified, or untrusted over the cap.
+  uint32 evidence_ignored = 5;
+  // Provenance records of the change.
+  uint32 provenance = 6;
+  // The change is conflicted.
+  bool conflicted = 7;
+}
+
+// A policy's decision about one change.
+message PolicyEvaluation {
+  // The decision.
+  PolicyDecision decision = 1;
+  // Which policy.
+  PolicySource source = 2;
+  // For INVALID_POLICY, every load error; otherwise warnings.
+  repeated PolicyDiagnostic diagnostics = 3;
+  // The change judged.
+  string change_id = 4;
+  // Its commit.
+  string commit_id = 5;
+  // Its tree; empty when conflicted.
+  string tree_id = 6;
+  // The operation it was read at.
+  string at_operation = 7;
+  // Every rule: the built-in ones first, then in file order.
+  repeated PolicyRuleResult rules = 8;
+  // What the evaluation saw.
+  PolicyInputSummary input = 9;
+  // The evaluation's cost bound, summed over the expressions it ran.
+  uint64 cost = 10;
+  // The input as JSON (`reef schema policy input`), with `include_input`.
+  string input_json = 11;
+}
+
+// The change to judge and the policy to judge it by.
+message EvaluatePolicyRequest {
+  // The repository, by id or path; empty for the workspace's.
+  string repo = 1;
+  // A workspace id, for `@`.
+  string workspace = 2;
+  // The change judged: one commit. `@` by default with `workspace`;
+  // required without.
+  string revision = 3;
+  // Where `reef-policy.toml` is read: a revision; empty for `trunk()`.
+  string policy_revision = 4;
+  // A policy file's bytes to evaluate instead, at most 256 KiB.
+  bytes policy = 5;
+  // Read at this operation instead of the head.
+  string at_operation = 6;
+  // Don't snapshot a workspace whose `@` the revision uses first.
+  bool skip_snapshot = 7;
+  // Fill `input_json`.
+  bool include_input = 8;
+}
+
+// The policy's decision.
+message EvaluatePolicyResponse {
+  // The evaluation.
+  PolicyEvaluation evaluation = 1;
+}

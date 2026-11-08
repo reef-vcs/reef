@@ -1,0 +1,11 @@
+{
+  "change": {"id": "s1", "commit": "c", "tree": "t", "paths": ["README.md"],
+             "files": [{"path": "README.md", "status": "modified", "lines_added": 1, "lines_removed": 1, "size": 10}],
+             "lines_added": 1, "lines_removed": 1},
+  "evidence": [
+    {"id": "ev-old-fail", "kind": "test", "result": "fail", "added_at": 10,
+     "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c", "identity_kind": "person", "actor": "executor"}},
+    {"id": "ev-new-pass", "kind": "test", "result": "pass", "added_at": 20,
+     "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c", "identity_kind": "person", "actor": "executor"}}
+  ]
+}

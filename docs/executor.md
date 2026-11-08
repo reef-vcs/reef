@@ -37,7 +37,7 @@ On a laptop the executor talks to the local daemon over its socket and signs wit
 
 ## Running it in CI
 
-In CI the executor dials the daemon's [remote listener](adr/0049-remote-listener.md) with a token linked to a `ci` identity, so its evidence is bound to that identity and policy can trust it (R3.07). On the daemon's machine:
+In CI the executor dials the daemon's [remote listener](adr/0049-remote-listener.md) with a token linked to a `ci` identity, so its evidence is bound to that identity and [policy](policy.md) can trust it. On the daemon's machine:
 
 ```sh
 reef identity create ci-main --kind ci
@@ -99,7 +99,7 @@ Checks come from two places:
 
 For each pair, the executor's own checks of that kind are tried first (with a target: those whose `targets` match it and that have `run_target`; for the whole check: those with `run`). Only when none matches are the tree's tried the same way. Several matching checks all run, the executor's first, in declaration order. All of a job's pairs and checks run in the same directory, one after another, so a later check sees what earlier ones wrote, as in a CI job: every check runs the tree's own code either way. A pair nothing matches gets `error` evidence: "no check for kind build as a whole in this executor's configuration, and the tree has no reef-checks.toml".
 
-Why a repository may declare at all: whatever runs on a tree is the tree's code. `cargo test` runs the tree's build scripts and tests; `just test` runs its `justfile`. A declaration in the tree changes which entry point runs, not whose code runs. A change to `reef-checks.toml` still changes how a tree is judged, so it shows in the proposal's diff, and every object it produced records the file's SHA-256 (`repository_checks`) and each check's declaration digest. Policy (R3.07) should treat the file as sign-off material.
+Why a repository may declare at all: whatever runs on a tree is the tree's code. `cargo test` runs the tree's build scripts and tests; `just test` runs its `justfile`. A declaration in the tree changes which entry point runs, not whose code runs. A change to `reef-checks.toml` still changes how a tree is judged, so it shows in the proposal's diff, and every object it produced records the file's SHA-256 (`repository_checks`) and each check's declaration digest. [Policy](policy.md) treats the file as sign-off material: a change to it needs the policy's owners (`builtin:owners`).
 
 The kinds an executor claims are its own checks' kinds, plus `[repository] kinds` (default `build`, `lint`, `test`) when repository checks are allowed. It can't see a tree's declarations before it claims a job on it, so a claimed kind the tree turns out not to declare gets `error` evidence.
 
@@ -214,7 +214,7 @@ A job submitted by tree alone (`reef job submit --tree`) has no commit to read a
 
 Network levels: `none` on Linux is a network namespace with only its own loopback (a test can bind `127.0.0.1` and reach nothing outside); on macOS it is no network at all, Unix sockets included. `loopback` on Linux is the same as `none`; on macOS it is the host's loopback, which reaches whatever listens there. `full` is the host's network; on macOS it reaches no Unix socket but the resolver's (so not the user's ssh-agent or gpg-agent), and on Linux the host's abstract Unix sockets (some X11 and D-Bus servers) stay reachable.
 
-Every claim carries the label `sandbox=<kind>`, so a requester can require one (`reef job submit --require sandbox=bubblewrap`), and policy can (R3.07).
+Every claim carries the label `sandbox=<kind>`, so a requester can require one (`reef job submit --require sandbox=bubblewrap`), and [policy](policy.md) can, with an attestor set's `when` over `e.annotations.sandbox.kind`.
 
 ### macOS: Seatbelt
 

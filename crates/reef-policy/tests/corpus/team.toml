@@ -1,0 +1,41 @@
+# A team: CI's evidence with a stored log, sign-off on CI configuration, no
+# keys, and size limits.
+version = 1
+
+[owners]
+groups = ["maintainers"]
+
+[groups]
+maintainers = ["alice", "bob"]
+
+[attestors.ci]
+identities = ["ci-main"]
+identity_kinds = ["ci"]
+when = 'e.artifacts.exists(a, a.name == "test.log" && a.state == "stored")'
+
+[[require]]
+name = "tests"
+paths = ["crates/**"]
+except = ["crates/**/*.md"]
+kinds = ["test", "lint"]
+attestors = ["ci"]
+
+[limits]
+max_files = 400
+max_lines = 4000
+except = ["Cargo.lock"]
+
+[[forbid]]
+name = "keys"
+paths = ["**/*.pem"]
+
+[[signoff]]
+name = "ci-config"
+paths = [".github/**"]
+groups = ["maintainers"]
+
+[[rule]]
+name = "provenance"
+when = 'change.files.size() > 0'
+expr = 'provenance.all(r, r.signature == "valid" && r.key.status == "bound")'
+message = "every commit of the change has a signed, bound provenance record"

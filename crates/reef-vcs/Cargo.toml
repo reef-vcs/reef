@@ -27,11 +27,12 @@ name = "reef"
 path = "src/main.rs"
 
 [dependencies]
-# The thin client and the error conventions, and no other Reef crate but the reference executor:
-# `reef` links neither the daemon nor jj-lib, which reef-testing's crate_graph test checks (R2.05,
-# ADR 0033, ADR 0060).
+# The thin client and the error conventions, and no other Reef crate but the reference executor
+# and the policy evaluator: `reef` links neither the daemon nor jj-lib, which reef-testing's
+# crate_graph test checks (R2.05, ADR 0033, ADR 0060, ADR 0061).
 reef-client.workspace = true
 reef-executor.workspace = true   # `reef executor` (R3.06)
+reef-policy.workspace = true     # `reef policy check`, offline (R3.07)
 zeroize.workspace = true         # `executor run --token-file`'s text, wiped
 reef-error.workspace = true
 reef-api.workspace = true        # the reef.api.v1 messages the CLI builds and prints (R2.01)

@@ -1,0 +1,42 @@
+[package]
+name = "reef-policy"
+description = "Reef policy: the format of a repository's reef-policy.toml and its evaluation over one change, with CEL conditions. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "policy", "cel"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+# No Reef crate but `reef-error`, no jj-lib, no gRPC, no SQLite, no tokio: the daemon evaluates
+# with it, the `reef` binary checks files offline with it, and the phase-four store will evaluate
+# with it (R3.07, ADR 0061). `reef-testing`'s crate_graph test keeps it that way.
+[dependencies]
+reef-error.workspace = true
+cel.workspace = true             # CEL conditions; used from `env`, `check` and `cost` only
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true            # the file, parsed strictly with spans for diagnostics
+globset.workspace = true         # path patterns
+regex.workspace = true           # `matches`, compiled once per evaluation with a size limit
+schemars.workspace = true        # the file, the input and the evaluation as JSON Schema
+ring.workspace = true            # SHA-256 of the evaluated bytes
+thiserror.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true      # test 10: the schemas against the corpus
+criterion.workspace = true
+
+[[bench]]
+name = "policy"
+harness = false

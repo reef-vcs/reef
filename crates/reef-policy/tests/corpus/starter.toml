@@ -1,0 +1,26 @@
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[attestors.local]
+identities = ["alice"]
+actors = ["executor"]
+
+[[require]]
+name = "tests"
+kinds = ["test"]
+attestors = ["local"]
+
+[[forbid]]
+name = "keys"
+paths = ["**/*.pem", "**/id_rsa", "**/id_ed25519"]
+message = "private keys never enter the tree"
+
+[conflicts]
+tier = "approve"
+
+[[conflicts.rule]]
+paths = ["docs/**"]
+tier = "land"
+attempts = 5

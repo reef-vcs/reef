@@ -446,6 +446,35 @@ async fn outputs_match_their_schemas() {
         .both(&a_dir, &["provenance", "list", "--change", "@"])
         .await;
     script.both(&a_dir, &["provenance", "show"]).await;
+    // R3.07: a starter policy, checked offline and over an input, and
+    // evaluated over `@` from its file.
+    let policy_dir = daemon.tmp.path().join("policy");
+    std::fs::create_dir_all(&policy_dir).unwrap();
+    script.json(&policy_dir, &["policy", "init"]).await;
+    script
+        .run(&policy_dir, &["policy", "init", "--stdout"])
+        .await;
+    script.both(&policy_dir, &["policy", "check"]).await;
+    let policy_input = policy_dir.join("input.json");
+    std::fs::write(&policy_input, r#"{"change": {"paths": ["a.txt"]}}"#).unwrap();
+    script
+        .both(
+            &policy_dir,
+            &["policy", "check", "--input", policy_input.to_str().unwrap()],
+        )
+        .await;
+    let policy_file = policy_dir.join("reef-policy.toml");
+    script
+        .both(
+            &a_dir,
+            &[
+                "policy",
+                "eval",
+                "--policy-file",
+                policy_file.to_str().unwrap(),
+            ],
+        )
+        .await;
     // R3.05: a job, deduplicated, listed, shown and cancelled.
     let submitted = script
         .json(

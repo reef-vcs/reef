@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 19;
+pub const API_REVISION: u32 = 20;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -99,6 +99,8 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.05: `ExecutorService`, `PRESENCE_KIND_JOB` and `Presence.job`,
     // `ListEvidenceRequest.job_id`, and GC's job counts.
     "1e15d31ae485d878e9921bc2fc785818f8b4c952f19172e5b64f6107fef2ff26",
+    // R3.07: `PolicyService`.
+    "7de26b8cf31e6e437502790248f2ac6562660e236a31090fb20c39517c716c55",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -559,6 +561,23 @@ pub mod error {
     /// Metadata: `field` (`evidence`, `progress`, `message`, `usage`,
     /// `outcome` or `reason`).
     pub const INVALID_JOB_UPDATE: &str = "INVALID_JOB_UPDATE";
+    /// `EvaluatePolicy` given both `policy` text and a `policy_revision`
+    /// (R3.07).
+    pub const POLICY_SOURCE_CONFLICT: &str = "POLICY_SOURCE_CONFLICT";
+    /// `EvaluatePolicy`'s `policy` text over 256 KiB (R3.07). Metadata:
+    /// `bytes`, `max`.
+    pub const POLICY_TOO_LARGE: &str = "POLICY_TOO_LARGE";
+    /// `reef policy eval --require-allow` for a change the policy does not
+    /// allow (R3.07): a client's reason, never a daemon's. The first rule
+    /// that blocks is in the error's `hint`.
+    pub const POLICY_BLOCKED: &str = "POLICY_BLOCKED";
+    /// `reef policy check` for a file that does not load (R3.07): a
+    /// client's reason, never a daemon's, which reports a policy that does
+    /// not load as the decision `INVALID_POLICY`.
+    pub const INVALID_POLICY: &str = "INVALID_POLICY";
+    /// `reef policy init` where `reef-policy.toml` already exists (R3.07):
+    /// a client's reason.
+    pub const POLICY_EXISTS: &str = "POLICY_EXISTS";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

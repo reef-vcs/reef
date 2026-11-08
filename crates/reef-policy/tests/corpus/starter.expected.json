@@ -1,0 +1,94 @@
+{
+  "cost": 0,
+  "decision": "allow",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 2,
+    "evidence_ignored": 0,
+    "lines_added": 1,
+    "lines_removed": 1,
+    "paths": 1,
+    "provenance": 0
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [
+        "ev-new-pass"
+      ],
+      "failed": [],
+      "kind": "require",
+      "message": "",
+      "missing": [],
+      "name": "tests",
+      "paths": [
+        "README.md"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "forbid",
+      "message": "",
+      "missing": [],
+      "name": "keys",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    }
+  ],
+  "sha256": "77289c46df9f6bc3c2c686ee49ee8829d14b3bfa5832a5d4be134a7a43fe6fb6",
+  "version": 1
+}

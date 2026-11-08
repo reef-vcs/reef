@@ -129,6 +129,9 @@ pub struct FileDiffInfo {
     pub too_large: bool,
     /// A side is not valid UTF-8.
     pub invalid_utf8: bool,
+    /// The new side's length in bytes, with [`DiffOptions::sizes`]; 0
+    /// otherwise, and for a deletion.
+    pub new_size: u64,
 }
 
 /// What a diff compares against.
@@ -163,6 +166,9 @@ pub struct DiffOptions {
     /// List every differing file's [`DiffPair`] in [`DiffPage::pairs`],
     /// when at most [`RENAME_LIMIT`] differ (R2.15's symbol diff).
     pub pairs: bool,
+    /// Fill [`FileDiffInfo::new_size`], reading a new side past
+    /// `max_file_bytes` to its end to count it (R3.07's size limits).
+    pub sizes: bool,
 }
 
 /// One differing file's two sides, without their content.
@@ -284,6 +290,8 @@ struct Side {
     bytes: Vec<u8>,
     binary: bool,
     too_large: bool,
+    /// The whole length, when counted.
+    size: u64,
 }
 
 /// Reads one side: at most `peek` bytes when only the binary check is
@@ -294,6 +302,7 @@ async fn read_side(
     value: MergedTreeValue,
     read: Option<usize>,
     materialize: &ConflictMaterializeOptions,
+    count: bool,
 ) -> Result<Side, DiffError> {
     let store = tree.store();
     let value = materialize_tree_value(store, path, value, tree.labels()).await?;
@@ -319,24 +328,41 @@ async fn read_side(
         MaterializedTreeValue::File(file) => {
             let limit = read.unwrap_or(BINARY_PEEK);
             let mut bytes = Vec::new();
-            file.reader
+            let mut reader = file.reader;
+            let error = |source: std::io::Error| BackendError::ReadFile {
+                path: path.to_owned(),
+                id: file.id.clone(),
+                source: source.into(),
+            };
+            (&mut reader)
                 .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
                 .read_to_end(&mut bytes)
                 .await
-                .map_err(|source| BackendError::ReadFile {
-                    path: path.to_owned(),
-                    id: file.id.clone(),
-                    source: source.into(),
-                })?;
-            (bytes, true)
+                .map_err(error)?;
+            let mut size = bytes.len() as u64;
+            if count && bytes.len() > limit {
+                size += futures::io::copy(&mut reader, &mut futures::io::sink())
+                    .await
+                    .map_err(error)?;
+            }
+            let binary = bytes[..bytes.len().min(BINARY_PEEK)].contains(&0);
+            let too_large = read.is_some_and(|max| bytes.len() > max);
+            return Ok(Side {
+                bytes,
+                binary,
+                too_large,
+                size,
+            });
         }
     };
     let binary = file && bytes[..bytes.len().min(BINARY_PEEK)].contains(&0);
     let too_large = read.is_some_and(|max| bytes.len() > max);
+    let size = bytes.len() as u64;
     Ok(Side {
         bytes,
         binary,
         too_large,
+        size,
     })
 }
 
@@ -553,6 +579,7 @@ struct Sides<'a> {
     to: &'a MergedTree,
     read: Option<usize>,
     materialize: &'a ConflictMaterializeOptions,
+    sizes: bool,
 }
 
 /// How the entry at `path` differs, given what each side holds.
@@ -628,6 +655,7 @@ async fn file_diff(
         values.before,
         sides.read,
         sides.materialize,
+        false,
     )
     .await?;
     let new = read_side(
@@ -636,8 +664,12 @@ async fn file_diff(
         values.after,
         sides.read,
         sides.materialize,
+        sides.sizes,
     )
     .await?;
+    if sides.sizes {
+        diff.new_size = new.size;
+    }
     diff.binary = old.binary || new.binary;
     diff.too_large = old.too_large || new.too_large;
     if sides.read.is_some() && !diff.binary && !diff.too_large {
@@ -766,6 +798,7 @@ pub async fn diff_page(
             to: &to_tree,
             read,
             materialize: &materialize,
+            sizes: options.sizes,
         };
         page.files
             .push(file_diff(&entry_path, values?, path, &sides, options).await?);
@@ -827,6 +860,7 @@ mod tests {
             after: None,
             limit: 100,
             pairs: false,
+            sizes: false,
         }
     }
 

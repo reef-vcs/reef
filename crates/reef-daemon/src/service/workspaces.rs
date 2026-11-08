@@ -303,6 +303,7 @@ async fn changed_counts(
                 // `total` counts every file whatever the limit.
                 limit: 1,
                 pairs: false,
+                sizes: false,
             };
             let mut counts = Vec::with_capacity(names.len());
             for name in &names {

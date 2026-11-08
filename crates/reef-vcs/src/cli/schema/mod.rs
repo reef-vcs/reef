@@ -48,6 +48,8 @@ pub(crate) enum Part {
     Api,
     // The evidence object format, for executors.
     Evidence,
+    // The repository policy: the file, the input and the evaluation.
+    Policy,
 }
 
 /// Prints the document, a part of it, or the descriptor set.
@@ -78,6 +80,7 @@ pub(crate) fn part_name(part: Part) -> &'static str {
         Part::Mcp => "mcp",
         Part::Api => "api",
         Part::Evidence => "evidence",
+        Part::Policy => "policy",
     }
 }
 
@@ -90,6 +93,9 @@ fn not_found(part: Part, name: &[String]) -> CliError {
         "mcp" => "Name a tool, as `reef schema mcp get_status`; `reef schema mcp` lists them all.",
         "evidence" => {
             "Name statement, predicate or envelope, as `reef schema evidence statement`; `reef schema evidence` prints all three."
+        }
+        "policy" => {
+            "Name file, input, evaluation or conflict_decision, as `reef schema policy input`; `reef schema policy` prints all four."
         }
         _ => {
             "Name a service or a message, as `reef schema api WorkspaceService`; `reef schema api` lists them all."

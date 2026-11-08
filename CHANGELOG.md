@@ -14,6 +14,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - The daemon's database becomes schema 10 (`0010_provenance`, R3.04) the first time this daemon opens it. From then on every committing snapshot and every `EditFiles` naming a workspace records a signed provenance record; `[provenance] enabled = false` turns that off.
 - The root help's "Also:" line lists `provenance` and no longer `restore`, which `--help-all` and `reef backup --help` still name.
 - The daemon's database becomes schema 11 (`0011_jobs`, R3.05) the first time this daemon opens it.
+- Repository policy (R3.07) needs no migration. A `reef-policy.toml` that uses a table a later Reef adds is `invalid_policy` to this one: upgrade daemons before policies.
 - Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
 ### Added
@@ -53,6 +54,10 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `executor.toml`, the executor's configuration (in the client's state directory, `--config` or `REEF_EXECUTOR_CONFIG`), and `reef-checks.toml`, a repository's check declarations at the root of its tree: argv, targets, timeout, literal environment, artifacts and the exit codes that mean no verdict, with the executor's own checks first and the environment around a run (passthrough, caches, host paths, the sandbox, network beyond `none`) the executor's alone.
 - `reef-executor`, the executor's crate, a client of the daemon with no jj-lib; its `sandbox` module is reusable (for `reef ws run --sandbox`, #62).
 - `reef-checks.toml` at Reef's root: rustfmt and the tests of each crate, for running Reef's checks with its own executor.
+- Repository policy (R3.07, [ADR 0061](docs/adr/0061-repository-policy-file.md), [docs/policy.md](docs/policy.md)): `reef-policy.toml` at a tree's root, strict TOML, format version 1. It names the owners who sign off a change to the policy files, groups of identities, attestor sets (whose evidence counts: identities or groups, identity kinds, actors, authorities and presence, excluding evidence from the change's own session or agent by default, with an optional CEL condition), required evidence per path, size limits, forbidden paths, sign-off areas, conflict tiers and attempt caps, and free CEL rules. The policy in force is the destination's (`trunk()` by default), never the change's; changes to `reef-policy.toml` and `reef-checks.toml` need the owners' sign-off. Evaluation reports every rule, with the evidence missing and the sign-offs needed; nothing refuses a change on it yet (R3.13 will).
+- `PolicyService.EvaluatePolicy` (API revision 20): the policy at a revision, or a policy file's text, evaluated over one change. A missing or invalid policy and a blocked change are decisions, not errors. CEL runs on cel-rust's `cel` 0.15.0 behind Reef's own static check and a cost bound computed before anything runs.
+- `reef policy check` (offline; `--input` evaluates over a JSON input, and a conflict input prints the tier; `-r` reads a revision's file), `reef policy eval` (`--policy-revision`, `--policy-file`, `--input-json`, and `--require-allow`, which exits 5 unless allowed) and `reef policy init` (a starter file naming the default identity; `--stdout`). `reef schema policy` prints the file, the input and the evaluation as JSON Schema.
+- `reef-policy`, the policy crate: the format and the evaluator, with no jj-lib, gRPC, tokio or SQLite dependency.
 
 ### Fixed
 

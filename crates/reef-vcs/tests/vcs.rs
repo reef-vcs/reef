@@ -4487,3 +4487,225 @@ async fn executor_sandbox_probes() {
     }
     daemon.stop().await;
 }
+
+/// R3.07 test 15: `reef policy check`, `eval` and `init`.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "the three commands end to end")]
+async fn policy_cli() {
+    // `check` needs no daemon: a state directory nobody serves.
+    let lone = tempfile::tempdir().unwrap();
+    let no_daemon = |dir: &Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reef"));
+        command
+            .env_remove("REEF_SOCKET")
+            .env_remove("REEF_OUTPUT")
+            .env("REEF_STATE_DIR", lone.path().join("state"))
+            .current_dir(dir)
+            .arg("--no-autostart");
+        command
+    };
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        work.path().join("reef-policy.toml"),
+        reef_policy::starter("alice"),
+    )
+    .unwrap();
+    let checked = json(&run(no_daemon(work.path()), &["-o", "json", "policy", "check"]).await);
+    assert_eq!(checked["version"], 1);
+    assert_eq!(checked["rules"][4], "tests");
+    std::fs::write(
+        work.path().join("bad.toml"),
+        "version = 1\n[owners]\ngroups = [\"x\"]\n",
+    )
+    .unwrap();
+    let output = run(
+        no_daemon(work.path()),
+        &["-o", "json", "policy", "check", "bad.toml"],
+    )
+    .await;
+    let error = failed(&output, 2, "INVALID_POLICY");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("bad.toml:3:11: owners.groups:"),
+        "{error}"
+    );
+    // `--input` evaluates offline; a conflict input prints the tier.
+    std::fs::write(
+        work.path().join("in.json"),
+        r#"{"change": {"paths": ["src/a.rs"]}}"#,
+    )
+    .unwrap();
+    let evaluated = json(
+        &run(
+            no_daemon(work.path()),
+            &["-o", "json", "policy", "check", "--input", "in.json"],
+        )
+        .await,
+    );
+    assert_eq!(evaluated["evaluation"]["decision"], "block");
+    std::fs::write(
+        work.path().join("conflict.json"),
+        r#"{"conflict": {"paths": ["docs/a.md"]}}"#,
+    )
+    .unwrap();
+    let tier = json(
+        &run(
+            no_daemon(work.path()),
+            &["-o", "json", "policy", "check", "--input", "conflict.json"],
+        )
+        .await,
+    );
+    assert_eq!(tier["conflict"]["tier"], "approve");
+
+    // Through the daemon.
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    write(&ws, "reef-policy.toml", reef_policy::starter("alice"));
+    let at = ok(&daemon, &dir, &["-o", "json", "policy", "check", "-r", "@"]).await;
+    assert_eq!(at["path"], "@:reef-policy.toml");
+    // No policy on trunk(): nothing lands automatically.
+    let none = ok(&daemon, &dir, &["-o", "json", "policy", "eval"]).await;
+    assert_eq!(none["decision"], "no_policy");
+    // The workspace's own file, as text: blocked, `test` missing.
+    let file = dir.join("reef-policy.toml");
+    let file = file.to_str().unwrap();
+    let blocked = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "policy", "eval", "--policy-file", file],
+    )
+    .await;
+    assert_eq!(blocked["decision"], "block", "{blocked}");
+    assert_eq!(blocked["source"]["from_request"], true);
+    let tests = blocked["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["name"] == "tests")
+        .unwrap();
+    assert_eq!(tests["missing"][0]["kind"], "test");
+    let brief = ok(
+        &daemon,
+        &dir,
+        &["-o", "brief", "policy", "eval", "--policy-file", file],
+    )
+    .await;
+    // The change adds reef-policy.toml itself, so the owners must sign too.
+    assert_eq!(brief["blocking"][0]["name"], "builtin:owners", "{brief}");
+    assert_eq!(brief["blocking"][1]["name"], "tests", "{brief}");
+    assert_eq!(brief["blocking"][1]["missing"][0], "test", "{brief}");
+    run_in(&daemon, &dir, &["policy", "eval", "--policy-file", file]).await;
+    let text = stdout(
+        &run_in(
+            &daemon,
+            &dir,
+            &["-o", "text", "policy", "eval", "--policy-file", file],
+        )
+        .await,
+    );
+    assert!(text.contains("decision: block"), "{text}");
+    assert!(text.contains("missing: test from local"), "{text}");
+    // --require-allow: exit 5, with the first unmet rule and the command.
+    let output = run_in(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "eval",
+            "--policy-file",
+            file,
+            "--require-allow",
+        ],
+    )
+    .await;
+    let error = serde_json::json!({ "error": failed(&output, 5, "POLICY_BLOCKED") });
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("builtin:owners:"),
+        "{error}"
+    );
+    let text = run_in(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "text",
+            "policy",
+            "eval",
+            "--policy-file",
+            file,
+            "--require-allow",
+        ],
+    )
+    .await;
+    text.clone().assert().code(5);
+    assert!(stdout(&text).contains("decision: block"));
+    assert_eq!(
+        strings(&error["error"]["next"]),
+        ["reef", "policy", "eval", "-r", "@"]
+    );
+    // The input, printed and read back offline, evaluates the same.
+    let with_input = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "eval",
+            "--policy-file",
+            file,
+            "--input-json",
+        ],
+    )
+    .await;
+    std::fs::write(
+        work.path().join("seen.json"),
+        serde_json::to_string(&with_input["input_json"]).unwrap(),
+    )
+    .unwrap();
+    let replayed = json(
+        &run(
+            no_daemon(&dir),
+            &[
+                "-o",
+                "json",
+                "policy",
+                "check",
+                "--input",
+                work.path().join("seen.json").to_str().unwrap(),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(replayed["evaluation"]["rules"], with_input["rules"]);
+    assert_eq!(replayed["evaluation"]["decision"], with_input["decision"]);
+
+    // `init` names the default identity, refuses to overwrite, and prints
+    // with --stdout.
+    let fresh = tempfile::tempdir().unwrap();
+    let init = ok(&daemon, fresh.path(), &["-o", "json", "policy", "init"]).await;
+    assert_eq!(init["placeholder"], false);
+    let owner = init["owner"].as_str().unwrap().to_owned();
+    let written = std::fs::read_to_string(fresh.path().join("reef-policy.toml")).unwrap();
+    assert!(written.contains(&format!("identities = [\"{owner}\"]")));
+    ok(&daemon, fresh.path(), &["-o", "json", "policy", "check"]).await;
+    err(
+        &daemon,
+        fresh.path(),
+        &["-o", "json", "policy", "init"],
+        4,
+        "POLICY_EXISTS",
+    )
+    .await;
+    let printed = stdout(&run_in(&daemon, fresh.path(), &["policy", "init", "--stdout"]).await);
+    assert_eq!(printed, written);
+    daemon.stop().await;
+}

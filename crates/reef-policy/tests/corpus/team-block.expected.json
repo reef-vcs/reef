@@ -1,0 +1,147 @@
+{
+  "cost": 34,
+  "decision": "block",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 2,
+    "evidence_ignored": 0,
+    "lines_added": 5020,
+    "lines_removed": 0,
+    "paths": 2,
+    "provenance": 1
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "require",
+      "message": "needs passing test, lint from ci",
+      "missing": [
+        {
+          "attestors": [
+            "ci"
+          ],
+          "evidence_ids": [],
+          "kind": "test",
+          "target": ""
+        },
+        {
+          "attestors": [
+            "ci"
+          ],
+          "evidence_ids": [],
+          "kind": "lint",
+          "target": ""
+        }
+      ],
+      "name": "tests",
+      "paths": [
+        "crates/x/src/lib.rs"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "unsatisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "limits",
+      "message": "5020 lines added and removed, over max_lines 4000",
+      "missing": [],
+      "name": "limits",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "unsatisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "forbid",
+      "message": "touches 1 forbidden path",
+      "missing": [],
+      "name": "keys",
+      "paths": [
+        "deploy/key.pem"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "unsatisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "signoff",
+      "message": "",
+      "missing": [],
+      "name": "ci-config",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "rule",
+      "message": "every commit of the change has a signed, bound provenance record",
+      "missing": [],
+      "name": "provenance",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "unsatisfied"
+    }
+  ],
+  "sha256": "8c825139fac866270c63c91c7e07cd3cdafdd0ecf52b5b1aa4d5dc13b5651f8e",
+  "version": 1
+}

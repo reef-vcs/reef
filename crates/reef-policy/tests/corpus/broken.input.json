@@ -1,0 +1,30 @@
+{
+  "change": {
+    "id": "a1b2", "commit": "c1", "tree": "t1", "parents": ["p1"],
+    "paths": ["crates/x/src/lib.rs", ".github/workflows/ci.yml"],
+    "files": [
+      {"path": "crates/x/src/lib.rs", "status": "modified", "lines_added": 12, "lines_removed": 3, "size": 900},
+      {"path": ".github/workflows/ci.yml", "status": "modified", "lines_added": 1, "lines_removed": 1, "size": 300}
+    ],
+    "lines_added": 13, "lines_removed": 4
+  },
+  "evidence": [
+    {"id": "ev-test", "kind": "test", "result": "pass", "added_at": 1000,
+     "artifacts": [{"name": "test.log", "sha256": "00", "state": "stored", "size": 10}],
+     "key": {"id": "k1", "status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1",
+             "identity_kind": "ci", "actor": "executor", "session": "ses_00000000000000c1", "presence": "none"}},
+    {"id": "ev-lint", "kind": "lint", "result": "pass", "added_at": 1001,
+     "artifacts": [{"name": "test.log", "sha256": "01", "state": "stored", "size": 10}],
+     "key": {"id": "k1", "status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1",
+             "identity_kind": "ci", "actor": "executor", "session": "ses_00000000000000c1", "presence": "none"}},
+    {"id": "ev-signoff", "kind": "signoff", "result": "pass", "added_at": 1002,
+     "key": {"id": "k2", "status": "bound", "identity": "bob", "identity_id": "idn_0000000000000b0b",
+             "identity_kind": "person", "actor": "human", "session": "ses_0000000000000b0b", "presence": "none"}}
+  ],
+  "provenance": [
+    {"id": "prv_1", "commit": "c1", "session": "ses_000000000000a9e7", "sequence": 1, "kind": "snapshot",
+     "agent": "claude@mac", "recorded_at": 900, "signature": "valid",
+     "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c", "identity_kind": "person",
+             "actor": "agent", "session": "ses_000000000000a9e7"}}
+  ]
+}

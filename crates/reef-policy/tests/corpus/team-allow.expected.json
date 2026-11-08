@@ -1,0 +1,149 @@
+{
+  "cost": 82,
+  "decision": "allow",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 3,
+    "evidence_ignored": 0,
+    "lines_added": 13,
+    "lines_removed": 4,
+    "paths": 2,
+    "provenance": 1
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [
+        "ev-test",
+        "ev-lint"
+      ],
+      "failed": [],
+      "kind": "require",
+      "message": "",
+      "missing": [],
+      "name": "tests",
+      "paths": [
+        "crates/x/src/lib.rs"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "limits",
+      "message": "",
+      "missing": [],
+      "name": "limits",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "forbid",
+      "message": "",
+      "missing": [],
+      "name": "keys",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [
+        "ev-signoff"
+      ],
+      "failed": [],
+      "kind": "signoff",
+      "message": "",
+      "missing": [],
+      "name": "ci-config",
+      "paths": [
+        ".github/workflows/ci.yml"
+      ],
+      "paths_total": 1,
+      "signoff": {
+        "count": 1,
+        "groups": [
+          "maintainers"
+        ],
+        "have": 1,
+        "identities": [],
+        "kinds": [
+          "signoff"
+        ],
+        "presence": "none",
+        "signed_by": [
+          "bob"
+        ]
+      },
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "rule",
+      "message": "",
+      "missing": [],
+      "name": "provenance",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    }
+  ],
+  "sha256": "8c825139fac866270c63c91c7e07cd3cdafdd0ecf52b5b1aa4d5dc13b5651f8e",
+  "version": 1
+}

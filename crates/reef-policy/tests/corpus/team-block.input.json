@@ -1,0 +1,24 @@
+{
+  "change": {
+    "id": "a1b3", "commit": "c2", "tree": "t2",
+    "paths": ["crates/x/src/lib.rs", "deploy/key.pem"],
+    "files": [
+      {"path": "crates/x/src/lib.rs", "status": "modified", "lines_added": 5000, "lines_removed": 0, "size": 90000},
+      {"path": "deploy/key.pem", "status": "added", "lines_added": 20, "lines_removed": 0, "size": 1700}
+    ],
+    "lines_added": 5020, "lines_removed": 0
+  },
+  "evidence": [
+    {"id": "ev-self", "kind": "test", "result": "pass", "added_at": 1000, "added_by_agent": "claude@mac",
+     "artifacts": [{"name": "test.log", "sha256": "00", "state": "stored"}],
+     "key": {"id": "k1", "status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1",
+             "identity_kind": "ci", "actor": "executor", "session": "ses_00000000000000c1"}},
+    {"id": "ev-nolog", "kind": "lint", "result": "pass", "added_at": 1001,
+     "key": {"id": "k1", "status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1",
+             "identity_kind": "ci", "actor": "executor", "session": "ses_00000000000000c1"}}
+  ],
+  "provenance": [
+    {"id": "prv_2", "commit": "c2", "session": "ses_000000000000a9e7", "agent": "claude@mac", "recorded_at": 900,
+     "signature": "invalid", "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c"}}
+  ]
+}

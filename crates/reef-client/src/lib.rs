@@ -56,6 +56,7 @@ use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
+use reef_api::v1::policy_service_client::PolicyServiceClient;
 use reef_api::v1::presence_service_client::PresenceServiceClient;
 use reef_api::v1::provenance_service_client::ProvenanceServiceClient;
 use reef_api::v1::remote_service_client::RemoteServiceClient;
@@ -1849,6 +1850,18 @@ impl Client {
 }
 
 impl Client {
+    /// `PolicyService.EvaluatePolicy` (R3.07): the repository's policy
+    /// evaluated over one change.
+    pub async fn evaluate_policy(
+        &self,
+        request: v1::EvaluatePolicyRequest,
+    ) -> Result<v1::EvaluatePolicyResponse, ClientError> {
+        let mut client =
+            PolicyServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("EvaluatePolicy", client.evaluate_policy(request))
+            .await
+    }
+
     fn provenance(&self) -> ProvenanceServiceClient<Svc> {
         ProvenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }

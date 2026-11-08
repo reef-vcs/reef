@@ -258,6 +258,7 @@ impl DiffService for DiffHandler {
                 .and_then(|mut paths| paths.pop()),
             limit: page.size(),
             pairs: symbols.is_some(),
+            sizes: false,
         };
         if page.pinned().is_none() && request.at_operation.is_empty() && !request.skip_snapshot {
             let needed = uses_working_copy(

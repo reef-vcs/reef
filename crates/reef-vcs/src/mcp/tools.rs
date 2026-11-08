@@ -647,6 +647,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
     ),
     (
+        "/reef.api.v1.PolicyService/EvaluatePolicy",
+        "an agent runs `reef policy eval`; R3.13's proposal flow reports it; tools/list is at its budget (#116)",
+    ),
+    (
         "/reef.api.v1.ProvenanceService/DeclareProvenance",
         "declared by the harness's hooks and by the server from its environment (R3.44), not by a tool call",
     ),

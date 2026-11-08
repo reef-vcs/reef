@@ -25,6 +25,7 @@ pub mod identity;
 pub mod maintenance;
 pub mod operations;
 pub mod page;
+pub mod policy;
 pub mod presence;
 pub mod provenance;
 pub mod remote;
