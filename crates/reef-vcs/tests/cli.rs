@@ -1795,8 +1795,13 @@ fn root_help_names_every_command() {
         // R3.03: `completions` left the first screen for `identity`, and
         // R3.04 `restore` for `provenance`; both are in `--help-all`, and
         // `reef backup --help` names `restore`. R3.05's `job` never joined
-        // it: agents do not schedule checks, the landing service will.
-        if command == "completions" || command == "restore" || command == "job" {
+        // it: agents do not schedule checks, the landing service will. Nor
+        // R3.06's `executor`: an operator runs it, not an agent.
+        if command == "completions"
+            || command == "restore"
+            || command == "job"
+            || command == "executor"
+        {
             continue;
         }
         assert!(words.contains(&command.as_str()), "{command}: {text}");
@@ -1986,6 +1991,10 @@ async fn every_command_completes_with_stdin_closed() {
         // `op watch` and `presence watch` wait 30 s by default.
         if command == ["op", "watch"] || command == ["presence", "watch"] {
             command.extend(["--for".to_owned(), "1".to_owned()]);
+        }
+        // `executor run` serves until stopped.
+        if command == ["executor", "run"] {
+            command.extend(["--once", "--wait", "1s"].map(str::to_owned));
         }
         // `ui` never opens a browser here (stdout is not a terminal), and
         // `--print` asks for no launch file either.

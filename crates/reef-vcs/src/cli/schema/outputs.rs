@@ -376,6 +376,24 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<Job>,
         object::<brief::Job<'static>>,
     ),
+    OutputRow {
+        note: Some(
+            "one line per job as it finishes; in text, a line per job on stderr and nothing on stdout",
+        ),
+        ..lines(
+            &["executor", "run"],
+            object::<reef_executor::report::JobReport>,
+        )
+    },
+    OutputRow {
+        note: Some(
+            "printed before an exit for a sandbox that cannot be applied (6) or a probe that escaped (6)",
+        ),
+        ..row(
+            &["executor", "check"],
+            object::<reef_executor::report::CheckReport>,
+        )
+    },
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

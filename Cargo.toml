@@ -11,6 +11,7 @@ default-members = [
     "crates/reef-evidence",
     "crates/reef-web",
     "crates/reef-daemon",
+    "crates/reef-executor",
     "crates/reef-vcs",
 ]
 
@@ -34,6 +35,7 @@ reef-symbols = { path = "crates/reef-symbols", version = "0.4.2" }
 reef-evidence = { path = "crates/reef-evidence", version = "0.4.2" }
 reef-web = { path = "crates/reef-web", version = "0.4.2" }
 reef-daemon = { path = "crates/reef-daemon", version = "0.4.2" }
+reef-executor = { path = "crates/reef-executor", version = "0.4.2" }
 reef-testing = { path = "crates/reef-testing", version = "0.4.2" }   # unpublished; see reef-daemon's `testing` feature
 
 # Core
@@ -161,6 +163,13 @@ tree-sitter-rust = "0.24"
 # SCIP's vendored schema (R2.14), compiled with protox like the API's. The version tonic-prost-build
 # already pulls in.
 prost-build = "0.14"
+
+# The reference executor (R3.06, ADR 0060), all already in the lockfile: collision-detecting SHA-1
+# for git object ids (through gix), target globs and the target pattern (through ignore and
+# tracing-subscriber's dependencies).
+sha1dc = "0.1"
+globset = "0.4"
+regex = "1"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }

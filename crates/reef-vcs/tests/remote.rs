@@ -669,3 +669,112 @@ async fn evidence_add_through_a_linked_token() {
     );
     daemon.stop().await;
 }
+
+// R3.06 test 6 through the CLI: `reef executor run` over the remote
+// listener with a token linked to a `ci` identity, the token in
+// `REEF_REMOTE_TOKEN` (on macOS the executor then runs itself again with
+// the token on a pipe, not in its environment) and then in a
+// `--token-file`. The evidence binds to the identity either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn executor_run_through_a_linked_token() {
+    let (daemon, repo, url, fingerprint) = remote_daemon().await;
+    daemon
+        .client
+        .create_identity(reef_api::v1::CreateIdentityRequest {
+            name: "ci-exec".into(),
+            kind: reef_api::v1::IdentityKind::Ci.into(),
+            ..reef_api::v1::CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let secret = daemon
+        .client
+        .create_remote_token_for("runner", RemoteScope::Write, None, "ci-exec")
+        .await
+        .unwrap()
+        .secret;
+    let work = short_tempdir();
+    let config = work.path().join("executor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[work]\ndir = {:?}\n[sandbox]\nkind = \"none\"\n[repository]\nchecks = \"deny\"\n[[check]]\nname = \"env\"\nkind = \"test\"\nrun = [\"true\"]\n",
+            work.path().join("work").display().to_string()
+        ),
+    )
+    .unwrap();
+    let state = work.path().join("client");
+    let token_file = work.path().join("token");
+    std::fs::write(&token_file, format!("{secret}\n")).unwrap();
+    let ws = daemon
+        .client
+        .create_workspace(reef_api::v1::CreateWorkspaceRequest {
+            repo: repo.id.clone(),
+            owner: "tester@host".into(),
+            ..reef_api::v1::CreateWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    for by_file in [false, true] {
+        let job = daemon
+            .client
+            .submit_job(reef_api::v1::SubmitJobRequest {
+                workspace: ws.id.clone(),
+                source: Some(reef_api::v1::submit_job_request::Source::Revision(
+                    "@".into(),
+                )),
+                kinds: vec!["test".into()],
+                duplicate: true,
+                ..reef_api::v1::SubmitJobRequest::default()
+            })
+            .await
+            .unwrap()
+            .job
+            .unwrap();
+        let mut command = client(&state);
+        command
+            .env("REEF_REMOTE", &url)
+            .env("REEF_REMOTE_FINGERPRINT", &fingerprint);
+        let config_arg = config.display().to_string();
+        let file_arg = token_file.display().to_string();
+        let mut args = vec![
+            "-o",
+            "json",
+            "executor",
+            "run",
+            "--config",
+            &config_arg,
+            "--once",
+            "--wait",
+            "10s",
+        ];
+        if by_file {
+            args.extend(["--token-file", &file_arg]);
+        } else {
+            command.env("REEF_REMOTE_TOKEN", &secret);
+        }
+        let output = run(command, &args, None).await;
+        let report = json(&output);
+        assert_eq!(report["job_id"], job.job_id, "{report}");
+        assert_eq!(report["outcome"], "done", "{report}");
+        let evidence = daemon
+            .client
+            .list_evidence(
+                reef_api::v1::ListEvidenceRequest {
+                    repo: repo.id.clone(),
+                    job_id: job.job_id.clone(),
+                    ..reef_api::v1::ListEvidenceRequest::default()
+                },
+                0,
+            )
+            .await
+            .unwrap()
+            .items;
+        let identity = evidence[0].identity.as_ref().unwrap();
+        assert_eq!(identity.status(), reef_api::v1::IdentityStatus::Bound);
+        assert_eq!(identity.key.as_ref().unwrap().identity, "ci-exec");
+    }
+    daemon.stop().await;
+}

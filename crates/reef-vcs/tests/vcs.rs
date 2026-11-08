@@ -4242,3 +4242,248 @@ async fn job_cli() {
     .await;
     daemon.stop().await;
 }
+
+/// R3.06 test 13: `reef executor check` and `run` through the CLI.
+/// `check` refuses a sandbox this platform lacks with exit 6 and `next`,
+/// a bad configuration with exit 2 naming its line, and prints the plan
+/// at a revision; `run --once` runs a job and prints its line, or exits 0
+/// (3 with --require-job) when none comes. Outputs are checked against
+/// `reef schema` by `run`. The sandbox's own probes are test 9 below.
+#[expect(clippy::too_many_lines, reason = "each refusal, then a plan and a job")]
+#[tokio::test(flavor = "multi_thread")]
+async fn executor_cli() {
+    let (daemon, repo) = fixture().await;
+    let created = ok(&daemon, &repo.root, &["-o", "json", "ws", "create"]).await;
+    let ws_dir = PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::write(
+        ws_dir.join("reef-checks.toml"),
+        "[[check]]\nname = \"exit\"\nkind = \"test\"\ntargets = [\"*\"]\nrun_target = [\"sh\", \"-c\", \"exit \\\"$1\\\"\", \"sh\", \"{target}\"]\n",
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let config = work.path().join("executor.toml");
+    let other = if cfg!(target_os = "macos") {
+        "bubblewrap"
+    } else {
+        "seatbelt"
+    };
+    std::fs::write(&config, format!("[sandbox]\nkind = \"{other}\"\n")).unwrap();
+    let config_arg = config.display().to_string();
+
+    // A sandbox this platform lacks: exit 6, the probe's reason, `next`.
+    let output = run_in(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "executor", "check", "--config", &config_arg],
+    )
+    .await;
+    output.clone().assert().code(6);
+    let error: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert!(
+        error["error"]["message"].as_str().unwrap().contains("only"),
+        "{error}"
+    );
+    assert_eq!(next_of(&error["error"]), ["reef", "executor", "check"]);
+    // A stream's error is one line: the piped (brief) form.
+    let output = run_in(
+        &daemon,
+        &ws_dir,
+        &["executor", "run", "--once", "--config", &config_arg],
+    )
+    .await;
+    output.clone().assert().code(6);
+
+    // A bad configuration: exit 2, naming its line.
+    std::fs::write(&config, "[executor]\nlease = \"1s\"\nnope = 1\n").unwrap();
+    let output = run_in(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "executor", "check", "--config", &config_arg],
+    )
+    .await;
+    output.clone().assert().code(2);
+    assert!(stdout(&output).contains("line 3"), "{}", stdout(&output));
+
+    // No sandbox, by configuration: the plan at a revision, and a job.
+    std::fs::write(
+        &config,
+        format!(
+            "[work]\ndir = {:?}\n[sandbox]\nkind = \"none\"\n",
+            work.path().join("work").display().to_string()
+        ),
+    )
+    .unwrap();
+    let checked = ok(
+        &daemon,
+        &ws_dir,
+        &[
+            "-o",
+            "json",
+            "executor",
+            "check",
+            "--config",
+            &config_arg,
+            "-r",
+            "@",
+            "--kind",
+            "test",
+            "--target",
+            "0",
+            "--target",
+            "$(id)",
+        ],
+    )
+    .await;
+    assert_eq!(checked["sandbox"]["kind"], "none");
+    let plan = checked["plan"].as_array().unwrap();
+    assert_eq!(plan[0]["checks"][0]["argv"][4], "0", "{checked}");
+    assert_eq!(plan[0]["checks"][0]["source"], "repository");
+    assert_eq!(plan[1]["checks"], serde_json::json!([]));
+    assert!(plan[1]["note"].as_str().unwrap().contains("target pattern"));
+    let text = run_in(
+        &daemon,
+        &ws_dir,
+        &[
+            "-o",
+            "text",
+            "executor",
+            "check",
+            "--config",
+            &config_arg,
+            "-r",
+            "@",
+            "--kind",
+            "test",
+            "--target",
+            "1",
+        ],
+    )
+    .await;
+    assert!(
+        stdout(&text).contains("test 1: exit (repository"),
+        "{}",
+        stdout(&text)
+    );
+
+    // run --once with no job: 0, or 3 with --require-job.
+    let idle = run_in(
+        &daemon,
+        &ws_dir,
+        &[
+            "-o",
+            "json",
+            "executor",
+            "run",
+            "--config",
+            &config_arg,
+            "--once",
+            "--wait",
+            "1s",
+        ],
+    )
+    .await;
+    idle.clone().assert().code(0);
+    assert_eq!(stdout(&idle), "");
+    let required = run_in(
+        &daemon,
+        &ws_dir,
+        &[
+            "executor",
+            "run",
+            "--config",
+            &config_arg,
+            "--once",
+            "--wait",
+            "1s",
+            "--require-job",
+        ],
+    )
+    .await;
+    required.clone().assert().code(3);
+
+    // A job: one JSON line.
+    let submitted = ok(
+        &daemon,
+        &ws_dir,
+        &[
+            "-o", "json", "job", "submit", "--kind", "test", "--target", "0", "--target", "1",
+        ],
+    )
+    .await;
+    let lines = json_lines(
+        &run_in(
+            &daemon,
+            &ws_dir,
+            &[
+                "-o",
+                "json",
+                "executor",
+                "run",
+                "--config",
+                &config_arg,
+                "--once",
+                "--wait",
+                "10s",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["job_id"], submitted["job"]["id"]);
+    assert_eq!(lines[0]["outcome"], "done");
+    assert_eq!(
+        (lines[0]["pass"].as_u64(), lines[0]["fail"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(lines[0]["sandbox"], "none");
+
+    // Listed in --help-all, not in the root help.
+    let all = stdout(&run_in(&daemon, &ws_dir, &["--help-all"]).await);
+    assert!(all.contains("executor"), "{all}");
+    daemon.stop().await;
+}
+
+/// R3.06 test 9: `reef executor check` runs every escape probe inside this
+/// platform's sandbox and a control run without it; each is refused inside
+/// and allowed outside. Skipped (printed) where the sandbox cannot apply,
+/// such as a runner already inside Seatbelt, unless
+/// `REEF_EXECUTOR_TESTS_REQUIRE_SANDBOX` is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn executor_sandbox_probes() {
+    let (daemon, repo) = fixture().await;
+    let output = run_in(&daemon, &repo.root, &["-o", "json", "executor", "check"]).await;
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    if !output.status.success() {
+        let problem = report["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            std::env::var_os("REEF_EXECUTOR_TESTS_REQUIRE_SANDBOX").is_none(),
+            "the sandbox must apply and hold here: {problem}"
+        );
+        assert!(
+            problem.contains("cannot be applied") || problem.contains("Seatbelt"),
+            "{report}"
+        );
+        eprintln!("skipped: the sandbox does not apply here: {problem}");
+        output.clone().assert().code(6);
+        daemon.stop().await;
+        return;
+    }
+    assert_eq!(report["sandbox"]["holds"], true, "{report:#}");
+    let probes = report["sandbox"]["probes"].as_array().unwrap();
+    assert!(probes.len() >= 14, "{report:#}");
+    for probe in probes {
+        let detail = probe["detail"].as_str().unwrap();
+        if probe["boundary"] == true {
+            assert_eq!(probe["refused"], true, "{probe}");
+        }
+        // The control run reached what the sandbox refused.
+        let control = detail.split("without the sandbox: ").nth(1).unwrap();
+        assert!(
+            !control.contains("denied")
+                && !control.contains("not permitted")
+                && !control.starts_with("did not run"),
+            "{probe}"
+        );
+    }
+    daemon.stop().await;
+}

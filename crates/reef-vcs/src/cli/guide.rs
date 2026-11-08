@@ -52,7 +52,9 @@ pub(crate) fn leaf_commands() -> Vec<Vec<String>> {
     fn walk(command: &clap::Command, path: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
         let children: Vec<_> = command
             .get_subcommands()
-            .filter(|child| child.get_name() != "help")
+            // Hidden commands (`executor __probe`) are internal, not part
+            // of the contract.
+            .filter(|child| child.get_name() != "help" && !child.is_hide_set())
             .collect();
         if children.is_empty() {
             out.push(path.clone());

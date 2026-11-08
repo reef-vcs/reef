@@ -1,0 +1,24 @@
+# What `reef executor` runs on Reef's own tree (docs/executor.md, R3.06). An executor's own
+# executor.toml checks come first; these fill the pairs it does not declare.
+#
+#   reef job submit --kind lint --wait
+#   reef job submit --kind test --target crates/reef-evidence --wait
+#
+# Each check runs in the executor's sandbox: the tree is writable, the home is the job's own and
+# empty, `~/.cargo` and `~/.rustup` are readable, and there is no network. So cargo runs offline,
+# against what the machine already fetched (`cargo fetch` outside the executor first). CI does not
+# run these through the executor; `just ci` is the gate.
+
+[[check]]
+name = "rustfmt"
+kind = "lint"
+run = ["cargo", "fmt", "--all", "--check"]
+timeout = "5m"
+
+[[check]]
+name = "crate"
+kind = "test"
+targets = ["crates/*"]
+run_target = ["cargo", "test", "--offline", "--manifest-path", "{target}/Cargo.toml"]
+timeout = "30m"
+env = { CARGO_INCREMENTAL = "0", CARGO_PROFILE_DEV_DEBUG = "line-tables-only" }
