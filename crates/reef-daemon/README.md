@@ -139,6 +139,27 @@ Provenance records (`provenance/`, `service/provenance.rs`, `db/provenance.rs`, 
 
 **GC** (`provenance::retention`), step 8: resolves each change of the old records in the head's view (`files::visible_commits_of_changes`), compacts records older than `[provenance] compact_after` to the first and last of each run by context digest (and any of a visible commit), deletes records of changes with no visible commit older than `retention`, and ended sessions with no record, 1,000 per transaction; `GcReport.provenance_compacted`, `provenance_removed` and `provenance_error`.
 
+## Executor protocol
+
+The executor protocol's job queue (`executor/`, `service/executor.rs`, `db/jobs.rs`, [ADR 0059](../../docs/adr/0059-executor-protocol.md), [docs/executor-protocol.md](../../docs/executor-protocol.md)): requesters submit jobs (checks of some evidence kinds and targets on a tree), and executors, processes outside Reef that dial the daemon, claim them under a lease and return signed evidence. The daemon never connects to an executor and never runs anything. Migration `0011_jobs` (schema 11) adds two tables, per repository, in backups, deleted by `ForgetRepository`.
+
+| Table | Key | Holds |
+| --- | --- | --- |
+| `jobs` | `(repo_id, id)`, `id` `job_<16 hex>` unique across the daemon | The spec (tree, sorted kinds, targets and requirements as JSON, budget, priority, commit and change), its SHA-256 for the dedupe, the state with its outcome or end reason, attempts, the submitter, the current claim (its token's blake3 digest, lease, deadline), the executor's declared fields, its token and linked identity, progress, usage, `elapsed_ms` |
+| `job_evidence` | `(repo_id, job_id, evidence_id)` | Each evidence object a job accepted: the attempt, its kind and target from the verified payload, `created`, `fresh`, `accepted_at`; no foreign key to `evidence`, whose retention is its own |
+
+**Transitions.** Every one (submit, claim, update, release, complete, cancel, lapse, deadline, queue timeout) is one immediate transaction that reads the job again (`Executor::transition`, `Db::transact`); there is no per-job lock. After the commit, still under the database lock (`Db::transact_then`), the job's presence entry is published, waiting claims wake when it was queued again, and the timer wakes, so publishes keep commit order. The timer (`Executor::tick`) reads the open rows (at most `[executor] max_open_jobs`), applies what is due through the same transactions, and sleeps until the next due time, at most 30 s. The queue's clock is the wall clock plus an offset that tests move (`Executor::advance`, `testing` feature). At start, running claims get at least one more lease and every open job's entry is published again.
+
+**Claims** (`ClaimJob`) wait on a `Notify` signalled by submissions and requeues (at most 16 per remote token, `MAX_WAITING_PER_TOKEN`; past it a claim answers at once), select the best matching queued job in Rust inside the transaction, and return a claim token `"<attempt>.<32 random bytes, base64url>"`; only its blake3 digest is stored, compared in constant time. The attempt in the token tells `lapsed` from `wrong_token`.
+
+**Evidence** (`executor::accept`). The service checks the job and its owner, verifies the call's envelopes on the blocking pool with `Verified::check`, and binds them to the job's tree and kinds; then one transaction applies any lapse that came due, checks the claim, checks completeness for `DONE`, and stores each object through `db::add_evidence_in` (the insert `AddEvidence` uses, rows from `service::evidence::evidence_rows`) with a `job_evidence` row. Evidence is added by tree, with no link.
+
+**Presence** (`executor::presence`): one daemon entry per open job, kind `JOB`, `DaemonKey::Job`; the terminal state is published and the entry ended (`CLEARED`). `ReportPresence` refuses kind `JOB` (`DAEMON_PRESENCE`).
+
+**Remote rules**: `SubmitJob` `Rule::None`, `ClaimJob` `Rule::LinkedToken` (through `service::identity::channel_of`), `UpdateJob` and `CompleteJob` `Rule::OwnClaim`, `CancelJob` `Rule::OwnJob`. Transitions are logged under `reef_daemon::executor::audit`; a claim token never is.
+
+**GC** (`executor::retention`), step 9: finished jobs older than `[executor] job_retention` and `keep_newer` go with their `job_evidence` rows, 1,000 per transaction; `GcReport.jobs_removed` and `jobs_error`.
+
 ## Web UI
 
 The web UI's listener (`web/`, [ADR 0047](../../docs/adr/0047-web-ui-transport-and-local-listener.md)) is the daemon's second, after the socket. Nothing is bound at start. The first `DaemonService.CreateWebSession` (ADMIN, so only on the socket) checks `[ui] enabled` and that the daemon embeds the built app rather than `reef-web`'s placeholder (`web::Limits::assets_built`, default `reef_web::BUILT`), then binds `[ui] listen` (a loopback IP literal with a port, `127.0.0.1:0` by default) under `WebUi`'s mutex, so concurrent calls bind once and a failed bind leaves the next call to retry. The listener is a second tonic server over the same services and `AppState` (`server::routes`, `server::web_router`): HTTP/1.1 and HTTP/2, `WebGateLayer`, then `tonic_web::GrpcWebLayer`, then `CompatLayer`. Its accept loop is `limits::Accepting` over a `TcpListener`, capped at 64 open connections (one more is accepted and closed), and a shutdown hook joins its server within the shutdown grace. It stays bound until the daemon stops.

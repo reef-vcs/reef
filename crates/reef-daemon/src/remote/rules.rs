@@ -20,14 +20,22 @@ pub(crate) enum Rule {
     /// The workspace must have been created by the caller's token.
     OwnWorkspace,
     /// Nothing beyond the scope: a write token writes changes, snapshots,
-    /// presence, symbol uploads, evidence and artifacts in every registered
-    /// repository.
+    /// presence, symbol uploads, evidence and artifacts, and submits jobs,
+    /// in every registered repository.
     None,
     /// Session keys (R3.03): only for the operator identity the caller's
     /// token is linked to, never `human`, and none for a token with no
     /// link. The handler resolves the identity from the token
     /// (`crate::identity::issue`).
     LinkedIdentity,
+    /// Job cancellation (R3.05): only jobs the caller's token submitted.
+    OwnJob,
+    /// A claim (R3.05): only a token linked to an operator identity, which
+    /// the job records.
+    LinkedToken,
+    /// A claim's updates and completion (R3.05): only through the token
+    /// that claimed the job, even holding its claim token.
+    OwnClaim,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -69,6 +77,11 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         "/reef.api.v1.ProvenanceService/DeclareProvenance",
         Rule::OwnWorkspace,
     ),
+    ("/reef.api.v1.ExecutorService/SubmitJob", Rule::None),
+    ("/reef.api.v1.ExecutorService/CancelJob", Rule::OwnJob),
+    ("/reef.api.v1.ExecutorService/ClaimJob", Rule::LinkedToken),
+    ("/reef.api.v1.ExecutorService/UpdateJob", Rule::OwnClaim),
+    ("/reef.api.v1.ExecutorService/CompleteJob", Rule::OwnClaim),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

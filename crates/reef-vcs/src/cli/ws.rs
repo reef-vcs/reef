@@ -702,6 +702,7 @@ async fn gc(ctx: &Ctx, repo: Option<&str>, dry_run: bool) -> Result<ExitCode, Cl
             ("jj", report.jj_error.as_ref()),
             ("evidence and artifacts", report.evidence_error.as_ref()),
             ("provenance", report.provenance_error.as_ref()),
+            ("jobs", report.jobs_error.as_ref()),
         ] {
             if let Some(error) = error {
                 failed.push(format!(

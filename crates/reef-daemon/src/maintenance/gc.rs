@@ -2,7 +2,7 @@
 //! and every `gc.interval` from the daemon's timer
 //! ([`super::timer`], #95, ADR 0041).
 //!
-//! Seven steps per repository, in order, with creates of the repository
+//! Nine steps per repository, in order, with creates of the repository
 //! held off throughout (its create lock, exclusively):
 //!
 //! 1. **jj**: abandon the operations older than `keep_newer`, collect the
@@ -58,6 +58,12 @@
 //!    ([`crate::provenance::retention`]). Before the session key sweep, so
 //!    keys only the deleted records named go with it. A failure is logged
 //!    and reported in [`GcReport::provenance_error`], as step 7's is.
+//! 9. **Jobs** (R3.05, ADR 0059): executor jobs that finished before
+//!    `[executor] job_retention` and `keep_newer`, with the record of the
+//!    evidence they accepted; the evidence stays, under step 7's rules
+//!    ([`crate::executor::retention`]). Open jobs are never touched. A
+//!    failure is logged and reported in [`GcReport::jobs_error`], as step
+//!    7's is.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -139,6 +145,11 @@ pub struct GcReport {
     pub provenance: crate::provenance::retention::Swept,
     /// Why step 8 stopped short, if it did.
     pub provenance_error: Option<String>,
+    /// Jobs step 9 deleted, or would have (R3.05); zero when it stopped
+    /// short.
+    pub jobs_removed: u64,
+    /// Why step 9 stopped short, if it did.
+    pub jobs_error: Option<String>,
 }
 
 /// Failure of a GC run, other than the jj step's (which is reported).
@@ -520,6 +531,38 @@ async fn run_repo(
             }
         };
 
+    // 9.
+    let (jobs_removed, jobs_error) = {
+        let db = Arc::clone(&state.db);
+        let retention = state.config.file.executor.job_retention;
+        let now = state.executor.now();
+        let keep = Timestamp::from(keep_newer);
+        let swept = tokio::task::spawn_blocking(move || {
+            crate::executor::retention::sweep(&db, id, now, retention, keep, dry_run)
+        })
+        .await;
+        let failed = match swept {
+            Ok(Ok(swept)) => Ok(swept.removed),
+            Ok(Err(error)) => Err(ErrorChain(&error).to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        match failed {
+            Ok(removed) => (removed, None),
+            Err(text) => {
+                match trigger {
+                    Trigger::Request => {
+                        tracing::error!(error = %text, "the jobs step of GC stopped short");
+                    }
+                    Trigger::Timer => tracing::warn!(
+                        error = %text,
+                        "the jobs step of timed GC stopped short; the next run retries"
+                    ),
+                }
+                (0, Some(text))
+            }
+        }
+    };
+
     // Session keys are machine-wide: the first report sweeps them, after
     // steps 7 and 8 have deleted the evidence and provenance that named
     // them (R3.03).
@@ -572,6 +615,8 @@ async fn run_repo(
         session_keys_removed,
         provenance,
         provenance_error,
+        jobs_removed,
+        jobs_error,
     };
     tracing::info!(
         keep_newer = %report.keep_newer,
@@ -592,6 +637,7 @@ async fn run_repo(
         session_keys_removed_count = report.session_keys_removed,
         provenance_compacted_count = report.provenance.compacted,
         provenance_removed_count = report.provenance.removed,
+        jobs_removed_count = report.jobs_removed,
         elapsed_ms = report.elapsed_ms,
         "garbage collection finished"
     );

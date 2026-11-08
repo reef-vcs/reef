@@ -4041,3 +4041,204 @@ async fn provenance_cli() {
         assert!(!db.windows(text.len()).any(|w| w == text));
     }
 }
+
+/// An executor in this process for `job_cli`: claims one job (waiting),
+/// reports progress, sends `result` for every pair, and completes `DONE`.
+async fn serve_one(
+    client: reef_daemon::client::Client,
+    result: reef_daemon::client::evidence::Outcome,
+) {
+    use reef_daemon::client::evidence::{Claim, SigningKey, TreeDigest};
+
+    let claimed = client
+        .claim_job(v1::ClaimJobRequest {
+            executor: Some(v1::ExecutorInfo {
+                name: "cli-runner".into(),
+                version: "1".into(),
+                kinds: vec!["test".into()],
+                labels: Vec::new(),
+            }),
+            protocol_version: 1,
+            repos: Vec::new(),
+            wait: Some(prost_types::Duration {
+                seconds: 30,
+                nanos: 0,
+            }),
+            lease: None,
+        })
+        .await
+        .unwrap();
+    let job = claimed.job.expect("a job to serve");
+    let spec = job.spec.unwrap();
+    let key = SigningKey::from_seed(&[5; 32]).unwrap();
+    let started = std::time::SystemTime::UNIX_EPOCH
+        + Duration::from_secs(
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    client
+        .update_job(v1::UpdateJobRequest {
+            job_id: job.job_id.clone(),
+            claim_token: claimed.claim_token.clone(),
+            progress: Some(v1::JobProgress {
+                phase: "test".into(),
+                done: 0,
+                total: 1,
+                unit: "targets".into(),
+            }),
+            evidence: Vec::new(),
+            release: false,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let evidence = spec
+        .targets
+        .iter()
+        .map(|target| {
+            let claim = Claim {
+                kind: "test".into(),
+                result,
+                target: Some(target.clone()),
+                started_on: started,
+                finished_on: started + Duration::from_secs(1),
+                artifacts: Vec::new(),
+                annotations: serde_json::Map::new(),
+            };
+            v1::SignedEvidence {
+                envelope: claim
+                    .sign(&TreeDigest::git(&spec.tree_id).unwrap(), &key)
+                    .unwrap()
+                    .to_bytes(),
+                public_key: key.public_key().spki().to_vec(),
+            }
+        })
+        .collect();
+    client
+        .complete_job(v1::CompleteJobRequest {
+            job_id: job.job_id,
+            claim_token: claimed.claim_token,
+            outcome: v1::JobOutcome::Done.into(),
+            evidence,
+            usage: None,
+            message: String::new(),
+        })
+        .await
+        .unwrap();
+}
+
+/// R3.05 test 14: `reef job submit --wait` follows a job an executor in
+/// this process runs, printing its states on stderr, and exits 0 whatever
+/// the results; `--for` gives up with exit 6 and leaves the job queued;
+/// `list`, `list --queue`, `show`, `cancel` and `evidence list --job`.
+/// Every output is checked against `reef schema` by `run`.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_cli() {
+    use reef_daemon::client::evidence::Outcome;
+
+    let (daemon, repo) = fixture().await;
+    let created = ok(&daemon, &repo.root, &["-o", "json", "ws", "create"]).await;
+    let ws_dir = PathBuf::from(created["path"].as_str().unwrap());
+    for (result, expected) in [(Outcome::Pass, "pass"), (Outcome::Fail, "fail")] {
+        let serving = tokio::spawn(serve_one(daemon.client.clone(), result));
+        let output = run_in(
+            &daemon,
+            &ws_dir,
+            &[
+                "-o",
+                "json",
+                "job",
+                "submit",
+                "--kind",
+                "test",
+                "--target",
+                "a",
+                "--duplicate",
+                "--wait",
+            ],
+        )
+        .await;
+        serving.await.unwrap();
+        let submitted = json(&output);
+        assert_eq!(submitted["created"], true);
+        let job = &submitted["job"];
+        assert_eq!(job["state"], "completed", "{submitted}");
+        assert_eq!(job["outcome"], "done");
+        assert_eq!(job["coverage"][0]["result"], expected);
+        assert_eq!(job["coverage"][0]["target"], "a");
+        let err = stderr(&output);
+        assert!(err.contains("queued"), "{err}");
+        assert!(err.contains("completed (done)"), "{err}");
+    }
+
+    // No executor: --for gives up with exit 6, and the job stays queued.
+    let output = run_in(
+        &daemon,
+        &ws_dir,
+        &[
+            "-o", "json", "job", "submit", "--kind", "lint", "--wait", "--for", "1s",
+        ],
+    )
+    .await;
+    output.clone().assert().code(6);
+    let listed = ok(&daemon, &ws_dir, &["-o", "json", "job", "list", "--queue"]).await;
+    let queued = listed.as_array().unwrap();
+    assert_eq!(queued.len(), 1, "{listed}");
+    assert_eq!(queued[0]["state"], "queued");
+    let id = queued[0]["id"].as_str().unwrap().to_owned();
+
+    // Text forms, a brief list, show and cancel by prefix.
+    let text = run_in(&daemon, &ws_dir, &["-o", "text", "job", "list"]).await;
+    assert!(
+        stdout(&text).contains("completed (done)"),
+        "{}",
+        stdout(&text)
+    );
+    let brief = ok(&daemon, &ws_dir, &["job", "list"]).await;
+    assert_eq!(brief.as_array().unwrap().len(), 3);
+    assert!(brief[0].get("coverage").is_none(), "{brief}");
+    let shown = run_in(&daemon, &ws_dir, &["-o", "text", "job", "show", &id[..10]]).await;
+    assert!(stdout(&shown).contains("(none yet)"), "{}", stdout(&shown));
+    let cancelled = ok(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "job", "cancel", &id, "--reason", "not needed"],
+    )
+    .await;
+    assert_eq!(cancelled["state"], "cancelled");
+    assert_eq!(cancelled["message"], "not needed");
+    let again = run_in(&daemon, &ws_dir, &["-o", "text", "job", "cancel", &id]).await;
+    assert!(stdout(&again).contains("cancelled job"));
+
+    // The evidence a job accepted.
+    let completed: Vec<String> = ok(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "job", "list", "--state", "completed"],
+    )
+    .await
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|job| job["id"].as_str().unwrap().to_owned())
+    .collect();
+    assert_eq!(completed.len(), 2);
+    let evidence = ok(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "evidence", "list", "--job", &completed[0]],
+    )
+    .await;
+    assert_eq!(evidence.as_array().unwrap().len(), 1, "{evidence}");
+    err(
+        &daemon,
+        &ws_dir,
+        &["-o", "json", "job", "show", "job_0123456789abcdef"],
+        3,
+        "JOB_NOT_FOUND",
+    )
+    .await;
+    daemon.stop().await;
+}

@@ -6,6 +6,7 @@ package reef.api.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/executor.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/workspaces.proto";
 
@@ -94,6 +95,10 @@ enum PresenceKind {
   PRESENCE_KIND_LEASE = 3;
   // A long-running operation's progress, from the daemon or a client.
   PRESENCE_KIND_PROGRESS = 4;
+  // An executor job's state and progress (R3.05), reported by the daemon
+  // only, from executors' UpdateJob calls. One entry per open job; it ends
+  // when the job does, and its ended event carries the terminal state.
+  PRESENCE_KIND_JOB = 5;
 }
 
 // How far a long-running operation has got.
@@ -138,6 +143,31 @@ message Presence {
   // Reported by the daemon itself (leases, snapshots, creates, store
   // builds). ReportPresence and ClearPresence refuse such an entry.
   bool by_daemon = 13;
+  // For PRESENCE_KIND_JOB: the job as of this report. Unset for other
+  // kinds.
+  JobPresence job = 14;
+}
+
+// A job, as a PRESENCE_KIND_JOB entry reports it (R3.05).
+message JobPresence {
+  // The job's id.
+  string job_id = 1;
+  // Its state.
+  JobState state = 2;
+  // How much ran, once COMPLETED.
+  JobOutcome outcome = 3;
+  // Why the daemon ended it, once EXPIRED.
+  JobEndReason end_reason = 4;
+  // The current or last attempt; 0 before the first claim.
+  uint32 attempt = 5;
+  // The current or last executor's name; empty before the first claim.
+  string executor = 6;
+  // The kinds requested.
+  repeated string kinds = 7;
+  // The tree.
+  string tree_id = 8;
+  // The executor's last progress report for the attempt.
+  JobProgress progress = 9;
 }
 
 // Report presence.

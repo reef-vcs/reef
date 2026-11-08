@@ -16,7 +16,7 @@ use reef_client::json::{
     SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
-use reef_client::json::{ProvenanceDeclared, ProvenanceRecord};
+use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
@@ -355,6 +355,27 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         list::<brief::ProvenanceRecord<'static>>,
     ),
     row(&["provenance", "declare"], object::<ProvenanceDeclared>),
+    OutputRow {
+        note: Some(
+            "with --wait, `job` is the job as it finished, with its coverage; the states it passed through go to stderr",
+        ),
+        ..view(
+            &["job", "submit"],
+            object::<JobSubmitted>,
+            object::<brief::Job<'static>>,
+        )
+    },
+    view(
+        &["job", "show"],
+        object::<Job>,
+        object::<brief::Job<'static>>,
+    ),
+    view(&["job", "list"], list::<Job>, list::<brief::Job<'static>>),
+    view(
+        &["job", "cancel"],
+        object::<Job>,
+        object::<brief::Job<'static>>,
+    ),
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

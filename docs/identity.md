@@ -6,7 +6,7 @@ A certificate says which identity a key is bound to and what the requester decla
 
 ## Identities
 
-An identity is `person` or `ci`, with a name (`[a-z0-9][a-z0-9._-]{0,62}`, not starting with `idn_` or `ses_`, which mark ids) that is never reused in the daemon's database, even after the identity is revoked, so a policy that names `alice` cannot be satisfied by a newcomer. Restoring an older backup can bring a name back with a new id, so a policy that must not be fooled pins the identity's id and the authority's key id, not the name alone. Agents are not identities: an agent acts for an identity, and a key records it as the declared `actor` (`agent`, `executor`, or `human` for the person signing directly) and its label as `agent`.
+An identity is `person` or `ci`, with a name (`[a-z0-9][a-z0-9._-]{0,62}`, not starting with `idn_` or `ses_`, which mark ids) that is never reused in the daemon's database, even after the identity is revoked, so a policy that names `alice` cannot be satisfied by a newcomer. Restoring an older backup can bring a name back with a new id, so a policy that must not be fooled pins the identity's id and the authority's key id, not the name alone. Agents are not identities: an agent acts for an identity, and a key records it as the declared `actor` (`agent`, `executor`, or `human` for the person signing directly) and its label as `agent`. An executor taking jobs from Reef's queue issues one key per job with actor `executor` ([docs/executor-protocol.md](executor-protocol.md)); through the remote listener it needs a token linked to an identity.
 
 ```sh
 reef identity list                       # the daemon creates one person identity, named after you

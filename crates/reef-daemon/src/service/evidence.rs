@@ -252,6 +252,47 @@ impl EvidenceError {
     }
 }
 
+/// The rows an add of `verified` writes, as `AddEvidence` and an executor
+/// job's acceptance (R3.05) write them: the key, the evidence row, and the
+/// digests of the artifacts its payload names.
+pub(crate) fn evidence_rows(
+    verified: &Verified,
+    repo_id: crate::model::RepoId,
+    agent: Option<String>,
+    remote_token_id: Option<String>,
+    now: Timestamp,
+) -> (EvidenceKeyRow, EvidenceRow, Vec<String>) {
+    let key = EvidenceKeyRow {
+        id: verified.key_id().to_string(),
+        algorithm: verified.key.algorithm().to_owned(),
+        public_key: verified.key.spki().to_vec(),
+        first_seen_at: now,
+    };
+    let index = &verified.index;
+    let row = EvidenceRow {
+        repo_id,
+        id: verified.id.clone(),
+        envelope: verified.canonical.clone(),
+        format: reef_evidence::FORMAT,
+        tree_id: index.tree_id.clone(),
+        kind: index.kind.clone(),
+        result: index.result.as_str().to_owned(),
+        target: index.target.clone(),
+        key_id: key.id.clone(),
+        started_at: Timestamp(index.started_at_ms),
+        finished_at: Timestamp(index.finished_at_ms),
+        added_at: now,
+        added_by_agent: agent,
+        remote_token_id,
+    };
+    let digests = index
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.sha256.clone())
+        .collect();
+    (key, row, digests)
+}
+
 fn task(error: &tokio::task::JoinError) -> Status {
     status(EvidenceError::Task(error.to_string()))
 }
@@ -270,7 +311,7 @@ impl EvidenceHandler {
 }
 
 /// `outcome` in the API.
-fn result_message(outcome: &str) -> v1::EvidenceResult {
+pub(crate) fn result_message(outcome: &str) -> v1::EvidenceResult {
     match Outcome::parse(outcome) {
         Some(Outcome::Pass) => v1::EvidenceResult::Pass,
         Some(Outcome::Fail) => v1::EvidenceResult::Fail,
@@ -438,7 +479,7 @@ fn payload_matches(filter: &EvidenceFilter, index: &Index, key_id: &str) -> bool
 /// payload does not match it is left out, and logged: its index columns
 /// were changed; and one whose certificate names none of the filter's
 /// identities is left out too.
-async fn messages(
+pub(crate) async fn messages(
     state: &AppState,
     repo: crate::model::RepoId,
     found: Vec<StoredEvidence>,
@@ -544,7 +585,7 @@ fn artifact_states(
 }
 
 /// A full change id in hex, from hex or reverse hex.
-fn full_change_id(text: &str) -> Result<String, Status> {
+pub(crate) fn full_change_id(text: &str) -> Result<String, Status> {
     let invalid = || {
         status(EvidenceError::InvalidChangeId {
             change: text.to_owned(),
@@ -680,40 +721,13 @@ impl EvidenceService for EvidenceHandler {
             .map_err(status)??;
         let now = Timestamp::now();
         let repo_id = target.repo.id;
-        let key = EvidenceKeyRow {
-            id: verified.key_id().to_string(),
-            algorithm: verified.key.algorithm().to_owned(),
-            public_key: verified.key.spki().to_vec(),
-            first_seen_at: now,
-        };
-        let index = &verified.index;
-        let row = EvidenceRow {
-            repo_id,
-            id: verified.id.clone(),
-            envelope: verified.canonical.clone(),
-            format: reef_evidence::FORMAT,
-            tree_id: index.tree_id.clone(),
-            kind: index.kind.clone(),
-            result: index.result.as_str().to_owned(),
-            target: index.target.clone(),
-            key_id: key.id.clone(),
-            started_at: Timestamp(index.started_at_ms),
-            finished_at: Timestamp(index.finished_at_ms),
-            added_at: now,
-            added_by_agent: agent,
-            remote_token_id,
-        };
+        let (key, row, digests) = evidence_rows(&verified, repo_id, agent, remote_token_id, now);
         let link = link.map(|(change_id, commit_id)| EvidenceLinkRow {
             change_id,
             evidence_id: verified.id.clone(),
             commit_id,
             linked_at: now,
         });
-        let digests: Vec<String> = index
-            .artifacts
-            .iter()
-            .map(|artifact| artifact.sha256.clone())
-            .collect();
         // One transaction writes and reads it back: a GC deleting old
         // evidence meanwhile either finds this row or never sees it.
         let (inserted, stored) = state
@@ -891,6 +905,11 @@ impl EvidenceService for EvidenceHandler {
                 .map(|name| name.trim().to_owned())
                 .filter(|name| !name.is_empty())
                 .collect(),
+            job_id: if request.job_id.trim().is_empty() {
+                None
+            } else {
+                Some(crate::executor::full_id(&request.job_id).map_err(status)?)
+            },
         };
         let mut found = state
             .db

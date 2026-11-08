@@ -128,6 +128,8 @@ pub struct EvidenceFilter {
     /// name (R3.03), as the session keys' columns say; reads check the
     /// certificates.
     pub identities: Vec<String>,
+    /// Only evidence this executor job accepted (R3.05), by full id.
+    pub job_id: Option<String>,
 }
 
 const COLUMNS: &str = "e.repo_id, e.id, e.envelope, e.format, e.tree_id, e.kind, e.result, \
@@ -315,6 +317,21 @@ pub(super) fn payload_artifacts(envelope: &[u8]) -> Option<Vec<String>> {
 }
 
 /// The evidence `id` of `repo` in `tx`, with its key.
+/// [`insert_evidence_in`] and the index of the artifacts its payload names
+/// (`artifacts`, digests; R3.02): the insert `AddEvidence` and an executor
+/// job's acceptance (R3.05) share.
+pub fn add_evidence_in(
+    tx: &Transaction<'_>,
+    key: &EvidenceKeyRow,
+    row: &EvidenceRow,
+    link: Option<&EvidenceLinkRow>,
+    artifacts: &[String],
+) -> Result<Inserted, DbError> {
+    let inserted = insert_evidence_in(tx, key, row, link)?;
+    super::artifacts::index_artifacts_in(tx, row.repo_id, &row.id, artifacts, row.added_at)?;
+    Ok(inserted)
+}
+
 fn evidence_in(
     tx: &Transaction<'_>,
     repo: RepoId,
@@ -352,14 +369,7 @@ impl Db {
         artifacts: &[String],
     ) -> Result<(Inserted, StoredEvidence), DbError> {
         self.in_transaction(|tx| {
-            let inserted = insert_evidence_in(tx, key, row, link)?;
-            super::artifacts::index_artifacts_in(
-                tx,
-                row.repo_id,
-                &row.id,
-                artifacts,
-                row.added_at,
-            )?;
+            let inserted = add_evidence_in(tx, key, row, link, artifacts)?;
             let stored =
                 evidence_in(tx, row.repo_id, &row.id)?.ok_or_else(|| DbError::NotFound {
                     what: WHAT,
@@ -551,6 +561,13 @@ impl Db {
                                WHERE repo_id = e.repo_id AND change_id = ?)",
             );
             values.push(text(change));
+        }
+        if let Some(job) = &filter.job_id {
+            sql.push_str(
+                " AND e.id IN (SELECT evidence_id FROM job_evidence
+                               WHERE repo_id = e.repo_id AND job_id = ?)",
+            );
+            values.push(text(job));
         }
         if let Some(target) = &filter.target {
             sql.push_str(" AND e.target = ?");

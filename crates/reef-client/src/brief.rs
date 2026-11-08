@@ -1110,3 +1110,56 @@ impl<'a> From<&'a json::ProvenanceRecord> for ProvenanceRecord<'a> {
         }
     }
 }
+
+/// A job's spec in brief: the tree and the kinds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.JobSpec")]
+pub struct JobSpec<'a> {
+    tree_id: &'a str,
+    kinds: &'a [String],
+}
+
+/// A job's executor in brief: its name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.JobExecutor")]
+pub struct JobExecutor<'a> {
+    name: &'a str,
+}
+
+/// An executor job (R3.05). Always `id`, `state`, `spec` (`tree_id`,
+/// `kinds`) and `evidence_count`; `outcome` and `end_reason` when set;
+/// `executor` (`name`) once claimed. Dropped: everything else; `job show -o
+/// json` has it, with the coverage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Job")]
+pub struct Job<'a> {
+    id: &'a str,
+    state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_reason: Option<&'a str>,
+    spec: JobSpec<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor: Option<JobExecutor<'a>>,
+    evidence_count: u32,
+}
+
+impl<'a> From<&'a json::Job> for Job<'a> {
+    fn from(job: &'a json::Job) -> Self {
+        Self {
+            id: &job.id,
+            state: &job.state,
+            outcome: job.outcome.as_deref(),
+            end_reason: job.end_reason.as_deref(),
+            spec: JobSpec {
+                tree_id: &job.spec.tree_id,
+                kinds: &job.spec.kinds,
+            },
+            executor: job.executor.as_ref().map(|executor| JobExecutor {
+                name: &executor.name,
+            }),
+            evidence_count: job.evidence_count,
+        }
+    }
+}

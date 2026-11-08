@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use reef_api::v1::PresenceKind;
 use reef_lib::error::{Classify, ErrorKind};
 
 use crate::error::{Advice, Advise};
@@ -115,10 +116,10 @@ pub enum PresenceError {
         /// `kind`, `agent`, `repo` or `workspace`.
         field: &'static str,
     },
-    /// A report of kind `LEASE`: reason `DAEMON_PRESENCE`, metadata
-    /// `kind`.
-    #[error("lease presence is reported by the daemon only")]
-    DaemonKind,
+    /// A report of kind `LEASE` or `JOB` (R3.05): reason
+    /// `DAEMON_PRESENCE`, metadata `kind`.
+    #[error("{} presence is reported by the daemon only", if *.0 == PresenceKind::Job { "job" } else { "lease" })]
+    DaemonKind(PresenceKind),
     /// A report or clear of an entry the daemon reports: reason
     /// `DAEMON_PRESENCE`, metadata `presence_id`.
     #[error("presence entry {0} is reported by the daemon")]
@@ -169,7 +170,7 @@ impl Classify for PresenceError {
             Self::NotFound(_) => ErrorKind::NotFound,
             Self::InvalidId(_)
             | Self::Mismatch { .. }
-            | Self::DaemonKind
+            | Self::DaemonKind(_)
             | Self::DaemonEntry(_)
             | Self::TooLarge { .. }
             | Self::InvalidAgent
@@ -192,7 +193,7 @@ impl Advise for PresenceError {
                 "An entry's kind, agent, repo and workspace are fixed; report a new entry for \
                  different ones."
             }
-            Self::DaemonKind | Self::DaemonEntry(_) => {
+            Self::DaemonKind(_) | Self::DaemonEntry(_) => {
                 "The daemon reports this entry itself; it cannot be reported or cleared by a \
                  client."
             }

@@ -535,6 +535,67 @@ fn session_key_keys() {
     }
 }
 
+// R3.05 test 13: `[executor]` parses, prints, keeps its defaults, and
+// refuses values out of range.
+#[test]
+fn executor_keys() {
+    let defaults = load_file("").unwrap().file.executor;
+    assert_eq!(defaults.default_wall_time, Duration::from_mins(30));
+    assert_eq!(defaults.max_wall_time, Duration::from_hours(6));
+    assert_eq!(defaults.queue_timeout, Duration::from_hours(1));
+    assert_eq!(defaults.max_attempts, 3);
+    assert_eq!(defaults.max_open_jobs, 1000);
+    assert_eq!(defaults.job_retention, Duration::from_hours(30 * 24));
+    let set = load_file(
+        "[executor]\ndefault_wall_time = \"10m\"\nmax_wall_time = \"1d\"\nqueue_timeout = \"2h\"\nmax_attempts = 5\nmax_open_jobs = 50\njob_retention = \"0s\"\n",
+    )
+    .unwrap();
+    let executor = &set.file.executor;
+    assert_eq!(executor.default_wall_time, Duration::from_mins(10));
+    assert_eq!(executor.max_wall_time, Duration::from_hours(24));
+    assert_eq!(executor.max_attempts, 5);
+    assert_eq!(executor.max_open_jobs, 50);
+    assert!(executor.job_retention.is_zero());
+    let shown = set.to_effective_toml();
+    let section = shown.split("[executor]").nth(1).unwrap();
+    for line in [
+        "default_wall_time = \"10m\"",
+        "queue_timeout = \"2h\"",
+        "max_attempts = 5",
+        "max_open_jobs = 50",
+        "job_retention = \"0s\"",
+    ] {
+        assert!(section.contains(line), "{line:?} in {shown}");
+    }
+    for (text, expected) in [
+        ("[executor]\nmax_attempts = 0\n", "executor.max_attempts"),
+        ("[executor]\nmax_attempts = 11\n", "executor.max_attempts"),
+        (
+            "[executor]\ndefault_wall_time = \"7h\"\n",
+            "executor.default_wall_time",
+        ),
+        (
+            "[executor]\nmax_wall_time = \"30s\"\ndefault_wall_time = \"10s\"\n",
+            "executor.max_wall_time",
+        ),
+        (
+            "[executor]\nqueue_timeout = \"30s\"\n",
+            "executor.queue_timeout",
+        ),
+        ("[executor]\nmax_open_jobs = 0\n", "executor.max_open_jobs"),
+        (
+            "[executor]\njob_retention = \"12h\"\n",
+            "executor.job_retention",
+        ),
+    ] {
+        let err = load_file(text).unwrap_err();
+        let ConfigError::Invalid { key, .. } = &err else {
+            panic!("{text:?}: {err:?}");
+        };
+        assert_eq!(key, expected, "{text:?}");
+    }
+}
+
 // R2.18 12: the web UI listens on a loopback IP with a port, nowhere else.
 #[test]
 fn listen_must_be_loopback() {

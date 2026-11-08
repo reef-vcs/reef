@@ -16,6 +16,7 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub mod executor;
 pub mod history;
 pub mod identity;
 pub mod lease;

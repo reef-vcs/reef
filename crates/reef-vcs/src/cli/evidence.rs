@@ -215,6 +215,9 @@ struct ListArgs {
     /// Only evidence whose key is certified for this identity, whatever its status; repeatable.
     #[arg(long, value_name = "NAME")]
     identity: Vec<String>,
+    /// Only evidence this executor job accepted, by its full id.
+    #[arg(long, value_name = "JOB_ID")]
+    job: Option<String>,
     /// Show at most this many; 0 for all. A cut is noted on stderr.
     #[arg(long, value_name = "N", default_value_t = LIST_LIMIT)]
     limit: usize,
@@ -273,7 +276,7 @@ pub(crate) async fn run(global: &super::Global, out: &Out, args: Args) -> Result
         }
         EvidenceCommand::List(args) => {
             check_key_ids(&args.key)?;
-            list(&super::connect(global, out).await?, args).await
+            Box::pin(list(&super::connect(global, out).await?, args)).await
         }
         EvidenceCommand::Show(args) => show(&super::connect(global, out).await?, args).await,
         EvidenceCommand::Key(KeyCommand::Generate { path }) => generate(out, &path),
@@ -1046,6 +1049,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<(), CliError> {
         target: args.target.unwrap_or_default(),
         key_ids: args.key,
         identities: args.identity,
+        job_id: args.job.unwrap_or_default(),
         skip_snapshot: args.no_snapshot,
         ..ListEvidenceRequest::default()
     };

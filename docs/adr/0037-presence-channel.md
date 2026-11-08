@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-27
 - Ticket: R2.10
+- Amended by: [0059](0059-executor-protocol.md) (a daemon-only kind, `JOB`, bounded by `[executor] max_open_jobs`)
 
 ## Context
 
