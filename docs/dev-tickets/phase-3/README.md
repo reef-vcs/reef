@@ -59,7 +59,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.41 | not yet briefed (Desktop shell on Linux and Windows) | L | R3.39 | none listed |
 | R3.42 | not yet briefed (Sigstore keyless identity) | M | R3.03 | none listed |
 | R3.43 | not yet briefed (Verified human presence for sign-off keys) | M | R3.03, R2.18 | none listed |
-| R3.44 | not yet briefed (Provenance from harnesses and SDKs) | S | R3.04, R2.25, R2.26 | none listed |
+| R3.44 | [R3.44-provenance-from-harnesses-and-sdks.md](R3.44-provenance-from-harnesses-and-sdks.md) | S | R3.04, R2.25, R2.26 | none listed |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 
