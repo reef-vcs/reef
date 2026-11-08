@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 use indexmap::IndexMap;
 
-use super::{Guide, Harness, Json, McpShape, Package, SIGNS, mcp_entry, render_with};
+use super::{
+    Agent, Guide, Harness, HookEvent, HookFacts, Json, McpShape, Package, SIGNS, mcp_entry,
+    render_with,
+};
 
 impl Package {
     /// The tree's directory, named by format, not by harness: another
@@ -50,12 +53,15 @@ const SERVER_DESCRIPTION: &str =
 /// organization.
 const SERVER_NAME: &str = "io.github.reef-vcs/reef";
 
-/// The Claude Code tools whose input names the file being edited, and
-/// where (JSON Pointers into the hook event), as `reef presence hook edit`
-/// reads them. Facts about one harness; the command knows none of them.
-const CLAUDE_CODE_EDIT_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
-const CLAUDE_CODE_PATHS: &[&str] = &["/tool_input/file_path", "/tool_input/notebook_path"];
-const CLAUDE_CODE_SESSION: &str = "/session_id";
+/// Claude Code's hook facts, from its row in the agent table: the
+/// commands below know none of them.
+fn claude_code() -> &'static HookFacts {
+    SIGNS
+        .iter()
+        .find(|sign| sign.agent == Agent::ClaudeCode)
+        .and_then(|sign| sign.hooks.as_ref())
+        .expect("Claude Code's row has its hook facts")
+}
 
 /// A hook command: `reef presence hook ...`, run only when `reef` is on
 /// `PATH`, never failing the tool call it runs before, and with its output
@@ -73,21 +79,6 @@ const WORKSPACES_NAME: &str = "reef-workspaces";
 const WORKSPACES_DESCRIPTION: &str = "Reef workspaces in place of git worktrees: each worktree \
      session and subagent gets a copy-on-write Reef workspace, held while the session runs.";
 
-/// Claude Code's worktree events and where their fields are (JSON Pointers
-/// into the hook event), as `reef ws provider` reads them: facts about one
-/// harness, which the command knows nothing of. `WorktreeCreate` replaces
-/// git's worktree and reads the path from the last line of stdout;
-/// `WorktreeRemove` names the directory. A resumed session returns to its
-/// worktree without either, and its `SessionStart` names the directory it
-/// started in, not the worktree (Claude Code 2.1.316, checked live); the
-/// event's `cwd` follows the session into its worktree from the first
-/// prompt, so `UserPromptSubmit` holds the workspace again.
-const PROVIDER_CREATE: (&str, &[(&str, &str)]) =
-    ("WorktreeCreate", &[("repo", "/cwd"), ("name", "/name")]);
-const PROVIDER_RELEASE: (&str, &[(&str, &str)]) =
-    ("WorktreeRemove", &[("workspace", "/worktree_path")]);
-const PROVIDER_REHOLD: (&str, &[(&str, &str)]) = ("UserPromptSubmit", &[("workspace", "/cwd")]);
-
 /// `--at` for each pair.
 fn at(pairs: &[(&str, &str)]) -> String {
     pairs
@@ -104,36 +95,54 @@ fn at(pairs: &[(&str, &str)]) -> String {
 /// starts no daemon, and is a lookup that finds nothing outside a
 /// workspace and keeps the follower of a workspace already held.
 fn provider_commands() -> [String; 3] {
+    let [create, release, rehold] = claude_code().provider;
     [
         format!(
             "reef ws provider create {} --hold-while parent -o text",
-            at(PROVIDER_CREATE.1)
+            at(create.at)
         ),
         // For this session: kept while another session holds it.
         format!(
             "reef ws provider release {} --hold-while parent",
-            at(PROVIDER_RELEASE.1)
+            at(release.at)
         ),
         format!(
             "reef --no-autostart ws provider attach {} --hold-while parent >/dev/null 2>&1 || true",
-            at(PROVIDER_REHOLD.1)
+            at(rehold.at)
         ),
     ]
 }
 
-/// The hook commands in `hooks.json`, as a harness runs them, for tests.
+/// A declaring hook's command (R3.44): `reef provenance declare --hook`,
+/// which never fails, prints nothing and starts no daemon, guarded as the
+/// presence hooks are.
+fn declare_command(event: &HookEvent) -> String {
+    format!(
+        "command -v reef >/dev/null 2>&1 && reef provenance declare --hook {} >/dev/null 2>&1 || true",
+        at(event.at)
+    )
+}
+
+/// The hook commands in `hooks.json`, as a harness runs them, for tests:
+/// the presence hooks', then each declaring event's.
 fn hook_commands() -> Vec<String> {
-    let paths: Vec<String> = CLAUDE_CODE_PATHS
+    let facts = claude_code();
+    let paths: Vec<String> = facts
+        .edit
+        .2
         .iter()
         .map(|pointer| format!("--path-at {pointer}"))
         .collect();
-    vec![
+    let mut commands = vec![
         hook_command(&format!(
-            "edit {} --session-at {CLAUDE_CODE_SESSION}",
-            paths.join(" ")
+            "edit {} --session-at {}",
+            paths.join(" "),
+            facts.session
         )),
-        hook_command(&format!("end --session-at {CLAUDE_CODE_SESSION}")),
-    ]
+        hook_command(&format!("end --session-at {}", facts.session)),
+    ];
+    commands.extend(facts.declare.iter().map(declare_command));
+    commands
 }
 
 /// Every file Reef's packages are, relative to the repository's root, with
@@ -235,7 +244,9 @@ fn readme(package: Package, install: &str) -> String {
     let hooks = match package {
         Package::ClaudeCode => {
             " Its hooks declare the files the agent is about to edit, so `reef presence watch` \
-             and the web UI show them."
+             and the web UI show them; and each prompt's SHA-256 (never its text), the session and \
+             the model, as the provenance of the work done in Reef workspaces (`reef provenance \
+             show`)."
         }
         Package::AgentPlugins => "",
     };
@@ -295,6 +306,7 @@ fn workspaces_readme() -> String {
 /// base, inside the harness's default.
 fn provider_hooks_json() -> Json {
     let [create, release, rehold] = provider_commands();
+    let [create_event, release_event, rehold_event] = claude_code().provider;
     let hook = |command: &str, timeout: Option<u64>, status: Option<&str>| {
         let mut pairs = vec![("type", text("command")), ("command", text(command))];
         if let Some(timeout) = timeout {
@@ -309,18 +321,18 @@ fn provider_hooks_json() -> Json {
         "hooks",
         object(vec![
             (
-                PROVIDER_CREATE.0,
+                create_event.name,
                 Json::Array(vec![object(vec![(
                     "hooks",
                     hook(&create, None, Some("Creating a Reef workspace")),
                 )])]),
             ),
             (
-                PROVIDER_RELEASE.0,
+                release_event.name,
                 Json::Array(vec![object(vec![("hooks", hook(&release, None, None))])]),
             ),
             (
-                PROVIDER_REHOLD.0,
+                rehold_event.name,
                 Json::Array(vec![object(vec![("hooks", hook(&rehold, Some(10), None))])]),
             ),
         ]),
@@ -399,8 +411,10 @@ fn servers(schema: Option<&str>, shape: McpShape) -> Json {
 }
 
 /// Claude Code's hooks: before an edit, declare it; at the session's end,
-/// clear the declaration.
+/// clear the declaration; and on each declaring event (a prompt, a
+/// session's start, a model switch), declare its provenance (R3.44).
 fn hooks_json() -> Json {
+    let facts = claude_code();
     let commands = hook_commands();
     let hook = |command: &str| {
         Json::Array(vec![object(vec![
@@ -409,22 +423,26 @@ fn hooks_json() -> Json {
             ("timeout", Json::Number(5.into())),
         ])])
     };
-    object(vec![(
-        "hooks",
-        object(vec![
-            (
-                "PreToolUse",
-                Json::Array(vec![object(vec![
-                    ("matcher", text(CLAUDE_CODE_EDIT_TOOLS)),
-                    ("hooks", hook(&commands[0])),
-                ])]),
-            ),
-            (
-                "SessionEnd",
-                Json::Array(vec![object(vec![("hooks", hook(&commands[1]))])]),
-            ),
-        ]),
-    )])
+    let mut events = vec![
+        (
+            facts.edit.0,
+            Json::Array(vec![object(vec![
+                ("matcher", text(facts.edit.1)),
+                ("hooks", hook(&commands[0])),
+            ])]),
+        ),
+        (
+            facts.end,
+            Json::Array(vec![object(vec![("hooks", hook(&commands[1]))])]),
+        ),
+    ];
+    for (event, command) in facts.declare.iter().zip(&commands[2..]) {
+        events.push((
+            event.name,
+            Json::Array(vec![object(vec![("hooks", hook(command))])]),
+        ));
+    }
+    object(vec![("hooks", object(events))])
 }
 
 /// Claude Code's marketplace: this repository, the plugin at the tag.
@@ -708,7 +726,8 @@ mod tests {
                     .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
         });
         assert!(name_ok, "{SERVER_NAME}");
-        // Every hook runs a `reef presence hook` this binary parses.
+        // Every hook runs a `reef presence hook` or a `reef provenance
+        // declare --hook` this binary parses, with the row's pointers.
         let hooks = json("plugins/claude-code/hooks/hooks.json");
         let mut commands = Vec::new();
         for (_, groups) in hooks["hooks"].as_object().unwrap() {
@@ -718,16 +737,48 @@ mod tests {
                 }
             }
         }
-        assert_eq!(commands, hook_commands());
+        // The test's JSON sorts keys; the file keeps the renderer's order.
+        let mut expected = hook_commands();
+        expected.sort();
+        commands.sort();
+        assert_eq!(commands, expected);
         for command in commands {
             let line = command
                 .strip_prefix("command -v reef >/dev/null 2>&1 && ")
                 .and_then(|line| line.strip_suffix(" >/dev/null 2>&1 || true"))
                 .unwrap_or_else(|| panic!("{command}"));
             let words: Vec<&str> = line.split(' ').collect();
-            assert_eq!(words[..3], ["reef", "presence", "hook"], "{line}");
+            assert!(
+                words[..3] == ["reef", "presence", "hook"]
+                    || words[..4] == ["reef", "provenance", "declare", "--hook"],
+                "{line}"
+            );
             crate::cli::Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{line}: {e}"));
         }
+    }
+
+    /// R3.44 test 10: each declaring event's hook names only fields
+    /// `declare` takes, with the row's pointers, and the prompt's carries
+    /// the instruction.
+    #[test]
+    fn declaring_hooks_name_declare_fields() {
+        let declare = &claude_code().declare;
+        assert!(!declare.is_empty());
+        for event in *declare {
+            for (field, pointer) in event.at {
+                assert!(
+                    crate::cli::provenance::DECLARE_FIELDS.contains(field),
+                    "{field}"
+                );
+                assert!(pointer.starts_with('/'), "{pointer}");
+            }
+        }
+        assert!(
+            declare
+                .iter()
+                .any(|event| event.at.iter().any(|(field, _)| *field == "instruction")),
+            "no hook declares the instruction"
+        );
     }
 
     /// R2.26 test 15: every provider hook runs a `reef ws provider` this

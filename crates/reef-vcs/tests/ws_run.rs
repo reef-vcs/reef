@@ -63,6 +63,11 @@ fn reef(daemon: &TestDaemon) -> std::process::Command {
         "RUST_LOG",
         "REEF_LOG_FORMAT",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
     ] {
         command.env_remove(var);
     }

@@ -260,6 +260,57 @@ pub(crate) struct Sign {
     /// How to tell that the harness has Reef's plugin installed, whose MCP
     /// server the repository's entry duplicates (#153).
     plugin_installed: Option<PluginInstalled>,
+    /// Its hook events and where their fields are, which the plugin's hooks
+    /// pass to `reef` as JSON Pointers (R2.25, R2.26, R3.44); None when it
+    /// ships no hooks.
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+    hooks: Option<HookFacts>,
+    /// What provenance takes from its environment (R3.44); None when
+    /// nothing is verified.
+    pub(crate) provenance: Option<HarnessFacts>,
+}
+
+/// One hook event, and the `--at FIELD=POINTER` pairs its command passes.
+#[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HookEvent {
+    /// The event's name, as the harness's hook configuration keys it.
+    pub(crate) name: &'static str,
+    /// Which fields, from where in the event.
+    pub(crate) at: &'static [(&'static str, &'static str)],
+}
+
+/// A harness's hook events and pointers: facts about the harness, which
+/// the commands they run know nothing of.
+#[cfg_attr(not(test), allow(dead_code, reason = "read by the packages' tests"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HookFacts {
+    /// The event before a tool runs, the matcher for the tools that edit
+    /// files, and where their paths are (`reef presence hook edit`).
+    pub(crate) edit: (&'static str, &'static str, &'static [&'static str]),
+    /// The event at a session's end (`reef presence hook end`).
+    pub(crate) end: &'static str,
+    /// Where an event's session id is.
+    pub(crate) session: &'static str,
+    /// The worktree provider's create, release and re-hold (R2.26).
+    pub(crate) provider: [HookEvent; 3],
+    /// The events whose fields `reef provenance declare --hook` declares:
+    /// the prompt's instruction, the model (R3.44).
+    pub(crate) declare: &'static [HookEvent],
+}
+
+/// What provenance reads from a running harness's environment (R3.44):
+/// only what it documents, or its pinned release's source sets.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HarnessFacts {
+    /// Its name in `context.harness`, as its MCP `clientInfo` and
+    /// `AI_AGENT` give it.
+    pub(crate) name: &'static str,
+    /// A variable holding its session id in its tools', hooks' and MCP
+    /// servers' processes: the client session.
+    pub(crate) session_env: Option<&'static str>,
+    /// A variable holding the model that runs, where it documents one.
+    pub(crate) model_env: Option<&'static str>,
 }
 
 /// Where a harness records Reef's plugin as installed, and what to do when
@@ -356,6 +407,74 @@ pub(crate) const SIGNS: &[Sign] = &[
             duplicates: Harness::McpJson,
             note: "Claude Code's reef plugin already serves Reef's MCP server here, so .mcp.json's `reef` server would list every tool twice; decline it when Claude Code asks, or add \"disabledMcpjsonServers\": [\"reef\"] to .claude/settings.local.json",
         }),
+        // Its hook events (code.claude.com/docs/en/hooks; Claude Code
+        // 2.1.316). `WorktreeCreate` replaces git's worktree and reads the
+        // path from the last line of stdout; `WorktreeRemove` names the
+        // directory. A resumed session returns to its worktree without
+        // either, and its `SessionStart` names the directory it started
+        // in, not the worktree (checked live); the event's `cwd` follows
+        // the session into its worktree from the first prompt, so
+        // `UserPromptSubmit` holds the workspace again. `prompt` is the
+        // submitted text; only `SessionStart` carries the model, when it
+        // knows it, and `PostModelSwitch` the next one.
+        hooks: Some(HookFacts {
+            edit: (
+                "PreToolUse",
+                "Edit|Write|MultiEdit|NotebookEdit",
+                &["/tool_input/file_path", "/tool_input/notebook_path"],
+            ),
+            end: "SessionEnd",
+            session: "/session_id",
+            provider: [
+                HookEvent {
+                    name: "WorktreeCreate",
+                    at: &[("repo", "/cwd"), ("name", "/name")],
+                },
+                HookEvent {
+                    name: "WorktreeRemove",
+                    at: &[("workspace", "/worktree_path")],
+                },
+                HookEvent {
+                    name: "UserPromptSubmit",
+                    at: &[("workspace", "/cwd")],
+                },
+            ],
+            declare: &[
+                HookEvent {
+                    name: "UserPromptSubmit",
+                    at: &[
+                        ("instruction", "/prompt"),
+                        ("client_session", "/session_id"),
+                        ("workspace", "/cwd"),
+                    ],
+                },
+                HookEvent {
+                    name: "SessionStart",
+                    at: &[
+                        ("model", "/model"),
+                        ("client_session", "/session_id"),
+                        ("workspace", "/cwd"),
+                    ],
+                },
+                HookEvent {
+                    name: "PostModelSwitch",
+                    at: &[
+                        ("model", "/to_model"),
+                        ("client_session", "/session_id"),
+                        ("workspace", "/cwd"),
+                    ],
+                },
+            ],
+        }),
+        // `CLAUDE_CODE_SESSION_ID` is documented in its tools', hooks' and
+        // MCP servers' processes, equal to the hooks' `session_id` (an MCP
+        // server keeps the one it started with across `/clear`). "There is
+        // no `$CLAUDE_MODEL` environment variable" (its hooks page).
+        provenance: Some(HarnessFacts {
+            name: "claude-code",
+            session_env: Some("CLAUDE_CODE_SESSION_ID"),
+            model_env: None,
+        }),
     },
     Sign {
         agent: Agent::Cursor,
@@ -367,6 +486,8 @@ pub(crate) const SIGNS: &[Sign] = &[
         package: None,
         install: "reef init --agents cursor",
         plugin_installed: None,
+        hooks: None,
+        provenance: None,
     },
     Sign {
         agent: Agent::Codex,
@@ -385,6 +506,8 @@ pub(crate) const SIGNS: &[Sign] = &[
         package: Some(Package::AgentPlugins),
         install: "codex plugin marketplace add reef-vcs/reef && codex plugin add reef@reef",
         plugin_installed: None,
+        hooks: None,
+        provenance: None,
     },
     Sign {
         agent: Agent::Opencode,
@@ -406,6 +529,8 @@ pub(crate) const SIGNS: &[Sign] = &[
         package: None,
         install: "reef init --agents opencode --user",
         plugin_installed: None,
+        hooks: None,
+        provenance: None,
     },
 ];
 
@@ -490,6 +615,21 @@ pub(crate) fn running(var: impl Fn(&str) -> Option<OsString>) -> Vec<Agent> {
         })
         .map(|sign| sign.agent)
         .collect()
+}
+
+/// The provenance facts of the harness that says it started this process,
+/// by the variables in [`SIGNS`]; `var` looks one up. None when no row's
+/// signal is set, or more than one is (one harness started from another's
+/// shell inherits its signals, and its session is not this one's).
+pub(crate) fn running_harness(
+    var: impl Fn(&str) -> Option<OsString>,
+) -> Option<&'static HarnessFacts> {
+    let mut running = running(var).into_iter();
+    let agent = running.next()?;
+    if running.next().is_some() {
+        return None;
+    }
+    sign(agent)?.provenance.as_ref()
 }
 
 /// The text Reef writes for `harness`: for a section, the marker lines and

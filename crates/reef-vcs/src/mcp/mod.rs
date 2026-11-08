@@ -22,6 +22,7 @@ mod wait;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use reef_api::v1;
 use reef_client::json::ErrorObject;
@@ -98,6 +99,9 @@ pub(crate) struct ReefServer {
     /// or a git or jj checkout around the current directory. When it does
     /// not, a call that names none is [`REPOSITORY_REQUIRED`].
     launch_scope: bool,
+    /// Set once the launch workspace's provenance has been declared
+    /// (R3.44): the harness and its session, at the first call there.
+    launch_declared: AtomicBool,
 }
 
 /// What a tool gets: the server, the connection, and the request.
@@ -152,9 +156,65 @@ impl Call<'_> {
         };
         if let Some(ws) = &scope.workspace {
             self.server.leases.keep(self.ctx, ws);
+            if !given && !self.server.launch_declared.swap(true, Ordering::SeqCst) {
+                self.declare_launch(ws).await;
+            }
         }
         self.server.activity.called(self.ctx, self.tool, &scope);
         Ok(scope)
+    }
+
+    /// What a workspace this server creates declares (R3.44): the harness
+    /// from the client's `initialize`, else the environment's; the
+    /// session and model the environment names; the session's note.
+    pub(super) fn declaration(&self) -> v1::ProvenanceDeclaration {
+        let mut declaration = cli::ambient::declaration(
+            cli::ambient::Ambient::current(),
+            self.server.global.state_dir().ok().as_deref(),
+        );
+        if let Some(harness) = client_harness(self.request) {
+            declaration.harness = Some(harness);
+        }
+        declaration
+    }
+
+    /// Declares the launch workspace's harness and client session where its
+    /// session has none, without a snapshot: they name who runs there, not
+    /// what an edit was for. Never over one it has: a harness's hook may
+    /// have declared a newer session there (a stdio server keeps the
+    /// session it started in). A failure is logged.
+    async fn declare_launch(&self, ws: &v1::Workspace) {
+        let wanted = self.declaration();
+        let context = ws
+            .provenance
+            .as_ref()
+            .and_then(|session| session.context.clone())
+            .unwrap_or_default();
+        let unset = |want: &Option<String>, have: &str| want.clone().filter(|_| have.is_empty());
+        let declaration = v1::ProvenanceDeclaration {
+            harness: unset(&wanted.harness, &context.harness),
+            client_session: unset(&wanted.client_session, &context.client_session),
+            ..v1::ProvenanceDeclaration::default()
+        };
+        if declaration == v1::ProvenanceDeclaration::default() || ws.provenance.is_none() {
+            return;
+        }
+        let declared = self
+            .ctx
+            .call(
+                self.ctx
+                    .client
+                    .declare_provenance(v1::DeclareProvenanceRequest {
+                        repo: ws.repo_id.clone(),
+                        workspace: ws.id.clone(),
+                        declaration: Some(declaration),
+                        no_snapshot: true,
+                    }),
+            )
+            .await;
+        if let Err(error) = declared {
+            tracing::debug!(target: "reef", reason = error.reason(), "declare the launch workspace");
+        }
     }
 
     /// The scope's workspace, which the tool needs.
@@ -183,6 +243,22 @@ impl Call<'_> {
             None => Err(required()),
         }
     }
+}
+
+/// The MCP client's `initialize`, as a harness label: `name/version`, or
+/// the name alone; `None` when it is not one a record can carry.
+fn client_harness(request: &RequestContext<RoleServer>) -> Option<String> {
+    let info = request.peer.peer_info()?;
+    let name = info.client_info.name.trim();
+    let version = info.client_info.version.trim();
+    let label = if version.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}/{version}")
+    };
+    reef_client::evidence::provenance::label_problem(&label)
+        .is_none()
+        .then_some(label)
 }
 
 /// Whether resolving the launch scope failed because there is no repository
@@ -241,6 +317,7 @@ pub(crate) async fn serve(global: Global, out: &Out) -> Result<ExitCode, CliErro
         leases: Leases::new(owner),
         activity: Arc::clone(&activity),
         launch_scope,
+        launch_declared: AtomicBool::new(false),
     };
     let internal = |message: String| CliError::Refused {
         kind: ErrorKind::Internal,

@@ -39,6 +39,7 @@ from reef.errors import (
     UnavailableError,
     UnsupportedError,
 )
+from reef.provenance import Provenance, instruction_sha256
 from reef.workspace import WorkspaceHandle
 
 __version__ = VERSION
@@ -58,6 +59,7 @@ __all__ = [
     "IoError",
     "NotFoundError",
     "PermissionDeniedError",
+    "Provenance",
     "ReefError",
     "RemoteConnectError",
     "RemoteMisdirectedError",
@@ -67,4 +69,5 @@ __all__ = [
     "WorkspaceHandle",
     "__version__",
     "connect",
+    "instruction_sha256",
 ]

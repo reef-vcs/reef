@@ -45,6 +45,11 @@ fn reef_in(state_dir: &Path) -> Command {
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
     ] {
         command.env_remove(var);
     }
@@ -639,6 +644,11 @@ fn autostart_spawns_daemon() {
             "REEF_LOG",
             "RUST_LOG",
             "REEF_AGENT",
+            "REEF_MODEL",
+            "REEF_TASK",
+            "AI_AGENT",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
         ] {
             command.env_remove(var);
         }
@@ -739,6 +749,11 @@ fn autostart_waits_while_the_lock_is_held() {
             "REEF_LOG",
             "RUST_LOG",
             "REEF_AGENT",
+            "REEF_MODEL",
+            "REEF_TASK",
+            "AI_AGENT",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
         ] {
             command.env_remove(var);
         }
@@ -851,6 +866,11 @@ fn lone_command(exe: &Path, state: &Path) -> std::process::Command {
         "RUST_LOG",
         "REEF_OUTPUT",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
     ] {
         command.env_remove(var);
     }
@@ -2035,6 +2055,11 @@ async fn every_command_completes_with_stdin_closed() {
                 "REEF_OUTPUT",
                 "REEF_WORKSPACE",
                 "REEF_AGENT",
+                "REEF_MODEL",
+                "REEF_TASK",
+                "AI_AGENT",
+                "CLAUDECODE",
+                "CLAUDE_CODE_SESSION_ID",
             ] {
                 command.env_remove(var);
             }

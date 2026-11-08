@@ -354,7 +354,13 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         list::<ProvenanceRecord>,
         list::<brief::ProvenanceRecord<'static>>,
     ),
-    row(&["provenance", "declare"], object::<ProvenanceDeclared>),
+    OutputRow {
+        note: Some(
+            "with --hook, nothing: a harness's hook runs it, and it exits 0 whatever happens (R3.44)",
+        ),
+        bytes_with: &["hook"],
+        ..row(&["provenance", "declare"], object::<ProvenanceDeclared>)
+    },
     OutputRow {
         note: Some(
             "with --wait, `job` is the job as it finished, with its coverage; the states it passed through go to stderr",

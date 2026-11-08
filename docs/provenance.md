@@ -35,7 +35,35 @@ reef provenance declare --no-instruction --task ""       # clear fields
 - `declare` snapshots the workspace first, so edits already on disk record under the context they were made under; `--no-snapshot` skips that, right after a snapshot.
 - `--identity` and `--actor` (`agent` by default, `executor`, or `human`) are fixed when the workspace is created; `ws create --help` and `ws run --help` name these flags in their last line.
 
-Harness hooks, `reef mcp` and the SDKs' workspace blocks declaring on their own are R3.44.
+### Declared for you
+
+The clients below declare without anyone typing a flag ([R3.44](dev-tickets/phase-3/R3.44-provenance-from-harnesses-and-sdks.md)). What they declare is still a claim, like any other.
+
+| Client | Declares | From |
+| --- | --- | --- |
+| A harness's prompt hook (Claude Code's `reef` plugin) | each prompt's instruction hash, the harness's session id, the harness | the hook event, by JSON Pointer; the environment |
+| Its session-start and model-switch hooks | the model | the hook event (`model`, `to_model`) |
+| `reef ws create`, `ws run`, `ws provider create` | the harness, its session, and the session's last instruction and model | the environment, and the session note below |
+| `reef mcp` | on every workspace it creates, the same, with the harness from the client's `initialize` (`clientInfo.name/version`); on the workspace it was started in, once and without a snapshot, the harness and session where that workspace has none | as above |
+| The SDKs' workspace blocks | what the program passes (`provenance=`, `declare()`), with `REEF_MODEL` and `REEF_TASK` as defaults | the program |
+
+**The harness.** `--harness` or a hook's pointer wins; then, in `reef mcp`, the MCP client's `initialize`; then `AI_AGENT`, a variable several coding agents set to name themselves, read the same way whoever set it (`name_version_…` or `name/version/…` reads as `name/version`, a version of digits and dashes with dots: Claude Code's `claude-code_2-1-316_agent` is `claude-code/2.1.316`; any other value a record can carry is kept as it is); then the harness the agent table recognizes from its environment, by name. **The session** is the variable the agent table names for that harness (Claude Code's `CLAUDE_CODE_SESSION_ID`), taken only when exactly one harness's signal is set and `AI_AGENT`, if set, names the same harness. A stdio MCP server keeps the session it started in across `/clear`, so the workspaces it creates after a `/clear` carry the earlier session, and that session's note (its last instruction before the `/clear`), until it is restarted. **The model** is `REEF_MODEL`, else a variable the harness documents (none does today), else the session note's. A value a record cannot carry is dropped: the environment never fails a command.
+
+**The prompt hook.** A harness runs, on each prompt:
+
+```sh
+reef provenance declare --hook --at instruction=/prompt --at client_session=/session_id --at workspace=/cwd
+```
+
+with the event on stdin (a field that is not a string is left out, and the rest declared). The prompt's text is hashed in the `reef` process (SHA-256 of the JSON string's UTF-8, as the harness delivered it: Claude Code expands pasted text into it) and dropped; only the hash goes anywhere. `--hook` exits 0 whatever happens, prints nothing (a prompt hook's stdout is context the model sees, and exit 2 blocks the prompt), never starts a daemon, and gives up after two seconds; failures go to the debug log by reason, never with the event. It declares for:
+
+- the workspace `--workspace` names, else the one the event's `cwd` is in, else `REEF_WORKSPACE`'s, else the current directory's, after snapshotting it, so edits made before the prompt keep the instruction they were made under;
+- every active workspace whose session declared the same client session, in any repository;
+- the **session note**, `<state>/provenance/sessions/<session>.json` (0600, in a 0700 directory): the session's last instruction hash, model and harness, never text, each with when it was declared. `reef ws create`, `ws run`, `ws provider create` and `reef mcp` declare each field from it for 24 hours after it was declared, so the workspace an agent creates in answer to a prompt is created under it. Notes older than that are deleted by the next hook.
+
+Another harness's adapter is the same command with its own pointers: `--stdin` takes the fields as keys of one JSON object (`workspace`, `model`, `harness`, `task`, `instruction`, `instruction_sha256`, `client_session`), `--at FIELD=POINTER` from anywhere in it, as [the workspace provider contract](workspace-provider.md) does. Without `--hook` it fails and prints like any `declare`.
+
+Not covered yet: a subagent's own task message, which reaches the harness as a tool call, not a prompt ([#239](https://github.com/reef-vcs/reef/issues/239)); Codex, whose plugin hooks need a `.codex-plugin` tree (the vendor-neutral tree Reef ships installs `hooks/hooks.json`, but Codex 0.166.0 does not load it; [#237](https://github.com/reef-vcs/reef/issues/237)); Cursor and opencode ([#238](https://github.com/reef-vcs/reef/issues/238)).
 
 ### The instruction hash
 

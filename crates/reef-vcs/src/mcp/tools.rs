@@ -652,7 +652,7 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.ProvenanceService/DeclareProvenance",
-        "declared by the harness's hooks and by the server from its environment (R3.44), not by a tool call",
+        "declared by the harness's hooks and by the server from its environment and the client's initialize, not by a tool call",
     ),
     (
         "/reef.api.v1.ProvenanceService/GetProvenance",
@@ -1127,22 +1127,40 @@ tool!(create_workspace, args::CreateWorkspace, |call, args| {
         (None, None) => None,
     };
     let scope = call.scope(args.repo.as_ref(), None).await?;
-    let response = ctx
-        .call_within_as(
+    // Declared from the environment and the client's `initialize` (R3.44).
+    let declared = call.declaration();
+    let request = CreateWorkspaceRequest {
+        repo: scope.repo_id,
+        start,
+        owner: call.server.leases.owner.clone(),
+        purpose: args.purpose.unwrap_or_default(),
+        missing_stores: args
+            .missing_stores
+            .map_or(0, |missing| v1::MissingStores::from(missing).into()),
+        provenance: (declared != v1::ProvenanceDeclaration::default()).then_some(declared),
+        ..CreateWorkspaceRequest::default()
+    };
+    let create = |request: CreateWorkspaceRequest| {
+        ctx.call_within_as(
             create_deadline(ctx.timeout_flag),
             |after| CliError::CreateTimeout { after },
-            ctx.client.create_workspace(CreateWorkspaceRequest {
-                repo: scope.repo_id,
-                start,
-                owner: call.server.leases.owner.clone(),
-                purpose: args.purpose.unwrap_or_default(),
-                missing_stores: args
-                    .missing_stores
-                    .map_or(0, |missing| v1::MissingStores::from(missing).into()),
-                ..CreateWorkspaceRequest::default()
-            }),
+            ctx.client.create_workspace(request),
         )
-        .await?;
+    };
+    let response = match create(request.clone()).await {
+        // The environment never fails a creation (R3.04).
+        Err(CliError::Daemon(error))
+            if request.provenance.is_some()
+                && error.reason() == reef_api::error::PROVENANCE_DISABLED =>
+        {
+            create(CreateWorkspaceRequest {
+                provenance: None,
+                ..request
+            })
+            .await?
+        }
+        response => response?,
+    };
     if let Some(ws) = &response.workspace {
         call.server.leases.keep(ctx, ws);
     }

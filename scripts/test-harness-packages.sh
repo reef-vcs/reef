@@ -3,8 +3,10 @@
 # this checkout's packages, and checks what the harness then has (R2.25):
 #
 #   Claude Code  the marketplace and plugin validate (--strict), the plugin
-#                installs with its MCP server and skill, and its edit hook,
-#                run as Claude Code runs it, declares an edit in a workspace
+#                installs with its MCP server and skill, its edit hook, run as
+#                Claude Code runs it, declares an edit in a workspace, and its
+#                prompt hook declares the prompt's hash, the session and the
+#                harness there, prints nothing, and exits 0 with no daemon
 #   Codex        the Agent Plugins tree installs, its MCP server starts with
 #                every tool and its skill reaches the prompt; and
 #                `reef init --agents codex --user` configures the server
@@ -76,6 +78,7 @@ harness_env() {
     mkdir -p "$home"
     env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
         -u CODEX_HOME -u XDG_CONFIG_HOME -u REEF_SOCKET -u REEF_WORKSPACE \
+        -u AI_AGENT -u CLAUDE_CODE_SESSION_ID -u REEF_MODEL -u REEF_TASK \
         HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" REEF_STATE_DIR="$state" \
         XDG_DATA_HOME="$home/.local/share" XDG_CACHE_HOME="$home/.cache" \
         XDG_STATE_HOME="$home/.local/state" PATH="$bin:$PATH" "$@"
@@ -130,6 +133,31 @@ out=$(cd "$ws" && printf '%s' "$event" | harness_env "$home" sh -c "$hook" 2>&1)
 REEF_STATE_DIR="$state" "$bin/reef" --no-autostart presence watch --for 0 --kind editing -o json |
     jq -e 'select(.presence.by_daemon == false and .presence.paths == ["a.txt"])' >/dev/null ||
     fail "the hook declared no edit"
+
+step "the installed plugin's prompt hook, in a workspace (R3.44)"
+hook=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$installed/hooks/hooks.json")
+prompt=$'add a parser test\n'
+event=$(jq -n --arg cwd "$ws" --arg prompt "$prompt" \
+    '{session_id: "s-1", cwd: $cwd, hook_event_name: "UserPromptSubmit", prompt: $prompt}')
+out=$(cd "$ws" && printf '%s' "$event" |
+    harness_env "$home" CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=s-1 AI_AGENT=claude-code_2-1-316_agent \
+        sh -c "$hook" 2>&1)
+[[ -z "$out" ]] || fail "the prompt hook printed: $out"
+expected=$(printf '%s' "$prompt" | shasum -a 256 | cut -d' ' -f1)
+REEF_STATE_DIR="$state" "$bin/reef" --no-autostart ws inspect "$ws" -o json |
+    jq -e --arg sha "$expected" '.provenance.context |
+        select(.instruction_sha256 == $sha and .client_session == "s-1" and .harness == "claude-code/2.1.316")' \
+        >/dev/null || fail "the prompt hook declared no instruction"
+# With no daemon: the binary itself, without the plugin's guard, starts
+# nothing, prints nothing and exits 0.
+declare_hook=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$installed/hooks/hooks.json" |
+    sed -e 's/^command -v reef >\/dev\/null 2>&1 && //' -e 's/ >\/dev\/null 2>&1 || true$//')
+[[ "$declare_hook" == "reef provenance declare --hook "* ]] || fail "unexpected prompt hook: $declare_hook"
+out=$(cd "$ws" && printf '%s' "$event" |
+    harness_env "$home" REEF_STATE_DIR="$tmp/no-daemon" sh -c "$declare_hook" 2>&1) ||
+    fail "the prompt hook failed with no daemon"
+[[ -z "$out" ]] || fail "the prompt hook printed with no daemon: $out"
+[[ ! -S "$tmp/no-daemon/daemon.sock" ]] || fail "the prompt hook started a daemon"
 
 # Recorded, not asserted: with both, Claude Code lists Reef's server twice
 # (the project's waiting for approval), as the quickstart says. A change
