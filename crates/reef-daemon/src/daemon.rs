@@ -153,6 +153,8 @@ pub struct AppState {
     pub provenance: Arc<crate::provenance::Provenance>,
     /// The executor protocol's job queue (R3.05).
     pub executor: Arc<crate::executor::Executor>,
+    /// Compiled repository policies (R3.07).
+    pub policy: Arc<crate::policy::Policies>,
 }
 
 impl fmt::Debug for AppState {
@@ -439,6 +441,7 @@ impl Daemon {
             identity,
             provenance,
             executor,
+            policy: Arc::new(crate::policy::Policies::default()),
         });
 
         // Before any snapshot can run (R2.10).

@@ -62,7 +62,7 @@ reef ws inspect <ws>            # the session: identity, actor, context, record 
 - `signature: valid` when the envelope, its signature and the stored index check out; `invalid` when something was changed behind the daemon.
 - `identity` is R3.03's status at the record's time: `bound`, `expired`, `revoked`, `unbound` (no certificate: the session could bind no identity, or the key was never certified), or `invalid`. A record whose key's certificate says it is held by a client, or certifies another session, reads `invalid`. An uncertified key reads `unbound` whoever holds it, so only a `bound` record says the daemon's authority vouched for the key.
 
-Whom to trust is policy's (R3.07).
+Whom to trust is the repository's [policy](policy.md)'s: a rule can require, for example, that every record of a change is signed and bound.
 
 ## Sessions and keys
 

@@ -1,0 +1,32 @@
+{
+  "cost": 0,
+  "decision": "invalid_policy",
+  "diagnostics": [
+    {
+      "column": 11,
+      "field": "groups",
+      "line": 4,
+      "message": "no group named \"nobody\" in [groups]",
+      "rule": "owners"
+    },
+    {
+      "column": 15,
+      "field": "expr",
+      "line": 8,
+      "message": "no field `pahts` here; the fields are author, commit, conflicted, description, empty, files, id, lines_added, lines_removed, parents, paths, tree",
+      "rule": "typo"
+    }
+  ],
+  "input": {
+    "conflicted": false,
+    "evidence": 3,
+    "evidence_ignored": 0,
+    "lines_added": 13,
+    "lines_removed": 4,
+    "paths": 2,
+    "provenance": 1
+  },
+  "rules": [],
+  "sha256": "ee9f3b0be0dc8e60b1da5d022fcbde7b2e597fb52a4c1dd6c154d9a626243195",
+  "version": 1
+}

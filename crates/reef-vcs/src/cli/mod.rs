@@ -38,6 +38,7 @@ mod job;
 mod log;
 mod op;
 mod out;
+pub(crate) mod policy;
 mod presence;
 mod provenance;
 mod provider;
@@ -354,6 +355,9 @@ enum Command {
     Job(job::Args),
     /// Run checks for jobs: Reef's reference executor, each check in a sandbox, evidence signed.
     Executor(executor::Args),
+    /// Check and evaluate the repository's policy: which evidence and sign-offs a change needs to land.
+    #[command(infer_subcommands = true)]
+    Policy(policy::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -822,6 +826,8 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Provenance(args) => provenance::run(&connect(&global, out).await?, args).await,
         Command::Job(args) => job::run(&connect(&global, out).await?, args).await,
         Command::Executor(args) => Box::pin(executor::run(&global, out, args)).await,
+        Command::Policy(args) if args.is_offline() => args.run_offline(out),
+        Command::Policy(args) => policy::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

@@ -13,7 +13,10 @@
 //! daemon and the client depend on it (R3.01, ADR 0055). `reef-executor`,
 //! the reference executor, is a client like `reef-vcs`: it reaches the
 //! daemon only through `reef-client`, links no jj-lib, and `reef-vcs`
-//! depends on it for `reef executor` (R3.06, ADR 0060).
+//! depends on it for `reef executor` (R3.06, ADR 0060). `reef-policy`,
+//! the policy format and evaluator, follows `reef-evidence`'s rule: no Reef
+//! crate but `reef-error`, and no jj-lib, gRPC, tokio or SQLite; the daemon
+//! and `reef-vcs` depend on it (R3.07, ADR 0061).
 
 #![allow(
     clippy::expect_used,
@@ -26,7 +29,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 12] = [
+const MEMBERS: [&str; 13] = [
     "reef-api",
     "reef-broker",
     "reef-client",
@@ -35,6 +38,7 @@ const MEMBERS: [&str; 12] = [
     "reef-evidence",
     "reef-executor",
     "reef-lib",
+    "reef-policy",
     "reef-symbols",
     "reef-testing",
     "reef-vcs",
@@ -228,7 +232,13 @@ fn crate_edges() {
     );
     assert_eq!(
         reef_dependencies(&metadata, "reef-vcs", &shipped),
-        ["reef-api", "reef-client", "reef-error", "reef-executor"]
+        [
+            "reef-api",
+            "reef-client",
+            "reef-error",
+            "reef-executor",
+            "reef-policy"
+        ]
     );
     // R3.06: the reference executor is a client of the daemon.
     assert_eq!(
@@ -260,6 +270,16 @@ fn crate_edges() {
     assert!(
         reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-evidence".to_owned()),
         "the daemon checks evidence"
+    );
+    // R3.07: the policy evaluator depends on reef-error alone, and the
+    // daemon evaluates with it.
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-policy", &shipped),
+        ["reef-error"]
+    );
+    assert!(
+        reef_dependencies(&metadata, "reef-daemon", &shipped).contains(&"reef-policy".to_owned()),
+        "the daemon evaluates policy"
     );
     // R2.18: the assets crate depends on nothing at all, and the daemon
     // embeds it.
@@ -316,6 +336,16 @@ fn reef_evidence_links_no_jj_grpc_or_sqlite() {
         reached > 5,
         "reef-evidence: only {reached} packages reached"
     );
+}
+
+/// R3.07: the policy evaluator links nothing of jj, gRPC, tokio or SQLite,
+/// and no Reef crate but `reef-error`.
+#[test]
+fn reef_policy_links_no_jj_grpc_or_sqlite() {
+    let metadata = resolved_metadata();
+    let reached =
+        assert_unreachable_but(&metadata, "reef-policy", &NOT_IN_EVIDENCE, &["reef-error"]);
+    assert!(reached > 5, "reef-policy: only {reached} packages reached");
 }
 
 #[test]

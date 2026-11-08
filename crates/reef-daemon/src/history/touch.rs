@@ -141,6 +141,7 @@ impl History {
                     after: None,
                     limit: MAX_PATHS,
                     pairs: symbol_store.is_some(),
+                    sizes: false,
                 };
                 let mut page =
                     diff::diff_page(&head, &DiffBase::Parents, &commit, &options, &|| false)

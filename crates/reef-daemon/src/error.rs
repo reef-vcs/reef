@@ -48,6 +48,7 @@ use crate::service::at_operation::ReplayError;
 use crate::service::evidence::EvidenceError;
 use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
+use crate::service::policy::PolicyError;
 use crate::snapshot::index::ReindexError;
 use crate::store::StoreError;
 use crate::subscribe::SubscribeError;
@@ -116,6 +117,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<PolicyError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.advice()
@@ -677,6 +680,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<HistoryError>() {
             history_reason(error)
         } else if let Some(error) = error.downcast_ref::<EvidenceError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<PolicyError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))

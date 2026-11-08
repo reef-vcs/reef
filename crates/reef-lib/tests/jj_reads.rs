@@ -816,6 +816,7 @@ fn options(format: diff::DiffFormat) -> diff::DiffOptions {
         after: None,
         limit: 1000,
         pairs: false,
+        sizes: false,
     }
 }
 

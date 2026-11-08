@@ -124,7 +124,7 @@ Evidence is [R3.01's format](evidence.md): an in-toto Statement v1 with predicat
 - **`error` versus `FAILED`.** A check that ran and reached no verdict (a crash, a timeout) is evidence with result `error`. `FAILED` is for a job you could not run at all (no tree, a broken runner). Neither blames the change.
 - **Freshness.** Each accepted object records `created` (stored for the first time by this call) and `fresh` (created, and its `startedOn` no earlier than five minutes before the claim). A re-sent old envelope is accepted but not fresh; policy may require fresh evidence. An object the job already accepted keeps its first place: re-sending it never makes it the latest word on its pair.
 - **Order.** A job's coverage shows, for each pair, the object it accepted last: within a call, the later in the call.
-- **Trust.** The daemon checks the envelope, the key, the signature and the binding. It does not decide whether your key is trusted: every read reports the key's identity and status ([identity.md](identity.md)), and the repository's policy (R3.07) decides what counts. Evidence from an untrusted signer is stored but weighs nothing.
+- **Trust.** The daemon checks the envelope, the key, the signature and the binding. It does not decide whether your key is trusted: every read reports the key's identity and status ([identity.md](identity.md)), and the repository's [policy](policy.md) decides what counts. Evidence from an untrusted signer is stored but weighs nothing.
 
 ## 7. Budget, cancellation, release, deadlines
 

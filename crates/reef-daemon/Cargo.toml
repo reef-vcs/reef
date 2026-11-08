@@ -55,6 +55,7 @@ reef-error.workspace = true
 reef-broker.workspace = true     # the subscription broker (R2.22)
 reef-symbols.workspace = true    # the symbol index's extraction (R2.14)
 reef-evidence.workspace = true   # the evidence format, checked at add and at every read (R3.01)
+reef-policy.workspace = true     # repository policy, evaluated over one change (R3.07)
 reef-web.workspace = true        # the web UI's embedded assets (R2.18)
 thiserror.workspace = true
 tracing.workspace = true

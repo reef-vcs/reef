@@ -676,3 +676,25 @@ cargo nextest run --release -p reef-daemon --test executor --no-capture -E 'test
 ```sh
 cargo nextest run --release -p reef-executor --test executor --run-ignored ignored-only --no-capture -E 'test(timings)'
 ```
+
+## Policy evaluation (R3.07)
+
+`crates/reef-policy/benches/policy.rs` measures loading and evaluating policies ([ADR 0061](adr/0061-repository-policy-file.md), [docs/policy.md](policy.md)): `cargo bench -p reef-policy --bench policy`. Release build on the M2 Max, run on 2026-11-08. Every load and evaluation includes starting its 64 MiB-stack thread. All trend data; none is a gate.
+
+| Benchmark | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| `policy/load_starter` | parse, check and compile `reef policy init`'s starter | 94 µs | < 2 ms |
+| `policy/load_200_rules` | the same for 200 `[[rule]]`s, each with a `when` and a macro over `change.paths` | 6.3 ms | < 50 ms |
+| `policy/evaluate_small` | the starter over 50 paths, 20 evidence objects and 10 provenance records | 0.84 ms | < 1 ms |
+| `policy/large/evaluate_100k_paths` | 20 rules (8 `[[require]]` with globs, 6 `[[forbid]]`, `[limits]`, 5 `[[rule]]`s each running `any_glob` and an `all` over every file) over 100,000 paths and files and 1,000 evidence objects | 590 ms | < 300 ms |
+| `policy/large/evaluate_200_rules_100k_paths` | 200 cheap rules over the same input: the cost bound stops them at the evaluation's 5×10^7 | 0.80 s | none |
+
+- **The large evaluation is 2.0× its expectation**, and most of it is the benchmark's five `[[rule]]`s, each walking 100,000 files in cel-rust's tree-walking interpreter (about 0.14 µs a node). Binding the input as CEL values and as JSON for the cost bound costs about 100 ms at 100,000 files. The declared tables (globs, limits, required evidence) are a few milliseconds of it. Path rules belong in the tables or `any_glob`, as [docs/policy.md](policy.md) says.
+- **The 200-rule case shows the bound at work**: the rules that fit under 5×10^7 run, and the rest report `error` without running. The cost bound charges values by their size (the review's first finding), which refuses more of them early than the first measurement's 1.47 s did.
+- **Through the daemon**, `tests/policy.rs`'s `evaluate` prints the median of ten `EvaluatePolicy` calls for a one-file change over the socket with a warm cache: 5.9 ms in a debug build (expected under 50 ms in release). It includes resolving both revisions, the diff, reading the tree's evidence with every signature checked again, and the change's provenance records.
+- **No existing path changed**, apart from the diff's new `sizes` option, which only `EvaluatePolicy` sets.
+
+```sh
+cargo bench -p reef-policy --bench policy
+cargo nextest run -p reef-daemon --test policy --success-output immediate -E 'test(evaluate)'
+```

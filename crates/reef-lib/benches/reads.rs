@@ -37,6 +37,7 @@ fn options(format: DiffFormat) -> DiffOptions {
         after: None,
         limit: PAGE,
         pairs: false,
+        sizes: false,
     }
 }
 

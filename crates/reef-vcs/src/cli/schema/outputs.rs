@@ -20,7 +20,7 @@ use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord}
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use crate::cli::{guide, here, init, presence, provider, remote, ws, ws_run};
+use crate::cli::{guide, here, init, policy, presence, provider, remote, ws, ws_run};
 
 /// A schema of what a command prints, built in the document's generator
 /// so each type is defined once.
@@ -393,6 +393,27 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
             &["executor", "check"],
             object::<reef_executor::report::CheckReport>,
         )
+    },
+    OutputRow {
+        note: Some(
+            "with --input, `evaluation` (or `conflict` for a conflict input); a file that does not load is an error (2) listing every problem in `hint`",
+        ),
+        ..row(&["policy", "check"], object::<policy::PolicyCheck>)
+    },
+    OutputRow {
+        note: Some(
+            "--require-allow exits 5 for any decision but allow: the error document (reason POLICY_BLOCKED, the first blocking rule in `hint`); in text, the evaluation too",
+        ),
+        ..view(
+            &["policy", "eval"],
+            object::<policy::PolicyEvaluated>,
+            object::<policy::BriefEvaluation<'static>>,
+        )
+    },
+    OutputRow {
+        note: Some("with --stdout, the starter file's text and nothing else"),
+        bytes_with: &["stdout"],
+        ..row(&["policy", "init"], object::<policy::PolicyInit>)
     },
     row(
         &["evidence", "artifact", "upload"],

@@ -1,0 +1,8 @@
+version = 1
+
+[owners]
+groups = ["nobody"]
+
+[[rule]]
+name = "typo"
+expr = 'change.pahts.size() > 0'

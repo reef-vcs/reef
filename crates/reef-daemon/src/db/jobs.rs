@@ -552,6 +552,40 @@ fn evidence_from_row(row: &Row<'_>) -> rusqlite::Result<JobEvidenceRow> {
 }
 
 impl Db {
+    /// For each of `ids` that a job accepted in `repo`, the job and
+    /// whether it was fresh (R3.05), for policy's `fresh` and `job`
+    /// (R3.07). Accepted by several jobs, a fresh acceptance wins, then the
+    /// earliest.
+    pub fn evidence_jobs(
+        &self,
+        repo: RepoId,
+        ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, (String, bool)>, DbError> {
+        let mut found: std::collections::HashMap<String, (String, bool)> =
+            std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(found);
+        }
+        self.with(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT job_id, fresh FROM job_evidence WHERE repo_id = ?1 AND evidence_id = ?2
+                 ORDER BY fresh DESC, accepted_at, job_id LIMIT 1",
+            )?;
+            for id in ids {
+                let row = stmt
+                    .query_row(params![repo, id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                    })
+                    .optional()?;
+                if let Some(row) = row {
+                    found.insert((*id).to_owned(), row);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
     /// Runs `f` in an immediate transaction under the lock, committing if
     /// it returns `Ok` and rolling back otherwise, for callers whose errors
     /// are their own, then `then` with the committed value while the lock

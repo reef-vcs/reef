@@ -34,11 +34,12 @@ pub(crate) fn document() -> Result<Value, String> {
     let pool = api::pool().ok_or("the API's descriptor set does not decode")?;
     let api = api::part(&pool, &mut defs);
     let evidence = evidence_part(&mut defs);
+    let policy = policy_part(&mut defs);
     let version = env!("CARGO_PKG_VERSION");
     let mut document = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": format!("urn:reef-vcs:schema:{version}"),
-        "description": "Reef's commands, MCP tools and API as JSON Schema (`reef schema`, ADR 0050). Each `cli.commands[]` entry gives an input schema, the `argv` that turns an input into words, and the output with -o json, -o brief and on a pipe; `mcp.tools` are the MCP tools with output schemas; `api.services` are the gRPC services, whose messages are described as canonical proto3 JSON; `evidence` is the format of evidence objects, for executors (ADR 0055).",
+        "description": "Reef's commands, MCP tools and API as JSON Schema (`reef schema`, ADR 0050). Each `cli.commands[]` entry gives an input schema, the `argv` that turns an input into words, and the output with -o json, -o brief and on a pipe; `mcp.tools` are the MCP tools with output schemas; `api.services` are the gRPC services, whose messages are described as canonical proto3 JSON; `evidence` is the format of evidence objects, for executors (ADR 0055); `policy` is reef-policy.toml, the input a policy sees and its evaluation (ADR 0061).",
         "reef": {
             "version": version,
             "commit": env!("REEF_BUILD_COMMIT"),
@@ -48,11 +49,13 @@ pub(crate) fn document() -> Result<Value, String> {
             "api_revision": reef_api::API_REVISION,
             "api_digest": reef_api::API_DIGEST,
             "executor_protocol": reef_api::EXECUTOR_PROTOCOL,
+            "policy_version": reef_policy::VERSION,
         },
         "cli": cli,
         "mcp": mcp,
         "api": api,
         "evidence": evidence,
+        "policy": policy,
         "$defs": defs,
     });
     reef_client::schema::strip_doc_links(&mut document);
@@ -60,7 +63,44 @@ pub(crate) fn document() -> Result<Value, String> {
 }
 
 /// The document's parts.
-const PARTS: [&str; 4] = ["cli", "mcp", "api", "evidence"];
+const PARTS: [&str; 5] = ["cli", "mcp", "api", "evidence", "policy"];
+
+/// The `policy` part (R3.07, ADR 0061): `reef-policy.toml`, the input an
+/// evaluation sees and the evaluation, as JSON Schema from `reef-policy`'s
+/// types, defined under `$defs` as `policy.<Name>`.
+fn policy_part(defs: &mut Map<String, Value>) -> Value {
+    let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
+    let members = reef_policy::schema::members(&mut generator);
+    defs.extend(generator.take_definitions(true));
+    let mut part = json!({
+        "description": "Repository policy (ADR 0061, docs/policy.md): `file` is reef-policy.toml read as JSON (strict: every table refuses unknown keys); `input` is what a policy sees about one change, which `reef policy eval --input-json` prints and `reef policy check --input` reads; `evaluation` is a decision with a result per rule; `conflict_decision` is the tier and attempt cap for a conflict input. The loader stays the authority on a file: the schema cannot state its references, patterns, CEL checks and cost bound.",
+        "version": reef_policy::VERSION,
+        "path": reef_policy::POLICY_PATH,
+    });
+    if let Some(object) = part.as_object_mut() {
+        for (name, schema) in members {
+            object.insert(name.to_owned(), Value::from(schema));
+        }
+    }
+    part
+}
+
+/// The `policy` part's schema members.
+const POLICY_MEMBERS: [&str; 4] = ["file", "input", "evaluation", "conflict_decision"];
+
+/// Keeps one member of the `policy` part.
+fn keep_policy(policy: &mut Value, name: &[String]) -> Option<()> {
+    let [name] = name else {
+        return None;
+    };
+    let name = name.to_ascii_lowercase().replace('-', "_");
+    let object = policy.as_object_mut()?;
+    if !POLICY_MEMBERS.contains(&name.as_str()) {
+        return None;
+    }
+    object.retain(|key, _| *key == name || !POLICY_MEMBERS.contains(&key.as_str()));
+    Some(())
+}
 
 /// The `evidence` part (R3.01, ADR 0055): the evidence object format as
 /// JSON Schema, from `reef-evidence`'s types, so an executor in any
@@ -145,6 +185,7 @@ pub(crate) fn select(mut document: Value, part: Part, name: &[String]) -> Option
             Part::Mcp => keep_tool(object.get_mut("mcp")?, name)?,
             Part::Api => keep_api(object, name)?,
             Part::Evidence => keep_evidence(object.get_mut("evidence")?, name)?,
+            Part::Policy => keep_policy(object.get_mut("policy")?, name)?,
         }
     }
     prune(object);

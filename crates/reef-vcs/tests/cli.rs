@@ -1796,11 +1796,14 @@ fn root_help_names_every_command() {
         // R3.04 `restore` for `provenance`; both are in `--help-all`, and
         // `reef backup --help` names `restore`. R3.05's `job` never joined
         // it: agents do not schedule checks, the landing service will. Nor
-        // R3.06's `executor`: an operator runs it, not an agent.
+        // R3.06's `executor`: an operator runs it, not an agent. R3.07's
+        // `policy` is in `--help-all` and the agent guide's long part: the
+        // first screen is at its budget.
         if command == "completions"
             || command == "restore"
             || command == "job"
             || command == "executor"
+            || command == "policy"
         {
             continue;
         }

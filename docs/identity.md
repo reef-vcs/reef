@@ -2,7 +2,7 @@
 
 An evidence object says which key signed it. An **operator identity** says whom that key answers to: a person, or a CI pipeline. The daemon certifies short-lived **session keys** for identities, and every evidence read reports the identity its key is bound to. [ADR 0057](adr/0057-operator-identities-and-session-keys.md) records why; [docs/evidence.md](evidence.md) has the evidence format, and [docs/provenance.md](provenance.md) the provenance records the daemon signs with keys it holds for each workspace's session.
 
-A certificate says which identity a key is bound to and what the requester declared it for. It never says that the identity should be trusted: a repository's policy decides that (R3.07).
+A certificate says which identity a key is bound to and what the requester declared it for. It never says that the identity should be trusted: a repository's [policy](policy.md) decides that, with attestor sets of identities, actors and authorities.
 
 ## Identities
 
