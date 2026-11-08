@@ -2,6 +2,7 @@
 // `ended` and `none`, and the mapping from what Phase 2's API reports.
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { ChangeOutcome } from "../gen/reef/api/v1/history_pb";
+import { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
 
 export const STATES = [
   "draft",
@@ -45,8 +46,31 @@ export function changeState(change: Change): Labelled {
   if (change.conflict) return { state: "conflicted", label: "conflicted" };
   if (change.divergent) return { state: "conflicted", label: "divergent" };
   if (change.hidden) return { state: "ended", label: "abandoned" };
+  // A recorded lifecycle (R3.09) before what the flags say.
+  const recorded = change.lifecycle?.recorded ? lifecycleState(change.lifecycle.state) : undefined;
+  if (recorded) return recorded;
   if (change.immutable) return { state: "landed", label: "landed" };
   return { state: "draft", label: "draft" };
+}
+
+/** A recorded lifecycle state (R3.09); undefined for draft and unknown values. */
+export function lifecycleState(state: LifecycleState): Labelled | undefined {
+  switch (state) {
+    case LifecycleState.PROPOSED:
+      return { state: "proposed", label: "proposed" };
+    case LifecycleState.QUEUED:
+      return { state: "queued", label: "queued" };
+    case LifecycleState.LANDED:
+      return { state: "landed", label: "landed" };
+    case LifecycleState.DECLINED:
+      return { state: "ended", label: "declined" };
+    case LifecycleState.WITHDRAWN:
+      return { state: "ended", label: "withdrawn" };
+    case LifecycleState.SUPERSEDED:
+      return { state: "ended", label: "superseded" };
+    default:
+      return undefined;
+  }
 }
 
 /** A change's state from R2.16's history outcome. */

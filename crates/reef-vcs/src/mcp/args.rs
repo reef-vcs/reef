@@ -242,6 +242,7 @@ pub(super) enum Kind {
     Undo,
     Edit,
     ImportRefs,
+    Transition,
     External,
     Other,
 }
@@ -258,6 +259,7 @@ impl From<Kind> for v1::OperationKind {
             Kind::Undo => Self::Undo,
             Kind::Edit => Self::Edit,
             Kind::ImportRefs => Self::ImportRefs,
+            Kind::Transition => Self::Transition,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
         }

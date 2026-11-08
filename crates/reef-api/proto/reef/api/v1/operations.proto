@@ -17,6 +17,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/remote.proto";
 
@@ -71,6 +72,15 @@ service OperationService {
   // its change keeps edits made after its snapshot, carried onto its new
   // commit (ADR 0039). When there is nothing to revert, `operation` is
   // unset.
+  //
+  // An operation that recorded lifecycle transitions (R3.09) is undone in
+  // the daemon's records instead of the view: each of its transitions,
+  // still its change's latest, is reverted by an inverse transition (cause
+  // UNDO) in a new operation of kind UNDO; undoing a change's first
+  // proposal returns it to DRAFT. One no longer the latest is
+  // OPERATION_SUPERSEDED. An observed landing is OPERATION_NOT_UNDOABLE.
+  // Through the remote listener, only the token that recorded a transition
+  // undoes it (PERMISSION_DENIED, reason REMOTE_PROPOSAL_NOT_OWNED).
   //
   // Never undone (INVALID_ARGUMENT, reason OPERATION_NOT_UNDOABLE): the
   // root operation, a merge of concurrent operations, one that adds or
@@ -157,6 +167,9 @@ enum OperationKind {
   // Written by Reef, and not one of the above, such as repository
   // initialization.
   OPERATION_KIND_OTHER = 11;
+  // A change's lifecycle state changed (R3.09): `Operation.transitions`
+  // says how. It changes nothing in the view.
+  OPERATION_KIND_TRANSITION = 12;
 }
 
 // Why a snapshot ran.
@@ -220,6 +233,10 @@ message Operation {
   // attributes `reef.remote-token` and `reef.remote-token-name`; unset for
   // calls over the socket and for operations Reef records on its own.
   RemoteCaller remote = 17;
+  // The lifecycle transitions it recorded (R3.09), from the operation
+  // attribute `reef.lifecycle`, in order; empty for most operations. Who
+  // performed them beyond `agent` and `remote` is in ListTransitions.
+  repeated ChangeTransition transitions = 18;
 }
 
 // What an operation changed, from the difference between its view and its
@@ -301,11 +318,12 @@ message OperationFilter {
   // Workspace ids or unique prefixes the operation was recorded for.
   repeated string workspaces = 1;
   // Change id prefixes, in hex or jj's reverse hex, matched against the
-  // operation's effects.
+  // operation's effects and its lifecycle transitions.
   repeated string changes = 2;
   // Agents, matched against `Operation.agent`.
   repeated string agents = 3;
-  // Kinds, matched against `Operation.kind`.
+  // Kinds, matched against `Operation.kind`; OPERATION_KIND_TRANSITION also
+  // matches an undo that recorded transitions (R3.09).
   repeated OperationKind kinds = 4;
 }
 

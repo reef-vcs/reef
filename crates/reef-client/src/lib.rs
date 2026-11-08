@@ -1306,6 +1306,86 @@ impl Client {
             .await
     }
 
+    /// `ChangeService.TransitionChange` (R3.09): moves a change through its
+    /// lifecycle.
+    pub async fn transition_change(
+        &self,
+        request: v1::TransitionChangeRequest,
+    ) -> Result<v1::TransitionChangeResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("TransitionChange", client.transition_change(request))
+            .await
+    }
+
+    /// `ChangeService.ListProposals` (R3.09): one page.
+    pub async fn list_proposals_page(
+        &self,
+        request: v1::ListProposalsRequest,
+    ) -> Result<v1::ListProposalsResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ListProposals", client.list_proposals(request))
+            .await
+    }
+
+    /// The first `limit` recorded lifecycles `request` asks for (all when
+    /// 0), newest update first, and whether more exist.
+    pub async fn list_proposals(
+        &self,
+        request: v1::ListProposalsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::ProposalEntry>, ClientError> {
+        let mut request = v1::ListProposalsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_proposals_page(request.clone()).await?;
+            limited.items.extend(response.entries);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// `ChangeService.ListTransitions` (R3.09): one page.
+    pub async fn list_transitions_page(
+        &self,
+        request: v1::ListTransitionsRequest,
+    ) -> Result<v1::ListTransitionsResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("ListTransitions", client.list_transitions(request))
+            .await
+    }
+
+    /// The first `limit` transitions `request` asks for (all when 0),
+    /// newest first, and whether more exist.
+    pub async fn list_transitions(
+        &self,
+        request: v1::ListTransitionsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::ChangeTransition>, ClientError> {
+        let mut request = v1::ListTransitionsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_transitions_page(request.clone()).await?;
+            limited.items.extend(response.transitions);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
     /// `OperationService.SubscribeOperations` (R2.09): the stream of
     /// frames, once the daemon has accepted the subscription. No deadline:
     /// the caller bounds the call and each wait for a frame itself. An

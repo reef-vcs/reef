@@ -83,9 +83,84 @@ impl Classify for InvalidChangeFilter {
     }
 }
 
+/// The operation `text` names when it records lifecycle transitions and
+/// nothing else (R3.09), which the daemon undoes in its own records; `None`
+/// otherwise, including when it does not resolve or also changed the view
+/// (the view's undo reports or refuses those).
+async fn lifecycle_operation(target: &super::reading::Target, text: &str) -> Option<OpEntry> {
+    use futures::FutureExt as _;
+    let text = text.to_owned();
+    target
+        .handle
+        .call_async(move |head| {
+            async move {
+                let repo = head.refresh().await.ok()?;
+                reef_lib::jj::lifecycle::transition_only_operation(&repo, &text).await
+            }
+            .boxed_local()
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
+/// `UndoOperation` of an operation that recorded lifecycle transitions
+/// (R3.09): the named workspace snapshotted first, as every undo does, then
+/// the inverse transitions.
+async fn undo_transitions(
+    state: &Arc<AppState>,
+    target: &super::reading::Target,
+    agent: Option<String>,
+    remote: Option<(String, String)>,
+    entry: &OpEntry,
+) -> Result<Response<UndoOperationResponse>, Status> {
+    let snapshot = super::reading::snapshot_first(
+        state,
+        target,
+        true,
+        std::time::Instant::now(),
+        agent.clone(),
+    )
+    .await?
+    .operation;
+    let undone = crate::lifecycle::undo(
+        state,
+        target.repo.id,
+        target.workspace.clone(),
+        agent.clone(),
+        remote,
+        entry.id.clone(),
+    )
+    .await
+    .map_err(status)?;
+    let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
+    let owner = target
+        .workspace
+        .as_ref()
+        .map(|record| record.owner.as_str());
+    let op_id = undone.op_id.to_string();
+    let operation = super::written_operation(
+        state,
+        target.repo.id,
+        Some(op_id.as_str()),
+        convert::Written {
+            kind: v1::OperationKind::Undo,
+            snapshot: None,
+            workspace: workspace_id.as_deref(),
+            agent: agent.as_deref().or(owner).unwrap_or_default(),
+        },
+    )
+    .await?;
+    Ok(Response::new(UndoOperationResponse {
+        operation,
+        snapshot,
+        undone_operation_id: entry.id.to_string(),
+    }))
+}
+
 /// A change id prefix in hex: hex as given, reverse hex (`z` to `k`)
 /// converted; `None` for anything else.
-pub(super) fn change_prefix(text: &str) -> Option<String> {
+pub(crate) fn change_prefix(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -237,7 +312,7 @@ impl Walk {
             if self.filter.names_changes() {
                 computed += 1;
                 effects = self.reads.effects(self.repo, &self.head, operation).await;
-                if !self.filter.touches(effects.as_ref()) {
+                if !self.filter.touches(&entry, effects.as_ref()) {
                     return ControlFlow::Continue(());
                 }
             }
@@ -468,9 +543,14 @@ impl OperationService for OperationsHandler {
         request: Request<UndoOperationRequest>,
     ) -> Result<Response<UndoOperationResponse>, Status> {
         let agent = super::caller_of(&request)?;
+        let remote = super::remote_of(&request)
+            .map(|caller| (caller.token_id.clone(), caller.token_name.clone()));
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
+        if let Some(entry) = lifecycle_operation(&target, &request.operation_id).await {
+            return undo_transitions(state, &target, agent, remote, &entry).await;
+        }
         let write = crate::workspace::Write::Undo {
             operation: request.operation_id,
         };

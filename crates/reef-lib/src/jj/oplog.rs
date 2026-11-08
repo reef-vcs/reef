@@ -291,6 +291,9 @@ pub const ATTR_AGENT: &str = "reef.agent";
 pub const ATTR_REMOTE_TOKEN: &str = "reef.remote-token";
 /// The name the remote token in [`ATTR_REMOTE_TOKEN`] had then (R2.08).
 pub const ATTR_REMOTE_TOKEN_NAME: &str = "reef.remote-token-name";
+/// The attribute recording lifecycle transitions (R3.09): a
+/// [`LifecycleRecord`](super::lifecycle::LifecycleRecord) as compact JSON.
+pub const ATTR_LIFECYCLE: &str = "reef.lifecycle";
 
 /// Separates an agent from the remote token it carries; see
 /// [`RemoteToken::mark`].
@@ -355,6 +358,8 @@ pub enum OpKind {
     Edit,
     /// Git refs were imported.
     ImportRefs,
+    /// A change's lifecycle state changed (R3.09).
+    Transition,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -363,7 +368,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 10] = [
+    pub const WRITTEN: [OpKind; 11] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -373,6 +378,7 @@ impl OpKind {
         OpKind::Undo,
         OpKind::Edit,
         OpKind::ImportRefs,
+        OpKind::Transition,
         OpKind::Other,
     ];
 
@@ -388,6 +394,7 @@ impl OpKind {
             OpKind::Undo => "undo",
             OpKind::Edit => "edit",
             OpKind::ImportRefs => "import-refs",
+            OpKind::Transition => "transition",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -417,6 +424,9 @@ pub struct OpMeta {
     /// [`ATTR_AGENT`]: who caused it; it may carry a remote token
     /// ([`RemoteToken::mark`]).
     pub agent: Option<String>,
+    /// [`ATTR_LIFECYCLE`]: the lifecycle transitions it records (R3.09);
+    /// empty for none.
+    pub transitions: Vec<super::lifecycle::TransitionRecord>,
 }
 
 impl OpMeta {
@@ -429,6 +439,7 @@ impl OpMeta {
             snapshot_kind: None,
             workspace: None,
             agent: None,
+            transitions: Vec::new(),
         }
     }
 
@@ -483,6 +494,12 @@ impl OpMeta {
                 tx.set_attribute(key.to_owned(), value.to_owned());
             }
         }
+        if !self.transitions.is_empty() {
+            tx.set_attribute(
+                ATTR_LIFECYCLE.to_owned(),
+                super::lifecycle::LifecycleRecord::encode(&self.transitions),
+            );
+        }
     }
 
     /// Applies the attributes and commits `tx` with the description.
@@ -524,13 +541,27 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 5] = [
+const WRITES: [(&str, OpKind); 13] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
     (EDIT_PREFIX, OpKind::Edit),
     (NEW_CHANGE_PREFIX, OpKind::Edit),
+    ("reef: propose change ", OpKind::Transition),
+    ("reef: withdraw change ", OpKind::Transition),
+    ("reef: decline change ", OpKind::Transition),
+    ("reef: supersede change ", OpKind::Transition),
+    ("reef: land change ", OpKind::Transition),
+    ("reef: queue change ", OpKind::Transition),
+    ("reef: dequeue change ", OpKind::Transition),
+    ("reef: unpropose change ", OpKind::Transition),
 ];
+/// The description of a transition (R3.09): `reef: <verb> change <change
+/// id>`, where the verb is `propose`, `withdraw`, `decline`, `supersede` or
+/// `land`, which [`classify`] reads back.
+pub fn transition_description(verb: &str, change: &str) -> String {
+    format!("reef: {verb} change {change}")
+}
 /// The description of a describe, before the commit id it rewrote.
 pub const DESCRIBE_PREFIX: &str = "reef: describe commit ";
 /// The description of an abandon, before the commit id it abandoned.

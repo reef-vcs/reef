@@ -236,6 +236,33 @@ const NOT_RUN: &[(&[&str], &str)] = &[
     ),
 ];
 
+/// Points `main` at the root commit of the repository at `root`, as `jj
+/// bookmark set main -r 'root()'` would.
+fn set_main(root: &Path) {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories,
+    };
+    use jj_lib::op_store::RefTarget;
+    use jj_lib::ref_name::RefName;
+    use jj_lib::repo::Repo as _;
+    let settings = reef_daemon::testing::test_settings();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+    let mut tx = repo.start_transaction();
+    let root_commit = tx.repo().store().root_commit_id().clone();
+    tx.repo_mut()
+        .set_local_bookmark_target(RefName::new("main"), RefTarget::normal(root_commit));
+    pollster::block_on(tx.commit("bookmark set")).unwrap();
+}
+
 /// Runs `reef` command lines against one daemon, checks each one's stdout
 /// against its schema, and records which commands ran.
 struct Script {
@@ -404,6 +431,31 @@ async fn outputs_match_their_schemas() {
         .await;
     script
         .json(&a_dir, &["abandon", &text(&child["change_id"])])
+        .await;
+    // The lifecycle (R3.09), with `main` on the root commit as `jj
+    // bookmark set` would put it, so proposals have a destination.
+    set_main(&root);
+    script.both(&a_dir, &["propose", "-m", "schema test"]).await;
+    script.both(&a_dir, &["proposal", "list"]).await;
+    script.both(&a_dir, &["proposal", "show"]).await;
+    script.both(&a_dir, &["proposal", "withdraw"]).await;
+    script.json(&a_dir, &["propose"]).await;
+    script.both(&a_dir, &["proposal", "decline", "@"]).await;
+    script.json(&a_dir, &["propose"]).await;
+    let replacement = script
+        .json(&root, &["ws", "create", "--new-on", &a_change])
+        .await;
+    script
+        .both(
+            &a_dir,
+            &[
+                "proposal",
+                "supersede",
+                "@",
+                "--by",
+                &text(&replacement["commit_id"]),
+            ],
+        )
         .await;
     script.both(&a_dir, &["history", "notes.txt"]).await;
     script.both(&a_dir, &["file", "list"]).await;

@@ -26,6 +26,7 @@ const KIND_WORDS: [OperationKind, string, string][] = [
   [OperationKind.ABANDON, "abandon", "abandons"],
   [OperationKind.UNDO, "undo", "undos"],
   [OperationKind.IMPORT_REFS, "ref import", "ref imports"],
+  [OperationKind.TRANSITION, "transition", "transitions"],
   [OperationKind.OTHER, "other", "other"],
   [OperationKind.UNSPECIFIED, "unclassified", "unclassified"],
 ];

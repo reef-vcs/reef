@@ -551,7 +551,7 @@ mod tests {
             .keys()
             .filter(|name| name.starts_with("brief."))
             .collect();
-        assert_eq!(views.len(), 17, "{views:?}");
+        assert_eq!(views.len(), 22, "{views:?}");
         for name in views {
             let view = &defs[name];
             let full = &defs[name.trim_start_matches("brief.")];

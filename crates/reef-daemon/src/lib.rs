@@ -20,6 +20,7 @@ pub mod executor;
 pub mod history;
 pub mod identity;
 pub mod lease;
+pub mod lifecycle;
 pub mod limits;
 pub mod lock;
 pub mod logging;

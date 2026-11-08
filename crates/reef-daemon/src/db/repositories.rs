@@ -212,6 +212,8 @@ impl Db {
             tx.execute("DELETE FROM provenance_sessions WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM job_evidence WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM jobs WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM lifecycle_transitions WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM lifecycle WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })

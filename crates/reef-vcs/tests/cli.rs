@@ -1818,12 +1818,16 @@ fn root_help_names_every_command() {
         // it: agents do not schedule checks, the landing service will. Nor
         // R3.06's `executor`: an operator runs it, not an agent. R3.07's
         // `policy` is in `--help-all` and the agent guide's long part: the
-        // first screen is at its budget.
+        // first screen is at its budget. So are R3.09's `propose` and
+        // `proposal`, until the landing service makes proposing how work
+        // lands (R3.13).
         if command == "completions"
             || command == "restore"
             || command == "job"
             || command == "executor"
             || command == "policy"
+            || command == "propose"
+            || command == "proposal"
         {
             continue;
         }

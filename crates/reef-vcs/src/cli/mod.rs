@@ -43,6 +43,7 @@ mod op;
 mod out;
 pub(crate) mod policy;
 mod presence;
+pub(crate) mod proposal;
 pub(crate) mod provenance;
 mod provider;
 mod remote;
@@ -319,6 +320,12 @@ enum Command {
     Describe(changes::DescribeArgs),
     /// Abandon a change: its descendants move onto its parents.
     Abandon(changes::AbandonArgs),
+    /// Propose a change for main: its lifecycle moves from draft to proposed.
+    #[command(after_help = "Example: reef propose @- -m 'ready for review'")]
+    Propose(proposal::ProposeArgs),
+    /// List, show, withdraw, decline and supersede proposals.
+    #[command(infer_subcommands = true)]
+    Proposal(proposal::Args),
     /// Revert one operation (`reef op log` lists them).
     Undo(op::UndoArgs),
     /// List the operation log, or show one operation.
@@ -820,6 +827,12 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Diff(args) => diff::run(&connect(&global, out).await?, args).await,
         Command::Describe(args) => changes::describe(&connect(&global, out).await?, args).await,
         Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
+        Command::Propose(args) => {
+            Box::pin(proposal::propose(&connect(&global, out).await?, args)).await
+        }
+        Command::Proposal(args) => {
+            Box::pin(proposal::run(&connect(&global, out).await?, args)).await
+        }
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,

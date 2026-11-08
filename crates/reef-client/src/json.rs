@@ -174,6 +174,10 @@ names_schema! {
     history_symbol_coverage_name_schema_or_null = history_symbol_coverage_name, true;
     lease_end_reason_schema_or_null = lease_end_reason, true;
     lease_state_schema = lease_state, false;
+    lifecycle_state_name_schema = lifecycle_state_name_or_unknown, false;
+    lifecycle_state_name_schema_or_null = lifecycle_state_name, true;
+    transition_actor_name_schema_or_null = transition_actor_name, true;
+    transition_cause_name_schema_or_null = transition_cause_name, true;
     operation_kind_name_schema_or_null = operation_kind_name, true;
     presence_kind_schema = presence_kind, false;
     snapshot_kind_name_schema = snapshot_kind_name, false;
@@ -1222,8 +1226,57 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::Undo) => "undo",
         Ok(v1::OperationKind::Edit) => "edit",
         Ok(v1::OperationKind::ImportRefs) => "import-refs",
+        Ok(v1::OperationKind::Transition) => "transition",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A lifecycle state's name (R3.09): `draft`, `proposed`, `queued`,
+/// `landed`, `declined`, `withdrawn` or `superseded`; `None` when unset.
+pub fn lifecycle_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::LifecycleState::try_from(state) {
+        Ok(v1::LifecycleState::Unspecified) => return None,
+        Ok(v1::LifecycleState::Draft) => "draft",
+        Ok(v1::LifecycleState::Proposed) => "proposed",
+        Ok(v1::LifecycleState::Queued) => "queued",
+        Ok(v1::LifecycleState::Landed) => "landed",
+        Ok(v1::LifecycleState::Declined) => "declined",
+        Ok(v1::LifecycleState::Withdrawn) => "withdrawn",
+        Ok(v1::LifecycleState::Superseded) => "superseded",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// [`lifecycle_state_name`], with `unknown` for unset.
+pub fn lifecycle_state_name_or_unknown(state: i32) -> &'static str {
+    lifecycle_state_name(state).unwrap_or(UNKNOWN)
+}
+
+/// A transition's cause (R3.09): `request`, `undo` or `observed`; `None`
+/// when unset.
+pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
+    let name = match v1::TransitionCause::try_from(cause) {
+        Ok(v1::TransitionCause::Unspecified) => return None,
+        Ok(v1::TransitionCause::Request) => "request",
+        Ok(v1::TransitionCause::Undo) => "undo",
+        Ok(v1::TransitionCause::Observed) => "observed",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Who performed a transition (R3.09): `human`, `agent` or `daemon`;
+/// `None` when unset.
+pub fn transition_actor_name(actor: i32) -> Option<&'static str> {
+    let name = match v1::TransitionActor::try_from(actor) {
+        Ok(v1::TransitionActor::Unspecified) => return None,
+        Ok(v1::TransitionActor::Human) => "human",
+        Ok(v1::TransitionActor::Agent) => "agent",
+        Ok(v1::TransitionActor::Daemon) => "daemon",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1300,6 +1353,203 @@ pub struct Change {
     pub workspace_ids: Vec<String>,
     /// jj workspaces whose working copy it is.
     pub jj_workspaces: Vec<String>,
+    /// Its lifecycle (R3.09); `null` when the daemon did not say.
+    pub lifecycle: Option<ChangeLifecycle>,
+}
+
+/// A change's lifecycle (R3.09, `docs/proposals.md`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ChangeLifecycle {
+    /// `draft`, `proposed`, `queued`, `landed`, `declined`, `withdrawn` or
+    /// `superseded`.
+    #[schemars(schema_with = "lifecycle_state_name_schema")]
+    pub state: String,
+    /// Whether a transition was recorded; false for a derived `draft`, or a
+    /// derived `landed` (immutable, never proposed through Reef).
+    pub recorded: bool,
+    /// Its proposal round; 0 when not recorded.
+    pub round: u32,
+    /// The commit its latest transition recorded.
+    pub commit_id: Option<String>,
+    /// While proposed or queued: its visible commit is another one.
+    pub amended: bool,
+    /// The bookmark it is proposed for.
+    pub destination: Option<String>,
+    /// For a superseded change, the superseding change in hex.
+    pub superseded_by: Option<String>,
+    /// Its latest transition.
+    pub last: Option<ChangeTransition>,
+    /// Whether the change has a visible commit.
+    pub visible: bool,
+}
+
+impl From<&v1::ChangeLifecycle> for ChangeLifecycle {
+    fn from(lifecycle: &v1::ChangeLifecycle) -> Self {
+        Self {
+            state: lifecycle_state_name_or_unknown(lifecycle.state).to_owned(),
+            recorded: lifecycle.recorded,
+            round: lifecycle.round,
+            commit_id: text(&lifecycle.commit_id),
+            amended: lifecycle.amended,
+            destination: text(&lifecycle.destination),
+            superseded_by: text(&lifecycle.superseded_by),
+            last: lifecycle.last.as_ref().map(ChangeTransition::from),
+            visible: lifecycle.visible,
+        }
+    }
+}
+
+/// One recorded transition of a change's lifecycle (R3.09).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ChangeTransition {
+    /// `trn_` and 16 hex digits.
+    pub id: String,
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its commit then.
+    pub commit_id: String,
+    /// The state before.
+    #[schemars(schema_with = "lifecycle_state_name_schema_or_null")]
+    pub from: Option<String>,
+    /// The state after.
+    #[schemars(schema_with = "lifecycle_state_name_schema_or_null")]
+    pub to: Option<String>,
+    /// `request`, `undo` or `observed`.
+    #[schemars(schema_with = "transition_cause_name_schema_or_null")]
+    pub cause: Option<String>,
+    /// Its proposal round.
+    pub round: u32,
+    /// The reason given; untrusted text.
+    pub reason: Option<String>,
+    /// For a supersede, the superseding change.
+    pub superseded_by: Option<String>,
+    /// The bookmark the change is proposed for.
+    pub destination: Option<String>,
+    /// For an undo, the operation it reverts.
+    pub undoes_operation_id: Option<String>,
+    /// The operation that recorded it.
+    pub operation_id: Option<String>,
+    /// GC collected that operation.
+    pub operation_collected: bool,
+    /// When it was recorded.
+    pub recorded_at: Option<String>,
+    /// The call's agent.
+    pub agent: Option<String>,
+    /// `human`, `agent` or `daemon`, as recorded.
+    #[schemars(schema_with = "transition_actor_name_schema_or_null")]
+    pub actor: Option<String>,
+    /// The operator identity recorded.
+    pub identity: Option<String>,
+    /// The provenance session of the workspace the call named.
+    pub session_id: Option<String>,
+    /// The remote token the call came through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteCaller>,
+}
+
+impl From<&v1::ChangeTransition> for ChangeTransition {
+    fn from(transition: &v1::ChangeTransition) -> Self {
+        Self {
+            id: transition.id.clone(),
+            change_id: transition.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&transition.change_id),
+            commit_id: transition.commit_id.clone(),
+            from: name(lifecycle_state_name(transition.from)),
+            to: name(lifecycle_state_name(transition.to)),
+            cause: name(transition_cause_name(transition.cause)),
+            round: transition.round,
+            reason: text(&transition.reason),
+            superseded_by: text(&transition.superseded_by),
+            destination: text(&transition.destination),
+            undoes_operation_id: text(&transition.undoes_operation_id),
+            operation_id: text(&transition.operation_id),
+            operation_collected: transition.operation_collected,
+            recorded_at: time(transition.recorded_at.as_ref()),
+            agent: text(&transition.agent),
+            actor: name(transition_actor_name(transition.actor)),
+            identity: text(&transition.identity),
+            session_id: text(&transition.session_id),
+            remote: transition.remote.as_ref().map(|remote| RemoteCaller {
+                token_id: remote.token_id.clone(),
+                token_name: remote.token_name.clone(),
+            }),
+        }
+    }
+}
+
+/// `reef propose` and `reef proposal withdraw|decline|supersede`: what a
+/// transition recorded (R3.09).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Transitioned {
+    /// The change afterwards.
+    pub change: Change,
+    /// Its lifecycle afterwards.
+    pub lifecycle: Option<ChangeLifecycle>,
+    /// The transition recorded; `null` when nothing changed.
+    pub transition: Option<ChangeTransition>,
+    /// The operation that recorded it; `null` when nothing changed.
+    pub operation_id: Option<String>,
+    /// The snapshot taken first, if it recorded one.
+    pub snapshot_operation_id: Option<String>,
+}
+
+impl From<&v1::TransitionChangeResponse> for Transitioned {
+    fn from(response: &v1::TransitionChangeResponse) -> Self {
+        Self {
+            change: change_or_default(response.change.as_ref()),
+            lifecycle: response.lifecycle.as_ref().map(ChangeLifecycle::from),
+            transition: response.transition.as_ref().map(ChangeTransition::from),
+            operation_id: operation_id(response.operation.as_ref()),
+            snapshot_operation_id: operation_id(response.snapshot.as_ref()),
+        }
+    }
+}
+
+/// `reef proposal list`: recorded lifecycles (R3.09).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Proposals {
+    /// The repository.
+    pub repo_id: String,
+    /// Newest update first.
+    pub proposals: Vec<Proposal>,
+}
+
+/// One recorded lifecycle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Proposal {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its lifecycle.
+    pub lifecycle: Option<ChangeLifecycle>,
+    /// The change at head; `null` when it has no visible commit.
+    pub change: Option<Change>,
+    /// The agent of its latest proposal.
+    pub proposed_by: Option<String>,
+}
+
+impl From<&v1::ProposalEntry> for Proposal {
+    fn from(entry: &v1::ProposalEntry) -> Self {
+        Self {
+            change_id: entry.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&entry.change_id),
+            lifecycle: entry.lifecycle.as_ref().map(ChangeLifecycle::from),
+            change: entry.change.as_ref().map(Change::from),
+            proposed_by: text(&entry.proposed_by),
+        }
+    }
+}
+
+/// `reef proposal show`: a change's lifecycle and its transitions (R3.09).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProposalHistory {
+    /// The change.
+    pub change: Change,
+    /// Newest first.
+    pub transitions: Vec<ChangeTransition>,
 }
 
 impl From<&v1::Change> for Change {
@@ -1323,6 +1573,7 @@ impl From<&v1::Change> for Change {
             tags: change.tags.clone(),
             workspace_ids: change.workspace_ids.clone(),
             jj_workspaces: change.jj_workspaces.clone(),
+            lifecycle: change.lifecycle.as_ref().map(ChangeLifecycle::from),
         }
     }
 }
@@ -1409,6 +1660,9 @@ pub struct Operation {
     /// over the socket.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteCaller>,
+    /// The lifecycle transitions it recorded (R3.09); absent for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<ChangeTransition>,
 }
 
 /// Who called through the remote listener (R2.08).
@@ -1443,6 +1697,7 @@ impl From<&v1::Operation> for Operation {
                 token_id: remote.token_id.clone(),
                 token_name: remote.token_name.clone(),
             }),
+            transitions: op.transitions.iter().map(ChangeTransition::from).collect(),
         }
     }
 }
@@ -2469,6 +2724,7 @@ mod tests {
                     "import-refs",
                     "external",
                     "other",
+                    "transition",
                 ],
             ),
             (

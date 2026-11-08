@@ -394,6 +394,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
         remote: remote_caller(&entry.attributes),
         attributes: entry.attributes.clone(),
         effects: None,
+        transitions: crate::lifecycle::messages::operation_transitions(entry),
     }
 }
 
@@ -451,6 +452,7 @@ pub(super) fn change(info: &ChangeInfo) -> v1::Change {
         tags: info.tags.clone(),
         workspace_ids,
         jj_workspaces,
+        lifecycle: None,
     }
 }
 
@@ -633,6 +635,7 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::Undo) => v1::OperationKind::Undo,
         Some(OpKind::Edit) => v1::OperationKind::Edit,
         Some(OpKind::ImportRefs) => v1::OperationKind::ImportRefs,
+        Some(OpKind::Transition) => v1::OperationKind::Transition,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
     }
@@ -699,6 +702,7 @@ pub(super) fn listed_operation(
         remote: remote_caller(&entry.attributes),
         attributes: entry.attributes.clone(),
         effects: None,
+        transitions: crate::lifecycle::messages::operation_transitions(entry),
     }
 }
 

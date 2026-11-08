@@ -21,6 +21,7 @@ pub mod gc;
 pub mod git;
 pub mod history;
 pub mod ignore;
+pub mod lifecycle;
 pub mod log;
 pub mod materialize;
 pub mod oplog;

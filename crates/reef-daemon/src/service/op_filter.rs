@@ -80,7 +80,15 @@ impl OpMatcher {
         class: &OpClass,
         owner: impl Fn(&str) -> Option<&'a str>,
     ) -> bool {
+        // An undo of a transition (kind UNDO) carries transitions too, and
+        // `transition` keeps it: whoever waits for a proposal's fate sees
+        // it undone (R3.09).
+        let transitions = self
+            .kinds
+            .contains(&i32::from(v1::OperationKind::Transition))
+            && entry.attributes.contains_key(oplog::ATTR_LIFECYCLE);
         if !self.kinds.is_empty()
+            && !transitions
             && !self
                 .kinds
                 .contains(&i32::from(convert::operation_kind(class.kind)))
@@ -105,9 +113,23 @@ impl OpMatcher {
         true
     }
 
-    /// Whether `effects` touch a change the filter names; false without
-    /// effects.
-    pub(crate) fn touches(&self, effects: Option<&OpEffects>) -> bool {
-        effects.is_some_and(|effects| self.changes.iter().any(|prefix| effects.touches(prefix)))
+    /// Whether `entry`'s `effects`, or the lifecycle transitions it
+    /// records (R3.09), touch a change the filter names; false without
+    /// either.
+    pub(crate) fn touches(&self, entry: &OpEntry, effects: Option<&OpEffects>) -> bool {
+        if effects.is_some_and(|effects| self.changes.iter().any(|prefix| effects.touches(prefix)))
+        {
+            return true;
+        }
+        if !entry.attributes.contains_key(oplog::ATTR_LIFECYCLE) {
+            return false;
+        }
+        reef_lib::jj::lifecycle::transitions_of(&entry.attributes)
+            .iter()
+            .any(|transition| {
+                self.changes
+                    .iter()
+                    .any(|prefix| transition.change.starts_with(prefix.as_str()))
+            })
     }
 }

@@ -73,3 +73,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0059](0059-executor-protocol.md) | Executor protocol | accepted |
 | [0060](0060-reference-executor.md) | Reference executor | accepted |
 | [0061](0061-repository-policy-file.md) | Repository policy file | accepted |
+| [0063](0063-change-lifecycle.md) | Change lifecycle | accepted |

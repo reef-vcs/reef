@@ -44,6 +44,7 @@ use reef_lib::jj::{
 use reef_lib::spec::SpecError;
 
 pub use create::ROOT_CHECKOUT;
+pub(crate) use create::{import_meta, refresh_for_resolve};
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;

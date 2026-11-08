@@ -3,6 +3,7 @@
 // operation from the stream and the same one from a list make the same
 // record. The operation pane reads the rest with `GetOperation`.
 import { timestampMs } from "@bufbuild/protobuf/wkt";
+import type { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
 import type { OperationKind, SnapshotKind, Operation } from "../gen/reef/api/v1/operations_pb";
 
 /** Characters of the description a record keeps. */
@@ -21,6 +22,8 @@ export interface OpRecord {
   username: string;
   hostname: string;
   description: string;
+  /** The state its first lifecycle transition moved a change to (R3.09). */
+  transitionTo?: LifecycleState;
 }
 
 export function recordOf(operation: Operation): OpRecord {
@@ -36,6 +39,7 @@ export function recordOf(operation: Operation): OpRecord {
     username: operation.username,
     hostname: operation.hostname,
     description: operation.description.slice(0, DESCRIPTION_KEPT),
+    ...(operation.transitions[0] ? { transitionTo: operation.transitions[0].to } : {}),
   };
 }
 

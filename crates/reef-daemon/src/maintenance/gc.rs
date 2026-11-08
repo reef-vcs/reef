@@ -468,6 +468,11 @@ async fn run_repo(
         }
     }
     drop(paused);
+    // The lifecycle transitions' operation ids follow the rewrite (R3.09);
+    // still under the create lock, so no transition records meanwhile.
+    if !jj.rewritten.is_empty() {
+        crate::lifecycle::map_operations(state, id, &jj.rewritten);
+    }
 
     let rest = clean_up(state, id, keep_newer, dry_run, store_leftovers).await;
 
