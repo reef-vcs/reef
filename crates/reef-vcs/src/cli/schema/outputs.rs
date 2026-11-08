@@ -448,6 +448,16 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         )
     },
     OutputRow {
+        note: Some(
+            "pages until --limit landings; a proposed policy that does not load (or a revision without one) is an error (2) listing every problem in `hint`; exits 0 whatever it reports",
+        ),
+        ..view(
+            &["policy", "simulate"],
+            object::<policy::PolicySimulation>,
+            object::<policy::BriefSimulation<'static>>,
+        )
+    },
+    OutputRow {
         note: Some("with --stdout, the starter file's text and nothing else"),
         bytes_with: &["stdout"],
         ..row(&["policy", "init"], object::<policy::PolicyInit>)

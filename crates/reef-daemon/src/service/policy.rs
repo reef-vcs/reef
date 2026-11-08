@@ -5,6 +5,10 @@
 //! evidence on its tree whose signature verifies at this read (with each
 //! signer's identity at witness time, and whether a job accepted it fresh),
 //! and every provenance record of its change. `reef_policy` does the rest.
+//! `SimulatePolicy` (R3.08) evaluates a proposed policy over recent
+//! landings with the same reads, in [`simulate`].
+
+pub mod simulate;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,7 +21,8 @@ use reef_lib::error::{Classify, ErrorKind};
 use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
 use reef_lib::jj::files;
 use reef_lib::jj::log::Describer;
-use reef_lib::jj::revset;
+use reef_lib::jj::revset::{self, RevsetScope};
+use reef_lib::jj::{CommitIdHex, ReadonlyRepo};
 use reef_policy::input::{self, Author, Change, File, Input, ProposedPolicy};
 use reef_policy::{Decision, Evaluation, RuleKind, Status as RuleStatus};
 use tonic::{Request, Response, Status};
@@ -48,6 +53,9 @@ pub enum PolicyError {
     /// Both `policy` text and a `policy_revision`.
     #[error("set `policy` or `policy_revision`, not both")]
     SourceConflict,
+    /// Neither `policy` text nor a `policy_revision`, where one is needed.
+    #[error("set `policy` or `policy_revision`: a simulation needs a proposed policy")]
+    SourceMissing,
     /// `policy` text over the file limit.
     #[error("the policy text is {bytes} bytes; a policy is at most {max}")]
     TooLarge {
@@ -64,7 +72,9 @@ pub enum PolicyError {
 impl Classify for PolicyError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::SourceConflict | Self::TooLarge { .. } => ErrorKind::InvalidArgument,
+            Self::SourceConflict | Self::SourceMissing | Self::TooLarge { .. } => {
+                ErrorKind::InvalidArgument
+            }
             Self::Task(_) => ErrorKind::Internal,
         }
     }
@@ -75,6 +85,9 @@ impl Advise for PolicyError {
         match self {
             Self::SourceConflict => Some(Advice::hint(
                 "Evaluate a policy file's text with `policy`, or the reef-policy.toml at a revision with `policy_revision`, not both.",
+            )),
+            Self::SourceMissing => Some(Advice::hint(
+                "Send the proposed policy file's text as `policy`, or name a revision whose reef-policy.toml to simulate with `policy_revision`; `reef policy simulate` reads ./reef-policy.toml by default.",
             )),
             Self::TooLarge { .. } => Some(Advice::hint(
                 "A policy is at most 256 KiB; `reef policy check` reports what a file holds.",
@@ -90,6 +103,7 @@ impl PolicyError {
         use reef_api::error as reason;
         Some(match self {
             Self::SourceConflict => (reason::POLICY_SOURCE_CONFLICT, Vec::new()),
+            Self::SourceMissing => (reason::POLICY_SOURCE_MISSING, Vec::new()),
             Self::TooLarge { bytes, max } => (
                 reason::POLICY_TOO_LARGE,
                 vec![("bytes", bytes.to_string()), ("max", max.to_string())],
@@ -117,19 +131,204 @@ impl PolicyHandler {
 }
 
 /// A policy file read from a tree.
+#[derive(Clone)]
 struct PolicyFile {
     blob_id: String,
     bytes: Result<Vec<u8>, String>,
 }
 
-/// What the repository thread reads.
-struct Read {
+/// What the repository thread reads about one change.
+struct ChangeRead {
     change: Change,
     tree_id: Option<String>,
+    /// The change's own `reef-policy.toml`, when it touches it.
     proposed: Option<PolicyFile>,
-    source_commit: String,
-    source: Option<PolicyFile>,
-    at_operation: String,
+    /// When it was committed.
+    committed_at: std::time::SystemTime,
+}
+
+/// The change at `commit`, its diff against its merged parents (every
+/// file, with sizes), and its own policy file when it touches one.
+/// `should_stop` ends the diff early once nobody waits for the answer.
+async fn read_change(
+    repo: &ReadonlyRepo,
+    scope: &RevsetScope<'_>,
+    commit: &CommitIdHex,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<ChangeRead, Status> {
+    let info = Describer::new(repo, scope)
+        .map_err(status)?
+        .describe(commit)
+        .await
+        .map_err(status)?;
+    // One page of everything, up to one past the cap: `diff_page` streams
+    // the whole diff on every call, so paging would be quadratic (review
+    // finding 8).
+    let options = DiffOptions {
+        format: DiffFormat::Stat,
+        context: 0,
+        max_lines: usize::MAX,
+        max_hunk_bytes: usize::MAX,
+        max_file_bytes: MAX_FILE_BYTES,
+        paths: Vec::new(),
+        after: None,
+        limit: reef_policy::MAX_PATHS + 1,
+        pairs: false,
+        sizes: true,
+    };
+    let files = diff::diff_page(repo, &DiffBase::Parents, commit, &options, should_stop)
+        .await
+        .map_err(status)?
+        .files;
+    let commit_tree = files::commit_tree(repo, commit).await.map_err(status)?;
+    // The evaluator matches the name ASCII case-insensitively; so does
+    // this (review finding 11).
+    let touches_policy = files.iter().any(|file| {
+        file.path.eq_ignore_ascii_case(reef_policy::POLICY_PATH)
+            || file
+                .old_path
+                .as_deref()
+                .is_some_and(|old| old.eq_ignore_ascii_case(reef_policy::POLICY_PATH))
+    });
+    let proposed = if touches_policy {
+        policy_file(&commit_tree).await?
+    } else {
+        None
+    };
+    let mut paths: Vec<String> = files
+        .iter()
+        .flat_map(|file| std::iter::once(file.path.clone()).chain(file.old_path.clone()))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let lines_added = files.iter().map(|f| i64::from(f.lines_added)).sum();
+    let lines_removed = files.iter().map(|f| i64::from(f.lines_removed)).sum();
+    let change = Change {
+        id: info.change_id.as_str().to_owned(),
+        commit: info.commit_id.as_str().to_owned(),
+        tree: info.tree_id.clone().unwrap_or_default(),
+        parents: info
+            .parent_commit_ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
+            .collect(),
+        description: info.description.clone(),
+        author: Author {
+            name: info.author.name.clone(),
+            email: info.author.email.clone(),
+        },
+        empty: info.empty,
+        conflicted: info.conflict,
+        paths,
+        files: files
+            .iter()
+            .map(|file| File {
+                path: file.path.clone(),
+                old_path: file.old_path.clone().unwrap_or_default(),
+                status: file_status(file.kind).to_owned(),
+                binary: file.binary,
+                too_large: file.too_large,
+                lines_added: if file.binary || file.too_large {
+                    0
+                } else {
+                    i64::from(file.lines_added)
+                },
+                lines_removed: if file.binary || file.too_large {
+                    0
+                } else {
+                    i64::from(file.lines_removed)
+                },
+                size: i64::try_from(file.new_size).unwrap_or(i64::MAX),
+            })
+            .collect(),
+        lines_added,
+        lines_removed,
+    };
+    Ok(ChangeRead {
+        change,
+        tree_id: info.tree_id,
+        proposed,
+        committed_at: info.committer.at,
+    })
+}
+
+/// The commit `revision` resolves to, and the `reef-policy.toml` in its
+/// tree, if it has one.
+async fn policy_at(
+    repo: &ReadonlyRepo,
+    scope: &RevsetScope<'_>,
+    revision: &str,
+) -> Result<(String, Option<PolicyFile>), Status> {
+    let resolved = revset::resolve_revision(repo, revision, scope)
+        .await
+        .map_err(status)?;
+    let tree = files::commit_tree(repo, &resolved.commit_id)
+        .await
+        .map_err(status)?;
+    Ok((
+        resolved.commit_id.as_str().to_owned(),
+        policy_file(&tree).await?,
+    ))
+}
+
+/// What the input says about the change's own policy file: whether it
+/// loads. Compiles through the cache, so it blocks.
+fn proposed_policy(state: &AppState, proposed: Option<&PolicyFile>) -> ProposedPolicy {
+    match proposed {
+        None => ProposedPolicy::default(),
+        Some(file) => match &file.bytes {
+            Ok(bytes) => ProposedPolicy {
+                present: true,
+                sha256: reef_policy::sha256_hex(bytes),
+                diagnostics: match &*state.policy.load(bytes) {
+                    Loaded::Policy(_) => Vec::new(),
+                    Loaded::Invalid(diagnostics) => diagnostics.clone(),
+                },
+            },
+            Err(problem) => ProposedPolicy {
+                present: true,
+                sha256: String::new(),
+                diagnostics: vec![reef_policy::Diagnostic {
+                    message: problem.clone(),
+                    ..reef_policy::Diagnostic::default()
+                }],
+            },
+        },
+    }
+}
+
+/// Where the policy an evaluation runs comes from.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// A request's text.
+    Text(&'a [u8]),
+    /// The file at a revision, or none there.
+    File(Option<&'a PolicyFile>),
+}
+
+/// `source` evaluated over `input`, through the daemon's cache. Blocks.
+fn evaluate_source(state: &AppState, source: Source<'_>, input: &Input) -> Evaluation {
+    match source {
+        Source::Text(bytes) => evaluate(state, Some(bytes), input),
+        Source::File(None) => evaluate(state, None, input),
+        Source::File(Some(file)) => match &file.bytes {
+            Ok(bytes) => evaluate(state, Some(bytes), input),
+            // A file that cannot be read whole: invalid, with no SHA-256,
+            // since its bytes were not read.
+            Err(problem) => {
+                let mut evaluation = Evaluation::invalid(
+                    &[],
+                    vec![reef_policy::Diagnostic {
+                        message: problem.clone(),
+                        ..reef_policy::Diagnostic::default()
+                    }],
+                    input,
+                );
+                evaluation.sha256.clear();
+                evaluation
+            }
+        },
+    }
 }
 
 /// `reef-policy.toml` in `tree`, if it has one.
@@ -466,26 +665,38 @@ fn file_status(kind: Option<diff::ChangeKind>) -> &'static str {
 fn source_message(
     revision: &str,
     commit: &str,
-    file: Option<&PolicyFile>,
-    from_request: Option<&[u8]>,
-    evaluation: &Evaluation,
+    source: Source<'_>,
+    sha256: &str,
+    version: u32,
 ) -> v1::PolicySource {
-    match from_request {
-        Some(_) => v1::PolicySource {
-            sha256: evaluation.sha256.clone(),
-            version: evaluation.version,
+    match source {
+        Source::Text(_) => v1::PolicySource {
+            sha256: sha256.to_owned(),
+            version,
             from_request: true,
             ..v1::PolicySource::default()
         },
-        None => v1::PolicySource {
+        Source::File(file) => v1::PolicySource {
             revision: revision.to_owned(),
             commit_id: commit.to_owned(),
             path: reef_policy::POLICY_PATH.to_owned(),
             blob_id: file.map(|file| file.blob_id.clone()).unwrap_or_default(),
-            sha256: evaluation.sha256.clone(),
-            version: evaluation.version,
+            sha256: sha256.to_owned(),
+            version,
             from_request: false,
         },
+    }
+}
+
+/// A rule kind as the API's.
+fn rule_kind(kind: RuleKind) -> v1::PolicyRuleKind {
+    match kind {
+        RuleKind::Builtin => v1::PolicyRuleKind::Builtin,
+        RuleKind::Require => v1::PolicyRuleKind::Require,
+        RuleKind::Limits => v1::PolicyRuleKind::Limits,
+        RuleKind::Forbid => v1::PolicyRuleKind::Forbid,
+        RuleKind::Signoff => v1::PolicyRuleKind::Signoff,
+        RuleKind::Rule => v1::PolicyRuleKind::Rule,
     }
 }
 
@@ -522,15 +733,7 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
             .iter()
             .map(|rule| v1::PolicyRuleResult {
                 name: rule.name.clone(),
-                kind: match rule.kind {
-                    RuleKind::Builtin => v1::PolicyRuleKind::Builtin,
-                    RuleKind::Require => v1::PolicyRuleKind::Require,
-                    RuleKind::Limits => v1::PolicyRuleKind::Limits,
-                    RuleKind::Forbid => v1::PolicyRuleKind::Forbid,
-                    RuleKind::Signoff => v1::PolicyRuleKind::Signoff,
-                    RuleKind::Rule => v1::PolicyRuleKind::Rule,
-                }
-                .into(),
+                kind: rule_kind(rule.kind).into(),
                 status: match rule.status {
                     RuleStatus::Satisfied => v1::PolicyRuleStatus::Satisfied,
                     RuleStatus::Unsatisfied => v1::PolicyRuleStatus::Unsatisfied,
@@ -601,10 +804,10 @@ impl PolicyService for PolicyHandler {
             }));
         }
         let state = &self.state;
-        let _turn = state
-            .policy
-            .turns
-            .acquire()
+        // Owned, and moved into the blocking task below: a caller that goes
+        // away does not free the turn while its evaluation still runs.
+        let turn = Arc::clone(&state.policy.turns)
+            .acquire_owned()
             .await
             .map_err(|error| status(PolicyError::Task(error.to_string())))?;
         let target = target(state, &request.repo, &request.workspace)?;
@@ -628,10 +831,11 @@ impl PolicyService for PolicyHandler {
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
         let read_target = target.clone();
+        let (stop, _guard) = state.reads.stop();
         let at_operation = request.at_operation.clone();
         let wanted_revision = revision.clone();
         let wanted_policy = policy_revision.clone();
-        let read = state
+        let (read, source_commit, source, at_operation) = state
             .reads
             .run(&target.handle, move || async move {
                 let target = read_target;
@@ -640,141 +844,14 @@ impl PolicyService for PolicyHandler {
                 let resolved = revset::resolve_revision(&repo, &wanted_revision, &scope)
                     .await
                     .map_err(status)?;
-                let info = Describer::new(&repo, &scope)
-                    .map_err(status)?
-                    .describe(&resolved.commit_id)
-                    .await
-                    .map_err(status)?;
-                // The diff against the merged parents, every page, with sizes.
-                let mut files = Vec::new();
-                let mut after = None;
-                loop {
-                    // One page of everything, up to one past the cap:
-                    // `diff_page` streams the whole diff on every call, so
-                    // paging would be quadratic (review finding 8).
-                    let options = DiffOptions {
-                        format: DiffFormat::Stat,
-                        context: 0,
-                        max_lines: usize::MAX,
-                        max_hunk_bytes: usize::MAX,
-                        max_file_bytes: MAX_FILE_BYTES,
-                        paths: Vec::new(),
-                        after,
-                        limit: reef_policy::MAX_PATHS + 1,
-                        pairs: false,
-                        sizes: true,
-                    };
-                    let page = diff::diff_page(
-                        &repo,
-                        &DiffBase::Parents,
-                        &resolved.commit_id,
-                        &options,
-                        &|| false,
-                    )
-                    .await
-                    .map_err(status)?;
-                    after = page
-                        .files
-                        .last()
-                        .map(|file| files::check_path(&file.path, false))
-                        .transpose()
-                        .map_err(status)?;
-                    let more = page.more;
-                    files.extend(page.files);
-                    if !more || files.len() > reef_policy::MAX_PATHS {
-                        break;
-                    }
-                }
-                let commit_tree = files::commit_tree(&repo, &resolved.commit_id)
-                    .await
-                    .map_err(status)?;
-                // The evaluator matches the name ASCII case-insensitively;
-                // so does this (review finding 11).
-                let touches_policy = files.iter().any(|file| {
-                    file.path.eq_ignore_ascii_case(reef_policy::POLICY_PATH)
-                        || file
-                            .old_path
-                            .as_deref()
-                            .is_some_and(|old| old.eq_ignore_ascii_case(reef_policy::POLICY_PATH))
-                });
-                let proposed = if touches_policy {
-                    policy_file(&commit_tree).await?
-                } else {
-                    None
-                };
+                let read =
+                    read_change(&repo, &scope, &resolved.commit_id, &|| stop.requested()).await?;
                 let (source_commit, source) = if from_request {
                     (String::new(), None)
                 } else {
-                    let resolved = revset::resolve_revision(&repo, &wanted_policy, &scope)
-                        .await
-                        .map_err(status)?;
-                    let tree = files::commit_tree(&repo, &resolved.commit_id)
-                        .await
-                        .map_err(status)?;
-                    (
-                        resolved.commit_id.as_str().to_owned(),
-                        policy_file(&tree).await?,
-                    )
+                    policy_at(&repo, &scope, &wanted_policy).await?
                 };
-                let mut paths: Vec<String> = files
-                    .iter()
-                    .flat_map(|file| {
-                        std::iter::once(file.path.clone()).chain(file.old_path.clone())
-                    })
-                    .collect();
-                paths.sort();
-                paths.dedup();
-                let lines_added = files.iter().map(|f| i64::from(f.lines_added)).sum();
-                let lines_removed = files.iter().map(|f| i64::from(f.lines_removed)).sum();
-                let change = Change {
-                    id: info.change_id.as_str().to_owned(),
-                    commit: info.commit_id.as_str().to_owned(),
-                    tree: info.tree_id.clone().unwrap_or_default(),
-                    parents: info
-                        .parent_commit_ids
-                        .iter()
-                        .map(|id| id.as_str().to_owned())
-                        .collect(),
-                    description: info.description.clone(),
-                    author: Author {
-                        name: info.author.name.clone(),
-                        email: info.author.email.clone(),
-                    },
-                    empty: info.empty,
-                    conflicted: info.conflict,
-                    paths,
-                    files: files
-                        .iter()
-                        .map(|file| File {
-                            path: file.path.clone(),
-                            old_path: file.old_path.clone().unwrap_or_default(),
-                            status: file_status(file.kind).to_owned(),
-                            binary: file.binary,
-                            too_large: file.too_large,
-                            lines_added: if file.binary || file.too_large {
-                                0
-                            } else {
-                                i64::from(file.lines_added)
-                            },
-                            lines_removed: if file.binary || file.too_large {
-                                0
-                            } else {
-                                i64::from(file.lines_removed)
-                            },
-                            size: i64::try_from(file.new_size).unwrap_or(i64::MAX),
-                        })
-                        .collect(),
-                    lines_added,
-                    lines_removed,
-                };
-                Ok::<_, Status>(Read {
-                    change,
-                    tree_id: info.tree_id,
-                    proposed,
-                    source_commit,
-                    source,
-                    at_operation: op_id(&repo),
-                })
+                Ok::<_, Status>((read, source_commit, source, op_id(&repo)))
             })
             .await
             .map_err(status)??;
@@ -787,78 +864,35 @@ impl PolicyService for PolicyHandler {
         let state = Arc::clone(&self.state);
         let request_policy = request.policy.clone();
         let include_input = request.include_input;
-        let Read {
+        let ChangeRead {
             change,
             tree_id,
             proposed,
-            source_commit,
-            source,
-            at_operation,
+            ..
         } = read;
         let evaluation = tokio::task::spawn_blocking(move || {
-            let proposed_policy = match &proposed {
-                None => ProposedPolicy::default(),
-                Some(file) => match &file.bytes {
-                    Ok(bytes) => ProposedPolicy {
-                        present: true,
-                        sha256: reef_policy::sha256_hex(bytes),
-                        diagnostics: match &*state.policy.load(bytes) {
-                            Loaded::Policy(_) => Vec::new(),
-                            Loaded::Invalid(diagnostics) => diagnostics.clone(),
-                        },
-                    },
-                    Err(problem) => ProposedPolicy {
-                        present: true,
-                        sha256: String::new(),
-                        diagnostics: vec![reef_policy::Diagnostic {
-                            message: problem.clone(),
-                            ..reef_policy::Diagnostic::default()
-                        }],
-                    },
-                },
-            };
+            let _turn = turn;
             let input = Input {
                 change,
                 evidence,
                 provenance,
                 evidence_ignored: ignored,
                 provenance_ignored,
-                proposed_policy,
+                proposed_policy: proposed_policy(&state, proposed.as_ref()),
             };
-            let (bytes, problem): (Option<&[u8]>, Option<String>) = if from_request {
-                (Some(request_policy.as_slice()), None)
+            let policy = if from_request {
+                Source::Text(&request_policy)
             } else {
-                match &source {
-                    None => (None, None),
-                    Some(file) => match &file.bytes {
-                        Ok(bytes) => (Some(bytes.as_slice()), None),
-                        Err(problem) => (None, Some(problem.clone())),
-                    },
-                }
+                Source::File(source.as_ref())
             };
-            let mut evaluation = match problem {
-                Some(problem) => Evaluation::invalid(
-                    &[],
-                    vec![reef_policy::Diagnostic {
-                        message: problem,
-                        ..reef_policy::Diagnostic::default()
-                    }],
-                    &input,
-                ),
-                None => evaluate(&state, bytes, &input),
-            };
-            if evaluation.decision == Decision::InvalidPolicy
-                && source.as_ref().is_some_and(|f| f.bytes.is_err())
-            {
-                evaluation.sha256.clear();
-            }
+            let evaluation = evaluate_source(&state, policy, &input);
             let mut message = evaluation_message(&evaluation);
             message.source = Some(source_message(
                 &policy_revision,
                 &source_commit,
-                source.as_ref(),
-                from_request.then_some(request_policy.as_slice()),
-                &evaluation,
+                policy,
+                &evaluation.sha256,
+                evaluation.version,
             ));
             input.change.id.clone_into(&mut message.change_id);
             input.change.commit.clone_into(&mut message.commit_id);
@@ -874,5 +908,13 @@ impl PolicyService for PolicyHandler {
         Ok(Response::new(EvaluatePolicyResponse {
             evaluation: Some(evaluation),
         }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn simulate_policy(
+        &self,
+        request: Request<v1::SimulatePolicyRequest>,
+    ) -> Result<Response<v1::SimulatePolicyResponse>, Status> {
+        simulate::simulate(self, request).await
     }
 }

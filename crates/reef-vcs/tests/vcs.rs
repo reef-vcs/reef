@@ -4712,3 +4712,279 @@ async fn policy_cli() {
     assert_eq!(printed, written);
     daemon.stop().await;
 }
+
+/// R3.08 test 10: `reef policy simulate`.
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_simulate_cli() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    // `@` adds main's would-be policy and a key; its parent is the
+    // synthetic tree.
+    write(&ws, "reef-policy.toml", reef_policy::starter("alice"));
+    write(&ws, "secrets/key.pem", "-----BEGIN-----\n");
+    let work = tempfile::tempdir().unwrap();
+    let proposed = work.path().join("proposed.toml");
+    std::fs::write(
+        &proposed,
+        format!(
+            "{}\n[[forbid]]\nname = \"secrets\"\npaths = [\"secrets/**\"]\n",
+            reef_policy::starter("alice")
+        ),
+    )
+    .unwrap();
+    let proposed = proposed.to_str().unwrap();
+    let window = "::@ ~ root()";
+
+    // No policy on trunk(): nothing to compare with.
+    let simulated = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            proposed,
+            "-r",
+            window,
+        ],
+    )
+    .await;
+    assert_eq!(simulated["proposed"]["from_request"], true);
+    assert_eq!(simulated["proposed"]["path"], proposed);
+    assert_eq!(simulated["baseline_state"], "no_policy", "{simulated}");
+    assert_eq!(simulated["truncated"], false);
+    let landings = simulated["landings"].as_array().unwrap();
+    assert_eq!(landings.len(), 2, "{simulated}");
+    let at = &landings[0];
+    assert_eq!(at["outcome"], "blocked");
+    let unmet: Vec<&str> = at["unmet"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(unmet, ["builtin:owners", "tests", "keys", "secrets"]);
+    assert_eq!(at["missing_evidence_only"], false);
+    assert!(at["committed_at"].is_string());
+    let parent = &landings[1];
+    assert_eq!(parent["outcome"], "blocked");
+    assert_eq!(parent["missing_evidence_only"], true);
+    assert_eq!(simulated["summary"]["blocked"], 2);
+    assert_eq!(simulated["summary"]["missing_evidence_only"], 1);
+
+    // Against `@`'s own policy: the key is what the proposal adds.
+    let compared = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            proposed,
+            "-r",
+            window,
+            "--baseline-revision",
+            "@",
+        ],
+    )
+    .await;
+    assert_eq!(compared["baseline_state"], "loads");
+    assert_eq!(compared["landings"][0]["outcome"], "still_blocked");
+    assert_eq!(compared["landings"][0]["baseline_decision"], "block");
+    assert_eq!(compared["summary"]["still_blocked"], 2);
+    let secrets = compared["summary"]["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["name"] == "secrets")
+        .unwrap();
+    assert_eq!(secrets["landings"], 1);
+
+    // Brief and text.
+    let brief = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "brief",
+            "policy",
+            "simulate",
+            "--policy-file",
+            proposed,
+            "-r",
+            window,
+        ],
+    )
+    .await;
+    assert_eq!(brief["blocked"], 2, "{brief}");
+    assert_eq!(brief["blocking"][0]["outcome"], "blocked");
+    assert_eq!(brief["blocking"][0]["rules"][3], "secrets");
+    let text = stdout(
+        &run_in(
+            &daemon,
+            &dir,
+            &[
+                "-o",
+                "text",
+                "policy",
+                "simulate",
+                "--policy-file",
+                proposed,
+                "-r",
+                window,
+            ],
+        )
+        .await,
+    );
+    assert!(
+        text.contains("2 landings: 2 would have been blocked (1 only for missing evidence)"),
+        "{text}"
+    );
+    assert!(text.contains("tests: missing test from local"), "{text}");
+    assert!(
+        text.contains("blocked by: builtin:owners 1, tests 2, keys 1, secrets 1"),
+        "{text}"
+    );
+
+    // --limit stops early and says so.
+    let one = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            proposed,
+            "-r",
+            window,
+            "--limit",
+            "1",
+        ],
+    )
+    .await;
+    assert_eq!(one["landings"].as_array().unwrap().len(), 1);
+    assert_eq!(one["truncated"], true);
+    // Pages of one landing each (the daemon's cost bound lowered): the CLI
+    // follows them and sums their counts.
+    let policy = &daemon.handle.state().policy;
+    policy
+        .page_cost
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    let paged = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            proposed,
+            "-r",
+            window,
+        ],
+    )
+    .await;
+    assert_eq!(paged["landings"], simulated["landings"]);
+    assert_eq!(paged["summary"], simulated["summary"]);
+    assert_eq!(paged["truncated"], false);
+    policy
+        .page_cost
+        .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+
+    // The policy at a revision.
+    let at_rev = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-revision",
+            "@",
+            "-r",
+            window,
+        ],
+    )
+    .await;
+    assert_eq!(at_rev["proposed"]["revision"], "@");
+    assert_eq!(at_rev["proposed"]["from_request"], false);
+    err(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-revision",
+            "root()",
+        ],
+        2,
+        "INVALID_POLICY",
+    )
+    .await;
+
+    // A file that does not load, and no file at all.
+    std::fs::write(
+        work.path().join("bad.toml"),
+        "version = 1\n[owners]\ngroups = [\"x\"]\n",
+    )
+    .unwrap();
+    let bad = work.path().join("bad.toml");
+    let error = err(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            bad.to_str().unwrap(),
+        ],
+        2,
+        "INVALID_POLICY",
+    )
+    .await;
+    assert!(
+        error["message"].as_str().unwrap().contains("bad.toml:3:11"),
+        "{error}"
+    );
+    let empty = work.path().join("empty.toml");
+    std::fs::write(&empty, "").unwrap();
+    err(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "policy",
+            "simulate",
+            "--policy-file",
+            empty.to_str().unwrap(),
+        ],
+        2,
+        "INVALID_POLICY",
+    )
+    .await;
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let error = err(
+        &daemon,
+        &dir.join("sub"),
+        &["-o", "json", "policy", "simulate"],
+        2,
+        "POLICY_SOURCE_MISSING",
+    )
+    .await;
+    assert!(error["hint"].as_str().unwrap().contains("--policy-file"));
+    daemon.stop().await;
+}

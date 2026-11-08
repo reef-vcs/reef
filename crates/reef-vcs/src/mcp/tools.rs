@@ -663,6 +663,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "an agent runs `reef policy eval`; R3.13's proposal flow reports it; tools/list is at its budget (#116)",
     ),
     (
+        "/reef.api.v1.PolicyService/SimulatePolicy",
+        "a policy author runs `reef policy simulate`; the policy editor renders it; tools/list is at its budget (#116)",
+    ),
+    (
         "/reef.api.v1.ProvenanceService/DeclareProvenance",
         "declared by the harness's hooks and by the server from its environment and the client's initialize, not by a tool call",
     ),

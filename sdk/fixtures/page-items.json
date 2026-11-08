@@ -2,6 +2,7 @@
   "about": "The items of each paged RPC whose response has more than one repeated field: the field the SDKs' `All` iterators yield, or null when the items depend on the request, so the RPC gets a page iterator only. Read by sdk/python/codegen/clientgen.py and sdk/typescript/codegen/protoc-gen-reef.mjs. ADR 0029's checklist, item 12.",
   "items": {
     "GetDiff": "files",
-    "QueryChanges": null
+    "QueryChanges": null,
+    "SimulatePolicy": "landings"
   }
 }

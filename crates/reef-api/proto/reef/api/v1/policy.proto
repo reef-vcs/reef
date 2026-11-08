@@ -13,6 +13,7 @@ syntax = "proto3";
 
 package reef.api.v1;
 
+import "google/protobuf/timestamp.proto";
 import "reef/api/v1/options.proto";
 
 // Evaluating a repository's policy.
@@ -38,6 +39,36 @@ service PolicyService {
   // snapshot's own error, with reason SNAPSHOT_FAILED (metadata
   // `workspace_id`).
   rpc EvaluatePolicy(EvaluatePolicyRequest) returns (EvaluatePolicyResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Evaluates a proposed policy over recent landings and reports which it
+  // would have blocked, and why (R3.08, ADR 0062). Until the landing
+  // service records landings, a landing is a commit of `revisions`: by
+  // default every non-merge ancestor of `trunk()`, newest first, each
+  // judged as its own change, as EvaluatePolicy judges it. Each landing is
+  // also evaluated under a baseline, the policy at `baseline_revision`
+  // (`trunk()` by default), and compared with it.
+  //
+  // One page per call. A page stops at the first of: `page_size`
+  // landings; the landing whose evaluations take the page's summed cost
+  // past 100,000,000; the landing that takes the page's touched paths past
+  // 200,000; the landing that takes the evidence and provenance rows its
+  // landings read past 50,000; the landing that would take its landings'
+  // encoded size past 3 MiB. A daemon reads at most two pages at once, and
+  // each evaluation takes one of its evaluation turns. Later pages read the
+  // operation the first page read. A proposed policy that does not load, or a revision
+  // without one, is answered at once with no landing evaluated.
+  //
+  // Errors: the revision reasons of ChangeService for `revisions`,
+  // `policy_revision` and `baseline_revision`; INVALID_ARGUMENT with reason
+  // POLICY_SOURCE_CONFLICT when both `policy` and `policy_revision` are
+  // set, POLICY_SOURCE_MISSING when neither is, POLICY_TOO_LARGE (metadata
+  // `bytes`, `max`) when `policy` is over 256 KiB, and INVALID_PAGE_TOKEN;
+  // a negative `page_size` is INVALID_ARGUMENT; a failed snapshot's own
+  // error, with reason SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc SimulatePolicy(SimulatePolicyRequest) returns (SimulatePolicyResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -247,4 +278,160 @@ message EvaluatePolicyRequest {
 message EvaluatePolicyResponse {
   // The evaluation.
   PolicyEvaluation evaluation = 1;
+}
+
+// How a landing's decision under the proposed policy compares with its
+// decision under the baseline. Blocked means anything but ALLOW.
+enum PolicySimulationOutcome {
+  // Not set: never an outcome the daemon returns.
+  POLICY_SIMULATION_OUTCOME_UNSPECIFIED = 0;
+  // The proposed policy blocks it; the baseline allows it.
+  POLICY_SIMULATION_OUTCOME_NEWLY_BLOCKED = 1;
+  // Both block it.
+  POLICY_SIMULATION_OUTCOME_STILL_BLOCKED = 2;
+  // The proposed policy allows it; the baseline blocks it.
+  POLICY_SIMULATION_OUTCOME_NEWLY_ALLOWED = 3;
+  // Both allow it.
+  POLICY_SIMULATION_OUTCOME_STILL_ALLOWED = 4;
+  // The proposed policy blocks it, and there is no baseline to compare
+  // with: none was asked for, or the baseline revision has no policy.
+  POLICY_SIMULATION_OUTCOME_BLOCKED = 5;
+  // The proposed policy allows it, and there is no baseline to compare
+  // with.
+  POLICY_SIMULATION_OUTCOME_ALLOWED = 6;
+}
+
+// A proposed policy and the landings to judge with it.
+message SimulatePolicyRequest {
+  // The repository, by id or path; empty for the workspace's.
+  string repo = 1;
+  // A workspace id, for revsets that name `@`.
+  string workspace = 2;
+  // The landings: a revset, read newest first. Empty for every non-merge
+  // ancestor of `trunk()`, `::trunk() ~ root() ~ merges()`.
+  string revisions = 3;
+  // The proposed policy's bytes, at most 256 KiB.
+  bytes policy = 4;
+  // Or the `reef-policy.toml` at this revision. Exactly one of `policy`
+  // and `policy_revision`.
+  string policy_revision = 5;
+  // Where the baseline policy is read; empty for `trunk()`. Ignored with
+  // `no_baseline`.
+  string baseline_revision = 6;
+  // Evaluate the proposed policy only, with no baseline.
+  bool no_baseline = 7;
+  // Read at this operation instead of the head.
+  string at_operation = 8;
+  // Don't snapshot a workspace whose `@` the revisions use first.
+  bool skip_snapshot = 9;
+  // Landings per page: 0 means 20, more than 100 means 100, and a negative
+  // value is INVALID_ARGUMENT. A page may hold fewer.
+  int32 page_size = 10;
+  // The previous page's `next_page_token`; empty for the first page. A
+  // token sent with different fields is INVALID_ARGUMENT, reason
+  // INVALID_PAGE_TOKEN.
+  string page_token = 11;
+  // Fill each landing's `evaluation` and `baseline_evaluation`.
+  bool include_evaluations = 12;
+}
+
+// One landing, judged by the proposed policy and the baseline.
+message PolicySimulatedLanding {
+  // Its change.
+  string change_id = 1;
+  // Its commit.
+  string commit_id = 2;
+  // Its tree; empty when conflicted.
+  string tree_id = 3;
+  // The first line of its description.
+  string subject = 4;
+  // Its author, as `name <email>`.
+  string author = 5;
+  // When it was committed.
+  google.protobuf.Timestamp committed_at = 6;
+  // The proposed policy's decision: ALLOW or BLOCK.
+  PolicyDecision decision = 7;
+  // The baseline's decision; UNSPECIFIED with `no_baseline`.
+  PolicyDecision baseline_decision = 8;
+  // How the two compare.
+  PolicySimulationOutcome outcome = 9;
+  // The proposed policy's rules that are unsatisfied or errored, in the
+  // evaluation's order.
+  repeated PolicyRuleResult unmet = 10;
+  // The names of the baseline's rules that are unsatisfied or errored.
+  repeated string baseline_unmet = 11;
+  // Blocked by the proposed policy only for evidence that is missing:
+  // every unmet rule is a required-evidence rule with no failed evidence.
+  bool missing_evidence_only = 12;
+  // The cost of both evaluations.
+  uint64 cost = 13;
+  // The proposed policy's full evaluation, with `include_evaluations`.
+  PolicyEvaluation evaluation = 14;
+  // The baseline's full evaluation, with `include_evaluations`.
+  PolicyEvaluation baseline_evaluation = 15;
+  // The landing alone was too large for a page: its full evaluations were
+  // left out, and if that was not enough, the paths its unmet rules list
+  // (their `paths_total` stays). EvaluatePolicy reports them for its commit.
+  bool trimmed = 16;
+}
+
+// How many landings one rule of the proposed policy blocked.
+message PolicySimulationRuleCount {
+  // The rule's name.
+  string name = 1;
+  // Its kind.
+  PolicyRuleKind kind = 2;
+  // The landings it was unsatisfied or errored on.
+  uint32 landings = 3;
+}
+
+// Counts over one page's landings.
+message PolicySimulationSummary {
+  // Landings evaluated.
+  uint32 landings = 1;
+  // Landings the proposed policy blocks.
+  uint32 blocked = 2;
+  // Of those, the ones blocked only for missing evidence.
+  uint32 missing_evidence_only = 3;
+  // Landings by outcome: NEWLY_BLOCKED.
+  uint32 newly_blocked = 4;
+  // STILL_BLOCKED.
+  uint32 still_blocked = 5;
+  // NEWLY_ALLOWED.
+  uint32 newly_allowed = 6;
+  // STILL_ALLOWED.
+  uint32 still_allowed = 7;
+  // Every rule of the proposed policy, built-ins first, then in file order,
+  // with how many of the page's landings it blocked (0 for none); empty
+  // for a page with no landings.
+  repeated PolicySimulationRuleCount rules = 8;
+}
+
+// A page of a simulation.
+message SimulatePolicyResponse {
+  // Whether the proposed policy loads: ALLOW when it does (it says nothing
+  // about any landing), NO_POLICY when `policy_revision` has no
+  // `reef-policy.toml`, INVALID_POLICY when it does not load. With
+  // NO_POLICY or INVALID_POLICY no landing is evaluated.
+  PolicyDecision proposed_decision = 1;
+  // The proposed policy's source.
+  PolicySource proposed = 2;
+  // The proposed policy's load errors, for INVALID_POLICY.
+  repeated PolicyDiagnostic diagnostics = 3;
+  // The baseline's source; empty with `no_baseline`.
+  PolicySource baseline = 4;
+  // The baseline's state: ALLOW when it loads, NO_POLICY when its revision
+  // has none, INVALID_POLICY when it does not load; UNSPECIFIED with
+  // `no_baseline`.
+  PolicyDecision baseline_state = 5;
+  // The landings of this page, newest first.
+  repeated PolicySimulatedLanding landings = 6;
+  // Counts over this page.
+  PolicySimulationSummary summary = 7;
+  // The page's evaluations' cost, summed.
+  uint64 cost = 8;
+  // The operation the landings were read at.
+  string at_operation = 9;
+  // The token for the next page; empty on the last page.
+  string next_page_token = 10;
 }

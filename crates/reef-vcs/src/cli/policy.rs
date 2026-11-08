@@ -6,6 +6,8 @@
 //! `--input` evaluates it over an input as `reef schema policy input`
 //! describes. `eval` asks the daemon (`EvaluatePolicy`), which reads the
 //! policy from `trunk()` unless told otherwise, never from the change.
+//! `simulate` (R3.08) asks the daemon (`SimulatePolicy`) how a proposed
+//! policy would have judged recent landings, page by page.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +40,11 @@ enum PolicyCommand {
     /// Evaluate the repository's policy over a change: the decision, and what is missing.
     #[command(after_help = "Example: reef policy eval -r @ --require-allow")]
     Eval(EvalArgs),
+    /// Judge recent landings with a proposed policy: what it would have blocked, and why.
+    #[command(
+        after_help = "Example: reef policy simulate --policy-file reef-policy.toml --limit 50"
+    )]
+    Simulate(SimulateArgs),
     /// Write a starter reef-policy.toml here: this machine's executor must pass `test`.
     #[command(after_help = "Example: reef policy init --stdout")]
     Init(InitArgs),
@@ -77,6 +84,37 @@ struct EvalArgs {
     /// Exit 5 unless the decision is allow.
     #[arg(long)]
     require_allow: bool,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+/// `reef policy simulate`.
+#[derive(Debug, clap::Args)]
+struct SimulateArgs {
+    /// The proposed policy file; reef-policy.toml in this directory when neither this nor --policy-revision is given.
+    #[arg(long, value_name = "FILE", conflicts_with = "policy_revision")]
+    policy_file: Option<PathBuf>,
+    /// Simulate the reef-policy.toml at this revision instead, such as a change that edits it.
+    #[arg(long, value_name = "REV")]
+    policy_revision: Option<String>,
+    /// The landings, a revset read newest first; every non-merge ancestor of `trunk()` when not given.
+    #[arg(short = 'r', long = "revisions", value_name = "REVSET")]
+    revisions: Option<String>,
+    /// The most landings to judge, newest first: 1 to 1000.
+    #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    limit: u32,
+    /// Compare with the reef-policy.toml at this revision instead of `trunk()`.
+    #[arg(long, value_name = "REV", conflicts_with = "no_baseline")]
+    baseline_revision: Option<String>,
+    /// Judge with the proposed policy alone, with no baseline.
+    #[arg(long)]
+    no_baseline: bool,
+    /// List every landing in text, not only those the proposed policy blocks.
+    #[arg(long)]
+    all: bool,
+    /// Include each landing's full evaluations in JSON.
+    #[arg(long)]
+    evaluations: bool,
     #[command(flatten)]
     scope: ScopeArgs,
 }
@@ -407,6 +445,21 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
+/// A proposed policy file's bytes. An empty file is refused here as one
+/// that does not load: sent as empty `policy`, it would mean no text at all.
+fn policy_text(path: &Path) -> Result<Vec<u8>, CliError> {
+    let bytes = std::fs::read(path).map_err(|source| CliError::Io {
+        op: "read",
+        path: path.to_owned(),
+        source,
+    })?;
+    if bytes.is_empty() {
+        let diagnostics = Policy::load(&bytes).err().unwrap_or_default();
+        return Err(invalid(&path.display().to_string(), &diagnostics));
+    }
+    Ok(bytes)
+}
+
 /// The error for a file that does not load: the first problem as the
 /// message, every problem in the hint.
 fn invalid(path: &str, diagnostics: &[Diagnostic]) -> CliError {
@@ -488,6 +541,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     match args.command {
         PolicyCommand::Check(args) => check_at(ctx, args).await,
         PolicyCommand::Eval(args) => eval(ctx, args).await,
+        PolicyCommand::Simulate(args) => simulate(ctx, args).await,
         PolicyCommand::Init(args) => init(ctx, &args).await,
     }
 }
@@ -512,77 +566,85 @@ async fn check_at(ctx: &Ctx, args: CheckArgs) -> Result<(), CliError> {
     )
 }
 
-/// `message`'s evaluation as `reef_policy`'s, which `check --input` prints:
-/// the same fields, so the two compare.
-pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
-    let need = |need: &v1::PolicyEvidenceNeed| Need {
+fn need_of(need: &v1::PolicyEvidenceNeed) -> Need {
+    Need {
         kind: need.kind.clone(),
         target: need.target.clone(),
         attestors: need.attestors.clone(),
         evidence_ids: need.evidence_ids.clone(),
-    };
+    }
+}
+
+fn kind_of(kind: i32) -> RuleKind {
+    match v1::PolicyRuleKind::try_from(kind).unwrap_or_default() {
+        v1::PolicyRuleKind::Require => RuleKind::Require,
+        v1::PolicyRuleKind::Limits => RuleKind::Limits,
+        v1::PolicyRuleKind::Forbid => RuleKind::Forbid,
+        v1::PolicyRuleKind::Signoff => RuleKind::Signoff,
+        v1::PolicyRuleKind::Rule => RuleKind::Rule,
+        v1::PolicyRuleKind::Builtin | v1::PolicyRuleKind::Unspecified => RuleKind::Builtin,
+    }
+}
+
+fn decision_of(decision: i32) -> Decision {
+    match v1::PolicyDecision::try_from(decision).unwrap_or_default() {
+        v1::PolicyDecision::Allow => Decision::Allow,
+        v1::PolicyDecision::NoPolicy => Decision::NoPolicy,
+        v1::PolicyDecision::InvalidPolicy => Decision::InvalidPolicy,
+        v1::PolicyDecision::Block | v1::PolicyDecision::Unspecified => Decision::Block,
+    }
+}
+
+fn diagnostic_of(d: &v1::PolicyDiagnostic) -> Diagnostic {
+    Diagnostic {
+        rule: d.rule.clone(),
+        field: d.field.clone(),
+        line: d.line,
+        column: d.column,
+        message: d.message.clone(),
+    }
+}
+
+/// A rule result message as `reef_policy`'s.
+fn rule_of(rule: &v1::PolicyRuleResult) -> RuleResult {
+    RuleResult {
+        name: rule.name.clone(),
+        kind: kind_of(rule.kind),
+        status: match v1::PolicyRuleStatus::try_from(rule.status).unwrap_or_default() {
+            v1::PolicyRuleStatus::Satisfied => Status::Satisfied,
+            v1::PolicyRuleStatus::Unsatisfied => Status::Unsatisfied,
+            v1::PolicyRuleStatus::NotApplicable => Status::NotApplicable,
+            v1::PolicyRuleStatus::Error | v1::PolicyRuleStatus::Unspecified => Status::Error,
+        },
+        message: rule.message.clone(),
+        paths: rule.paths.clone(),
+        paths_total: i64::from(rule.paths_total),
+        missing: rule.missing.iter().map(need_of).collect(),
+        failed: rule.failed.iter().map(need_of).collect(),
+        signoff: rule.signoff.as_ref().map(|s| SignoffNeed {
+            groups: s.groups.clone(),
+            identities: s.identities.clone(),
+            count: i64::from(s.count),
+            have: i64::from(s.have),
+            signed_by: s.signed_by.clone(),
+            presence: s.presence.clone(),
+            kinds: s.kinds.clone(),
+        }),
+        evidence_ids: rule.evidence_ids.clone(),
+    }
+}
+
+/// `message`'s evaluation as `reef_policy`'s, which `check --input` prints:
+/// the same fields, so the two compare.
+pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
     let source = message.source.clone().unwrap_or_default();
     let input = message.input.unwrap_or_default();
     Evaluation {
-        decision: match v1::PolicyDecision::try_from(message.decision).unwrap_or_default() {
-            v1::PolicyDecision::Allow => Decision::Allow,
-            v1::PolicyDecision::NoPolicy => Decision::NoPolicy,
-            v1::PolicyDecision::InvalidPolicy => Decision::InvalidPolicy,
-            v1::PolicyDecision::Block | v1::PolicyDecision::Unspecified => Decision::Block,
-        },
+        decision: decision_of(message.decision),
         sha256: source.sha256,
         version: source.version,
-        diagnostics: message
-            .diagnostics
-            .iter()
-            .map(|d| Diagnostic {
-                rule: d.rule.clone(),
-                field: d.field.clone(),
-                line: d.line,
-                column: d.column,
-                message: d.message.clone(),
-            })
-            .collect(),
-        rules: message
-            .rules
-            .iter()
-            .map(|rule| RuleResult {
-                name: rule.name.clone(),
-                kind: match v1::PolicyRuleKind::try_from(rule.kind).unwrap_or_default() {
-                    v1::PolicyRuleKind::Require => RuleKind::Require,
-                    v1::PolicyRuleKind::Limits => RuleKind::Limits,
-                    v1::PolicyRuleKind::Forbid => RuleKind::Forbid,
-                    v1::PolicyRuleKind::Signoff => RuleKind::Signoff,
-                    v1::PolicyRuleKind::Rule => RuleKind::Rule,
-                    v1::PolicyRuleKind::Builtin | v1::PolicyRuleKind::Unspecified => {
-                        RuleKind::Builtin
-                    }
-                },
-                status: match v1::PolicyRuleStatus::try_from(rule.status).unwrap_or_default() {
-                    v1::PolicyRuleStatus::Satisfied => Status::Satisfied,
-                    v1::PolicyRuleStatus::Unsatisfied => Status::Unsatisfied,
-                    v1::PolicyRuleStatus::NotApplicable => Status::NotApplicable,
-                    v1::PolicyRuleStatus::Error | v1::PolicyRuleStatus::Unspecified => {
-                        Status::Error
-                    }
-                },
-                message: rule.message.clone(),
-                paths: rule.paths.clone(),
-                paths_total: i64::from(rule.paths_total),
-                missing: rule.missing.iter().map(need).collect(),
-                failed: rule.failed.iter().map(need).collect(),
-                signoff: rule.signoff.as_ref().map(|s| SignoffNeed {
-                    groups: s.groups.clone(),
-                    identities: s.identities.clone(),
-                    count: i64::from(s.count),
-                    have: i64::from(s.have),
-                    signed_by: s.signed_by.clone(),
-                    presence: s.presence.clone(),
-                    kinds: s.kinds.clone(),
-                }),
-                evidence_ids: rule.evidence_ids.clone(),
-            })
-            .collect(),
+        diagnostics: message.diagnostics.iter().map(diagnostic_of).collect(),
+        rules: message.rules.iter().map(rule_of).collect(),
         input: InputSummary {
             paths: i64::from(input.paths),
             lines_added: i64::try_from(input.lines_added).unwrap_or(i64::MAX),
@@ -599,11 +661,7 @@ pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
 async fn eval(ctx: &Ctx, args: EvalArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let policy = match &args.policy_file {
-        Some(path) => std::fs::read(path).map_err(|source| CliError::Io {
-            op: "read",
-            path: path.clone(),
-            source,
-        })?,
+        Some(path) => policy_text(path)?,
         None => Vec::new(),
     };
     let response = ctx
@@ -734,4 +792,503 @@ async fn init(ctx: &Ctx, args: &InitArgs) -> Result<(), CliError> {
         owner,
         placeholder,
     })
+}
+
+/// How a landing's decision under the proposed policy compares with the
+/// baseline's (R3.08). Blocked means any decision but allow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Outcome {
+    /// The proposed policy blocks it; the baseline allows it.
+    NewlyBlocked,
+    /// Both block it.
+    StillBlocked,
+    /// The proposed policy allows it; the baseline blocks it.
+    NewlyAllowed,
+    /// Both allow it.
+    StillAllowed,
+    /// The proposed policy blocks it, with no baseline to compare with.
+    Blocked,
+    /// The proposed policy allows it, with no baseline to compare with.
+    Allowed,
+}
+
+impl Outcome {
+    fn of(outcome: i32) -> Outcome {
+        use v1::PolicySimulationOutcome as O;
+        match O::try_from(outcome).unwrap_or_default() {
+            O::NewlyBlocked => Outcome::NewlyBlocked,
+            O::StillBlocked => Outcome::StillBlocked,
+            O::NewlyAllowed => Outcome::NewlyAllowed,
+            O::StillAllowed => Outcome::StillAllowed,
+            O::Allowed => Outcome::Allowed,
+            O::Blocked | O::Unspecified => Outcome::Blocked,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Outcome::NewlyBlocked => "newly blocked",
+            Outcome::StillBlocked => "still blocked",
+            Outcome::NewlyAllowed => "newly allowed",
+            Outcome::StillAllowed => "still allowed",
+            Outcome::Blocked => "blocked",
+            Outcome::Allowed => "allowed",
+        }
+    }
+}
+
+/// One landing, judged by the proposed policy and the baseline.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct SimulatedLanding {
+    /// Its change.
+    pub(crate) change_id: String,
+    /// Its commit.
+    pub(crate) commit_id: String,
+    /// Its tree; empty when conflicted.
+    pub(crate) tree_id: String,
+    /// The first line of its description.
+    pub(crate) subject: String,
+    /// Its author, as `name <email>`.
+    pub(crate) author: String,
+    /// When it was committed.
+    pub(crate) committed_at: Option<String>,
+    /// The proposed policy's decision.
+    pub(crate) decision: Decision,
+    /// The baseline's decision; absent with no baseline.
+    pub(crate) baseline_decision: Option<Decision>,
+    /// How the two compare.
+    pub(crate) outcome: Outcome,
+    /// The proposed policy's rules that are unsatisfied or errored.
+    pub(crate) unmet: Vec<RuleResult>,
+    /// The names of the baseline's rules that are unsatisfied or errored.
+    pub(crate) baseline_unmet: Vec<String>,
+    /// Blocked only for evidence its tree does not have.
+    pub(crate) missing_evidence_only: bool,
+    /// The cost of both evaluations.
+    pub(crate) cost: u64,
+    /// With --evaluations, the proposed policy's full evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) evaluation: Option<Evaluation>,
+    /// With --evaluations, the baseline's full evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) baseline_evaluation: Option<Evaluation>,
+    /// Too large for a page alone: its evaluations, and perhaps its unmet
+    /// rules' paths, were left out (`reef policy eval -r` has them).
+    pub(crate) trimmed: bool,
+}
+
+/// How many landings one rule of the proposed policy blocked.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct SimulatedRule {
+    /// The rule's name.
+    pub(crate) name: String,
+    /// Its kind.
+    pub(crate) kind: RuleKind,
+    /// The landings it blocked.
+    pub(crate) landings: u32,
+}
+
+/// Counts over every landing judged.
+#[derive(Debug, Default, Serialize, JsonSchema)]
+pub(crate) struct SimulationSummary {
+    /// Landings judged.
+    pub(crate) landings: u32,
+    /// Landings the proposed policy blocks.
+    pub(crate) blocked: u32,
+    /// Of those, the ones blocked only for missing evidence.
+    pub(crate) missing_evidence_only: u32,
+    /// Blocked by the proposed policy, allowed by the baseline.
+    pub(crate) newly_blocked: u32,
+    /// Blocked by both.
+    pub(crate) still_blocked: u32,
+    /// Allowed by the proposed policy, blocked by the baseline.
+    pub(crate) newly_allowed: u32,
+    /// Allowed by both.
+    pub(crate) still_allowed: u32,
+    /// Every rule of the proposed policy, in its order, with the landings
+    /// it blocked.
+    pub(crate) rules: Vec<SimulatedRule>,
+}
+
+impl SimulationSummary {
+    fn add(&mut self, page: &v1::PolicySimulationSummary) {
+        self.landings += page.landings;
+        self.blocked += page.blocked;
+        self.missing_evidence_only += page.missing_evidence_only;
+        self.newly_blocked += page.newly_blocked;
+        self.still_blocked += page.still_blocked;
+        self.newly_allowed += page.newly_allowed;
+        self.still_allowed += page.still_allowed;
+        for rule in &page.rules {
+            match self.rules.iter_mut().find(|have| have.name == rule.name) {
+                Some(have) => have.landings += rule.landings,
+                None => self.rules.push(SimulatedRule {
+                    name: rule.name.clone(),
+                    kind: kind_of(rule.kind),
+                    landings: rule.landings,
+                }),
+            }
+        }
+    }
+}
+
+/// The baseline's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BaselineState {
+    /// The baseline policy loads.
+    Loads,
+    /// Its revision has no reef-policy.toml: nothing to compare with.
+    NoPolicy,
+    /// It does not load: it blocks every landing.
+    InvalidPolicy,
+}
+
+/// What `reef policy simulate` prints.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct PolicySimulation {
+    /// The proposed policy.
+    pub(crate) proposed: PolicySource,
+    /// The baseline; absent with --no-baseline.
+    pub(crate) baseline: Option<PolicySource>,
+    /// The baseline's state; absent with --no-baseline.
+    pub(crate) baseline_state: Option<BaselineState>,
+    /// The operation the landings were read at.
+    pub(crate) at_operation: String,
+    /// The landings judged, newest first; in text, only those blocked
+    /// unless --all.
+    pub(crate) landings: Vec<SimulatedLanding>,
+    /// Counts over them.
+    pub(crate) summary: SimulationSummary,
+    /// The evaluations' cost, summed.
+    pub(crate) cost: u64,
+    /// --limit stopped before the window's end.
+    pub(crate) truncated: bool,
+    /// Text only: list every landing.
+    #[serde(skip)]
+    pub(crate) all: bool,
+}
+
+/// The brief view of a simulation: the counts, and each blocked landing
+/// with its unmet rules' names.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BriefSimulation<'a> {
+    landings: u32,
+    blocked: u32,
+    newly_blocked: u32,
+    still_blocked: u32,
+    newly_allowed: u32,
+    missing_evidence_only: u32,
+    truncated: bool,
+    blocking: Vec<BriefLanding<'a>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct BriefLanding<'a> {
+    commit: &'a str,
+    outcome: Outcome,
+    rules: Vec<&'a str>,
+}
+
+impl<'a> BriefSimulation<'a> {
+    pub(crate) fn of(simulation: &'a PolicySimulation) -> BriefSimulation<'a> {
+        let summary = &simulation.summary;
+        BriefSimulation {
+            landings: summary.landings,
+            blocked: summary.blocked,
+            newly_blocked: summary.newly_blocked,
+            still_blocked: summary.still_blocked,
+            newly_allowed: summary.newly_allowed,
+            missing_evidence_only: summary.missing_evidence_only,
+            truncated: simulation.truncated,
+            blocking: simulation
+                .landings
+                .iter()
+                .filter(|landing| landing.decision != Decision::Allow)
+                .map(|landing| BriefLanding {
+                    commit: short(&landing.commit_id),
+                    outcome: landing.outcome,
+                    rules: landing
+                        .unmet
+                        .iter()
+                        .map(|rule| rule.name.as_str())
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn plural(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A policy source in one line.
+fn source_line(source: &PolicySource) -> String {
+    if source.from_request {
+        format!("{} (sha256 {})", source.path, short(&source.sha256))
+    } else if source.blob_id.is_empty() {
+        format!(
+            "none in {} at {} ({})",
+            reef_policy::POLICY_PATH,
+            source.revision,
+            short(&source.commit_id)
+        )
+    } else {
+        format!(
+            "{} at {} ({}, sha256 {})",
+            source.path,
+            source.revision,
+            short(&source.commit_id),
+            short(&source.sha256)
+        )
+    }
+}
+
+/// A short reason for an unmet rule.
+fn reason(rule: &RuleResult) -> String {
+    if let Some(missing) = rule.missing.first() {
+        let more = if rule.missing.len() > 1 {
+            format!(" and {} more", rule.missing.len() - 1)
+        } else {
+            String::new()
+        };
+        return format!(
+            "missing {} from {}{more}",
+            missing.kind,
+            missing.attestors.join(" or ")
+        );
+    }
+    if !rule.message.is_empty() {
+        return rule.message.clone();
+    }
+    status_word(rule.status).to_owned()
+}
+
+impl TextRender for PolicySimulation {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "proposed: {}", source_line(&self.proposed))?;
+        match (&self.baseline, self.baseline_state) {
+            (Some(source), Some(BaselineState::NoPolicy)) => writeln!(
+                w,
+                "baseline: {}; nothing to compare with",
+                source_line(source)
+            )?,
+            (Some(source), Some(BaselineState::InvalidPolicy)) => writeln!(
+                w,
+                "baseline: {} does not load; it blocks every landing",
+                source_line(source)
+            )?,
+            (Some(source), _) => writeln!(w, "baseline: {}", source_line(source))?,
+            (None, _) => writeln!(w, "baseline: none")?,
+        }
+        for landing in &self.landings {
+            if !self.all && landing.decision == Decision::Allow {
+                continue;
+            }
+            writeln!(
+                w,
+                "{:<13}  {}  {}",
+                landing.outcome.word(),
+                short(&landing.commit_id),
+                landing.subject
+            )?;
+            for rule in &landing.unmet {
+                writeln!(w, "  {}: {}", rule.name, reason(rule))?;
+            }
+        }
+        let summary = &self.summary;
+        let allowed = summary.landings - summary.blocked;
+        let mut detail = Vec::new();
+        if self.baseline_state == Some(BaselineState::Loads)
+            || self.baseline_state == Some(BaselineState::InvalidPolicy)
+        {
+            detail.push(format!(
+                "{} newly, {} also by the baseline",
+                summary.newly_blocked, summary.still_blocked
+            ));
+        }
+        if summary.missing_evidence_only > 0 {
+            detail.push(format!(
+                "{} only for missing evidence",
+                summary.missing_evidence_only
+            ));
+        }
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", detail.join("; "))
+        };
+        writeln!(
+            w,
+            "{}: {} would have been blocked{detail}; {} allowed{}",
+            plural(summary.landings, "landing", "landings"),
+            summary.blocked,
+            allowed,
+            if summary.newly_allowed > 0 {
+                format!(" ({} newly)", summary.newly_allowed)
+            } else {
+                String::new()
+            }
+        )?;
+        let blocking: Vec<String> = summary
+            .rules
+            .iter()
+            .filter(|rule| rule.landings > 0)
+            .map(|rule| format!("{} {}", rule.name, rule.landings))
+            .collect();
+        if !blocking.is_empty() {
+            writeln!(w, "blocked by: {}", blocking.join(", "))?;
+        }
+        if self.truncated {
+            writeln!(w, "more landings follow: raise --limit (at most 1000)")?;
+        }
+        Ok(())
+    }
+}
+
+/// A landing message as the CLI's.
+fn landing_of(landing: &v1::PolicySimulatedLanding) -> SimulatedLanding {
+    SimulatedLanding {
+        change_id: landing.change_id.clone(),
+        commit_id: landing.commit_id.clone(),
+        tree_id: landing.tree_id.clone(),
+        subject: landing.subject.clone(),
+        author: landing.author.clone(),
+        committed_at: landing
+            .committed_at
+            .as_ref()
+            .map(reef_client::json::rfc3339),
+        decision: decision_of(landing.decision),
+        baseline_decision: (landing.baseline_decision != 0)
+            .then(|| decision_of(landing.baseline_decision)),
+        outcome: Outcome::of(landing.outcome),
+        unmet: landing.unmet.iter().map(rule_of).collect(),
+        baseline_unmet: landing.baseline_unmet.clone(),
+        missing_evidence_only: landing.missing_evidence_only,
+        cost: landing.cost,
+        evaluation: landing.evaluation.as_ref().map(evaluation_of),
+        baseline_evaluation: landing.baseline_evaluation.as_ref().map(evaluation_of),
+        trimmed: landing.trimmed,
+    }
+}
+
+fn source_of(source: v1::PolicySource, path: Option<&Path>) -> PolicySource {
+    PolicySource {
+        revision: source.revision,
+        commit_id: source.commit_id,
+        path: match path {
+            Some(path) => path.display().to_string(),
+            None => source.path,
+        },
+        blob_id: source.blob_id,
+        sha256: source.sha256,
+        version: source.version,
+        from_request: source.from_request,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn simulate(ctx: &Ctx, args: SimulateArgs) -> Result<(), CliError> {
+    let file = match (&args.policy_file, &args.policy_revision) {
+        (Some(path), _) => Some(path.clone()),
+        (None, Some(_)) => None,
+        (None, None) => Some(PathBuf::from(reef_policy::POLICY_PATH)),
+    };
+    let policy = match &file {
+        Some(path) if args.policy_file.is_none() && !path.exists() => {
+            return Err(CliError::Precheck {
+                kind: ErrorKind::InvalidArgument,
+                reason: reef_api::error::POLICY_SOURCE_MISSING,
+                message: format!("no {} in this directory to simulate", path.display()),
+                advice: Advice::hint(
+                    "Name the proposed policy with --policy-file FILE, or a revision whose reef-policy.toml to simulate with --policy-revision REV.",
+                ),
+            });
+        }
+        Some(path) => policy_text(path)?,
+        None => Vec::new(),
+    };
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let request = v1::SimulatePolicyRequest {
+        repo: scope.repo_id.clone(),
+        workspace: scope.workspace_id(),
+        revisions: args.revisions.clone().unwrap_or_default(),
+        policy,
+        policy_revision: args.policy_revision.clone().unwrap_or_default(),
+        baseline_revision: args.baseline_revision.clone().unwrap_or_default(),
+        no_baseline: args.no_baseline,
+        include_evaluations: args.evaluations,
+        ..v1::SimulatePolicyRequest::default()
+    };
+    let limit = usize::try_from(args.limit).unwrap_or(usize::MAX);
+    let mut landings = Vec::new();
+    let mut summary = SimulationSummary::default();
+    let mut cost = 0u64;
+    let mut token = String::new();
+    let mut first: Option<v1::SimulatePolicyResponse> = None;
+    let truncated = loop {
+        let remaining = limit - landings.len();
+        let page = ctx
+            .call(ctx.client.simulate_policy(v1::SimulatePolicyRequest {
+                page_size: i32::try_from(remaining.min(100)).unwrap_or(100),
+                page_token: token.clone(),
+                ..request.clone()
+            }))
+            .await?;
+        if page.proposed_decision() != v1::PolicyDecision::Allow {
+            let path = match (&file, &args.policy_revision) {
+                (Some(path), _) => path.display().to_string(),
+                (None, Some(revision)) => format!("{revision}:{}", reef_policy::POLICY_PATH),
+                (None, None) => reef_policy::POLICY_PATH.to_owned(),
+            };
+            if page.proposed_decision() == v1::PolicyDecision::NoPolicy {
+                return Err(CliError::Precheck {
+                    kind: ErrorKind::InvalidArgument,
+                    reason: reef_api::error::INVALID_POLICY,
+                    message: format!("there is no {path} to simulate"),
+                    advice: Advice::hint(
+                        "Name a revision that has a reef-policy.toml, or a file with --policy-file.",
+                    ),
+                });
+            }
+            let diagnostics: Vec<Diagnostic> = page.diagnostics.iter().map(diagnostic_of).collect();
+            return Err(invalid(&path, &diagnostics));
+        }
+        cost = cost.saturating_add(page.cost);
+        if let Some(page_summary) = &page.summary {
+            summary.add(page_summary);
+        }
+        landings.extend(page.landings.iter().map(landing_of));
+        let next = page.next_page_token.clone();
+        if first.is_none() {
+            first = Some(page);
+        }
+        if next.is_empty() {
+            break false;
+        }
+        if landings.len() >= limit {
+            break true;
+        }
+        token = next;
+    };
+    let first = first.unwrap_or_default();
+    let simulation = PolicySimulation {
+        proposed: source_of(first.proposed.clone().unwrap_or_default(), file.as_deref()),
+        baseline: first.baseline.clone().map(|source| source_of(source, None)),
+        baseline_state: match first.baseline_state() {
+            v1::PolicyDecision::Unspecified => None,
+            v1::PolicyDecision::NoPolicy => Some(BaselineState::NoPolicy),
+            v1::PolicyDecision::InvalidPolicy => Some(BaselineState::InvalidPolicy),
+            v1::PolicyDecision::Allow | v1::PolicyDecision::Block => Some(BaselineState::Loads),
+        },
+        at_operation: first.at_operation.clone(),
+        landings,
+        summary,
+        cost,
+        truncated,
+        all: args.all,
+    };
+    ctx.out.object_with(&simulation, BriefSimulation::of)
 }
