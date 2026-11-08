@@ -655,3 +655,24 @@ cargo nextest run --release -p reef-daemon --test provenance --success-output im
 cargo nextest run --release -p reef-daemon --test executor --run-ignored ignored-only --no-capture -E 'test(timings)'
 cargo nextest run --release -p reef-daemon --test executor --no-capture -E 'test(claims_match)'
 ```
+
+## Reference executor (R3.06)
+
+`crates/reef-executor/tests/executor.rs`'s `timings` (ignored by default) measures the executor against an in-process daemon ([ADR 0060](adr/0060-reference-executor.md), [docs/executor.md](executor.md)). Release build on the M2 Max, run on 2026-11-08, Seatbelt. All trend data; none is a gate.
+
+| Measurement | Timed | M2 Max, median | Expected |
+| --- | --- | ---: | --- |
+| sandbox start | `true` under a generated Seatbelt profile, less `true` alone (30 runs) | 7.1 ms | < 30 ms |
+| job overhead | claim to completion for one pair running `true`, warm cache, socket (7 jobs) | 297 ms | < 300 ms |
+| materialize, `small` | 1,014 entries, 28 MB: cold / warm / one changed file, socket, disk check on | 0.95 s / 0.19 s / 0.20 s | < 3 s / < 300 ms |
+| materialize, `medium` | 10,014 entries, 59 MB: cold / warm / one changed file | 4.1 s / 1.8 s / 1.8 s | < 30 s / < 2 s |
+| disk check | `verify = "disk"` over `listing`, warm page cache: `small` / `medium` | 36 ms / 191 ms | < 1 s (`medium`) |
+| remote materialize | `small`, cold, over the remote listener on loopback with a `ci` token | 0.95 s | < 10 s |
+
+- **No existing path changed.** The executor calls only RPCs that exist.
+- **A warm tree is mostly the listing and the layout:** `ListFiles` of 10,000 entries and 10,000 files copied out of the blob cache. Reef's own tree (about 1,100 files) materializes cold in about a second from the installed daemon, as the dogfood run in the PR showed.
+- **The job's overhead** is two round trips for the session key (its authority, then the issue), the listing and layout of the warm `small` tree, the check, the log's upload, and the completion.
+
+```sh
+cargo nextest run --release -p reef-executor --test executor --run-ignored ignored-only --no-capture -E 'test(timings)'
+```

@@ -221,6 +221,14 @@ const NOT_RUN: &[(&[&str], &str)] = &[
     (&["remote", "remove"], "needs a saved profile"),
     (&["mcp"], "prints the MCP protocol, not JSON output"),
     (&["completions"], "prints a shell script"),
+    (
+        &["executor", "run"],
+        "serves jobs until stopped; reef-executor's tests run it, and tests/vcs.rs executor_cli checks its lines against the row",
+    ),
+    (
+        &["executor", "check"],
+        "runs the sandbox's probes, which a Seatbelt runner refuses; tests/vcs.rs executor_cli checks it against its row",
+    ),
 ];
 
 /// Runs `reef` command lines against one daemon, checks each one's stdout

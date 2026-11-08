@@ -27,9 +27,12 @@ name = "reef"
 path = "src/main.rs"
 
 [dependencies]
-# The thin client and the error conventions, and no other Reef crate: `reef` links neither the
-# daemon nor jj-lib, which reef-testing's crate_graph test checks (R2.05, ADR 0033).
+# The thin client and the error conventions, and no other Reef crate but the reference executor:
+# `reef` links neither the daemon nor jj-lib, which reef-testing's crate_graph test checks (R2.05,
+# ADR 0033, ADR 0060).
 reef-client.workspace = true
+reef-executor.workspace = true   # `reef executor` (R3.06)
+zeroize.workspace = true         # `executor run --token-file`'s text, wiped
 reef-error.workspace = true
 reef-api.workspace = true        # the reef.api.v1 messages the CLI builds and prints (R2.01)
 prost-types.workspace = true     # google.protobuf.Duration in those messages
@@ -41,7 +44,7 @@ humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true      # `-o json`
 tokio = { workspace = true, features = ["process"] }   # `ws run`'s child (R1.21)
-nix = { workspace = true, features = ["signal", "poll"] }   # `reef daemon stop`, `ws run`'s forwarding; `op watch` sees a closed stdout
+nix = { workspace = true, features = ["signal", "poll", "fs"] }   # `reef daemon stop`, `ws run`'s forwarding; `op watch` sees a closed stdout; `executor run`'s token pipe
 libc = { workspace = true }   # a holder's parent and start time (R2.26)
 rmcp.workspace = true            # `reef mcp` (R2.13)
 schemars.workspace = true        # its tools' input schemas, and `reef schema`'s (R2.24)

@@ -212,6 +212,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y watchman
           watchman version
+      # The reference executor's sandbox on Linux (R3.06): bubblewrap needs unprivileged user
+      # namespaces, which Ubuntu 24.04 restricts through AppArmor unless the image lifts it. The
+      # step says which it found; the tests then fail rather than run checks unsandboxed.
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+          if bwrap --unshare-user --unshare-net --ro-bind / / true; then
+            echo "bubblewrap creates user namespaces as is"
+          else
+            echo "::notice::user namespaces are restricted on this image; lifting the AppArmor restriction for this VM"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-user --unshare-net --ro-bind / / true
+          fi
+          echo "REEF_EXECUTOR_TESTS_REQUIRE_SANDBOX=1" >>"$GITHUB_ENV"
       # Linux lints in the `lint` job.
       - name: Lint
         if: runner.os == 'macOS'
@@ -263,6 +279,33 @@ jobs:
           path: target/cli-shape-*.json
           if-no-files-found: error
           retention-days: 7
+
+  # The reference executor's Seatbelt sandbox (R3.06). The self-hosted Mac runs every job inside
+  # its own Seatbelt profile (scripts/mac-runner.sh), and macOS refuses a sandbox inside another,
+  # so there the executor's tests run their checks unsandboxed and say so. This job runs them on
+  # GitHub's macOS with the sandbox required, on main and on pull requests labelled `macos`, as the
+  # macOS legs did before #211.
+  executor-sandbox-macos:
+    name: executor sandbox (macos-15, hosted)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos')
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      REEF_EXECUTOR_TESTS_REQUIRE_SANDBOX: 1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      - name: The executor's tests, sandboxed
+        run: cargo nextest run -p reef-executor
+      - name: The CLI's executor tests and probes
+        run: cargo nextest run -p reef-vcs -E 'test(/executor/)'
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
@@ -595,7 +638,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [plan, fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript]
+    needs: [plan, fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript, executor-sandbox-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -616,6 +659,9 @@ jobs:
           WEB_E2E: ${{ needs.web-e2e.result }}
           PYTHON: ${{ needs.python.result }}
           TYPESCRIPT: ${{ needs.typescript.result }}
+          # Skipped on a pull request without the `macos` label.
+          EXECUTOR_MAC: ${{ needs.executor-sandbox-macos.result }}
         run: |
           echo "$NEEDS"
           [[ "$PLAN" == "success" && "$FMT" == "success" &&"$API" == "success" && "$DENY" == "success" && "$LINT" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
+          [[ "$EXECUTOR_MAC" == "success" || "$EXECUTOR_MAC" == "skipped" ]]

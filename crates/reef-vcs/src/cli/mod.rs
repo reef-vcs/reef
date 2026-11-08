@@ -23,6 +23,7 @@ mod diff;
 mod env;
 mod error;
 mod evidence;
+mod executor;
 mod file;
 pub(crate) mod guide;
 pub(crate) mod heartbeat;
@@ -351,6 +352,8 @@ enum Command {
     /// Ask executors to check a tree, and follow the jobs: the executor protocol's requester side.
     #[command(infer_subcommands = true)]
     Job(job::Args),
+    /// Run checks for jobs: Reef's reference executor, each check in a sandbox, evidence signed.
+    Executor(executor::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -787,6 +790,11 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
     {
         return Err(local_only_error(name));
     }
+    if let Command::Executor(args) = &command
+        && let Some(code) = args.probe()
+    {
+        return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));
+    }
     let done = match command {
         Command::Guide(args) => guide::print(out, &args),
         Command::Here(args) => here::run(&connect(&global, out).await?, &global, args).await,
@@ -813,6 +821,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Identity(args) => identity::run(&connect(&global, out).await?, args).await,
         Command::Provenance(args) => provenance::run(&connect(&global, out).await?, args).await,
         Command::Job(args) => job::run(&connect(&global, out).await?, args).await,
+        Command::Executor(args) => Box::pin(executor::run(&global, out, args)).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),
@@ -836,10 +845,20 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
 /// Connects to the daemon, starting it first when nothing answers on its
 /// socket, unless `--no-autostart`.
 pub(crate) async fn connect(global: &Global, out: &Out) -> Result<Ctx, CliError> {
+    connect_with(global, out, None).await
+}
+
+/// [`connect`], with `token` in place of `REEF_REMOTE_TOKEN` for a remote
+/// daemon (`reef executor run --token-file`).
+pub(crate) async fn connect_with(
+    global: &Global,
+    out: &Out,
+    token: Option<reef_client::remote::Token>,
+) -> Result<Ctx, CliError> {
     // Before the socket is tried, so a bad name starts no daemon.
     let agent = global.agent()?.map(str::to_owned);
     if let Some(chosen) = &global.remote {
-        let target = remote::target(global, chosen)?;
+        let target = remote::target_with(global, chosen, token)?;
         let client = Client::connect_remote(&target)
             .await
             .map_err(CliError::Daemon)?;

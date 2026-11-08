@@ -394,13 +394,20 @@ fn remove(global: &Global, out: &Out, name: &str) -> Result<(), CliError> {
 /// The remote this command line names, `--remote` else `REEF_REMOTE`: a
 /// profile's name, or an `https://` URL with `REEF_REMOTE_TOKEN`.
 /// `REEF_REMOTE_TOKEN` and `REEF_REMOTE_FINGERPRINT` override a profile's.
-pub(crate) fn target(global: &Global, chosen: &str) -> Result<RemoteTarget, CliError> {
+///
+/// `token` (`reef executor run --token-file`) takes the place of
+/// `REEF_REMOTE_TOKEN` and the profile's.
+pub(crate) fn target_with(
+    global: &Global,
+    chosen: &str,
+    token: Option<Token>,
+) -> Result<RemoteTarget, CliError> {
     let env = |name: &str| {
         std::env::var(name)
             .ok()
             .filter(|value| !value.trim().is_empty())
     };
-    let token_env = env(remote::TOKEN_ENV).map(|token| Token::new(&token));
+    let token_env = token.or_else(|| env(remote::TOKEN_ENV).map(|token| Token::new(&token)));
     let fingerprint_env = env(remote::FINGERPRINT_ENV);
     if chosen.starts_with("https://") {
         let url = RemoteUrl::parse(chosen).ok_or_else(|| {

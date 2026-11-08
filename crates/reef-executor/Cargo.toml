@@ -1,0 +1,50 @@
+[package]
+name = "reef-executor"
+description = "Reef's reference executor (R3.06): claims jobs from a Reef daemon, materializes and checks the tree, runs the declared checks in a sandbox, and returns signed evidence. Reef is version control for fleets of coding agents."
+readme = "README.md"
+keywords = ["vcs", "version-control", "agents", "sandbox", "ci"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# A client of the daemon, like `reef-vcs`: no jj-lib, no daemon, no SQLite. `reef-testing`'s
+# crate_graph test keeps it that way (ADR 0060).
+[dependencies]
+reef-api.workspace = true
+reef-client.workspace = true
+reef-error.workspace = true
+reef-evidence.workspace = true
+prost-types.workspace = true     # google.protobuf.Duration in the claim
+tokio = { workspace = true, features = ["process"] }
+futures.workspace = true         # blobs fetched eight at a time
+serde.workspace = true
+serde_json.workspace = true      # annotations, and the reports
+schemars.workspace = true        # the reports' JSON Schema, which `reef schema` prints
+toml.workspace = true            # executor.toml and reef-checks.toml
+humantime.workspace = true
+humantime-serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+etcetera.workspace = true        # the platform cache directory
+sha1dc.workspace = true          # git object ids, with collision detection
+globset.workspace = true         # check targets
+regex.workspace = true           # the executor's target pattern
+zeroize.workspace = true         # the remote token read from a file
+libc.workspace = true            # wait4, setsid, rlimits, and macOS's proc_* calls
+nix = { workspace = true, features = ["signal", "process", "fs", "hostname", "user"] }
+tempfile.workspace = true        # blobs written beside the cache, then renamed
+
+[dev-dependencies]
+reef-daemon = { workspace = true, features = ["testing"] }
+reef-testing.workspace = true
+jj-lib.workspace = true          # tree ids to compare the git tree hash against
+pollster.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

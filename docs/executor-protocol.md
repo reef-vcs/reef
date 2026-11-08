@@ -8,7 +8,7 @@ This document is what an executor author builds against. An executor is a progra
 - The **daemon** keeps the queue: it validates requests, leases jobs to executors, checks the evidence they return, and publishes progress. It schedules; it never executes.
 - An **executor** claims jobs, runs whatever it runs for the requested kinds and targets, and returns signed evidence.
 
-The daemon never connects to an executor and never sends it a command. A job names a tree, evidence kinds and targets; what runs for them is the executor's decision, from its own configuration or from a declaration in the repository at that tree. An adapter that forwards Reef jobs to a CI system, a remote execution service or a runner fleet is an executor.
+The daemon never connects to an executor and never sends it a command. A job names a tree, evidence kinds and targets; what runs for them is the executor's decision, from its own configuration or from a declaration in the repository at that tree. An adapter that forwards Reef jobs to a CI system, a remote execution service or a runner fleet is an executor. Reef ships one, `reef executor` ([executor.md](executor.md), [ADR 0060](adr/0060-reference-executor.md)), as a reference and for a laptop or a small CI setup.
 
 ## 2. Connecting
 
@@ -48,6 +48,10 @@ Any means that yields exactly `spec.tree_id`:
 - a git checkout of `spec.commit_id` (set when the job was submitted by revision), checked with `git rev-parse <commit>^{tree}` equal to `tree_id`;
 - the repository's own store, for an executor on the daemon's machine (`GetRepository` gives its root);
 - `FileService.ListFiles` and `ReadFile` at `spec.commit_id`, a slow fallback that works over the remote listener.
+
+A job submitted by tree alone has no `commit_id`, so an executor that reads through `FileService` cannot get its tree and completes it `FAILED`. A requester that wants any executor to be able to run a job submits it by revision.
+
+Whatever the means, check the tree yourself rather than trusting anyone's word for it. With `FileService`, the recursive listing's entries (path, type and `file_id`, which is the git object id) hash, as git hashes trees, to `tree_id`; each blob's bytes hash, as a git blob, to its `file_id`; and what you laid out on disk can be hashed back to `tree_id` before anything runs. `reef executor` does all three ([executor.md](executor.md#getting-the-tree)).
 
 Evidence must be about `tree_id` and nothing else: the daemon refuses an object about another tree (`JOB_EVIDENCE_MISMATCH`, `field` `tree`).
 
@@ -139,6 +143,8 @@ No protocol can check these; a repository trusts an executor's identity on the a
 - Use one session key per job, held in memory and never written to disk, with actor `executor`.
 - Report `error`, not `pass`, when you cannot tell.
 - Check that what you ran on is exactly `tree_id`.
+
+[executor.md](executor.md) describes one way to meet each of these: `reef executor`'s sandbox, its keys, its target rules and its tree checks.
 
 ## 9. Versioning
 
