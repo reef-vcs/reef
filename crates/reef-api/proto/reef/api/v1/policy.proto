@@ -45,6 +45,7 @@ service PolicyService {
 
 // What a policy decides about a change.
 enum PolicyDecision {
+  // Not set: never a decision the daemon returns.
   POLICY_DECISION_UNSPECIFIED = 0;
   // Every rule is satisfied or does not apply.
   POLICY_DECISION_ALLOW = 1;
@@ -59,6 +60,7 @@ enum PolicyDecision {
 
 // Which kind of rule a result is for.
 enum PolicyRuleKind {
+  // Not set: never a kind the daemon returns.
   POLICY_RULE_KIND_UNSPECIFIED = 0;
   // `builtin:input`, `builtin:conflicts`, `builtin:policy-file` or
   // `builtin:owners`.
@@ -77,6 +79,7 @@ enum PolicyRuleKind {
 
 // A rule's outcome.
 enum PolicyRuleStatus {
+  // Not set: never a status the daemon returns.
   POLICY_RULE_STATUS_UNSPECIFIED = 0;
   // The rule holds.
   POLICY_RULE_STATUS_SATISFIED = 1;
