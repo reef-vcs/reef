@@ -210,8 +210,8 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.07 | Policy file and CEL evaluation | `reef-policy.cel` or similar in the repo: trusted attestors, required evidence kinds, size limits, forbidden paths, sign-off areas, conflict tiers, attempt caps. Evaluated with `cel-rust`. | M | R3.01 |
-| R3.08 | Policy simulation | Evaluate a proposed policy against recent landings and report what it would have blocked. API and CLI. | S | R3.07 |
+| R3.07 | Policy file and CEL evaluation | `reef-policy.toml` in the repo (strict TOML tables whose conditions are CEL, plus free CEL rules, format version 1), read from the destination's tree (`trunk()` by default), never from the change judged: trusted attestor sets (bound keys by identity, group, actor, authority and presence, excluding the change's own session), required evidence kinds per path, size limits, forbidden paths, sign-off areas (over `signoff` evidence from person identities; the policy files themselves always need the owners), conflict tiers and attempt caps (parsed and looked up here, applied by R3.28), and free rules. Evaluated with cel-rust (`cel`, pinned) in a new `reef-policy` crate with no jj-lib, behind Reef's own static check and a cost bound; the result is a decision with every rule's result, the missing evidence and the sign-offs needed, and fails closed. `PolicyService.EvaluatePolicy` (READ) and `reef policy check`, `eval` and `init`; enforcement is R3.13's. Brief in `dev-tickets/phase-3/`. | M | R3.01 |
+| R3.08 | Policy simulation | Evaluate a proposed policy (R3.07's `EvaluatePolicy` with the policy's text) against recent landings and report what it would have blocked. API and CLI. | S | R3.07 |
 | R3.09 | Change lifecycle states | Draft, proposed, queued, landed, declined, withdrawn, superseded, recorded as operations. Transitions in the API. | M | R2.03 |
 | R3.10 | Stacks | Dependency edges on changes. Propose, review, and land a stack as one unit with prefix landing. | M | R3.09 |
 | R3.11 | Dependent change lifecycle | A dependent proposed while its dependency is still proposed is a separate, linked proposal ordered by the edge at landing. Amending a dependency rebases dependents, preserving their IDs, and attaches a conflict object where the rebase does not apply. A declined or withdrawn dependency returns each dependent to its owner or the resolver queue with a conflict object; a superseded one rebases dependents onto the superseding change. | M | R3.10, R3.13 |
@@ -221,18 +221,18 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 
 | ID | Title | Scope | Size | Depends on |
 | --- | --- | --- | --- | --- |
-| R3.13 | Landing service, local | Lands onto a local main. Verifies evidence against policy, refuses conflicted changes, rebases, checks commutation. Pins the evidence a landing used, so R3.02's retention never deletes it. | L | R3.07, R3.09 |
+| R3.13 | Landing service, local | Lands onto a local main. Verifies evidence against policy (R3.07's evaluator, with the policy read from the branch it lands onto, refusing anything but `ALLOW`, so nothing lands automatically without a policy), refuses conflicted changes, rebases, checks commutation. Pins the evidence and the policy blob a landing used, so R3.02's retention never deletes the evidence. | L | R3.07, R3.09 |
 | R3.14 | Batching and bisect | Batch rebased proposals, run the executor on the batch head, land on pass, bisect on failure. | L | R3.13, R3.06 |
 | R3.15 | Evidence transfer rules | Policy-declared rules that accept evidence from the submitted tree for cheap checks when hunks commute. | S | R3.14 |
 | R3.16 | Landed history projection | Squash and summarize by policy into the published history while preserving the operation log. | M | R3.13 |
 | R3.17 | Degraded landing to a git remote | After a local landing, push the landed projection to a configured git remote through jj-lib's git support, so a team on GitHub sees landed history while evidence, provenance, and conflicts stay local. Refuses to push a conflicted change. This is the "degraded form against a git remote" the roadmap promises for phase three; the native wire protocol hardening is R4.14. | M | R3.16 |
 | R3.18 | Minimal check set computation | Given the symbol-level diff, cached evidence for ancestors and siblings, and the check kinds policy requires, compute the smallest set of checks that satisfies policy and request only those from the executor. Fall back to the full set when the symbol index is missing. | L | R3.14, R2.15 |
 | R3.19 | Per-target evidence | Evidence kinds scoped to a test or build target, so a passing target on a tree is one object and partial results compose across batches. | M | R3.01 |
-| R3.20 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day. Exhausted budgets surface in the triage inbox. | M | R3.07, R3.14 |
+| R3.20 | Compute budgets in policy | Executor time caps per proposal, per agent, and per repository per day, as a `[budgets]` table in R3.07's policy file with a `budget` input. Exhausted budgets surface in the triage inbox. | M | R3.07, R3.14 |
 | R3.21 | Landing queue priority | Proposals a human is waiting on are scheduled before proposals an agent is waiting on. Policy can add priority rules. | S | R3.14 |
 | R3.22 | Behavioral diff evidence kind | The executor runs the suite on the base tree and on the proposal and attests to outcome changes: newly passing, newly failing, added, removed. Includes parsing a check's declared test report (JUnit XML) into per-test outcomes in the reference executor (R3.06 uploads reports unparsed). Rendered in the proposal view. | M | R3.06, R3.19 |
 | R3.23 | Test changes in the proposal view | Show tests added, changed, and deleted as a distinct section alongside the code, with deleted assertions called out. | M | R3.31 |
-| R3.24 | Independent test authorship rules | Policy rules requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.07, R3.10 |
+| R3.24 | Independent test authorship rules | Policy rules in R3.07's file, over a `stack` input built from R3.10's dependency edges, requiring, for designated paths, that tests come from a different change than the code, or that test changes need human sign-off. | S | R3.07, R3.10 |
 
 ### Workstream: conflicts
 
@@ -241,7 +241,7 @@ Phases are sequential at the milestone level, but later phases contain tickets t
 | R3.25 | Conflict objects in the API | Expose jj-lib's stored conflicts as structured records with base, sides, and each side's provenance. | M | R3.04 |
 | R3.26 | Agent-scoped undo | Undo scoped to the operations an agent performed on its own changes, per the data model: an agent cannot undo another agent's operation without policy approval. Undoing an operation that another change has built on does not rewrite that change; it attaches a conflict object naming the undone operation to the dependent for its owner to resolve. Extends R2.03. | M | R3.25, R2.03 |
 | R3.27 | Resolver assignment and queue | Assign to the originating agent of the later change by default. Resolver queue with priority for conflicts whose owner's session has ended. | M | R3.25 |
-| R3.28 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Resolutions enter the proposal flow marked as resolutions. | M | R3.27, R3.07 |
+| R3.28 | Resolution tiers and attempt caps | Policy tiers: resolve and land, resolve and require approval, ask before attempting. Attempt cap per conflict. Both are declared in R3.07's `[conflicts]` table and looked up with its `conflict_tier`; this ticket builds the conflict input from R3.25's objects and applies them. Resolutions enter the proposal flow marked as resolutions. | M | R3.27, R3.07 |
 | R3.29 | Intent conflict escalation | Heuristics and an agent-facing prompt for detecting that two sides disagree on what to build, escalating to ask-first regardless of policy. | M | R3.28 |
 | R3.30 | Backpressure | Refuse a second unresolved conflict ancestor without policy approval. | S | R3.28 |
 
