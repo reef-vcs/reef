@@ -119,9 +119,9 @@ impl Classify for RetentionError {
     }
 }
 
-/// When evidence and artifacts are pinned by live work, as SQL over an
-/// evidence row `e`; see [`crate::db::PINNED`]. R3.13's landing pin
-/// extends that condition.
+/// When evidence is kept by retention, as SQL over an evidence row `e`:
+/// live work, or a landing's pin (R3.13); see [`crate::db::PINNED`].
+/// Artifacts are pinned by live work alone ([`crate::db::LIVE_PINNED`]).
 pub fn pinned() -> &'static str {
     crate::db::PINNED
 }

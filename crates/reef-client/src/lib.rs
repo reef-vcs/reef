@@ -54,6 +54,7 @@ use reef_api::v1::executor_service_client::ExecutorServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
 use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
+use reef_api::v1::landing_service_client::LandingServiceClient;
 use reef_api::v1::maintenance_service_client::MaintenanceServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
 use reef_api::v1::policy_service_client::PolicyServiceClient;
@@ -1952,6 +1953,62 @@ impl Client {
             PolicyServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("SimulatePolicy", client.simulate_policy(request))
             .await
+    }
+
+    fn landing(&self) -> LandingServiceClient<Svc> {
+        LandingServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `LandingService.LandChange` (R3.13): judges a proposed change, queues
+    /// it, and waits up to `request.wait_ms` for its landing.
+    pub async fn land_change(
+        &self,
+        request: v1::LandChangeRequest,
+    ) -> Result<v1::LandChangeResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("LandChange", client.land_change(request)).await
+    }
+
+    /// `LandingService.GetLanding` (R3.13).
+    pub async fn get_landing(
+        &self,
+        request: v1::GetLandingRequest,
+    ) -> Result<v1::GetLandingResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("GetLanding", client.get_landing(request)).await
+    }
+
+    /// `LandingService.ListLandings` (R3.13): one page.
+    pub async fn list_landings_page(
+        &self,
+        request: v1::ListLandingsRequest,
+    ) -> Result<v1::ListLandingsResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("ListLandings", client.list_landings(request))
+            .await
+    }
+
+    /// The first `limit` landings `request` asks for (all when 0), newest
+    /// first, and whether more exist.
+    pub async fn list_landings(
+        &self,
+        request: v1::ListLandingsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::Landing>, ClientError> {
+        let mut request = v1::ListLandingsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_landings_page(request.clone()).await?;
+            limited.items.extend(response.landings);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
     }
 
     fn provenance(&self) -> ProvenanceServiceClient<Svc> {

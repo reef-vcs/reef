@@ -52,6 +52,7 @@ pub fn cause_message(cause: TransitionCause) -> v1::TransitionCause {
         TransitionCause::Request => v1::TransitionCause::Request,
         TransitionCause::Undo => v1::TransitionCause::Undo,
         TransitionCause::Observed => v1::TransitionCause::Observed,
+        TransitionCause::Landing => v1::TransitionCause::Landing,
     }
 }
 
@@ -62,6 +63,7 @@ pub fn cause_of(value: i32) -> Option<TransitionCause> {
         v1::TransitionCause::Request => Some(TransitionCause::Request),
         v1::TransitionCause::Undo => Some(TransitionCause::Undo),
         v1::TransitionCause::Observed => Some(TransitionCause::Observed),
+        v1::TransitionCause::Landing => Some(TransitionCause::Landing),
     }
 }
 
@@ -75,7 +77,7 @@ pub fn actor_of(value: i32) -> Option<Actor> {
     }
 }
 
-fn actor_message(text: &str) -> v1::TransitionActor {
+pub(crate) fn actor_message(text: &str) -> v1::TransitionActor {
     match Actor::parse(text) {
         Actor::Human => v1::TransitionActor::Human,
         Actor::Agent => v1::TransitionActor::Agent,

@@ -1,0 +1,25 @@
+{
+  "change": {"id": "l1", "commit": "c", "tree": "t", "state": "queued", "paths": ["src/lib.rs"],
+             "files": [{"path": "src/lib.rs", "status": "modified", "lines_added": 3, "lines_removed": 1, "size": 40}],
+             "lines_added": 3, "lines_removed": 1},
+  "landing": {"destination": "main", "destination_commit": "d", "rebased": true,
+              "overlap": ["src/lib.rs", "Cargo.lock", "src/lib.rs"], "overlap_total": 2},
+  "evidence": [
+    {"id": "ev-revoked", "kind": "test", "result": "pass", "added_at": 10,
+     "key": {"status": "revoked", "identity": "ci-main", "identity_id": "idn_00000000000000c1", "identity_kind": "ci", "actor": "executor"}},
+    {"id": "ev-unbound", "kind": "test", "result": "pass", "added_at": 11,
+     "key": {"status": "unbound"}},
+    {"id": "ev-agent", "kind": "test", "result": "pass", "added_at": 12,
+     "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c", "identity_kind": "person", "actor": "agent"}},
+    {"id": "ev-self", "kind": "test", "result": "pass", "added_at": 13,
+     "key": {"status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1", "identity_kind": "ci", "actor": "executor", "session": "ses_00000000000000a1"}},
+    {"id": "ev-error", "kind": "test", "result": "error", "added_at": 14,
+     "key": {"status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1", "identity_kind": "ci", "actor": "executor"}},
+    {"id": "ev-lint", "kind": "lint", "result": "pass", "added_at": 15,
+     "key": {"status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1", "identity_kind": "ci", "actor": "executor"}}
+  ],
+  "provenance": [
+    {"id": "prv_1", "commit": "c", "session": "ses_00000000000000a1", "agent": "claude@mac", "recorded_at": 5,
+     "signature": "valid", "key": {"status": "bound", "identity": "alice", "identity_id": "idn_000000000000a11c"}}
+  ]
+}

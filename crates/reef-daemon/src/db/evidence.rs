@@ -22,12 +22,22 @@ const SWEEP_BATCH: usize = 1000;
 
 /// When the evidence row `e` is pinned by live work (R3.02): its tree is a
 /// live commit's, or it is linked to a live change. Needs the temporary
-/// tables [`Db::create_live_tables`] fills. R3.13's landing pin extends
-/// this condition.
-pub const PINNED: &str = "(e.tree_id IN (SELECT tree_id FROM temp.gc_live_trees)
+/// tables [`Db::create_live_tables`] fills. The artifacts that pinned
+/// evidence names are pinned by this condition alone.
+pub const LIVE_PINNED: &str = "(e.tree_id IN (SELECT tree_id FROM temp.gc_live_trees)
       OR EXISTS (SELECT 1 FROM evidence_links l
                  WHERE l.repo_id = e.repo_id AND l.evidence_id = e.id
                    AND l.change_id IN (SELECT change_id FROM temp.gc_live_changes)))";
+
+/// When the evidence row `e` is kept by GC's retention: [`LIVE_PINNED`],
+/// or a landing used it (R3.13, `landing_evidence`), which keeps it until
+/// the repository is forgotten.
+pub const PINNED: &str = "(e.tree_id IN (SELECT tree_id FROM temp.gc_live_trees)
+      OR EXISTS (SELECT 1 FROM evidence_links l
+                 WHERE l.repo_id = e.repo_id AND l.evidence_id = e.id
+                   AND l.change_id IN (SELECT change_id FROM temp.gc_live_changes))
+      OR EXISTS (SELECT 1 FROM landing_evidence p
+                 WHERE p.repo_id = e.repo_id AND p.evidence_id = e.id))";
 
 /// One row of `evidence_keys`.
 #[derive(Clone, Debug, PartialEq, Eq)]

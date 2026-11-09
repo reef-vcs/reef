@@ -19,4 +19,18 @@ describe("operationSentence for transitions", () => {
   it("falls back without a transition", () => {
     expect(operationSentence(base)).toBe("moved a change through its lifecycle");
   });
+
+  // R3.13: the landing service's dequeue and land.
+  it("names a dequeue", () => {
+    const transitions = [
+      { from: LifecycleState.QUEUED, to: LifecycleState.PROPOSED },
+    ] as unknown as NonNullable<Parameters<typeof operationSentence>[0]["transitions"]>;
+    expect(operationSentence({ ...base, transitions })).toBe("returned a proposal from the queue");
+  });
+
+  it("names a landing", () => {
+    expect(
+      operationSentence({ kind: OperationKind.LAND, snapshotKind: SnapshotKind.UNSPECIFIED }),
+    ).toBe("landed a change");
+  });
 });

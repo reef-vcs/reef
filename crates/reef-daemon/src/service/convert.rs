@@ -395,6 +395,11 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
         attributes: entry.attributes.clone(),
         effects: None,
         transitions: crate::lifecycle::messages::operation_transitions(entry),
+        landing_id: entry
+            .attributes
+            .get(reef_lib::jj::oplog::ATTR_LANDING)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -636,6 +641,7 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::Edit) => v1::OperationKind::Edit,
         Some(OpKind::ImportRefs) => v1::OperationKind::ImportRefs,
         Some(OpKind::Transition) => v1::OperationKind::Transition,
+        Some(OpKind::Land) => v1::OperationKind::Land,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
     }
@@ -703,6 +709,11 @@ pub(super) fn listed_operation(
         attributes: entry.attributes.clone(),
         effects: None,
         transitions: crate::lifecycle::messages::operation_transitions(entry),
+        landing_id: entry
+            .attributes
+            .get(reef_lib::jj::oplog::ATTR_LANDING)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 

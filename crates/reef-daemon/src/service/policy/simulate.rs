@@ -203,6 +203,8 @@ fn judge(
         evidence_ignored,
         provenance_ignored,
         proposed_policy: proposed_policy(state, own_file.as_ref()),
+        // Each landing is judged on its own tree, as it landed.
+        landing: reef_policy::input::Landing::default(),
     };
     let evaluation = proposed.evaluate(&input);
     // As `EvaluatePolicy` evaluates it, through the cache.

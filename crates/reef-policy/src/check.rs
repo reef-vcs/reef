@@ -143,6 +143,7 @@ pub(crate) struct Shapes {
     pub(crate) change: Shape,
     pub(crate) evidence: Shape,
     pub(crate) provenance: Shape,
+    pub(crate) landing: Shape,
     pub(crate) groups: Shape,
     pub(crate) e: Shape,
     pub(crate) conflict: Shape,
@@ -160,6 +161,7 @@ pub(crate) fn shapes() -> &'static Shapes {
             change: field("change"),
             evidence: field("evidence"),
             provenance: field("provenance"),
+            landing: field("landing"),
             groups: Shape::Map(Box::new(Shape::List(Box::new(Shape::Scalar)))),
             e: Shape::of::<Evidence>(),
             conflict: Shape::of::<ConflictInput>(),
@@ -176,6 +178,7 @@ impl Scope {
                 ("change", &shapes.change, "change"),
                 ("evidence", &shapes.evidence, "evidence"),
                 ("provenance", &shapes.provenance, "provenance"),
+                ("landing", &shapes.landing, "landing"),
                 ("groups", &shapes.groups, "groups"),
             ],
             Scope::Evidence => vec![
@@ -363,7 +366,7 @@ impl Checker {
             (Scope::Change, "e") => {
                 "; `e` is an attestor set's `when` variable: iterate `evidence` instead"
             }
-            (Scope::Evidence, "change" | "evidence" | "provenance") => {
+            (Scope::Evidence, "change" | "evidence" | "provenance" | "landing") => {
                 "; an attestor set's `when` sees one evidence object, `e`"
             }
             _ => "",

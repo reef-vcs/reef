@@ -1,0 +1,265 @@
+// Landing proposed changes onto a local bookmark (R3.13, ADR 0064;
+// `docs/landing.md`).
+//
+// A landing is one attempt to put a queued change onto its destination, a
+// local bookmark, in one jj operation. The change must be PROPOSED at the
+// commit its proposal recorded. The gate judges that commit with the
+// policy at the destination's head (R3.07) and refuses anything but ALLOW;
+// a change it passes is QUEUED, and the repository's landing worker lands
+// it: a fast-forward when the destination's head is its only parent, else
+// a rebase onto the head that must merge with no conflict, judged again,
+// then one operation that moves the bookmark and records the LANDED
+// transition. A landing that does not finish returns the change to
+// PROPOSED with a reason. Every attempt is a record that keeps its
+// evaluation, and the evidence a landed change's rules used is kept for
+// good.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/lifecycle.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/policy.proto";
+import "reef/api/v1/remote.proto";
+
+// Landing changes and reading landings.
+service LandingService {
+  // Lands a proposed change: judges it at the gate, queues it, and waits up
+  // to `wait_ms` for the landing to finish. A change the gate refuses is a
+  // landing with outcome BLOCKED, not an error, and stays PROPOSED; one
+  // already QUEUED returns its open landing. Through the remote listener,
+  // any write token may ask: proposing a change is the request to land it,
+  // and policy decides.
+  //
+  // Errors: the revision reasons of ChangeService for `revision`;
+  // EXPECTED_COMMIT_MISMATCH; FAILED_PRECONDITION with reason NOT_PROPOSED
+  // (metadata `change_id`, `state`), PROPOSAL_AMENDED (metadata
+  // `change_id`, `commit_id`, `visible_commit_id`), DESTINATION_NOT_LOCAL,
+  // DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED (metadata
+  // `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
+  // `max`); INVALID_ARGUMENT with reason INVALID_WAIT (metadata `max`); a
+  // failed snapshot's own error, with reason SNAPSHOT_FAILED (metadata
+  // `workspace_id`).
+  rpc LandChange(LandChangeRequest) returns (LandChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+
+  // One landing, by id or as a change's latest, with every change's whole
+  // evaluation.
+  //
+  // Errors: NOT_FOUND with reason LANDING_NOT_FOUND (metadata `id` or
+  // `change_id`); INVALID_ARGUMENT when both or neither of `id` and
+  // `change` are set; the repository reasons.
+  rpc GetLanding(GetLandingRequest) returns (GetLandingResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // A repository's landings, newest first, filtered and paged. Each
+  // change's evaluation carries only its decision and source; GetLanding
+  // returns it whole.
+  //
+  // Errors: INVALID_PAGE_TOKEN; a negative `page_size` is INVALID_ARGUMENT;
+  // the repository reasons.
+  rpc ListLandings(ListLandingsRequest) returns (ListLandingsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// How a landing ended, or that it has not yet.
+enum LandingOutcome {
+  // Not set; in a filter, any.
+  LANDING_OUTCOME_UNSPECIFIED = 0;
+  // The gate refused it: the change was never queued and stays PROPOSED.
+  LANDING_OUTCOME_BLOCKED = 1;
+  // The change is queued and the landing has not finished.
+  LANDING_OUTCOME_QUEUED = 2;
+  // The destination moved to the landed commit.
+  LANDING_OUTCOME_LANDED = 3;
+  // Queued, then returned to PROPOSED with a reason.
+  LANDING_OUTCOME_DEQUEUED = 4;
+  // A client withdrew, declined or superseded the change while it was
+  // queued, or it was seen landed some other way.
+  LANDING_OUTCOME_CANCELLED = 5;
+}
+
+// Why a landing was blocked or dequeued.
+enum LandingReason {
+  // None: it landed, is queued, or was cancelled.
+  LANDING_REASON_UNSPECIFIED = 0;
+  // The policy's decision was not ALLOW; the change's evaluation says why.
+  LANDING_REASON_POLICY = 1;
+  // Rebasing onto the destination conflicts; `conflicts` lists the paths.
+  LANDING_REASON_CONFLICTED = 2;
+  // A parent of the change is not on the destination.
+  LANDING_REASON_UNLANDED_PARENTS = 3;
+  // The change's visible commit is no longer the queued one.
+  LANDING_REASON_AMENDED = 4;
+  // The destination bookmark is gone, conflicted, or not local.
+  LANDING_REASON_DESTINATION = 5;
+  // The destination moved under the landing three times in a row.
+  LANDING_REASON_BUSY = 6;
+  // An internal error; `message` says what.
+  LANDING_REASON_FAILED = 7;
+}
+
+// One change of a landing.
+message LandedChange {
+  // The change, in hex.
+  string change_id = 1;
+  // The commit it was queued at: the one judged.
+  string queued_commit_id = 2;
+  // That commit's tree.
+  string queued_tree_id = 3;
+  // The commit now on the destination; empty unless it landed.
+  string landed_commit_id = 4;
+  // Its tree.
+  string landed_tree_id = 5;
+  // Whether it was rebased onto the destination; false for a fast-forward.
+  bool rebased = 6;
+  // Paths both the change and the destination changed since the change's
+  // parents, at most 100.
+  repeated string overlap = 7;
+  // How many there are.
+  uint32 overlap_total = 8;
+  // For a CONFLICTED landing, the conflicted paths, at most 100.
+  repeated string conflicts = 9;
+  // How many there are.
+  uint32 conflicts_total = 10;
+  // The evaluation, with its source; unset when the landing stopped before
+  // judging. ListLandings sends only its decision and source.
+  PolicyEvaluation evaluation = 11;
+  // The evidence a landed change's satisfied rules used, kept for good and
+  // linked to the change.
+  repeated string pinned_evidence_ids = 12;
+}
+
+// One attempt to land.
+message Landing {
+  // `lnd_` and 16 hex digits.
+  string id = 1;
+  // The repository.
+  string repo_id = 2;
+  // The destination bookmark.
+  string destination = 3;
+  // Its head when the landing read it.
+  string destination_before = 4;
+  // Its head after a landing; empty otherwise.
+  string destination_after = 5;
+  // How it ended.
+  LandingOutcome outcome = 6;
+  // Why, for BLOCKED and DEQUEUED.
+  LandingReason reason = 7;
+  // More about the reason; untrusted text for a policy's messages.
+  string message = 8;
+  // The changes, in landing order: one per landing until stacks and
+  // batches.
+  repeated LandedChange changes = 9;
+  // How many identical requests a BLOCKED landing stands for.
+  uint32 attempts = 10;
+  // The operation that queued the change; empty for BLOCKED.
+  string enqueue_operation_id = 11;
+  // The operation that landed or returned it; empty otherwise.
+  string operation_id = 12;
+  // Whether GC dropped `operation_id`'s operation, past its window.
+  bool operation_collected = 13;
+  // The `reef-agent` that asked.
+  string agent = 14;
+  // Who asked, as declared.
+  TransitionActor actor = 15;
+  // The identity that asked: the named workspace's session identity, else
+  // the daemon's default person identity.
+  string identity = 16;
+  // The remote token that asked, if the call came through the remote
+  // listener.
+  RemoteCaller remote = 17;
+  // When it was asked for.
+  google.protobuf.Timestamp created_at = 18;
+  // When it finished; unset while QUEUED.
+  google.protobuf.Timestamp finished_at = 19;
+}
+
+// The change to land.
+message LandChangeRequest {
+  // The repository, by id or path; empty for the workspace's.
+  string repo = 1;
+  // A workspace id, for `@`.
+  string workspace = 2;
+  // The revision naming the change; required. `@` needs `workspace`.
+  string revision = 3;
+  // The commit the caller expects `revision` to name; empty for no check.
+  string expected_commit_id = 4;
+  // How long to wait for the landing to finish, at most 600,000; 0 returns
+  // once it is queued (or refused).
+  uint32 wait_ms = 5;
+  // Who asks: HUMAN or AGENT; unspecified is AGENT when the call carries an
+  // agent name, else HUMAN. Through the remote listener it is AGENT.
+  TransitionActor actor = 6;
+  // Skip the snapshot of `workspace` a revision using `@` takes first.
+  bool skip_snapshot = 7;
+}
+
+// What LandChange did.
+message LandChangeResponse {
+  // The landing as it was when the wait ended.
+  Landing landing = 1;
+  // The operation that queued the change; unset for BLOCKED, or when the
+  // change was already queued.
+  Operation enqueue = 2;
+  // The operation that landed or returned it, if it finished in time.
+  Operation operation = 3;
+  // The snapshot of `workspace` taken first, if it recorded an operation.
+  Operation snapshot = 4;
+  // The change afterwards.
+  Change change = 5;
+}
+
+// The landing to read.
+message GetLandingRequest {
+  // The repository, by id or path.
+  string repo = 1;
+  // A landing id. Set this or `change`.
+  string id = 2;
+  // A change id (hex, or a unique prefix): its latest landing.
+  string change = 3;
+  // Also return the policy bytes the landing evaluated.
+  bool include_policy = 4;
+}
+
+// One landing.
+message GetLandingResponse {
+  // The landing.
+  Landing landing = 1;
+  // The policy text its evaluation ran, when asked and known.
+  string policy = 2;
+}
+
+// Which landings to list.
+message ListLandingsRequest {
+  // The repository, by id or path.
+  string repo = 1;
+  // Destination bookmarks; empty for all.
+  repeated string destinations = 2;
+  // Outcomes; empty for all.
+  repeated LandingOutcome outcomes = 3;
+  // Change ids (hex, or prefixes); empty for all.
+  repeated string changes = 4;
+  // Only landings that finished after this.
+  google.protobuf.Timestamp finished_after = 5;
+  // At most this many per page, up to 200; 0 for 50.
+  int32 page_size = 6;
+  // A previous response's `next_page_token`.
+  string page_token = 7;
+}
+
+// A page of landings.
+message ListLandingsResponse {
+  // Newest first.
+  repeated Landing landings = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}

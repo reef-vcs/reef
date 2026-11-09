@@ -2,7 +2,7 @@
 
 A repository's policy is `reef-policy.toml` at the root of its tree: which signers' evidence counts, which evidence a change needs, how large a change may be, which paths no change may touch, which areas need a person's sign-off, and how conflicts are resolved. Reef evaluates it over one change and answers with a decision and a result per rule: what is satisfied, what is missing, and who must sign. This page is the format, version 1 ([ADR 0061](adr/0061-repository-policy-file.md)).
 
-Evaluation decides; it never refuses anything. The landing service (R3.13) is what will refuse to land a change the policy does not allow. Until then, `reef policy eval` tells you, or an agent, whether a change would land and what it lacks.
+Evaluation decides; it never refuses anything. The [landing service](landing.md) (R3.13) refuses to land a change the policy at its destination does not allow. `reef policy eval` tells you, or an agent, beforehand whether a change would land and what it lacks.
 
 ```sh
 reef policy init                      # a starter reef-policy.toml in this directory
@@ -16,13 +16,13 @@ reef policy simulate --limit 50       # what this file would have blocked of the
 
 A change is never judged by its own policy.
 
-- **The policy in force is the one on the destination's tree**: `trunk()` by default (`main`, `origin/HEAD`'s branch, `master` or `trunk`), the branch it lands onto once R3.13 lands changes. `reef policy eval --policy-revision REV` reads another revision's, and `--policy-file FILE` evaluates a file's text, for trying a policy out; `reef policy simulate` tries one over recent landings ([Simulating a policy](#simulating-a-policy)).
+- **The policy in force is the one on the destination's tree**: `trunk()` by default (`main`, `origin/HEAD`'s branch, `master` or `trunk`), the branch `reef land` lands it onto ([landing](landing.md)). `reef policy eval --policy-revision REV` reads another revision's, and `--policy-file FILE` evaluates a file's text, for trying a policy out; `reef policy simulate` tries one over recent landings ([Simulating a policy](#simulating-a-policy)).
 - **A change to `reef-policy.toml` or `reef-checks.toml` needs the owners' sign-off.** The built-in rule `builtin:owners` applies whenever a change touches either file, at the tree's root, and needs `[owners]`' sign-off, as a `[[signoff]]` area would. It cannot be removed: a policy that a change could switch off for itself would be no policy. `reef-checks.toml` is included because it declares what the reference executor runs for a check ([executor.md](executor.md)), so a change to it changes how a tree is judged.
 - **A change's own new policy must load.** `builtin:policy-file` applies when a change touches `reef-policy.toml` and keeps it: the new file must parse and pass the static check, so the destination never receives a policy that blocks everything. Deleting the file is allowed, with the owners' sign-off.
 - **No file is `no_policy`**, and a file that does not load is `invalid_policy`, with every problem it has. Neither lets anything land automatically.
 - **The first policy reaches the destination outside the gate**: there is nothing to judge it by. Commit it by hand after `reef policy check`.
 
-Every evaluation names the bytes it evaluated: the policy revision, its commit, the file's blob id and the SHA-256 of its bytes. R3.13 pins them with each landing.
+Every evaluation names the bytes it evaluated: the policy revision, its commit, the file's blob id and the SHA-256 of its bytes. A landing records them and keeps the bytes (`reef landing show --policy`).
 
 ## The file
 
@@ -129,7 +129,7 @@ The names of the sets an object satisfies are `e.attestors`, which free rules ca
 
 ## Required evidence, limits, forbidden paths and sign-offs
 
-These tables are evaluated by Reef itself, not compiled to CEL, so their results carry data: R3.13 requests the missing evidence from the named attestor sets, and the proposal view shows who must sign.
+These tables are evaluated by Reef itself, not compiled to CEL, so their results carry data: a landing's refusal lists the missing evidence and, for each pair, the objects on the tree that did not count and why (`rejected`); R3.45 requests the missing evidence from the named attestor sets, and the proposal view shows who must sign.
 
 - **`[[require]]`**: for each kind, and each of `targets` (or the whole check, no target, when empty), the objects of that kind and target from a named set decide, and **the newest verdict by witness time wins**: the latest `pass` or `fail` among them is the requirement's outcome. `error` objects never count: R3.01 defines `error` as no verdict. So a flaky run that failed and then passed on the same tree is satisfied, and a pass followed by a fail is not. No object is **missing**; a newest `fail` is **failed**, with its id. A per-target object never satisfies a whole-check requirement: how targets add up to a whole check is R3.19's.
 - **`[limits]`**: `max_files` over the touched paths, `max_lines` over lines added plus removed, `max_file_size` over each added or modified file's new side, all after `except`. A binary file, or one too large to count (over 16 MiB), counts no lines. One rule, `limits`, reports every limit passed and the files over the size limit.
@@ -157,7 +157,8 @@ A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, ses
 - **Provenance**: every record of the change, up to 10,000; more is `builtin:input`'s error.
 - **No clock.** Nothing in the input is "now", and identity status is judged at each object's witness time, so an evaluation depends only on the policy's bytes and the input.
 - **Limits**: at most 100,000 touched paths; a larger change is `builtin:input`'s error.
-- **What later tickets add**, each a new field the static check learns: `change.state` (R3.09), `stack` (R3.10, for R3.24), the `conflict` object's other fields (R3.25 to R3.28), `budget` (R3.20) and `batch` (R3.14). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
+- **`change.state` and `landing`** (R3.13). `change.state` is the change's lifecycle state (`draft`, `proposed`, `queued`, `landed`, `declined`, `withdrawn`, `superseded`); inside a landing it is `queued`. `landing` is `{destination, destination_commit, rebased, overlap, overlap_total}`: the bookmark the change lands onto, its head, whether the change is rebased onto it (false for a fast-forward), and the paths both the change and the destination changed since the change's parents (at most 1,000, sorted). `reef policy eval` fills it from a preview onto the policy revision (`trunk()` by default, or `trunk()` for `--policy-file`); `reef policy simulate` judges each landing on its own tree (`rebased: false`).
+- **What later tickets add**, each a new field the static check learns: `stack` (R3.10, for R3.24), the `conflict` object's other fields (R3.25 to R3.28), `budget` (R3.20) and `batch` (R3.14). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
 
 ## CEL
 
@@ -222,7 +223,7 @@ reef policy simulate --no-baseline -o json            # the proposed policy's de
 ```
 
 - **The proposed policy** is `./reef-policy.toml` by default, read by the CLI and sent as text; `--policy-file FILE` names another, and `--policy-revision REV` reads the one at a revision, such as a change that edits it. A proposed policy that does not load is an error (exit 2) listing every problem, as `reef policy check` lists them; nothing is evaluated.
-- **A landing**, until the landing service records landings (R3.13), is a commit that reached the destination: every ancestor of `trunk()` but merges and the root, newest first (`::trunk() ~ root() ~ merges()`), each judged as its own change exactly as `reef policy eval -r <commit>` judges it, with the evidence on its tree and its provenance as they are now. A merge is left out because what R3.07 judges of it is its diff against its merged parents, its conflict resolution; the commits it merged are in the window. `-r REVSET` names any other window: `-r 'first_ancestors(trunk(), 50)'` for the first-parent line, `-r 'ancestors(trunk()) & committer_date(after:"2 weeks ago")'` by time. Once R3.13 records landings, with the evidence they used, they replace this default.
+- **A landing**, until the landing service records landings (R3.13), is a commit that reached the destination: every ancestor of `trunk()` but merges and the root, newest first (`::trunk() ~ root() ~ merges()`), each judged as its own change exactly as `reef policy eval -r <commit>` judges it, with the evidence on its tree and its provenance as they are now. A merge is left out because what R3.07 judges of it is its diff against its merged parents, its conflict resolution; the commits it merged are in the window. `-r REVSET` names any other window: `-r 'first_ancestors(trunk(), 50)'` for the first-parent line, `-r 'ancestors(trunk()) & committer_date(after:"2 weeks ago")'` by time. R3.13 records landings, with the evidence they used and the policy bytes; the window switches to those records in #246.
 - **The baseline** is the policy at `trunk()` (`--baseline-revision REV` for another, `--no-baseline` for none), the same for every landing, so the report says what the proposed change to the policy changes. Each landing's outcome compares the two decisions, where blocked means anything but `allow`:
 
   | Outcome | Proposed policy | Baseline |
@@ -356,6 +357,25 @@ tier = "ask"
 paths = ["docs/**"]
 tier = "land"
 attempts = 5
+```
+
+
+Landings that are always tested as they land, until R3.14 tests the rebased batch head: refuse a rebase, or a rebase over paths the destination changed ([landing](landing.md)).
+
+```toml policy
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[[rule]]
+name = "fast-forward-only"
+expr = '!landing.rebased'
+message = "rebase onto the destination and run the checks again"
+
+[[rule]]
+name = "queued-changes"
+expr = 'change.state == "queued" || change.state == "proposed"'
 ```
 
 ## Upgrading

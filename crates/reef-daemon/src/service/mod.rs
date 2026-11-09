@@ -22,6 +22,7 @@ pub mod executor;
 pub mod files;
 pub mod history;
 pub mod identity;
+pub mod landing;
 pub mod maintenance;
 pub mod operations;
 pub mod page;

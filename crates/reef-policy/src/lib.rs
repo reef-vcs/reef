@@ -39,7 +39,7 @@ pub mod schema;
 
 pub use conflict::ConflictDecision;
 pub use eval::{
-    Decision, Evaluation, InputSummary, Need, RuleKind, RuleResult, SignoffNeed, Status,
+    Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
 };
 pub use format::{Diagnostic, Policy, Tier, VERSION};
 pub use input::{Case, ConflictInput, Input};
@@ -70,6 +70,14 @@ pub const EVIDENCE_UNTRUSTED_MAX: usize = 1_000;
 
 /// The most paths a rule result lists; `paths_total` counts them all.
 pub const MAX_REPORTED_PATHS: usize = 20;
+
+/// The most paths [`input::Landing::overlap`] lists; `overlap_total`
+/// counts them all.
+pub const MAX_OVERLAP_PATHS: usize = 1_000;
+
+/// The most rejected objects a missing need lists ([`eval::Need::rejected`]);
+/// `rejected_total` counts them all.
+pub const MAX_REJECTED: usize = 20;
 
 /// The SHA-256 of `bytes`, as lowercase hex.
 pub fn sha256_hex(bytes: &[u8]) -> String {

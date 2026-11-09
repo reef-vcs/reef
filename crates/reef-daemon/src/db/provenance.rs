@@ -587,7 +587,7 @@ impl Db {
             temp_set(tx, "gc_provenance_visible", visible)?;
             let mut stmt = tx.prepare(
                 "WITH runs AS (
-                   SELECT id, commit_id, recorded_at, context_digest,
+                   SELECT id, change_id, commit_id, recorded_at, context_digest,
                           LAG(context_digest) OVER w AS previous,
                           LEAD(context_digest) OVER w AS following
                    FROM provenance WHERE repo_id = ?1
@@ -595,7 +595,9 @@ impl Db {
                  SELECT id FROM runs
                  WHERE recorded_at < ?2
                    AND previous IS context_digest AND following IS context_digest
-                   AND commit_id NOT IN (SELECT value FROM temp.gc_provenance_visible)",
+                   AND commit_id NOT IN (SELECT value FROM temp.gc_provenance_visible)
+                   AND change_id NOT IN (SELECT change_id FROM landing_changes
+                                         WHERE repo_id = ?1 AND landed_commit IS NOT NULL)",
             )?;
             let ids = stmt
                 .query_map(params![repo, before], |row| row.get(0))?
@@ -623,7 +625,9 @@ impl Db {
             let mut stmt = tx.prepare(
                 "SELECT id FROM provenance
                  WHERE repo_id = ?1 AND recorded_at < ?2
-                   AND change_id IN (SELECT value FROM temp.gc_provenance_gone)",
+                   AND change_id IN (SELECT value FROM temp.gc_provenance_gone)
+                   AND change_id NOT IN (SELECT change_id FROM landing_changes
+                                         WHERE repo_id = ?1 AND landed_commit IS NOT NULL)",
             )?;
             let ids = stmt
                 .query_map(params![repo, before], |row| row.get(0))?

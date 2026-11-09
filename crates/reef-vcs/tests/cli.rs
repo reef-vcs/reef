@@ -1828,6 +1828,8 @@ fn root_help_names_every_command() {
             || command == "policy"
             || command == "propose"
             || command == "proposal"
+            || command == "land"
+            || command == "landing"
         {
             continue;
         }

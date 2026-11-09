@@ -613,6 +613,9 @@ pub enum ManagerError {
     /// An undo was refused or failed (R2.03).
     #[error("undo the operation")]
     Undo(#[from] reef_lib::jj::undo::UndoError),
+    /// A landing was refused or failed (R3.13).
+    #[error("land the change")]
+    Land(#[from] reef_lib::jj::land::LandError),
     /// An edit of files was refused or failed (R2.04).
     #[error("edit the files")]
     Edit(#[from] reef_lib::jj::files::EditError),
@@ -676,6 +679,7 @@ impl Classify for ManagerError {
             Self::OpLog(error) => error.kind(),
             Self::Rewrite(error) => error.kind(),
             Self::Undo(error) => error.kind(),
+            Self::Land(error) => error.kind(),
             Self::Edit(error) => error.kind(),
             Self::OpLookup(error) => error.kind(),
             Self::RewriteSnapshot { .. } => ErrorKind::Conflict,

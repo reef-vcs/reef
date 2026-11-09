@@ -88,6 +88,8 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         Rule::OwnWorkspace,
     ),
     ("/reef.api.v1.ExecutorService/SubmitJob", Rule::None),
+    // Proposing is the request to land; policy decides (R3.13).
+    ("/reef.api.v1.LandingService/LandChange", Rule::None),
     ("/reef.api.v1.ExecutorService/CancelJob", Rule::OwnJob),
     ("/reef.api.v1.ExecutorService/ClaimJob", Rule::LinkedToken),
     ("/reef.api.v1.ExecutorService/UpdateJob", Rule::OwnClaim),

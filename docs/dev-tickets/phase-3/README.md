@@ -20,7 +20,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.02 | [R3.02-evidence-artifact-store.md](R3.02-evidence-artifact-store.md) | M | R3.01 | none listed |
 | R3.03 | [R3.03-session-keys-and-operator-identity.md](R3.03-session-keys-and-operator-identity.md) | L | R3.01 | R3.04, R3.06, R3.42, R3.43, R4.09, R4.10 |
 | R3.04 | [R3.04-provenance-records.md](R3.04-provenance-records.md) | M | R3.03 | R3.25, R3.37, R3.44 |
-| R3.05 | [R3.05-executor-protocol.md](R3.05-executor-protocol.md) | M | R3.01, R2.01 | R3.06, R6.03 |
+| R3.05 | [R3.05-executor-protocol.md](R3.05-executor-protocol.md) | M | R3.01, R2.01 | R3.06, R3.45, R6.03 |
 | R3.06 | [R3.06-trusted-executor.md](R3.06-trusted-executor.md) | L | R3.05, R3.03 | R3.14, R3.22 |
 | R3.07 | [R3.07-policy-file-and-cel.md](R3.07-policy-file-and-cel.md) | M | R3.01 | R3.08, R3.13, R3.20, R3.24, R3.28, R6.03 |
 | R3.08 | [R3.08-policy-simulation.md](R3.08-policy-simulation.md) | S | R3.07 | none listed |
@@ -28,7 +28,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.10 | not yet briefed (Stacks) | M | R3.09 | R3.11, R3.24 |
 | R3.11 | not yet briefed (Dependent change lifecycle) | M | R3.10, R3.13 | none listed |
 | R3.12 | not yet briefed (Comments as instructions) | M | R3.09, R2.13 | R3.32 |
-| R3.13 | not yet briefed (Landing service, local) | L | R3.07, R3.09 | R3.11, R3.14, R3.16 |
+| R3.13 | [R3.13-landing-service-local.md](R3.13-landing-service-local.md) | L | R3.07, R3.09 | R3.11, R3.14, R3.16, R3.45 |
 | R3.14 | not yet briefed (Batching and bisect) | L | R3.13, R3.06 | R3.15, R3.18, R3.20, R3.21, R3.34, R4.11 |
 | R3.15 | not yet briefed (Evidence transfer rules) | S | R3.14 | none listed |
 | R3.16 | not yet briefed (Landed history projection) | M | R3.13 | R3.17, R4.16 |
@@ -60,6 +60,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.42 | not yet briefed (Sigstore keyless identity) | M | R3.03 | none listed |
 | R3.43 | not yet briefed (Verified human presence for sign-off keys) | M | R3.03, R2.18 | none listed |
 | R3.44 | [R3.44-provenance-from-harnesses-and-sdks.md](R3.44-provenance-from-harnesses-and-sdks.md) | S | R3.04, R2.25, R2.26 | none listed |
+| R3.45 | not yet briefed (Automatic landing and evidence requests) | M | R3.13, R3.05 | none listed |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 
@@ -77,3 +78,4 @@ These were decided while writing the briefs. `dev-phases.md` was edited to match
 - **R3.08's recent landings are the destination's non-merge ancestors until R3.13 records landings, and each is compared with a baseline** (2026-11-08). Nothing records a landing before R3.13, so a landing is a commit that reached `trunk()`, other than a merge, judged as its own change, newest first, with any revset accepted; R3.13's landing records, with the evidence they pinned, replace that default. The report compares each landing's decision under the proposed policy with the destination's current policy, and counts apart the landings blocked only for missing evidence, which history usually lacks (squash merges make new trees, and retention expires old evidence). The row now says so.
 - **R3.44's prompt hook also reaches the workspaces its harness session creates or holds elsewhere, and the model comes from hook events** (2026-11-08). An agent following the guide works from the root checkout, so a hook that declared only for its `cwd` would leave most records without an instruction: the hook also declares for every active workspace whose session declared the same client session, and leaves a session note (hashes only) that the session's next workspaces declare from for 24 hours. The reference harness documents its model only in hook events (`SessionStart`, `PostModelSwitch`), not in its environment, so "where a harness documents one" covers both.
 - **R3.09 records each transition as an operation and a row, records only the client transitions and observed landings itself, and makes accept a sign-off rather than a state** (2026-11-08). "Recorded as operations" is an operation per transition carrying a `reef.lifecycle` attribute, plus a row in `reef.sqlite3`, because GC drops operations older than its window and the inbox needs every open proposal in one query. Clients propose, withdraw, decline and supersede; enqueue, dequeue and land are defined here and recorded by R3.13, whose row now says so, except that the daemon records a recorded change as landed when it reaches `trunk()`, since until R3.13 every landing happens outside Reef. Accept is R3.07's `signoff` evidence, which R3.31's row now says. The ticket adds `reef propose` and `reef proposal`, which the row did not mention.
+- **R3.13 lands on request, judges the submitted tree, and leaves automatic landing and evidence requests to a new row, R3.45** (2026-11-08). Landing what policy allows without anyone asking needs a second trigger system (evidence, provenance and policy changes) and per-proposal evaluation keys, and requesting missing evidence needs job dedupe and retries; together they push R3.13 well past L, so R3.45 (M, after R3.13 and R3.05) takes both. "Checks commutation" is a rebase onto the destination that merges with no conflict; the paths both sides touched are recorded and given to policy as `landing`, so a repository can require fast-forward or disjoint paths until R3.14 tests the batch head. A change whose parents have not landed is refused (R3.10 lands stacks). "Pins the evidence and the policy blob" also links the evidence to the change, copies the policy bytes into `reef.sqlite3`, and keeps the change's provenance whole; artifacts keep their own retention. The row now says so, and R3.45's row is new.

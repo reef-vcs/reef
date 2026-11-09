@@ -178,7 +178,7 @@ An agent proposes a change plus evidence, or a stack of dependent changes as one
 
 Landing then rebases onto the current head. A rebase produces a new tree hash, so evidence computed on the submitted tree proves nothing about the rebased one, and disjoint hunks are no guarantee of semantic compatibility: one agent can change a signature while another adds a caller. The landing service is therefore a merge queue. It batches rebased changes, asks the trusted executor to run the required checks on the batch head, lands the batch if the checks pass, and bisects the batch to find the culprit if they fail. A stack lands as a prefix: if a later change fails, the earlier ones still land. Policy can declare an evidence transfer rule for cheap checks such as lint, accepting results from the submitted tree when the hunks commute, so only expensive checks rerun on the batch.
 
-If the rebase does not commute, the proposal returns to its owner with a conflict object, or to the resolver queue if the owner's session has ended. This is a merge queue inside the version control system rather than one bolted onto CI.
+If the rebase does not commute, the proposal returns to its owner with a conflict object, or to the resolver queue if the owner's session has ended. This is a merge queue inside the version control system rather than one bolted onto CI. R3.13 builds its local form, landing one change at a time on request ([ADR 0064](adr/0064-landing-service-local.md), [landing](landing.md)).
 
 ### What evidence proves
 

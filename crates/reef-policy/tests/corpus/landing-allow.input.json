@@ -1,0 +1,10 @@
+{
+  "change": {"id": "l2", "commit": "c", "tree": "t", "state": "queued", "paths": ["src/lib.rs"],
+             "files": [{"path": "src/lib.rs", "status": "modified", "lines_added": 3, "lines_removed": 1, "size": 40}],
+             "lines_added": 3, "lines_removed": 1},
+  "landing": {"destination": "main", "destination_commit": "c0"},
+  "evidence": [
+    {"id": "ev-ci", "kind": "test", "result": "pass", "added_at": 10,
+     "key": {"status": "bound", "identity": "ci-main", "identity_id": "idn_00000000000000c1", "identity_kind": "ci", "actor": "executor"}}
+  ]
+}

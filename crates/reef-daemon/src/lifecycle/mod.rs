@@ -599,6 +599,37 @@ async fn record(
     Ok(Recorded { op_id, rows })
 }
 
+/// Records `row` (a daemon transition: the landing service's enqueue or
+/// dequeue, R3.13) in an operation of its own described by `meta`; the
+/// caller holds the repository's create lock shared and its lifecycle
+/// lock.
+pub(crate) async fn record_daemon_transition(
+    state: &AppState,
+    repo: RepoId,
+    row: TransitionRow,
+    meta: OpMeta,
+) -> Result<Recorded, LifecycleError> {
+    record(state, repo, vec![Planned { row, owner: None }], meta).await
+}
+
+/// Commits the pending `row` with `op_id`, which ended at `recorded_at`,
+/// and updates its change's `lifecycle` row: R3.09's last step, for an
+/// operation another path wrote (the landing service's land, R3.13). The
+/// caller holds the lifecycle lock.
+pub(crate) fn commit_written_transition(
+    state: &AppState,
+    repo: RepoId,
+    row: &TransitionRow,
+    op_id: &str,
+    recorded_at: Timestamp,
+) -> Result<Option<TransitionRow>, LifecycleError> {
+    let existing = state.db.lifecycle_row(repo, &row.change_id)?;
+    let update = update_for(row, existing.as_ref(), recorded_at, None);
+    Ok(state
+        .db
+        .commit_transition(repo, &row.id, op_id, recorded_at, &update)?)
+}
+
 /// A client's transition request, resolved by the service.
 #[derive(Clone, Debug)]
 pub struct TransitionRequest {
@@ -692,14 +723,25 @@ fn identity_of(
     state: &AppState,
     request: &TransitionRequest,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let session = request.workspace.as_ref().and_then(|workspace| {
+    identity_for(state, request.workspace.as_ref(), request.remote.as_ref())
+}
+
+/// The identity a request records: the remote token's linked one, else
+/// the workspace's provenance session's, else the default person identity;
+/// as `(id, name, session)`. Shared with the landing service (R3.13).
+pub(crate) fn identity_for(
+    state: &AppState,
+    workspace: Option<&WorkspaceRecord>,
+    remote: Option<&(String, String)>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let session = workspace.and_then(|workspace| {
         state
             .db
             .live_provenance_session(&workspace.id.as_hex())
             .ok()
             .flatten()
     });
-    let id = match &request.remote {
+    let id = match remote {
         Some((token, _)) => state
             .db
             .remote_tokens()
@@ -1124,6 +1166,17 @@ async fn undo_inner(
                 "it records a landing seen on trunk(); move the bookmark back instead",
             ));
         }
+        if row.cause == TransitionCause::Landing.as_str() {
+            return Err(refuse(match row.to_state.as_str() {
+                "queued" => "the landing service queued the change; withdraw the proposal instead",
+                "landed" => {
+                    "a landing moved its destination; land a revert, or move the bookmark back with jj"
+                }
+                _ => {
+                    "the landing service returned the change to proposed; land it again with `reef land`"
+                }
+            }));
+        }
         if let Some((token, _)) = &remote
             && row.remote_token.as_deref() != Some(token.as_str())
         {
@@ -1405,6 +1458,15 @@ pub(crate) fn map_operations(
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map lifecycle transitions' operation ids");
+        }
+    } // Landings' operations follow the same rewrite (R3.13).
+    match state.db.map_landing_operations(repo, &map) {
+        Ok((mapped, collected)) if mapped + collected > 0 => {
+            tracing::info!(%repo, mapped, collected, "mapped landings' operation ids");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map landings' operation ids");
         }
     }
 }

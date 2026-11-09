@@ -130,6 +130,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::lifecycle::LifecycleError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::landing::LandingError>() {
+            error.advice()
         } else if let Some(error) = error.downcast_ref::<RetentionError>() {
             match error {
                 RetentionError::Db(error) => error.advice(),
@@ -694,6 +696,8 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<crate::executor::ExecutorError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::lifecycle::LifecycleError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::landing::LandingError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)

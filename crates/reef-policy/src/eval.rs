@@ -82,6 +82,30 @@ pub struct Need {
     pub attestors: Vec<String>,
     /// For a failed need, the failing object.
     pub evidence_ids: Vec<String>,
+    /// For a missing need, the objects of its kind and target that were on
+    /// the tree and did not count, each with why (R3.13), at most
+    /// [`crate::MAX_REJECTED`]; the daemon adds those whose signature does
+    /// not verify, which never reach the evaluator.
+    pub rejected: Vec<Rejected>,
+    /// How many objects were rejected; more than `rejected`'s length when
+    /// it was cut.
+    pub rejected_total: i64,
+}
+
+/// An evidence object that did not count for a need, and why (R3.13).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "policy.Rejected")]
+pub struct Rejected {
+    /// The evidence id.
+    pub evidence_id: String,
+    /// Why it did not count: `error` (no verdict), `key_unbound`,
+    /// `key_expired`, `key_revoked` or `key_invalid` (its key's status at
+    /// witness time), `self` (from the change's own session or agent),
+    /// `presence` (its key's presence is below the set's), `condition` (a
+    /// set's `when` was false), or `untrusted` (no attestor set of the rule
+    /// accepts its signer). The daemon adds `signature_invalid`.
+    pub why: String,
 }
 
 /// A sign-off a rule needs, and what it has.
@@ -551,6 +575,11 @@ impl Policy {
             .files
             .sort_by(|a, b| (&a.path, &a.old_path).cmp(&(&b.path, &b.old_path)));
         input.change.parents.sort();
+        input.landing.overlap.sort();
+        input.landing.overlap.dedup();
+        let overlap = i64::try_from(input.landing.overlap.len()).unwrap_or(i64::MAX);
+        input.landing.overlap_total = input.landing.overlap_total.max(overlap);
+        input.landing.overlap.truncate(crate::MAX_OVERLAP_PATHS);
         input
             .evidence
             .sort_by(|a, b| (a.added_at, &a.id).cmp(&(b.added_at, &b.id)));
@@ -707,17 +736,20 @@ impl Policy {
         let change = serde_json::to_value(&evaluator.input.change).unwrap_or_default();
         let evidence = serde_json::to_value(&evaluator.input.evidence).unwrap_or_default();
         let provenance = serde_json::to_value(&evaluator.input.provenance).unwrap_or_default();
+        let landing = serde_json::to_value(&evaluator.input.landing).unwrap_or_default();
         let shapes = shapes();
         evaluator.sizes = Sizes::of(&[
             ("change", &change, &shapes.change),
             ("evidence", &evidence, &shapes.evidence),
             ("provenance", &provenance, &shapes.provenance),
+            ("landing", &landing, &shapes.landing),
             ("groups", &groups_json, &shapes.groups),
         ]);
         evaluator.context = env::context(vec![
             ("change", env::to_value(&evaluator.input.change)),
             ("evidence", env::to_value(&evaluator.input.evidence)),
             ("provenance", env::to_value(&evaluator.input.provenance)),
+            ("landing", env::to_value(&evaluator.input.landing)),
             ("groups", groups_value),
         ]);
         if !problems.is_empty() {
@@ -726,7 +758,53 @@ impl Policy {
         evaluator
     }
 
-    #[allow(clippy::unused_self)]
+    /// Why `e`, of a missing need's kind and target, did not count for
+    /// `require`: the first reason that applies, over the rule's attestor
+    /// sets (R3.13).
+    fn rejection(&self, require: &Require, e: &Evidence) -> &'static str {
+        if e.result != "pass" && e.result != "fail" {
+            return "error";
+        }
+        match e.key.status.as_str() {
+            "bound" => {}
+            "unbound" => return "key_unbound",
+            "expired" => return "key_expired",
+            "revoked" => return "key_revoked",
+            _ => return "key_invalid",
+        }
+        let sets = || {
+            require
+                .attestors
+                .iter()
+                .filter_map(|name| self.attestors.get(name))
+        };
+        if sets().any(|set| declared_match(set, e)) {
+            return "condition";
+        }
+        let trusted_but = |set: &Attestor, presence: bool, self_ok: bool| {
+            set.members.contains(&e.key.identity_id, &e.key.identity)
+                && (set.identity_kinds.is_empty()
+                    || set.identity_kinds.contains(&e.key.identity_kind))
+                && set.actors.contains(&e.key.actor)
+                && (set.authorities.is_empty() || set.authorities.contains(&e.key.authority))
+                && (presence
+                    || Presence::of_key(&e.key.presence)
+                        .is_some_and(|presence| presence >= set.presence))
+                && (self_ok || set.allow_self || !e.from_self)
+        };
+        if sets().any(|set| trusted_but(set, false, true)) {
+            return "self";
+        }
+        if sets().any(|set| trusted_but(set, true, false)) {
+            return "presence";
+        }
+        "untrusted"
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each pair's newest verdict, then the message"
+    )]
     fn require(&self, evaluator: &mut Evaluator, require: &Require) -> RuleResult {
         let covered: Vec<String> = require
             .filter
@@ -776,9 +854,27 @@ impl Policy {
                     target: (*target).to_owned(),
                     attestors: require.attestors.clone(),
                     evidence_ids: ids,
+                    rejected: Vec::new(),
+                    rejected_total: 0,
                 };
                 match newest {
-                    None => result.missing.push(need(Vec::new())),
+                    None => {
+                        let mut missing = need(Vec::new());
+                        let rejected: Vec<Rejected> = evaluator
+                            .input
+                            .evidence
+                            .iter()
+                            .rev()
+                            .filter(|e| e.kind == *kind && e.target == *target)
+                            .map(|e| Rejected {
+                                evidence_id: e.id.clone(),
+                                why: self.rejection(require, e).to_owned(),
+                            })
+                            .collect();
+                        missing.rejected_total = i64::try_from(rejected.len()).unwrap_or(i64::MAX);
+                        missing.rejected = rejected.into_iter().take(crate::MAX_REJECTED).collect();
+                        result.missing.push(missing);
+                    }
                     Some(e) if e.result == "fail" => result.failed.push(need(vec![e.id.clone()])),
                     Some(e) => result.evidence_ids.push(e.id.clone()),
                 }

@@ -187,7 +187,7 @@ pub(super) struct ListOperations {
     pub(super) changes: Option<Vec<String>>,
     /// Only operations by these agents.
     pub(super) agents: Option<Vec<String>>,
-    /// Only operations of these kinds.
+    /// Only these operation kinds.
     pub(super) kinds: Option<Vec<Kind>>,
     /// Include what each operation changed.
     pub(super) include_effects: Option<bool>,
@@ -243,6 +243,7 @@ pub(super) enum Kind {
     Edit,
     ImportRefs,
     Transition,
+    Land,
     External,
     Other,
 }
@@ -260,6 +261,7 @@ impl From<Kind> for v1::OperationKind {
             Kind::Edit => Self::Edit,
             Kind::ImportRefs => Self::ImportRefs,
             Kind::Transition => Self::Transition,
+            Kind::Land => Self::Land,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
         }
@@ -334,7 +336,7 @@ pub(super) struct WaitForOperations {
     pub(super) changes: Option<Vec<String>>,
     /// Only operations by these agents.
     pub(super) agents: Option<Vec<String>>,
-    /// Only operations of these kinds.
+    /// Only these operation kinds.
     pub(super) kinds: Option<Vec<Kind>>,
     /// Wait for operations after this one (id or prefix), such as the last result's last_operation_id [default: the newest now].
     pub(super) after_operation: Option<String>,

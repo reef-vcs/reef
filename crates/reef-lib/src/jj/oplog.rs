@@ -294,6 +294,9 @@ pub const ATTR_REMOTE_TOKEN_NAME: &str = "reef.remote-token-name";
 /// The attribute recording lifecycle transitions (R3.09): a
 /// [`LifecycleRecord`](super::lifecycle::LifecycleRecord) as compact JSON.
 pub const ATTR_LIFECYCLE: &str = "reef.lifecycle";
+/// The attribute naming the landing an operation recorded (R3.13): its id,
+/// `lnd_<16 hex>`.
+pub const ATTR_LANDING: &str = "reef.landing";
 
 /// Separates an agent from the remote token it carries; see
 /// [`RemoteToken::mark`].
@@ -360,6 +363,9 @@ pub enum OpKind {
     ImportRefs,
     /// A change's lifecycle state changed (R3.09).
     Transition,
+    /// The landing service moved a destination bookmark onto a change
+    /// (R3.13).
+    Land,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -368,7 +374,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 11] = [
+    pub const WRITTEN: [OpKind; 12] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -379,6 +385,7 @@ impl OpKind {
         OpKind::Edit,
         OpKind::ImportRefs,
         OpKind::Transition,
+        OpKind::Land,
         OpKind::Other,
     ];
 
@@ -395,6 +402,7 @@ impl OpKind {
             OpKind::Edit => "edit",
             OpKind::ImportRefs => "import-refs",
             OpKind::Transition => "transition",
+            OpKind::Land => "land",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -427,6 +435,8 @@ pub struct OpMeta {
     /// [`ATTR_LIFECYCLE`]: the lifecycle transitions it records (R3.09);
     /// empty for none.
     pub transitions: Vec<super::lifecycle::TransitionRecord>,
+    /// [`ATTR_LANDING`]: the landing it records (R3.13).
+    pub landing: Option<String>,
 }
 
 impl OpMeta {
@@ -440,6 +450,7 @@ impl OpMeta {
             workspace: None,
             agent: None,
             transitions: Vec::new(),
+            landing: None,
         }
     }
 
@@ -482,6 +493,7 @@ impl OpMeta {
         let optional = [
             (ATTR_SNAPSHOT_KIND, self.snapshot_kind.as_deref()),
             (ATTR_WORKSPACE, self.workspace.as_deref()),
+            (ATTR_LANDING, self.landing.as_deref()),
             (ATTR_AGENT, agent),
             (ATTR_REMOTE_TOKEN, remote.as_ref().map(|r| r.id.as_str())),
             (

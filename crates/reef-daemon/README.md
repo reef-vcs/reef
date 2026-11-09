@@ -40,8 +40,13 @@ Since R2.03 every operation Reef records carries the attributes, so the descript
 | describe, abandon, undo, edit | `describe`, `abandon`, `undo`, `edit` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
 | a store build's scratch create and release | as create and release | | the scratch workspace | the request's `reef-agent`, else `reef-store-build` |
 | a lifecycle transition (R3.09) | `transition` (`undo` for an undo of one) | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner; none for an observed landing |
+| a landing (R3.13) | `land` | | | the `reef-agent` that asked for it |
 
-A lifecycle transition's operation also carries `reef.lifecycle`, the transitions as compact JSON, format 1 (`reef_lib::jj::lifecycle::LifecycleRecord`), and changes nothing in the view.
+A lifecycle transition's operation also carries `reef.lifecycle`, the transitions as compact JSON, format 1 (`reef_lib::jj::lifecycle::LifecycleRecord`), and changes nothing in the view. A landing's operation (`reef: land change <id> on <bookmark>`) carries `reef.lifecycle` with its `landed` transition and `reef.landing` with the landing's id, and moves the bookmark.
+
+### Landing service
+
+`landing/` ([ADR 0064](../../docs/adr/0064-landing-service-local.md), [docs/landing.md](../../docs/landing.md)) judges a proposal at the gate (`land_change`: the preview and the destination's policy over the recorded commit), queues it with an enqueue transition, and lands queued changes with one worker per repository (`landing::worker`): under the repository's create lock shared from its judgment to its record, then the lifecycle lock, through `Manager::rewrite_held` with `Write::Land`. Start-up resumes every repository's queue. Records are `landings`, `landing_changes`, `landing_evidence` (pins, part of retention's `PINNED`) and `landing_policies`.
 
 ### Change lifecycle
 

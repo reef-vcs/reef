@@ -13,7 +13,7 @@
       "column": 15,
       "field": "expr",
       "line": 8,
-      "message": "no field `pahts` here; the fields are author, commit, conflicted, description, empty, files, id, lines_added, lines_removed, parents, paths, tree",
+      "message": "no field `pahts` here; the fields are author, commit, conflicted, description, empty, files, id, lines_added, lines_removed, parents, paths, state, tree",
       "rule": "typo"
     }
   ],
