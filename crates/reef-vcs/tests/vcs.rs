@@ -4988,3 +4988,144 @@ async fn policy_simulate_cli() {
     assert!(error["hint"].as_str().unwrap().contains("--policy-file"));
     daemon.stop().await;
 }
+
+/// Workspaces writing one file from one base, the second released and
+/// rebased onto the first outside the daemon: `(first, second, rebased)`
+/// commits (R3.25).
+async fn conflicted(daemon: &TestDaemon, repo: &SyntheticRepo) -> (String, String, String) {
+    let a = create_at(daemon, repo, None).await.workspace.unwrap();
+    let b = create_at(daemon, repo, None).await.workspace.unwrap();
+    write(&a, "conflict.txt", "one\nfrom a\nthree\n");
+    write(&b, "conflict.txt", "one\nfrom b\nthree\n");
+    let a_commit = daemon
+        .client
+        .snapshot_workspace("", &a.id, "")
+        .await
+        .unwrap()
+        .commit_id;
+    let b_commit = daemon
+        .client
+        .snapshot_workspace("", &b.id, "")
+        .await
+        .unwrap()
+        .commit_id;
+    daemon
+        .client
+        .release_workspace(&repo.id, &b.id, false, false)
+        .await
+        .unwrap();
+    let root = repo.root.clone();
+    let (b2, a2) = (b_commit.clone(), a_commit.clone());
+    let rebased = tokio::task::spawn_blocking(move || common::conflict::rebase(&root, &b2, &a2))
+        .await
+        .unwrap();
+    (a_commit, b_commit, rebased)
+}
+
+/// `reef conflict show --policy-input` read by `reef policy check --input`
+/// with a policy whose rule matches the conflict's path and a side's agent.
+async fn policy_input_tier(daemon: &TestDaemon, root: &Path, rebased: &str) {
+    let input = run_in(
+        daemon,
+        root,
+        &["conflict", "show", "-r", rebased, "--policy-input"],
+    )
+    .await;
+    let input_json = json(&input);
+    assert_eq!(input_json["conflict"]["paths"][0], "conflict.txt");
+    assert_eq!(input_json["conflict"]["sides"].as_array().unwrap().len(), 2);
+    let dir = tempfile::tempdir().unwrap();
+    let input_file = dir.path().join("conflict.json");
+    std::fs::write(&input_file, &input.stdout).unwrap();
+    let policy = dir.path().join("reef-policy.toml");
+    std::fs::write(
+        &policy,
+        "version = 1\n[owners]\nidentities = [\"alice\"]\n[conflicts]\ntier = \"ask\"\n\
+         [[conflicts.rule]]\npaths = [\"conflict.txt\"]\nwhen = 'conflict.sides.exists(s, s.agent == \"test@host\")'\ntier = \"land\"\n",
+    )
+    .unwrap();
+    let checked = ok(
+        daemon,
+        dir.path(),
+        &[
+            "-o",
+            "json",
+            "policy",
+            "check",
+            policy.to_str().unwrap(),
+            "--input",
+            input_file.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(checked["conflict"]["tier"], "land", "{checked}");
+}
+
+/// R3.25 test 11: `reef conflict list` and `show` over a conflict a
+/// rebase made outside the daemon; `--policy-input` feeds `reef policy
+/// check --input`; a clean revision is `NOT_CONFLICTED` with a `next`.
+#[tokio::test]
+async fn conflict_cli() {
+    let (daemon, repo) = fixture().await;
+    let (a_commit, b_commit, rebased) = conflicted(&daemon, &repo).await;
+    let root = repo.root.clone();
+
+    let listed = ok(&daemon, &root, &["-o", "json", "conflict", "list"]).await;
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["change"]["commit_id"], rebased.as_str());
+    assert_eq!(listed[0]["terms"][0]["source"]["attribution"], "verified");
+    assert_eq!(
+        listed[0]["terms"][0]["source"]["commit_id"],
+        a_commit.as_str()
+    );
+    assert_eq!(
+        listed[0]["terms"][2]["source"]["commit_id"],
+        b_commit.as_str()
+    );
+    // Piped, the brief view.
+    let brief = ok(&daemon, &root, &["conflict", "list"]).await;
+    assert_eq!(
+        brief[0]["sides"][1]["origin"], "rebased revision",
+        "{brief}"
+    );
+    assert_eq!(brief[0]["sides"][1]["attribution"], "verified", "{brief}");
+
+    let shown = ok(
+        &daemon,
+        &root,
+        &["-o", "json", "conflict", "show", "-r", &rebased, "--hunks"],
+    )
+    .await;
+    let file = &shown["files"][0];
+    assert_eq!(file["path"], "conflict.txt");
+    assert_eq!(file["kind"], "add-add");
+    assert_eq!(file["terms"][1]["type"], "absent");
+    assert!(!file["hunks"].as_array().unwrap().is_empty(), "{shown}");
+    let text = stdout(
+        &run_in(
+            &daemon,
+            &root,
+            &["-o", "text", "conflict", "show", "-r", &rebased, "--hunks"],
+        )
+        .await,
+    );
+    assert!(text.contains("side 1"), "{text}");
+    assert!(text.contains("from b"), "{text}");
+    assert!(text.contains("verified"), "{text}");
+
+    // The policy's conflict input, looked up offline.
+    policy_input_tier(&daemon, &root, &rebased).await;
+
+    // A clean revision.
+    let error = err(
+        &daemon,
+        &root,
+        &["conflict", "show", "-r", &a_commit],
+        3,
+        reef_api::error::NOT_CONFLICTED,
+    )
+    .await;
+    assert_eq!(next_of(&error)[..3], ["reef", "show", "-r"]);
+    daemon.stop().await;
+}

@@ -15,6 +15,7 @@ pub mod artifacts;
 pub mod at_operation;
 pub mod changes;
 pub mod compat;
+pub mod conflicts;
 pub mod daemon;
 pub mod diff;
 pub mod evidence;

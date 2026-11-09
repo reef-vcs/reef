@@ -308,8 +308,9 @@ impl Advise for LifecycleError {
             Self::Empty { .. } => Some(Advice::hint(
                 "A workspace's `@` is often a fresh empty change: did you mean `@-`?",
             )),
-            Self::Conflicted { .. } => Some(Advice::hint(
-                "Resolve the conflicts first; landing refuses a conflicted change.",
+            Self::Conflicted { change } => Some(Advice::run(
+                "Resolve the conflicts first; landing refuses a conflicted change. Its sides, where each came from and who wrote it:",
+                ["reef", "conflict", "show", "-r", change.as_str()],
             )),
             Self::Divergent { .. } => Some(Advice::hint(
                 "Resolve the divergence first: abandon the commit you do not want with `reef abandon <commit>`.",

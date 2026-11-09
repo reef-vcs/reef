@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 23;
+pub const API_REVISION: u32 = 24;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -111,6 +111,8 @@ pub const API_DIGESTS: &[&str] = &[
     // `OPERATION_KIND_LAND`, `Operation.landing_id`, and
     // `PolicyEvidenceNeed.rejected` and `rejected_total`.
     "0c59ea9c3a2de7e203fb67623ba54975938ac4ce069cc2df4e315a784ebc9e6e",
+    // R3.25: `ConflictService`.
+    "bfa0d1793aad508ef3f3d86723eb8f3f9319fbeb8ec191d8f86b2d6ecdbc4926",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -671,6 +673,12 @@ pub mod error {
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";
+    /// `GetConflict` of a revision whose tree has no conflict (R3.25).
+    /// Metadata: `commit_id`.
+    pub const NOT_CONFLICTED: &str = "NOT_CONFLICTED";
+    /// `GetConflict`'s `max_file_bytes` over 16 MiB (R3.25). Metadata:
+    /// `max`.
+    pub const MAX_FILE_BYTES_TOO_LARGE: &str = "MAX_FILE_BYTES_TOO_LARGE";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

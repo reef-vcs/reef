@@ -47,6 +47,7 @@ use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
 use reef_api::v1;
 use reef_api::v1::artifact_service_client::ArtifactServiceClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
+use reef_api::v1::conflict_service_client::ConflictServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
@@ -2070,6 +2071,78 @@ impl Client {
             }
             request.page_token = response.next_page_token;
         }
+    }
+}
+
+impl Client {
+    fn conflicts(&self) -> ConflictServiceClient<Svc> {
+        ConflictServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// One page of `ConflictService.ListConflicts` (R3.25).
+    pub async fn list_conflicts_page(
+        &self,
+        request: v1::ListConflictsRequest,
+    ) -> Result<v1::ListConflictsResponse, ClientError> {
+        self.call("ListConflicts", self.conflicts().list_conflicts(request))
+            .await
+    }
+
+    /// The first `limit` conflicts the listing `request` asks for (all
+    /// when 0), in the revset's order, and whether more exist; `request`'s
+    /// page fields are ignored.
+    pub async fn list_conflicts(
+        &self,
+        request: v1::ListConflictsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::Conflict>, ClientError> {
+        let mut request = v1::ListConflictsRequest {
+            page_size: limited_page_size(limit).min(200),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_conflicts_page(request.clone()).await?;
+            limited.items.extend(response.conflicts);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// One page of `ConflictService.GetConflict` (R3.25): the conflict with
+    /// one page of its files.
+    pub async fn get_conflict_page(
+        &self,
+        request: v1::GetConflictRequest,
+    ) -> Result<v1::GetConflictResponse, ClientError> {
+        self.call("GetConflict", self.conflicts().get_conflict(request))
+            .await
+    }
+
+    /// The conflict `request` asks for with every page's files, and the
+    /// first page's other fields; `request`'s page fields are ignored.
+    pub async fn get_conflict(
+        &self,
+        request: v1::GetConflictRequest,
+    ) -> Result<v1::GetConflictResponse, ClientError> {
+        let mut request = v1::GetConflictRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        let mut whole = self.get_conflict_page(request.clone()).await?;
+        while !whole.next_page_token.is_empty() {
+            request.page_token = std::mem::take(&mut whole.next_page_token);
+            let next = self.get_conflict_page(request.clone()).await?;
+            if let (Some(conflict), Some(more)) = (whole.conflict.as_mut(), next.conflict) {
+                conflict.files.extend(more.files);
+            }
+            whole.next_page_token = next.next_page_token;
+        }
+        Ok(whole)
     }
 }
 

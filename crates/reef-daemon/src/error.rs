@@ -21,6 +21,7 @@ use std::error::Error;
 use prost::Message as _;
 use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
+use reef_lib::jj::conflict::ConflictError;
 use reef_lib::jj::diff::{EntryKind, PathError};
 use reef_lib::jj::files::{EditError, EditProblem, FileError};
 use reef_lib::jj::oplog::OpLookupError;
@@ -45,6 +46,7 @@ use crate::repo::RegisterError;
 use crate::service::InvalidAgent;
 use crate::service::artifacts::ArtifactError;
 use crate::service::at_operation::ReplayError;
+use crate::service::conflicts::ConflictReadError;
 use crate::service::evidence::EvidenceError;
 use crate::service::operations::InvalidChangeFilter;
 use crate::service::page::{PageError, PageTokenError};
@@ -120,6 +122,10 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<PolicyError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<ConflictReadError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<ConflictError>() {
+            conflict_advice(error)
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<IdentityError>() {
@@ -687,6 +693,19 @@ fn reason_and_metadata(
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<PolicyError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<ConflictReadError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<ConflictError>() {
+            match error {
+                ConflictError::NotConflicted { commit_id } => Some((
+                    reef_api::error::NOT_CONFLICTED,
+                    meta(&[("commit_id", commit_id.to_string())]),
+                )),
+                ConflictError::BadCursor => {
+                    Some((reef_api::error::INVALID_PAGE_TOKEN, BTreeMap::new()))
+                }
+                _ => None,
+            }
         } else if let Some(error) = error.downcast_ref::<ArtifactError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<IdentityError>() {
@@ -719,6 +738,17 @@ fn reason_and_metadata(
         current = error.source();
     }
     None
+}
+
+/// How to read a revision that has no conflict (R3.25).
+fn conflict_advice(error: &ConflictError) -> Option<Advice> {
+    match error {
+        ConflictError::NotConflicted { commit_id } => Some(Advice::run(
+            "The revision's tree has no conflict; `reef conflict list` lists the conflicted changes.",
+            ["reef", "show", "-r", commit_id.as_str()],
+        )),
+        _ => None,
+    }
 }
 
 /// How to fix a refused describe or abandon (R2.03).

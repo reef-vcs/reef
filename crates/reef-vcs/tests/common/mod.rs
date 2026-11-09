@@ -7,6 +7,7 @@
     reason = "each test binary uses some of these helpers; a panic is the failure report"
 )]
 
+pub(crate) mod conflict;
 pub(crate) mod mcp;
 pub(crate) mod schema;
 

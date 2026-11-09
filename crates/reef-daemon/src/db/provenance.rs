@@ -556,6 +556,22 @@ impl Db {
         })
     }
 
+    /// How many records `repo` holds for the change `change_id` (R3.25).
+    pub fn provenance_count_by_change(
+        &self,
+        repo: RepoId,
+        change_id: &str,
+    ) -> Result<u64, DbError> {
+        self.with(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM provenance WHERE repo_id = ?1 AND change_id = ?2",
+                params![repo, change_id],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+    }
+
     /// The distinct change ids of `repo`'s records recorded before
     /// `before`: what GC's eighth step resolves in the head's view.
     pub fn provenance_changes_before(

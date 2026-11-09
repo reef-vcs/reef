@@ -92,6 +92,8 @@ reef ws inspect <ws>            # the session: identity, actor, context, record 
 
 Whom to trust is the repository's [policy](policy.md)'s: a rule can require, for example, that every record of a change is signed and bound.
 
+A conflict reports each side's provenance the same way, by the side's change, with the exact commit's record when it has one ([docs/conflicts.md](conflicts.md#who-wrote-each-side)).
+
 ## Sessions and keys
 
 Each workspace has one provenance session from creation to release. Which identity it binds:

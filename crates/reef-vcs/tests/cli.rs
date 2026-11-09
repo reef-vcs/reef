@@ -1820,7 +1820,9 @@ fn root_help_names_every_command() {
         // `policy` is in `--help-all` and the agent guide's long part: the
         // first screen is at its budget. So are R3.09's `propose` and
         // `proposal`, until the landing service makes proposing how work
-        // lands (R3.13).
+        // lands (R3.13). R3.25's `conflict` is in `--help-all`, and `reef
+        // status` and the conflicted refusals name it where an agent meets
+        // a conflict.
         if command == "completions"
             || command == "restore"
             || command == "job"
@@ -1830,6 +1832,7 @@ fn root_help_names_every_command() {
             || command == "proposal"
             || command == "land"
             || command == "landing"
+            || command == "conflict"
         {
             continue;
         }

@@ -41,6 +41,7 @@ tracing.workspace = true
 toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true      # the `reef.lifecycle` operation attribute (R3.09)
+sha2.workspace = true            # conflict and conflicted-file ids (R3.25)
 humantime-serde.workspace = true
 tempfile.workspace = true        # jj's checkout, written by GC (issue #94)
 
