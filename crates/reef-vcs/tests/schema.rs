@@ -32,6 +32,11 @@ fn reef_in(state: &Path) -> Command {
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
         "REEF_REMOTE",
     ] {
         command.env_remove(var);

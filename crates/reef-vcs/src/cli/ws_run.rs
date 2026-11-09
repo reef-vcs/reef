@@ -39,7 +39,7 @@ use super::error::kind_text;
 use super::heartbeat::{Heartbeater, heartbeats};
 use super::repo::missing;
 use super::ws::{CreateTarget, lease_length, note_default_start};
-use super::{CliError, Ctx, Out};
+use super::{CliError, Ctx, Global, Out};
 
 /// A second SIGINT or SIGTERM within this long of the first kills the
 /// command.
@@ -172,7 +172,7 @@ struct Outcome {
     error: Option<CliError>,
 }
 
-pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
+pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCode, CliError> {
     // A session's identity and actor are fixed when its workspace is made;
     // an existing one's context is `reef provenance declare`'s (R3.04).
     if args.workspace.is_some()
@@ -189,7 +189,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<ExitCode, CliError> {
             attach_rule(ctx, workspace, args.owner.as_deref()).await?,
             None,
         ),
-        None => create(ctx, &args).await?,
+        None => create(ctx, global, &args).await?,
     };
     // The workspace exists from here on: a failure before the command runs
     // still releases it (or, with `--keep`, snapshots it).
@@ -287,7 +287,11 @@ fn report_command(ctx: &Ctx, ws: &Workspace, command: &[String]) -> Reporter {
 
 /// `WorkspaceService.CreateWorkspace` with `ws run`'s defaults: the workspace, and what
 /// the default start chose, if the flags named no start.
-async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), CliError> {
+async fn create(
+    ctx: &Ctx,
+    global: &Global,
+    args: &Args,
+) -> Result<(Workspace, Option<String>), CliError> {
     let request = CreateWorkspaceRequest {
         owner: args
             .owner
@@ -298,7 +302,9 @@ async fn create(ctx: &Ctx, args: &Args) -> Result<(Workspace, Option<String>), C
             .clone()
             .unwrap_or_else(|| purpose_of(&args.command)),
         lease_length: lease_length(args.lease)?,
-        provenance: args.provenance.declaration()?,
+        provenance: args
+            .provenance
+            .declaration(global.state_dir().ok().as_deref())?,
         ..args.target.request()?
     };
     let response =

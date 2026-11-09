@@ -272,6 +272,48 @@ def test_presence_reporter(client: reef.Client, repo: str) -> None:
         )
 
 
+def test_workspace_provenance(
+    client: reef.Client, repo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3.44: a block declares at creation, and declare() replaces fields after a snapshot."""
+    monkeypatch.setenv("REEF_TASK", "T-env")
+    monkeypatch.delenv("REEF_MODEL", raising=False)
+    first = "fix the parser\n"
+    provenance = reef.Provenance(model="example/model-1", instruction=first, client_session="s-1")
+    with client.workspace(repo, purpose="provenance", provenance=provenance) as ws:
+        context = ws.workspace.provenance.context
+        assert context.model == "example/model-1"
+        assert context.task == "T-env"
+        assert context.client_session == "s-1"
+        assert context.instruction_sha256 == reef.instruction_sha256(first)
+        (ws.path / "a.txt").write_text("a\n")
+        second = "now the tests"
+        declared = ws.declare(instruction=second, task="")
+        assert declared.HasField("operation"), "the edit before was snapshotted first"
+        assert declared.session.context.instruction_sha256 == reef.instruction_sha256(second)
+        assert declared.session.context.task == ""
+        records = client.list_provenance(repo=repo, workspace_id=ws.id).records
+        assert [r.context.instruction_sha256 for r in records] == [reef.instruction_sha256(first)]
+        with pytest.raises(reef.InvalidArgumentError):
+            ws.declare(model="two words")
+    # A mapping, and the async client.
+
+    async def run() -> None:
+        aclient = await reef.aio.connect(socket=client.target)
+        async with (
+            aclient,
+            aclient.workspace(
+                repo, purpose="async provenance", report_presence=False, provenance={"task": "T-a"}
+            ) as aws,
+        ):
+            assert aws.workspace.provenance.context.task == "T-a"
+            done = await aws.declare(model="m-2", snapshot=False)
+            assert not done.HasField("operation")
+            assert done.session.context.model == "m-2"
+
+    asyncio.run(run())
+
+
 async def test_async_client(daemon: Daemon, repo: str) -> None:
     client = await reef.aio.connect(state_dir=daemon.state, agent="sdk-async")
     async with client:

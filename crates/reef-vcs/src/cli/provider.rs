@@ -15,7 +15,7 @@
 //! the workspace, with a final snapshot, once the lease and its grace run
 //! out (R2.13's rule).
 
-use std::io::{self, Read as _};
+use std::io;
 use std::time::Duration;
 
 use reef_api::v1::{
@@ -26,9 +26,9 @@ use reef_client::json::{self, Lease};
 use reef_client::{default_owner, json::reverse_hex};
 use reef_error::{Advice, Classify as _};
 use serde::Serialize;
-use serde_json::Value;
 
 use super::holder::{self, HoldWhile, Holder};
+use super::input::{Fields, Input, Rules};
 use super::out::TextRender;
 use super::repo::missing;
 use super::scope::is_workspace_not_found;
@@ -41,8 +41,6 @@ use super::{CREATE_TIMEOUT, CliError, Ctx, Global, RepoArg};
 pub(crate) const PROVIDER_INPUT_INVALID: &str = "PROVIDER_INPUT_INVALID";
 /// The contract's version: changes only for an incompatible change.
 const CONTRACT: u32 = 1;
-/// The most stdin is read.
-const STDIN_MAX: u64 = 1024 * 1024;
 /// The longest name.
 const NAME_MAX: usize = 64;
 
@@ -68,17 +66,6 @@ enum ProviderCommand {
     /// Snapshot and release a workspace; by id, again is not an error.
     #[command(after_help = "Example: reef ws provider release --workspace 3f2a")]
     Release(ReleaseArgs),
-}
-
-/// Where the fields come from besides flags.
-#[derive(Debug, clap::Args)]
-struct Input {
-    /// Read the fields as one JSON object on stdin, keyed by the flags' names (`new_on`).
-    #[arg(long)]
-    stdin: bool,
-    /// Take FIELD from stdin's object at a JSON pointer, such as `repo=/cwd` (implies --stdin).
-    #[arg(long = "at", value_name = "FIELD=POINTER")]
-    at: Vec<String>,
 }
 
 /// `ws provider create`.
@@ -210,117 +197,18 @@ pub(crate) struct ProviderReleased {
 
 pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), CliError> {
     match args.command {
-        ProviderCommand::Create(args) => create(ctx, global, args).await,
+        ProviderCommand::Create(args) => Box::pin(create(ctx, global, args)).await,
         ProviderCommand::Attach(args) => attach(ctx, global, args).await,
         ProviderCommand::Release(args) => release(ctx, global, args).await,
     }
 }
 
-/// The stdin object and the `--at` pointers into it.
-#[derive(Debug, Default)]
-struct Fields {
-    stdin: Option<Value>,
-    at: Vec<(&'static str, String)>,
-}
-
-impl Fields {
-    /// Reads stdin if `--stdin` or `--at` asks for it, and checks the
-    /// pointers' fields against `known`.
-    fn read(input: &Input, known: &[&'static str]) -> Result<Self, CliError> {
-        let stdin = if input.stdin || !input.at.is_empty() {
-            let mut bytes = Vec::new();
-            io::stdin()
-                .take(STDIN_MAX + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|source| CliError::Io {
-                    op: "read",
-                    path: "stdin".into(),
-                    source,
-                })?;
-            Some(parse_stdin(&bytes)?)
-        } else {
-            None
-        };
-        Self::with(stdin, &input.at, known)
-    }
-
-    fn with(stdin: Option<Value>, at: &[String], known: &[&'static str]) -> Result<Self, CliError> {
-        let at = at
-            .iter()
-            .map(|pair| {
-                let (field, pointer) = pair.split_once('=').unwrap_or((pair, ""));
-                let field = known.iter().find(|known| **known == field).ok_or_else(|| {
-                    invalid(
-                        "at",
-                        format!(
-                            "--at {pair}: no field `{field}`; this command takes {}",
-                            known.join(", ")
-                        ),
-                    )
-                })?;
-                if !(pointer.is_empty() || pointer.starts_with('/')) {
-                    return Err(invalid(
-                        "at",
-                        format!("--at {pair}: a JSON pointer is empty or starts with `/`"),
-                    ));
-                }
-                Ok((*field, pointer.to_owned()))
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self { stdin, at })
-    }
-
-    /// `field`'s value: the flag, else the pointer's, else the object's
-    /// key; `None` when none gives one.
-    fn get(&self, field: &'static str, flag: Option<String>) -> Result<Option<String>, CliError> {
-        if flag.is_some() {
-            return Ok(flag);
-        }
-        let Some(stdin) = &self.stdin else {
-            return Ok(None);
-        };
-        for (_, pointer) in self.at.iter().filter(|(name, _)| *name == field) {
-            if let Some(value) = text(field, stdin.pointer(pointer))? {
-                return Ok(Some(value));
-            }
-        }
-        text(field, stdin.get(field))
-    }
-}
-
-/// Stdin as one JSON object of at most [`STDIN_MAX`] bytes.
-fn parse_stdin(bytes: &[u8]) -> Result<Value, CliError> {
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > STDIN_MAX {
-        return Err(invalid("stdin", "stdin is over 1 MiB".to_owned()));
-    }
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| invalid("stdin", format!("stdin is not JSON: {error}")))?;
-    if !value.is_object() {
-        return Err(invalid("stdin", "stdin is not one JSON object".to_owned()));
-    }
-    Ok(value)
-}
-
-/// A field's value as text: a string, or for `hold_while` a whole
-/// number; `null` and absent are none.
-fn text(field: &'static str, value: Option<&Value>) -> Result<Option<String>, CliError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.clone())),
-        Some(Value::Number(number)) if field == "hold_while" && number.is_u64() => {
-            Ok(Some(number.to_string()))
-        }
-        Some(_) => Err(invalid(
-            field,
-            format!(
-                "`{field}` must be a string{}",
-                if field == "hold_while" {
-                    " or a pid"
-                } else {
-                    ""
-                }
-            ),
-        )),
+/// The provider's fields: `hold_while` may be a pid.
+const fn rules(known: &'static [&'static str]) -> Rules {
+    Rules {
+        known,
+        numbers: &["hold_while"],
+        invalid,
     }
 }
 
@@ -458,7 +346,7 @@ impl CreateRequest {
 }
 
 async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliError> {
-    let fields = Fields::read(&args.input, CREATE_FIELDS)?;
+    let fields = Fields::read(&args.input, &rules(CREATE_FIELDS))?;
     let request = CreateRequest::from(args, &fields)?;
     // Before anything is created: a holder that is not running fails here.
     let holder = request.hold_while.map(holder::resolve).transpose()?;
@@ -488,22 +376,43 @@ async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliE
             .as_ref()
             .map(|outer| create_workspace_request::Start::NewOn(outer.commit_id.clone()))
     });
+    // What the harness's environment and its session's note declare
+    // (R3.44): a subagent's workspace carries its harness and session.
+    let declared = super::ambient::declaration(
+        super::ambient::Ambient::current(),
+        global.state_dir().ok().as_deref(),
+    );
     let create = CreateWorkspaceRequest {
         start,
         owner: request.owner.clone(),
         purpose: request.purpose.clone().unwrap_or_default(),
         lease_length: lease_length(request.lease)?,
         missing_stores: MissingStores::Fail.into(),
+        provenance: (declared != v1::ProvenanceDeclaration::default()).then_some(declared),
         ..CreateWorkspaceRequest::default()
     };
-    let response = ctx
-        .call_with_repo_within(deadline, &repo, |repo| {
+    let call = |create: CreateWorkspaceRequest| {
+        ctx.call_with_repo_within(deadline, &repo, move |repo| {
             ctx.client.create_workspace(CreateWorkspaceRequest {
                 repo,
                 ..create.clone()
             })
         })
-        .await?;
+    };
+    let response = match call(create.clone()).await {
+        // The environment never fails a creation (R3.04).
+        Err(CliError::Daemon(error))
+            if create.provenance.is_some()
+                && error.reason() == reef_api::error::PROVENANCE_DISABLED =>
+        {
+            call(CreateWorkspaceRequest {
+                provenance: None,
+                ..create
+            })
+            .await?
+        }
+        response => response?,
+    };
     note_default_start(ctx, &response.start);
     let start = (!response.start.is_empty()).then_some(response.start);
     let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
@@ -697,7 +606,7 @@ fn provide(
 }
 
 async fn attach(ctx: &Ctx, global: &Global, args: AttachArgs) -> Result<(), CliError> {
-    let fields = Fields::read(&args.input, ATTACH_FIELDS)?;
+    let fields = Fields::read(&args.input, &rules(ATTACH_FIELDS))?;
     let workspace = required(&fields, "workspace", args.workspace)?;
     let owner = fields.get("owner", args.owner)?;
     let holder = hold_while(fields.get("hold_while", args.hold_while)?)?
@@ -773,7 +682,7 @@ fn keep_for_others(
 }
 
 async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), CliError> {
-    let fields = Fields::read(&args.input, RELEASE_FIELDS)?;
+    let fields = Fields::read(&args.input, &rules(RELEASE_FIELDS))?;
     let workspace = super::scope::workspace_arg(&required(&fields, "workspace", args.workspace)?)?;
     let found = ctx
         .call(ctx.client.inspect_workspace("", &workspace, false))
@@ -903,7 +812,7 @@ pub(crate) fn create_on(repo_id: &str, change_id: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -928,7 +837,7 @@ mod tests {
 
     fn create(argv: &[&str], stdin: Option<Value>) -> Result<CreateRequest, CliError> {
         let given = parsed(argv);
-        let fields = Fields::with(stdin, &given.input.at, CREATE_FIELDS)?;
+        let fields = Fields::with(stdin, &given.input.at, &rules(CREATE_FIELDS))?;
         CreateRequest::from(given, &fields)
     }
 
@@ -992,7 +901,12 @@ mod tests {
             b"nope".to_vec(),
             vec![b' '; 1024 * 1024 + 1],
         ] {
-            assert_eq!(field_of(&parse_stdin(&bytes).unwrap_err()), "stdin");
+            assert_eq!(
+                field_of(
+                    &super::super::input::parse_stdin(&bytes, &rules(CREATE_FIELDS)).unwrap_err()
+                ),
+                "stdin"
+            );
         }
     }
 
@@ -1003,7 +917,7 @@ mod tests {
         let fields = Fields::with(
             Some(event.clone()),
             &["workspace=/cwd".to_owned()],
-            ATTACH_FIELDS,
+            &rules(ATTACH_FIELDS),
         )
         .unwrap();
         assert_eq!(
@@ -1014,14 +928,15 @@ mod tests {
             required(&fields, "workspace", None).unwrap(),
             "/from/pointer"
         );
-        let fields = Fields::with(Some(event), &[], RELEASE_FIELDS).unwrap();
+        let fields = Fields::with(Some(event), &[], &rules(RELEASE_FIELDS)).unwrap();
         assert_eq!(required(&fields, "workspace", None).unwrap(), "from-key");
-        let none = Fields::with(Some(json!({})), &[], RELEASE_FIELDS).unwrap();
+        let none = Fields::with(Some(json!({})), &[], &rules(RELEASE_FIELDS)).unwrap();
         assert_eq!(
             field_of(&required(&none, "workspace", None).unwrap_err()),
             "workspace"
         );
-        let unknown = Fields::with(None, &["repo=/cwd".to_owned()], RELEASE_FIELDS).unwrap_err();
+        let unknown =
+            Fields::with(None, &["repo=/cwd".to_owned()], &rules(RELEASE_FIELDS)).unwrap_err();
         assert_eq!(field_of(&unknown), "at");
     }
 

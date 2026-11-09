@@ -121,7 +121,7 @@ async fn hook(global: &Global, args: Args) -> Result<(), CliError> {
 
 /// Stdin as JSON, read on a thread of its own so the deadline can leave a
 /// read that never ends (the process exits without joining it).
-async fn read_event() -> Result<serde_json::Value, CliError> {
+pub(crate) async fn read_event() -> Result<serde_json::Value, CliError> {
     let (send, receive) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -159,14 +159,20 @@ fn session(event: &serde_json::Value, pointer: Option<&str>) -> String {
         )
 }
 
-/// `<state>/presence/hooks/<session>.id`, with a session id that is not a
-/// plain name replaced by its hash, so it cannot leave the directory.
+/// `<state>/presence/hooks/<session>.id`, named by [`session_file_name`].
 fn id_file(global: &Global, session: &str) -> Result<PathBuf, CliError> {
+    let dir = global.state_dir()?.join("presence/hooks");
+    Ok(dir.join(format!("{}.id", session_file_name(session))))
+}
+
+/// A harness session's id as a file name: the id when it is a plain name,
+/// else `h` and its hash, so it cannot leave the directory.
+pub(crate) fn session_file_name(session: &str) -> String {
     let plain = session.len() <= 64
         && session
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    let name = if plain {
+    if plain {
         session.to_owned()
     } else {
         // FNV-1a: stable across builds, unlike std's hasher.
@@ -176,12 +182,10 @@ fn id_file(global: &Global, session: &str) -> Result<PathBuf, CliError> {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
             });
         format!("h{hash:016x}")
-    };
-    let dir = global.state_dir()?.join("presence/hooks");
-    Ok(dir.join(format!("{name}.id")))
+    }
 }
 
-fn create_private_dir(dir: &Path) -> Result<(), CliError> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<(), CliError> {
     use std::os::unix::fs::DirBuilderExt as _;
     std::fs::DirBuilder::new()
         .recursive(true)

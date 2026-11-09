@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use reef_api::v1::{
@@ -21,7 +21,11 @@ use reef_client::brief;
 use reef_client::json::{ProvenanceDeclared, ProvenanceRecord, ProvenanceSession};
 use serde::Serialize;
 
+use reef_error::Advice;
+use serde_json::Value;
+
 use super::advice::AdviceCtx;
+use super::input::{Fields, Input, Rules};
 use super::out::{TextRender, TextRow};
 use super::scope::{self, ScopeArgs};
 use super::{CliError, Ctx};
@@ -98,15 +102,20 @@ struct ListArgs {
 
 /// `reef provenance declare`.
 #[derive(Debug, clap::Args)]
-struct DeclareArgs {
+pub(crate) struct DeclareArgs {
     #[command(flatten)]
     declare: DeclareFlags,
+    #[command(flatten)]
+    input: Input,
+    /// Run as a harness's hook: never fail or print, start no daemon, give up after 2s.
+    #[arg(long)]
+    hook: bool,
     /// The agent runtime and its version, as name/version.
     #[arg(long, value_name = "NAME/VERSION")]
     harness: Option<String>,
     /// The harness's own session id.
     #[arg(long, value_name = "ID")]
-    client_session: Option<String>,
+    pub(crate) client_session: Option<String>,
     /// The instruction's SHA-256, if already computed.
     #[arg(long, value_name = "HEX", conflicts_with_all = ["instruction_file", "no_instruction"])]
     instruction_sha256: Option<String>,
@@ -115,9 +124,153 @@ struct DeclareArgs {
     no_instruction: bool,
     /// Do not snapshot first (only right after a snapshot).
     #[arg(long)]
-    no_snapshot: bool,
+    pub(crate) no_snapshot: bool,
     #[command(flatten)]
     scope: ScopeArgs,
+}
+
+/// The fields `declare` takes from stdin (`--stdin`, `--at`): the flags',
+/// `workspace`, and `instruction`, text hashed here (R3.44).
+pub(crate) const DECLARE_FIELDS: &[&str] = &[
+    "workspace",
+    "model",
+    "harness",
+    "task",
+    "instruction",
+    "instruction_sha256",
+    "client_session",
+];
+
+/// `declare`'s stdin fields; a bad one is `INVALID_PROVENANCE`.
+const DECLARE_RULES: Rules = Rules {
+    known: DECLARE_FIELDS,
+    numbers: &[],
+    invalid: invalid_input,
+};
+
+fn invalid_input(field: &'static str, message: String) -> CliError {
+    CliError::Input {
+        reason: reef_api::error::INVALID_PROVENANCE,
+        message,
+        field,
+        advice: Advice::hint(
+            "Give each field as a flag, or as a key of one JSON object on stdin (--stdin); `reef provenance declare --help` lists the flags.",
+        ),
+    }
+}
+
+/// A declaration from flags and stdin, and the workspace it names.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Declaring {
+    /// `workspace` from stdin: an id, a prefix, or a path inside one.
+    pub(crate) workspace: Option<String>,
+    pub(crate) declaration: ProvenanceDeclaration,
+}
+
+impl DeclareArgs {
+    /// Whether this is `--hook`, which runs without a daemon connection
+    /// made first.
+    pub(crate) fn is_hook(&self) -> bool {
+        self.hook
+    }
+
+    /// Whether stdin holds the fields.
+    pub(crate) fn reads_stdin(&self) -> bool {
+        self.input.reads_stdin() || self.hook
+    }
+
+    /// `--workspace`.
+    pub(crate) fn scope_workspace(&self) -> Option<String> {
+        self.scope.workspace.clone()
+    }
+
+    /// The declaration: each field from its flag, else its pointer, else
+    /// stdin's key. `instruction` is hashed here, its text dropped. With
+    /// `lenient` (a hook), a value a record cannot carry, or an empty one,
+    /// is left out instead of refused.
+    pub(crate) fn declaring(
+        &self,
+        stdin: Option<Value>,
+        lenient: bool,
+    ) -> Result<Declaring, CliError> {
+        let reads_stdin = stdin.is_some();
+        let fields = Fields::with(stdin, &self.input.at, &DECLARE_RULES)?;
+        let flags = &self.declare;
+        // A field's value; with `lenient`, one that is not a string is
+        // left out, by name in the debug log, never with its value.
+        let get = |name: &'static str, flag: Option<String>| -> Result<Option<String>, CliError> {
+            match fields.get(name, flag) {
+                Err(_) if lenient => {
+                    tracing::debug!(target: "reef", field = name, "provenance hook: field left out");
+                    Ok(None)
+                }
+                got => got,
+            }
+        };
+        let field = |name: &'static str,
+                     flag: Option<&String>,
+                     check: fn(&str) -> Option<String>|
+         -> Result<Option<String>, CliError> {
+            let value = get(name, flag.cloned())?.map(|text| text.trim().to_owned());
+            Ok(match value {
+                Some(value) if lenient && (value.is_empty() || check(&value).is_some()) => {
+                    tracing::debug!(target: "reef", field = name, "provenance hook: field left out");
+                    None
+                }
+                value => value,
+            })
+        };
+        let stdin_file = flags
+            .instruction_file
+            .as_ref()
+            .filter(|path| path.as_os_str() == "-");
+        let instruction = if stdin_file.is_some() && reads_stdin {
+            // Stdin is the fields' object: the file is not there.
+            if !lenient {
+                return Err(CliError::Usage(
+                    "--instruction-file - and --stdin both read stdin; give the instruction as a field of stdin's object".to_owned(),
+                ));
+            }
+            None
+        } else if let Some(path) = &flags.instruction_file {
+            Some(instruction_digest(path)?)
+        } else if self.no_instruction {
+            Some(String::new())
+        } else if let Some(sha) = &self.instruction_sha256 {
+            Some(sha.trim().to_ascii_lowercase())
+        } else if let Some(text) = get("instruction", None)? {
+            // Its exact bytes: the JSON string as decoded, nothing trimmed.
+            Some(sha256_of(text.as_bytes()))
+        } else {
+            field(
+                "instruction_sha256",
+                None,
+                reef_client::evidence::provenance::instruction_problem,
+            )?
+            .map(|sha| sha.to_ascii_lowercase())
+        };
+        let label = reef_client::evidence::provenance::label_problem;
+        Ok(Declaring {
+            workspace: get("workspace", None)?.filter(|text| !text.trim().is_empty()),
+            declaration: ProvenanceDeclaration {
+                model: field("model", flags.model.as_ref(), label)?,
+                task: field(
+                    "task",
+                    flags.task.as_ref(),
+                    reef_client::evidence::provenance::task_problem,
+                )?,
+                harness: field("harness", self.harness.as_ref(), label)?,
+                client_session: field("client_session", self.client_session.as_ref(), label)?,
+                instruction_sha256: instruction,
+                ..ProvenanceDeclaration::default()
+            },
+        })
+    }
+}
+
+/// The SHA-256 of `bytes`, as lowercase hex.
+pub(crate) fn sha256_of(bytes: &[u8]) -> String {
+    reef_client::evidence::sha256_hex(bytes)
 }
 
 /// `--model`, `--task` and `--instruction-file`: what `ws create`, `ws
@@ -220,25 +373,58 @@ impl SessionFlags {
     /// a flag: a declaration a daemon with `[provenance] enabled = false`
     /// refuses is then dropped, since naming nothing is never refused.
     pub(crate) fn only_from_env(&self) -> bool {
-        self.model.is_none()
-            && self.task.is_none()
+        // An empty `--model` or `--task` declares nothing on a new
+        // workspace, so it counts as not given.
+        let unset =
+            |flag: &Option<String>| flag.as_deref().is_none_or(|text| text.trim().is_empty());
+        unset(&self.model)
+            && unset(&self.task)
             && self.instruction_file.is_none()
             && self.identity.is_none()
             && self.actor.is_none()
     }
 
     /// `CreateWorkspaceRequest.provenance`; `None` when nothing is given.
-    pub(crate) fn declaration(&self) -> Result<Option<ProvenanceDeclaration>, CliError> {
+    /// What the flags leave unset comes from the environment
+    /// ([`super::ambient::declaration`]): the harness running this, its
+    /// session, and its session's note under `state_dir` (R3.44).
+    pub(crate) fn declaration(
+        &self,
+        state_dir: Option<&Path>,
+    ) -> Result<Option<ProvenanceDeclaration>, CliError> {
+        self.declaration_over(super::ambient::declaration(
+            super::ambient::Ambient::current(),
+            state_dir,
+        ))
+    }
+
+    /// [`Self::declaration`] over what the environment declares.
+    fn declaration_over(
+        &self,
+        ambient: ProvenanceDeclaration,
+    ) -> Result<Option<ProvenanceDeclaration>, CliError> {
         let mut declaration = DeclareFlags {
-            model: self.model(),
-            task: self.task(),
+            model: self.model.clone(),
+            task: self.task.clone(),
             instruction_file: self.instruction_file.clone(),
         }
         .declaration()?;
-        // A new workspace has nothing to clear: an empty value (an empty
-        // `REEF_MODEL`, say) declares nothing.
-        declaration.model = declaration.model.filter(|text| !text.is_empty());
-        declaration.task = declaration.task.filter(|text| !text.is_empty());
+        // A new workspace has nothing to clear: an empty flag declares
+        // nothing, and stops the environment's value too.
+        let given = |value: Option<String>| value.filter(|text| !text.is_empty());
+        declaration.model = match self.model {
+            Some(_) => given(declaration.model),
+            None => ambient.model,
+        };
+        declaration.task = match self.task {
+            Some(_) => given(declaration.task),
+            None => ambient.task,
+        };
+        declaration.instruction_sha256 = declaration
+            .instruction_sha256
+            .or(ambient.instruction_sha256);
+        declaration.harness = ambient.harness;
+        declaration.client_session = ambient.client_session;
         declaration.identity = self.identity.clone().unwrap_or_default();
         declaration.actor = match self.actor.as_deref() {
             Some("human") => v1::SessionActor::Human,
@@ -266,6 +452,22 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         ProvenanceCommand::Show(args) => Box::pin(show(ctx, args)).await,
         ProvenanceCommand::List(args) => Box::pin(list(ctx, args)).await,
         ProvenanceCommand::Declare(args) => declare(ctx, args).await,
+    }
+}
+
+impl Args {
+    /// Whether this is `declare --hook`.
+    pub(crate) fn is_hook(&self) -> bool {
+        matches!(&self.command, ProvenanceCommand::Declare(args) if args.is_hook())
+    }
+
+    /// `declare --hook`'s arguments, which run with no connection made
+    /// first ([`super::declare_hook::run`]).
+    pub(crate) fn into_hook(self) -> Option<DeclareArgs> {
+        match self.command {
+            ProvenanceCommand::Declare(args) if args.is_hook() => Some(args),
+            _ => None,
+        }
     }
 }
 
@@ -373,20 +575,36 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<(), CliError> {
 }
 
 async fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<(), CliError> {
-    let scope = scope::resolve(ctx, &args.scope).await?;
+    let stdin = if args.reads_stdin() {
+        if args
+            .declare
+            .instruction_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str() == "-")
+        {
+            // Before stdin is read: `declaring` refuses it too.
+            return Err(CliError::Usage(
+                "--instruction-file - and --stdin both read stdin; give the instruction as a field of stdin's object".to_owned(),
+            ));
+        }
+        Some(read_stdin_object()?)
+    } else {
+        None
+    };
+    let declaring = args.declaring(stdin, false)?;
+    let scope_args = match (&args.scope.workspace, &declaring.workspace) {
+        (None, Some(workspace)) => ScopeArgs {
+            workspace: Some(workspace.clone()),
+            ..args.scope.clone()
+        },
+        _ => args.scope.clone(),
+    };
+    let scope = scope::resolve(ctx, &scope_args).await?;
     let Some(workspace) = scope.workspace.clone() else {
         return Err(scope::scope_required());
     };
     let advice = AdviceCtx::new(&scope);
-    let mut declaration = args.declare.declaration()?;
-    declaration.harness = args.harness.map(|text| text.trim().to_owned());
-    declaration.client_session = args.client_session.map(|text| text.trim().to_owned());
-    if let Some(sha256) = args.instruction_sha256 {
-        declaration.instruction_sha256 = Some(sha256.trim().to_ascii_lowercase());
-    }
-    if args.no_instruction {
-        declaration.instruction_sha256 = Some(String::new());
-    }
+    let declaration = declaring.declaration;
     let response = ctx
         .call(ctx.client.declare_provenance(DeclareProvenanceRequest {
             repo: scope.repo_id.clone(),
@@ -405,6 +623,21 @@ async fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<(), CliError> {
         workspace: workspace.id,
         fields: changed_fields(&declaration),
     })
+}
+
+/// Stdin as one JSON object, for `declare --stdin`.
+fn read_stdin_object() -> Result<Value, CliError> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(super::input::STDIN_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::Io {
+            op: "read",
+            path: "stdin".into(),
+            source,
+        })?;
+    super::input::parse_stdin(&bytes, &DECLARE_RULES)
 }
 
 /// The fields a declaration sets or clears, as the CLI names them.
@@ -665,16 +898,152 @@ mod tests {
     #[test]
     fn session_flags_declare_only_what_is_given() {
         let flags = SessionFlags::default();
-        assert_eq!(flags.declaration().unwrap(), None);
+        let none = ProvenanceDeclaration::default();
+        assert_eq!(flags.declaration_over(none.clone()).unwrap(), None);
         let flags = SessionFlags {
             model: Some(" m/1 ".into()),
             actor: Some("human".into()),
             ..SessionFlags::default()
         };
-        let declaration = flags.declaration().unwrap().unwrap();
+        let declaration = flags.declaration_over(none.clone()).unwrap().unwrap();
         assert_eq!(declaration.model.as_deref(), Some("m/1"));
         assert_eq!(declaration.actor(), v1::SessionActor::Human);
         assert_eq!(flags.env()[0], (MODEL_ENV, " m/1 ".to_owned()));
         assert!(!flags.only_from_env());
+    }
+
+    /// R3.44 test 4: the environment fills what the flags leave unset; an
+    /// empty flag stops it.
+    #[test]
+    fn session_flags_over_the_environment() {
+        let sha = reef_client::evidence::sha256_hex(b"from the note");
+        let ambient = ProvenanceDeclaration {
+            model: Some("env-model".into()),
+            task: Some("T-env".into()),
+            harness: Some("example/1.0".into()),
+            client_session: Some("s-1".into()),
+            instruction_sha256: Some(sha.clone()),
+            ..ProvenanceDeclaration::default()
+        };
+        let declaration = SessionFlags::default()
+            .declaration_over(ambient.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(declaration, ambient);
+        let flags = SessionFlags {
+            model: Some(String::new()),
+            task: Some("T-flag".into()),
+            ..SessionFlags::default()
+        };
+        let declaration = flags.declaration_over(ambient).unwrap().unwrap();
+        assert_eq!(declaration.model, None);
+        assert_eq!(declaration.task.as_deref(), Some("T-flag"));
+        assert_eq!(declaration.instruction_sha256, Some(sha));
+        assert_eq!(declaration.harness.as_deref(), Some("example/1.0"));
+    }
+
+    fn declare_args(argv: &[&str]) -> DeclareArgs {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            args: DeclareArgs,
+        }
+        Probe::try_parse_from(std::iter::once("declare").chain(argv.iter().copied()))
+            .unwrap()
+            .args
+    }
+
+    /// R3.44 test 2: the instruction is the SHA-256 of the string's UTF-8,
+    /// nothing trimmed; a flag wins over a pointer, a pointer over a key.
+    #[test]
+    fn stdin_fields_and_the_instruction() {
+        let event = serde_json::json!({
+            "prompt": "fix the bug\n",
+            "session_id": "s-1",
+            "cwd": "/w",
+            "model": "event-model",
+            "unicode": "caf\u{e9} \u{0}",
+        });
+        let args = declare_args(&[
+            "--at",
+            "instruction=/prompt",
+            "--at",
+            "client_session=/session_id",
+            "--at",
+            "workspace=/cwd",
+            "--model",
+            "flag-model",
+        ]);
+        let declaring = args.declaring(Some(event.clone()), false).unwrap();
+        assert_eq!(declaring.workspace.as_deref(), Some("/w"));
+        let declaration = declaring.declaration;
+        assert_eq!(
+            declaration.instruction_sha256.as_deref(),
+            Some(reef_client::evidence::sha256_hex(b"fix the bug\n").as_str())
+        );
+        assert_eq!(declaration.client_session.as_deref(), Some("s-1"));
+        assert_eq!(declaration.model.as_deref(), Some("flag-model"));
+        // The object's own key, then nothing.
+        let declaration = declare_args(&["--stdin"])
+            .declaring(Some(event.clone()), false)
+            .unwrap()
+            .declaration;
+        assert_eq!(declaration.model.as_deref(), Some("event-model"));
+        assert_eq!(declaration.instruction_sha256, None);
+        let unicode = declare_args(&["--at", "instruction=/unicode"])
+            .declaring(Some(event.clone()), false)
+            .unwrap()
+            .declaration;
+        assert_eq!(
+            unicode.instruction_sha256.as_deref(),
+            Some(reef_client::evidence::sha256_hex("caf\u{e9} \u{0}".as_bytes()).as_str())
+        );
+        // A non-string field: dropped by a hook, the rest still declared.
+        let mixed = serde_json::json!({"prompt": 3, "model": {"id": "x"}, "session_id": "s-2"});
+        let kept = declare_args(&[
+            "--hook",
+            "--at",
+            "instruction=/prompt",
+            "--at",
+            "client_session=/session_id",
+            "--at",
+            "workspace=/nowhere",
+        ])
+        .declaring(Some(mixed), true)
+        .unwrap()
+        .declaration;
+        assert_eq!(kept.client_session.as_deref(), Some("s-2"));
+        assert_eq!(kept.instruction_sha256, None);
+        assert_eq!(kept.model, None);
+        // `--instruction-file -` with stdin's fields: refused, or dropped
+        // by a hook.
+        let both = declare_args(&["--stdin", "--instruction-file", "-"]);
+        assert!(both.declaring(Some(serde_json::json!({})), false).is_err());
+        let hook = declare_args(&["--hook", "--instruction-file", "-"]);
+        assert_eq!(
+            hook.declaring(Some(serde_json::json!({})), true)
+                .unwrap()
+                .declaration
+                .instruction_sha256,
+            None
+        );
+        // A bad field: refused plainly, dropped by a hook.
+        let bad = serde_json::json!({"model": "two words", "task": 3});
+        let error = declare_args(&["--stdin"])
+            .declaring(Some(serde_json::json!({"model": "two words"})), true)
+            .unwrap();
+        assert_eq!(error.declaration.model, None);
+        let error = declare_args(&["--stdin"])
+            .declaring(Some(bad), false)
+            .unwrap_err();
+        assert_eq!(error.reason(), reef_api::error::INVALID_PROVENANCE);
+        let error = declare_args(&["--at", "nope=/x"])
+            .declaring(Some(event), true)
+            .unwrap_err();
+        assert_eq!(
+            error.metadata().get("field").map(String::as_str),
+            Some("at")
+        );
     }
 }

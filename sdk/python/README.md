@@ -54,6 +54,17 @@ with reef.connect() as client:
 While the block runs, the lease is renewed and a presence entry shows it in `reef presence watch`
 and the web UI, as `reef ws run` does for a command.
 
+Each commit the daemon records for the workspace gets a signed provenance record. Say what the
+work is for, at the start and as it changes; an instruction is hashed here, and only its SHA-256 is
+sent (`REEF_MODEL` and `REEF_TASK` fill a model and task you do not give):
+
+```python
+declared = reef.Provenance(model="example/model-1", task="T-123", instruction=prompt)
+with client.workspace(repo.id, provenance=declared) as ws:
+    ...
+    ws.declare(instruction=next_prompt)   # snapshots first; "" clears a field
+```
+
 ## Subscriptions, with asyncio
 
 ```python

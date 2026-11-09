@@ -21,6 +21,7 @@ import {
   type Client,
   connect,
   DaemonNotRunningError,
+  instructionSha256,
   InvalidArgumentError,
   NotFoundError,
   Reporter,
@@ -243,6 +244,46 @@ describe("local daemon", () => {
     await client.withAttached(id, { owner: "other@machine", release: true }, () => undefined);
     expect((await client.getWorkspace({ workspace: id })).workspace?.state).toBe(
       WorkspaceState.RELEASED,
+    );
+  });
+
+  // R3.44
+  it("workspace provenance", async () => {
+    const first = "fix the parser\n";
+    await client.withWorkspace(
+      {
+        repo,
+        purpose: "provenance",
+        reportPresence: false,
+        provenance: {
+          model: "example/model-1",
+          task: "T-ts",
+          instruction: first,
+          clientSession: "s-1",
+        },
+      },
+      async (ws) => {
+        const context = ws.workspace.provenance?.context;
+        expect(context?.model).toBe("example/model-1");
+        expect(context?.task).toBe("T-ts");
+        expect(context?.clientSession).toBe("s-1");
+        expect(context?.instructionSha256).toBe(instructionSha256(first));
+        writeFileSync(join(ws.path, "a.txt"), "a\n");
+        const second = "now the tests";
+        const declared = await ws.declare({ instruction: second, task: "" });
+        expect(declared.operation).toBeDefined();
+        expect(declared.session?.context?.instructionSha256).toBe(instructionSha256(second));
+        expect(declared.session?.context?.task).toBe("");
+        const records = await client.listProvenance({ repo, workspaceId: ws.id });
+        expect(records.records.map((record) => record.context?.instructionSha256)).toEqual([
+          instructionSha256(first),
+        ]);
+        const quiet = await ws.declare({ model: "m-2" }, { snapshot: false });
+        expect(quiet.operation).toBeUndefined();
+        await expect(ws.declare({ model: "two words" })).rejects.toMatchObject({
+          kind: "invalid_argument",
+        });
+      },
     );
   });
 

@@ -14,6 +14,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - The daemon's database becomes schema 10 (`0010_provenance`, R3.04) the first time this daemon opens it. From then on every committing snapshot and every `EditFiles` naming a workspace records a signed provenance record; `[provenance] enabled = false` turns that off.
 - The root help's "Also:" line lists `provenance` and no longer `restore`, which `--help-all` and `reef backup --help` still name.
 - The daemon's database becomes schema 11 (`0011_jobs`, R3.05) the first time this daemon opens it.
+- Claude Code's `reef` plugin gains `UserPromptSubmit`, `SessionStart` and `PostModelSwitch` hooks that declare provenance (R3.44); update the plugin to get them. `reef ws create`, `ws run`, `ws provider create` and `reef mcp` now declare the harness and its session from the environment on every workspace they create.
 - Repository policy (R3.07) needs no migration. A `reef-policy.toml` that uses a table a later Reef adds is `invalid_policy` to this one: upgrade daemons before policies.
 - Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
@@ -58,6 +59,12 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `PolicyService.EvaluatePolicy` (API revision 20): the policy at a revision, or a policy file's text, evaluated over one change. A missing or invalid policy and a blocked change are decisions, not errors. CEL runs on cel-rust's `cel` 0.15.0 behind Reef's own static check and a cost bound computed before anything runs.
 - `reef policy check` (offline; `--input` evaluates over a JSON input, and a conflict input prints the tier; `-r` reads a revision's file), `reef policy eval` (`--policy-revision`, `--policy-file`, `--input-json`, and `--require-allow`, which exits 5 unless allowed) and `reef policy init` (a starter file naming the default identity; `--stdout`). `reef schema policy` prints the file, the input and the evaluation as JSON Schema.
 - `reef-policy`, the policy crate: the format and the evaluator, with no jj-lib, gRPC, tokio or SQLite dependency.
+
+- Provenance from harnesses and SDKs (R3.44, [docs/provenance.md](docs/provenance.md#declared-for-you)): `reef provenance declare --stdin --at FIELD=POINTER` takes its fields from one JSON object on stdin, with `instruction` text hashed in the process and never sent, and `--hook` makes it a harness hook that exits 0, prints nothing, starts no daemon and gives up after two seconds. A hook declares for the event's workspace, every active workspace of the same client session, and a session note (`<state>/provenance/sessions/`, hashes only) that new workspaces of that session declare from for 24 hours.
+- Claude Code's `reef` plugin declares each prompt's instruction hash and session (`UserPromptSubmit`) and the model (`SessionStart`, `PostModelSwitch`).
+- The harness and its session from the environment: `AI_AGENT` (read the same for every harness; `claude-code_2-1-316_agent` is `claude-code/2.1.316`), and the agent table's session variable for the harness it recognizes (Claude Code's `CLAUDE_CODE_SESSION_ID`). `reef mcp` takes the harness from the MCP client's `initialize`, declares it on every workspace it creates, and once, without a snapshot, on the workspace it was started in.
+- Python SDK: `reef.Provenance`, `reef.instruction_sha256`, `client.workspace(..., provenance=...)` and `handle.declare(...)` (sync and `reef.aio`). TypeScript SDK: `client.workspace({ provenance })`, `handle.declare(...)` and `instructionSha256`. Both hash an instruction locally, take `REEF_MODEL` and `REEF_TASK` as defaults, and require API revision 18 for a declaration the program gave.
+- The agent guide names `REEF_MODEL` and `REEF_TASK`.
 
 ### Fixed
 

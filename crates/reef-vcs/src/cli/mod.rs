@@ -14,11 +14,13 @@
 //! and unique prefixes resolve; nothing is renamed).
 
 mod advice;
+pub(crate) mod ambient;
 mod autostart;
 mod backup;
 pub(crate) mod changes;
 mod config;
 pub(crate) mod daemon;
+mod declare_hook;
 mod diff;
 mod env;
 mod error;
@@ -34,13 +36,14 @@ pub(crate) mod holder;
 mod hook;
 mod identity;
 mod init;
+mod input;
 mod job;
 mod log;
 mod op;
 mod out;
 pub(crate) mod policy;
 mod presence;
-mod provenance;
+pub(crate) mod provenance;
 mod provider;
 mod remote;
 mod render;
@@ -622,7 +625,16 @@ pub(crate) fn main() -> ExitCode {
         _ => global.output,
     };
     let out = Out::detect(flag, global.quiet);
-    if let Err(error) = init_logging(global.verbose) {
+    // A harness's hook never fails and prints nothing: one whose logging
+    // cannot start (a bad `REEF_LOG` in the harness) runs without it.
+    let hook = match &command {
+        Command::Presence(args) => args.is_hook(),
+        Command::Provenance(args) => args.is_hook(),
+        _ => false,
+    };
+    if let Err(error) = init_logging(global.verbose)
+        && !hook
+    {
         out.error(&error);
         return ExitCode::from(error.exit_code());
     }
@@ -823,6 +835,10 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Evidence(args) if args.is_offline() => args.run_offline(out),
         Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,
         Command::Identity(args) => identity::run(&connect(&global, out).await?, args).await,
+        Command::Provenance(args) if args.is_hook() => match args.into_hook() {
+            Some(hook) => declare_hook::run(&global, hook).await,
+            None => Ok(()),
+        },
         Command::Provenance(args) => provenance::run(&connect(&global, out).await?, args).await,
         Command::Job(args) => job::run(&connect(&global, out).await?, args).await,
         Command::Executor(args) => Box::pin(executor::run(&global, out, args)).await,
@@ -840,7 +856,9 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
             out.raw(&buffer)
         }
         Command::Repo(args) => repo::run(&connect(&global, out).await?, args).await,
-        Command::Ws(args) => return ws::run(&connect(&global, out).await?, &global, args).await,
+        Command::Ws(args) => {
+            return Box::pin(ws::run(&connect(&global, out).await?, &global, args)).await;
+        }
         Command::Store(args) => return store::run(&connect(&global, out).await?, args).await,
         Command::Backup(args) => return backup::run(&connect(&global, out).await?, args).await,
         Command::Restore(args) => restore::run(&global, out, &args),

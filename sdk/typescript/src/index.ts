@@ -28,6 +28,7 @@ export { API_REVISION, COMMIT, VERSION } from "./gen/build.js";
 export { RPCS } from "./gen/rpcs.js";
 export type { CallOptions, ConnectOptions } from "./options.js";
 export { BURST, REFRESH, Reporter, type ReporterOptions } from "./presence.js";
+export { instructionSha256, type Provenance } from "./provenance.js";
 export type { Cadence, State, Subject } from "./presence-core.js";
 export type { Access, Rpc } from "./rpc.js";
 export { Stream } from "./stream.js";

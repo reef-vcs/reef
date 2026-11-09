@@ -100,6 +100,9 @@ fn reef(daemon: &TestDaemon, dir: &Path) -> Command {
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
         "REEF_AGENT",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
         "REEF_MODEL",
         "REEF_TASK",
     ] {

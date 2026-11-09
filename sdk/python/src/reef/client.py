@@ -23,7 +23,10 @@ from reef.errors import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from reef.api.v1 import GetDaemonStatusResponse
+    from reef.provenance import Provenance
     from reef.workspace import WorkspaceBlock
 
 Req = TypeVar("Req", bound=Message)
@@ -308,6 +311,7 @@ class Client(Methods):
         activity: str | None = None,
         keep: bool = False,
         report_presence: bool = True,
+        provenance: Provenance | Mapping[str, Any] | None = None,
     ) -> WorkspaceBlock:
         """A new workspace for a ``with`` block, as ``reef ws run`` holds one for a command.
 
@@ -326,7 +330,12 @@ class Client(Methods):
             activity: The presence entry's text; the purpose, else the command line.
             keep: Leave the workspace active at the end instead of releasing it.
             report_presence: Report a presence entry for the block.
+            provenance: What its work is for (a :class:`reef.Provenance` or a mapping of its
+                fields): model, harness, task, instruction (hashed here, never sent), client
+                session, identity, actor. ``REEF_MODEL`` and ``REEF_TASK`` fill a model and task
+                it does not set, as ``reef ws create``'s do.
         """
+        from reef.provenance import CreatePlan
         from reef.workspace import WorkspaceBlock
 
         return WorkspaceBlock(
@@ -344,6 +353,7 @@ class Client(Methods):
             keep=keep,
             report_presence=report_presence,
             release=True,
+            provenance=CreatePlan.of(provenance),
         )
 
     def attach(

@@ -22,8 +22,11 @@ from reef.errors import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from reef.aio.workspace import AsyncWorkspaceBlock
     from reef.api.v1 import GetDaemonStatusResponse
+    from reef.provenance import Provenance
 
 Req = TypeVar("Req", bound=Message)
 Resp = TypeVar("Resp", bound=Message)
@@ -293,9 +296,11 @@ class AsyncClient(Methods):
         activity: str | None = None,
         keep: bool = False,
         report_presence: bool = True,
+        provenance: Provenance | Mapping[str, Any] | None = None,
     ) -> AsyncWorkspaceBlock:
         """A new workspace for an ``async with`` block; see :meth:`reef.Client.workspace`."""
         from reef.aio.workspace import AsyncWorkspaceBlock
+        from reef.provenance import CreatePlan
 
         return AsyncWorkspaceBlock(
             self,
@@ -312,6 +317,7 @@ class AsyncClient(Methods):
             keep=keep,
             report_presence=report_presence,
             release=True,
+            provenance=CreatePlan.of(provenance),
         )
 
     def attach(

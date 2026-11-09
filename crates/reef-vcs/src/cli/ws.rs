@@ -235,10 +235,10 @@ impl Args {
 
 pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCode, CliError> {
     let done = match args.command {
-        WsCommand::Provider(args) => provider::run(ctx, global, args).await,
-        WsCommand::Run(args) => return ws_run::run(ctx, args).await,
+        WsCommand::Provider(args) => Box::pin(provider::run(ctx, global, args)).await,
+        WsCommand::Run(args) => return ws_run::run(ctx, global, args).await,
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
-        WsCommand::Create(args) => create(ctx, args).await,
+        WsCommand::Create(args) => create(ctx, global, args).await,
         WsCommand::List {
             repo,
             all,
@@ -804,12 +804,14 @@ pub(crate) async fn create_declared(
     }
 }
 
-async fn create(ctx: &Ctx, args: CreateArgs) -> Result<(), CliError> {
+async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliError> {
     let request = CreateWorkspaceRequest {
         owner: args.owner.unwrap_or_else(default_owner),
         purpose: args.purpose.unwrap_or_default(),
         lease_length: lease_length(args.lease)?,
-        provenance: args.provenance.declaration()?,
+        provenance: args
+            .provenance
+            .declaration(global.state_dir().ok().as_deref())?,
         ..args.target.request()?
     };
     let response = create_declared(ctx, &args.target.repo()?, request, &args.provenance).await?;

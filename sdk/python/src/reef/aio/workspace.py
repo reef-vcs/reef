@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from reef.aio.client import AsyncClient
     from reef.aio.presence import Reporter
     from reef.api.v1 import (
+        DeclareProvenanceResponse,
         EditFilesResponse,
         GetDiffResponse,
         GetStatusResponse,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
         SnapshotWorkspaceResponse,
         Workspace,
     )
+    from reef.provenance import CreatePlan
 
 log = logging.getLogger("reef")
 
@@ -140,6 +142,35 @@ class AsyncWorkspaceHandle:
             self._update(response.workspace)
         return response
 
+    async def declare(
+        self,
+        *,
+        model: str | None = None,
+        harness: str | None = None,
+        task: str | None = None,
+        instruction: str | bytes | None = None,
+        instruction_sha256: str | None = None,
+        client_session: str | None = None,
+        snapshot: bool = True,
+    ) -> DeclareProvenanceResponse:
+        """Replaces fields of the workspace's provenance context; see
+        :meth:`reef.WorkspaceHandle.declare`.
+        """
+        from reef.provenance import PROVENANCE_REVISION, declare_fields
+
+        declaration = declare_fields(
+            model=model,
+            harness=harness,
+            task=task,
+            instruction=instruction,
+            instruction_sha256=instruction_sha256,
+            client_session=client_session,
+        )
+        await self._client.require_revision(PROVENANCE_REVISION)
+        return await self._client.declare_provenance(
+            workspace=self.id, declaration=declaration, no_snapshot=not snapshot
+        )
+
     def activity(self, text: str) -> None:
         """Replaces the presence entry's text, at most once a second."""
         reporter = self._block.reporter
@@ -165,9 +196,11 @@ class AsyncWorkspaceBlock:
         keep: bool,
         report_presence: bool,
         release: bool,
+        provenance: CreatePlan | None = None,
     ) -> None:
         self._client = client
         self._create = create
+        self._provenance = provenance
         self._attach = attach
         self._owner = owner
         self._activity = activity
@@ -183,7 +216,7 @@ class AsyncWorkspaceBlock:
         if self._create is not None:
             fields = dict(self._create)
             fields["owner"] = fields.get("owner") or _identity.process_owner()
-            workspace = (await client.create_workspace(**fields)).workspace
+            workspace = await self._create_workspace(fields)
         else:
             assert self._attach is not None
             workspace = (await client.get_workspace(workspace=self._attach)).workspace
@@ -203,6 +236,28 @@ class AsyncWorkspaceBlock:
                 log.warning("releasing workspace %s failed", workspace.id, exc_info=True)
             raise
         return self.handle
+
+    async def _create_workspace(self, fields: dict[str, Any]) -> Workspace:
+        """Creates it with its provenance; see ``WorkspaceBlock._create_workspace``."""
+        from reef.provenance import PROVENANCE_DISABLED, PROVENANCE_REVISION
+
+        client = self._client
+        plan = self._provenance
+        if plan is not None and plan.declaration is not None:
+            if plan.explicit:
+                await client.require_revision(PROVENANCE_REVISION)
+                fields["provenance"] = plan.declaration.message(creating=True)
+            elif (await client.daemon_status()).api_revision >= PROVENANCE_REVISION:
+                fields["provenance"] = plan.declaration.message(creating=True)
+        try:
+            return (await client.create_workspace(**fields)).workspace
+        except ReefError as error:
+            if "provenance" not in fields or plan is None or plan.explicit:
+                raise
+            if error.reason != PROVENANCE_DISABLED:
+                raise
+            del fields["provenance"]
+            return (await client.create_workspace(**fields)).workspace
 
     def _start_presence(self, workspace: Workspace) -> Reporter:
         from reef.aio.presence import Reporter

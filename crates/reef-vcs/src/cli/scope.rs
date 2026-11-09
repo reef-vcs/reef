@@ -201,6 +201,19 @@ async fn implicit(ctx: &Ctx) -> Result<Scope, CliError> {
     }
 }
 
+/// The workspace `text` names (an id, a prefix, or a path inside one);
+/// `None` when it names none.
+pub(crate) async fn find_workspace(
+    ctx: &Ctx,
+    text: &str,
+) -> Result<Option<v1::Workspace>, CliError> {
+    match lookup(ctx, String::new(), workspace_arg(text)?).await {
+        Ok(ws) => Ok(Some(ws)),
+        Err(CliError::Daemon(error)) if is_workspace_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// A remote daemon was given no scope: this machine's directory names
 /// nothing there (R2.08).
 pub(crate) fn scope_required() -> CliError {

@@ -18,6 +18,7 @@ import type {
   ReadFileResponse,
 } from "./gen/reef/api/v1/files_pb.js";
 import { PresenceKind } from "./gen/reef/api/v1/presence_pb.js";
+import type { DeclareProvenanceResponse } from "./gen/reef/api/v1/provenance_pb.js";
 import type { GetStatusRequestSchema, GetStatusResponse } from "./gen/reef/api/v1/status_pb.js";
 import {
   type Backend,
@@ -33,6 +34,13 @@ import { defaultOwner, presenceAgent, processOwner } from "./identity.js";
 import { HEARTBEAT_DEADLINE, LeaseCore, leaseGone } from "./lease-core.js";
 import { REFRESH } from "./presence-core.js";
 import { Reporter } from "./presence.js";
+import {
+  createPlan,
+  declaration,
+  PROVENANCE_DISABLED,
+  PROVENANCE_REVISION,
+  type Provenance,
+} from "./provenance.js";
 import { debug, sleep, warn } from "./warn.js";
 
 /** The longest activity text a command gives, as `ws run` cuts its purpose. */
@@ -57,6 +65,12 @@ export interface WorkspaceOptions {
   keep?: boolean | undefined;
   /** Report one ACTIVITY presence entry while it is held; true by default. */
   reportPresence?: boolean | undefined;
+  /**
+   * What its work is for (R3.44): model, harness, task, instruction (hashed here, never sent),
+   * client session, identity, actor. `REEF_MODEL` and `REEF_TASK` fill a model and task it does
+   * not set, as `reef ws create`'s do.
+   */
+  provenance?: Provenance | undefined;
 }
 
 /** An existing workspace for a block. */
@@ -287,6 +301,25 @@ export class WorkspaceHandle implements AsyncDisposable {
     return response;
   }
 
+  /**
+   * Replaces fields of the workspace's provenance context (R3.44): `undefined` leaves a field,
+   * `""` clears it. `instruction` is hashed here, and only its SHA-256 is sent. Snapshots first,
+   * so edits already made are recorded under the context they were made under, unless
+   * `snapshot` is false. Throws IncompatibleError for a daemon older than API revision 18.
+   */
+  async declare(
+    fields: Omit<Provenance, "identity" | "actor">,
+    options: { snapshot?: boolean } = {},
+  ): Promise<DeclareProvenanceResponse> {
+    const message = declaration(fields, false);
+    await this.#client.requireRevision(PROVENANCE_REVISION);
+    return this.#client.declareProvenance({
+      workspace: this.id,
+      declaration: message,
+      noSnapshot: options.snapshot === false,
+    });
+  }
+
   /** Replaces the presence entry's text, at most once a second. */
   activity(text: string): void {
     this.#reporter?.set({ activity: text });
@@ -349,19 +382,48 @@ export async function openWorkspace(
   client: Client,
   options: WorkspaceOptions,
 ): Promise<WorkspaceHandle> {
-  const response = await client.createWorkspace({
+  const request = {
     repo: options.repo,
     start:
       options.change !== undefined
-        ? { case: "change", value: options.change }
+        ? { case: "change" as const, value: options.change }
         : options.newOn !== undefined
-          ? { case: "newOn", value: options.newOn }
+          ? { case: "newOn" as const, value: options.newOn }
           : { case: undefined },
     purpose: options.purpose ?? "",
     owner: options.owner || processOwner(),
     ...(options.backend === undefined ? {} : { backend: options.backend }),
     ...(options.leaseLength === undefined ? {} : { leaseLength: options.leaseLength }),
-  });
+  };
+  // What its work is for; a declaration made only of the environment's defaults is dropped
+  // where the daemon cannot take it, as `reef ws create` drops it.
+  const plan = createPlan(options.provenance);
+  let provenance = plan?.declaration;
+  if (plan?.explicit === true) {
+    await client.requireRevision(PROVENANCE_REVISION);
+  } else if (
+    plan !== undefined &&
+    (await client.daemonStatus()).apiRevision < PROVENANCE_REVISION
+  ) {
+    provenance = undefined;
+  }
+  let response;
+  try {
+    response = await client.createWorkspace({
+      ...request,
+      ...(provenance === undefined ? {} : { provenance }),
+    });
+  } catch (error) {
+    if (
+      provenance === undefined ||
+      plan?.explicit === true ||
+      !isReefError(error) ||
+      error.reason !== PROVENANCE_DISABLED
+    ) {
+      throw error;
+    }
+    response = await client.createWorkspace(request);
+  }
   const workspace = response.workspace;
   if (workspace === undefined) {
     throw new Error("CreateWorkspace answered without a workspace");

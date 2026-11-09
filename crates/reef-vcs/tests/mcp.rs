@@ -76,6 +76,12 @@ fn command_in(state: &Path, dir: &Path, args: &[&str]) -> Command {
         "REEF_OUTPUT",
         "REEF_WORKSPACE",
         "REEF_AGENT",
+        "REEF_MODEL",
+        "REEF_TASK",
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "OPENCODE",
     ] {
         command.env_remove(var);
     }
@@ -903,6 +909,107 @@ async fn agent_names() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("agent"));
+}
+
+// R3.44 9: a workspace the server creates declares the client's
+// `initialize` as its harness and the environment's session and task; the
+// launch workspace gets them at the first call there, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn declares_provenance_from_initialize_and_the_environment() {
+    let (daemon, repo) = fixture().await;
+    let mut in_session = command(&daemon, &repo.root);
+    in_session
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-9")
+        .env("REEF_TASK", "T-9");
+    let mut root = Mcp::start(in_session).await;
+    let created = create(&mut root).await;
+    let context = inspect(&daemon, &id(&created))
+        .await
+        .provenance
+        .unwrap()
+        .context
+        .unwrap();
+    assert_eq!(context.harness, "reef-tests/0");
+    assert_eq!(context.client_session, "s-9");
+    assert_eq!(context.task, "T-9");
+
+    let plain = daemon
+        .client
+        .create_workspace(v1::CreateWorkspaceRequest {
+            repo: repo.id.clone(),
+            owner: "test@host".to_owned(),
+            ..v1::CreateWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    let records_before = inspect(&daemon, &plain.id)
+        .await
+        .provenance
+        .unwrap()
+        .records;
+    let mut launched = command(&daemon, Path::new(&plain.path));
+    launched
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-9b");
+    let mut launched = Mcp::start(launched).await;
+    launched.ok("get_status", json!({})).await;
+    let session = inspect(&daemon, &plain.id).await.provenance.unwrap();
+    let context = session.context.unwrap();
+    assert_eq!(context.harness, "reef-tests/0");
+    assert_eq!(context.client_session, "s-9b");
+    // Without a snapshot: nothing is recorded for it.
+    assert_eq!(session.records, records_before);
+    // Once: a newer session a hook declares there is not undone.
+    daemon
+        .client
+        .declare_provenance(v1::DeclareProvenanceRequest {
+            repo: repo.id.clone(),
+            workspace: plain.id.clone(),
+            declaration: Some(v1::ProvenanceDeclaration {
+                client_session: Some("s-newer".to_owned()),
+                ..v1::ProvenanceDeclaration::default()
+            }),
+            no_snapshot: true,
+        })
+        .await
+        .unwrap();
+    launched.ok("get_status", json!({})).await;
+    let context = inspect(&daemon, &plain.id)
+        .await
+        .provenance
+        .unwrap()
+        .context
+        .unwrap();
+    assert_eq!(context.client_session, "s-newer");
+    // A new server in a workspace whose session has one fills only what it
+    // lacks.
+    let mut again = command(&daemon, Path::new(&plain.path));
+    again
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-stale");
+    let mut again = Mcp::start(again).await;
+    again.ok("get_status", json!({})).await;
+    let context = inspect(&daemon, &plain.id)
+        .await
+        .provenance
+        .unwrap()
+        .context
+        .unwrap();
+    assert_eq!(context.client_session, "s-newer");
+    // A call naming another workspace declares nothing there.
+    launched
+        .ok("get_status", json!({"workspace": id(&created)}))
+        .await;
+    let context = inspect(&daemon, &id(&created))
+        .await
+        .provenance
+        .unwrap()
+        .context
+        .unwrap();
+    assert_eq!(context.client_session, "s-9");
 }
 
 // 15

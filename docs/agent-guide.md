@@ -16,16 +16,17 @@ Output is JSON when piped; errors carry `hint` and `next`, a command to run.
 ## Commands
 
 - `reef ws create` prints a new workspace's path; `reef ws release <id>`
-  ends it. `reef ws list` counts each one's changed files;
-  `reef ws inspect <id>` has the rest. Ids take 4+ characters.
+  ends it. `reef ws list` counts changed files; `reef ws inspect <id>`
+  has the rest. Ids take 4+ characters.
 - `cd "$(reef ws move -o text <id> --new-on main)"` snapshots and starts the next task
   in the same directory and lease (`cd` again: overlays remount).
-- `--workspace <id>` or `--repo <path|id>` picks what to read (default: here).
+- `--workspace <id>` or `--repo <path|id>` picks what to read.
 
 ## Inside ws run
 
-It runs in the workspace with `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`,
-`REEF_REPO` and `REEF_SOCKET` set, its lease renewed until it exits.
+It runs there with `REEF_WORKSPACE`, `REEF_WORKSPACE_PATH`, `REEF_REPO`
+and `REEF_SOCKET` set, its lease renewed until it exits. `REEF_MODEL` and
+`REEF_TASK` name your model and task in provenance.
 
 ## Output
 

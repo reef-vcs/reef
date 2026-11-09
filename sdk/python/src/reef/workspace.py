@@ -23,6 +23,7 @@ from reef.errors import ConflictError, ReefError
 
 if TYPE_CHECKING:
     from reef.api.v1 import (
+        DeclareProvenanceResponse,
         EditFilesResponse,
         GetDiffResponse,
         GetStatusResponse,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     )
     from reef.client import Client
     from reef.presence import Reporter
+    from reef.provenance import CreatePlan
 
 log = logging.getLogger("reef")
 
@@ -192,6 +194,40 @@ class WorkspaceHandle:
             self._update(response.workspace)
         return response
 
+    def declare(
+        self,
+        *,
+        model: str | None = None,
+        harness: str | None = None,
+        task: str | None = None,
+        instruction: str | bytes | None = None,
+        instruction_sha256: str | None = None,
+        client_session: str | None = None,
+        snapshot: bool = True,
+    ) -> DeclareProvenanceResponse:
+        """Replaces fields of the workspace's provenance context (R3.44): ``None`` leaves a
+        field, ``""`` clears it. ``instruction`` is hashed here, and only its SHA-256 is sent.
+        Snapshots first, so edits already made are recorded under the context they were made
+        under, unless ``snapshot`` is false.
+
+        Raises:
+            IncompatibleError: The daemon is older than API revision 18.
+        """
+        from reef.provenance import PROVENANCE_REVISION, declare_fields
+
+        declaration = declare_fields(
+            model=model,
+            harness=harness,
+            task=task,
+            instruction=instruction,
+            instruction_sha256=instruction_sha256,
+            client_session=client_session,
+        )
+        self._client.require_revision(PROVENANCE_REVISION)
+        return self._client.declare_provenance(
+            workspace=self.id, declaration=declaration, no_snapshot=not snapshot
+        )
+
     def activity(self, text: str) -> None:
         """Replaces the presence entry's text, at most once a second."""
         reporter = self._block.reporter
@@ -217,9 +253,11 @@ class WorkspaceBlock:
         keep: bool,
         report_presence: bool,
         release: bool,
+        provenance: CreatePlan | None = None,
     ) -> None:
         self._client = client
         self._create = create
+        self._provenance = provenance
         self._attach = attach
         self._owner = owner
         self._activity = activity
@@ -236,7 +274,7 @@ class WorkspaceBlock:
         if self._create is not None:
             fields = dict(self._create)
             fields["owner"] = fields.get("owner") or _identity.process_owner()
-            workspace = client.create_workspace(**fields).workspace
+            workspace = self._create_workspace(fields)
         else:
             assert self._attach is not None
             workspace = client.get_workspace(workspace=self._attach).workspace
@@ -257,6 +295,30 @@ class WorkspaceBlock:
                 log.warning("releasing workspace %s failed", workspace.id, exc_info=True)
             raise
         return handle
+
+    def _create_workspace(self, fields: dict[str, Any]) -> Workspace:
+        """Creates it with its provenance; a declaration made only of the environment's
+        defaults is dropped where the daemon cannot take it, as ``reef ws create`` drops it.
+        """
+        from reef.provenance import PROVENANCE_DISABLED, PROVENANCE_REVISION
+
+        client = self._client
+        plan = self._provenance
+        if plan is not None and plan.declaration is not None:
+            if plan.explicit:
+                client.require_revision(PROVENANCE_REVISION)
+                fields["provenance"] = plan.declaration.message(creating=True)
+            elif client.daemon_status().api_revision >= PROVENANCE_REVISION:
+                fields["provenance"] = plan.declaration.message(creating=True)
+        try:
+            return client.create_workspace(**fields).workspace
+        except ReefError as error:
+            if "provenance" not in fields or plan is None or plan.explicit:
+                raise
+            if error.reason != PROVENANCE_DISABLED:
+                raise
+            del fields["provenance"]
+            return client.create_workspace(**fields).workspace
 
     def _start_presence(self, workspace: Workspace) -> Reporter:
         from reef.presence import Reporter
