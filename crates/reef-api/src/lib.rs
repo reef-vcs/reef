@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 26;
+pub const API_REVISION: u32 = 27;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -123,6 +123,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `LandedChange`'s tested tree, commit and evaluation,
     // `OPERATION_KIND_BATCH` and `Operation.batch_id`.
     "d242e8603cb2e2d038d087a1e8931fe4f36e528519092ec895c17150e39ea7cd",
+    // R3.12: `comment_event.proto` and `comments.proto` (`CommentService`),
+    // `OPERATION_KIND_COMMENT` and `Operation.comments`.
+    "b9610ccee06b466fe068e2daf6d10774e66248a109a3b8050ad55b81484474c1",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -711,6 +714,51 @@ pub mod error {
     /// `GetConflict`'s `max_file_bytes` over 16 MiB (R3.25). Metadata:
     /// `max`.
     pub const MAX_FILE_BYTES_TOO_LARGE: &str = "MAX_FILE_BYTES_TOO_LARGE";
+    /// `CreateComment` with no kind (R3.12).
+    pub const KIND_REQUIRED: &str = "KIND_REQUIRED";
+    /// A comment's text that is empty, over 16 KiB, or has a control
+    /// character other than newline and tab; or an instruction's summary
+    /// over 4 KiB or with one (R3.12).
+    pub const INVALID_TEXT: &str = "INVALID_TEXT";
+    /// A comment's anchor whose path is not in the tree its side names,
+    /// whose lines are outside the file, or that has lines without a path or
+    /// in a binary file (R3.12). Metadata: `path`.
+    pub const INVALID_ANCHOR: &str = "INVALID_ANCHOR";
+    /// A comment's `reply_to` naming no comment on the same change (R3.12).
+    /// Metadata: `reply_to`.
+    pub const INVALID_REPLY_TO: &str = "INVALID_REPLY_TO";
+    /// `CreateComment.confirm` without ceilings, or on a note (R3.12).
+    pub const CEILINGS_REQUIRED: &str = "CEILINGS_REQUIRED";
+    /// `UpdateInstruction` with no target state, or one no request may set
+    /// (R3.12).
+    pub const INSTRUCTION_STATE_REQUIRED: &str = "INSTRUCTION_STATE_REQUIRED";
+    /// No comment with this id in the repository (R3.12). Metadata: `id`.
+    pub const COMMENT_NOT_FOUND: &str = "COMMENT_NOT_FOUND";
+    /// `UpdateInstruction` or `ClaimInstruction` of a note (R3.12).
+    /// Metadata: `id`.
+    pub const NOT_AN_INSTRUCTION: &str = "NOT_AN_INSTRUCTION";
+    /// An instruction move its state does not allow (R3.12). Metadata:
+    /// `state`, `to`.
+    pub const INSTRUCTION_NOT_ALLOWED: &str = "INSTRUCTION_NOT_ALLOWED";
+    /// `CreateComment` of an instruction on a change that has landed or was
+    /// superseded (R3.12): it could only expire. Metadata: `change_id`,
+    /// `state`.
+    pub const CHANGE_FINAL: &str = "CHANGE_FINAL";
+    /// `ClaimInstruction` naming no workspace, client session or change
+    /// (R3.12).
+    pub const CLAIM_SCOPE_REQUIRED: &str = "CLAIM_SCOPE_REQUIRED";
+    /// A change with 1,000 comments already (R3.12). Metadata: `max`.
+    pub const TOO_MANY_COMMENTS: &str = "TOO_MANY_COMMENTS";
+    /// A change with 16 unfinished instructions, or a session with 64
+    /// (R3.12). Metadata: `max`.
+    pub const TOO_MANY_INSTRUCTIONS: &str = "TOO_MANY_INSTRUCTIONS";
+    /// Through the remote listener, an instruction, or a take, from a token
+    /// linked to no operator identity (R3.12).
+    pub const REMOTE_IDENTITY_REQUIRED: &str = "REMOTE_IDENTITY_REQUIRED";
+    /// Through the remote listener, a move of an instruction another token
+    /// wrote or claimed, or a claim of a change another token proposed
+    /// (R3.12). Metadata: `id`.
+    pub const REMOTE_COMMENT_NOT_OWNED: &str = "REMOTE_COMMENT_NOT_OWNED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

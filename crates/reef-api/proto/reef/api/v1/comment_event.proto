@@ -1,0 +1,81 @@
+// The types a comment's operation carries (R3.12, ADR 0069;
+// `docs/comments.md`): what kind of comment it is, the states of an
+// instruction, and one recorded event. CommentService (`comments.proto`)
+// uses them, and `Operation.comments` carries the events, so they live
+// apart from both.
+syntax = "proto3";
+
+package reef.api.v1;
+
+// What a comment is, fixed when it is written.
+enum CommentKind {
+  // Not set; in a request, INVALID_ARGUMENT with reason KIND_REQUIRED.
+  COMMENT_KIND_UNSPECIFIED = 0;
+  // Data for whoever reads it. Never delivered to a session.
+  COMMENT_KIND_NOTE = 1;
+  // Work for the session that made the change: confirmed against its
+  // estimate, then taken by that session (ClaimInstruction).
+  COMMENT_KIND_INSTRUCTION = 2;
+}
+
+// Where an instruction is. DONE, FAILED and CANCELLED are final.
+enum InstructionState {
+  // Not set; in a filter, any.
+  INSTRUCTION_STATE_UNSPECIFIED = 0;
+  // Written with its estimate; nothing is delivered until it is confirmed.
+  INSTRUCTION_STATE_AWAITING_CONFIRMATION = 1;
+  // Confirmed; waiting for its session to take it.
+  INSTRUCTION_STATE_PENDING = 2;
+  // A client took it for a session.
+  INSTRUCTION_STATE_DELIVERED = 3;
+  // The session said it started.
+  INSTRUCTION_STATE_RUNNING = 4;
+  // The session said it finished, or the change was proposed again after
+  // the instruction was delivered.
+  INSTRUCTION_STATE_DONE = 5;
+  // The session said it could not, or it ran past its time.
+  INSTRUCTION_STATE_FAILED = 6;
+  // Withdrawn before it ran, or made moot by the change landing or being
+  // superseded, or left untouched past its time.
+  INSTRUCTION_STATE_CANCELLED = 7;
+}
+
+// Why an instruction's state changed.
+enum InstructionCause {
+  // Not set.
+  INSTRUCTION_CAUSE_UNSPECIFIED = 0;
+  // A client asked for it.
+  INSTRUCTION_CAUSE_REQUEST = 1;
+  // The change was proposed again after the instruction was delivered.
+  INSTRUCTION_CAUSE_REPROPOSED = 2;
+  // The change landed or was superseded.
+  INSTRUCTION_CAUSE_CHANGE_FINAL = 3;
+  // It was left untouched for 7 days.
+  INSTRUCTION_CAUSE_EXPIRED = 4;
+}
+
+// One comment write as an operation's `reef.comment` attribute records it:
+// ids and states, never the text. GetComment reads the comment.
+message CommentEvent {
+  // The event's id, `cev_` and 16 hex digits.
+  string id = 1;
+  // The comment, `cmt_` and 16 hex digits.
+  string comment_id = 2;
+  // Its change, in hex.
+  string change_id = 3;
+  // The change's proposal round when the comment was written; 0 for a
+  // change never proposed.
+  uint32 round = 4;
+  // Note or instruction.
+  CommentKind kind = 5;
+  // What happened: `comment` (a note written), `instruct` (an instruction
+  // written), `confirm`, `claim`, `start`, `finish`, `cancel` or
+  // `release`.
+  string event = 6;
+  // For an instruction, its state before; unspecified for a new comment.
+  InstructionState from = 7;
+  // For an instruction, its state after; unspecified for a note.
+  InstructionState to = 8;
+  // Why.
+  InstructionCause cause = 9;
+}

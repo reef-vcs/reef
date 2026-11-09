@@ -32,6 +32,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v reef >/dev/null 2>&1 && reef comment next --hook --at client_session=/session_id --at workspace=/cwd --emit context 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -43,6 +52,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v reef >/dev/null 2>&1 && reef comment next --hook --at client_session=/session_id --at workspace=/cwd --emit context 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostModelSwitch": [
@@ -51,6 +69,17 @@
           {
             "type": "command",
             "command": "command -v reef >/dev/null 2>&1 && reef provenance declare --hook --at model=/to_model --at client_session=/session_id --at workspace=/cwd >/dev/null 2>&1 || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v reef >/dev/null 2>&1 && reef comment next --hook --at client_session=/session_id --at workspace=/cwd --emit block 2>/dev/null || true",
             "timeout": 5
           }
         ]

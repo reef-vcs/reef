@@ -6,4 +6,4 @@ A write in a workspace returns the workspace afterwards: `workspace.divergent` t
 
 A failed call returns `{"error": {kind, reason, message, hint, next}}`: `hint` says how to fix it, and `next` is a `reef` command line that does.
 
-The server keeps the leases of workspaces it creates alive while it runs. wait_for_operations waits for other agents' work.
+The server keeps the leases of workspaces it creates alive while it runs. wait_for_operations waits for other agents' work. After proposing, wait_for_operations with kind comment on your change delivers a reviewer's instruction; do it, then propose again.

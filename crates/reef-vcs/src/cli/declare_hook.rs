@@ -187,7 +187,10 @@ async fn targets(
 
 /// The active workspaces whose provenance session declared `session` as
 /// its client session, in every repository.
-async fn session_workspaces(ctx: &Ctx, session: &str) -> Result<Vec<v1::Workspace>, CliError> {
+pub(crate) async fn session_workspaces(
+    ctx: &Ctx,
+    session: &str,
+) -> Result<Vec<v1::Workspace>, CliError> {
     let workspaces = ctx
         .call(ctx.client.list_workspaces(ListWorkspacesRequest {
             states: vec![WorkspaceState::Active.into()],

@@ -83,6 +83,25 @@ impl Classify for InvalidChangeFilter {
     }
 }
 
+/// The operation `text` names when it records comment events (R3.12),
+/// which no undo reverts; `None` otherwise.
+async fn comment_operation(target: &super::reading::Target, text: &str) -> Option<OpEntry> {
+    use futures::FutureExt as _;
+    let text = text.to_owned();
+    target
+        .handle
+        .call_async(move |head| {
+            async move {
+                let repo = head.refresh().await.ok()?;
+                reef_lib::jj::comments::comment_operation(&repo, &text).await
+            }
+            .boxed_local()
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
 /// The operation `text` names when it records lifecycle transitions and
 /// nothing else (R3.09), which the daemon undoes in its own records; `None`
 /// otherwise, including when it does not resolve or also changed the view
@@ -548,6 +567,14 @@ impl OperationService for OperationsHandler {
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
+        if let Some(entry) = comment_operation(&target, &request.operation_id).await {
+            // A delivered instruction cannot be unsent, nor a note unsaid
+            // (R3.12).
+            return Err(status(reef_lib::jj::undo::UndoError::NotUndoable {
+                op: entry.id,
+                why: "it records comments; cancel an instruction with `reef comment cancel` instead",
+            }));
+        }
         if let Some(entry) = lifecycle_operation(&target, &request.operation_id).await {
             return undo_transitions(state, &target, agent, remote, &entry).await;
         }

@@ -405,6 +405,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
             .get(reef_lib::jj::oplog::ATTR_BATCH)
             .cloned()
             .unwrap_or_default(),
+        comments: crate::comments::messages::operation_comments(entry),
     }
 }
 
@@ -647,6 +648,7 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::ImportRefs) => v1::OperationKind::ImportRefs,
         Some(OpKind::Transition) => v1::OperationKind::Transition,
         Some(OpKind::Land) => v1::OperationKind::Land,
+        Some(OpKind::Comment) => v1::OperationKind::Comment,
         Some(OpKind::Batch) => v1::OperationKind::Batch,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
@@ -725,6 +727,7 @@ pub(super) fn listed_operation(
             .get(reef_lib::jj::oplog::ATTR_BATCH)
             .cloned()
             .unwrap_or_default(),
+        comments: crate::comments::messages::operation_comments(entry),
     }
 }
 

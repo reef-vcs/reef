@@ -402,7 +402,7 @@ pub(super) const TOOLS: &[ToolDef] = &[
         name: "wait_for_operations",
         title: "Wait for operations",
         rpc: "/reef.api.v1.OperationService/SubscribeOperations",
-        description: "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones.",
+        description: "Wait until operations matching the filter are recorded (another agent's write) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out, instructions}; pass last_operation_id back as after_operation for the next ones.",
         destructive: false,
         idempotent: false,
         schema: schema::<args::WaitForOperations>,
@@ -693,6 +693,26 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
         "/reef.api.v1.LandingService/ListLandings",
         "an agent runs `reef landing list`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.CommentService/CreateComment",
+        "a reviewer writes comments with `reef comment add` or the proposal view (R3.31); tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.CommentService/GetComment",
+        "an agent runs `reef comment show`; wait_for_operations frames the instructions it takes (R3.12)",
+    ),
+    (
+        "/reef.api.v1.CommentService/ListComments",
+        "an agent runs `reef comment list`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.CommentService/UpdateInstruction",
+        "an agent proposes again when done, or runs `reef comment fail`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.CommentService/ClaimInstruction",
+        "wait_for_operations with kind comment takes the session's instructions; hooks and `reef comment next` take them too (R3.12)",
     ),
     (
         "/reef.api.v1.LandingService/GetBatch",

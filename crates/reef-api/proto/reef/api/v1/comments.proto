@@ -1,0 +1,467 @@
+// Comments on changes, and instructions to the session that made them
+// (R3.12, ADR 0069; `docs/comments.md`).
+//
+// A comment is an immutable note or instruction on a change, anchored to
+// the change's round and the commit its author saw, and optionally to a
+// path and lines. An instruction is routed to the session that proposed
+// the change, carries an estimate of what Reef recorded about the change's
+// cost, and is delivered only after it is confirmed: a session takes it
+// with ClaimInstruction, and reports start, done or failure with
+// UpdateInstruction. Reef starts no agent. Every write is an operation
+// whose `Operation.comments` names it, and rows the daemon keeps through
+// GC; the text is in the rows only.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/comment_event.proto";
+import "reef/api/v1/lifecycle.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/remote.proto";
+
+// Writing and reading comments, and moving instructions.
+service CommentService {
+  // Writes a note or an instruction on a change. An instruction is written
+  // AWAITING_CONFIRMATION with its estimate, unless `confirm` is set and
+  // the estimate meets `ceilings`. A revision that uses `@` snapshots the
+  // workspace first. Through the remote listener, any write token writes a
+  // note; an instruction needs a token linked to an operator identity.
+  //
+  // Errors: the revision reasons of ChangeService; HIDDEN_REVISION;
+  // EXPECTED_COMMIT_MISMATCH and INVALID_COMMIT_ID; INVALID_ARGUMENT with
+  // reason KIND_REQUIRED, INVALID_TEXT, INVALID_ANCHOR (metadata `path`),
+  // INVALID_REPLY_TO (metadata `reply_to`) or CEILINGS_REQUIRED (`confirm`
+  // with no ceiling above 0); FAILED_PRECONDITION with reason CHANGE_FINAL
+  // for an instruction on a landed or superseded change (metadata
+  // `change_id`, `state`);
+  // UNAVAILABLE with reason TOO_MANY_COMMENTS or TOO_MANY_INSTRUCTIONS
+  // (metadata `max`); PERMISSION_DENIED with reason
+  // REMOTE_IDENTITY_REQUIRED; a failed snapshot's own error.
+  rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+
+  // One comment, with its replies.
+  //
+  // Errors: NOT_FOUND with reason COMMENT_NOT_FOUND (metadata `id`); the
+  // repository reasons.
+  rpc GetComment(GetCommentRequest) returns (GetCommentResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // A repository's comments, oldest first, filtered and paged.
+  //
+  // Errors: INVALID_PAGE_TOKEN; a negative `page_size` is INVALID_ARGUMENT;
+  // a change filter that is not hex or reverse hex is INVALID_ARGUMENT; the
+  // repository reasons.
+  rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Moves an instruction: confirm (to PENDING from
+  // AWAITING_CONFIRMATION), release (to PENDING from DELIVERED, which needs
+  // `expected_state` DELIVERED, so a confirmation sent again never hands a
+  // taken instruction out twice), start
+  // (RUNNING), finish (DONE or FAILED) or cancel (CANCELLED). Moving it to
+  // the state it is in does nothing. Through the remote listener, confirm
+  // and cancel (at any state) need the token that wrote it, and the others
+  // the token that claimed it.
+  //
+  // Errors: NOT_FOUND with reason COMMENT_NOT_FOUND; INVALID_ARGUMENT with
+  // reason INSTRUCTION_STATE_REQUIRED or INVALID_TEXT (the summary);
+  // FAILED_PRECONDITION with reason NOT_AN_INSTRUCTION,
+  // INSTRUCTION_NOT_ALLOWED (metadata `state`, `to`) or
+  // EXPECTED_STATE_MISMATCH (metadata `expected_state`, `state`);
+  // PERMISSION_DENIED with reason REMOTE_COMMENT_NOT_OWNED.
+  rpc UpdateInstruction(UpdateInstructionRequest) returns (UpdateInstructionResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+
+  // Takes the oldest PENDING instruction for a session, or the one
+  // `comment_id` names, and moves it to DELIVERED (RUNNING with `start`).
+  // An instruction matches when its target is the request's client
+  // session, or the named workspace's (or, for a target that declared
+  // none, the workspace itself); with `take`, any instruction on the
+  // change the request names; and an instruction with no target matches
+  // any request on its change. Nothing to take is an empty response, not
+  // an error. Through the remote listener, only the token that proposed
+  // the change claims without `take`, and `take` needs a token linked to
+  // an operator identity.
+  //
+  // Errors: FAILED_PRECONDITION with reason CLAIM_SCOPE_REQUIRED (no
+  // workspace, client session or change); the revision reasons for
+  // `change`; NOT_FOUND with reason COMMENT_NOT_FOUND for `comment_id`;
+  // PERMISSION_DENIED with reason REMOTE_COMMENT_NOT_OWNED or
+  // REMOTE_IDENTITY_REQUIRED.
+  rpc ClaimInstruction(ClaimInstructionRequest) returns (ClaimInstructionResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+}
+
+// How an instruction reached its session.
+enum DeliveryChannel {
+  // Not set; in a request, SDK.
+  DELIVERY_CHANNEL_UNSPECIFIED = 0;
+  // `reef comment next`.
+  DELIVERY_CHANNEL_CLI = 1;
+  // A harness hook running `reef comment next --hook`.
+  DELIVERY_CHANNEL_HOOK = 2;
+  // `reef mcp`, inside `wait_for_operations`.
+  DELIVERY_CHANNEL_MCP = 3;
+  // A client calling ClaimInstruction itself.
+  DELIVERY_CHANNEL_SDK = 4;
+}
+
+// Where an instruction's target came from.
+enum TargetSource {
+  // Not set.
+  TARGET_SOURCE_UNSPECIFIED = 0;
+  // The session that recorded the change's latest proposal.
+  TARGET_SOURCE_PROPOSAL = 1;
+  // The session of the change's latest provenance record.
+  TARGET_SOURCE_PROVENANCE = 2;
+  // Neither: any session on the change may take it.
+  TARGET_SOURCE_NONE = 3;
+}
+
+// Which version of an anchored file a comment's lines are in.
+enum LineSide {
+  // Not set; NEW.
+  LINE_SIDE_UNSPECIFIED = 0;
+  // The file in the anchor commit.
+  LINE_SIDE_NEW = 1;
+  // The file in the anchor commit's first parent: for removed lines.
+  LINE_SIDE_OLD = 2;
+}
+
+// Where in a change a comment points, beyond the change itself.
+message CommentAnchor {
+  // A path in the anchor commit's tree (NEW) or its first parent's (OLD);
+  // empty for the whole change.
+  string path = 1;
+  // Which tree.
+  LineSide side = 2;
+  // The first line, 1-based; 0 for the whole file. Needs `path`.
+  uint32 start_line = 3;
+  // The last line, inclusive; 0 for `start_line` alone.
+  uint32 end_line = 4;
+}
+
+// Who wrote a comment, as recorded.
+message CommentAuthor {
+  // The call's `reef-agent`.
+  string agent = 1;
+  // HUMAN or AGENT: declared on the socket; always AGENT through the
+  // remote listener.
+  TransitionActor actor = 2;
+  // The identity's name: the remote token's linked identity, else the
+  // named workspace's provenance session's, else the daemon's default
+  // person identity.
+  string identity = 3;
+  // Its id.
+  string identity_id = 4;
+  // The named workspace's provenance session.
+  string session_id = 5;
+  // The remote token the call came through; unset over the socket.
+  RemoteCaller remote = 6;
+}
+
+// The session an instruction is for, resolved when it was written.
+message InstructionTarget {
+  // Where it came from.
+  TargetSource source = 1;
+  // The Reef provenance session.
+  string session_id = 2;
+  // The client session that session declared: the harness's own session
+  // id, which is what resumes. Empty when it declared none.
+  string client_session = 3;
+  // The harness that session declared, unverified.
+  string harness = 4;
+  // That session's agent.
+  string agent = 5;
+  // That session's workspace.
+  string workspace_id = 6;
+  // When the client session was last seen: its latest declaration,
+  // provenance record or claim. Reef cannot tell whether a session is
+  // still running.
+  google.protobuf.Timestamp last_seen_at = 7;
+}
+
+// A cost a runner reported for an instruction (R3.46); unset until then.
+message ReportedCost {
+  // Model input tokens.
+  uint64 input_tokens = 1;
+  // Model output tokens.
+  uint64 output_tokens = 2;
+  // An amount of money, as decimal text.
+  string amount = 3;
+  // Its currency, ISO 4217.
+  string currency = 4;
+  // Who reported it.
+  string source = 5;
+}
+
+// What Reef recorded that predicts an instruction's cost, computed once
+// when it was written. Model tokens and price are not visible to Reef.
+message InstructionEstimate {
+  // SHA-256 of the estimate's canonical JSON, in hex.
+  string digest = 1;
+  // When it was computed.
+  google.protobuf.Timestamp computed_at = 2;
+  // Whether any check of the change finished: the parts below are known.
+  bool checks_known = 3;
+  // How many jobs (R3.05) ran on the tree of the change's recorded
+  // proposal commit, else its visible commit.
+  uint32 checks = 4;
+  // Their total wall time, in milliseconds.
+  uint64 check_wall_ms = 5;
+  // Their total CPU time, in milliseconds, where executors reported it.
+  uint64 check_cpu_ms = 6;
+  // Whether any earlier instruction finished DONE to base `agent_wall_ms`
+  // on.
+  bool agent_known = 7;
+  // The median wall time from delivery to done of earlier instructions.
+  uint64 agent_wall_ms = 8;
+  // How many instructions that median is of.
+  uint32 agent_samples = 9;
+  // Which ones: `change`, `session` or `repository`.
+  string agent_basis = 10;
+  // The target session's declared model, unverified.
+  string model = 11;
+  // The target session's declared harness, unverified.
+  string harness = 12;
+  // A runner's report (R3.46).
+  ReportedCost reported = 13;
+  // A sentence for each part that is unknown, and that model tokens and
+  // price are not visible to Reef while `reported` is unset.
+  repeated string unknown = 14;
+}
+
+// The most a one-call confirmation accepts (CreateCommentRequest.confirm).
+message InstructionCeilings {
+  // The most check wall time, in milliseconds; 0 for no bound.
+  uint64 max_check_wall_ms = 1;
+  // The most agent wall time, in milliseconds; 0 for no bound.
+  uint64 max_agent_wall_ms = 2;
+  // Whether an unknown part meets its ceiling.
+  bool allow_unknown = 3;
+}
+
+// An instruction's state, route and outcome.
+message Instruction {
+  // Where it is.
+  InstructionState state = 1;
+  // Why it got there.
+  InstructionCause cause = 2;
+  // What it was estimated to cost.
+  InstructionEstimate estimate = 3;
+  // The session it is for.
+  InstructionTarget target = 4;
+  // The client session that took it; empty until then.
+  string claimed_client_session = 5;
+  // The workspace that took it.
+  string claimed_workspace_id = 6;
+  // The agent that took it.
+  string claimed_agent = 7;
+  // How it was taken.
+  DeliveryChannel channel = 8;
+  // Whether a session other than the target took it.
+  bool taken = 9;
+  // What the session said when it finished or failed, or why it was
+  // cancelled.
+  string summary = 10;
+  // When it was confirmed.
+  google.protobuf.Timestamp confirmed_at = 11;
+  // When it was taken.
+  google.protobuf.Timestamp delivered_at = 12;
+  // When it started.
+  google.protobuf.Timestamp started_at = 13;
+  // When it finished, failed or was cancelled.
+  google.protobuf.Timestamp finished_at = 14;
+}
+
+// One comment.
+message Comment {
+  // `cmt_` and 16 hex digits.
+  string id = 1;
+  // The change, in hex.
+  string change_id = 2;
+  // The change's proposal round when written; 0 for a change never
+  // proposed.
+  uint32 round = 3;
+  // The commit its author saw.
+  string commit_id = 4;
+  // Where in the change; unset for the whole change.
+  CommentAnchor anchor = 5;
+  // The comment it replies to; empty for none.
+  string reply_to = 6;
+  // Note or instruction.
+  CommentKind kind = 7;
+  // The text, as written: data from whoever wrote it.
+  string text = 8;
+  // SHA-256 of the text's UTF-8 bytes, in hex: the instruction hash a
+  // session that takes it declares into its provenance.
+  string text_sha256 = 9;
+  // Who wrote it.
+  CommentAuthor author = 10;
+  // When it was written.
+  google.protobuf.Timestamp created_at = 11;
+  // The operation that recorded it.
+  string operation_id = 12;
+  // GC dropped `operation_id`.
+  bool operation_collected = 13;
+  // With a path: the change's visible commit has a different file at the
+  // path than the anchor commit.
+  bool outdated = 14;
+  // For an instruction, its state and route; unset for a note.
+  Instruction instruction = 15;
+}
+
+// Write a comment.
+message CreateCommentRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to, and whose session the author's is; empty
+  // for none.
+  string workspace = 2;
+  // The change: a revision naming one commit.
+  string revision = 3;
+  // The commit the author saw, which must be the change's visible commit;
+  // empty for no check.
+  string expected_commit_id = 4;
+  // Where in the change; unset for the whole change.
+  CommentAnchor anchor = 5;
+  // A comment on the same change it replies to; empty for none.
+  string reply_to = 6;
+  // Note or instruction; required.
+  CommentKind kind = 7;
+  // 1 byte to 16 KiB of UTF-8, with no control characters but newline and
+  // tab.
+  string text = 8;
+  // HUMAN or AGENT; unspecified: AGENT with an agent name, else HUMAN.
+  TransitionActor actor = 9;
+  // For an instruction: confirm it in this call when the estimate meets
+  // `ceilings`, which are then required.
+  bool confirm = 10;
+  // The ceilings `confirm` checks.
+  InstructionCeilings ceilings = 11;
+  // Do not snapshot the workspace first.
+  bool skip_snapshot = 12;
+}
+
+// The comment written.
+message CreateCommentResponse {
+  // The comment, with its estimate for an instruction.
+  Comment comment = 1;
+  // The operation that recorded it.
+  Operation operation = 2;
+  // The snapshot taken first, if one was.
+  Operation snapshot = 3;
+  // Why `confirm` did not confirm the instruction, when it did not.
+  string confirm_refused = 4;
+}
+
+// One comment.
+message GetCommentRequest {
+  // The repository.
+  string repo = 1;
+  // The comment's id.
+  string id = 2;
+}
+
+// A comment and its replies.
+message GetCommentResponse {
+  // The comment.
+  Comment comment = 1;
+  // The comments that reply to it, oldest first, at most 100.
+  repeated Comment replies = 2;
+}
+
+// A page of comments.
+message ListCommentsRequest {
+  // The repository.
+  string repo = 1;
+  // Change id prefixes, in hex or jj's reverse hex; empty for every
+  // change.
+  repeated string changes = 2;
+  // Kinds; empty for both.
+  repeated CommentKind kinds = 3;
+  // Instruction states; empty for any. A state filter leaves notes out.
+  repeated InstructionState states = 4;
+  // Only instructions whose target or claimer is this client session.
+  string client_session = 5;
+  // Only comments written after this.
+  google.protobuf.Timestamp created_after = 6;
+  // Comments per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 7;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 8;
+}
+
+// Comments, oldest first.
+message ListCommentsResponse {
+  // The page.
+  repeated Comment comments = 1;
+  // The next page's token; empty after the last.
+  string next_page_token = 2;
+}
+
+// Move an instruction.
+message UpdateInstructionRequest {
+  // The repository.
+  string repo = 1;
+  // The instruction's comment id.
+  string id = 2;
+  // PENDING (confirm, or release from DELIVERED), RUNNING, DONE, FAILED or
+  // CANCELLED.
+  InstructionState to = 3;
+  // The state the caller expects; unspecified skips the check.
+  InstructionState expected_state = 4;
+  // What the session did, or why it failed or was cancelled: at most
+  // 4 KiB, as `text`.
+  string summary = 5;
+  // The workspace the caller works in; empty for none.
+  string workspace = 6;
+}
+
+// The instruction afterwards.
+message UpdateInstructionResponse {
+  // The comment.
+  Comment comment = 1;
+  // The operation that recorded the move; unset when nothing changed.
+  Operation operation = 2;
+}
+
+// Take an instruction for a session.
+message ClaimInstructionRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace the session works in; empty for none.
+  string workspace = 2;
+  // The session's client session: the harness's own session id.
+  string client_session = 3;
+  // A revision naming the change to take from; empty for any.
+  string change = 4;
+  // One instruction by id; empty for the oldest that matches.
+  string comment_id = 5;
+  // Take an instruction meant for another session on `change` (or the
+  // workspace's change).
+  bool take = 6;
+  // Move it to RUNNING, not DELIVERED.
+  bool start = 7;
+  // How it is being delivered.
+  DeliveryChannel channel = 8;
+}
+
+// The instruction taken.
+message ClaimInstructionResponse {
+  // The instruction, with its text; unset when there was none to take.
+  Comment comment = 1;
+  // The operation that recorded the claim; unset with `comment`.
+  Operation operation = 2;
+}

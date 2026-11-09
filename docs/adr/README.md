@@ -79,3 +79,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0065](0065-conflict-objects.md) | Conflict objects | accepted |
 | [0066](0066-sigstore-keyless-session-keys.md) | Sigstore keyless session keys | accepted |
 | [0067](0067-batching-and-bisect.md) | Batching and bisect | accepted |
+| [0069](0069-comments-and-instructions.md) | Comments and instructions | accepted |

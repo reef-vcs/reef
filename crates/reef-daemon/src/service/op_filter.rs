@@ -113,11 +113,23 @@ impl OpMatcher {
         true
     }
 
-    /// Whether `entry`'s `effects`, or the lifecycle transitions it
-    /// records (R3.09), touch a change the filter names; false without
-    /// either.
+    /// Whether `entry`'s `effects`, the lifecycle transitions it records
+    /// (R3.09), or the comment events it records (R3.12), touch a change
+    /// the filter names; false without any.
     pub(crate) fn touches(&self, entry: &OpEntry, effects: Option<&OpEffects>) -> bool {
         if effects.is_some_and(|effects| self.changes.iter().any(|prefix| effects.touches(prefix)))
+        {
+            return true;
+        }
+        let named = |change: &str| {
+            self.changes
+                .iter()
+                .any(|prefix| change.starts_with(prefix.as_str()))
+        };
+        if entry.attributes.contains_key(oplog::ATTR_COMMENT)
+            && reef_lib::jj::comments::comment_events_of(&entry.attributes)
+                .iter()
+                .any(|event| named(&event.change))
         {
             return true;
         }

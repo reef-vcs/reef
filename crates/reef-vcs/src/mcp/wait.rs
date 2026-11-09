@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use reef_api::v1::subscribe_operations_request::Start;
-use reef_api::v1::{OperationFilter, SubscribeOperationsRequest};
+use reef_api::v1::{self, OperationFilter, SubscribeOperationsRequest};
 use reef_client::ClientError;
 use reef_client::json;
 use reef_error::ErrorKind;
@@ -17,7 +17,7 @@ use rmcp::model::ProgressNotificationParam;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 
-use super::results::Waited;
+use super::results::{Delivered, Waited};
 use super::tools::filter;
 use super::{Call, ToolError, args, parse, to_value};
 use crate::cli::{CliError, Ctx};
@@ -54,12 +54,12 @@ pub(super) fn run<'a>(
             include_effects: args.include_effects.unwrap_or(false),
         };
         to_value(
-            &wait(
+            &Box::pin(wait(
                 call,
                 &mut log,
                 args.after_operation,
                 Duration::from_secs(timeout),
-            )
+            ))
             .await?,
         )
     })
@@ -71,6 +71,63 @@ struct Log<'a> {
     repo: String,
     filter: OperationFilter,
     include_effects: bool,
+}
+
+/// Takes, for this server's client session (from its environment), each
+/// instruction whose confirmation `operations` record, and frames it for
+/// the model (R3.12): an agent waiting on its change after proposing gets
+/// a reviewer's instruction in the result it already waits for. Only this
+/// tool takes them; reading the log never does.
+async fn deliver(log: &Log<'_>, operations: &[v1::Operation]) -> Vec<Delivered> {
+    let Some(session) = crate::cli::ambient::Ambient::current().client_session else {
+        return Vec::new();
+    };
+    let mut delivered = Vec::new();
+    for operation in operations {
+        for event in &operation.comments {
+            if !crate::cli::comment::confirmed_event(event) {
+                continue;
+            }
+            let claimed = log
+                .ctx
+                .call(
+                    log.ctx
+                        .client
+                        .claim_instruction(v1::ClaimInstructionRequest {
+                            repo: log.repo.clone(),
+                            client_session: session.clone(),
+                            comment_id: event.comment_id.clone(),
+                            // DELIVERED: a call cancelled before its result
+                            // reaches the model leaves one that can be
+                            // released.
+                            channel: v1::DeliveryChannel::Mcp.into(),
+                            ..v1::ClaimInstructionRequest::default()
+                        }),
+                )
+                .await;
+            match claimed {
+                Ok(response) => {
+                    if let Some(comment) = response.comment {
+                        crate::cli::comment::declare_instruction(
+                            log.ctx,
+                            &session,
+                            &comment.text_sha256,
+                        )
+                        .await;
+                        delivered.push(Delivered {
+                            id: comment.id.clone(),
+                            change_id: comment.change_id.clone(),
+                            frame: crate::cli::comment::frame(&comment),
+                        });
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(target: "reef", reason = error.reason(), "mcp: taking an instruction");
+                }
+            }
+        }
+    }
+    delivered
 }
 
 async fn wait(
@@ -99,6 +156,7 @@ async fn wait(
         operations: Vec::new(),
         last_operation_id: last,
         timed_out: true,
+        instructions: Vec::new(),
     };
     loop {
         tokio::select! {
@@ -126,10 +184,12 @@ async fn wait(
                             operation.effects = None;
                         }
                     }
+                    let instructions = Box::pin(deliver(log, &operations)).await;
                     return Ok(Waited {
                         last_operation_id: operations.last().map(|op| op.id.clone()),
                         operations: operations.iter().map(json::Operation::from).collect(),
                         timed_out: false,
+                        instructions,
                     });
                 }
                 if let Some(head) = frame.head_operation_ids.last() {

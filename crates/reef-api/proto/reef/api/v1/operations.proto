@@ -17,6 +17,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/comment_event.proto";
 import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/remote.proto";
@@ -179,6 +180,9 @@ enum OperationKind {
   // batch's trial commits without landing (R3.14): `Operation.batch_id`
   // names the batch.
   OPERATION_KIND_BATCH = 14;
+  // A comment was written or an instruction moved (R3.12):
+  // `Operation.comments` says which. It changes nothing in the view.
+  OPERATION_KIND_COMMENT = 15;
 }
 
 // Why a snapshot ran.
@@ -252,6 +256,10 @@ message Operation {
   // The batch it tested or landed (R3.14), from the operation attribute
   // `reef.batch`; empty for most operations. GetBatch reads it.
   string batch_id = 20;
+  // The comment events it recorded (R3.12), from the operation attribute
+  // `reef.comment`, in order; empty for most operations. GetComment reads
+  // a comment's text.
+  repeated CommentEvent comments = 21;
 }
 
 // What an operation changed, from the difference between its view and its
@@ -333,7 +341,7 @@ message OperationFilter {
   // Workspace ids or unique prefixes the operation was recorded for.
   repeated string workspaces = 1;
   // Change id prefixes, in hex or jj's reverse hex, matched against the
-  // operation's effects and its lifecycle transitions.
+  // operation's effects, its lifecycle transitions and its comment events.
   repeated string changes = 2;
   // Agents, matched against `Operation.agent`.
   repeated string agents = 3;

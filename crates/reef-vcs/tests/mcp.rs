@@ -1432,3 +1432,115 @@ async fn every_tool_result_matches_its_output_schema() {
         assert!(called.contains(tool), "{tool} was not called");
     }
 }
+
+// R3.12 test 16: a wait that sees an instruction for the server's session
+// confirmed takes it, starts it, and frames it in the result; another
+// session's server does not.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "two servers, one instruction")]
+async fn wait_delivers_instructions() {
+    let (daemon, repo) = fixture().await;
+    let workspace = daemon
+        .client
+        .create_workspace(v1::CreateWorkspaceRequest {
+            repo: repo.id.clone(),
+            owner: "test@host".to_owned(),
+            provenance: Some(v1::ProvenanceDeclaration {
+                client_session: Some("s-instr".to_owned()),
+                ..v1::ProvenanceDeclaration::default()
+            }),
+            ..v1::CreateWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    std::fs::write(Path::new(&workspace.path).join("w.txt"), "w\n").unwrap();
+    daemon
+        .client
+        .snapshot_workspace("", &workspace.id, "")
+        .await
+        .unwrap();
+    let written = daemon
+        .client
+        .create_comment(v1::CreateCommentRequest {
+            workspace: workspace.id.clone(),
+            revision: "@".to_owned(),
+            kind: v1::CommentKind::Instruction.into(),
+            text: "rename w.txt to x.txt".to_owned(),
+            ..v1::CreateCommentRequest::default()
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    assert_eq!(
+        written
+            .instruction
+            .as_ref()
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .client_session,
+        "s-instr"
+    );
+
+    let mut other = command(&daemon, &repo.root);
+    other
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-other");
+    let mut other = Mcp::start(other).await;
+    let mut mine = command(&daemon, &repo.root);
+    mine.env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-instr");
+    let mut mine = Mcp::start(mine).await;
+    let arguments = json!({"kinds": ["comment"], "timeout_seconds": 10});
+    let other_wait = other
+        .send(
+            "tools/call",
+            json!({"name": "wait_for_operations", "arguments": arguments}),
+        )
+        .await;
+    let wait = mine
+        .send(
+            "tools/call",
+            json!({"name": "wait_for_operations", "arguments": arguments}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    daemon
+        .client
+        .update_instruction(v1::UpdateInstructionRequest {
+            repo: repo.id.clone(),
+            id: written.id.clone(),
+            to: v1::InstructionState::Pending.into(),
+            ..v1::UpdateInstructionRequest::default()
+        })
+        .await
+        .unwrap();
+    let (_, answer) = result_of(&mine.response(wait).await);
+    assert_eq!(answer["timed_out"], false, "{answer}");
+    assert_eq!(
+        answer["instructions"][0]["id"],
+        written.id.as_str(),
+        "{answer}"
+    );
+    let frame = answer["instructions"][0]["frame"].as_str().unwrap();
+    assert!(frame.contains("rename w.txt to x.txt"), "{frame}");
+    let (_, theirs) = result_of(&other.response(other_wait).await);
+    assert!(theirs.get("instructions").is_none(), "{theirs}");
+    let read = daemon
+        .client
+        .get_comment(v1::GetCommentRequest {
+            repo: repo.id.clone(),
+            id: written.id.clone(),
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let instruction = read.instruction.unwrap();
+    assert_eq!(instruction.state(), v1::InstructionState::Delivered);
+    assert_eq!(instruction.channel(), v1::DeliveryChannel::Mcp);
+}

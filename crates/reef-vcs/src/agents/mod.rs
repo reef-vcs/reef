@@ -297,6 +297,11 @@ pub(crate) struct HookFacts {
     /// The events whose fields `reef provenance declare --hook` declares:
     /// the prompt's instruction, the model (R3.44).
     pub(crate) declare: &'static [HookEvent],
+    /// The events at which `reef comment next --hook` hands the session
+    /// its instruction (R3.12), and how each prints it: plain context on a
+    /// prompt or a session's start, and the decision object that keeps the
+    /// agent working at the turn's end, where the harness documents one.
+    pub(crate) instruct: &'static [(HookEvent, crate::cli::comment::Emit)],
 }
 
 /// What provenance reads from a running harness's environment (R3.44):
@@ -464,6 +469,33 @@ pub(crate) const SIGNS: &[Sign] = &[
                         ("workspace", "/cwd"),
                     ],
                 },
+            ],
+            // Documented (its hooks page): a `Stop` hook's
+            // `{"decision": "block", "reason": …}` keeps Claude working with
+            // the reason; `UserPromptSubmit` and `SessionStart` add plain
+            // stdout to the context on exit 0.
+            instruct: &[
+                (
+                    HookEvent {
+                        name: "Stop",
+                        at: &[("client_session", "/session_id"), ("workspace", "/cwd")],
+                    },
+                    crate::cli::comment::Emit::Block,
+                ),
+                (
+                    HookEvent {
+                        name: "UserPromptSubmit",
+                        at: &[("client_session", "/session_id"), ("workspace", "/cwd")],
+                    },
+                    crate::cli::comment::Emit::Context,
+                ),
+                (
+                    HookEvent {
+                        name: "SessionStart",
+                        at: &[("client_session", "/session_id"), ("workspace", "/cwd")],
+                    },
+                    crate::cli::comment::Emit::Context,
+                ),
             ],
         }),
         // `CLAUDE_CODE_SESSION_ID` is documented in its tools', hooks' and

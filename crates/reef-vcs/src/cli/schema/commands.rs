@@ -85,6 +85,11 @@ pub(crate) fn global(root: &clap::Command) -> Result<Value, String> {
 /// `constraints_match_clap` probes clap for every argument and fails until
 /// this list is complete.
 pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
+    (&["comment", "add"], "allow_unknown", &["confirm"]),
+    (&["comment", "add"], "lines", &["path"]),
+    (&["comment", "add"], "max_agent_time", &["confirm"]),
+    (&["comment", "add"], "max_check_time", &["confirm"]),
+    (&["comment", "add"], "old", &["path"]),
     (&["diff"], "call_sites", &["symbols", "expand"]),
     (&["diff"], "source", &["symbols", "expand"]),
     (&["evidence", "add"], "envelope", &["public_key"]),

@@ -361,7 +361,7 @@ Five views are live.
 
 Everything agents do: creating and reclaiming workspaces, snapshotting, submitting, responding to review comments, resolving assigned conflicts, querying history, rebasing. Agents never see the interface. The design rule is that no state exists that the interface can show and the API cannot, and no action exists in the interface that is not one API call, so an agent could do anything a human does.
 
-The review comment that becomes an instruction is the most powerful feature here and the easiest to abuse, since a casual note now spawns work and consumes compute. Comments are explicitly marked as instructions or as notes, and an instruction shows its estimated cost before it runs.
+The review comment that becomes an instruction is the most powerful feature here and the easiest to abuse, since a casual note now spawns work and consumes compute. Comments are explicitly marked as instructions or as notes, and an instruction shows its estimated cost before it runs. R3.12 builds it ([ADR 0069](adr/0069-comments-and-instructions.md), [docs/comments.md](comments.md)): an instruction goes to the session that proposed the change, its estimate is what Reef recorded (check time, earlier instructions' agent time) with tokens and price stated as unknown, and the session takes it; Reef starts no agent.
 
 ## Open ecosystem
 

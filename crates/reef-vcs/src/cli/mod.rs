@@ -18,6 +18,7 @@ pub(crate) mod ambient;
 mod autostart;
 mod backup;
 pub(crate) mod changes;
+pub(crate) mod comment;
 mod config;
 pub(crate) mod conflict;
 pub(crate) mod daemon;
@@ -334,6 +335,9 @@ enum Command {
     /// List and show landings, with what the policy decided.
     #[command(infer_subcommands = true)]
     Landing(land::Args),
+    /// Notes on changes, and instructions for the session that made them.
+    #[command(infer_subcommands = true)]
+    Comment(comment::Args),
     /// Revert one operation (`reef op log` lists them).
     Undo(op::UndoArgs),
     /// List the operation log, or show one operation.
@@ -648,6 +652,7 @@ pub(crate) fn main() -> ExitCode {
     let hook = match &command {
         Command::Presence(args) => args.is_hook(),
         Command::Provenance(args) => args.is_hook(),
+        Command::Comment(args) => comment::is_hook(args).is_some(),
         _ => false,
     };
     if let Err(error) = init_logging(global.verbose)
@@ -846,6 +851,13 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Proposal(args) => {
             Box::pin(proposal::run(&connect(&global, out).await?, args)).await
         }
+        Command::Comment(args) if comment::is_hook(&args).is_some() => {
+            match comment::is_hook(&args) {
+                Some(next) => Box::pin(comment::run_hook(&global, next)).await,
+                None => Ok(()),
+            }
+        }
+        Command::Comment(args) => Box::pin(comment::run(&connect(&global, out).await?, args)).await,
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,

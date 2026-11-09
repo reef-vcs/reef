@@ -518,6 +518,49 @@ async fn outputs_match_their_schemas() {
     script.json(&lander_dir, &["land"]).await;
     script.both(&lander_dir, &["landing", "list"]).await;
     script.both(&lander_dir, &["landing", "show", "@-"]).await;
+    // Comments and instructions (R3.12), on a draft of its own (the earlier
+    // change was superseded, and takes no instruction): each command once
+    // in JSON and once in brief; a second move to the same state records
+    // nothing.
+    let commenter = script
+        .json(&root, &["ws", "create", "--new-on", &a_change])
+        .await;
+    let c_dir = PathBuf::from(text(&commenter["path"]));
+    std::fs::write(c_dir.join("commented.txt"), "c\n").unwrap();
+    script
+        .both(&c_dir, &["comment", "add", "-m", "a note"])
+        .await;
+    let written = script
+        .json(&c_dir, &["comment", "add", "--instruction", "-m", "do it"])
+        .await;
+    let first = text(&written["comment"]["id"]);
+    script.both(&c_dir, &["comment", "list"]).await;
+    script.both(&c_dir, &["comment", "show", &first]).await;
+    script.both(&c_dir, &["comment", "confirm", &first]).await;
+    script.both(&c_dir, &["comment", "next", "--start"]).await;
+    script
+        .both(&c_dir, &["comment", "done", &first, "-m", "did it"])
+        .await;
+    let written = script
+        .json(&c_dir, &["comment", "add", "--instruction", "-m", "again"])
+        .await;
+    let second = text(&written["comment"]["id"]);
+    script.json(&c_dir, &["comment", "confirm", &second]).await;
+    script.json(&c_dir, &["comment", "next"]).await;
+    script.both(&c_dir, &["comment", "release", &second]).await;
+    script.json(&c_dir, &["comment", "next"]).await;
+    script.both(&c_dir, &["comment", "start", &second]).await;
+    script
+        .both(&c_dir, &["comment", "fail", &second, "-m", "could not"])
+        .await;
+    let written = script
+        .json(
+            &c_dir,
+            &["comment", "add", "--instruction", "-m", "never mind"],
+        )
+        .await;
+    let third = text(&written["comment"]["id"]);
+    script.both(&c_dir, &["comment", "cancel", &third]).await;
     // Its batch (R3.14).
     script.both(&lander_dir, &["landing", "batches"]).await;
     script.both(&lander_dir, &["landing", "batch", "@-"]).await;

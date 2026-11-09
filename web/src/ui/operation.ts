@@ -14,6 +14,7 @@ const KINDS: Partial<Record<OperationKind, string>> = {
   [OperationKind.IMPORT_REFS]: "import refs",
   [OperationKind.TRANSITION]: "transition",
   [OperationKind.LAND]: "land",
+  [OperationKind.COMMENT]: "comment",
   [OperationKind.BATCH]: "batch",
   [OperationKind.EXTERNAL]: "external",
   [OperationKind.OTHER]: "other",
