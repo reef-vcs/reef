@@ -17,6 +17,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/assignments.proto";
 import "reef/api/v1/comment_event.proto";
 import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/options.proto";
@@ -183,6 +184,9 @@ enum OperationKind {
   // A comment was written or an instruction moved (R3.12):
   // `Operation.comments` says which. It changes nothing in the view.
   OPERATION_KIND_COMMENT = 15;
+  // A resolver assignment changed (R3.27): `Operation.conflict_events` says
+  // how. It changes nothing in the view, and undo refuses it.
+  OPERATION_KIND_CONFLICT_ASSIGNMENT = 16;
 }
 
 // Why a snapshot ran.
@@ -260,6 +264,11 @@ message Operation {
   // `reef.comment`, in order; empty for most operations. GetComment reads
   // a comment's text.
   repeated CommentEvent comments = 21;
+  // The resolver assignment events it announced (R3.27), from the
+  // operation attribute `reef.conflict`, in order; empty for most
+  // operations. Each carries what the attribute holds (see
+  // ConflictAssignmentEvent); GetConflictAssignment has the rest.
+  repeated ConflictAssignmentEvent conflict_events = 22;
 }
 
 // What an operation changed, from the difference between its view and its
@@ -338,10 +347,13 @@ message WorkingCopyEffect {
 // Which operations to return. An empty field is no constraint; values
 // within a field are ORed, and fields are ANDed.
 message OperationFilter {
-  // Workspace ids or unique prefixes the operation was recorded for.
+  // Workspace ids or unique prefixes the operation was recorded for, or,
+  // for an operation announcing resolver assignments (R3.27), that one of
+  // its events' owners works in.
   repeated string workspaces = 1;
   // Change id prefixes, in hex or jj's reverse hex, matched against the
-  // operation's effects, its lifecycle transitions and its comment events.
+  // operation's effects, its lifecycle transitions, its comment events and
+  // its assignment events.
   repeated string changes = 2;
   // Agents, matched against `Operation.agent`.
   repeated string agents = 3;

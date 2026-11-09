@@ -2276,6 +2276,109 @@ impl Client {
         }
         Ok(whole)
     }
+
+    /// One page of `ConflictService.ListConflictAssignments` (R3.27).
+    pub async fn list_conflict_assignments_page(
+        &self,
+        request: v1::ListConflictAssignmentsRequest,
+    ) -> Result<v1::ListConflictAssignmentsResponse, ClientError> {
+        self.call(
+            "ListConflictAssignments",
+            self.conflicts().list_conflict_assignments(request),
+        )
+        .await
+    }
+
+    /// The first `limit` assignments `request` asks for (all when 0), the
+    /// queue first in its order, and whether more exist; `request`'s page
+    /// fields are ignored.
+    pub async fn list_conflict_assignments(
+        &self,
+        request: v1::ListConflictAssignmentsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::ConflictAssignment>, ClientError> {
+        let mut request = v1::ListConflictAssignmentsRequest {
+            page_size: limited_page_size(limit).min(200),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_conflict_assignments_page(request.clone()).await?;
+            limited.items.extend(response.assignments);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// One page of `ConflictService.GetConflictAssignment` (R3.27): the
+    /// assignment with one page of its events.
+    pub async fn get_conflict_assignment_page(
+        &self,
+        request: v1::GetConflictAssignmentRequest,
+    ) -> Result<v1::GetConflictAssignmentResponse, ClientError> {
+        self.call(
+            "GetConflictAssignment",
+            self.conflicts().get_conflict_assignment(request),
+        )
+        .await
+    }
+
+    /// The assignment `request` asks for with every page's events;
+    /// `request`'s page fields are ignored.
+    pub async fn get_conflict_assignment(
+        &self,
+        request: v1::GetConflictAssignmentRequest,
+    ) -> Result<v1::GetConflictAssignmentResponse, ClientError> {
+        let mut request = v1::GetConflictAssignmentRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        let mut whole = self.get_conflict_assignment_page(request.clone()).await?;
+        while !whole.next_page_token.is_empty() {
+            request.page_token = std::mem::take(&mut whole.next_page_token);
+            let next = self.get_conflict_assignment_page(request.clone()).await?;
+            whole.events.extend(next.events);
+            whole.next_page_token = next.next_page_token;
+        }
+        Ok(whole)
+    }
+
+    /// `ConflictService.ClaimConflict` (R3.27): claims a queued assignment
+    /// for a workspace's session.
+    pub async fn claim_conflict(
+        &self,
+        request: v1::ClaimConflictRequest,
+    ) -> Result<v1::ClaimConflictResponse, ClientError> {
+        self.call("ClaimConflict", self.conflicts().claim_conflict(request))
+            .await
+    }
+
+    /// `ConflictService.ReleaseConflict` (R3.27): gives an assignment up to
+    /// the queue.
+    pub async fn release_conflict(
+        &self,
+        request: v1::ReleaseConflictRequest,
+    ) -> Result<v1::ReleaseConflictResponse, ClientError> {
+        self.call(
+            "ReleaseConflict",
+            self.conflicts().release_conflict(request),
+        )
+        .await
+    }
+
+    /// `ConflictService.AssignConflict` (R3.27): assigns, queues,
+    /// reprioritizes or takes over an assignment.
+    pub async fn assign_conflict(
+        &self,
+        request: v1::AssignConflictRequest,
+    ) -> Result<v1::AssignConflictResponse, ClientError> {
+        self.call("AssignConflict", self.conflicts().assign_conflict(request))
+            .await
+    }
 }
 
 impl Client {

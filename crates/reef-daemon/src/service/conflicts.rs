@@ -627,6 +627,10 @@ impl ConflictService for ConflictHandler {
         } else {
             None
         };
+        if let Err(error) = crate::assign::look(state, target.repo.id).await {
+            tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot bring conflict assignments up to date");
+        }
+        super::assignments::fill(state, target.repo.id, &mut conflicts);
         let next_page_token = match resume {
             Some((position, commit)) => page.token_at(&format!("{position}:{commit}"), &at),
             None => String::new(),
@@ -822,10 +826,54 @@ impl ConflictService for ConflictHandler {
             Some(last) if more || trimmed => page.token_at(&last.path, &at),
             _ => String::new(),
         };
+        if let Err(error) = crate::assign::look(state, target.repo.id).await {
+            tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot bring conflict assignments up to date");
+        }
+        super::assignments::fill(state, target.repo.id, std::slice::from_mut(&mut conflict));
         Ok(Response::new(GetConflictResponse {
             conflict: Some(conflict),
             next_page_token,
             at_operation: at,
         }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn list_conflict_assignments(
+        &self,
+        request: Request<v1::ListConflictAssignmentsRequest>,
+    ) -> Result<Response<v1::ListConflictAssignmentsResponse>, Status> {
+        super::assignments::list(&self.state, request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn get_conflict_assignment(
+        &self,
+        request: Request<v1::GetConflictAssignmentRequest>,
+    ) -> Result<Response<v1::GetConflictAssignmentResponse>, Status> {
+        super::assignments::get(&self.state, request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn claim_conflict(
+        &self,
+        request: Request<v1::ClaimConflictRequest>,
+    ) -> Result<Response<v1::ClaimConflictResponse>, Status> {
+        super::assignments::claim(&self.state, request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn release_conflict(
+        &self,
+        request: Request<v1::ReleaseConflictRequest>,
+    ) -> Result<Response<v1::ReleaseConflictResponse>, Status> {
+        super::assignments::release(&self.state, request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn assign_conflict(
+        &self,
+        request: Request<v1::AssignConflictRequest>,
+    ) -> Result<Response<v1::AssignConflictResponse>, Status> {
+        super::assignments::assign(&self.state, request).await
     }
 }

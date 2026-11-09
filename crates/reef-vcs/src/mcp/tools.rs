@@ -672,11 +672,31 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.ConflictService/GetConflict",
-        "an agent runs `reef conflict show`; R3.27's assignment, which hands an agent a conflict, revisits a tool; tools/list is at its budget (#116)",
+        "an agent runs `reef conflict show`; get_status names the conflicts assigned to a workspace (R3.27); tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.ConflictService/ListConflicts",
-        "an agent runs `reef conflict list`; R3.27's resolver queue revisits a tool; tools/list is at its budget (#116)",
+        "an agent runs `reef conflict list`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/ListConflictAssignments",
+        "get_status names the conflicts assigned to a workspace, and an agent runs `reef conflict queue` or `assignments`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/GetConflictAssignment",
+        "an agent runs `reef conflict assignment`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/ClaimConflict",
+        "an agent runs `reef conflict claim --next`, which also makes the workspace it resolves in; wait_for_operations with kind conflict_assignment follows assignments; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/ReleaseConflict",
+        "an agent runs `reef conflict release`; releasing its workspace also gives its conflicts back; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/AssignConflict",
+        "a person reassigns and takes over conflicts (`reef conflict assign`, `take`); an agent claims; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.PolicyService/EvaluatePolicy",

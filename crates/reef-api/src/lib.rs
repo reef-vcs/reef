@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 27;
+pub const API_REVISION: u32 = 28;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -126,6 +126,11 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.12: `comment_event.proto` and `comments.proto` (`CommentService`),
     // `OPERATION_KIND_COMMENT` and `Operation.comments`.
     "b9610ccee06b466fe068e2daf6d10774e66248a109a3b8050ad55b81484474c1",
+    // R3.27: `assignments.proto`, the assignment RPCs of `ConflictService`,
+    // `Conflict.assignment`, `WorkspaceStatus.conflict_assignments` and
+    // `conflict_assignment_count`, `OPERATION_KIND_CONFLICT_ASSIGNMENT` and
+    // `Operation.conflict_events`.
+    "9f940822fdba9c74e5fb7c59f9ac8c2d37f0a27f563ba1c5108d0c2de9f38722",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -759,6 +764,42 @@ pub mod error {
     /// wrote or claimed, or a claim of a change another token proposed
     /// (R3.12). Metadata: `id`.
     pub const REMOTE_COMMENT_NOT_OWNED: &str = "REMOTE_COMMENT_NOT_OWNED";
+    /// An assignment id, or a change, with no resolver assignment (R3.27).
+    /// Metadata: `assignment`.
+    pub const ASSIGNMENT_NOT_FOUND: &str = "ASSIGNMENT_NOT_FOUND";
+    /// `ClaimConflict` with no assignment named when the resolver queue is
+    /// empty (R3.27).
+    pub const QUEUE_EMPTY: &str = "QUEUE_EMPTY";
+    /// A claim or release of an assignment another session or a person
+    /// holds (R3.27). Metadata: `state`, `owner_workspace`, `owner_agent`.
+    pub const ASSIGNMENT_HELD: &str = "ASSIGNMENT_HELD";
+    /// A claim of an assignment nobody owns, which a caller must queue,
+    /// assign or take first (R3.27). Metadata: `assignment`.
+    pub const ASSIGNMENT_UNOWNED: &str = "ASSIGNMENT_UNOWNED";
+    /// A change to an assignment that has closed (R3.27). Metadata:
+    /// `assignment`.
+    pub const ASSIGNMENT_CLOSED: &str = "ASSIGNMENT_CLOSED";
+    /// A claim for, or an assignment to, a workspace that is not active or
+    /// has no live provenance session (R3.27). Metadata: `workspace_id`.
+    pub const NO_LIVE_SESSION: &str = "NO_LIVE_SESSION";
+    /// `AssignConflict` with `take` from an agent: a person takes a
+    /// conflict over, an agent claims it (R3.27).
+    pub const TAKE_NEEDS_PERSON: &str = "TAKE_NEEDS_PERSON";
+    /// An `expected_conflict_id` that is not the assignment's conflict
+    /// (R3.27). Metadata: `conflict_id`.
+    pub const CONFLICT_CHANGED: &str = "CONFLICT_CHANGED";
+    /// An assignment with 1,000 events refuses more (R3.27). Metadata:
+    /// `max`.
+    pub const ASSIGNMENT_EVENT_LIMIT: &str = "ASSIGNMENT_EVENT_LIMIT";
+    /// An assignment priority outside -100 to 100 (R3.27). Metadata: `min`,
+    /// `max`.
+    pub const INVALID_PRIORITY: &str = "INVALID_PRIORITY";
+    /// `ReleaseConflict` with no assignment named, from a workspace that
+    /// owns none or several (R3.27). Metadata: `owned`, the ids it owns,
+    /// comma-separated.
+    pub const ASSIGNMENT_REQUIRED: &str = "ASSIGNMENT_REQUIRED";
+    /// `AssignConflict` with neither a target nor a priority (R3.27).
+    pub const ASSIGNMENT_TARGET_REQUIRED: &str = "ASSIGNMENT_TARGET_REQUIRED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

@@ -20,6 +20,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/error.proto",
     "proto/reef/api/v1/lifecycle.proto",
     "proto/reef/api/v1/comment_event.proto",
+    "proto/reef/api/v1/assignments.proto",
     "proto/reef/api/v1/operations.proto",
     "proto/reef/api/v1/changes.proto",
     "proto/reef/api/v1/files.proto",

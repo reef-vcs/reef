@@ -21,6 +21,7 @@ pub(crate) mod changes;
 pub(crate) mod comment;
 mod config;
 pub(crate) mod conflict;
+pub(crate) mod conflict_assign;
 pub(crate) mod daemon;
 mod declare_hook;
 mod diff;
@@ -862,10 +863,12 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,
         Command::Presence(args) if args.is_hook() => match args.into_hook() {
-            Some(hook) => hook::run(&global, hook).await,
+            Some(hook) => Box::pin(hook::run(&global, hook)).await,
             None => Ok(()),
         },
-        Command::Presence(args) => presence::run(&connect(&global, out).await?, args).await,
+        Command::Presence(args) => {
+            Box::pin(presence::run(&connect(&global, out).await?, args)).await
+        }
         Command::Ui(args) => ui::run(&connect(&global, out).await?, args).await,
         Command::Remote(args) => remote::run(&global, out, args).await,
         Command::File(args) => file::run(&connect(&global, out).await?, args).await,
@@ -882,7 +885,9 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Executor(args) => Box::pin(executor::run(&global, out, args)).await,
         Command::Policy(args) if args.is_offline() => args.run_offline(out),
         Command::Policy(args) => policy::run(&connect(&global, out).await?, args).await,
-        Command::Conflict(args) => conflict::run(&connect(&global, out).await?, args).await,
+        Command::Conflict(args) => {
+            Box::pin(conflict::run(&connect(&global, out).await?, &global, args)).await
+        }
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

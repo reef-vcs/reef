@@ -12,6 +12,7 @@
 //! later revisions declare ahead of their tickets.
 
 pub mod artifacts;
+pub mod assignments;
 pub mod at_operation;
 pub mod changes;
 pub mod comments;

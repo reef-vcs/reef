@@ -5,18 +5,22 @@
 // every term with its role, jj's label and the commit it came from, each
 // side's provenance, and every conflicted path with each term's value and,
 // on request, its hunks. Objects are derived from jj on every read and
-// never stored (docs/conflicts.md). These are reads only; nothing here
-// assigns or resolves a conflict.
+// never stored (docs/conflicts.md). Nothing here resolves a conflict: a
+// resolution is a new snapshot of the change. The assignment RPCs (R3.27,
+// ADR 0068) say who should resolve each conflict a change introduces.
 syntax = "proto3";
 
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/assignments.proto";
 import "reef/api/v1/changes.proto";
+import "reef/api/v1/lifecycle.proto";
+import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/provenance.proto";
 
-// Reading conflicts.
+// Reading conflicts, and assigning them to resolvers.
 service ConflictService {
   // The conflicted commits of a revset, each with its terms, their sources
   // and provenance, and its first 20 conflicted paths (no per-term values,
@@ -49,6 +53,80 @@ service ConflictService {
   rpc GetConflict(GetConflictRequest) returns (GetConflictResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
+  }
+  // A repository's resolver assignments (R3.27): QUEUED ones first, in
+  // queue order (priority, highest first, then time queued) with their
+  // `queue_position`, then the rest by `updated_at`, newest first. The
+  // daemon brings its assignments up to date with the head first.
+  //
+  // Errors: NOT_FOUND for a repository or workspace that does not exist;
+  // INVALID_ARGUMENT with reason INVALID_PAGE_TOKEN.
+  rpc ListConflictAssignments(ListConflictAssignmentsRequest) returns (ListConflictAssignmentsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // One assignment with its events, oldest first, a page at a time; every
+  // page repeats the assignment.
+  //
+  // Errors: NOT_FOUND with reason ASSIGNMENT_NOT_FOUND (metadata
+  // `assignment`); the revision reasons of ChangeService when
+  // `assignment` is a revision; INVALID_ARGUMENT with reason
+  // INVALID_PAGE_TOKEN.
+  rpc GetConflictAssignment(GetConflictAssignmentRequest) returns (GetConflictAssignmentResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Claims a queued assignment for `workspace`'s provenance session, which
+  // holds it while it lives: when that session ends with the conflict
+  // still there, the assignment goes back through the owner rules (follow,
+  // grace, queue). An assignment already ASSIGNED to that session is
+  // returned unchanged, with no operation.
+  //
+  // Errors: NOT_FOUND with reason ASSIGNMENT_NOT_FOUND, or QUEUE_EMPTY
+  // when `assignment` is empty and nothing is queued; FAILED_PRECONDITION
+  // with reason ASSIGNMENT_HELD (metadata `state`, `owner_workspace`,
+  // `owner_agent`) when another session or a person holds it,
+  // ASSIGNMENT_UNOWNED when Reef never recorded the change,
+  // ASSIGNMENT_CLOSED, and NO_LIVE_SESSION (metadata `workspace_id`) when
+  // the workspace is not active or has no live provenance session;
+  // FAILED_PRECONDITION also with reason CONFLICT_CHANGED (metadata
+  // `conflict_id`) when `expected_conflict_id` differs, and
+  // ASSIGNMENT_EVENT_LIMIT (metadata `max`); PERMISSION_DENIED through the
+  // remote listener for a workspace another token created.
+  rpc ClaimConflict(ClaimConflictRequest) returns (ClaimConflictResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Gives up an assignment to the queue: from the workspace whose session
+  // owns it, or from the person who took it (the daemon's default person
+  // identity, on the socket).
+  //
+  // Errors: NOT_FOUND with reason ASSIGNMENT_NOT_FOUND;
+  // FAILED_PRECONDITION with reason ASSIGNMENT_HELD when the caller does
+  // not own it, ASSIGNMENT_CLOSED, ASSIGNMENT_EVENT_LIMIT; INVALID_ARGUMENT
+  // with reason INVALID_REASON, and ASSIGNMENT_REQUIRED (metadata `owned`)
+  // when `assignment` is empty and the workspace owns none or several; PERMISSION_DENIED through the remote listener for a workspace another
+  // token created.
+  rpc ReleaseConflict(ReleaseConflictRequest) returns (ReleaseConflictResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Assigns an open assignment to a workspace's live session, puts it in
+  // the queue, or lets a person take it over, and with `priority` sets its
+  // priority; with no target, only the priority changes. Overrides a claim
+  // or a takeover. Every assignment records who made it. An agent (the
+  // caller's actor) assigning to a workspace is held to a claim's rules: a
+  // queued assignment only. A person's takeover is not refused at the
+  // event limit.
+  //
+  // Errors: NOT_FOUND with reason ASSIGNMENT_NOT_FOUND;
+  // FAILED_PRECONDITION with reason ASSIGNMENT_CLOSED, NO_LIVE_SESSION for
+  // a target workspace with no live session, TAKE_NEEDS_PERSON when an
+  // agent asks to take it, CONFLICT_CHANGED, ASSIGNMENT_EVENT_LIMIT;
+  // PERMISSION_DENIED with reason REMOTE_HUMAN_REQUIRED for `take` through the
+  // remote listener; INVALID_ARGUMENT with reason INVALID_PRIORITY
+  // (metadata `min`, `max`), INVALID_REASON, or ASSIGNMENT_TARGET_REQUIRED
+  // when neither a target nor a priority is given.
+  rpc AssignConflict(AssignConflictRequest) returns (AssignConflictResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
   }
 }
 
@@ -270,6 +348,66 @@ message Conflict {
   // More than 64 terms: terms and sources are not reported, and files
   // carry paths only.
   bool too_wide = 10;
+  // The change's open resolver assignment of this kind (R3.27), as it is
+  // now, even for a read at an earlier operation; unset when it has none.
+  ConflictAssignment assignment = 11;
+}
+
+// A resolver assignment (R3.27): one change that introduces a conflict, and
+// who should resolve it. At most one is open per change and kind.
+message ConflictAssignment {
+  // `asg_` and 16 hex digits.
+  string id = 1;
+  // The change, in hex.
+  string change_id = 2;
+  // What the conflict is about.
+  ConflictKind kind = 3;
+  // The change's conflicted commit when the daemon last looked.
+  string commit_id = 4;
+  // The conflict's id when the daemon last looked; it moves when a
+  // conflicted path's sides change, and the assignment stays.
+  string conflict_id = 5;
+  // The conflict's id when the assignment opened.
+  string first_conflict_id = 6;
+  // Conflicted files the change introduces, when last looked at.
+  uint32 introduced = 7;
+  // Conflicted files in all, when last looked at.
+  uint32 files_total = 8;
+  // Where it stands.
+  ConflictAssignmentState state = 9;
+  // Why.
+  ConflictAssignmentReason reason = 10;
+  // Who owns it: for QUEUED, its last owner, kept for RETURNED; unset when
+  // nobody ever owned it.
+  ConflictOwner owner = 11;
+  // From -100 to 100; the queue takes higher first.
+  int32 priority = 12;
+  // When it last entered the queue; unset when it never did.
+  google.protobuf.Timestamp queued_at = 13;
+  // Its place in the queue, from 1, in ListConflictAssignments; 0
+  // otherwise.
+  uint32 queue_position = 14;
+  // When it will be queued unless its owner is followed: its ended
+  // owner's grace deadline. Unset otherwise.
+  google.protobuf.Timestamp queue_after = 15;
+  // How many times a resolver claimed it.
+  uint32 claims = 16;
+  // How many events it has.
+  uint32 events = 17;
+  // When it opened.
+  google.protobuf.Timestamp opened_at = 18;
+  // When it last changed.
+  google.protobuf.Timestamp updated_at = 19;
+  // When its conflict id last changed.
+  google.protobuf.Timestamp conflict_changed_at = 20;
+  // When it closed; unset while it is open.
+  google.protobuf.Timestamp closed_at = 21;
+  // The change's commit when it closed RESOLVED or INHERITED.
+  string closed_commit_id = 22;
+  // The provenance session whose record names `closed_commit_id`, when the
+  // daemon recorded that commit; empty otherwise (the jj CLI, or a rebase
+  // that made the conflict go away).
+  string resolved_session_id = 23;
 }
 
 // ListConflicts' request.
@@ -336,4 +474,140 @@ message GetConflictResponse {
   string next_page_token = 2;
   // The operation it was read at.
   string at_operation = 3;
+}
+
+// ListConflictAssignments' request.
+message ListConflictAssignmentsRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // Only these states; empty for every open one (ASSIGNED, QUEUED, TAKEN,
+  // UNOWNED).
+  repeated ConflictAssignmentState states = 2;
+  // Only assignments this workspace's live session owns.
+  string workspace = 3;
+  // Only these changes, by hex or reverse-hex prefix.
+  repeated string change_ids = 4;
+  // Only assignments whose owner declared this agent.
+  string agent = 5;
+  // Only assignments whose owner has this identity, by id or name.
+  string identity = 6;
+  // Assignments per page: 0 means 50, more than 200 means 200.
+  int32 page_size = 7;
+  // The previous page's `next_page_token`.
+  string page_token = 8;
+}
+
+// ListConflictAssignments' response.
+message ListConflictAssignmentsResponse {
+  // The assignments.
+  repeated ConflictAssignment assignments = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}
+
+// GetConflictAssignment's request.
+message GetConflictAssignmentRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // An assignment id, or a revision naming one change: its open
+  // assignment, else its newest closed one.
+  string assignment = 2;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 3;
+  // Events per page: 0 means 100, more than 1,000 means 1,000.
+  int32 page_size = 4;
+  // The previous page's `next_page_token`.
+  string page_token = 5;
+}
+
+// GetConflictAssignment's response.
+message GetConflictAssignmentResponse {
+  // The assignment.
+  ConflictAssignment assignment = 1;
+  // This page's events, oldest first.
+  repeated ConflictAssignmentEvent events = 2;
+  // The next page's token; empty on the last page.
+  string next_page_token = 3;
+}
+
+// ClaimConflict's request.
+message ClaimConflictRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace whose live provenance session claims it. Required.
+  string workspace = 2;
+  // An assignment id, or a revision naming one change; empty for the
+  // queue's head.
+  string assignment = 3;
+  // The conflict id the caller read; empty for no check.
+  string expected_conflict_id = 4;
+}
+
+// ClaimConflict's response.
+message ClaimConflictResponse {
+  // The assignment afterwards.
+  ConflictAssignment assignment = 1;
+  // The change, at the head.
+  Change change = 2;
+  // The operation that announced the claim; unset when nothing changed.
+  Operation operation = 3;
+}
+
+// ReleaseConflict's request.
+message ReleaseConflictRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace whose session owns it; empty for a person releasing what
+  // they took.
+  string workspace = 2;
+  // An assignment id, or a revision naming one change.
+  string assignment = 3;
+  // Why, at most 4 KiB, no control characters but newlines and tabs.
+  string reason = 4;
+}
+
+// ReleaseConflict's response.
+message ReleaseConflictResponse {
+  // The assignment afterwards.
+  ConflictAssignment assignment = 1;
+  // The operation that announced it.
+  Operation operation = 2;
+}
+
+// AssignConflict's request.
+message AssignConflictRequest {
+  // The repository; may be empty when `caller_workspace` is named.
+  string repo = 1;
+  // An assignment id, or a revision naming one change.
+  string assignment = 2;
+  // The conflict id the caller read; empty for no check.
+  string expected_conflict_id = 3;
+  // Where it goes; unset to change only the priority.
+  oneof target {
+    // Assign it to this active workspace's live provenance session.
+    string workspace = 4;
+    // Put it in the queue.
+    bool queue = 5;
+    // A person takes it over, as the caller's identity.
+    bool take = 6;
+  }
+  // From -100 to 100; unset to keep it.
+  optional int32 priority = 7;
+  // Why, at most 4 KiB, no control characters but newlines and tabs.
+  string reason = 8;
+  // The workspace the caller works in, for `@` in `assignment` and the
+  // caller's session in the record; empty for none.
+  string caller_workspace = 9;
+  // Who the caller is; unspecified for AGENT when the call carries an
+  // agent name and HUMAN otherwise. Through the remote listener it is
+  // always AGENT.
+  TransitionActor actor = 10;
+}
+
+// AssignConflict's response.
+message AssignConflictResponse {
+  // The assignment afterwards.
+  ConflictAssignment assignment = 1;
+  // The operation that announced it.
+  Operation operation = 2;
 }

@@ -177,6 +177,8 @@ names_schema! {
     lifecycle_state_name_schema = lifecycle_state_name_or_unknown, false;
     lifecycle_state_name_schema_or_null = lifecycle_state_name, true;
     transition_actor_name_schema_or_null = transition_actor_name, true;
+    assignment_state_name_schema_or_null = assignment_state_name, true;
+    assignment_reason_name_schema_or_null = assignment_reason_name, true;
     transition_cause_name_schema_or_null = transition_cause_name, true;
     comment_kind_name_schema_or_null = comment_kind_name, true;
     instruction_state_name_schema_or_null = instruction_state_name, true;
@@ -1233,6 +1235,7 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::Land) => "land",
         Ok(v1::OperationKind::Comment) => "comment",
         Ok(v1::OperationKind::Batch) => "batch",
+        Ok(v1::OperationKind::ConflictAssignment) => "conflict-assignment",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
         Err(_) => UNKNOWN,
@@ -1341,6 +1344,229 @@ pub fn snapshot_kind_opt(kind: i32) -> Option<&'static str> {
 
 fn name(value: Option<&'static str>) -> Option<String> {
     value.map(str::to_owned)
+}
+
+/// A resolver assignment's state (R3.27): `assigned`, `queued`, `taken`,
+/// `unowned` or `closed`; `None` when unset.
+pub fn assignment_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::ConflictAssignmentState::try_from(state) {
+        Ok(v1::ConflictAssignmentState::Unspecified) => return None,
+        Ok(v1::ConflictAssignmentState::Assigned) => "assigned",
+        Ok(v1::ConflictAssignmentState::Queued) => "queued",
+        Ok(v1::ConflictAssignmentState::Taken) => "taken",
+        Ok(v1::ConflictAssignmentState::Unowned) => "unowned",
+        Ok(v1::ConflictAssignmentState::Closed) => "closed",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Why a resolver assignment is where it is (R3.27): `default`,
+/// `followed`, `returned`, `owner-ended`, `no-owner`, `claimed`,
+/// `released`, `assigned`, `taken`, `changed`, `resolved`, `inherited`,
+/// `abandoned`, `immutable` or `reopened`; `None` when unset.
+pub fn assignment_reason_name(reason: i32) -> Option<&'static str> {
+    use v1::ConflictAssignmentReason as R;
+    let name = match R::try_from(reason) {
+        Ok(R::Unspecified) => return None,
+        Ok(R::Default) => "default",
+        Ok(R::Followed) => "followed",
+        Ok(R::Returned) => "returned",
+        Ok(R::OwnerEnded) => "owner-ended",
+        Ok(R::NoOwner) => "no-owner",
+        Ok(R::Claimed) => "claimed",
+        Ok(R::Released) => "released",
+        Ok(R::Assigned) => "assigned",
+        Ok(R::Taken) => "taken",
+        Ok(R::Changed) => "changed",
+        Ok(R::Resolved) => "resolved",
+        Ok(R::Inherited) => "inherited",
+        Ok(R::Abandoned) => "abandoned",
+        Ok(R::Immutable) => "immutable",
+        Ok(R::Reopened) => "reopened",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Who owns a resolver assignment (R3.27): a provenance session and its
+/// workspace, or a person's identity alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConflictOwner {
+    /// The provenance session; `null` for a person.
+    pub session_id: Option<String>,
+    /// Its workspace.
+    pub workspace_id: Option<String>,
+    /// That workspace's owner.
+    pub workspace_owner: Option<String>,
+    /// The operator identity's name, else its id.
+    pub identity: Option<String>,
+    /// `human`, `agent` or `ci`.
+    pub actor: Option<String>,
+    /// The agent label its session declared; untrusted text.
+    pub agent: Option<String>,
+    /// The client session its session declared; untrusted text.
+    pub client_session: Option<String>,
+    /// Whether its session is live.
+    pub live: bool,
+    /// When its session ended.
+    pub ended_at: Option<String>,
+}
+
+impl From<&v1::ConflictOwner> for ConflictOwner {
+    fn from(owner: &v1::ConflictOwner) -> Self {
+        Self {
+            session_id: text(&owner.session_id),
+            workspace_id: text(&owner.workspace_id),
+            workspace_owner: text(&owner.workspace_owner),
+            identity: text(&owner.identity_name).or_else(|| text(&owner.identity_id)),
+            actor: text(&owner.actor),
+            agent: text(&owner.agent),
+            client_session: text(&owner.client_session),
+            live: owner.live,
+            ended_at: time(owner.ended_at.as_ref()),
+        }
+    }
+}
+
+/// A resolver assignment (R3.27): one change that introduces a conflict,
+/// and who should resolve it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConflictAssignment {
+    /// `asg_` and 16 hex digits.
+    pub id: String,
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its conflicted commit, as last looked at.
+    pub commit_id: String,
+    /// The conflict's id, as last looked at.
+    pub conflict_id: String,
+    /// The conflict's id when the assignment opened.
+    pub first_conflict_id: String,
+    /// Conflicted files the change introduces.
+    pub introduced: u32,
+    /// Conflicted files in all.
+    pub files_total: u32,
+    /// Where it stands.
+    #[schemars(schema_with = "assignment_state_name_schema_or_null")]
+    pub state: Option<String>,
+    /// Why.
+    #[schemars(schema_with = "assignment_reason_name_schema_or_null")]
+    pub reason: Option<String>,
+    /// Who owns it; for `queued`, its last owner.
+    pub owner: Option<ConflictOwner>,
+    /// From -100 to 100.
+    pub priority: i32,
+    /// When it last entered the queue.
+    pub queued_at: Option<String>,
+    /// Its place in the queue, from 1; `null` when not queued or not
+    /// listed.
+    pub queue_position: Option<u32>,
+    /// When it will be queued unless its ended owner is followed.
+    pub queue_after: Option<String>,
+    /// Claims made on it.
+    pub claims: u32,
+    /// Events it has.
+    pub events: u32,
+    /// When it opened.
+    pub opened_at: Option<String>,
+    /// When it last changed.
+    pub updated_at: Option<String>,
+    /// When it closed.
+    pub closed_at: Option<String>,
+    /// The change's commit when it closed.
+    pub closed_commit_id: Option<String>,
+    /// The session that recorded that commit, when the daemon did.
+    pub resolved_session_id: Option<String>,
+}
+
+impl From<&v1::ConflictAssignment> for ConflictAssignment {
+    fn from(row: &v1::ConflictAssignment) -> Self {
+        Self {
+            id: row.id.clone(),
+            change_id: row.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&row.change_id),
+            commit_id: row.commit_id.clone(),
+            conflict_id: row.conflict_id.clone(),
+            first_conflict_id: row.first_conflict_id.clone(),
+            introduced: row.introduced,
+            files_total: row.files_total,
+            state: name(assignment_state_name(row.state)),
+            reason: name(assignment_reason_name(row.reason)),
+            owner: row.owner.as_ref().map(ConflictOwner::from),
+            priority: row.priority,
+            queued_at: time(row.queued_at.as_ref()),
+            queue_position: (row.queue_position > 0).then_some(row.queue_position),
+            queue_after: time(row.queue_after.as_ref()),
+            claims: row.claims,
+            events: row.events,
+            opened_at: time(row.opened_at.as_ref()),
+            updated_at: time(row.updated_at.as_ref()),
+            closed_at: time(row.closed_at.as_ref()),
+            closed_commit_id: text(&row.closed_commit_id),
+            resolved_session_id: text(&row.resolved_session_id),
+        }
+    }
+}
+
+/// One change of a resolver assignment (R3.27).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConflictAssignmentEvent {
+    /// `cae_` and 16 hex digits.
+    pub id: String,
+    /// Its place in the repository's events.
+    pub seq: u64,
+    /// The conflict's id then.
+    pub conflict_id: String,
+    /// The state before; `null` when it opened.
+    #[schemars(schema_with = "assignment_state_name_schema_or_null")]
+    pub from: Option<String>,
+    /// The state after.
+    #[schemars(schema_with = "assignment_state_name_schema_or_null")]
+    pub to: Option<String>,
+    /// Why.
+    #[schemars(schema_with = "assignment_reason_name_schema_or_null")]
+    pub reason: Option<String>,
+    /// The owner afterwards.
+    pub owner: Option<ConflictOwner>,
+    /// The priority afterwards.
+    pub priority: i32,
+    /// The reason the caller gave; untrusted text.
+    pub note: Option<String>,
+    /// `human`, `agent` or `daemon`.
+    #[schemars(schema_with = "transition_actor_name_schema_or_null")]
+    pub by_actor: Option<String>,
+    /// The caller's agent; untrusted text.
+    pub by_agent: Option<String>,
+    /// The caller's identity.
+    pub by_identity_id: Option<String>,
+    /// The remote token the call came through.
+    pub by_remote_token: Option<String>,
+    /// When.
+    pub at: Option<String>,
+}
+
+impl From<&v1::ConflictAssignmentEvent> for ConflictAssignmentEvent {
+    fn from(event: &v1::ConflictAssignmentEvent) -> Self {
+        Self {
+            id: event.id.clone(),
+            seq: event.seq,
+            conflict_id: event.conflict_id.clone(),
+            from: name(assignment_state_name(event.from_state)),
+            to: name(assignment_state_name(event.to_state)),
+            reason: name(assignment_reason_name(event.reason)),
+            owner: event.owner.as_ref().map(ConflictOwner::from),
+            priority: event.priority,
+            note: text(&event.note),
+            by_actor: name(transition_actor_name(event.by_actor)),
+            by_agent: text(&event.by_agent),
+            by_identity_id: text(&event.by_identity_id),
+            by_remote_token: text(&event.by_remote_token),
+            at: time(event.at.as_ref()),
+        }
+    }
 }
 
 /// An author or committer.
@@ -2349,6 +2575,20 @@ pub struct WorkspaceStatus {
     pub walk_reason: Option<String>,
     /// The snapshot the status took, if it recorded one.
     pub snapshot: Option<Operation>,
+    /// The open resolver assignments its session owns (R3.27), at most 10.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflict_assignments: Vec<ConflictAssignment>,
+    /// How many.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub conflict_assignment_count: u32,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if"
+)]
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 impl From<&v1::GetStatusResponse> for RepoStatus {
@@ -2381,6 +2621,12 @@ impl From<&v1::GetStatusResponse> for RepoStatus {
                 source: name(status_source_name(ws.source)),
                 walk_reason: name(status_walk_reason_name(ws.walk_reason)),
                 snapshot: operation(ws.snapshot.as_ref()),
+                conflict_assignments: ws
+                    .conflict_assignments
+                    .iter()
+                    .map(ConflictAssignment::from)
+                    .collect(),
+                conflict_assignment_count: ws.conflict_assignment_count,
             }),
         }
     }

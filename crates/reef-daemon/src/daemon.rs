@@ -162,6 +162,8 @@ pub struct AppState {
     pub landings: crate::landing::Landings,
     /// Comment locks and the instruction sweep's queue (R3.12).
     pub comments: Arc<crate::comments::Comments>,
+    /// Resolver assignments' locks and follower (R3.27).
+    pub assignments: Arc<crate::assign::Assignments>,
 }
 
 impl fmt::Debug for AppState {
@@ -452,6 +454,7 @@ impl Daemon {
             lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
             landings: crate::landing::Landings::default(),
             comments: Arc::new(crate::comments::Comments::default()),
+            assignments: Arc::new(crate::assign::Assignments::default()),
         });
 
         // Before any snapshot can run (R2.10).
@@ -484,6 +487,8 @@ impl Daemon {
         crate::landing::start(&state);
         // Instructions made moot by transitions, and expired ones (R3.12).
         crate::comments::start(&state);
+        // Resolver assignments follow the log (R3.27).
+        crate::assign::follow::start(&state);
         let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),

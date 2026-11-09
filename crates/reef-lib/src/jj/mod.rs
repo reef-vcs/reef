@@ -14,6 +14,7 @@
 /// `Cargo.lock`.
 pub const JJ_LIB_VERSION: &str = "0.47.0";
 
+pub mod assignment;
 pub mod comments;
 pub mod conflict;
 pub mod diff;

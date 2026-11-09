@@ -8,7 +8,8 @@
 //! source is only what jj's label, which any client writes, says.
 //!
 //! `show --policy-input` prints the conflict as R3.07's `ConflictInput`,
-//! for `reef policy check --input`: the seam R3.28 builds on.
+//! for `reef policy check --input`: the seam R3.28 builds on. Who resolves
+//! each conflict is `conflict_assign`'s (R3.27).
 
 use std::io::{self, Write};
 
@@ -46,6 +47,29 @@ enum ConflictCommand {
     /// Show one conflict: each side's source and provenance, and each file's terms and hunks.
     #[command(after_help = "Example: reef conflict show -r @ --hunks")]
     Show(ShowArgs),
+    /// List the resolver queue: conflicts whose owner's session ended, in the order resolvers take them.
+    #[command(after_help = "Example: reef conflict queue")]
+    Queue(super::conflict_assign::QueueArgs),
+    /// List resolver assignments: who resolves each conflict a change introduces.
+    #[command(after_help = "Example: reef conflict assignments --mine")]
+    Assignments(super::conflict_assign::AssignmentsArgs),
+    /// Show one resolver assignment and its history.
+    #[command(after_help = "Example: reef conflict assignment asg_0123456789abcdef")]
+    Assignment(super::conflict_assign::AssignmentArgs),
+    /// Claim a queued conflict for your workspace, or for a new one editing its change.
+    #[command(after_help = "Example: reef conflict claim --next")]
+    Claim(super::conflict_assign::ClaimArgs),
+    /// Give a conflict you hold back to the queue.
+    #[command(after_help = "Example: reef conflict release --reason \"needs a product decision\"")]
+    Release(super::conflict_assign::ReleaseArgs),
+    /// Assign a conflict to a workspace, queue it, or set its priority.
+    #[command(
+        after_help = "Example: reef conflict assign asg_0123456789abcdef --queue --priority 10"
+    )]
+    Assign(super::conflict_assign::AssignArgs),
+    /// Take a conflict over yourself, as a person.
+    #[command(after_help = "Example: reef conflict take asg_0123456789abcdef")]
+    Take(super::conflict_assign::TakeArgs),
 }
 
 /// `reef conflict list`.
@@ -308,6 +332,9 @@ pub(crate) struct Conflict {
     introduced: u32,
     /// More than 64 terms: terms and sources are not reported.
     too_wide: bool,
+    /// The change's open resolver assignment (R3.27), as it is now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assignment: Option<json::ConflictAssignment>,
 }
 
 fn provenance_of(summary: &v1::ConflictSideProvenance) -> ConflictSideProvenance {
@@ -402,6 +429,10 @@ impl From<&v1::Conflict> for Conflict {
             files_total: conflict.files_total,
             introduced: conflict.introduced,
             too_wide: conflict.too_wide,
+            assignment: conflict
+                .assignment
+                .as_ref()
+                .map(json::ConflictAssignment::from),
         }
     }
 }
@@ -433,6 +464,11 @@ pub(crate) struct BriefConflict<'a> {
     introduced: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sides: Vec<BriefSide<'a>>,
+    /// The open assignment's id and state (R3.27).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assignment: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assignment_state: Option<&'a str>,
 }
 
 impl<'a> From<&'a Conflict> for BriefConflict<'a> {
@@ -454,6 +490,11 @@ impl<'a> From<&'a Conflict> for BriefConflict<'a> {
                     agent: agent_of(term),
                 })
                 .collect(),
+            assignment: conflict.assignment.as_ref().map(|a| a.id.as_str()),
+            assignment_state: conflict
+                .assignment
+                .as_ref()
+                .and_then(|a| a.state.as_deref()),
         }
     }
 }
@@ -662,6 +703,14 @@ impl TextRender for Conflict {
         if let Some(line) = provenance_text(self.change_provenance.as_ref()) {
             writeln!(w, "owner   {line}")?;
         }
+        if let Some(assignment) = &self.assignment {
+            writeln!(
+                w,
+                "resolver {}  ({})",
+                super::conflict_assign::resolver_text(assignment),
+                assignment.id
+            )?;
+        }
         for file in &self.files {
             self.render_file(file, w)?;
         }
@@ -681,7 +730,8 @@ impl TextRender for Conflict {
 }
 
 impl TextRow for Conflict {
-    const HEADER: &'static [&'static str] = &["CHANGE", "CONFLICT", "SIDES", "FILES", "PATHS"];
+    const HEADER: &'static [&'static str] =
+        &["CHANGE", "CONFLICT", "SIDES", "FILES", "RESOLVER", "PATHS"];
 
     fn row(&self) -> Vec<String> {
         let sides: Vec<String> = self
@@ -716,6 +766,9 @@ impl TextRow for Conflict {
             short(&self.id),
             sides.join(", "),
             format!("{} ({} new)", self.files_total, self.introduced),
+            self.assignment
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), super::conflict_assign::resolver_text),
             paths.join(" "),
         ]
     }
@@ -774,10 +827,18 @@ pub(crate) fn policy_input(conflict: &v1::Conflict) -> ConflictInput {
     }
 }
 
-pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
+pub(crate) async fn run(ctx: &Ctx, global: &super::Global, args: Args) -> Result<(), CliError> {
+    use super::conflict_assign as assign;
     match args.command {
         ConflictCommand::List(args) => Box::pin(list(ctx, args)).await,
         ConflictCommand::Show(args) => Box::pin(show(ctx, args)).await,
+        ConflictCommand::Queue(args) => Box::pin(assign::queue(ctx, args)).await,
+        ConflictCommand::Assignments(args) => Box::pin(assign::assignments(ctx, args)).await,
+        ConflictCommand::Assignment(args) => Box::pin(assign::assignment(ctx, args)).await,
+        ConflictCommand::Claim(args) => Box::pin(assign::claim(ctx, global, args)).await,
+        ConflictCommand::Release(args) => Box::pin(assign::release(ctx, args)).await,
+        ConflictCommand::Assign(args) => Box::pin(assign::assign(ctx, args)).await,
+        ConflictCommand::Take(args) => Box::pin(assign::take(ctx, args)).await,
     }
 }
 

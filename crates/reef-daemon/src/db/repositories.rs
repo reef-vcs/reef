@@ -223,6 +223,15 @@ impl Db {
             tx.execute("DELETE FROM landing_batches WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM comment_events WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM comments WHERE repo_id = ?1", [id])?;
+            tx.execute(
+                "DELETE FROM conflict_assignment_events WHERE repo_id = ?1",
+                [id],
+            )?;
+            tx.execute("DELETE FROM conflict_assignments WHERE repo_id = ?1", [id])?;
+            tx.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                [super::conflict_assignments::seq_key(id)],
+            )?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })

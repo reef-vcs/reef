@@ -304,6 +304,10 @@ pub const ATTR_COMMENT: &str = "reef.comment";
 /// The attribute naming the batch an operation tested or landed (R3.14):
 /// its id, `bat_<16 hex>`.
 pub const ATTR_BATCH: &str = "reef.batch";
+/// The attribute announcing resolver assignment events (R3.27): an
+/// [`AssignmentRecord`](super::assignment::AssignmentRecord) as compact
+/// JSON.
+pub const ATTR_CONFLICT: &str = "reef.conflict";
 
 /// Separates an agent from the remote token it carries; see
 /// [`RemoteToken::mark`].
@@ -378,6 +382,8 @@ pub enum OpKind {
     Batch,
     /// A comment was written or an instruction moved (R3.12).
     Comment,
+    /// A resolver assignment changed (R3.27).
+    ConflictAssignment,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -386,7 +392,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 14] = [
+    pub const WRITTEN: [OpKind; 15] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -400,6 +406,7 @@ impl OpKind {
         OpKind::Land,
         OpKind::Batch,
         OpKind::Comment,
+        OpKind::ConflictAssignment,
         OpKind::Other,
     ];
 
@@ -419,6 +426,7 @@ impl OpKind {
             OpKind::Land => "land",
             OpKind::Comment => "comment",
             OpKind::Batch => "batch",
+            OpKind::ConflictAssignment => "conflict-assignment",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -458,6 +466,9 @@ pub struct OpMeta {
     pub comment_events: Vec<super::comments::CommentEventRecord>,
     /// [`ATTR_BATCH`]: the batch it tests or lands (R3.14).
     pub batch: Option<String>,
+    /// [`ATTR_CONFLICT`]: the assignment events it announces (R3.27);
+    /// empty for none.
+    pub conflict_events: Vec<super::assignment::AssignmentNotice>,
 }
 
 impl OpMeta {
@@ -474,6 +485,7 @@ impl OpMeta {
             landing: None,
             comment_events: Vec::new(),
             batch: None,
+            conflict_events: Vec::new(),
         }
     }
 
@@ -540,6 +552,12 @@ impl OpMeta {
             tx.set_attribute(
                 ATTR_COMMENT.to_owned(),
                 super::comments::CommentRecord::encode(&self.comment_events),
+            );
+        }
+        if !self.conflict_events.is_empty() {
+            tx.set_attribute(
+                ATTR_CONFLICT.to_owned(),
+                super::assignment::AssignmentRecord::encode(&self.conflict_events),
             );
         }
     }
