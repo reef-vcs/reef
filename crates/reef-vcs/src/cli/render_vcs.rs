@@ -83,6 +83,13 @@ fn log_line(entry: &LogEntry, workspace: &str) -> String {
             words.push(marker.to_owned());
         }
     }
+    // A recorded lifecycle (R3.09): `proposed`, `amended`.
+    if let Some(lifecycle) = change.lifecycle.as_ref().filter(|l| l.recorded) {
+        words.push(lifecycle.state.clone());
+        if lifecycle.amended {
+            words.push("amended".to_owned());
+        }
+    }
     words.push(first_line(&change.description).to_owned());
     words.join(" ")
 }
@@ -241,6 +248,9 @@ impl TextRender for ChangeSummary {
         ];
         if !change.bookmarks.is_empty() {
             pairs.push(("bookmarks", change.bookmarks.join(" ")));
+        }
+        if let Some(lifecycle) = change.lifecycle.as_ref().filter(|l| l.recorded) {
+            pairs.push(("state", super::proposal::lifecycle_words(lifecycle)));
         }
         pairs.push(("parents", parents.join(" ")));
         block(w, &pairs)?;
@@ -585,6 +595,11 @@ fn op_line(op: &Operation) -> String {
     if let Some(snapshot) = &op.snapshot_kind {
         kind.push('/');
         kind.push_str(snapshot);
+    }
+    // A lifecycle transition (R3.09): `transition/proposed`.
+    if let Some(to) = op.transitions.first().and_then(|t| t.to.as_deref()) {
+        kind.push('/');
+        kind.push_str(to);
     }
     format!(
         "{} {} {kind} {} {} {}",

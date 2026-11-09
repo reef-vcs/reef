@@ -34,6 +34,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
 
@@ -91,9 +92,71 @@ service ChangeService {
   // Errors: as for DescribeChange, less INVALID_DESCRIPTION, and
   // FAILED_PRECONDITION with reason SNAPSHOT_FAILED (metadata
   // `workspace_id`) when a workspace could not be snapshotted first
-  // (nothing is written).
+  // (nothing is written), or CHANGE_IN_REVIEW (metadata `change_id`,
+  // `state`) for a change that is PROPOSED or QUEUED and not divergent
+  // (R3.09): withdraw it first.
   rpc AbandonChange(AbandonChangeRequest) returns (AbandonChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Moves a change through its lifecycle (R3.09, ADR 0063;
+  // `docs/proposals.md`): `to` PROPOSED from DRAFT, WITHDRAWN or DECLINED
+  // (a new round), or from PROPOSED when its commit moved (the new commit is
+  // recorded); WITHDRAWN, DECLINED or SUPERSEDED from PROPOSED or QUEUED.
+  // QUEUED and LANDED are the landing service's (R3.13) and LANDED also the
+  // daemon's, which records one when a recorded change reaches `trunk()`.
+  // Every transition records the change's visible commit and is one
+  // operation of kind TRANSITION. A transition to the state the change is
+  // in, with the same commit and destination, records nothing: `operation`
+  // is unset. When `revision` involves `@`, the workspace is snapshotted
+  // first unless `skip_snapshot`, and the snapshot is `snapshot`.
+  //
+  // PROPOSED refuses an immutable, hidden, empty or conflicted change, and
+  // one commit of a divergent change. A recorded change with no visible
+  // commit can still be withdrawn, declined or superseded, named by its
+  // change id. Through the remote listener (R2.08):
+  // any write token proposes a DRAFT change; only the token that proposed
+  // it proposes it again, withdraws or supersedes it; nobody declines until
+  // a remote human can be verified (R3.43).
+  //
+  // Errors: as for every revision read, and INVALID_ARGUMENT with reason
+  // REVISION_REQUIRED, INVALID_COMMIT_ID (metadata `commit_id`),
+  // TRANSITION_TARGET_REQUIRED (no `to`, or one this daemon does not know),
+  // TRANSITION_RESERVED (metadata `to`; QUEUED, LANDED or DRAFT),
+  // INVALID_REASON (over 4 KiB, or a control character but newline and
+  // tab), INVALID_DESTINATION (metadata `destination`; not a local bookmark,
+  // or set for another state than PROPOSED) or SUPERSEDED_BY_REQUIRED
+  // (empty for SUPERSEDED, or set for another state); FAILED_PRECONDITION
+  // with reason EXPECTED_COMMIT_MISMATCH (metadata `expected_commit_id`,
+  // `commit_id`), IMMUTABLE_REVISION or HIDDEN_REVISION (metadata
+  // `commit_id`), TRANSITION_NOT_ALLOWED (metadata `change_id`, `state`,
+  // `to`), EXPECTED_STATE_MISMATCH (metadata `expected_state`, `state`),
+  // CHANGE_EMPTY, CHANGE_CONFLICTED or CHANGE_DIVERGENT (metadata
+  // `change_id`), INVALID_SUPERSEDED_BY (metadata `superseded_by`; the
+  // change itself, or not one visible commit), NO_DESTINATION (no
+  // `trunk()` and no `destination`), SNAPSHOT_FAILED (metadata
+  // `workspace_id`), or for a `workspace` that is not active; and
+  // PERMISSION_DENIED with reason REMOTE_PROPOSAL_NOT_OWNED (metadata
+  // `change_id`) or REMOTE_HUMAN_REQUIRED.
+  rpc TransitionChange(TransitionChangeRequest) returns (TransitionChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Changes with a recorded lifecycle, newest update first (R3.09). Each
+  // entry has the change at head, unset when it has no visible commit.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_CHANGE_ID (metadata
+  // `change`) or INVALID_PAGE_TOKEN; NOT_FOUND with reason
+  // REPOSITORY_NOT_FOUND (metadata `repo`).
+  rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Recorded transitions, newest first (R3.09): the lifecycle's audit
+  // trail, kept through GC.
+  //
+  // Errors: as for ListProposals.
+  rpc ListTransitions(ListTransitionsRequest) returns (ListTransitionsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
 
@@ -144,6 +207,9 @@ message Change {
   repeated string workspace_ids = 16;
   // Other jj workspaces whose working-copy commit it is, such as `default`.
   repeated string jj_workspaces = 17;
+  // Its lifecycle (R3.09), as of the operation read: the latest transition
+  // recorded by that operation's end.
+  ChangeLifecycle lifecycle = 18;
 }
 
 // How a log entry reaches a parent.
@@ -275,4 +341,112 @@ message AbandonChangeResponse {
   string abandoned_commit_id = 1;
   // The operation that abandoned it.
   Operation operation = 2;
+}
+
+// Move a change through its lifecycle.
+message TransitionChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to, and whose provenance session is recorded;
+  // empty for none.
+  string workspace = 2;
+  // The change, by a revision naming one of its commits; required.
+  string revision = 3;
+  // The state to move it to: PROPOSED, WITHDRAWN, DECLINED or SUPERSEDED.
+  LifecycleState to = 4;
+  // When set, FAILED_PRECONDITION unless the change is in this state.
+  LifecycleState expected_state = 5;
+  // When non-empty, FAILED_PRECONDITION unless the revision still resolves
+  // to this commit.
+  string expected_commit_id = 6;
+  // Why, for the record; at most 4 KiB of UTF-8, no control characters but
+  // newline and tab. Untrusted text to every reader.
+  string reason = 7;
+  // For SUPERSEDED, a revision naming one visible commit of the superseding
+  // change; empty otherwise.
+  string superseded_by = 8;
+  // For PROPOSED, the local bookmark it is proposed for; empty for the one
+  // `trunk()` resolves to.
+  string destination = 9;
+  // Who is performing it, recorded as declared; through the remote listener
+  // always AGENT.
+  TransitionActor actor = 10;
+  // Do not snapshot the workspace first.
+  bool skip_snapshot = 11;
+}
+
+// What a transition recorded.
+message TransitionChangeResponse {
+  // The change's lifecycle afterwards.
+  ChangeLifecycle lifecycle = 1;
+  // The transition recorded; unset when nothing changed.
+  ChangeTransition transition = 2;
+  // The operation that recorded it; unset when nothing changed.
+  Operation operation = 3;
+  // The workspace's snapshot taken first, if it recorded an operation.
+  Operation snapshot = 4;
+  // The change afterwards.
+  Change change = 5;
+}
+
+// List recorded lifecycles.
+message ListProposalsRequest {
+  // The repository.
+  string repo = 1;
+  // States to list; empty for PROPOSED and QUEUED.
+  repeated LifecycleState states = 2;
+  // Change id prefixes, in hex or jj's reverse hex; empty for every change.
+  repeated string changes = 3;
+  // Agents that recorded the latest proposal; empty for any.
+  repeated string agents = 4;
+  // At most this many entries; 0 for the default (100), at most 1,000.
+  int32 page_size = 5;
+  // A previous response's `next_page_token`.
+  string page_token = 6;
+}
+
+// One recorded change's lifecycle.
+message ProposalEntry {
+  // The change, in hex.
+  string change_id = 1;
+  // Its lifecycle now.
+  ChangeLifecycle lifecycle = 2;
+  // The change at head; unset when it has no visible commit.
+  Change change = 3;
+  // The agent that recorded its latest proposal; empty for none.
+  string proposed_by = 4;
+}
+
+// A page of recorded lifecycles.
+message ListProposalsResponse {
+  // The entries.
+  repeated ProposalEntry entries = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// List recorded transitions.
+message ListTransitionsRequest {
+  // The repository.
+  string repo = 1;
+  // Change id prefixes, in hex or jj's reverse hex; empty for every change.
+  repeated string changes = 2;
+  // Target states; empty for any.
+  repeated LifecycleState to = 3;
+  // Causes; empty for any.
+  repeated TransitionCause causes = 4;
+  // Only transitions recorded after this time.
+  google.protobuf.Timestamp recorded_after = 5;
+  // At most this many transitions; 0 for the default (100), at most 1,000.
+  int32 page_size = 6;
+  // A previous response's `next_page_token`.
+  string page_token = 7;
+}
+
+// A page of transitions.
+message ListTransitionsResponse {
+  // The transitions, newest first.
+  repeated ChangeTransition transitions = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
 }

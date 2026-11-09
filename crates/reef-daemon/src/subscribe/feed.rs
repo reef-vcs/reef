@@ -160,7 +160,7 @@ async fn read_blocking(
         }
         computed += 1;
         let delivered = deliver(state, repo, tip, &records, operation, entry.clone()).await;
-        if matcher.names_changes() && !matcher.touches(delivered.effects.as_ref()) {
+        if matcher.names_changes() && !matcher.touches(entry, delivered.effects.as_ref()) {
             batch.frontier.advance(entry);
             continue;
         }

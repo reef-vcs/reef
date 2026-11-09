@@ -561,7 +561,7 @@ impl BrokerSource {
             let kept = matcher.keeps_classified(&delivered.entry, &delivered.class, |_| {
                 delivered.owner.as_deref()
             }) && (!matcher.names_changes()
-                || matcher.touches(delivered.effects.as_ref()));
+                || matcher.touches(&delivered.entry, delivered.effects.as_ref()));
             if kept {
                 let first = batch.operations.is_empty() && budget.first_free;
                 if !first && bytes + delivered.encoded > budget.bytes {

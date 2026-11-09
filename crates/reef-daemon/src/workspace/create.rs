@@ -87,7 +87,7 @@ const CREATE_STEPS: u64 = 8;
 /// What a ref import before resolving a revision records (R2.03): for the
 /// workspace being created, moved or written for, when there is one, and
 /// the agent that asked.
-pub(super) fn import_meta(workspace: Option<WorkspaceId>, agent: Option<&str>) -> OpMeta {
+pub(crate) fn import_meta(workspace: Option<WorkspaceId>, agent: Option<&str>) -> OpMeta {
     let mut meta = OpMeta::new(OpKind::ImportRefs, IMPORT_DESCRIPTION);
     meta.workspace = workspace.map(|id| id.as_hex());
     meta.agent = agent.map(str::to_owned);
@@ -672,7 +672,7 @@ pub(super) async fn resolve_start(
 /// root (bookmarks, new changes) count when a revision is resolved. The
 /// import, if it changes anything, is recorded with `import`
 /// ([`import_meta`]).
-pub(super) async fn refresh_for_resolve(
+pub(crate) async fn refresh_for_resolve(
     head: &mut crate::repo::RepoHead,
     import: &OpMeta,
 ) -> Result<(), ManagerError> {

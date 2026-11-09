@@ -23,6 +23,7 @@ The read RPCs (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ListOperatio
 | `reef: abandon commit <commit id>` | `ABANDON` |
 | `reef: undo operation <operation id>`, or `undo: restore to operation <id>` | `UNDO` |
 | `reef: edit commit <commit id>`, `reef: new change on <commit id>` | `EDIT` |
+| `reef: propose change <change id>` (and `withdraw`, `decline`, `supersede`, `land`) | `TRANSITION` |
 | any other `reef: ` description | `OTHER` |
 | anything else, including jj's own `import git head` | `EXTERNAL` |
 
@@ -38,6 +39,18 @@ Since R2.03 every operation Reef records carries the attributes, so the descript
 | `import git head` at registration, a rematerialization | `other` | | the workspace (rematerialization) | the request's `reef-agent` (registration), else the owner |
 | describe, abandon, undo, edit | `describe`, `abandon`, `undo`, `edit` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
 | a store build's scratch create and release | as create and release | | the scratch workspace | the request's `reef-agent`, else `reef-store-build` |
+| a lifecycle transition (R3.09) | `transition` (`undo` for an undo of one) | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner; none for an observed landing |
+
+A lifecycle transition's operation also carries `reef.lifecycle`, the transitions as compact JSON, format 1 (`reef_lib::jj::lifecycle::LifecycleRecord`), and changes nothing in the view.
+
+### Change lifecycle
+
+`lifecycle/` ([ADR 0063](../../docs/adr/0063-change-lifecycle.md), [docs/proposals.md](../../docs/proposals.md)) records each transition as a `pending` row in `lifecycle_transitions`, then its operation, then the row committed with the operation's id in the transaction that updates `lifecycle`, under the repository's create lock (shared) and its lifecycle lock. Start-up step 5 commits or drops what a crash left pending; GC maps the rows' operation ids through its rewrite; `lifecycle::observe` records a recorded change as landed when it reaches `trunk()`; `UndoOperation` of a transition's operation reverts it in the rows.
+
+| Table | Key | Holds |
+| --- | --- | --- |
+| `lifecycle_transitions` | `(repo_id, id)`, `id` `trn_<16 hex>` | Every transition: change, commit, from, to, cause, round, reason, superseded-by, destination, the operation (or `operation_collected`), and who: agent, actor, identity, session, remote token; `seq` orders a repository's committed transitions |
+| `lifecycle` | `(repo_id, change_id)` | Each recorded change's state: its latest committed transition, and who made its latest proposal |
 
 `DescribeChange`, `AbandonChange` and `UndoOperation` run through `Manager::rewrite` (`workspace/rewrite.rs`): plan on the repository thread, then take the repository's create lock shared and each moved workspace's scan lock in id order (as GC does), snapshot those workspaces one at a time, descendants first (abandon and undo), write one operation, and have each moved workspace take its new commit, descendants first. A workspace the write kept on its change keeps the edits it made meanwhile: they are carried onto its new commit in the same change, an overlap left as a conflict there ([ADR 0039](../../docs/adr/0039-carrying-edits-through-a-write.md)).
 

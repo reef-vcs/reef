@@ -17,6 +17,7 @@ use reef_client::json::{
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
+use reef_client::json::{Proposal, ProposalHistory, Transitioned};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
@@ -238,6 +239,36 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     view(&["diff"], object::<Diff>, object::<brief::Diff<'static>>),
     row(&["describe"], object::<Described>),
     row(&["abandon"], object::<Abandoned>),
+    view(
+        &["propose"],
+        object::<Transitioned>,
+        object::<brief::Transitioned<'static>>,
+    ),
+    view(
+        &["proposal", "list"],
+        list::<Proposal>,
+        list::<brief::Proposal<'static>>,
+    ),
+    view(
+        &["proposal", "show"],
+        object::<ProposalHistory>,
+        object::<brief::ProposalHistory<'static>>,
+    ),
+    view(
+        &["proposal", "withdraw"],
+        object::<Transitioned>,
+        object::<brief::Transitioned<'static>>,
+    ),
+    view(
+        &["proposal", "decline"],
+        object::<Transitioned>,
+        object::<brief::Transitioned<'static>>,
+    ),
+    view(
+        &["proposal", "supersede"],
+        object::<Transitioned>,
+        object::<brief::Transitioned<'static>>,
+    ),
     row(&["undo"], object::<Undone>),
     row(&["op", "log"], list::<Operation>),
     row(&["op", "show"], object::<Operation>),

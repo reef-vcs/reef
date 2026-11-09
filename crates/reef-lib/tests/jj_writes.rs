@@ -963,3 +963,117 @@ async fn revert_keeps_git_refs() {
         Some(&main)
     );
 }
+
+// R3.09 test 1: a transition is an operation with no view change whose
+// `reef.lifecycle` attribute round-trips and survives GC's rewrite; the
+// description classifies without it; `on_trunk` finds a change by id
+// across a rewrite, and not one on a side branch; `find_transitions`
+// finds the operation by transition id.
+#[tokio::test]
+async fn record_transitions() {
+    use reef_lib::jj::lifecycle::{
+        self, LifecycleState, TransitionCause, TransitionRecord, on_trunk,
+    };
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1")], "base").await;
+    let landed = new_commit(&mut tx, &[&base], &[("a", "2")], "landed").await;
+    let side = new_commit(&mut tx, &[&base], &[("b", "1")], "side").await;
+    bookmark(&mut tx, "main", &landed);
+    fx.commit(tx, "setup").await;
+    let view_before = fx.head().view().store_view().clone();
+
+    let record = TransitionRecord {
+        id: "trn_0123456789abcdef".to_owned(),
+        change: landed.change_id().hex(),
+        commit: landed.id().hex(),
+        from: LifecycleState::Draft,
+        to: LifecycleState::Proposed,
+        cause: TransitionCause::Request,
+        round: 1,
+        reason: "ready".to_owned(),
+        superseded_by: String::new(),
+        destination: "main".to_owned(),
+        undoes: String::new(),
+    };
+    let mut meta = meta(OpKind::Transition);
+    meta.description = oplog::transition_description("propose", &record.change);
+    meta.transitions = vec![record.clone()];
+    let op = fx.repo.record_transitions(&meta).await.unwrap();
+    assert_eq!(op, fx.op());
+    assert_eq!(*fx.head().view().store_view(), view_before);
+    let attributes = fx.attributes();
+    assert_eq!(
+        attributes.get(ATTR_KIND).map(String::as_str),
+        Some("transition")
+    );
+    assert_eq!(lifecycle::transitions_of(&attributes), vec![record.clone()]);
+    let entry = oplog::entry(fx.head().operation());
+    assert_eq!(oplog::classify(&entry).kind, Some(OpKind::Transition));
+    // Stripped of its attributes, the description still classifies.
+    let mut stripped = entry.clone();
+    stripped.attributes.clear();
+    assert_eq!(oplog::classify(&stripped).kind, Some(OpKind::Transition));
+
+    // No transitions to record is an error, not an empty operation.
+    assert!(
+        fx.repo
+            .record_transitions(&OpMeta::new(OpKind::Transition, "nothing"))
+            .await
+            .is_err()
+    );
+
+    // The operation is found by its transition's id.
+    let ids = std::collections::BTreeSet::from([record.id.clone()]);
+    let found = lifecycle::find_transitions(&fx.head(), &ids, SystemTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    assert_eq!(found[&record.id].op_id, op);
+    let none = lifecycle::find_transitions(&fx.head(), &ids, SystemTime::now())
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "the walk stops at not_before");
+
+    // On trunk: the landed change (rewritten since), not the side branch.
+    let mut tx = fx.tx();
+    let rewritten = tx
+        .repo_mut()
+        .rewrite_commit(&landed)
+        .set_description("landed, described")
+        .write()
+        .await
+        .unwrap();
+    bookmark(&mut tx, "main", &rewritten);
+    fx.commit(tx, "rewrite").await;
+    let changes = [hex_change(&landed), hex_change(&side), hex_change(&base)];
+    let found = on_trunk(&fx.head(), &changes).await.unwrap();
+    let found: Vec<(String, String)> = found
+        .into_iter()
+        .map(|(change, commit)| (change.to_string(), commit.to_string()))
+        .collect();
+    assert!(found.contains(&(landed.change_id().hex(), rewritten.id().hex())));
+    assert!(found.contains(&(base.change_id().hex(), base.id().hex())));
+    assert!(
+        !found
+            .iter()
+            .any(|(change, _)| *change == side.change_id().hex())
+    );
+    assert!(lifecycle::local_bookmark_exists(&fx.head(), "main"));
+    assert!(!lifecycle::local_bookmark_exists(&fx.head(), "nosuch"));
+
+    // GC keeps the attribute on the kept copy of a newer operation.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let cut = SystemTime::now();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let later = fx.repo.record_transitions(&meta).await.unwrap();
+    let outcome = fx.repo.gc(cut).await.unwrap();
+    assert!(outcome.operations_abandoned > 0);
+    assert!(outcome.rewritten.iter().any(|(old, _)| *old == later));
+    assert_ne!(fx.op(), later);
+    assert_eq!(lifecycle::transitions_of(&fx.attributes()), vec![record]);
+}
+
+fn hex_change(commit: &Commit) -> reef_lib::jj::ChangeIdHex {
+    commit.change_id().hex().parse().unwrap()
+}

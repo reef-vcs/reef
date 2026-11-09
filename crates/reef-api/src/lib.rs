@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 20;
+pub const API_REVISION: u32 = 21;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -101,6 +101,10 @@ pub const API_DIGESTS: &[&str] = &[
     "1e15d31ae485d878e9921bc2fc785818f8b4c952f19172e5b64f6107fef2ff26",
     // R3.07: `PolicyService`.
     "7de26b8cf31e6e437502790248f2ac6562660e236a31090fb20c39517c716c55",
+    // R3.09: `lifecycle.proto`, `ChangeService.TransitionChange`,
+    // `ListProposals` and `ListTransitions`, `Change.lifecycle`,
+    // `Operation.transitions` and `OPERATION_KIND_TRANSITION`.
+    "5e6f6fc83757f1a038225f70d2528df25eb5319edf16d20b436c9fa83571ef12",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -578,6 +582,52 @@ pub mod error {
     /// `reef policy init` where `reef-policy.toml` already exists (R3.07):
     /// a client's reason.
     pub const POLICY_EXISTS: &str = "POLICY_EXISTS";
+    /// `TransitionChange` to a state only the daemon records (R3.09):
+    /// QUEUED, LANDED, DRAFT, or none. Metadata: `to`.
+    pub const TRANSITION_RESERVED: &str = "TRANSITION_RESERVED";
+    /// `TransitionChange` with no `to`, or one this daemon does not know
+    /// (R3.09).
+    pub const TRANSITION_TARGET_REQUIRED: &str = "TRANSITION_TARGET_REQUIRED";
+    /// `TransitionChange` from a state the transition table does not allow
+    /// it from (R3.09). Metadata: `change_id`, `state`, `to`.
+    pub const TRANSITION_NOT_ALLOWED: &str = "TRANSITION_NOT_ALLOWED";
+    /// `TransitionChange` whose `expected_state` is not the change's
+    /// (R3.09). Metadata: `expected_state`, `state`.
+    pub const EXPECTED_STATE_MISMATCH: &str = "EXPECTED_STATE_MISMATCH";
+    /// A transition's reason over 4 KiB or with a control character other
+    /// than newline and tab (R3.09).
+    pub const INVALID_REASON: &str = "INVALID_REASON";
+    /// A proposal's `destination` that is not a local bookmark, or one given
+    /// for another state (R3.09). Metadata: `destination`.
+    pub const INVALID_DESTINATION: &str = "INVALID_DESTINATION";
+    /// A proposal with no `destination` in a repository with no `trunk()`
+    /// (R3.09).
+    pub const NO_DESTINATION: &str = "NO_DESTINATION";
+    /// SUPERSEDED without `superseded_by`, or `superseded_by` for another
+    /// state (R3.09).
+    pub const SUPERSEDED_BY_REQUIRED: &str = "SUPERSEDED_BY_REQUIRED";
+    /// `superseded_by` naming the change itself, or not one visible commit
+    /// (R3.09). Metadata: `superseded_by`.
+    pub const INVALID_SUPERSEDED_BY: &str = "INVALID_SUPERSEDED_BY";
+    /// A proposal of a change that changes nothing (R3.09). Metadata:
+    /// `change_id`.
+    pub const CHANGE_EMPTY: &str = "CHANGE_EMPTY";
+    /// A proposal of a change whose tree has conflicts (R3.09). Metadata:
+    /// `change_id`.
+    pub const CHANGE_CONFLICTED: &str = "CHANGE_CONFLICTED";
+    /// A proposal of one commit of a divergent change (R3.09). Metadata:
+    /// `change_id`.
+    pub const CHANGE_DIVERGENT: &str = "CHANGE_DIVERGENT";
+    /// `AbandonChange` of a change that is PROPOSED or QUEUED (R3.09).
+    /// Metadata: `change_id`, `state`.
+    pub const CHANGE_IN_REVIEW: &str = "CHANGE_IN_REVIEW";
+    /// Through the remote listener, a transition of a proposal another
+    /// token made, or an undo of another token's transition (R3.09).
+    /// Metadata: `change_id`.
+    pub const REMOTE_PROPOSAL_NOT_OWNED: &str = "REMOTE_PROPOSAL_NOT_OWNED";
+    /// A decline through the remote listener, which cannot verify a human
+    /// until R3.43 (R3.09).
+    pub const REMOTE_HUMAN_REQUIRED: &str = "REMOTE_HUMAN_REQUIRED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

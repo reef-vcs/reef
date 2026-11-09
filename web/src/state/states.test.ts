@@ -3,6 +3,7 @@ import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { ChangeSchema } from "../gen/reef/api/v1/changes_pb";
 import { ChangeOutcome } from "../gen/reef/api/v1/history_pb";
+import { ChangeLifecycleSchema, LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
 import { changeState, outcomeState } from "./states";
 
 describe("changeState", () => {
@@ -25,6 +26,41 @@ describe("changeState", () => {
             expect(changeState(change)).toEqual(expected);
           });
         }
+});
+
+describe("changeState with a lifecycle (R3.09)", () => {
+  it.each([
+    [LifecycleState.PROPOSED, true, "proposed", "proposed"],
+    [LifecycleState.QUEUED, true, "queued", "queued"],
+    [LifecycleState.LANDED, true, "landed", "landed"],
+    [LifecycleState.DECLINED, true, "ended", "declined"],
+    [LifecycleState.WITHDRAWN, true, "ended", "withdrawn"],
+    [LifecycleState.SUPERSEDED, true, "ended", "superseded"],
+    // Derived (not recorded): the flags decide, as before.
+    [LifecycleState.LANDED, false, "draft", "draft"],
+    [LifecycleState.DRAFT, false, "draft", "draft"],
+  ])("%s recorded=%s", (state, recorded, expected, label) => {
+    const change = create(ChangeSchema, {
+      lifecycle: create(ChangeLifecycleSchema, { state, recorded }),
+    });
+    expect(changeState(change)).toEqual({ state: expected, label });
+  });
+
+  it("an abandoned proposal reads abandoned", () => {
+    const change = create(ChangeSchema, {
+      hidden: true,
+      lifecycle: create(ChangeLifecycleSchema, { state: LifecycleState.PROPOSED, recorded: true }),
+    });
+    expect(changeState(change)).toEqual({ state: "ended", label: "abandoned" });
+  });
+
+  it("conflicts still come first", () => {
+    const change = create(ChangeSchema, {
+      conflict: true,
+      lifecycle: create(ChangeLifecycleSchema, { state: LifecycleState.PROPOSED, recorded: true }),
+    });
+    expect(changeState(change).state).toBe("conflicted");
+  });
 });
 
 describe("outcomeState", () => {

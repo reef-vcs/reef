@@ -145,6 +145,7 @@ enum KindArg {
     Undo,
     Edit,
     ImportRefs,
+    Transition,
     External,
     Other,
 }
@@ -161,6 +162,7 @@ impl From<KindArg> for v1::OperationKind {
             KindArg::Undo => Self::Undo,
             KindArg::Edit => Self::Edit,
             KindArg::ImportRefs => Self::ImportRefs,
+            KindArg::Transition => Self::Transition,
             KindArg::External => Self::External,
             KindArg::Other => Self::Other,
         }

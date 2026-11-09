@@ -127,6 +127,13 @@ impl ChangeIdHex {
         Self(id.hex())
     }
 
+    /// The id as jj-lib's type. The text is valid hex by construction, so
+    /// the empty fallback is never taken.
+    pub(crate) fn to_id(&self) -> jj_lib::backend::ChangeId {
+        jj_lib::backend::ChangeId::try_from_hex(&self.0)
+            .unwrap_or_else(|| jj_lib::backend::ChangeId::new(Vec::new()))
+    }
+
     /// The change id in jj's "reverse hex", the spelling `jj log` shows
     /// humans: the digits `0` to `f` become the letters `z` to `k`.
     pub fn reverse_hex(&self) -> String {

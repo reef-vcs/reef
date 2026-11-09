@@ -1,0 +1,134 @@
+// Change lifecycle states (R3.09, ADR 0063; `docs/proposals.md`).
+//
+// A change is DRAFT until it is proposed. Every transition after that is an
+// operation in the log, whose `Operation.transitions` names it, and a row
+// the daemon keeps through GC, undo and restore. `ChangeService` performs
+// and lists them; this file holds the types both services use.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/remote.proto";
+
+// A change's lifecycle state.
+enum LifecycleState {
+  // Not set; in a request, no state.
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  // Not put forward. A change with no recorded transition is a draft (or
+  // LANDED when it is immutable).
+  LIFECYCLE_STATE_DRAFT = 1;
+  // Put forward for its destination.
+  LIFECYCLE_STATE_PROPOSED = 2;
+  // Taken by the landing service (R3.13), which lands its recorded commit.
+  LIFECYCLE_STATE_QUEUED = 3;
+  // On its destination. Final.
+  LIFECYCLE_STATE_LANDED = 4;
+  // A reviewer said no; it may be proposed again.
+  LIFECYCLE_STATE_DECLINED = 5;
+  // Its proposer took it back; it may be proposed again.
+  LIFECYCLE_STATE_WITHDRAWN = 6;
+  // Replaced by the change `superseded_by` names. Final.
+  LIFECYCLE_STATE_SUPERSEDED = 7;
+}
+
+// Why a transition was recorded.
+enum TransitionCause {
+  // Not set.
+  TRANSITION_CAUSE_UNSPECIFIED = 0;
+  // A client asked for it (TransitionChange).
+  TRANSITION_CAUSE_REQUEST = 1;
+  // It reverts an earlier transition (UndoOperation).
+  TRANSITION_CAUSE_UNDO = 2;
+  // The daemon saw the change's commit on `trunk()`, however it got there.
+  TRANSITION_CAUSE_OBSERVED = 3;
+}
+
+// Who performed a transition, as recorded. Over the socket a caller
+// declares it, and it is not verified (ADR 0027); through the remote
+// listener it is always AGENT.
+enum TransitionActor {
+  // Not set; in a request, AGENT when the call carries an agent name and
+  // HUMAN otherwise.
+  TRANSITION_ACTOR_UNSPECIFIED = 0;
+  // A person.
+  TRANSITION_ACTOR_HUMAN = 1;
+  // An agent.
+  TRANSITION_ACTOR_AGENT = 2;
+  // The daemon itself.
+  TRANSITION_ACTOR_DAEMON = 3;
+}
+
+// One recorded transition of a change's lifecycle.
+message ChangeTransition {
+  // `trn_` and 16 hex digits.
+  string id = 1;
+  // The change, in hex.
+  string change_id = 2;
+  // Its commit when the transition was recorded.
+  string commit_id = 3;
+  // The state before.
+  LifecycleState from = 4;
+  // The state after.
+  LifecycleState to = 5;
+  // Why it was recorded.
+  TransitionCause cause = 6;
+  // The proposal round it belongs to: 1 for the first proposal, one more
+  // for each proposal after a withdrawal or a decline.
+  uint32 round = 7;
+  // The reason its performer gave; untrusted text.
+  string reason = 8;
+  // For SUPERSEDED, the superseding change in hex.
+  string superseded_by = 9;
+  // The bookmark the change is proposed for.
+  string destination = 10;
+  // For an undo, the operation it reverts.
+  string undoes_operation_id = 11;
+  // The operation that recorded it. GC gives kept operations new ids, and
+  // this follows them.
+  string operation_id = 12;
+  // GC collected `operation_id`, which was older than its window; the id
+  // is what it was.
+  bool operation_collected = 13;
+  // When it was recorded: the operation's end.
+  google.protobuf.Timestamp recorded_at = 14;
+  // The `reef-agent` of the call; empty for none.
+  string agent = 15;
+  // Who performed it, as recorded.
+  TransitionActor actor = 16;
+  // The operator identity's name: the remote token's linked identity, else
+  // the named workspace's provenance session's, else the daemon's default
+  // person identity; empty when none.
+  string identity = 17;
+  // That identity's id.
+  string identity_id = 18;
+  // The provenance session of the workspace the request named (R3.04).
+  string session_id = 19;
+  // The remote token the call came through (R2.08).
+  RemoteCaller remote = 20;
+}
+
+// A change's lifecycle as of a read.
+message ChangeLifecycle {
+  // Its state.
+  LifecycleState state = 1;
+  // Whether a transition was recorded; false for a derived DRAFT, or a
+  // derived LANDED (an immutable change that never left DRAFT through Reef).
+  bool recorded = 2;
+  // Its proposal round; 0 when not recorded.
+  uint32 round = 3;
+  // The commit recorded with its latest transition; empty when not recorded.
+  string commit_id = 4;
+  // While PROPOSED or QUEUED: its visible commit is not `commit_id` (amended
+  // or rebased since). Proposing it again records the new commit.
+  bool amended = 5;
+  // The bookmark it is proposed for.
+  string destination = 6;
+  // For SUPERSEDED, the superseding change in hex.
+  string superseded_by = 7;
+  // The latest transition; unset when not recorded.
+  ChangeTransition last = 8;
+  // Whether the change has a visible commit. False for a recorded change
+  // whose commits were all abandoned outside Reef.
+  bool visible = 9;
+}

@@ -647,6 +647,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
     ),
     (
+        "/reef.api.v1.ChangeService/TransitionChange",
+        "an agent runs `reef propose` and `reef proposal`; R3.13's proposal flow decides the tool; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ChangeService/ListProposals",
+        "an agent runs `reef proposal list`; wait_for_operations with kind transition follows a proposal",
+    ),
+    (
+        "/reef.api.v1.ChangeService/ListTransitions",
+        "an agent runs `reef proposal show`; get_change carries the lifecycle",
+    ),
+    (
         "/reef.api.v1.PolicyService/EvaluatePolicy",
         "an agent runs `reef policy eval`; R3.13's proposal flow reports it; tools/list is at its budget (#116)",
     ),

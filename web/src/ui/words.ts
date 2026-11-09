@@ -1,6 +1,7 @@
 // The human vocabulary (the design pass), used outside developer mode. The
 // API's words (`operationLabel`, lease health words) stay what developer mode
 // shows, so a page can be checked against `reef` output.
+import { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
 import { OperationKind, SnapshotKind, type Operation } from "../gen/reef/api/v1/operations_pb";
 import type { HealthWord } from "../fleet/lease";
 
@@ -13,6 +14,7 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.UNDO]: "undid an operation",
   [OperationKind.EDIT]: "edited files",
   [OperationKind.IMPORT_REFS]: "imported git refs",
+  [OperationKind.TRANSITION]: "moved a change through its lifecycle",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };
@@ -25,10 +27,30 @@ const SNAPSHOTS: Partial<Record<SnapshotKind, string>> = {
   [SnapshotKind.SHUTDOWN]: "snapshotted at shutdown",
 };
 
+const TRANSITIONS: Partial<Record<LifecycleState, string>> = {
+  [LifecycleState.DRAFT]: "returned a change to draft",
+  [LifecycleState.PROPOSED]: "proposed a change",
+  [LifecycleState.QUEUED]: "queued a proposal",
+  [LifecycleState.LANDED]: "recorded a landing",
+  [LifecycleState.DECLINED]: "declined a proposal",
+  [LifecycleState.WITHDRAWN]: "withdrew a proposal",
+  [LifecycleState.SUPERSEDED]: "superseded a change",
+};
+
+/** What an operation's first lifecycle transition moved a change to, if any (R3.09). */
+type WithTransition = Pick<Operation, "kind" | "snapshotKind"> & {
+  transitionTo?: LifecycleState;
+  transitions?: Operation["transitions"];
+};
+
 /** "described a change": past tense, lower case. */
-export function operationSentence(operation: Pick<Operation, "kind" | "snapshotKind">): string {
+export function operationSentence(operation: WithTransition): string {
   if (operation.kind === OperationKind.SNAPSHOT) {
     return SNAPSHOTS[operation.snapshotKind] ?? "saved a snapshot";
+  }
+  if (operation.kind === OperationKind.TRANSITION) {
+    const to = operation.transitionTo ?? operation.transitions?.[0]?.to;
+    if (to !== undefined && TRANSITIONS[to]) return TRANSITIONS[to];
   }
   return SENTENCES[operation.kind] ?? "did something else";
 }

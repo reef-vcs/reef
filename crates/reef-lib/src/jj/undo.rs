@@ -177,6 +177,15 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
     if classify(&entry(op)).kind == Some(OpKind::MoveWorkspace) && !op.metadata().is_snapshot {
         return refuse("it moves a workspace; move the workspace back instead");
     }
+    // The daemon reverts a lifecycle transition in its own rows (R3.09); a
+    // view revert would leave them as they are.
+    if op
+        .metadata()
+        .attributes
+        .contains_key(super::oplog::ATTR_LIFECYCLE)
+    {
+        return refuse("it records a lifecycle transition, which only the daemon undoes");
+    }
     let git = |view: &View| {
         (
             view.git_refs.clone(),

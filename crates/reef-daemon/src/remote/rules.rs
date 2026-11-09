@@ -36,6 +36,12 @@ pub(crate) enum Rule {
     /// A claim's updates and completion (R3.05): only through the token
     /// that claimed the job, even holding its claim token.
     OwnClaim,
+    /// A lifecycle transition (R3.09), decided by the handler per target:
+    /// any token proposes a draft; only the token that proposed a change
+    /// proposes it again, withdraws or supersedes it; nobody declines
+    /// (`crate::lifecycle::transition`). An undo of a transition needs the
+    /// token that recorded it (`crate::lifecycle::undo`).
+    Lifecycle,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -62,6 +68,10 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ),
     ("/reef.api.v1.ChangeService/DescribeChange", Rule::None),
     ("/reef.api.v1.ChangeService/AbandonChange", Rule::None),
+    (
+        "/reef.api.v1.ChangeService/TransitionChange",
+        Rule::Lifecycle,
+    ),
     ("/reef.api.v1.OperationService/UndoOperation", Rule::None),
     ("/reef.api.v1.FileService/EditFiles", Rule::None),
     ("/reef.api.v1.PresenceService/ReportPresence", Rule::None),

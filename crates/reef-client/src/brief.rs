@@ -108,7 +108,8 @@ pub fn workspaces_with_repo(list: &[json::Workspace]) -> Vec<Workspace<'_>> {
 /// `divergent`, since then the change id names more than one commit; the
 /// description and flags when set. Dropped: `change_id`,
 /// `parent_commit_ids`, `parent_change_ids`, `author`, `committer`,
-/// `tree_id`, `jj_workspaces`.
+/// `tree_id`, `jj_workspaces`. `lifecycle` only when a transition was
+/// recorded (R3.09), as [`Lifecycle`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Change")]
 #[expect(clippy::struct_excessive_bools, reason = "the full type's flags")]
@@ -135,6 +136,151 @@ pub struct Change<'a> {
     tags: &'a [String],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     workspace_ids: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<Lifecycle<'a>>,
+}
+
+/// A recorded lifecycle (R3.09). Always `state`; `round` and `amended` when
+/// set; `superseded_by` when set. Dropped: `recorded` (always true here),
+/// `commit_id`, `destination`, `last`, `visible`; `proposal show` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.ChangeLifecycle")]
+pub struct Lifecycle<'a> {
+    state: &'a str,
+    #[serde(skip_serializing_if = "is_zero")]
+    round: u32,
+    #[serde(skip_serializing_if = "is_false")]
+    amended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<&'a str>,
+}
+
+impl<'a> Lifecycle<'a> {
+    /// The brief view of `lifecycle` when it was recorded; `None` for a
+    /// derived one.
+    pub fn of(lifecycle: &'a json::ChangeLifecycle) -> Option<Self> {
+        lifecycle.recorded.then(|| Self {
+            state: &lifecycle.state,
+            round: lifecycle.round,
+            amended: lifecycle.amended,
+            superseded_by: lifecycle.superseded_by.as_deref(),
+        })
+    }
+}
+
+/// A recorded transition (R3.09). Always `change_id_reverse_hex` and `to`;
+/// `from`, `cause`, `round`, `reason`, `superseded_by`, `agent`, `actor`
+/// and `recorded_at` when set. Dropped: `id`, `change_id`, `commit_id`,
+/// `destination`, `undoes_operation_id`, `operation_id`,
+/// `operation_collected`, `identity`, `session_id`, `remote`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.ChangeTransition")]
+pub struct ChangeTransition<'a> {
+    change_id_reverse_hex: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_zero")]
+    round: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_at: Option<&'a str>,
+}
+
+impl<'a> From<&'a json::ChangeTransition> for ChangeTransition<'a> {
+    fn from(transition: &'a json::ChangeTransition) -> Self {
+        Self {
+            change_id_reverse_hex: &transition.change_id_reverse_hex,
+            from: transition.from.as_deref(),
+            to: transition.to.as_deref(),
+            cause: transition.cause.as_deref(),
+            round: transition.round,
+            reason: transition.reason.as_deref(),
+            superseded_by: transition.superseded_by.as_deref(),
+            agent: transition.agent.as_deref(),
+            actor: transition.actor.as_deref(),
+            recorded_at: transition.recorded_at.as_deref(),
+        }
+    }
+}
+
+/// A recorded lifecycle in a listing (R3.09). Always
+/// `change_id_reverse_hex`; `lifecycle` as [`Lifecycle`]; `proposed_by`
+/// when set. Dropped: `change_id`, `change`; `proposal show` has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Proposal")]
+pub struct Proposal<'a> {
+    change_id_reverse_hex: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<Lifecycle<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposed_by: Option<&'a str>,
+}
+
+impl<'a> From<&'a json::Proposal> for Proposal<'a> {
+    fn from(proposal: &'a json::Proposal) -> Self {
+        Self {
+            change_id_reverse_hex: &proposal.change_id_reverse_hex,
+            lifecycle: proposal.lifecycle.as_ref().and_then(Lifecycle::of),
+            proposed_by: proposal.proposed_by.as_deref(),
+        }
+    }
+}
+
+/// What a transition recorded (R3.09). Always `change`; `lifecycle` when
+/// recorded; `operation_id` when one was recorded. Dropped: `transition`
+/// (the lifecycle's state and round say it), `snapshot_operation_id`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Transitioned")]
+pub struct Transitioned<'a> {
+    change: Change<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<Lifecycle<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a json::Transitioned> for Transitioned<'a> {
+    fn from(transitioned: &'a json::Transitioned) -> Self {
+        Self {
+            change: Change::from(&transitioned.change),
+            lifecycle: transitioned.lifecycle.as_ref().and_then(Lifecycle::of),
+            operation_id: transitioned.operation_id.as_deref(),
+        }
+    }
+}
+
+/// `reef proposal show` (R3.09): the change as [`Change`], and its
+/// transitions as [`ChangeTransition`], newest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.ProposalHistory")]
+pub struct ProposalHistory<'a> {
+    change: Change<'a>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    transitions: Vec<ChangeTransition<'a>>,
+}
+
+impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
+    fn from(history: &'a json::ProposalHistory) -> Self {
+        Self {
+            change: Change::from(&history.change),
+            transitions: history
+                .transitions
+                .iter()
+                .map(ChangeTransition::from)
+                .collect(),
+        }
+    }
 }
 
 impl<'a> From<&'a json::Change> for Change<'a> {
@@ -151,6 +297,7 @@ impl<'a> From<&'a json::Change> for Change<'a> {
             bookmarks: &change.bookmarks,
             tags: &change.tags,
             workspace_ids: &change.workspace_ids,
+            lifecycle: change.lifecycle.as_ref().and_then(Lifecycle::of),
         }
     }
 }
@@ -469,6 +616,7 @@ mod tests {
             tags: Vec::new(),
             workspace_ids: Vec::new(),
             jj_workspaces: vec!["reef-1".into()],
+            lifecycle: None,
         }
     }
 

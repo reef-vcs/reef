@@ -338,6 +338,23 @@ impl StatusService for StatusHandler {
             }
             _ => None,
         };
+        let mut repository_status = repository_status;
+        let mut workspace_status = workspace_status;
+        if !at {
+            // The lifecycle at head (R3.09); a status at an operation
+            // leaves it unset.
+            let changes = repository_status
+                .trunk
+                .iter_mut()
+                .chain(repository_status.heads.iter_mut())
+                .chain(workspace_status.iter_mut().flat_map(|status| {
+                    status
+                        .working_copy
+                        .iter_mut()
+                        .chain(status.parents.iter_mut())
+                }));
+            crate::lifecycle::messages::fill(state, target.repo.id, changes, None);
+        }
         Ok(Response::new(GetStatusResponse {
             repository: Some(v1::Repository::from(&target.repo)),
             at_operation: read.at,

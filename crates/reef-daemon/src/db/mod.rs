@@ -35,6 +35,7 @@ mod evidence;
 mod identity;
 pub(crate) mod jobs;
 mod leases;
+pub(crate) mod lifecycle;
 mod provenance;
 mod reclaims;
 mod remote_tokens;
@@ -65,13 +66,16 @@ pub use provenance::{
 pub use remote_tokens::{Digest, RemoteTokenRow, TokenScope};
 
 pub use leases::Renewal;
+pub use lifecycle::{
+    LifecycleFilter, LifecycleRow, LifecycleUpdate, TransitionFilter, TransitionRow,
+};
 
 /// The migrations, in number order. A migration's number is fixed by the
 /// Phase 1 plan, not by landing order: `0002_base_cache` (R1.02),
 /// `0003_snapshots` (R1.16), `0004_stores` (R1.20), `0005_watchman` (R1.14),
 /// then `0006_remote_tokens` (R2.08), `0007_evidence` (R3.01),
 /// `0008_artifacts` (R3.02), `0009_identity` (R3.03), `0010_provenance`
-/// (R3.04) and `0011_jobs` (R3.05).
+/// (R3.04), `0011_jobs` (R3.05) and `0012_lifecycle` (R3.09).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -110,6 +114,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0010_provenance.sql"),
     ),
     ("0011_jobs", include_str!("migrations/0011_jobs.sql")),
+    (
+        "0012_lifecycle",
+        include_str!("migrations/0012_lifecycle.sql"),
+    ),
 ];
 
 /// The schema version (`user_version`) of a fully migrated database: the
@@ -780,8 +788,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -789,7 +797,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -832,7 +840,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 11
+                    supported: 12
                 }
             ),
             "{error:?}"
@@ -859,7 +867,8 @@ mod tests {
                 "0008_artifacts",
                 "0009_identity",
                 "0010_provenance",
-                "0011_jobs"
+                "0011_jobs",
+                "0012_lifecycle"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -885,7 +894,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -899,7 +908,8 @@ mod tests {
                 "0008_artifacts",
                 "0009_identity",
                 "0010_provenance",
-                "0011_jobs"
+                "0011_jobs",
+                "0012_lifecycle"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -944,7 +954,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
@@ -981,22 +991,22 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.evidence_counts().unwrap(), (0, 0, 0));
         drop(db);
 
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 12).unwrap();
+        conn.pragma_update(None, "user_version", 13).unwrap();
         drop(conn);
         let error = Db::open(&path).err().unwrap();
         assert!(
             matches!(
                 error,
                 DbError::TooNew {
-                    found: 12,
-                    supported: 11
+                    found: 13,
+                    supported: 12
                 }
             ),
             "{error:?}"
@@ -1081,8 +1091,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(
             db.artifacts_of_evidence(record.id, "e1").unwrap(),
             [a.clone(), b.clone()]
@@ -1169,8 +1179,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         let tokens = db.remote_tokens().unwrap();
         assert_eq!(tokens.len(), 1);
@@ -1227,8 +1237,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         assert_eq!(db.identities().unwrap().len(), 1);
         assert_eq!(db.provenance_counts().unwrap(), (0, 0));
@@ -1283,8 +1293,8 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.open_jobs().unwrap(), Vec::new());

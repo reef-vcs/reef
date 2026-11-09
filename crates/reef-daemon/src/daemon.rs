@@ -31,7 +31,8 @@
 //!    repository's workspace root, `repos/*/ws/` by default, R1.07).
 //! 5. Start one repository thread per registered repository. Then rebuild
 //!    each one's `snapshots` index from its operation log (R1.16) and log
-//!    the report, before any snapshot can add a row.
+//!    the report, before any snapshot can add a row. Then commit or drop
+//!    the lifecycle transitions a crash left pending (R3.09).
 //! 6. Load active workspaces ([`Manager::load_active`], R1.05): reopen each
 //!    one's jj handle; reclaim one whose directory is gone, or after a
 //!    restore (`meta.rematerialize_pending`, R1.18) rebuild it instead. Each
@@ -155,6 +156,8 @@ pub struct AppState {
     pub executor: Arc<crate::executor::Executor>,
     /// Compiled repository policies (R3.07).
     pub policy: Arc<crate::policy::Policies>,
+    /// Change lifecycle locks (R3.09).
+    pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
 }
 
 impl fmt::Debug for AppState {
@@ -442,6 +445,7 @@ impl Daemon {
             provenance,
             executor,
             policy: Arc::new(crate::policy::Policies::default()),
+            lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
         });
 
         // Before any snapshot can run (R2.10).
@@ -468,6 +472,8 @@ impl Daemon {
         state.presence.start(state.shutdown.clone());
         // After presence starts: it republishes the open jobs' entries.
         state.executor.start(state.shutdown.clone());
+        // Landings seen on trunk() (R3.09).
+        crate::lifecycle::observe::start(&state);
         let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),
@@ -609,6 +615,9 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
         .into_iter()
         .map(|id| reindex_repo(state, id));
     futures::future::join_all(reindexes).await;
+    //    Then commit or drop the lifecycle transitions a crash left pending
+    //    between their row and their operation (R3.09).
+    crate::lifecycle::resolve_pending(state).await;
 
     // 6. Load active workspaces. A database failure here is logged; the
     //    daemon still serves registration and the database's view.
