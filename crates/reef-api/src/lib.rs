@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 21;
+pub const API_REVISION: u32 = 22;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -105,6 +105,8 @@ pub const API_DIGESTS: &[&str] = &[
     // `ListProposals` and `ListTransitions`, `Change.lifecycle`,
     // `Operation.transitions` and `OPERATION_KIND_TRANSITION`.
     "5e6f6fc83757f1a038225f70d2528df25eb5319edf16d20b436c9fa83571ef12",
+    // R3.08: `PolicyService.SimulatePolicy`.
+    "7db337285320b24ebd6a611443775ec510f7022b5abf2e2ecf7e0f5bdc9b4be7",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -565,12 +567,16 @@ pub mod error {
     /// Metadata: `field` (`evidence`, `progress`, `message`, `usage`,
     /// `outcome` or `reason`).
     pub const INVALID_JOB_UPDATE: &str = "INVALID_JOB_UPDATE";
-    /// `EvaluatePolicy` given both `policy` text and a `policy_revision`
-    /// (R3.07).
+    /// `EvaluatePolicy` or `SimulatePolicy` given both `policy` text and a
+    /// `policy_revision` (R3.07).
     pub const POLICY_SOURCE_CONFLICT: &str = "POLICY_SOURCE_CONFLICT";
-    /// `EvaluatePolicy`'s `policy` text over 256 KiB (R3.07). Metadata:
+    /// `EvaluatePolicy`'s or `SimulatePolicy`'s `policy` text over 256 KiB
+    /// (R3.07). Metadata:
     /// `bytes`, `max`.
     pub const POLICY_TOO_LARGE: &str = "POLICY_TOO_LARGE";
+    /// `SimulatePolicy` given neither `policy` text nor a `policy_revision`
+    /// (R3.08).
+    pub const POLICY_SOURCE_MISSING: &str = "POLICY_SOURCE_MISSING";
     /// `reef policy eval --require-allow` for a change the policy does not
     /// allow (R3.07): a client's reason, never a daemon's. The first rule
     /// that blocks is in the error's `hint`.

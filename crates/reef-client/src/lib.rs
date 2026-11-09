@@ -1942,6 +1942,18 @@ impl Client {
             .await
     }
 
+    /// `PolicyService.SimulatePolicy` (R3.08): one page of a proposed
+    /// policy evaluated over recent landings, beside a baseline.
+    pub async fn simulate_policy(
+        &self,
+        request: v1::SimulatePolicyRequest,
+    ) -> Result<v1::SimulatePolicyResponse, ClientError> {
+        let mut client =
+            PolicyServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("SimulatePolicy", client.simulate_policy(request))
+            .await
+    }
+
     fn provenance(&self) -> ProvenanceServiceClient<Svc> {
         ProvenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }

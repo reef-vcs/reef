@@ -9,13 +9,14 @@ reef policy init                      # a starter reef-policy.toml in this direc
 reef policy check                     # its keys, references, patterns and CEL, with no daemon
 reef policy eval                      # the policy on trunk() over @: allow, block, or why not
 reef policy eval -r @- --require-allow    # exit 5 unless allowed
+reef policy simulate --limit 50       # what this file would have blocked of the last 50 landings
 ```
 
 ## Where the policy comes from
 
 A change is never judged by its own policy.
 
-- **The policy in force is the one on the destination's tree**: `trunk()` by default (`main`, `origin/HEAD`'s branch, `master` or `trunk`), the branch it lands onto once R3.13 lands changes. `reef policy eval --policy-revision REV` reads another revision's, and `--policy-file FILE` evaluates a file's text, for trying a policy out (R3.08's simulation builds on that).
+- **The policy in force is the one on the destination's tree**: `trunk()` by default (`main`, `origin/HEAD`'s branch, `master` or `trunk`), the branch it lands onto once R3.13 lands changes. `reef policy eval --policy-revision REV` reads another revision's, and `--policy-file FILE` evaluates a file's text, for trying a policy out; `reef policy simulate` tries one over recent landings ([Simulating a policy](#simulating-a-policy)).
 - **A change to `reef-policy.toml` or `reef-checks.toml` needs the owners' sign-off.** The built-in rule `builtin:owners` applies whenever a change touches either file, at the tree's root, and needs `[owners]`' sign-off, as a `[[signoff]]` area would. It cannot be removed: a policy that a change could switch off for itself would be no policy. `reef-checks.toml` is included because it declares what the reference executor runs for a check ([executor.md](executor.md)), so a change to it changes how a tree is judged.
 - **A change's own new policy must load.** `builtin:policy-file` applies when a change touches `reef-policy.toml` and keeps it: the new file must parse and pass the static check, so the destination never receives a policy that blocks everything. Deleting the file is allowed, with the owners' sign-off.
 - **No file is `no_policy`**, and a file that does not load is `invalid_policy`, with every problem it has. Neither lets anything land automatically.
@@ -208,6 +209,34 @@ An evaluation waits its turn behind at most three others in one daemon. An expre
 Every rule is evaluated and reported, so a blocked change sees every reason at once: the built-in rules first (`builtin:input`, the input was within its limits; `builtin:conflicts`, the change's tree has no conflict; `builtin:policy-file`; `builtin:owners`), then the file's in file order. A rule result has its `status` (`satisfied`, `unsatisfied`, `not_applicable`, `error`), a `message`, the touched `paths` it is about (at most 20, and `paths_total`), the `missing` and `failed` evidence (each `{kind, target, attestors, evidence_ids}`), the `signoff` it needs and has, and the `evidence_ids` that satisfied it. **Everything fails closed**: a rule that errors blocks, and nothing means "allow because the policy could not tell". `reef schema policy evaluation` prints the shape.
 
 **Conflict tiers.** `[conflicts]` and `[[conflicts.rule]]` are not part of a change's evaluation. For a conflict, the first `[[conflicts.rule]]` whose `paths` match one of the conflict's paths (or that names none) and whose `when` holds gives the tier and attempt cap; else `[conflicts]` does (`approve` and 3 without the table). A `when` that errors is the error, which R3.28 treats as the strictest tier, `ask`. `reef policy check --input` with `{"conflict": {...}}` prints the tier.
+
+## Simulating a policy
+
+Before a policy change lands, `reef policy simulate` shows what it would have done to recent history: it evaluates a proposed policy over recent landings, beside the policy in force, and reports which landings it would have blocked and why ([ADR 0062](adr/0062-policy-simulation.md)).
+
+```sh
+reef policy simulate                                  # ./reef-policy.toml over the newest 20 landings
+reef policy simulate --policy-revision @ --limit 200  # the policy a change proposes, over 200
+reef policy simulate -r 'trunk()~30..trunk()' --all   # every landing of a window, allowed ones too
+reef policy simulate --no-baseline -o json            # the proposed policy's decisions alone
+```
+
+- **The proposed policy** is `./reef-policy.toml` by default, read by the CLI and sent as text; `--policy-file FILE` names another, and `--policy-revision REV` reads the one at a revision, such as a change that edits it. A proposed policy that does not load is an error (exit 2) listing every problem, as `reef policy check` lists them; nothing is evaluated.
+- **A landing**, until the landing service records landings (R3.13), is a commit that reached the destination: every ancestor of `trunk()` but merges and the root, newest first (`::trunk() ~ root() ~ merges()`), each judged as its own change exactly as `reef policy eval -r <commit>` judges it, with the evidence on its tree and its provenance as they are now. A merge is left out because what R3.07 judges of it is its diff against its merged parents, its conflict resolution; the commits it merged are in the window. `-r REVSET` names any other window: `-r 'first_ancestors(trunk(), 50)'` for the first-parent line, `-r 'ancestors(trunk()) & committer_date(after:"2 weeks ago")'` by time. Once R3.13 records landings, with the evidence they used, they replace this default.
+- **The baseline** is the policy at `trunk()` (`--baseline-revision REV` for another, `--no-baseline` for none), the same for every landing, so the report says what the proposed change to the policy changes. Each landing's outcome compares the two decisions, where blocked means anything but `allow`:
+
+  | Outcome | Proposed policy | Baseline |
+  | --- | --- | --- |
+  | `newly_blocked` | blocks | allows |
+  | `still_blocked` | blocks | blocks, or does not load |
+  | `newly_allowed` | allows | blocks, or does not load |
+  | `still_allowed` | allows | allows |
+  | `blocked`, `allowed` | blocks, allows | no policy, or `--no-baseline`: nothing to compare with |
+
+  The landings in the window did land; a baseline with no policy judged none of them, so it compares with nothing rather than "blocking" them all.
+- **Missing evidence on history.** Each blocked landing lists its unmet rules, and `missing_evidence_only` marks a landing blocked only because evidence a `[[require]]` needs is missing (no trusted object at all, not a trusted failure). History usually lacks evidence: evidence binds to a tree, a forge's squash merge makes a new tree that no check ran on, and evidence on an old trunk commit expires after `[evidence] retention` ([evidence.md](evidence.md#retention)). So the summary counts those landings apart, and the other reasons (limits, forbidden paths, sign-offs, rules, failed evidence) are what a simulation over history tells you. The policy runs as written; nothing pretends the evidence was there, so each decision is the one `reef policy eval` would give. Identity status is judged at each object's witness time, as always, so a key revoked since with an earlier `--since` no longer counts.
+- **Bounds.** The daemon answers a page at a time (`PolicyService.SimulatePolicy`, a READ call) and the CLI follows pages up to `--limit` landings (20 by default, at most 1,000). A page holds at most 100 landings (20 by default) and ends early after the landing whose evaluations, proposed and baseline, take its summed cost past 100,000,000 (twice one evaluation's bound), after the landing that takes the paths its landings touch past 200,000 or the evidence and provenance rows it reads past 50,000, or before its landings pass 3 MiB encoded. A landing too large for a page alone is `trimmed`: its full evaluations, and if need be its unmet rules' paths, are left out. A daemon reads at most two pages at once, each evaluation takes one of its four evaluation turns in turn, and later pages read the operation the first page read.
+- **Output.** Text lists the landings the proposed policy blocks (`--all`: every landing) with each unmet rule's reason, then a summary ("20 landings: 7 would have been blocked (3 newly, 4 also by the baseline; 5 only for missing evidence); 13 allowed") and how many landings each rule blocked. JSON has every landing with both decisions, the outcome, the unmet rules and the cost, and `truncated` when `--limit` stopped short; `--evaluations` adds each landing's full evaluations. It exits 0 whatever it reports.
 
 ## Recipes
 

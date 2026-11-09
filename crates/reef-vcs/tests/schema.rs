@@ -532,6 +532,24 @@ async fn outputs_match_their_schemas() {
             ],
         )
         .await;
+    // R3.08: the same file simulated over `@` and its parent, beside
+    // `@`'s own policy.
+    script
+        .both(
+            &a_dir,
+            &[
+                "policy",
+                "simulate",
+                "--policy-file",
+                policy_file.to_str().unwrap(),
+                "-r",
+                "::@ ~ root()",
+                "--baseline-revision",
+                "@",
+                "--evaluations",
+            ],
+        )
+        .await;
     // R3.05: a job, deduplicated, listed, shown and cancelled.
     let submitted = script
         .json(

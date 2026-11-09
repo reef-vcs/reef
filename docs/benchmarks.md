@@ -698,3 +698,11 @@ cargo nextest run --release -p reef-executor --test executor --run-ignored ignor
 cargo bench -p reef-policy --bench policy
 cargo nextest run -p reef-daemon --test policy --success-output immediate -E 'test(evaluate)'
 ```
+
+## Policy simulation (R3.08)
+
+`SimulatePolicy` ([ADR 0062](adr/0062-policy-simulation.md), [docs/policy.md](policy.md#simulating-a-policy)) reads each landing's input as `EvaluatePolicy` does and evaluates it twice, under the proposed policy and the baseline, so its cost is about one `EvaluatePolicy` per landing plus the second evaluation. `tests/policy.rs`'s `simulate_over_landings` prints the median of five simulations of its eight landings (the proposed policy has `[[require]]`, `[limits]`, `[[forbid]]` and a `[[rule]]`; the baseline one `[[require]]`), over the socket with a warm cache: **16 ms in a debug build on the M2 Max** (2026-11-08), about 2 ms a landing. At that rate the CLI's default 20 landings take well under the brief's one second, and `--limit 1000` ten pages of a few seconds. Trend data; none is a gate. No existing path changed: `EvaluatePolicy` reads and evaluates through the same functions as before.
+
+```sh
+cargo nextest run -p reef-daemon --test policy --success-output immediate -E 'test(simulate_over_landings)'
+```

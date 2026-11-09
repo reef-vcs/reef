@@ -316,7 +316,7 @@ GitHub's interface is organized around commits, branches, and pull requests beca
 
 **Audit and explain.** For any line: why it exists, which task, which agent, which instruction, which evidence landed it. For any symbol: every change that touched it, filtered by agent, model, or time. Two history views, the curated landed history and the raw operation log, with a timeline to scrub and revert from.
 
-**Operate the fleet.** A dashboard of proposals in flight, workspaces with owner, lease, and disk, the landing queue with batches and bisects in progress, the conflict queue, and which agent is on which change. Policy has an editor with simulation that shows which recent landings a proposed rule would have blocked.
+**Operate the fleet.** A dashboard of proposals in flight, workspaces with owner, lease, and disk, the landing queue with batches and bisects in progress, the conflict queue, and which agent is on which change. Policy has an editor with simulation that shows which recent landings a proposed rule would have blocked ([docs/policy.md](policy.md#simulating-a-policy)).
 
 ### What shrinks or disappears
 
