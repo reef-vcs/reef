@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use reef_api::v1::landing_service_server::LandingService;
 use reef_api::v1::{
-    self, GetLandingRequest, GetLandingResponse, LandChangeRequest, LandChangeResponse,
+    self, GetBatchRequest, GetBatchResponse, GetLandingRequest, GetLandingResponse,
+    LandChangeRequest, LandChangeResponse, ListBatchesRequest, ListBatchesResponse,
     ListLandingsRequest, ListLandingsResponse, OperationKind,
 };
 use tonic::{Request, Response, Status};
@@ -18,10 +19,11 @@ use super::reading::{bad_token, snapshot_first, target, uses_working_copy};
 use super::written_operation;
 use crate::daemon::AppState;
 use crate::error::status;
-use crate::landing::messages::{landing_message, outcome_of};
+use crate::landing::messages::{batch_message, landing_message, outcome_of};
 use crate::landing::{LandRequest, LandingError};
 
 const LIST_LANDINGS: &str = "/reef.api.v1.LandingService/ListLandings";
+const LIST_BATCHES: &str = "/reef.api.v1.LandingService/ListBatches";
 
 /// Serves `LandingService`.
 #[derive(Debug)]
@@ -260,6 +262,102 @@ impl LandingService for LandingHandler {
                 .iter()
                 .map(|landing| landing_message(landing, false))
                 .collect::<Vec<v1::Landing>>(),
+            next_page_token,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo))]
+    async fn get_batch(
+        &self,
+        request: Request<GetBatchRequest>,
+    ) -> Result<Response<GetBatchResponse>, Status> {
+        let request = request.into_inner();
+        let state = &self.state;
+        let id = request.id.trim();
+        let change = request.change.trim();
+        if id.is_empty() == change.is_empty() {
+            return Err(status(LandingError::Selector));
+        }
+        let target = target(state, &request.repo, "")?;
+        let found = if id.is_empty() {
+            let prefix = super::operations::change_prefix(change).ok_or_else(|| {
+                status(super::operations::InvalidChangeFilter {
+                    change: change.to_owned(),
+                })
+            })?;
+            state
+                .db
+                .latest_batch_of(target.repo.id, &prefix)
+                .map_err(status)?
+        } else {
+            state.db.batch(target.repo.id, id).map_err(status)?
+        };
+        let Some(batch) = found else {
+            let what = if id.is_empty() { change } else { id };
+            return Err(status(LandingError::BatchNotFound(what.to_owned())));
+        };
+        Ok(Response::new(GetBatchResponse {
+            batch: Some(batch_message(&batch)),
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo))]
+    async fn list_batches(
+        &self,
+        request: Request<ListBatchesRequest>,
+    ) -> Result<Response<ListBatchesResponse>, Status> {
+        let request = request.into_inner();
+        let state = &self.state;
+        let page = PageRequest::new(
+            LIST_BATCHES,
+            request.page_size,
+            &request.page_token,
+            &ListBatchesRequest {
+                page_size: 0,
+                page_token: String::new(),
+                ..request.clone()
+            },
+        )
+        .map_err(status)?;
+        let target = target(state, &request.repo, "")?;
+        let filter = crate::db::BatchFilter {
+            destinations: request.destinations.clone(),
+            open_only: request.open_only,
+            finished_after: request
+                .finished_after
+                .as_ref()
+                .map(|after| crate::model::Timestamp(millis(after))),
+        };
+        let cursor = match page.cursor() {
+            None => None,
+            Some(text) => {
+                let (at, id) = text.split_once(':').ok_or_else(bad_token)?;
+                Some((
+                    crate::model::Timestamp(at.parse::<i64>().map_err(|_| bad_token())?),
+                    id.to_owned(),
+                ))
+            }
+        };
+        let size = page.size();
+        let mut rows = state
+            .db
+            .batch_page(
+                target.repo.id,
+                &filter,
+                cursor.as_ref().map(|(at, id)| (*at, id.as_str())),
+                size + 1,
+            )
+            .map_err(status)?;
+        let more = rows.len() > size;
+        rows.truncate(size);
+        let next_page_token = match (more, rows.last()) {
+            (true, Some(last)) => {
+                page.token_at(&format!("{}:{}", last.row.created_at.0, last.row.id), "")
+            }
+            _ => String::new(),
+        };
+        Ok(Response::new(ListBatchesResponse {
+            batches: rows.iter().map(batch_message).collect(),
             next_page_token,
         }))
     }

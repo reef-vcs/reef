@@ -695,6 +695,14 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "an agent runs `reef landing list`; tools/list is at its budget (#116)",
     ),
     (
+        "/reef.api.v1.LandingService/GetBatch",
+        "an agent runs `reef landing batch`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.LandingService/ListBatches",
+        "an agent runs `reef landing batches`; tools/list is at its budget (#116)",
+    ),
+    (
         "/reef.api.v1.PolicyService/SimulatePolicy",
         "a policy author runs `reef policy simulate`; the policy editor renders it; tools/list is at its budget (#116)",
     ),

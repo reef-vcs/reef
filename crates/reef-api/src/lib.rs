@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 25;
+pub const API_REVISION: u32 = 26;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -118,6 +118,11 @@ pub const API_DIGESTS: &[&str] = &[
     // `Identity.oidc_matches`, `Authority.kind`, `CreateIdentityRequest.oidc`,
     // `ListSessionKeysRequest.issuer_kind`.
     "8e2d830087b026c18b01fffbc9eaaec35441cf73e0fa1fb97fb409329fa05096",
+    // R3.14: `LandingService.GetBatch` and `ListBatches`, `LandingBatch`,
+    // `LANDING_REASON_CHECKS` and `UNAVAILABLE`, `Landing.batch_id`,
+    // `LandedChange`'s tested tree, commit and evaluation,
+    // `OPERATION_KIND_BATCH` and `Operation.batch_id`.
+    "d242e8603cb2e2d038d087a1e8931fe4f36e528519092ec895c17150e39ea7cd",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -697,6 +702,9 @@ pub mod error {
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";
+    /// `GetBatch` naming no batch, or a change that was in none (R3.14).
+    /// Metadata: `id` or `change_id`.
+    pub const BATCH_NOT_FOUND: &str = "BATCH_NOT_FOUND";
     /// `GetConflict` of a revision whose tree has no conflict (R3.25).
     /// Metadata: `commit_id`.
     pub const NOT_CONFLICTED: &str = "NOT_CONFLICTED";

@@ -13,6 +13,16 @@
 // PROPOSED with a reason. Every attempt is a record that keeps its
 // evaluation, and the evidence a landed change's rules used is kept for
 // good.
+//
+// Every landing runs in a batch (R3.14, ADR 0067): queued changes for one
+// destination, rebased one on another onto its head. Under the
+// destination policy's `[landing] checks = "batch"` (the default), each
+// change's `[[require]]` rules are judged again on the batch's tested
+// tree, whose evidence counts for every change at or below it; the
+// executor is asked only for the pairs missing there, on a trial commit
+// carrying that tree. A failing tree is bisected over the batch's
+// prefixes: the passing prefix lands, the first failing change returns to
+// PROPOSED with reason CHECKS, and the rest stay queued.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -68,6 +78,26 @@ service LandingService {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // One batch (R3.14), by id or as a change's latest, with its members and
+  // trials.
+  //
+  // Errors: NOT_FOUND with reason BATCH_NOT_FOUND (metadata `id` or
+  // `change_id`); INVALID_ARGUMENT when both or neither of `id` and
+  // `change` are set; the repository reasons.
+  rpc GetBatch(GetBatchRequest) returns (GetBatchResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // A repository's batches, newest first, filtered and paged.
+  //
+  // Errors: INVALID_PAGE_TOKEN; a negative `page_size` is INVALID_ARGUMENT;
+  // the repository reasons.
+  rpc ListBatches(ListBatchesRequest) returns (ListBatchesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 // How a landing ended, or that it has not yet.
@@ -105,6 +135,14 @@ enum LandingReason {
   LANDING_REASON_BUSY = 6;
   // An internal error; `message` says what.
   LANDING_REASON_FAILED = 7;
+  // The change was found to fail required checks on its batch's tested
+  // tree (R3.14): the tree with it failed where the tree before it passed.
+  // `tested_evaluation` names the failed evidence.
+  LANDING_REASON_CHECKS = 8;
+  // No verdict could be had on the batch's tested tree: the executor jobs
+  // asked for its missing evidence ended without one, or nobody claimed
+  // them (R3.14). Not the change's fault; `message` names the jobs.
+  LANDING_REASON_UNAVAILABLE = 9;
 }
 
 // One change of a landing.
@@ -136,6 +174,17 @@ message LandedChange {
   // The evidence a landed change's satisfied rules used, kept for good and
   // linked to the change.
   repeated string pinned_evidence_ids = 12;
+  // The tree whose evidence its `[[require]]` rules were judged on in its
+  // batch (R3.14); empty when none was (`checks = "proposal"`).
+  string tested_tree_id = 13;
+  // The trial commit carrying that tree; empty when none was written.
+  string tested_commit_id = 14;
+  // The evaluation over the tested tree's evidence, of which only the
+  // `[[require]]` rules count; unset when there was none. ListLandings
+  // sends only its decision and source.
+  PolicyEvaluation tested_evaluation = 15;
+  // Its position in the batch, from 1; 0 when it was never in one.
+  uint32 batch_position = 16;
 }
 
 // One attempt to land.
@@ -156,8 +205,8 @@ message Landing {
   LandingReason reason = 7;
   // More about the reason; untrusted text for a policy's messages.
   string message = 8;
-  // The changes, in landing order: one per landing until stacks and
-  // batches.
+  // The changes, in landing order: one per landing until stacks (R3.10).
+  // A batch lands several landings in one operation.
   repeated LandedChange changes = 9;
   // How many identical requests a BLOCKED landing stands for.
   uint32 attempts = 10;
@@ -181,6 +230,156 @@ message Landing {
   google.protobuf.Timestamp created_at = 18;
   // When it finished; unset while QUEUED.
   google.protobuf.Timestamp finished_at = 19;
+  // The batch it is, or was last, in (R3.14); empty when none.
+  string batch_id = 20;
+}
+
+// Where a batch is (R3.14).
+enum BatchState {
+  // Not set; in a filter, any.
+  BATCH_STATE_UNSPECIFIED = 0;
+  // Its head tree's checks are requested or running.
+  BATCH_STATE_TESTING = 1;
+  // Its head failed; a smaller prefix is being tested.
+  BATCH_STATE_BISECTING = 2;
+  // It ended; `outcome` says how.
+  BATCH_STATE_FINISHED = 3;
+}
+
+// How a batch ended (R3.14).
+enum BatchOutcome {
+  // Not finished.
+  BATCH_OUTCOME_UNSPECIFIED = 0;
+  // Every member landed.
+  BATCH_OUTCOME_LANDED = 1;
+  // A prefix landed (possibly none), the culprit returned to PROPOSED with
+  // reason CHECKS, and the members after it stayed queued.
+  BATCH_OUTCOME_SPLIT = 2;
+  // No verdict could be had; the tested members returned to PROPOSED with
+  // reason UNAVAILABLE.
+  BATCH_OUTCOME_UNAVAILABLE = 3;
+  // The destination moved or a member left; the members still queued form
+  // the next batch.
+  BATCH_OUTCOME_REFORMED = 4;
+  // The daemon stopped; the next batch forms from the queue.
+  BATCH_OUTCOME_INTERRUPTED = 5;
+  // The destination moved under three batches in a row; the members
+  // returned to PROPOSED with reason BUSY.
+  BATCH_OUTCOME_BUSY = 6;
+}
+
+// What became of one member of a batch (R3.14).
+enum BatchMemberResult {
+  // Not decided yet.
+  BATCH_MEMBER_RESULT_UNSPECIFIED = 0;
+  // It landed.
+  BATCH_MEMBER_RESULT_LANDED = 1;
+  // It was the first failing change; returned with reason CHECKS.
+  BATCH_MEMBER_RESULT_CULPRIT = 2;
+  // It stayed queued for the next batch.
+  BATCH_MEMBER_RESULT_REQUEUED = 3;
+  // It returned to PROPOSED for another reason (its landing says which).
+  BATCH_MEMBER_RESULT_DEQUEUED = 4;
+  // It left the queue: withdrawn, declined, superseded or landed by hand.
+  BATCH_MEMBER_RESULT_LEFT = 5;
+  // It returned to PROPOSED with reason UNAVAILABLE.
+  BATCH_MEMBER_RESULT_UNAVAILABLE = 6;
+}
+
+// How a trial ended (R3.14).
+enum TrialResult {
+  // Not finished.
+  TRIAL_RESULT_UNSPECIFIED = 0;
+  // Every included member's required evidence passed on the tree.
+  TRIAL_RESULT_PASSED = 1;
+  // Some required evidence's newest trusted verdict on the tree is a fail.
+  TRIAL_RESULT_FAILED = 2;
+  // The jobs ended with evidence still missing.
+  TRIAL_RESULT_UNAVAILABLE = 3;
+  // The batch re-formed or ended first.
+  TRIAL_RESULT_CANCELLED = 4;
+}
+
+// One member of a batch.
+message BatchMember {
+  // Its position in the chain, from 1.
+  uint32 position = 1;
+  // Its landing.
+  string landing_id = 2;
+  // The change, in hex.
+  string change_id = 3;
+  // The commit it was queued at.
+  string queued_commit_id = 4;
+  // The chain's tree with it applied: the destination and every member up
+  // to it.
+  string planned_tree_id = 5;
+  // What became of it.
+  BatchMemberResult result = 6;
+}
+
+// One tested prefix of a batch.
+message BatchTrial {
+  // How many members the tested tree has, from the first.
+  uint32 prefix = 1;
+  // The tested tree.
+  string tree_id = 2;
+  // The trial commit carrying it; empty when no executor run was needed.
+  string commit_id = 3;
+  // The operation that wrote the trial commit.
+  string operation_id = 4;
+  // How it ended; unset while open.
+  TrialResult result = 5;
+  // The executor jobs asked for the tree's missing evidence.
+  repeated string job_ids = 6;
+  // For a FAILED trial, the needs whose newest verdict is a fail; for an
+  // UNAVAILABLE one, those still missing. At most 20.
+  repeated PolicyEvidenceNeed needs = 7;
+  // How many there are.
+  uint32 needs_total = 8;
+  // How many times its jobs were asked for.
+  uint32 attempts = 9;
+  // When it started.
+  google.protobuf.Timestamp created_at = 10;
+  // When it ended; unset while open.
+  google.protobuf.Timestamp finished_at = 11;
+}
+
+// One attempt to land several queued changes together (R3.14).
+message LandingBatch {
+  // `bat_` and 16 hex digits.
+  string id = 1;
+  // The repository.
+  string repo_id = 2;
+  // The destination bookmark.
+  string destination = 3;
+  // Its head when the batch formed: the chain's base.
+  string base_commit_id = 4;
+  // Where it is.
+  BatchState state = 5;
+  // How it ended.
+  BatchOutcome outcome = 6;
+  // The members, in chain order.
+  repeated BatchMember members = 7;
+  // The tested prefixes, in the order they were tested.
+  repeated BatchTrial trials = 8;
+  // The culprit's position, for SPLIT; 0 otherwise.
+  uint32 culprit_position = 9;
+  // How many members landed.
+  uint32 landed_count = 10;
+  // The destination policy's `[landing] checks`: `batch` or `proposal`.
+  string checks = 11;
+  // The commit whose policy formed the batch.
+  string policy_commit_id = 12;
+  // The operation that landed members; empty when none landed.
+  string operation_id = 13;
+  // Whether GC dropped `operation_id`'s operation, past its window.
+  bool operation_collected = 14;
+  // More about how it ended.
+  string message = 15;
+  // When it formed.
+  google.protobuf.Timestamp created_at = 16;
+  // When it finished; unset while open.
+  google.protobuf.Timestamp finished_at = 17;
 }
 
 // The change to land.
@@ -260,6 +459,46 @@ message ListLandingsRequest {
 message ListLandingsResponse {
   // Newest first.
   repeated Landing landings = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+}
+
+// The batch to read.
+message GetBatchRequest {
+  // The repository, by id or path.
+  string repo = 1;
+  // A batch id. Set this or `change`.
+  string id = 2;
+  // A change id (hex, or a unique prefix): the latest batch it was in.
+  string change = 3;
+}
+
+// One batch.
+message GetBatchResponse {
+  // The batch.
+  LandingBatch batch = 1;
+}
+
+// Which batches to list.
+message ListBatchesRequest {
+  // The repository, by id or path.
+  string repo = 1;
+  // Destination bookmarks; empty for all.
+  repeated string destinations = 2;
+  // Only batches not yet finished.
+  bool open_only = 3;
+  // Only batches that finished after this (open ones are always listed).
+  google.protobuf.Timestamp finished_after = 4;
+  // At most this many per page, up to 200; 0 for 50.
+  int32 page_size = 5;
+  // A previous response's `next_page_token`.
+  string page_token = 6;
+}
+
+// A page of batches.
+message ListBatchesResponse {
+  // Newest first.
+  repeated LandingBatch batches = 1;
   // The next page's token; empty on the last page.
   string next_page_token = 2;
 }

@@ -66,6 +66,8 @@ pub struct LandingRow {
     pub created_at: Timestamp,
     /// When it finished.
     pub finished_at: Option<Timestamp>,
+    /// The batch it is, or was last, in (R3.14).
+    pub batch_id: Option<String>,
 }
 
 /// One change of a landing, as `landing_changes` holds it.
@@ -95,6 +97,15 @@ pub struct LandingChangeRow {
     pub evaluation: Option<String>,
     /// The SHA-256 of `evaluation`, for deduplicating blocked attempts.
     pub evaluation_sha256: Option<String>,
+    /// The tree its `[[require]]` rules were judged on in its batch
+    /// (R3.14).
+    pub tested_tree: Option<String>,
+    /// The trial commit carrying it.
+    pub tested_commit: Option<String>,
+    /// The evaluation over the tested tree's evidence, as JSON.
+    pub tested_evaluation: Option<String>,
+    /// Its position in its batch, from 1.
+    pub batch_position: Option<u32>,
 }
 
 /// A landing and its changes.
@@ -124,10 +135,11 @@ pub struct LandingFilter {
 const COLUMNS: &str = "repo_id, id, destination, destination_before, destination_after, outcome,
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
-     remote_token_name, created_at, finished_at";
+     remote_token_name, created_at, finished_at, batch_id";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
-     landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256";
+     landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
+     tested_tree, tested_commit, tested_evaluation, batch_position";
 
 fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
     Ok(LandingRow {
@@ -153,6 +165,7 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
         remote_token_name: row.get(19)?,
         created_at: row.get(20)?,
         finished_at: row.get(21)?,
+        batch_id: row.get(22)?,
     })
 }
 
@@ -170,6 +183,12 @@ fn change_from_row(row: &Row<'_>) -> rusqlite::Result<LandingChangeRow> {
         decision: row.get(9)?,
         evaluation: row.get(10)?,
         evaluation_sha256: row.get(11)?,
+        tested_tree: row.get(12)?,
+        tested_commit: row.get(13)?,
+        tested_evaluation: row.get(14)?,
+        batch_position: row
+            .get::<_, Option<i64>>(15)?
+            .and_then(|position| u32::try_from(position).ok()),
     })
 }
 
@@ -178,7 +197,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23)"
         ),
         params![
             row.repo_id,
@@ -203,6 +222,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.remote_token_name,
             row.created_at,
             row.finished_at,
+            row.batch_id,
         ],
     )?;
     Ok(())
@@ -222,7 +242,8 @@ fn write_changes_in(
         tx.execute(
             &format!(
                 "INSERT INTO landing_changes(repo_id, landing_id, {CHANGE_COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18)"
             ),
             params![
                 repo,
@@ -239,6 +260,10 @@ fn write_changes_in(
                 change.decision,
                 change.evaluation,
                 change.evaluation_sha256,
+                change.tested_tree,
+                change.tested_commit,
+                change.tested_evaluation,
+                change.batch_position.map(i64::from),
             ],
         )?;
     }

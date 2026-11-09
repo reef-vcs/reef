@@ -18,6 +18,7 @@
 //! `land_batch` takes a list so that stacks (R3.10) and batches (R3.14)
 //! widen it; this ticket lands one change per landing.
 
+mod batch;
 pub mod messages;
 mod worker;
 
@@ -45,6 +46,7 @@ use crate::repo::RepoThreadError;
 use crate::service::policy as policy_input;
 use crate::workspace::ManagerError;
 
+pub use batch::{AGENT as BATCH_AGENT, BATCH_PRIORITY, BATCH_QUEUE_TIMEOUT, MAX_TRIAL_ATTEMPTS};
 pub use worker::start;
 
 /// The most changes a repository has queued at once.
@@ -131,6 +133,11 @@ pub enum Reason {
     Busy,
     /// An internal error.
     Failed,
+    /// The change failed required checks on its batch's tested tree
+    /// (R3.14).
+    Checks,
+    /// No verdict could be had on the batch's tested tree (R3.14).
+    Unavailable,
 }
 
 impl Reason {
@@ -144,6 +151,8 @@ impl Reason {
             Reason::Destination => "destination",
             Reason::Busy => "busy",
             Reason::Failed => "failed",
+            Reason::Checks => "checks",
+            Reason::Unavailable => "unavailable",
         }
     }
 
@@ -157,6 +166,8 @@ impl Reason {
             Reason::Destination,
             Reason::Busy,
             Reason::Failed,
+            Reason::Checks,
+            Reason::Unavailable,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == text)
@@ -203,6 +214,9 @@ pub enum LandingError {
     /// No landing has the id, or the change has none.
     #[error("no landing {0}")]
     NotFound(String),
+    /// No batch has the id, or the change was in none (R3.14).
+    #[error("no batch {0}")]
+    BatchNotFound(String),
     /// Both or neither of an id and a change.
     #[error("name a landing id or a change, not both")]
     Selector,
@@ -242,7 +256,7 @@ impl Classify for LandingError {
             | Self::DestinationConflicted(_) => ErrorKind::Conflict,
             Self::QueueFull => ErrorKind::Unavailable,
             Self::InvalidWait | Self::Selector => ErrorKind::InvalidArgument,
-            Self::NotFound(_) => ErrorKind::NotFound,
+            Self::NotFound(_) | Self::BatchNotFound(_) => ErrorKind::NotFound,
             Self::Revision(error) => error.kind(),
             Self::Rewrite(error) => error.kind(),
             Self::Lifecycle(error) => error.kind(),
@@ -304,6 +318,10 @@ impl Advise for LandingError {
                 "List the repository's landings.",
                 ["reef", "landing", "list"],
             )),
+            Self::BatchNotFound(_) => Some(Advice::run(
+                "List the repository's batches.",
+                ["reef", "landing", "batches"],
+            )),
             _ => None,
         }
     }
@@ -349,6 +367,17 @@ impl LandingError {
             Self::InvalidWait => (
                 reason::INVALID_WAIT,
                 vec![("max", MAX_WAIT.as_millis().to_string())],
+            ),
+            Self::BatchNotFound(what) => (
+                reason::BATCH_NOT_FOUND,
+                vec![(
+                    if what.starts_with("bat_") {
+                        "id"
+                    } else {
+                        "change_id"
+                    },
+                    what.clone(),
+                )],
             ),
             Self::NotFound(what) => (
                 reason::LANDING_NOT_FOUND,
@@ -432,6 +461,19 @@ pub(crate) struct Judged {
     pub(crate) tree: Option<String>,
     pub(crate) evaluation: Evaluation,
     pub(crate) policy: PolicyUsed,
+    /// The change's touched paths (R3.14: `[landing] alone`).
+    pub(crate) paths: Vec<String>,
+}
+
+/// What a judgment sees beyond the change itself (R3.14): the `landing`
+/// input from a batch's chain instead of the change's own preview, the
+/// `batch` input, and the tree whose evidence the input carries instead of
+/// the change's own (a batch's tested tree).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct JudgeContext {
+    pub(crate) landing: Option<reef_policy::input::Landing>,
+    pub(crate) batch: reef_policy::Batch,
+    pub(crate) evidence_tree: Option<String>,
 }
 
 /// What judging a change found.
@@ -474,11 +516,21 @@ struct Read {
 
 /// Judges `target`: the preview at the destination's head, then the policy
 /// there over the queued commit (R3.13). Reads only.
-#[expect(clippy::too_many_lines, reason = "the reads, then the evaluation")]
 pub(crate) async fn judge(
     state: &AppState,
     repo: RepoId,
     target: &LandTarget,
+) -> Result<Verdict, LandingError> {
+    judge_with(state, repo, target, &JudgeContext::default()).await
+}
+
+/// [`judge`], seeing what `context` says besides the change (R3.14).
+#[expect(clippy::too_many_lines, reason = "the reads, then the evaluation")]
+pub(crate) async fn judge_with(
+    state: &AppState,
+    repo: RepoId,
+    target: &LandTarget,
+    context: &JudgeContext,
 ) -> Result<Verdict, LandingError> {
     let handle = state.manager.handle(repo)?;
     let read = {
@@ -544,7 +596,9 @@ pub(crate) async fn judge(
     LifecycleState::Queued
         .as_str()
         .clone_into(&mut change.change.state);
-    let evidence = match &change.tree_id {
+    let paths = change.change.paths.clone();
+    let evidence_tree = context.evidence_tree.as_ref().or(change.tree_id.as_ref());
+    let evidence = match evidence_tree {
         Some(tree) => policy_input::read_evidence(state, repo, tree)
             .await
             .map_err(|status| LandingError::Input(status.message().to_owned()))?,
@@ -559,7 +613,11 @@ pub(crate) async fn judge(
             .await
             .map_err(|status| LandingError::Input(status.message().to_owned()))?;
     let tree = change.tree_id.clone();
-    let landing = policy_input::landing_input(&target.bookmark, &preview);
+    let landing = context
+        .landing
+        .clone()
+        .unwrap_or_else(|| policy_input::landing_input(&target.bookmark, &preview));
+    let batch = context.batch.clone();
     let policy_file = read.policy;
     let turn = Arc::clone(&state.policy.turns)
         .acquire_owned()
@@ -579,6 +637,7 @@ pub(crate) async fn judge(
                 provenance_ignored,
                 proposed_policy: proposed_policy(&policies, proposed.as_ref()),
                 landing,
+                batch,
             };
             let mut evaluation = evaluate_file(&policies, policy_file.as_ref(), &input);
             policy_input::reject_invalid(&mut evaluation, &evidence.invalid);
@@ -598,6 +657,7 @@ pub(crate) async fn judge(
         tree,
         evaluation: evaluated,
         policy,
+        paths,
     });
     if judged.evaluation.decision == Decision::Allow {
         return Ok(Verdict::Allow(judged));
@@ -794,6 +854,10 @@ pub(crate) fn change_row(
             .as_deref()
             .map(|json| reef_policy::sha256_hex(json.as_bytes())),
         evaluation,
+        tested_tree: None,
+        tested_commit: None,
+        tested_evaluation: None,
+        batch_position: None,
     }
 }
 
@@ -872,6 +936,7 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         remote_token_name: who.remote.as_ref().map(|(_, name)| name.clone()),
         created_at: Timestamp::now(),
         finished_at: None,
+        batch_id: None,
     }
 }
 

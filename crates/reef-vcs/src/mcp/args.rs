@@ -137,7 +137,7 @@ pub(super) struct GetDiff {
     pub(super) to_revision: Option<String>,
     /// Only these paths, repository-relative or absolute inside the scope.
     pub(super) paths: Option<Vec<String>>,
-    /// `hunks`, `stat` (line counts), `summary` (paths) or `symbols` (changed symbols, call sites) [default: hunks].
+    /// `hunks`, `stat` (line counts), `summary` (paths) or `symbols` (symbols, call sites) [default: hunks].
     pub(super) format: Option<Format>,
     /// Only these symbols' lines.
     pub(super) expand: Option<Vec<String>>,
@@ -244,6 +244,7 @@ pub(super) enum Kind {
     ImportRefs,
     Transition,
     Land,
+    Batch,
     External,
     Other,
 }
@@ -262,6 +263,7 @@ impl From<Kind> for v1::OperationKind {
             Kind::ImportRefs => Self::ImportRefs,
             Kind::Transition => Self::Transition,
             Kind::Land => Self::Land,
+            Kind::Batch => Self::Batch,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
         }
@@ -338,7 +340,7 @@ pub(super) struct WaitForOperations {
     pub(super) agents: Option<Vec<String>>,
     /// Only these operation kinds.
     pub(super) kinds: Option<Vec<Kind>>,
-    /// Wait for operations after this one (id or prefix), such as the last result's last_operation_id [default: the newest now].
+    /// Wait for operations after this one (id or prefix), e.g. the last result's last_operation_id [default: the newest now].
     pub(super) after_operation: Option<String>,
     /// Give up after this many seconds, 0 to check once [default: 30, at most 300].
     pub(super) timeout_seconds: Option<u64>,

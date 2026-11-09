@@ -33,4 +33,22 @@ describe("operationSentence for transitions", () => {
       operationSentence({ kind: OperationKind.LAND, snapshotKind: SnapshotKind.UNSPECIFIED }),
     ).toBe("landed a change");
   });
+
+  it("names a batch's landing and its trials", () => {
+    const transitions = [
+      { from: LifecycleState.QUEUED, to: LifecycleState.LANDED },
+      { from: LifecycleState.QUEUED, to: LifecycleState.LANDED },
+      { from: LifecycleState.QUEUED, to: LifecycleState.LANDED },
+    ] as unknown as NonNullable<Parameters<typeof operationSentence>[0]["transitions"]>;
+    expect(
+      operationSentence({
+        kind: OperationKind.LAND,
+        snapshotKind: SnapshotKind.UNSPECIFIED,
+        transitions,
+      }),
+    ).toBe("landed 3 changes");
+    expect(
+      operationSentence({ kind: OperationKind.BATCH, snapshotKind: SnapshotKind.UNSPECIFIED }),
+    ).toBe("tested a batch of changes");
+  });
 });

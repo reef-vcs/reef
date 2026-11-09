@@ -4,7 +4,7 @@ This document is what an executor author builds against. An executor is a progra
 
 ## 1. Roles
 
-- A **requester** asks for checks on a tree: the landing service (R3.45, R3.14), `reef job submit`, or any client that calls `SubmitJob`.
+- A **requester** asks for checks on a tree: the landing service (R3.45, R3.14), `reef job submit`, or any client that calls `SubmitJob`. The landing service asks for a batch's missing evidence on a trial commit carrying the batch's tree, one job per kind (so an executor that has only some of the kinds can still claim one), at priority 1,000 and with a 15-minute queue timeout, as `reef-landing` ([landing](landing.md#batches)).
 - The **daemon** keeps the queue: it validates requests, leases jobs to executors, checks the evidence they return, and publishes progress. It schedules; it never executes.
 - An **executor** claims jobs, runs whatever it runs for the requested kinds and targets, and returns signed evidence.
 

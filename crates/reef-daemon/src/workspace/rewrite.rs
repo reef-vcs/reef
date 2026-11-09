@@ -39,7 +39,7 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::files;
-use reef_lib::jj::land::LandTarget;
+use reef_lib::jj::land::{LandPlan, LandedMember};
 use reef_lib::jj::lifecycle::TransitionRecord;
 use reef_lib::jj::log::{ChangeInfo, Describer};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
@@ -84,13 +84,16 @@ pub enum Write {
     /// working-copy commit, and move the bookmark, with the landing's
     /// transitions.
     Land {
-        /// What to land.
-        target: LandTarget,
-        /// The bookmark's head the landing was judged against.
-        destination: CommitIdHex,
-        /// The landing id, for `reef.landing`.
-        landing: String,
-        /// The transitions; one with no commit names the landed one.
+        /// What to land: changes in order onto the bookmark's head they
+        /// were judged against, and a batch's trial commits to abandon
+        /// (R3.14).
+        plan: LandPlan,
+        /// The landing id, for `reef.landing`, when one change lands.
+        landing: Option<String>,
+        /// The batch id, for `reef.batch` (R3.14).
+        batch: Option<String>,
+        /// The transitions; one with no commit names its change's landed
+        /// commit.
         transitions: Vec<TransitionRecord>,
     },
     /// Edit files without a workspace (R2.04).
@@ -167,6 +170,8 @@ pub struct Rewritten {
     pub abandoned: Option<CommitIdHex>,
     /// For an undo, the operation reverted, in full.
     pub undone: Option<OperationIdHex>,
+    /// For a land, each change as it landed, in order (R3.14).
+    pub landed: Vec<LandedMember>,
 }
 
 /// What step 1 found.
@@ -183,6 +188,7 @@ struct Written {
     op_id: Option<OperationIdHex>,
     change: Option<ChangeInfo>,
     abandoned: Option<CommitIdHex>,
+    landed: Vec<LandedMember>,
     /// Working copies before and after.
     before: Vec<WorkingCopy>,
     after: Vec<WorkingCopy>,
@@ -338,6 +344,7 @@ impl Manager {
             change: written.change,
             abandoned: written.abandoned,
             undone: planned.undone,
+            landed: written.landed,
         })
     }
 
@@ -698,14 +705,26 @@ async fn plan(
                 undone: None,
             })
         }
-        Write::Land { target, .. } => {
+        Write::Land { plan, .. } => {
             refresh_for_resolve(head, &import_meta(workspace, agent)).await?;
             let repo = head.repo.readonly();
-            let found =
-                rewrite::writable(&repo, target.commit.as_str(), None, &scope(head, jj_name))
-                    .await?;
+            let mut workspaces = Vec::new();
+            for member in &plan.members {
+                let found = rewrite::writable(
+                    &repo,
+                    member.target.commit.as_str(),
+                    None,
+                    &scope(head, jj_name),
+                )
+                .await?;
+                for name in found.workspaces {
+                    if !workspaces.contains(&name) {
+                        workspaces.push(name);
+                    }
+                }
+            }
             Ok(Planned {
-                workspaces: rewrite::descendants_first(&repo, &found.workspaces).await?,
+                workspaces: rewrite::descendants_first(&repo, &workspaces).await?,
                 undone: None,
             })
         }
@@ -871,6 +890,7 @@ async fn commit(
         op_id: None,
         change: None,
         abandoned: None,
+        landed: Vec::new(),
         before,
         after: Vec::new(),
     };
@@ -914,21 +934,33 @@ async fn commit(
             written.op_id = head.repo.revert_operation(&undone, &meta).await?;
         }
         Write::Land {
-            target: land,
-            destination,
+            plan,
             landing,
+            batch,
             transitions,
         } => {
-            meta.description = format!(
-                "{} on {}",
-                oplog::transition_description("land", land.change.as_str()),
-                land.bookmark
-            );
+            meta.description = match (plan.members.as_slice(), batch) {
+                ([one], _) => format!(
+                    "{} on {}",
+                    oplog::transition_description("land", one.target.change.as_str()),
+                    plan.bookmark
+                ),
+                (members, Some(batch)) => format!(
+                    "reef: land {} changes on {} (batch {batch})",
+                    members.len(),
+                    plan.bookmark
+                ),
+                (members, None) => {
+                    format!("reef: land {} changes on {}", members.len(), plan.bookmark)
+                }
+            };
             meta.transitions.clone_from(transitions);
-            meta.landing = Some(landing.clone());
-            let landed = head.repo.land(land, destination, &meta).await?;
-            changed_commit = Some(landed.commit);
+            meta.landing.clone_from(landing);
+            meta.batch.clone_from(batch);
+            let landed = head.repo.land_chain(plan, &meta).await?;
+            changed_commit = landed.members.last().map(|member| member.commit.clone());
             written.op_id = Some(landed.op_id);
+            written.landed = landed.members;
         }
         Write::Edit {
             target: edit_target,

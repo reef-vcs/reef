@@ -41,8 +41,8 @@ pub use conflict::ConflictDecision;
 pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
 };
-pub use format::{Diagnostic, Policy, Tier, VERSION};
-pub use input::{Case, ConflictInput, Input};
+pub use format::{Checks, Diagnostic, LandingSettings, Policy, Tier, VERSION};
+pub use input::{Batch, Case, ConflictInput, Input};
 
 /// Where a tree's policy file is: at its root.
 pub const POLICY_PATH: &str = "reef-policy.toml";
@@ -156,6 +156,17 @@ attestors = ["local"]
 name = "keys"
 paths = ["**/*.pem", "**/id_rsa", "**/id_ed25519"]
 message = "private keys never enter the tree"
+
+# How landings are batched and checked (docs/landing.md). With "batch", the
+# landing service rebases queued changes together and asks an executor
+# (`reef executor run`) for the required evidence on the batch's tree before
+# landing; "proposal" judges each change's own tree only, for a repository
+# whose trusted evidence does not come from executor jobs.
+[landing]
+checks = "batch"
+# batch_max = 8
+# batch_wait = "0s"
+# alone = ["migrations/**"]
 "#;
 
 #[cfg(test)]

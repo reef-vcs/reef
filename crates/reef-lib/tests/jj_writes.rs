@@ -1196,3 +1196,154 @@ async fn preview_and_land() {
     );
     assert_eq!(fx.op(), op, "a refusal writes no operation");
 }
+
+// R3.14: a chain of changes previewed, a trial commit, and the chain landed
+// in one operation.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture through each case")]
+async fn chains_trials_and_land_chain() {
+    use jj_lib::object_id::ObjectId;
+    use reef_lib::jj::land::{self, LandError, LandPlan, LandTarget, PlannedMember};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1\n2\n3\n")], "base").await;
+    let one = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("b", "b")], "one").await;
+    let two = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("c", "c")], "two").await;
+    // Merges onto `base` alone, but conflicts with `two` on `c`.
+    let clash = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("c", "x")],
+        "clash",
+    )
+    .await;
+    let three = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("b", "b"), ("d", "d")],
+        "three",
+    )
+    .await;
+    bookmark(&mut tx, "main", &base);
+    set_wc(&mut tx, "first", &one);
+    set_wc(&mut tx, "last", &three);
+    fx.commit(tx, "setup").await;
+    let target = |commit: &Commit| LandTarget {
+        change: hex_change(commit),
+        commit: hex(commit),
+        bookmark: "main".to_owned(),
+    };
+    let targets = [target(&one), target(&two), target(&clash), target(&three)];
+
+    let chain = land::preview_chain(&fx.head(), "main", &targets)
+        .await
+        .unwrap();
+    assert_eq!(chain.destination, hex(&base));
+    let included: Vec<bool> = chain.members.iter().map(|m| m.included).collect();
+    assert_eq!(included, [true, true, false, true]);
+    assert!(!chain.members[0].rebased, "the first is a fast-forward");
+    assert!(chain.members[1].rebased);
+    assert_eq!(chain.members[2].conflicts, ["c"]);
+    assert!(chain.members[2].tree.is_none());
+    // `three` touched `b`, which `one`, an earlier member, also did.
+    assert_eq!(chain.members[3].overlap, ["b"]);
+    assert_eq!(
+        chain.members[0].tree,
+        one.tree_ids().as_resolved().map(ObjectId::hex)
+    );
+    let head_tree = chain.members[3].tree.clone().unwrap();
+
+    // A trial commit carries the head tree on the destination's head, as a
+    // new change.
+    let mut trial_meta = meta(OpKind::Batch);
+    trial_meta.batch = Some("bat_0123456789abcdef".to_owned());
+    let trial = fx
+        .repo
+        .write_trial(&hex(&base), &head_tree, "reef: batch trial", &trial_meta)
+        .await
+        .unwrap();
+    let trial_commit = fx.get(&trial.commit).await;
+    assert_eq!(trial_commit.parent_ids(), [base.id().clone()]);
+    assert_eq!(
+        trial_commit.tree_ids().as_resolved().map(ObjectId::hex),
+        Some(head_tree.clone())
+    );
+    let attributes = fx.attributes();
+    assert_eq!(attributes.get(ATTR_KIND).map(String::as_str), Some("batch"));
+    assert_eq!(
+        attributes.get(oplog::ATTR_BATCH).map(String::as_str),
+        Some("bat_0123456789abcdef")
+    );
+    assert!(matches!(
+        fx.repo
+            .write_trial(&hex(&base), &"0".repeat(40), "x", &trial_meta)
+            .await
+            .unwrap_err(),
+        LandError::NoTree(_)
+    ));
+
+    let planned = |commit: &Commit, tree: Option<String>| PlannedMember {
+        target: target(commit),
+        tree,
+    };
+    let plan = LandPlan {
+        bookmark: "main".to_owned(),
+        destination: hex(&base),
+        members: vec![
+            planned(&one, chain.members[0].tree.clone()),
+            planned(&two, chain.members[1].tree.clone()),
+            planned(&three, Some(head_tree.clone())),
+        ],
+        trials: vec![trial.commit.clone()],
+    };
+    // A forged planned tree is refused, and nothing is written.
+    let mut forged = plan.clone();
+    forged.members[1].tree = Some(base.tree_ids().as_resolved().unwrap().hex());
+    let op = fx.op();
+    let refused = fx
+        .repo
+        .land_chain(&forged, &meta(OpKind::Land))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, LandError::PlanMismatch { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(fx.op(), op);
+
+    let landed = fx
+        .repo
+        .land_chain(&plan, &meta(OpKind::Land))
+        .await
+        .unwrap();
+    assert_eq!(landed.members.len(), 3);
+    assert_eq!(landed.members[0].commit, hex(&one));
+    let last = fx.get(&landed.members[2].commit).await;
+    assert_eq!(last.change_id(), three.change_id());
+    assert_eq!(
+        last.tree_ids().as_resolved().map(ObjectId::hex),
+        Some(head_tree)
+    );
+    assert_eq!(
+        fx.local_bookmark("main"),
+        RefTarget::normal(last.id().clone())
+    );
+    // Both workspaces on landed commits, the first and the last, have new
+    // empty changes on them.
+    let mut moved = landed.new_working_copies.clone();
+    moved.sort();
+    assert_eq!(moved, ["first", "last"]);
+    let first_wc = fx
+        .get(&fx.wc("first").unwrap().hex().parse().unwrap())
+        .await;
+    assert_eq!(first_wc.parent_ids(), [one.id().clone()]);
+    // The trial commit is abandoned; abandoning it again writes nothing.
+    assert_eq!(
+        fx.repo
+            .end_trials(std::slice::from_ref(&trial.commit), &trial_meta)
+            .await
+            .unwrap(),
+        None
+    );
+}

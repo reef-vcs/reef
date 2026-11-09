@@ -172,8 +172,13 @@ enum OperationKind {
   OPERATION_KIND_TRANSITION = 12;
   // The landing service moved a destination bookmark onto a change
   // (R3.13): `Operation.transitions` has its LANDED transition and
-  // `Operation.landing_id` its landing.
+  // `Operation.landing_id` its landing. A batch (R3.14) lands several
+  // changes in one: one transition each, and `Operation.batch_id`.
   OPERATION_KIND_LAND = 13;
+  // The landing service wrote a batch's trial commit, or abandoned a
+  // batch's trial commits without landing (R3.14): `Operation.batch_id`
+  // names the batch.
+  OPERATION_KIND_BATCH = 14;
 }
 
 // Why a snapshot ran.
@@ -244,6 +249,9 @@ message Operation {
   // The landing it recorded (R3.13), from the operation attribute
   // `reef.landing`; empty for most operations. GetLanding reads it.
   string landing_id = 19;
+  // The batch it tested or landed (R3.14), from the operation attribute
+  // `reef.batch`; empty for most operations. GetBatch reads it.
+  string batch_id = 20;
 }
 
 // What an operation changed, from the difference between its view and its

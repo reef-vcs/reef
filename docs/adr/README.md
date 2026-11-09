@@ -78,3 +78,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0064](0064-landing-service-local.md) | Landing service, local | accepted |
 | [0065](0065-conflict-objects.md) | Conflict objects | accepted |
 | [0066](0066-sigstore-keyless-session-keys.md) | Sigstore keyless session keys | accepted |
+| [0067](0067-batching-and-bisect.md) | Batching and bisect | accepted |

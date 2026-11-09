@@ -49,6 +49,15 @@ pub const MAX_COUNT: i64 = 64;
 /// The fewest and most conflict resolution attempts a policy may allow.
 pub const ATTEMPTS: std::ops::RangeInclusive<i64> = 1..=20;
 
+/// `[landing] batch_max`'s range (R3.14).
+pub const BATCH_MAX: std::ops::RangeInclusive<i64> = 1..=32;
+
+/// `[landing] batch_max`'s default.
+pub const DEFAULT_BATCH_MAX: u32 = 8;
+
+/// `[landing] batch_wait`'s longest value.
+pub const MAX_BATCH_WAIT: std::time::Duration = std::time::Duration::from_mins(10);
+
 /// The files whose changes `builtin:owners` covers: the policy itself and
 /// R3.06's check declarations, since a change to either changes how a tree
 /// is judged.
@@ -109,8 +118,19 @@ struct RawFile {
     #[serde(default)]
     signoff: Vec<Spanned<RawSignoff>>,
     conflicts: Option<Spanned<RawConflicts>>,
+    landing: Option<Spanned<RawLanding>>,
     #[serde(default)]
     rule: Vec<Spanned<RawRule>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLanding {
+    checks: Option<Text>,
+    batch_max: Option<Spanned<i64>>,
+    batch_wait: Option<Text>,
+    #[serde(default)]
+    alone: List,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +268,100 @@ pub struct Policy {
     pub(crate) attestors: BTreeMap<String, Attestor>,
     pub(crate) entries: Vec<Entry>,
     pub(crate) conflicts: Conflicts,
+    pub(crate) landing: LandingSettings,
+}
+
+impl Policy {
+    /// The `[landing]` table, or its defaults (R3.14, ADR 0067).
+    pub fn landing(&self) -> &LandingSettings {
+        &self.landing
+    }
+}
+
+/// Where a landing judges a change's `[[require]]` evidence (R3.14).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename = "policy.Checks")]
+pub enum Checks {
+    /// On the submitted tree at the gate, and again on the batch's tested
+    /// tree at landing.
+    #[default]
+    Batch,
+    /// On the submitted tree only (R3.13's landing).
+    Proposal,
+}
+
+impl Checks {
+    /// Its text in the file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Checks::Batch => "batch",
+            Checks::Proposal => "proposal",
+        }
+    }
+
+    /// The value `text` names.
+    pub fn parse(text: &str) -> Option<Checks> {
+        match text {
+            "batch" => Some(Checks::Batch),
+            "proposal" => Some(Checks::Proposal),
+            _ => None,
+        }
+    }
+}
+
+/// `[landing]`: how the landing service batches and checks landings onto
+/// the destination whose tree has this policy (R3.14, ADR 0067).
+#[derive(Debug)]
+pub struct LandingSettings {
+    /// Where `[[require]]` evidence must hold.
+    pub checks: Checks,
+    /// The most changes in a batch.
+    pub batch_max: u32,
+    /// How long a batch waits for more changes after its oldest was queued.
+    pub batch_wait: std::time::Duration,
+    /// Paths whose changes land in a batch of their own.
+    pub alone: Patterns,
+}
+
+impl Default for LandingSettings {
+    fn default() -> Self {
+        LandingSettings {
+            checks: Checks::Batch,
+            batch_max: DEFAULT_BATCH_MAX,
+            batch_wait: std::time::Duration::ZERO,
+            alone: Patterns::empty(),
+        }
+    }
+}
+
+impl LandingSettings {
+    /// Whether a change touching `paths` lands in a batch of its own: it
+    /// touches a policy file ([`POLICY_FILES`]) or an `alone` path.
+    pub fn alone<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> bool {
+        paths.into_iter().any(|path| {
+            POLICY_FILES
+                .iter()
+                .any(|file| path.eq_ignore_ascii_case(file))
+                || (!self.alone.is_empty() && self.alone.matches(path))
+        })
+    }
+}
+
+/// `text` as a duration: digits then `ms`, `s` or `m`.
+fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let digits = text.find(|c: char| !c.is_ascii_digit())?;
+    if digits == 0 {
+        return None;
+    }
+    let value: u64 = text[..digits].parse().ok()?;
+    match &text[digits..] {
+        "ms" => Some(std::time::Duration::from_millis(value)),
+        "s" => Some(std::time::Duration::from_secs(value)),
+        "m" => value.checked_mul(60).map(std::time::Duration::from_secs),
+        _ => None,
+    }
 }
 
 /// One rule of the file, in file order.
@@ -1411,6 +1525,8 @@ impl Loader<'_> {
             }
         };
 
+        let landing = self.landing(raw.landing.as_ref());
+
         Policy {
             sha256: crate::sha256_hex(text.as_bytes()),
             owners,
@@ -1418,7 +1534,59 @@ impl Loader<'_> {
             attestors,
             entries: entries.into_iter().map(|(_, entry)| entry).collect(),
             conflicts,
+            landing,
         }
+    }
+
+    fn landing(&mut self, raw: Option<&Spanned<RawLanding>>) -> LandingSettings {
+        let mut settings = LandingSettings::default();
+        let Some(raw) = raw else {
+            return settings;
+        };
+        let raw = raw.get_ref();
+        if let Some(checks) = &raw.checks {
+            match Checks::parse(checks.get_ref()) {
+                Some(parsed) => settings.checks = parsed,
+                None => self.at(
+                    "landing",
+                    "checks",
+                    checks.span().start,
+                    format!("{:?} is not batch or proposal", checks.get_ref()),
+                ),
+            }
+        }
+        if let Some(max) = &raw.batch_max {
+            match u32::try_from(*max.get_ref()) {
+                Ok(value) if BATCH_MAX.contains(max.get_ref()) => settings.batch_max = value,
+                _ => self.at(
+                    "landing",
+                    "batch_max",
+                    max.span().start,
+                    format!(
+                        "{} is not from {} to {}",
+                        max.get_ref(),
+                        BATCH_MAX.start(),
+                        BATCH_MAX.end()
+                    ),
+                ),
+            }
+        }
+        if let Some(wait) = &raw.batch_wait {
+            match parse_duration(wait.get_ref()) {
+                Some(value) if value <= MAX_BATCH_WAIT => settings.batch_wait = value,
+                _ => self.at(
+                    "landing",
+                    "batch_wait",
+                    wait.span().start,
+                    format!(
+                        "{:?} is not a duration from \"0s\" to \"10m\" (such as \"30s\")",
+                        wait.get_ref()
+                    ),
+                ),
+            }
+        }
+        settings.alone = self.patterns("landing", "alone", &raw.alone);
+        settings
     }
 
     fn tier(&mut self, tier: Option<&Text>) -> Option<Tier> {
@@ -1699,5 +1867,61 @@ message = "every commit of the change has a signed, bound provenance record"
         );
         let found = errors(&text);
         assert!(found.len() >= 3, "{found:#?}");
+    }
+
+    #[test]
+    fn the_landing_table() {
+        let defaults = Policy::load(with("").as_bytes()).unwrap();
+        let landing = defaults.landing();
+        assert_eq!(landing.checks, Checks::Batch);
+        assert_eq!(landing.batch_max, DEFAULT_BATCH_MAX);
+        assert_eq!(landing.batch_wait, std::time::Duration::ZERO);
+        assert!(landing.alone(["reef-policy.toml"]));
+        assert!(landing.alone(["Reef-Checks.toml"]));
+        assert!(!landing.alone(["src/lib.rs"]));
+        let set = Policy::load(
+            with(
+                "[landing]\nchecks = \"proposal\"\nbatch_max = 1\nbatch_wait = \"90s\"\nalone = [\"migrations/**\"]\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let landing = set.landing();
+        assert_eq!(landing.checks, Checks::Proposal);
+        assert_eq!(landing.batch_max, 1);
+        assert_eq!(landing.batch_wait, std::time::Duration::from_secs(90));
+        assert!(landing.alone(["src/a.rs", "migrations/0001.sql"]));
+        one(
+            &with("[landing]\nchecks = \"never\"\n"),
+            "is not batch or proposal",
+        );
+        one(&with("[landing]\nbatch_max = 33\n"), "is not from 1 to 32");
+        one(&with("[landing]\nbatch_max = 0\n"), "is not from 1 to 32");
+        one(
+            &with("[landing]\nbatch_wait = \"11m\"\n"),
+            "is not a duration",
+        );
+        one(
+            &with("[landing]\nbatch_wait = \"soon\"\n"),
+            "is not a duration",
+        );
+        one(&with("[landing]\nautomatic = true\n"), "unknown field");
+        one(&with("[landing]\nalone = [\"a/[\"]\n"), "pattern \"a/[\"");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("0s"), Some(std::time::Duration::ZERO));
+        assert_eq!(
+            parse_duration("250ms"),
+            Some(std::time::Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse_duration("10m"),
+            Some(std::time::Duration::from_mins(10))
+        );
+        assert_eq!(parse_duration("s"), None);
+        assert_eq!(parse_duration("5h"), None);
+        assert_eq!(parse_duration("-1s"), None);
     }
 }
