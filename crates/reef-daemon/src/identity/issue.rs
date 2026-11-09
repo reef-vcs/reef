@@ -507,6 +507,8 @@ impl Identities {
             issued_by_agent: agent,
             remote_token_id: token_id,
             revocation: None,
+            issuer_kind: IssuerKind::ReefDaemon.as_str().to_owned(),
+            oidc_id: None,
         };
         match self
             .db
@@ -654,6 +656,8 @@ impl Identities {
             issued_by_agent: agent.map(str::to_owned),
             remote_token_id: (channel != "socket").then(|| channel.to_owned()),
             revocation: None,
+            issuer_kind: IssuerKind::ReefDaemon.as_str().to_owned(),
+            oidc_id: None,
         };
         let limit = self.limit();
         match self
@@ -678,9 +682,12 @@ impl Identities {
     /// `rows` read on the blocking pool ([`read_keys`]).
     pub async fn read(&self, rows: Vec<SessionKeyRow>) -> Result<Vec<ReadKey>, IdentityError> {
         let db = Arc::clone(&self.db);
-        Ok(tokio::task::spawn_blocking(move || read_keys(&db, rows))
-            .await
-            .map_err(|error| task(&error))??)
+        let keyless = self.keyless_root();
+        Ok(
+            tokio::task::spawn_blocking(move || read_keys(&db, rows, keyless.as_deref()))
+                .await
+                .map_err(|error| task(&error))??,
+        )
     }
 
     fn unused_session_id(&self) -> Result<String, DbError> {

@@ -151,25 +151,31 @@ struct AddArgs {
     /// Sign with this key file, not a session key; it reads unbound.
     #[arg(long, value_name = "PEM")]
     key: Option<PathBuf>,
-    /// The identity to sign as: the default one, or a remote token's, if left out.
+    /// The identity to sign as [default: yours, or a remote token's].
     #[arg(long, value_name = "NAME", conflicts_with = "key")]
     identity: Option<String>,
-    /// agent (the default), executor, or human: declared, not verified.
+    /// agent (default), executor, or human: declared, not verified.
     #[arg(long, value_parser = ["agent", "executor", "human"], conflicts_with = "key")]
     actor: Option<String>,
-    /// The change the evidence is for, whose tree it is about [default: the workspace's change].
+    /// Sign keyless (Sigstore): see docs/identity.md.
+    #[arg(long, conflicts_with_all = ["key", "identity"])]
+    keyless: bool,
+    /// With --keyless, the OIDC token's file (0600); else `SIGSTORE_ID_TOKEN` or GitHub Actions' token.
+    #[arg(long, value_name = "PATH", requires = "keyless", hide = true, conflicts_with_all = ["key", "identity", "envelope", "public_key"])]
+    oidc_token_file: Option<PathBuf>,
+    /// The change whose tree it is about [default: the workspace's change].
     #[arg(short = 'r', long, value_name = "REV")]
     revision: Option<String>,
     /// The test or build target covered [default: the whole check].
     #[arg(long, value_name = "TARGET")]
     target: Option<String>,
-    /// When the check started: RFC 3339, or a duration ago such as 5m [default: now].
+    /// When the check started: RFC 3339, or a duration ago (5m) [default: now].
     #[arg(long, value_name = "TIME")]
     started: Option<String>,
     /// When it finished [default: now].
     #[arg(long, value_name = "TIME")]
     finished: Option<String>,
-    /// A file the check produced, hashed and uploaded first; repeatable (with --envelope, one it names).
+    /// A file the check produced, uploaded first; repeatable (with --envelope, one it names).
     #[arg(long, value_name = "PATH")]
     artifact: Vec<PathBuf>,
     /// Record --artifact files by digest, without uploading.
@@ -178,11 +184,11 @@ struct AddArgs {
     /// A note in the claim's annotations; repeatable.
     #[arg(long, value_name = "KEY=VALUE")]
     annotation: Vec<String>,
-    /// Send this DSSE envelope, signed elsewhere, instead of signing.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "target", "started", "finished", "annotation"], requires = "public_key")]
+    /// Send this DSSE envelope, signed elsewhere.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "keyless", "target", "started", "finished", "annotation"], requires = "public_key")]
     envelope: Option<PathBuf>,
     /// The envelope signer's public key, SPKI PEM.
-    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "target", "started", "finished", "annotation"])]
+    #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "keyless", "target", "started", "finished", "annotation"])]
     public_key: Option<PathBuf>,
     #[command(flatten)]
     scope: ScopeArgs,
@@ -272,7 +278,8 @@ pub(crate) async fn run(global: &super::Global, out: &Out, args: Args) -> Result
     match args.command {
         EvidenceCommand::Add(args) => {
             let prepared = prepare(&args)?;
-            add(&super::connect(global, out).await?, args, prepared).await
+            // Boxed: with the keyless path the add's future is large.
+            Box::pin(add(&super::connect(global, out).await?, args, prepared)).await
         }
         EvidenceCommand::List(args) => {
             check_key_ids(&args.key)?;
@@ -581,6 +588,12 @@ enum Signer {
     File(SigningKey),
     /// A session key for `identity` (empty: the default) as `actor`.
     Session { identity: String, actor: Actor },
+    /// A keyless key as `actor` (R3.42), with the OIDC token from this file
+    /// or the environment.
+    Keyless {
+        actor: Actor,
+        token_file: Option<PathBuf>,
+    },
 }
 
 /// How long `add`'s session key lives: it signs one envelope.
@@ -628,6 +641,14 @@ fn prepare(args: &AddArgs) -> Result<Prepared, CliError> {
     // The key and the claim before any call: a bad key sends nothing.
     let signing = match (&args.envelope, &args.key) {
         (None, Some(key)) => Some((Signer::File(load_key(key)?), claim_of(args)?)),
+        (None, None) if args.keyless => Some((
+            Signer::Keyless {
+                actor: Actor::parse(args.actor.as_deref().unwrap_or("agent"))
+                    .unwrap_or(Actor::Agent),
+                token_file: args.oidc_token_file.clone(),
+            },
+            claim_of(args)?,
+        )),
         (None, None) => Some((
             Signer::Session {
                 identity: args.identity.clone().unwrap_or_default(),
@@ -901,6 +922,12 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
                     )
                     .await
                     .map_err(|error| advice.refine(error))?;
+                    &issued.signing_key
+                }
+                Signer::Keyless { actor, token_file } => {
+                    issued = super::identity::keyless_key(ctx, *actor, "", token_file.clone())
+                        .await
+                        .map_err(|error| advice.refine(error))?;
                     &issued.signing_key
                 }
             };
@@ -1185,11 +1212,21 @@ fn identity_line(evidence: &Evidence) -> String {
     };
     match identity.status.as_deref() {
         Some("bound") => {
+            let certified = match &key.sigstore {
+                // R3.42: keyless, certified by Fulcio for an OIDC identity.
+                Some(sigstore) => format!(
+                    "keyless: {} {}, rekor #{}",
+                    sigstore.oidc_issuer, sigstore.oidc_subject, sigstore.log_index
+                ),
+                None => format!(
+                    "certified by {} (this daemon)",
+                    short(&key.authority_key_id)
+                ),
+            };
             let mut line = format!(
-                "{who}, session {}, presence {} (not verified), certified by {} (this daemon)",
+                "{who}, session {}, presence {} (not verified), {certified}",
                 key.session_id,
                 key.presence.as_deref().unwrap_or("-"),
-                short(&key.authority_key_id)
             );
             if let Some(revocation) = revocation {
                 let _ = write!(

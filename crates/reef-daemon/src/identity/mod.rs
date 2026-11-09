@@ -23,6 +23,7 @@ pub mod authority;
 pub mod issue;
 pub mod read;
 pub mod retention;
+pub mod sigstore;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -211,6 +212,48 @@ pub enum IdentityError {
         /// The current authority's key id, which a proof must name.
         authority_key_id: String,
     },
+    /// A keyless bundle that does not verify: `INVALID_SIGSTORE_BUNDLE`
+    /// (R3.42).
+    #[error("{0}")]
+    InvalidBundle(reef_evidence::sigstore::BundleError),
+    /// A keyless certificate no live OIDC match accepts:
+    /// `SIGSTORE_IDENTITY_UNMATCHED`.
+    #[error("no identity accepts OIDC issuer {issuer} and subject {subject}")]
+    Unmatched {
+        /// The certificate's OIDC issuer.
+        issuer: String,
+        /// Its subject.
+        subject: String,
+    },
+    /// Keyless keys are off, or the trusted root is unusable:
+    /// `SIGSTORE_UNAVAILABLE`.
+    #[error("{}", if *problem == "disabled" { "keyless keys are off ([sigstore] enabled = false)".to_owned() } else { format!("the Sigstore trusted root is not usable: {detail}") })]
+    SigstoreUnavailable {
+        /// `disabled` or `trusted_root`.
+        problem: &'static str,
+        /// What is wrong with the root.
+        detail: String,
+    },
+    /// An OIDC match out of its bounds: `INVALID_OIDC_MATCH`.
+    #[error("{field}: {message}")]
+    InvalidMatch {
+        /// `issuer` or `subject`.
+        field: &'static str,
+        /// What is wrong.
+        message: String,
+    },
+    /// A live match has the issuer and subject: `OIDC_MATCH_EXISTS`.
+    #[error("identity {identity} already accepts this OIDC issuer and subject")]
+    MatchExists {
+        /// The identity holding it, by name.
+        identity: String,
+    },
+    /// No match has the id: `OIDC_MATCH_NOT_FOUND`.
+    #[error("no OIDC match is {id}")]
+    MatchNotFound {
+        /// The id.
+        id: String,
+    },
     /// The authority key could not be loaded, made or written.
     #[error(transparent)]
     Authority(#[from] AuthorityError),
@@ -232,15 +275,23 @@ impl Classify for IdentityError {
             | Self::InvalidKeyId { .. }
             | Self::InvalidRevocation { .. }
             | Self::InvalidProof { .. }
-            | Self::AmbiguousAuthority { .. } => ErrorKind::InvalidArgument,
-            Self::NoDefault { .. } | Self::IsDefault { .. } | Self::AuthorityIsCurrent { .. } => {
-                ErrorKind::Conflict
+            | Self::AmbiguousAuthority { .. }
+            | Self::InvalidBundle(_)
+            | Self::InvalidMatch { .. } => ErrorKind::InvalidArgument,
+            Self::NoDefault { .. }
+            | Self::IsDefault { .. }
+            | Self::AuthorityIsCurrent { .. }
+            | Self::Revoked { .. }
+            | Self::TooMany { .. }
+            | Self::Unmatched { .. }
+            | Self::SigstoreUnavailable { .. } => ErrorKind::Conflict,
+            Self::Exists { .. } | Self::KeyExists { .. } | Self::MatchExists { .. } => {
+                ErrorKind::AlreadyExists
             }
-            Self::Exists { .. } | Self::KeyExists { .. } => ErrorKind::AlreadyExists,
-            Self::NotFound { .. } | Self::KeyNotFound { .. } | Self::AuthorityNotFound { .. } => {
-                ErrorKind::NotFound
-            }
-            Self::Revoked { .. } | Self::TooMany { .. } => ErrorKind::Conflict,
+            Self::NotFound { .. }
+            | Self::KeyNotFound { .. }
+            | Self::AuthorityNotFound { .. }
+            | Self::MatchNotFound { .. } => ErrorKind::NotFound,
             Self::Refused { .. } => ErrorKind::PermissionDenied,
             Self::Authority(error) => error.kind(),
             Self::Db(error) => error.kind(),
@@ -323,6 +374,26 @@ impl Advise for IdentityError {
             Self::InvalidProof { .. } => Advice::hint(
                 "Sign the proof's pre-authentication encoding over the current authority's key id (ListAuthorities) and the identity, actor and session exactly as sent; docs/identity.md gives the bytes. A rotation in between changes the authority: fetch it and retry.",
             ),
+            Self::InvalidBundle(error) => Advice::hint(error.step.hint()),
+            Self::Unmatched { issuer, subject } => Advice::hint(format!(
+                "On the daemon's machine, let an identity accept this certificate: reef identity oidc add <identity> --issuer {issuer} --subject {subject}"
+            )),
+            Self::SigstoreUnavailable { problem, .. } => Advice::hint(if *problem == "disabled" {
+                "Set [sigstore] enabled = true in the daemon's config.toml and restart it to register keyless keys."
+            } else {
+                "Fix [sigstore] trusted_root (an absolute path to a trusted_root.json), or empty it for the root Reef ships, and restart the daemon."
+            }),
+            Self::InvalidMatch { field, .. } => Advice::hint(if *field == "issuer" {
+                "Give the OIDC issuer exactly as the certificate names it: an https:// URL, such as https://token.actions.githubusercontent.com."
+            } else {
+                "Give the subject exactly as the certificate's SAN: an email, or a workflow URI such as https://github.com/OWNER/REPO/.github/workflows/WF.yml@refs/heads/main."
+            }),
+            Self::MatchExists { .. } => Advice::hint(
+                "A certificate binds to one identity: revoke the other identity's match first (`reef identity show <identity>` lists its matches).",
+            ),
+            Self::MatchNotFound { .. } => Advice::hint(
+                "`reef identity show <identity>` lists an identity's OIDC matches with their ids.",
+            ),
             Self::Authority(error) => return error.advice(),
             Self::Db(error) => return error.advice(),
             Self::Task(_) => return None,
@@ -332,6 +403,7 @@ impl Advise for IdentityError {
 
 impl IdentityError {
     /// The reason and metadata of `ErrorDetail`, for `crate::error`.
+    #[expect(clippy::too_many_lines, reason = "one arm per reason")]
     pub(crate) fn reason(&self) -> Option<(&'static str, Vec<(&'static str, String)>)> {
         use reef_api::error as reason;
         Some(match self {
@@ -425,6 +497,30 @@ impl IdentityError {
                     ("authority_key_id", authority_key_id.clone()),
                 ],
             ),
+            Self::InvalidBundle(error) => (
+                reason::INVALID_SIGSTORE_BUNDLE,
+                vec![
+                    ("step", error.step.as_str().to_owned()),
+                    ("problem", error.problem.clone()),
+                ],
+            ),
+            Self::Unmatched { issuer, subject } => (
+                reason::SIGSTORE_IDENTITY_UNMATCHED,
+                vec![("issuer", issuer.clone()), ("subject", subject.clone())],
+            ),
+            Self::SigstoreUnavailable { problem, .. } => (
+                reason::SIGSTORE_UNAVAILABLE,
+                vec![("problem", (*problem).to_owned())],
+            ),
+            Self::InvalidMatch { field, .. } => (
+                reason::INVALID_OIDC_MATCH,
+                vec![("field", (*field).to_owned())],
+            ),
+            Self::MatchExists { identity } => (
+                reason::OIDC_MATCH_EXISTS,
+                vec![("identity", identity.clone())],
+            ),
+            Self::MatchNotFound { id } => (reason::OIDC_MATCH_NOT_FOUND, vec![("id", id.clone())]),
             Self::InvalidKeyId { .. } | Self::Authority(_) | Self::Db(_) | Self::Task(_) => {
                 return None;
             }
@@ -452,6 +548,8 @@ pub struct Identities {
     settings: SessionKeysSection,
     /// [`MAX_SESSION_KEYS`], lowered by tests.
     limit: AtomicUsize,
+    /// `[sigstore]` and its trusted root (R3.42).
+    sigstore: sigstore::Keyless,
 }
 
 impl std::fmt::Debug for Identities {
@@ -538,6 +636,7 @@ impl Identities {
             default_problem,
             settings: config.file.session_keys.clone(),
             limit: AtomicUsize::new(MAX_SESSION_KEYS),
+            sigstore: sigstore::Keyless::load(&config.file.sigstore),
         })
     }
 

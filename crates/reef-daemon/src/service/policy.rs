@@ -505,6 +505,23 @@ fn key_of(identity: Option<&v1::KeyIdentity>, key_id: &str) -> input::Key {
                 .as_str_name(),
             "KEY_CUSTODY_",
         ),
+        issuer_kind: word(
+            v1::IssuerKind::try_from(key.issuer_kind)
+                .unwrap_or_default()
+                .as_str_name(),
+            "ISSUER_KIND_",
+        )
+        .replace('_', "-"),
+        oidc_issuer: key
+            .sigstore
+            .as_ref()
+            .map(|sigstore| sigstore.oidc_issuer.clone())
+            .unwrap_or_default(),
+        oidc_subject: key
+            .sigstore
+            .as_ref()
+            .map(|sigstore| sigstore.oidc_subject.clone())
+            .unwrap_or_default(),
         authority: key.authority_key_id,
     }
 }

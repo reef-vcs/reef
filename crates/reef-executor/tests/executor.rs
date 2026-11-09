@@ -1285,3 +1285,93 @@ artifacts = ["file-link", "dir-link/secret", "fifo", "d/real.txt"]
     }
     daemon.stop().await;
 }
+
+// R3.42 test 12: an executor with `keyless = true` signs a job's evidence
+// with keys Fulcio certified (the fake on loopback), had when the job first
+// signs and renewed in one session when less than three minutes remain.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyless_job() {
+    use reef_testing::sigstore::San;
+    use reef_testing::sigstore::fake::FakeSigstore;
+    const ISSUER: &str = "https://token.actions.githubusercontent.com";
+    const SUBJECT: &str = "https://github.com/o/r/.github/workflows/reef.yml@refs/heads/main";
+    let fake = FakeSigstore::start(ISSUER, San::Uri(SUBJECT.to_owned()));
+    // Leaves that end within three minutes: every pair renews its key.
+    fake.set_lifetime(150);
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path().join("trusted_root.json");
+    std::fs::write(&root, fake.trusted_root()).unwrap();
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.sigstore.trusted_root = root.display().to_string();
+    })
+    .await;
+    let client = &daemon.client;
+    client
+        .create_identity(CreateIdentityRequest {
+            name: "ci-main".into(),
+            kind: IdentityKind::Ci.into(),
+            oidc: vec![v1::OidcMatchSpec {
+                issuer: ISSUER.into(),
+                subject: SUBJECT.into(),
+            }],
+            ..CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    // The executor reads its token and endpoints from its environment, as
+    // in CI. Each test runs in its own process under nextest.
+    #[allow(
+        unsafe_code,
+        reason = "this test's own process sets its environment before any thread reads it"
+    )]
+    // SAFETY: the variables are set before the executor starts, and nothing
+    // else in this process reads or writes them concurrently.
+    unsafe {
+        std::env::set_var("SIGSTORE_ID_TOKEN", fake.token());
+        std::env::set_var("REEF_SIGSTORE_FULCIO_URL", fake.url());
+        std::env::set_var("REEF_SIGSTORE_REKOR_URL", fake.url());
+    }
+    let ws = create(client, &repo.id).await;
+    write(&ws, "reef-checks.toml", CHECKS.as_bytes());
+    let exec = executor(
+        &daemon,
+        client.clone(),
+        "[executor]\nkeyless = true\n",
+        false,
+    );
+    let job = submit(client, &ws, &["test"], &["0", "1"]).await;
+    let report = exec.once(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(report.outcome, "done", "{report:?}");
+    let evidence = client
+        .list_evidence(
+            ListEvidenceRequest {
+                repo: repo.id.clone(),
+                job_id: job.job_id.clone(),
+                ..ListEvidenceRequest::default()
+            },
+            0,
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(evidence.len(), 2);
+    let mut sessions = std::collections::BTreeSet::new();
+    let mut keys = std::collections::BTreeSet::new();
+    for object in &evidence {
+        let identity = object.identity.as_ref().unwrap();
+        assert_eq!(identity.status(), v1::IdentityStatus::Bound);
+        let key = identity.key.as_ref().unwrap();
+        assert_eq!(key.issuer_kind(), v1::IssuerKind::Sigstore);
+        assert_eq!(key.identity, "ci-main");
+        assert_eq!(key.actor(), v1::SessionActor::Executor);
+        assert_eq!(key.sigstore.as_ref().unwrap().oidc_subject, SUBJECT);
+        sessions.insert(key.session_id.clone());
+        keys.insert(key.key_id.clone());
+    }
+    assert_eq!(sessions.len(), 1, "one session for the job");
+    assert_eq!(keys.len(), 2, "a renewed key per pair");
+    // A keyless executor names no identity.
+    let error =
+        Config::parse("[executor]\nkeyless = true\nidentity = \"ci-main\"\n", None).unwrap_err();
+    assert!(error.to_string().contains("keyless"), "{error}");
+}

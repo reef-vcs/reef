@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-08
 - Ticket: R3.07
+- Amended by: [0066](0066-sigstore-keyless-session-keys.md) (attestor sets gain `issuer_kinds`; the input's key gains `issuer_kind`, `oidc_issuer` and `oidc_subject`)
 
 ## Context
 

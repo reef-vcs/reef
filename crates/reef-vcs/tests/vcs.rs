@@ -5129,3 +5129,233 @@ async fn conflict_cli() {
     assert_eq!(next_of(&error)[..3], ["reef", "show", "-r"]);
     daemon.stop().await;
 }
+
+// R3.42 test 12: `reef identity oidc`, `session issue --keyless` and
+// `evidence add --keyless` against the fake Fulcio and Rekor, every output
+// checked against `reef schema`.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "each command, in turn")]
+async fn keyless_cli() {
+    use reef_testing::sigstore::San;
+    use reef_testing::sigstore::fake::FakeSigstore;
+    const ISSUER: &str = "https://token.actions.githubusercontent.com";
+    const SUBJECT: &str = "https://github.com/o/r/.github/workflows/reef.yml@refs/heads/main";
+    let fake = FakeSigstore::start(ISSUER, San::Uri(SUBJECT.to_owned()));
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path().join("trusted_root.json");
+    std::fs::write(&root, fake.trusted_root()).unwrap();
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        no_automatic_snapshots(config);
+        config.file.sigstore.trusted_root = root.display().to_string();
+    })
+    .await;
+    let ws = create(&daemon, &repo).await;
+    let dir = path(&ws);
+    let keyless = |daemon: &TestDaemon, token: Option<String>| {
+        let mut command = reef(daemon, &dir);
+        command
+            .env_remove("SIGSTORE_ID_TOKEN")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+            .env("REEF_SIGSTORE_FULCIO_URL", fake.url())
+            .env("REEF_SIGSTORE_REKOR_URL", fake.url());
+        if let Some(token) = token {
+            command.env("SIGSTORE_ID_TOKEN", token);
+        }
+        command
+    };
+
+    let spec = format!("{ISSUER}={SUBJECT}");
+    let created = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "identity", "create", "ci-main", "--kind", "ci", "--oidc", &spec,
+        ],
+    )
+    .await;
+    assert_eq!(created["oidc_matches"][0]["subject"], SUBJECT);
+    let other = "https://github.com/o/r/.github/workflows/other.yml@refs/heads/main";
+    let added = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o",
+            "json",
+            "identity",
+            "oidc",
+            "add",
+            "ci-main",
+            "--issuer",
+            ISSUER,
+            "--subject",
+            other,
+        ],
+    )
+    .await;
+    let added_id = added["id"].as_str().unwrap().to_owned();
+    let revoked = ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "identity", "oidc", "revoke", &added_id],
+    )
+    .await;
+    assert!(revoked["match"]["revocation"].is_object(), "{revoked}");
+    assert_eq!(revoked["key_ids"], serde_json::json!([]));
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "identity", "show", "ci-main"],
+    )
+    .await;
+    assert!(stdout(&text).contains("(revoked)"), "{}", stdout(&text));
+
+    // A keyless key, printed as JSON with its bundle.
+    let issued = json(
+        &run(
+            keyless(&daemon, Some(fake.token())),
+            &[
+                "-o",
+                "json",
+                "identity",
+                "session",
+                "issue",
+                "--keyless",
+                "--actor",
+                "executor",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(issued["key"]["issuer_kind"], "sigstore", "{issued}");
+    assert_eq!(issued["key"]["identity"], "ci-main");
+    assert_eq!(issued["key"]["sigstore"]["oidc_subject"], SUBJECT);
+    assert_eq!(
+        issued["certificate"]["mediaType"],
+        "application/vnd.dev.sigstore.bundle.v0.3+json"
+    );
+    assert!(
+        issued["private_key"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATE KEY")
+    );
+
+    // Evidence signed keyless reads bound, and its text names the subject.
+    let added = json(
+        &run(
+            keyless(&daemon, Some(fake.token())),
+            &[
+                "-o",
+                "json",
+                "evidence",
+                "add",
+                "--kind",
+                "test",
+                "--result",
+                "pass",
+                "--keyless",
+                "--actor",
+                "executor",
+            ],
+        )
+        .await,
+    );
+    let evidence = &added["evidence"];
+    assert_eq!(evidence["identity"]["status"], "bound", "{evidence}");
+    assert_eq!(evidence["identity"]["key"]["issuer_kind"], "sigstore");
+    let id = evidence["id"].as_str().unwrap().to_owned();
+    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &id]).await;
+    assert!(
+        stdout(&text).contains(&format!("keyless: {ISSUER} {SUBJECT}")),
+        "{}",
+        stdout(&text)
+    );
+    let listed = ok(
+        &daemon,
+        &dir,
+        &[
+            "-o", "json", "identity", "session", "list", "--issuer", "sigstore",
+        ],
+    )
+    .await;
+    assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
+    let key_id = listed[0]["key_id"].as_str().unwrap().to_owned();
+    let text = run_in(
+        &daemon,
+        &dir,
+        &["-o", "text", "identity", "session", "show", &key_id],
+    )
+    .await;
+    assert!(stdout(&text).contains("keyless"), "{}", stdout(&text));
+
+    // No token: refused before anything is signed, with the sources named.
+    let refused = run(
+        keyless(&daemon, None),
+        &[
+            "-o",
+            "json",
+            "evidence",
+            "add",
+            "--kind",
+            "test",
+            "--result",
+            "pass",
+            "--keyless",
+        ],
+    )
+    .await;
+    assert!(!refused.status.success());
+    assert!(
+        stdout(&refused).contains("SIGSTORE_ID_TOKEN"),
+        "{}",
+        stdout(&refused)
+    );
+    // A token file others can read is refused.
+    let token_dir = tempfile::tempdir().unwrap();
+    let token_file = token_dir.path().join("token");
+    std::fs::write(&token_file, fake.token()).unwrap();
+    std::fs::set_permissions(
+        &token_file,
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .unwrap();
+    let loose = run(
+        keyless(&daemon, None),
+        &[
+            "-o",
+            "json",
+            "identity",
+            "session",
+            "issue",
+            "--keyless",
+            "--oidc-token-file",
+            token_file.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(!loose.status.success());
+    assert!(stdout(&loose).contains("0600"), "{}", stdout(&loose));
+    std::fs::set_permissions(
+        &token_file,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let from_file = json(
+        &run(
+            keyless(&daemon, None),
+            &[
+                "-o",
+                "json",
+                "identity",
+                "session",
+                "issue",
+                "--keyless",
+                "--oidc-token-file",
+                token_file.to_str().unwrap(),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(from_file["key"]["issuer_kind"], "sigstore");
+}

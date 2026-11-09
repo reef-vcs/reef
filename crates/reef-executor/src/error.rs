@@ -1,6 +1,7 @@
 //! The executor's errors, with their kind (and so the CLI's exit code) and
 //! the fix.
 
+use reef_client::keyless::KeylessError;
 use reef_client::{ClientError, IssueError};
 use reef_error::{Advice, Classify as _, ErrorKind};
 
@@ -44,6 +45,10 @@ pub enum Error {
     /// later job would hit.
     #[error("no session key for the job: {0}")]
     Key(#[source] Box<IssueError>),
+    /// A keyless key could not be had (R3.42): no OIDC token, Fulcio or
+    /// Rekor unreachable, or the daemon refused the bundle.
+    #[error("no keyless session key for the job: {0}")]
+    Keyless(#[source] Box<KeylessError>),
     /// The daemon refused evidence this executor made: a bug in the
     /// executor, which every later job would repeat.
     #[error("the daemon refused evidence {evidence}: {error}")]
@@ -71,6 +76,13 @@ impl Error {
                 IssueError::Client(error) => error.kind(),
                 _ => ErrorKind::Internal,
             },
+            Error::Keyless(error) => match &**error {
+                KeylessError::Client(error) => error.kind(),
+                KeylessError::NoToken | KeylessError::TokenFile { .. } | KeylessError::Token(_) => {
+                    ErrorKind::InvalidArgument
+                }
+                _ => ErrorKind::Unavailable,
+            },
             Error::NoJob(_) => ErrorKind::NotFound,
         }
     }
@@ -89,6 +101,17 @@ impl Error {
             Error::Key(issue) => match &**issue {
                 IssueError::Client(error) => error.advice(),
                 _ => None,
+            },
+            Error::Keyless(error) => match &**error {
+                KeylessError::Client(error) => error.advice(),
+                KeylessError::NoToken | KeylessError::TokenFile { .. } | KeylessError::Token(_) => {
+                    Some(Advice::hint(
+                        "Run the executor where an OIDC token is at hand: GitHub Actions with `permissions: id-token: write`, or SIGSTORE_ID_TOKEN; on macOS the executor drops these variables, so keyless executors run on Linux.",
+                    ))
+                }
+                _ => Some(Advice::hint(
+                    "Check that Fulcio and Rekor are reachable (REEF_SIGSTORE_FULCIO_URL, REEF_SIGSTORE_REKOR_URL).",
+                )),
             },
             Error::NoJob(_) => Some(Advice::run(
                 "Submit one, or wait longer with --wait.",

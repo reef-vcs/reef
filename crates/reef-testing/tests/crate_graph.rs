@@ -307,7 +307,9 @@ fn reef_binary_has_no_jj_lib() {
 #[test]
 fn tls_is_ring_only() {
     let metadata = resolved_metadata();
-    for root in ["reef-vcs", "reef-daemon", "reef-client"] {
+    // `reef-evidence` with its `sigstore` feature (R3.42): `sigstore-verify`
+    // without its default aws-lc backend, on Reef's ring provider.
+    for root in ["reef-vcs", "reef-daemon", "reef-client", "reef-evidence"] {
         assert_unreachable(&metadata, root, &NO_TLS_BACKEND, false);
     }
 }
@@ -322,7 +324,8 @@ fn reef_symbols_links_no_jj_grpc_or_sqlite() {
 }
 
 /// R3.01: the evidence format links nothing of jj, gRPC, tokio or SQLite,
-/// and no Reef crate but `reef-error`.
+/// and no Reef crate but `reef-error`; R3.42's `sigstore` feature included,
+/// since the metadata resolves every feature.
 #[test]
 fn reef_evidence_links_no_jj_grpc_or_sqlite() {
     let metadata = resolved_metadata();

@@ -4,7 +4,7 @@
 - Date: 2026-10-25
 - Ticket: R2.01
 - Supersedes: [0017](0017-daemon-api-v0-and-error-mapping.md)
-- Amended by: [0055](0055-evidence-object-format.md) (decision 12's exceptions), [0056](0056-evidence-artifact-store-and-retention.md) (decision 12's exceptions gain `UploadArtifact`), [0057](0057-operator-identities-and-session-keys.md) (decision 12's exceptions gain `IssueSessionKey`), [0059](0059-executor-protocol.md) (decision 12's exceptions gain the executor protocol's five WRITE RPCs)
+- Amended by: [0055](0055-evidence-object-format.md) (decision 12's exceptions), [0056](0056-evidence-artifact-store-and-retention.md) (decision 12's exceptions gain `UploadArtifact`), [0057](0057-operator-identities-and-session-keys.md) (decision 12's exceptions gain `IssueSessionKey`), [0059](0059-executor-protocol.md) (decision 12's exceptions gain the executor protocol's five WRITE RPCs), [0066](0066-sigstore-keyless-session-keys.md) (decision 12's exceptions gain `RegisterSigstoreKey`)
 
 ## Context
 

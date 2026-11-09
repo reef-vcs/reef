@@ -89,6 +89,7 @@ pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["diff"], "source", &["symbols", "expand"]),
     (&["evidence", "add"], "envelope", &["public_key"]),
     (&["evidence", "add"], "public_key", &["envelope"]),
+    (&["evidence", "add"], "oidc_token_file", &["keyless"]),
     (&["executor", "check"], "kinds", &["revision"]),
     (&["executor", "check"], "targets", &["revision"]),
     (&["executor", "run"], "require_job", &["once"]),
@@ -96,6 +97,11 @@ pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["history"], "change_kind", &["symbol"]),
     (&["identity", "authority", "rotate"], "since", &["revoke"]),
     (&["identity", "authority", "rotate"], "reason", &["revoke"]),
+    (
+        &["identity", "session", "issue"],
+        "oidc_token_file",
+        &["keyless"],
+    ),
     (&["job", "submit"], "wait_for", &["wait"]),
     (&["ws", "renew"], "while_pid", &["follow"]),
 ];

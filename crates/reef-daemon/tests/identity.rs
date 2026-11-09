@@ -353,6 +353,7 @@ async fn identities_admin() {
             kind: Kind::Person.into(),
             display_name: "Carol Example".into(),
             email: "carol@example.com".into(),
+            oidc: Vec::new(),
         })
         .await
         .unwrap()
@@ -384,6 +385,7 @@ async fn identities_admin() {
                 kind: kind.into(),
                 display_name: display_name.into(),
                 email: email.into(),
+                oidc: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -1727,7 +1729,7 @@ async fn gc_backup_restore() {
     let rows = restored
         .session_keys_by_id(&[named.record.key_id.as_str()])
         .unwrap();
-    let reads = reef_daemon::identity::read::read_keys(&restored, rows).unwrap();
+    let reads = reef_daemon::identity::read::read_keys(&restored, rows, None).unwrap();
     let added = at_ms(evidence.added_at.as_ref());
     assert_eq!(
         reads[0].status_at(reef_daemon::model::Timestamp(added)),

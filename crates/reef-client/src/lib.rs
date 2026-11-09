@@ -24,6 +24,7 @@ pub mod backup;
 pub mod brief;
 pub mod error;
 pub mod json;
+pub mod keyless;
 pub mod logging;
 pub mod paths;
 pub mod presence;
@@ -525,6 +526,15 @@ impl Client {
             .map_err(|_| ClientError::InvalidAgent(agent.clone()))?;
         self.agent.agent = Some(value);
         Ok(self)
+    }
+
+    /// The agent label this client sends as `reef-agent`, if any.
+    pub fn agent_label(&self) -> Option<String> {
+        self.agent
+            .agent
+            .as_ref()
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
     }
 
     /// The socket this client is connected to.

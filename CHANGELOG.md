@@ -21,6 +21,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - Policy simulation (R3.08) needs no migration; the daemon serves API revision 22.
 - The daemon's database becomes schema 13 (`0013_landings`, R3.13) the first time this daemon opens it; the daemon serves API revision 23. A `reef-policy.toml` that names `change.state` or `landing` is `invalid_policy` to an older daemon.
 - Conflict objects (R3.25) need no migration; the daemon serves API revision 24.
+- The daemon's database becomes schema 14 (`0014_sigstore`, R3.42) the first time this daemon opens it, and serves API revision 25. Keyless keys are on by default against the public-good Sigstore trusted root Reef ships; `[sigstore] enabled = false` turns them off.
 - Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
 ### Added
@@ -77,6 +78,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - The harness and its session from the environment: `AI_AGENT` (read the same for every harness; `claude-code_2-1-316_agent` is `claude-code/2.1.316`), and the agent table's session variable for the harness it recognizes (Claude Code's `CLAUDE_CODE_SESSION_ID`). `reef mcp` takes the harness from the MCP client's `initialize`, declares it on every workspace it creates, and once, without a snapshot, on the workspace it was started in.
 - Python SDK: `reef.Provenance`, `reef.instruction_sha256`, `client.workspace(..., provenance=...)` and `handle.declare(...)` (sync and `reef.aio`). TypeScript SDK: `client.workspace({ provenance })`, `handle.declare(...)` and `instructionSha256`. Both hash an instruction locally, take `REEF_MODEL` and `REEF_TASK` as defaults, and require API revision 18 for a declaration the program gave.
 - The agent guide names `REEF_MODEL` and `REEF_TASK`.
+- Sigstore keyless session keys (R3.42, [ADR 0066](docs/adr/0066-sigstore-keyless-session-keys.md), [docs/identity.md](docs/identity.md#keyless-sigstore)): a session key certified by Sigstore's Fulcio against an OIDC identity (a CI job's own token, or one a person supplies), whose binding statement Rekor logs, registered with the daemon as a Sigstore bundle and verified offline against a trusted root through `sigstore-verify` with a ring provider. Evidence signed by it is unchanged and reads `issuer_kind: sigstore` with the OIDC issuer and subject. A CI pipeline's evidence can now be bound to its `ci` identity by its workflow, not by a long-lived Reef token.
+- OIDC matches on identities: `reef identity create --oidc ISSUER=SUBJECT`, `reef identity oidc add` and `revoke` (`CreateIdentityRequest.oidc`, `AddOidcMatch`, `RevokeOidcMatch`, `Identity.oidc_matches`): exact issuers and subjects, one live match per pair; revoking one revokes the keys bound through it.
+- `IdentityService.RegisterSigstoreKey` (API revision 25), `ISSUER_KIND_SIGSTORE`, `SessionKey.sigstore`, `Authority.kind` (Fulcio CAs are recorded as authorities that never issue), and `ListSessionKeysRequest.issuer_kind` (`reef identity session list --issuer`).
+- `reef identity session issue --keyless` and `reef evidence add --keyless`, with the OIDC token from `--oidc-token-file`, `SIGSTORE_ID_TOKEN`, or GitHub Actions' token (`REEF_SIGSTORE_FULCIO_URL` and `_REKOR_URL` name other instances); `reef_client::Client::issue_keyless_session_key`. Nothing opens a browser.
+- `[executor] keyless = true`: the reference executor signs each job's evidence with a keyless key, renewed in the job's session.
+- Policy: attestor sets gain `issuer_kinds` (`reef-daemon`, `sigstore`), and an evidence object's `key` gains `issuer_kind`, `oidc_issuer` and `oidc_subject`.
+- `[sigstore] enabled` and `trusted_root` in the daemon's configuration; `reef schema evidence sigstore_binding_statement`; `scripts/sigstore-root.sh` and a weekly workflow that flags a stale vendored root.
 
 ### Changed
 

@@ -46,6 +46,7 @@ groups = []
 identity_kinds = ["ci"]                    # person | ci; default either
 actors = ["executor"]                      # human | agent | executor; default ["executor"]
 authorities = []                           # authority key ids; empty: any authority this daemon verifies
+issuer_kinds = []                          # reef-daemon | sigstore (keyless, R3.42); default either
 presence = "none"                          # the least presence accepted; default none
 self = "exclude"                           # exclude | allow: evidence from the change's own session or agent
 when = 'e.fresh && e.artifacts.exists(a, a.state == "stored")'   # optional CEL over `e`
@@ -114,14 +115,14 @@ An `[attestors.<name>]` set decides whose evidence counts, per evidence object, 
 
 1. The key is `bound`: certified by an authority this daemon verifies, witnessed within the key's window and before every revocation that applies ([identity.md](identity.md)). Unbound, expired, revoked and invalid keys never count.
 2. The key's identity is one of `identities`, or a member of one of `groups`: matched by id for `idn_...` entries and by the certificate's name otherwise.
-3. `identity_kinds`, `actors` (default `["executor"]`) and `authorities` (64-hex authority key ids; empty for any authority this daemon verifies), when given.
+3. `identity_kinds`, `actors` (default `["executor"]`), `authorities` (64-hex authority key ids, a daemon's or a Fulcio CA's; empty for any authority this daemon verifies) and `issuer_kinds` (`reef-daemon`, or `sigstore` for keyless keys), when given.
 4. The key's presence is at least the set's (`none` < `user_verified`). Every key today has `none`, so a set that asks for `user_verified` matches nothing until R3.43.
 5. Unless `self = "allow"`, the object did not come from the change itself (below).
 6. `when`, a CEL expression over `e` (the object) and `groups`, holds. One that errors on an object (or costs too much) leaves that object out and makes `builtin:input` an error, which blocks: the object could be the newest verdict, and leaving it out must not let an older one decide. The diagnostics name the set and the object.
 
 The names of the sets an object satisfies are `e.attestors`, which free rules can use.
 
-**What `self` excludes.** An object is the change's own when its key was certified for a session that also recorded one of the change's provenance records ([provenance.md](provenance.md)), when its key's agent label, with the same identity, is the agent of one of those records, or when the `reef-agent` that added it is. That implements the design's "excludes the submitting agent signing its own test run" as far as Reef can know it. On one uid it is a speed bump, not a wall: an agent that wants to can obtain a key for its user's person identity with any declared actor, from another session, and add evidence under another agent label ([threat model](threat-model.md), S-59, S-92). What keeps an agent from attesting its own work is trusting an identity whose keys it cannot get: a `ci` identity, whose keys need its remote token, and, after R3.43, `presence = "user_verified"` for sign-offs.
+**What `self` excludes.** An object is the change's own when its key was certified for a session that also recorded one of the change's provenance records ([provenance.md](provenance.md)), when its key's agent label, with the same identity, is the agent of one of those records, or when the `reef-agent` that added it is. That implements the design's "excludes the submitting agent signing its own test run" as far as Reef can know it. On one uid it is a speed bump, not a wall: an agent that wants to can obtain a key for its user's person identity with any declared actor, from another session, and add evidence under another agent label ([threat model](threat-model.md), S-59, S-92). What keeps an agent from attesting its own work is trusting an identity whose keys it cannot get: a `ci` identity, whose keys need its remote token or, keyless, its job's OIDC token (`issuer_kinds = ["sigstore"]`), and, after R3.43, `presence = "user_verified"` for sign-offs.
 
 **Names and ids.** Identity names are never reused within one daemon's database, but restoring an old backup can bring a name back with a new id. A policy that must not be fooled pins ids, and authorities, rather than names (S-93).
 
@@ -151,7 +152,7 @@ What a policy sees about one change, built by the daemon. `reef schema policy in
 | `provenance` | every provenance record of `change.id`: `id`, `commit`, `tree`, `workspace`, `session`, `sequence`, `kind`, `agent`, `recorded_at`, `model`, `harness`, `task`, `instruction_sha256`, `client_session`, `signature` (`valid`, `invalid`), `key` |
 | `groups` | the policy's `[groups]`, from name to members as written |
 
-A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, custody, authority}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`.
+A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
 
 - **Evidence is filtered before CEL, not trusted by it.** Objects whose signature does not verify are counted, not shown (`evidence_ignored`). Every object some attestor set or sign-off rule accepts is kept, up to 10,000 (more is `builtin:input`'s error, which blocks); the rest are kept newest first up to 1,000, so junk on a tree cannot push trusted evidence out of view (S-94). The daemon reads at most the newest 20,000 objects of a tree, and an object's annotations only when they are at most 16 KiB as JSON (otherwise `{}`, so a condition over them fails and blocks).
 - **Provenance**: every record of the change, up to 10,000; more is `builtin:input`'s error.
@@ -291,6 +292,25 @@ groups = ["maintainers"]
 [[forbid]]
 name = "keys"
 paths = ["**/*.pem", "**/id_rsa", "**/id_ed25519", "**/.env"]
+```
+
+A team trusting only keyless evidence from its CI workflow on `main` ([identity.md](identity.md#keyless-sigstore)): the `ci-main` identity's OIDC match names the workflow, and a stolen Reef token cannot mint its keyless keys.
+
+```toml policy
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[attestors.ci]
+identities = ["ci-main"]
+issuer_kinds = ["sigstore"]
+when = 'e.key.oidc_subject.endsWith("@refs/heads/main")'
+
+[[require]]
+name = "checks"
+kinds = ["test"]
+attestors = ["ci"]
 ```
 
 Every commit of the change recorded with a bound, signed provenance record, and paths restricted to ASCII.

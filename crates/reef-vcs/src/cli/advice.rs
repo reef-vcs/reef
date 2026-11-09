@@ -364,6 +364,41 @@ impl AdviceCtx {
                 "The daemon cannot write its authority key at {}; make that directory writable by the daemon's user.",
                 get("path")
             )),
+            // Sigstore keyless keys (R3.42).
+            reason::SIGSTORE_IDENTITY_UNMATCHED => Advice::hint(format!(
+                "No identity accepts this keyless certificate. On the daemon's machine: reef identity oidc add <identity> --issuer {} --subject {}",
+                get("issuer"),
+                get("subject")
+            )),
+            reason::INVALID_SIGSTORE_BUNDLE => Advice::hint(format!(
+                "The keyless bundle fails at {}: {}",
+                get("step"),
+                get("problem")
+            )),
+            reason::SIGSTORE_UNAVAILABLE => Advice::hint(if get("problem") == "disabled" {
+                "Keyless keys are off on this daemon ([sigstore] enabled = false); sign without --keyless, or turn them on."
+            } else {
+                "The daemon's Sigstore trusted root did not load: fix [sigstore] trusted_root in its config.toml and restart it."
+            }),
+            reason::INVALID_OIDC_MATCH => Advice::hint(
+                "Give the issuer as an https:// URL and the subject exactly as the certificate's SAN (an email or a URI), both visible ASCII.",
+            ),
+            reason::OIDC_MATCH_EXISTS => Advice {
+                hint: format!(
+                    "Identity {} already accepts that issuer and subject; revoke its match first (its id is in `reef identity show {}`).",
+                    get("identity"),
+                    get("identity")
+                ),
+                next: vec![
+                    "reef".into(),
+                    "identity".into(),
+                    "show".into(),
+                    get("identity").to_owned(),
+                ],
+            },
+            reason::OIDC_MATCH_NOT_FOUND => Advice::hint(
+                "`reef identity show <identity>` lists an identity's OIDC matches with their ids.",
+            ),
             reason::SNAPSHOT_FAILED if self.snapshots_first => Advice {
                 hint: "The workspace could not be snapshotted; --no-snapshot reads its last snapshot."
                     .to_owned(),

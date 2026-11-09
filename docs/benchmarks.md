@@ -611,6 +611,18 @@ cargo bench -p reef-evidence --bench evidence -- session
 cargo nextest run --release -p reef-daemon --test identity --success-output immediate -E 'test(issue_over_the_socket) | test(evidence_reports_identity)'
 ```
 
+
+## Keyless (R3.42)
+
+`check_sigstore_bundle` of the recorded public-good bundle ([ADR 0066](adr/0066-sigstore-keyless-session-keys.md)): `cargo test --release -p reef-evidence --features sigstore --test sigstore_recorded -- --ignored --nocapture`, 200 runs. Release build on the M2 Max with two other builds running, 2026-11-08. Trend data, not a gate.
+
+| Measurement | Timed | M2 Max, mean | Expected |
+| --- | --- | ---: | --- |
+| `sigstore/check` | parse the bundle, verify the chain (two P-384 signatures), the SCT, the checkpoint and the SET (P-256), the DSSE signature (ed25519), then read the statement | 1.7 ms | < 1 ms |
+
+- **The chain dominates**: ring's P-384 verification is the cost, twice per bundle (the leaf by the intermediate, the intermediate by the root). An early version also verified the leaf's signature again to name its CA, 3.2 ms; it now names the CA by the leaf's issuer and checks the signature only when two CAs share the name.
+- A read verifies each keyless key's bundle once, so a page of evidence pays this per distinct keyless key, not per object.
+
 ## Provenance (R3.04)
 
 `crates/reef-evidence/benches/evidence.rs` measures a provenance record's format ([ADR 0058](adr/0058-provenance-records.md)), and `crates/reef-daemon/tests/provenance.rs`'s `timings` the daemon's paths against two in-process daemons, one with `[provenance] enabled = false`. Release build on the M2 Max, run on 2026-11-06.

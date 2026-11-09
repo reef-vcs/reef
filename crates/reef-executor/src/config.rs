@@ -138,6 +138,11 @@ pub struct ExecutorSection {
     pub repos: Vec<String>,
     /// The session keys' identity; empty for the default.
     pub identity: String,
+    /// Sign each job's evidence with a keyless (Sigstore) key (R3.42):
+    /// Fulcio certifies it against the job's OIDC token, and its identity is
+    /// whichever accepts the token's issuer and subject; `identity` must be
+    /// empty. Default false.
+    pub keyless: bool,
     /// The claim's lease: 15 seconds to 10 minutes.
     #[serde(with = "humantime_serde")]
     pub lease: Duration,
@@ -150,6 +155,7 @@ impl Default for ExecutorSection {
             labels: Vec::new(),
             repos: Vec::new(),
             identity: String::new(),
+            keyless: false,
             lease: Duration::from_mins(1),
         }
     }
@@ -501,6 +507,12 @@ impl Config {
         let fail = |message: String| Error::Config {
             message: format!("{}: {message}", display(path)),
         };
+        if raw.executor.keyless && !raw.executor.identity.is_empty() {
+            return Err(fail(format!(
+                "[executor] keyless = true with identity = {:?}: a keyless key's identity is the one whose OIDC match accepts its token; leave identity empty",
+                raw.executor.identity
+            )));
+        }
         let lease = raw.executor.lease;
         if lease < Duration::from_secs(15) || lease > Duration::from_mins(10) {
             return Err(fail(format!(

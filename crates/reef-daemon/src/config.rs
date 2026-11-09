@@ -136,6 +136,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         "session_keys",
         &["lifetime", "max_lifetime", "default_identity"],
     ),
+    ("sigstore", &["enabled", "trusted_root"]),
     ("provenance", &["enabled", "compact_after", "retention"]),
     (
         "executor",
@@ -231,6 +232,8 @@ pub struct FileConfig {
     pub artifacts: ArtifactsSection,
     /// `[session_keys]` (R3.03).
     pub session_keys: SessionKeysSection,
+    /// `[sigstore]` (R3.42).
+    pub sigstore: SigstoreSection,
     /// `[provenance]` (R3.04).
     pub provenance: ProvenanceSection,
     /// `[executor]` (R3.05).
@@ -760,6 +763,31 @@ impl Default for SessionKeysSection {
             lifetime: Duration::from_hours(1),
             max_lifetime: Duration::from_hours(24),
             default_identity: String::new(),
+        }
+    }
+}
+
+/// `[sigstore]`: Sigstore keyless session keys (R3.42, ADR 0066). The daemon
+/// verifies keyless bundles offline against a trusted root and never
+/// fetches anything.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SigstoreSection {
+    /// Register keyless keys and read them. False refuses registration
+    /// (`SIGSTORE_UNAVAILABLE`) and reads every keyless key as invalid.
+    /// Default true.
+    pub enabled: bool,
+    /// An absolute path to a `trusted_root.json` (a private Sigstore
+    /// deployment, or a root newer than this build), read at start. Empty,
+    /// the default: the public-good root Reef ships.
+    pub trusted_root: String,
+}
+
+impl Default for SigstoreSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trusted_root: String::new(),
         }
     }
 }
@@ -1715,6 +1743,13 @@ impl Config {
                 ],
             ),
             (
+                "sigstore",
+                vec![
+                    ("enabled", f.sigstore.enabled.to_string()),
+                    ("trusted_root", s(&f.sigstore.trusted_root)),
+                ],
+            ),
+            (
                 "provenance",
                 vec![
                     ("enabled", f.provenance.enabled.to_string()),
@@ -2146,6 +2181,15 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             ),
         ),
     ]);
+    if !file.sigstore.trusted_root.is_empty()
+        && !Path::new(&file.sigstore.trusted_root).is_absolute()
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            key: "sigstore.trusted_root".to_owned(),
+            reason: format!("{:?} must be an absolute path", file.sigstore.trusted_root),
+        });
+    }
     if let Some((key, reason)) = file.remote.invalid() {
         return Err(ConfigError::Invalid {
             path: path.to_owned(),

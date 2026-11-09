@@ -69,3 +69,45 @@ pub(crate) fn authority_changed(action: &'static str, retired: Option<&str>, key
         "authority key changed"
     );
 }
+
+/// A keyless key registered (R3.42): its identity, the certificate's OIDC
+/// issuer and subject, and its log entry.
+pub(crate) fn registered(
+    key: &SessionKeyRow,
+    identity: &str,
+    certified: &reef_evidence::sigstore::SigstoreCertified,
+    token_name: Option<&str>,
+) {
+    tracing::info!(
+        target: "reef_daemon::identity::audit",
+        key_id = %key.key_id,
+        identity_id = %key.identity_id,
+        identity,
+        actor = %key.actor,
+        session_id = %key.session_id,
+        agent = key.issued_by_agent.as_deref().unwrap_or_default(),
+        token_id = key.remote_token_id.as_deref().unwrap_or_default(),
+        token_name = token_name.unwrap_or_default(),
+        oidc_issuer = %certified.oidc_issuer,
+        oidc_subject = %certified.oidc_subject,
+        oidc_match_id = key.oidc_id.as_deref().unwrap_or_default(),
+        log_index = certified.log_index,
+        authority_key_id = %key.authority_id,
+        not_after = %key.not_after.to_rfc3339(),
+        "keyless session key registered"
+    );
+}
+
+/// An OIDC match added (R3.42).
+pub(crate) fn oidc_changed(action: &'static str, row: &crate::db::OidcMatchRow, identity: &str) {
+    tracing::info!(
+        target: "reef_daemon::identity::audit",
+        action,
+        oidc_match_id = %row.id,
+        identity_id = %row.identity_id,
+        identity,
+        issuer = %row.issuer,
+        subject = %row.subject,
+        "OIDC match changed"
+    );
+}

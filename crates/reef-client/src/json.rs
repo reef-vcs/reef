@@ -3788,11 +3788,13 @@ pub fn key_custody_name(custody: i32) -> Option<&'static str> {
     Some(name)
 }
 
-/// An issuer kind's name: `reef-daemon` (R3.03); `None` when unspecified.
+/// An issuer kind's name: `reef-daemon` (R3.03) or `sigstore` (R3.42);
+/// `None` when unspecified.
 pub fn issuer_kind_name(kind: i32) -> Option<&'static str> {
     let name = match v1::IssuerKind::try_from(kind) {
         Ok(v1::IssuerKind::Unspecified) => return None,
         Ok(v1::IssuerKind::ReefDaemon) => "reef-daemon",
+        Ok(v1::IssuerKind::Sigstore) => "sigstore",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -3869,6 +3871,91 @@ pub struct Identity {
     pub live_session_keys: u32,
     /// The live remote tokens linked to it.
     pub remote_token_names: Vec<String>,
+    /// The OIDC issuers and subjects whose keyless certificates it accepts
+    /// (R3.42), oldest first, revoked ones included.
+    pub oidc_matches: Vec<OidcMatch>,
+}
+
+/// An exact OIDC issuer and subject an identity accepts keyless
+/// certificates for (R3.42).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct OidcMatch {
+    /// `oidc_` and 16 hex digits.
+    pub id: String,
+    /// The identity's id.
+    pub identity_id: String,
+    /// The OIDC issuer, exact.
+    pub issuer: String,
+    /// The certificate's subject (its SAN), exact.
+    pub subject: String,
+    /// When it was added.
+    pub created_at: Option<String>,
+    /// Its revocation, which applies to every key bound through it; `null`
+    /// while live.
+    pub revocation: Option<Revocation>,
+}
+
+impl From<&v1::OidcMatch> for OidcMatch {
+    fn from(row: &v1::OidcMatch) -> Self {
+        Self {
+            id: row.id.clone(),
+            identity_id: row.identity_id.clone(),
+            issuer: row.issuer.clone(),
+            subject: row.subject.clone(),
+            created_at: time(row.created_at.as_ref()),
+            revocation: row.revocation.as_ref().map(Revocation::from),
+        }
+    }
+}
+
+/// What `reef identity oidc revoke` covered (R3.42).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct OidcMatchRevoked {
+    /// The match, with its revocation.
+    #[serde(rename = "match")]
+    pub matched: OidcMatch,
+    /// The keys bound through it, newest first, up to 1,000.
+    pub key_ids: Vec<String>,
+}
+
+/// What a keyless key's Sigstore certificate says (R3.42).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SigstoreCertificate {
+    /// The certificate's OIDC issuer.
+    pub oidc_issuer: String,
+    /// Its subject: an email or a URI.
+    pub oidc_subject: String,
+    /// The OIDC match it was bound through.
+    pub oidc_match_id: String,
+    /// When the log witnessed the binding statement.
+    pub integrated_time: Option<String>,
+    /// The log's id.
+    pub log_id: String,
+    /// The entry's index in the log.
+    pub log_index: u64,
+    /// Fulcio's CI claims, by name.
+    pub ci_claims: BTreeMap<String, String>,
+    /// SHA-256 of the registered bundle.
+    pub bundle_id: String,
+}
+
+impl From<&v1::SigstoreCertificate> for SigstoreCertificate {
+    fn from(certificate: &v1::SigstoreCertificate) -> Self {
+        Self {
+            oidc_issuer: certificate.oidc_issuer.clone(),
+            oidc_subject: certificate.oidc_subject.clone(),
+            oidc_match_id: certificate.oidc_match_id.clone(),
+            integrated_time: time(certificate.integrated_time.as_ref()),
+            log_id: certificate.log_id.clone(),
+            log_index: certificate.log_index,
+            ci_claims: certificate
+                .ci_claims
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            bundle_id: certificate.bundle_id.clone(),
+        }
+    }
 }
 
 impl From<&v1::Identity> for Identity {
@@ -3884,6 +3971,7 @@ impl From<&v1::Identity> for Identity {
             is_default: identity.is_default,
             live_session_keys: identity.live_session_keys,
             remote_token_names: identity.remote_token_names.clone(),
+            oidc_matches: identity.oidc_matches.iter().map(OidcMatch::from).collect(),
         }
     }
 }
@@ -3914,7 +4002,8 @@ pub struct SessionKey {
     /// Where its private half lives: `client` or `daemon`.
     #[schemars(schema_with = "key_custody_name_schema_or_null")]
     pub custody: Option<String>,
-    /// Who issued its certificate: `reef-daemon`.
+    /// Who issued its certificate: `reef-daemon`, or `sigstore` for a
+    /// keyless key (R3.42).
     #[schemars(schema_with = "issuer_kind_name_schema_or_null")]
     pub issuer_kind: Option<String>,
     /// The issuing authority's key id.
@@ -3932,6 +4021,8 @@ pub struct SessionKey {
     pub revocation: Option<Revocation>,
     /// Whether its certificate verified at this read.
     pub certificate_valid: bool,
+    /// A keyless key's Sigstore certificate (R3.42); `null` otherwise.
+    pub sigstore: Option<SigstoreCertificate>,
 }
 
 impl From<&v1::SessionKey> for SessionKey {
@@ -3954,6 +4045,7 @@ impl From<&v1::SessionKey> for SessionKey {
             remote_token_id: text(&key.remote_token_id),
             revocation: key.revocation.as_ref().map(Revocation::from),
             certificate_valid: key.certificate_valid,
+            sigstore: key.sigstore.as_ref().map(SigstoreCertificate::from),
         }
     }
 }
@@ -3999,6 +4091,10 @@ pub struct Authority {
     pub revocation: Option<Revocation>,
     /// Whether it is the one that issues now.
     pub current: bool,
+    /// `reef-daemon`, or `sigstore` for a Fulcio CA a keyless key came
+    /// from (R3.42).
+    #[schemars(schema_with = "issuer_kind_name_schema_or_null")]
+    pub kind: Option<String>,
 }
 
 impl From<&v1::Authority> for Authority {
@@ -4013,6 +4109,7 @@ impl From<&v1::Authority> for Authority {
             retired_at: time(authority.retired_at.as_ref()),
             revocation: authority.revocation.as_ref().map(Revocation::from),
             current: authority.current,
+            kind: name(issuer_kind_name(authority.kind)),
         }
     }
 }

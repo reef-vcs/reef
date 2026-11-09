@@ -126,7 +126,8 @@ Operator identities and session keys (`identity/`, `service/identity.rs`, `db/id
 | `identity_authorities` | `id`, the SHA-256 of `public_key` | Each authority key the daemon has had: its DER SubjectPublicKeyInfo, host, `created_at`, `retired_at` (unset for the current one), and its revocation; never deleted |
 | `identities` | `id`, `idn_<16 hex>` | Each identity's unique, never-reused `name`, `kind` (`person` or `ci`), display name, email, and revocation; never deleted |
 | `sessions` | `id`, `ses_<16 hex>` | The identity, actor and channel (`socket`, or the remote token's id) of a session's keys, and its revocation |
-| `session_keys` | `key_id`, the evidence key id | Each key's certificate (a canonical DSSE envelope), the columns that index it (session, identity, authority, actor, presence, custody, window), the issuer's `reef-agent` and remote token, and its revocation |
+| `identity_oidc` | `id`, `oidc_<16 hex>` | Each OIDC issuer and subject an identity accepts keyless keys for (R3.42), and its revocation; never deleted |
+| `session_keys` | `key_id`, the evidence key id | Each key's certificate (a canonical DSSE envelope, or a keyless key's Sigstore bundle with `issuer_kind` `sigstore` and its `oidc_id`), the columns that index it (session, identity, authority, actor, presence, custody, window), the issuer's `reef-agent` and remote token, and its revocation |
 
 `remote_tokens` gains `identity_id`, the identity a token is linked to.
 
@@ -139,6 +140,8 @@ Operator identities and session keys (`identity/`, `service/identity.rs`, `db/id
 **Revocation** sets `revoked_at` and `invalid_from` on a key, a session, an identity or an authority (`RevokeAuthority` for a retired one, `RotateAuthority` with `revoke` for the current one); a later revocation keeps the first `revoked_at` and only moves `invalid_from` earlier. The current default identity cannot be revoked. A key is live (`ListSessionKeys`, `live_session_keys`) while it, its session, its identity and its authority are all unrevoked.
 
 **GC** (`identity::retention`) sweeps, in the first report of a run, keys whose `not_after` is before `min(now - 7 days, keep_newer)` and that no evidence or provenance record names (`pinned()`), then sessions left with no key; `GcReport.session_keys_removed` counts them. `ForgetRepository` touches none of these tables.
+
+**Keyless keys** (`identity::sigstore`, [ADR 0066](../../docs/adr/0066-sigstore-keyless-session-keys.md)). `identity_oidc` holds each identity's exact OIDC issuers and subjects (one live match per pair). `RegisterSigstoreKey` verifies a Sigstore bundle offline with `reef_evidence::sigstore::check_sigstore_bundle` against the trusted root `[sigstore]` loaded at start (the one Reef ships, or `trusted_root`; none when `enabled = false` or it does not load), on the blocking pool; finds the live match of the certificate's issuer and subject; applies the identity (live, never `human` for `ci`) and the statement's session (a keyless session, channel `sigstore`, with the same identity and actor); records the Fulcio CA in `identity_authorities` (`kind` `sigstore`, retired from the start); and stores the key in `session_keys` with `issuer_kind` `sigstore`, the bundle as `certificate`, Fulcio's window, and `oidc_id`. The same bundle again returns the record. Reads verify the bundle again and take the identity from the recorded match, which must still name the certificate's issuer and subject; the match's revocation applies beside the others.
 
 ## Provenance
 

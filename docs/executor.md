@@ -74,6 +74,18 @@ jobs:
 
 A trusted CI identity should run each job on a fresh VM or container: the sandbox narrows what a tree's code can reach, but it is not a VM.
 
+### Keyless in CI
+
+With `[executor] keyless = true`, the executor signs each job's evidence with a keyless session key ([identity.md](identity.md#keyless-sigstore)): Sigstore's Fulcio certifies it against the job's own OIDC token, and the daemon binds it to the identity whose OIDC match names the workflow. The remote token then only connects and claims jobs; it no longer decides whose evidence it is, so a leaked token cannot mint evidence a keyless-only policy counts (`issuer_kinds = ["sigstore"]`, [policy.md](policy.md)). On the daemon's machine:
+
+```sh
+reef identity create ci-main --kind ci \
+  --oidc https://token.actions.githubusercontent.com=https://github.com/OWNER/REPO/.github/workflows/reef.yml@refs/heads/main
+reef remote token create ci-runner --scope write --identity ci-main --expires 90d
+```
+
+The workflow needs `permissions: id-token: write`, and `executor.toml` sets `keyless = true` and leaves `identity` empty. The executor asks for the token itself, outside the sandbox, when a job first signs, and renews its key in the job's session when less than three minutes remain; checks never see `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN` or `SIGSTORE_ID_TOKEN`. On macOS the executor drops those variables with the rest of its environment, so keyless executors run on Linux.
+
 ## Declaring checks
 
 A **check** is one declared command for one evidence kind. A job's pairs (each requested kind with each target, or each kind alone) are matched to checks, and each matched check runs as one sandboxed process.
@@ -299,6 +311,7 @@ name = "laptop"                     # default reef-executor@<host>
 labels = ["gpu=none"]               # added to os=, arch= and sandbox=
 repos = []                          # only these repositories; empty for all
 identity = ""                       # the session keys' identity; empty for the default
+keyless = false                     # sign with keyless (Sigstore) keys; identity must be empty
 lease = "60s"                       # 15s to 10m
 
 [repository]

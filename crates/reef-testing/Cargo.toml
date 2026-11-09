@@ -28,6 +28,13 @@ time.workspace = true
 # and the token-count cache.
 sha2.workspace = true
 toml.workspace = true
+# A local Sigstore (R3.42): a Fulcio CA, a CT log and a Rekor log that build complete keyless
+# bundles for tests, and a fake Fulcio, Rekor and OIDC endpoint on loopback.
+ring.workspace = true
+rcgen.workspace = true
+base64.workspace = true
+x509-cert.workspace = true
+der.workspace = true
 # R2.17's `o200k` counter, built only by the benchmark (`just tokens`): ordinary builds, tests and
 # the crates that dev-depend on reef-testing never compile it; `just lint` (`--all-features`)
 # type-checks it.

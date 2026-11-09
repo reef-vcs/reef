@@ -138,11 +138,15 @@ vocabulary! {
 }
 
 vocabulary! {
-    /// Who issues certificates. R4.10 adds `reef-store` and R3.42
-    /// `sigstore`.
+    /// Who issues certificates. R4.10 adds `reef-store`.
     IssuerKind {
         /// A Reef daemon's authority key.
         ReefDaemon = "reef-daemon",
+        /// Sigstore's Fulcio, against an OIDC identity (R3.42, ADR 0066):
+        /// the key's certificate is a Sigstore bundle, checked by
+        /// `crate::sigstore::check_sigstore_bundle`, never by
+        /// [`check_certificate`].
+        Sigstore = "sigstore",
     }
 }
 
@@ -305,6 +309,57 @@ pub struct SessionKeyPredicate {
     pub unknown: BTreeMap<String, Value>,
 }
 
+/// A keyless session key's binding statement (R3.42, ADR 0066): what the
+/// key Fulcio certified signs about itself, which Rekor logs. Its predicate
+/// type is [`SIGSTORE_BINDING_PREDICATE_TYPE`]; `crate::sigstore` (feature
+/// `sigstore`) checks it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "evidence.SigstoreBindingStatement")]
+pub struct SigstoreBindingStatement {
+    /// `https://in-toto.io/Statement/v1`.
+    #[serde(rename = "_type")]
+    #[schemars(extend("const" = "https://in-toto.io/Statement/v1"))]
+    pub type_: String,
+    /// Exactly one: `{"name": "session-key", "digest": {"sha256": <the
+    /// certified key's id>}}`.
+    #[schemars(length(min = 1, max = 1))]
+    pub subject: Vec<ResourceDescriptor>,
+    /// `urn:reef-vcs:sigstore-session-key:v1`.
+    #[serde(rename = "predicateType")]
+    #[schemars(extend("const" = "urn:reef-vcs:sigstore-session-key:v1"))]
+    pub predicate_type: String,
+    /// What the key declares about itself.
+    pub predicate: SigstoreBindingPredicate,
+}
+
+/// A binding statement's predicate (R3.42). The identity is not here: the
+/// verifier matches the Fulcio certificate's OIDC issuer and subject, and
+/// the window is the certificate's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "evidence.SigstoreBindingPredicate")]
+pub struct SigstoreBindingPredicate {
+    /// What the key is for: `human` only for a `person` identity.
+    #[schemars(extend("enum" = ["human", "agent", "executor"]))]
+    pub actor: String,
+    /// The signer's agent label: declared, never verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub agent: Option<String>,
+    /// The session, chosen by the client for its first key and repeated by
+    /// its renewals: `ses_` and 16 lowercase hex digits.
+    #[schemars(regex(pattern = r"^ses_[0-9a-f]{16}$"))]
+    pub session: String,
+    /// `none`: an OIDC login is not a verification of each use.
+    #[schemars(extend("enum" = ["none"]))]
+    pub presence: String,
+    /// `client`: the key lives in the process Fulcio certified it for.
+    #[schemars(extend("enum" = ["client"]))]
+    pub custody: String,
+}
+
+/// The binding statement's predicate type (R3.42).
+pub const SIGSTORE_BINDING_PREDICATE_TYPE: &str = "urn:reef-vcs:sigstore-session-key:v1";
+
 /// The identity a certificate names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "evidence.CertificateIdentity")]
@@ -429,7 +484,8 @@ pub struct Authority {
 }
 
 /// The revocations that apply to a certified key beside its authority's:
-/// the key's own, its session's and its identity's.
+/// the key's own, its session's, its identity's, and, for a keyless key
+/// (R3.42), the OIDC match it was bound through.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Revocations {
     /// The key's.
@@ -438,6 +494,26 @@ pub struct Revocations {
     pub session: Option<Revocation>,
     /// Its identity's.
     pub identity: Option<Revocation>,
+    /// The binding's: the OIDC match a keyless key was bound to its
+    /// identity through (R3.42); `None` for a daemon-issued key.
+    pub binding: Option<Revocation>,
+}
+
+/// The earliest of `revocations` and `authority`'s, by `invalid_from`.
+pub fn earliest_revocation<'a>(
+    revocations: &'a Revocations,
+    authority: Option<&'a Revocation>,
+) -> Option<&'a Revocation> {
+    [
+        revocations.key.as_ref(),
+        revocations.session.as_ref(),
+        revocations.identity.as_ref(),
+        revocations.binding.as_ref(),
+        authority,
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|revocation| revocation.invalid_from_ms)
 }
 
 /// A certificate that verifies against a known authority.
@@ -460,15 +536,7 @@ impl Certified {
     /// The earliest applicable revocation, by `invalid_from`: the key's, its
     /// session's, its identity's or its authority's.
     pub fn revocation<'a>(&'a self, revocations: &'a Revocations) -> Option<&'a Revocation> {
-        [
-            revocations.key.as_ref(),
-            revocations.session.as_ref(),
-            revocations.identity.as_ref(),
-            self.authority.revocation.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .min_by_key(|revocation| revocation.invalid_from_ms)
+        earliest_revocation(revocations, self.authority.revocation.as_ref())
     }
 }
 
@@ -549,13 +617,28 @@ pub fn status_at(
     witnessed_at_ms: i64,
     revocations: &Revocations,
 ) -> IdentityStatus {
-    if certified
-        .revocation(revocations)
+    status_of(
+        &certified.binding,
+        certified.authority.revocation.as_ref(),
+        witnessed_at_ms,
+        revocations,
+    )
+}
+
+/// [`status_at`] for a binding verified by any issuer: `binding`'s window,
+/// `revocations` and its authority's revocation, if any. A keyless key's
+/// binding (R3.42) is judged here, with its Fulcio window.
+pub fn status_of(
+    binding: &Binding,
+    authority: Option<&Revocation>,
+    witnessed_at_ms: i64,
+    revocations: &Revocations,
+) -> IdentityStatus {
+    if earliest_revocation(revocations, authority)
         .is_some_and(|revocation| witnessed_at_ms >= revocation.invalid_from_ms)
     {
         return IdentityStatus::Revoked;
     }
-    let binding = &certified.binding;
     if witnessed_at_ms < binding.not_before_ms || witnessed_at_ms > binding.not_after_ms {
         return IdentityStatus::Expired;
     }
@@ -656,7 +739,7 @@ fn parse_certificate(payload: &[u8], key_id: &KeyId) -> Result<Binding, Invalid>
 
 /// The subject's `sha256`: exactly one subject, named `session-key`, whose
 /// digest is only a `sha256` of 64 lowercase hex digits.
-fn subject_digest(subject: Option<&Value>) -> Result<&str, Invalid> {
+pub(crate) fn subject_digest(subject: Option<&Value>) -> Result<&str, Invalid> {
     let bad = |message: String| Err(Invalid::Subject(message));
     let Some(Value::Array(subjects)) = subject else {
         return bad("subject is missing or not an array".into());
@@ -686,7 +769,11 @@ fn subject_digest(subject: Option<&Value>) -> Result<&str, Invalid> {
 }
 
 /// A string field of `object`, or the error for `field`.
-fn string<'a>(object: &'a Map<String, Value>, key: &str, field: &str) -> Result<&'a str, Invalid> {
+pub(crate) fn string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    field: &str,
+) -> Result<&'a str, Invalid> {
     match object.get(key) {
         Some(Value::String(text)) => Ok(text),
         Some(_) => Err(predicate_error(field, format!("{key} is not a string"))),
@@ -695,7 +782,7 @@ fn string<'a>(object: &'a Map<String, Value>, key: &str, field: &str) -> Result<
 }
 
 /// A predicate field naming one value of a vocabulary.
-fn known<T>(
+pub(crate) fn known<T>(
     predicate: &Map<String, Value>,
     field: &str,
     parse: fn(&str) -> Option<T>,
@@ -713,7 +800,7 @@ fn known<T>(
     })
 }
 
-fn names<T: Copy>(all: &[T], name: fn(T) -> &'static str) -> Vec<&'static str> {
+pub(crate) fn names<T: Copy>(all: &[T], name: fn(T) -> &'static str) -> Vec<&'static str> {
     all.iter().map(|value| name(*value)).collect()
 }
 
@@ -837,12 +924,16 @@ fn issuer_of(predicate: &Map<String, Value>) -> Result<Issuer, Invalid> {
     match predicate.get("issuer") {
         Some(Value::Object(issuer)) => {
             let kind = string(issuer, "kind", "issuer")?;
-            let kind = IssuerKind::parse(kind).ok_or_else(|| {
-                predicate_error(
-                    "issuer",
-                    format!("kind {kind:?} is not one this reader knows: reef-daemon"),
-                )
-            })?;
+            // A keyless key's certificate is a Sigstore bundle, never this
+            // predicate (R3.42), so `sigstore` is not an issuer kind here.
+            let kind = IssuerKind::parse(kind)
+                .filter(|kind| *kind != IssuerKind::Sigstore)
+                .ok_or_else(|| {
+                    predicate_error(
+                        "issuer",
+                        format!("kind {kind:?} is not one this reader knows: reef-daemon"),
+                    )
+                })?;
             let key_id = string(issuer, "keyId", "issuer")?;
             let key_id = KeyId::parse(key_id)
                 .ok_or_else(|| predicate_error("issuer", "keyId is not 64 lowercase hex digits"))?;
