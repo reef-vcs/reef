@@ -21,7 +21,9 @@ use reef_client::json::{Proposal, ProposalHistory, Transitioned};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use crate::cli::{guide, here, init, land, policy, presence, provider, remote, ws, ws_run};
+use crate::cli::{
+    conflict, guide, here, init, land, policy, presence, provider, remote, ws, ws_run,
+};
 
 /// A schema of what a command prints, built in the document's generator
 /// so each type is defined once.
@@ -481,6 +483,27 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         note: Some("with --stdout, the starter file's text and nothing else"),
         bytes_with: &["stdout"],
         ..row(&["policy", "init"], object::<policy::PolicyInit>)
+    },
+    OutputRow {
+        note: Some(
+            "pages until --limit conflicts; each with its terms, sources and provenance, and its first 20 paths without per-term values",
+        ),
+        ..view(
+            &["conflict", "list"],
+            list::<conflict::Conflict>,
+            list::<conflict::BriefConflict<'static>>,
+        )
+    },
+    OutputRow {
+        note: Some(
+            "every page of files; hunks with --hunks; with --policy-input, `{\"conflict\": ConflictInput}` for `reef policy check --input` instead, in every form; a revision without a conflict is an error (3, reason NOT_CONFLICTED)",
+        ),
+        bytes_with: &["policy_input"],
+        ..view(
+            &["conflict", "show"],
+            object::<conflict::Conflict>,
+            object::<conflict::BriefConflict<'static>>,
+        )
     },
     row(
         &["evidence", "artifact", "upload"],

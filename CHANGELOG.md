@@ -20,6 +20,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - Repository policy (R3.07) needs no migration. A `reef-policy.toml` that uses a table a later Reef adds is `invalid_policy` to this one: upgrade daemons before policies.
 - Policy simulation (R3.08) needs no migration; the daemon serves API revision 22.
 - The daemon's database becomes schema 13 (`0013_landings`, R3.13) the first time this daemon opens it; the daemon serves API revision 23. A `reef-policy.toml` that names `change.state` or `landing` is `invalid_policy` to an older daemon.
+- Conflict objects (R3.25) need no migration; the daemon serves API revision 24.
 - Garbage collection now deletes evidence that is not on live work and was added more than 90 days ago, at the first run after upgrading (the daemon runs GC every `[gc] interval`, a day by default). Set `[evidence] retention = "0s"` in the daemon's `config.toml` before upgrading to keep all evidence; `reef ws gc --dry-run` reports what would go.
 
 ### Added
@@ -81,6 +82,10 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 - Evidence a landing used is kept until the repository is forgotten, whatever `[evidence] retention` says, and linked to the change; a landed change's provenance records are no longer compacted or expired (R3.13).
 - `reef propose`'s note points at `reef land`; `TRANSITION_CAUSE_LANDING` joins the transition causes.
+
+- Conflict objects (R3.25, [ADR 0065](docs/adr/0065-conflict-objects.md), [docs/conflicts.md](docs/conflicts.md)): a conflicted commit read as data, derived from jj's stored conflict on every read and never stored. Every term of jj's merge (its *n* sides and *n − 1* bases) is reported with its role, jj's label, and the commit it came from: jj's label proposes that commit, and it is `verified` only when a commit related to the conflicted one holds the term's exact value at the conflicted paths (`label` when only the label says so, `none` when nothing matches). Each verified side carries its change's provenance (sessions, the newest record, and the exact commit's record), and each conflicted file its kind, each term's value, an id that survives describes and edits elsewhere, whether a parent carries the same conflict, and, on request, its hunks with each term's text and line numbers.
+- `ConflictService.ListConflicts` and `GetConflict` (API revision 24), READ: conflicted commits of a revset (`mutable() & conflicts()` by default, `introduced_only` to leave out inherited ones), and one conflict with its files a page at a time (`paths`, `hunks`, `max_file_bytes`). A clean revision is `NOT_CONFLICTED`.
+- `reef conflict list` and `reef conflict show` (`--path`, `--hunks`, and `--policy-input`, which prints the conflict as `reef policy check --input` reads it), in `--help-all`. `reef status` names `reef conflict show` under a workspace's conflicted paths, and the refusals of a conflicted change (`CHANGE_CONFLICTED`, `CONFLICTED_REVISION`) give it as their `next`.
 
 ### Fixed
 

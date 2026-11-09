@@ -659,6 +659,14 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "an agent runs `reef proposal show`; get_change carries the lifecycle",
     ),
     (
+        "/reef.api.v1.ConflictService/GetConflict",
+        "an agent runs `reef conflict show`; R3.27's assignment, which hands an agent a conflict, revisits a tool; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.ConflictService/ListConflicts",
+        "an agent runs `reef conflict list`; R3.27's resolver queue revisits a tool; tools/list is at its budget (#116)",
+    ),
+    (
         "/reef.api.v1.PolicyService/EvaluatePolicy",
         "an agent runs `reef policy eval`; `reef land` reports it; tools/list is at its budget (#116)",
     ),

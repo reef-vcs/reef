@@ -174,8 +174,9 @@ impl Advise for EvidenceError {
             Self::TreeMismatch { commit_tree_id, .. } => Some(Advice::hint(format!(
                 "The revision has moved on to tree {commit_tree_id}; sign a claim about that tree, or add this one without a revision."
             ))),
-            Self::Conflicted { .. } => Some(Advice::hint(
-                "Resolve the conflict first; a conflicted change has no tree to test.",
+            Self::Conflicted { commit_id } => Some(Advice::run(
+                "Resolve the conflict first; a conflicted change has no tree to test. Its sides:",
+                ["reef", "conflict", "show", "-r", commit_id.as_str()],
             )),
             Self::NotFound { .. } => Some(Advice::run(
                 "List the repository's evidence to find its id; evidence that is not on live work is deleted after [evidence] retention (`reef config show`).",

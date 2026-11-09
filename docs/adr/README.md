@@ -76,3 +76,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0062](0062-policy-simulation.md) | Policy simulation | accepted |
 | [0063](0063-change-lifecycle.md) | Change lifecycle | accepted |
 | [0064](0064-landing-service-local.md) | Landing service, local | accepted |
+| [0065](0065-conflict-objects.md) | Conflict objects | accepted |

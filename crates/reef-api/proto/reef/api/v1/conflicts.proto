@@ -1,0 +1,339 @@
+// Conflicts (R3.25, ADR 0065): jj's stored conflicts as structured records.
+//
+// jj stores a conflicted commit's tree as a merge of *n* sides and *n − 1*
+// bases, one label per term. A conflict object is one conflicted commit's:
+// every term with its role, jj's label and the commit it came from, each
+// side's provenance, and every conflicted path with each term's value and,
+// on request, its hunks. Objects are derived from jj on every read and
+// never stored (docs/conflicts.md). These are reads only; nothing here
+// assigns or resolves a conflict.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/provenance.proto";
+
+// Reading conflicts.
+service ConflictService {
+  // The conflicted commits of a revset, each with its terms, their sources
+  // and provenance, and its first 20 conflicted paths (no per-term values,
+  // no hunks), in the revset's log order (as ListChanges returns it). Later
+  // pages read the same operation as the first. A page looks at no more
+  // than 10,000 commits of the revset and stops before its response passes
+  // 3 MiB, so a page may hold fewer than `page_size`, or none, with a
+  // `next_page_token`.
+  //
+  // Errors: the revset reasons of ChangeService; INVALID_ARGUMENT with
+  // reason INVALID_PAGE_TOKEN; a failed snapshot's own error, with reason
+  // SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // One conflicted commit, with its files a page at a time, each with its
+  // per-term values and, with `hunks`, its hunks. Every page repeats the
+  // conflict's terms and change, so each stands alone. A page with hunks
+  // ends after the file whose hunks pass 2 MiB in all.
+  //
+  // Errors: the revision reasons of ChangeService, and INVALID_ARGUMENT
+  // with reason REVISION_REQUIRED (an empty `revision` without
+  // `workspace`); NOT_FOUND with reason NOT_CONFLICTED (metadata
+  // `commit_id`) when the revision's tree has no conflict;
+  // INVALID_ARGUMENT with reason MAX_FILE_BYTES_TOO_LARGE (metadata `max`)
+  // over 16 MiB, INVALID_PATH (metadata `path`) for a path that is not
+  // repository-relative, and INVALID_PAGE_TOKEN; a failed snapshot's own
+  // error, with reason SNAPSHOT_FAILED (metadata `workspace_id`).
+  rpc GetConflict(GetConflictRequest) returns (GetConflictResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// What a conflict is about. Later tickets add kinds jj does not store.
+enum ConflictKind {
+  // Not set.
+  CONFLICT_KIND_UNSPECIFIED = 0;
+  // jj's stored conflict in a commit's tree.
+  CONFLICT_KIND_TREE = 1;
+}
+
+// A term's place in jj's merge.
+enum ConflictTermRole {
+  // Not set.
+  CONFLICT_TERM_ROLE_UNSPECIFIED = 0;
+  // One of the *n* sides (jj's adds).
+  CONFLICT_TERM_ROLE_SIDE = 1;
+  // One of the *n − 1* bases (jj's removes).
+  CONFLICT_TERM_ROLE_BASE = 2;
+}
+
+// How a term's source commit was decided.
+enum ConflictAttribution {
+  // Not set.
+  CONFLICT_ATTRIBUTION_UNSPECIFIED = 0;
+  // A commit linked to the conflicted one (a parent, an earlier commit of
+  // its change or a parent of one, or a commit the label names that is an
+  // ancestor of a parent) holds exactly the term's value at every checked
+  // conflicted path (up to 200), and the term has a value at one of them
+  // at least. It says the commit holds that content, not that it was the
+  // one merged.
+  CONFLICT_ATTRIBUTION_VERIFIED = 1;
+  // jj's label names the commit, and the content does not confirm it:
+  // declared by whoever wrote the label, which any client can.
+  CONFLICT_ATTRIBUTION_LABEL = 2;
+  // No candidate resolved or matched; the source is empty.
+  CONFLICT_ATTRIBUTION_NONE = 3;
+}
+
+// How a path conflicts, summarizing its terms.
+enum ConflictFileKind {
+  // Not set.
+  CONFLICT_FILE_KIND_UNSPECIFIED = 0;
+  // Files on every present term, and their bits agree.
+  CONFLICT_FILE_KIND_CONTENT = 1;
+  // Only the executable bit differs.
+  CONFLICT_FILE_KIND_EXECUTABLE = 2;
+  // No base has it; several sides add it.
+  CONFLICT_FILE_KIND_ADD_ADD = 3;
+  // Some side deletes it.
+  CONFLICT_FILE_KIND_MODIFY_DELETE = 4;
+  // A file against a symlink, directory or submodule.
+  CONFLICT_FILE_KIND_TYPE = 5;
+  // Anything else: symlinks or submodules against their own kind.
+  CONFLICT_FILE_KIND_OTHER = 6;
+}
+
+// What a term holds at a path.
+enum ConflictValueType {
+  // Not set.
+  CONFLICT_VALUE_TYPE_UNSPECIFIED = 0;
+  // Nothing.
+  CONFLICT_VALUE_TYPE_ABSENT = 1;
+  // A regular file.
+  CONFLICT_VALUE_TYPE_FILE = 2;
+  // A symbolic link.
+  CONFLICT_VALUE_TYPE_SYMLINK = 3;
+  // A directory.
+  CONFLICT_VALUE_TYPE_TREE = 4;
+  // A git submodule.
+  CONFLICT_VALUE_TYPE_SUBMODULE = 5;
+}
+
+// The commit a term came from.
+message ConflictSource {
+  // The commit, in hex; empty with CONFLICT_ATTRIBUTION_NONE. It may be
+  // hidden (a rebased change's earlier commit).
+  string commit_id = 1;
+  // Its change, in hex.
+  string change_id = 2;
+  // How it was decided.
+  ConflictAttribution attribution = 3;
+  // Its description's first line, at most 1 KiB.
+  string description = 4;
+  // Its author.
+  Signature author = 5;
+  // When it was committed.
+  google.protobuf.Timestamp committed_at = 6;
+}
+
+// Who produced a side: R3.04's records of the side's change, re-verified at
+// this read. Only a VERIFIED side carries one, and a response reads the
+// records of at most 64 changes.
+message ConflictSideProvenance {
+  // The change the records are of.
+  string change_id = 1;
+  // The record of the source commit itself, when the daemon recorded that
+  // commit; no envelope.
+  ProvenanceRecord commit_record = 2;
+  // The change's newest record that verifies, recorded at or before the
+  // source commit's committer time, else its newest that verifies; no
+  // envelope.
+  ProvenanceRecord latest_record = 3;
+  // The sessions with records of the change, newest first, at most 10.
+  // Each one's `records` counts its records of this change.
+  repeated ProvenanceSession sessions = 4;
+  // Sessions among the newest 200 records of the change.
+  uint32 sessions_total = 5;
+  // Records of the change, in all.
+  uint64 records = 6;
+  // Of the records read (the newest 200), those that do not verify.
+  uint64 invalid_records = 7;
+}
+
+// One term of the conflicted tree.
+message ConflictTerm {
+  // Its index in jj's order: side 0, base 0, side 1, ….
+  uint32 index = 1;
+  // Side or base.
+  ConflictTermRole role = 2;
+  // jj's label, verbatim up to 1 KiB; empty for none. Free text any client
+  // can write.
+  string label = 3;
+  // The label's last parenthesized suffix (`rebase destination`,
+  // `rebased revision`), as written; never trusted.
+  string origin = 4;
+  // The commit it came from.
+  ConflictSource source = 5;
+  // VERIFIED sides only: who produced it.
+  ConflictSideProvenance provenance = 6;
+}
+
+// One term's value at a conflicted path.
+message ConflictValue {
+  // The term's index in the commit's merge.
+  uint32 index = 1;
+  // What it holds.
+  ConflictValueType type = 2;
+  // The object id in hex (blob, symlink, tree, or submodule commit); empty
+  // when absent.
+  string id = 3;
+  // The executable bit, for a file.
+  bool executable = 4;
+}
+
+// One hunk's text on one term.
+message ConflictHunkTerm {
+  // The term's index in the commit's merge.
+  uint32 index = 1;
+  // Its text, UTF-8 with invalid sequences replaced.
+  string text = 2;
+  // Its first line, from 1, in that term's file as the hunks rebuild it:
+  // the term with the other terms' non-conflicting changes applied, as
+  // jj's markers show it.
+  uint32 start_line = 3;
+  // Its lines.
+  uint32 line_count = 4;
+}
+
+// One hunk of a conflicted file, as jj's merge splits it.
+message ConflictHunk {
+  // Every term agrees here (or all but one left it unchanged).
+  bool resolved = 1;
+  // The agreed text, for a resolved hunk.
+  string text = 2;
+  // Each term's text, for a conflicted hunk: one per term of the file's
+  // simplified merge (repeated side and base pairs dropped).
+  repeated ConflictHunkTerm terms = 3;
+}
+
+// One conflicted path.
+message ConflictFile {
+  // The path, repository-relative.
+  string path = 1;
+  // SHA-256 of the path and its simplified terms, 64 hex digits: the same
+  // in a child that inherits the conflict and across edits to other paths.
+  string id = 2;
+  // How it conflicts.
+  ConflictFileKind kind = 3;
+  // A parent carries the same conflict (the same `id`) at this path.
+  bool inherited = 4;
+  // Each term's value, in the commit's term order; empty in ListConflicts
+  // and for a conflict that is `too_wide`.
+  repeated ConflictValue terms = 5;
+  // The file, as resolved and conflicted hunks in order; only with
+  // GetConflict's `hunks`, and only for content and add/add conflicts.
+  repeated ConflictHunk hunks = 6;
+  // A term has a NUL in its first 8,000 bytes: no hunks.
+  bool binary = 7;
+  // A term is over `max_file_bytes`, the terms over 32 MiB together, the
+  // hunks' text over 2 MiB, or the file alone over the response's limit:
+  // no hunks.
+  bool too_large = 8;
+}
+
+// One conflicted commit's conflict.
+message Conflict {
+  // `cfl_` and 32 hex digits: SHA-256 over the change id and each file's
+  // id in path order. Unchanged by a describe or an edit to a path that
+  // does not conflict; changed when a conflicted path's sides change.
+  string id = 1;
+  // What it is about.
+  ConflictKind kind = 2;
+  // The conflicted commit.
+  Change change = 3;
+  // Its number of sides.
+  uint32 arity = 4;
+  // Every term, in jj's order; empty when `too_wide`.
+  repeated ConflictTerm terms = 5;
+  // Who produced the conflicted change itself, summarized as for a side.
+  ConflictSideProvenance change_provenance = 6;
+  // Conflicted paths, in path order: this page's in GetConflict, the
+  // first 20 in ListConflicts.
+  repeated ConflictFile files = 7;
+  // Conflicted paths, in all.
+  uint32 files_total = 8;
+  // Conflicted paths no parent carries.
+  uint32 introduced = 9;
+  // More than 64 terms: terms and sources are not reported, and files
+  // carry paths only.
+  bool too_wide = 10;
+}
+
+// ListConflicts' request.
+message ListConflictsRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // A jj revset; empty for `mutable() & conflicts()`. Commits without a
+  // conflict are skipped.
+  string revset = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+  // Conflicts per page: 0 means 50, more than 200 means 200.
+  int32 page_size = 6;
+  // The previous page's `next_page_token`.
+  string page_token = 7;
+  // Leave out commits whose every conflicted path is inherited.
+  bool introduced_only = 8;
+}
+
+// ListConflicts' response.
+message ListConflictsResponse {
+  // The conflicts.
+  repeated Conflict conflicts = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+  // The operation they were read at.
+  string at_operation = 3;
+}
+
+// GetConflict's request.
+message GetConflictRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // One commit; empty for `@` with `workspace`.
+  string revision = 3;
+  // Only files equal to, or under, one of these repository-relative paths.
+  repeated string paths = 4;
+  // Fill each file's hunks.
+  bool hunks = 5;
+  // Bytes of each term a file's hunks may read: 0 means 1 MiB; more than
+  // 16 MiB is INVALID_ARGUMENT.
+  uint64 max_file_bytes = 6;
+  // Read at this operation; empty for the head.
+  string at_operation = 7;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 8;
+  // Files per page: 0 means 200, more than 1,000 means 1,000.
+  int32 page_size = 9;
+  // The previous page's `next_page_token`.
+  string page_token = 10;
+}
+
+// GetConflict's response.
+message GetConflictResponse {
+  // The conflict, with this page's files.
+  Conflict conflict = 1;
+  // The next page's token; empty on the last page.
+  string next_page_token = 2;
+  // The operation it was read at.
+  string at_operation = 3;
+}

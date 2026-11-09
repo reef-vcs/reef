@@ -19,6 +19,7 @@ mod autostart;
 mod backup;
 pub(crate) mod changes;
 mod config;
+pub(crate) mod conflict;
 pub(crate) mod daemon;
 mod declare_hook;
 mod diff;
@@ -375,6 +376,9 @@ enum Command {
     /// Check and evaluate the repository's policy: which evidence and sign-offs a change needs to land.
     #[command(infer_subcommands = true)]
     Policy(policy::Args),
+    /// Show conflicts as data: each side, the commit it came from, and who wrote it.
+    #[command(infer_subcommands = true)]
+    Conflict(conflict::Args),
     /// Print the agent guide: what Reef is and the commands that matter.
     #[command(visible_alias = "agent-guide")]
     Guide(guide::Args),
@@ -866,6 +870,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Executor(args) => Box::pin(executor::run(&global, out, args)).await,
         Command::Policy(args) if args.is_offline() => args.run_offline(out),
         Command::Policy(args) => policy::run(&connect(&global, out).await?, args).await,
+        Command::Conflict(args) => conflict::run(&connect(&global, out).await?, args).await,
         Command::Init(args) => init::run(&global, out, args).await,
         Command::Mcp => return crate::mcp::serve(global, out).await,
         Command::Schema(args) => schema::run(out, &args),

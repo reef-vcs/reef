@@ -817,6 +817,42 @@ async fn outputs_match_their_schemas() {
         )
         .await;
 
+    // R3.25: a conflict a rebase made outside the daemon, listed and shown.
+    let left = script.json(&root, &["ws", "create"]).await;
+    let right = script.json(&root, &["ws", "create"]).await;
+    let (left_dir, right_dir) = (
+        PathBuf::from(text(&left["path"])),
+        PathBuf::from(text(&right["path"])),
+    );
+    std::fs::write(left_dir.join("conflict.txt"), "one\nleft\n").unwrap();
+    std::fs::write(right_dir.join("conflict.txt"), "one\nright\n").unwrap();
+    let left_commit = text(
+        &script
+            .json(&root, &["ws", "snapshot", &text(&left["id"])])
+            .await["commit_id"],
+    );
+    let right_commit = text(
+        &script
+            .json(&root, &["ws", "snapshot", &text(&right["id"])])
+            .await["commit_id"],
+    );
+    script
+        .run(&root, &["ws", "release", &text(&right["id"])])
+        .await;
+    let jj_root = root.clone();
+    let rebased = tokio::task::spawn_blocking(move || {
+        common::conflict::rebase(&jj_root, &right_commit, &left_commit)
+    })
+    .await
+    .unwrap();
+    script.both(&root, &["conflict", "list"]).await;
+    script
+        .both(&root, &["conflict", "show", "-r", &rebased, "--hunks"])
+        .await;
+    script
+        .run(&root, &["ws", "release", &text(&left["id"])])
+        .await;
+
     // Releases and GC last: they end the workspaces.
     script.json(&root, &["ws", "release", &a_id]).await;
     script.run(&root, &["ws", "release", &text(&b["id"])]).await;

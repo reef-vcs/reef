@@ -157,8 +157,12 @@ impl TextRender for RepoStatus {
             if ws.conflicted_path_count > 0 {
                 writeln!(w, "Conflicted paths ({}):", ws.conflicted_path_count)?;
                 for path in &ws.conflicted_paths {
-                    writeln!(w, "{path}")?;
+                    writeln!(w, "{}", super::conflict::clean(path))?;
                 }
+                writeln!(
+                    w,
+                    "Each side, where it came from and who wrote it: reef conflict show"
+                )?;
             }
         }
         if let Some(repo) = &self.repository {
