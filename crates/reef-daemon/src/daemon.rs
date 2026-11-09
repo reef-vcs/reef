@@ -158,6 +158,8 @@ pub struct AppState {
     pub policy: Arc<crate::policy::Policies>,
     /// Change lifecycle locks (R3.09).
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
+    /// The landing service's workers and waiters (R3.13).
+    pub landings: crate::landing::Landings,
 }
 
 impl fmt::Debug for AppState {
@@ -446,6 +448,7 @@ impl Daemon {
             executor,
             policy: Arc::new(crate::policy::Policies::default()),
             lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
+            landings: crate::landing::Landings::default(),
         });
 
         // Before any snapshot can run (R2.10).
@@ -474,6 +477,8 @@ impl Daemon {
         state.executor.start(state.shutdown.clone());
         // Landings seen on trunk() (R3.09).
         crate::lifecycle::observe::start(&state);
+        // Queued landings resume (R3.13).
+        crate::landing::start(&state);
         let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),

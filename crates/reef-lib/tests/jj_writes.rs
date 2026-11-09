@@ -1077,3 +1077,122 @@ async fn record_transitions() {
 fn hex_change(commit: &Commit) -> reef_lib::jj::ChangeIdHex {
     commit.change_id().hex().parse().unwrap()
 }
+
+// R3.13: previewing and landing a change on a bookmark.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture through each case")]
+async fn preview_and_land() {
+    use reef_lib::jj::land::{self, LandError, LandTarget};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1\n2\n3\n")], "base").await;
+    let ours = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("b", "b")], "ours").await;
+    let theirs = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("c", "c")],
+        "theirs",
+    )
+    .await;
+    let clash = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\nX\n3\n"), ("c", "d")],
+        "clash",
+    )
+    .await;
+    let child = new_commit(
+        &mut tx,
+        &[&ours],
+        &[("a", "1\n2\n3\n"), ("b", "b"), ("e", "e")],
+        "child",
+    )
+    .await;
+    bookmark(&mut tx, "main", &base);
+    set_wc(&mut tx, "agent", &ours);
+    fx.commit(tx, "setup").await;
+    let target = |commit: &Commit| LandTarget {
+        change: hex_change(commit),
+        commit: hex(commit),
+        bookmark: "main".to_owned(),
+    };
+
+    // A fast-forward: nothing rebased, no overlap.
+    let preview = land::preview(&fx.head(), &target(&ours)).await.unwrap();
+    assert!(!preview.rebased);
+    assert_eq!(preview.destination, hex(&base));
+    // A parent not on the destination.
+    let unlanded = land::preview(&fx.head(), &target(&child))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(unlanded, LandError::UnlandedParents { .. }),
+        "{unlanded:?}"
+    );
+
+    let landed = fx
+        .repo
+        .land(&target(&ours), &hex(&base), &meta(OpKind::Land))
+        .await
+        .unwrap();
+    assert!(!landed.rebased);
+    assert_eq!(landed.commit, hex(&ours));
+    assert_eq!(
+        fx.local_bookmark("main"),
+        RefTarget::normal(ours.id().clone())
+    );
+    // The workspace on the landed commit has a new empty change on it.
+    assert_eq!(landed.new_working_copies, ["agent"]);
+    let wc = fx
+        .get(&fx.wc("agent").unwrap().hex().parse().unwrap())
+        .await;
+    assert_eq!(wc.parent_ids(), [ours.id().clone()]);
+    assert_eq!(wc.tree_ids(), ours.tree_ids());
+    assert_eq!(
+        fx.attributes().get(ATTR_KIND).map(String::as_str),
+        Some("land")
+    );
+
+    // A rebase over a disjoint change: same change, new commit, no overlap.
+    let preview = land::preview(&fx.head(), &target(&theirs)).await.unwrap();
+    assert!(preview.rebased);
+    assert_eq!(preview.overlap_total, 0);
+    assert!(!preview.conflicted());
+    let rebased = fx
+        .repo
+        .land(&target(&theirs), &hex(&ours), &meta(OpKind::Land))
+        .await
+        .unwrap();
+    assert!(rebased.rebased);
+    let landed_commit = fx.get(&rebased.commit).await;
+    assert_eq!(landed_commit.change_id(), theirs.change_id());
+    assert_eq!(landed_commit.parent_ids(), [ours.id().clone()]);
+
+    // A conflicting rebase: listed, nothing written; a moved destination
+    // is refused.
+    let preview = land::preview(&fx.head(), &target(&clash)).await.unwrap();
+    assert!(preview.conflicted());
+    assert_eq!(preview.conflicts, ["c"]);
+    assert_eq!(preview.overlap, ["c"]);
+    let op = fx.op();
+    let moved = fx
+        .repo
+        .land(&target(&clash), &hex(&ours), &meta(OpKind::Land))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(moved, LandError::DestinationMoved { .. }),
+        "{moved:?}"
+    );
+    let conflicts = fx
+        .repo
+        .land(&target(&clash), &rebased.commit, &meta(OpKind::Land))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(conflicts, LandError::RebaseConflicts),
+        "{conflicts:?}"
+    );
+    assert_eq!(fx.op(), op, "a refusal writes no operation");
+}

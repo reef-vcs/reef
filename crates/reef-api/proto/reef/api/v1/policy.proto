@@ -165,6 +165,24 @@ message PolicyEvidenceNeed {
   repeated string attestors = 3;
   // For a failed need, the failing object.
   repeated string evidence_ids = 4;
+  // For a missing need, the objects of its kind and target on the tree that
+  // did not count, and why (R3.13), at most 20.
+  repeated PolicyRejectedEvidence rejected = 5;
+  // How many objects were rejected; more than `rejected` holds when it was
+  // cut.
+  uint32 rejected_total = 6;
+}
+
+// An evidence object that did not count for a need, and why (R3.13).
+message PolicyRejectedEvidence {
+  // The evidence id.
+  string evidence_id = 1;
+  // Why: `signature_invalid` (its signature does not verify), `error` (no verdict), `key_unbound`, `key_expired`,
+  // `key_revoked` or `key_invalid` (its key's status at witness time),
+  // `self` (from the change's own session or agent), `presence` (its key's
+  // presence is below the attestor set's), `condition` (a set's `when` was
+  // false), or `untrusted` (no attestor set of the rule accepts its signer).
+  string why = 2;
 }
 
 // A sign-off a rule needs, and what it has.

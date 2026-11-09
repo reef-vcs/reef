@@ -15,6 +15,7 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.EDIT]: "edited files",
   [OperationKind.IMPORT_REFS]: "imported git refs",
   [OperationKind.TRANSITION]: "moved a change through its lifecycle",
+  [OperationKind.LAND]: "landed a change",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };
@@ -49,7 +50,12 @@ export function operationSentence(operation: WithTransition): string {
     return SNAPSHOTS[operation.snapshotKind] ?? "saved a snapshot";
   }
   if (operation.kind === OperationKind.TRANSITION) {
-    const to = operation.transitionTo ?? operation.transitions?.[0]?.to;
+    const first = operation.transitions?.[0];
+    const to = operation.transitionTo ?? first?.to;
+    // The landing service's dequeue (R3.13): back to proposed, from queued.
+    if (to === LifecycleState.PROPOSED && first?.from === LifecycleState.QUEUED) {
+      return "returned a proposal from the queue";
+    }
     if (to !== undefined && TRANSITIONS[to]) return TRANSITIONS[to];
   }
   return SENTENCES[operation.kind] ?? "did something else";

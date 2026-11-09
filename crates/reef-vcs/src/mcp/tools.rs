@@ -648,7 +648,7 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.ChangeService/TransitionChange",
-        "an agent runs `reef propose` and `reef proposal`; R3.13's proposal flow decides the tool; tools/list is at its budget (#116)",
+        "an agent runs `reef propose` and `reef proposal`, then `reef land`; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.ChangeService/ListProposals",
@@ -660,7 +660,19 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.PolicyService/EvaluatePolicy",
-        "an agent runs `reef policy eval`; R3.13's proposal flow reports it; tools/list is at its budget (#116)",
+        "an agent runs `reef policy eval`; `reef land` reports it; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.LandingService/LandChange",
+        "an agent runs `reef land` after `reef propose`; wait_for_operations with kind land follows it; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.LandingService/GetLanding",
+        "an agent runs `reef landing show`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.LandingService/ListLandings",
+        "an agent runs `reef landing list`; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.PolicyService/SimulatePolicy",

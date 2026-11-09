@@ -1,0 +1,29 @@
+# A landing (R3.13): CI's tests, fast-forward and disjoint landings only, and
+# only queued changes. The inputs show each reason evidence is rejected.
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[attestors.ci]
+identities = ["ci-main"]
+identity_kinds = ["ci"]
+
+[[require]]
+name = "tests"
+kinds = ["test"]
+attestors = ["ci"]
+
+[[rule]]
+name = "fast-forward"
+expr = '!landing.rebased'
+message = "lands only on the destination's head"
+
+[[rule]]
+name = "disjoint"
+expr = 'landing.overlap_total == 0'
+message = "touches nothing the destination changed"
+
+[[rule]]
+name = "queued"
+expr = 'change.state == "queued"'

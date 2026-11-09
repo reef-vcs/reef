@@ -1,9 +1,9 @@
 //! What a policy sees about one change: the input the daemon builds, and
 //! `reef policy check --input` reads back as JSON.
 //!
-//! CEL sees [`Input::change`], [`Input::evidence`] and
-//! [`Input::provenance`] as the variables `change`, `evidence` and
-//! `provenance`, and the policy's own groups as `groups`. Strings for
+//! CEL sees [`Input::change`], [`Input::evidence`],
+//! [`Input::provenance`] and [`Input::landing`] as the variables `change`,
+//! `evidence`, `provenance` and `landing`, and the policy's own groups as `groups`. Strings for
 //! enumerations, integers (`int`, never `uint`) for counts and times in
 //! milliseconds since the Unix epoch, and no `null`: an absent value is an
 //! empty string, zero or an empty list.
@@ -43,6 +43,31 @@ pub struct Input {
     /// whether it is still present and what loading it reported.
     /// `builtin:policy-file` reads it; CEL does not.
     pub proposed_policy: ProposedPolicy,
+    /// Where the change would land (R3.13): the destination and what
+    /// rebasing onto it does. Empty outside a landing or its preview.
+    pub landing: Landing,
+}
+
+/// What landing the change does (R3.13, ADR 0064): the destination it
+/// lands onto, whether the change is rebased onto its head, and the paths
+/// both the change and the destination touched since the change's parents.
+/// A policy that trusts only fast-forward landings says `!landing.rebased`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "policy.Landing")]
+pub struct Landing {
+    /// The destination bookmark; empty when nothing was previewed.
+    pub destination: String,
+    /// Its head: the commit the change lands on.
+    pub destination_commit: String,
+    /// Whether the change is rebased onto `destination_commit`; false for
+    /// a fast-forward, whose landed tree is the judged one.
+    pub rebased: bool,
+    /// Paths both the change and the destination changed since the
+    /// change's parents, sorted, at most [`crate::MAX_OVERLAP_PATHS`].
+    pub overlap: Vec<String>,
+    /// How many there are; more than `overlap`'s length when it was cut.
+    pub overlap_total: i64,
 }
 
 /// The change judged.
@@ -75,6 +100,10 @@ pub struct Change {
     pub lines_added: i64,
     /// Lines removed over `files`.
     pub lines_removed: i64,
+    /// Its lifecycle state (R3.09): `draft`, `proposed`, `queued`,
+    /// `landed`, `declined`, `withdrawn` or `superseded`; `queued` inside a
+    /// landing (R3.13).
+    pub state: String,
 }
 
 /// A commit's author.

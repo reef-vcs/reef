@@ -13,6 +13,7 @@ const KINDS: Partial<Record<OperationKind, string>> = {
   [OperationKind.EDIT]: "edit",
   [OperationKind.IMPORT_REFS]: "import refs",
   [OperationKind.TRANSITION]: "transition",
+  [OperationKind.LAND]: "land",
   [OperationKind.EXTERNAL]: "external",
   [OperationKind.OTHER]: "other",
 };

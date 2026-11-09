@@ -1,0 +1,118 @@
+{
+  "cost": 15,
+  "decision": "allow",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 1,
+    "evidence_ignored": 0,
+    "lines_added": 3,
+    "lines_removed": 1,
+    "paths": 1,
+    "provenance": 0
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [
+        "ev-ci"
+      ],
+      "failed": [],
+      "kind": "require",
+      "message": "",
+      "missing": [],
+      "name": "tests",
+      "paths": [
+        "src/lib.rs"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "rule",
+      "message": "",
+      "missing": [],
+      "name": "fast-forward",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "rule",
+      "message": "",
+      "missing": [],
+      "name": "disjoint",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "rule",
+      "message": "",
+      "missing": [],
+      "name": "queued",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    }
+  ],
+  "sha256": "d452e42abfbc3ba89e71825d5371311fe9f44928553133bd5f2385191e403ffd",
+  "version": 1
+}

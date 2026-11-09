@@ -278,6 +278,24 @@ impl Db {
         })
     }
 
+    /// Sets the commit of the pending transition `id`: a landing knows the
+    /// commit it landed only after its operation (R3.13).
+    pub fn set_pending_transition_commit(
+        &self,
+        repo: RepoId,
+        id: &str,
+        commit: &str,
+    ) -> Result<(), DbError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE lifecycle_transitions SET commit_id = ?3
+                 WHERE repo_id = ?1 AND id = ?2 AND status = 'pending'",
+                params![repo, id, commit],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Deletes the pending transition `id`: its operation was never written.
     pub fn delete_pending_transition(&self, repo: RepoId, id: &str) -> Result<(), DbError> {
         self.with(|conn| {

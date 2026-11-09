@@ -132,25 +132,94 @@ impl PolicyHandler {
 
 /// A policy file read from a tree.
 #[derive(Clone)]
-struct PolicyFile {
-    blob_id: String,
-    bytes: Result<Vec<u8>, String>,
+pub(crate) struct PolicyFile {
+    pub(crate) blob_id: String,
+    pub(crate) bytes: Result<Vec<u8>, String>,
 }
 
 /// What the repository thread reads about one change.
-struct ChangeRead {
-    change: Change,
-    tree_id: Option<String>,
+pub(crate) struct ChangeRead {
+    pub(crate) change: Change,
+    pub(crate) tree_id: Option<String>,
     /// The change's own `reef-policy.toml`, when it touches it.
-    proposed: Option<PolicyFile>,
+    pub(crate) proposed: Option<PolicyFile>,
     /// When it was committed.
-    committed_at: std::time::SystemTime,
+    pub(crate) committed_at: std::time::SystemTime,
+}
+
+/// Evidence on a tree whose signature does not verify: never in the input,
+/// but reported as rejected when a need of its kind and target is missing
+/// (R3.13).
+#[derive(Clone, Debug)]
+pub(crate) struct InvalidEvidence {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) target: String,
+    /// `signature_invalid`.
+    pub(crate) why: &'static str,
+}
+
+/// What [`read_evidence`] read.
+pub(crate) struct EvidenceRead {
+    /// The objects whose signature verifies.
+    pub(crate) evidence: Vec<input::Evidence>,
+    /// How many were left out.
+    pub(crate) ignored: i64,
+    /// Those left out for their signature.
+    pub(crate) invalid: Vec<InvalidEvidence>,
+}
+
+/// Adds each of `invalid` to the `rejected` list of every missing need of
+/// its kind and target in `evaluation`, first (R3.13).
+pub(crate) fn reject_invalid(evaluation: &mut Evaluation, invalid: &[InvalidEvidence]) {
+    if invalid.is_empty() {
+        return;
+    }
+    for rule in &mut evaluation.rules {
+        for need in &mut rule.missing {
+            let found: Vec<reef_policy::Rejected> = invalid
+                .iter()
+                .filter(|e| e.kind == need.kind && e.target == need.target)
+                .map(|e| reef_policy::Rejected {
+                    evidence_id: e.id.clone(),
+                    why: e.why.to_owned(),
+                })
+                .collect();
+            if found.is_empty() {
+                continue;
+            }
+            need.rejected_total = need
+                .rejected_total
+                .saturating_add(i64::try_from(found.len()).unwrap_or(i64::MAX));
+            let mut rejected = found;
+            rejected.append(&mut need.rejected);
+            rejected.truncate(reef_policy::MAX_REJECTED);
+            need.rejected = rejected;
+        }
+    }
+}
+
+/// `change`'s lifecycle state as the policy input names it: its row's, or
+/// `landed` for an unrecorded immutable change and `draft` otherwise.
+pub(crate) fn change_state(
+    state: &AppState,
+    repo: crate::model::RepoId,
+    change: &str,
+    immutable: bool,
+) -> Result<String, Status> {
+    Ok(
+        match state.db.lifecycle_row(repo, change).map_err(status)? {
+            Some(row) => row.state,
+            None if immutable => "landed".to_owned(),
+            None => "draft".to_owned(),
+        },
+    )
 }
 
 /// The change at `commit`, its diff against its merged parents (every
 /// file, with sizes), and its own policy file when it touches one.
 /// `should_stop` ends the diff early once nobody waits for the answer.
-async fn read_change(
+pub(crate) async fn read_change(
     repo: &ReadonlyRepo,
     scope: &RevsetScope<'_>,
     commit: &CommitIdHex,
@@ -243,6 +312,7 @@ async fn read_change(
             .collect(),
         lines_added,
         lines_removed,
+        state: if info.immutable { "landed" } else { "draft" }.to_owned(),
     };
     Ok(ChangeRead {
         change,
@@ -254,7 +324,7 @@ async fn read_change(
 
 /// The commit `revision` resolves to, and the `reef-policy.toml` in its
 /// tree, if it has one.
-async fn policy_at(
+pub(crate) async fn policy_at(
     repo: &ReadonlyRepo,
     scope: &RevsetScope<'_>,
     revision: &str,
@@ -273,7 +343,7 @@ async fn policy_at(
 
 /// What the input says about the change's own policy file: whether it
 /// loads. Compiles through the cache, so it blocks.
-fn proposed_policy(state: &AppState, proposed: Option<&PolicyFile>) -> ProposedPolicy {
+pub(crate) fn proposed_policy(state: &AppState, proposed: Option<&PolicyFile>) -> ProposedPolicy {
     match proposed {
         None => ProposedPolicy::default(),
         Some(file) => match &file.bytes {
@@ -299,7 +369,7 @@ fn proposed_policy(state: &AppState, proposed: Option<&PolicyFile>) -> ProposedP
 
 /// Where the policy an evaluation runs comes from.
 #[derive(Clone, Copy)]
-enum Source<'a> {
+pub(crate) enum Source<'a> {
     /// A request's text.
     Text(&'a [u8]),
     /// The file at a revision, or none there.
@@ -307,7 +377,7 @@ enum Source<'a> {
 }
 
 /// `source` evaluated over `input`, through the daemon's cache. Blocks.
-fn evaluate_source(state: &AppState, source: Source<'_>, input: &Input) -> Evaluation {
+pub(crate) fn evaluate_source(state: &AppState, source: Source<'_>, input: &Input) -> Evaluation {
     match source {
         Source::Text(bytes) => evaluate(state, Some(bytes), input),
         Source::File(None) => evaluate(state, None, input),
@@ -332,7 +402,9 @@ fn evaluate_source(state: &AppState, source: Source<'_>, input: &Input) -> Evalu
 }
 
 /// `reef-policy.toml` in `tree`, if it has one.
-async fn policy_file(tree: &reef_lib::jj::MergedTree) -> Result<Option<PolicyFile>, Status> {
+pub(crate) async fn policy_file(
+    tree: &reef_lib::jj::MergedTree,
+) -> Result<Option<PolicyFile>, Status> {
     let Some(file) = files::tree_file(tree, reef_policy::POLICY_PATH)
         .await
         .map_err(status)?
@@ -473,7 +545,28 @@ impl PolicyHandler {
         repo: crate::model::RepoId,
         tree: &str,
     ) -> Result<(Vec<input::Evidence>, i64), Status> {
-        let state = &self.state;
+        let read = read_evidence(&self.state, repo, tree).await?;
+        Ok((read.evidence, read.ignored))
+    }
+
+    /// Every provenance record of `change`, checked again at this read.
+    async fn provenance(
+        &self,
+        repo: crate::model::RepoId,
+        change: &str,
+    ) -> Result<(Vec<input::Provenance>, i64), Status> {
+        read_provenance(&self.state, repo, change).await
+    }
+}
+
+/// The evidence on `tree` whose signature verifies, how many rows were left
+/// out, and those left out for their signature.
+pub(crate) async fn read_evidence(
+    state: &AppState,
+    repo: crate::model::RepoId,
+    tree: &str,
+) -> Result<EvidenceRead, Status> {
+    {
         let filter = EvidenceFilter {
             tree_id: Some(tree.to_owned()),
             ..EvidenceFilter::default()
@@ -482,6 +575,7 @@ impl PolicyHandler {
         let mut ignored = 0i64;
         let mut read = 0usize;
         let mut evidence = Vec::new();
+        let mut invalid = Vec::new();
         // Page by page, so no more than a page of envelopes is in memory at
         // once (review finding 6).
         loop {
@@ -508,31 +602,43 @@ impl PolicyHandler {
             if !rows.is_empty() {
                 let messages =
                     super::evidence::messages(state, repo, rows, true, None, None).await?;
-                let (page, invalid) = self.convert(repo, &messages)?;
+                let (page, bad) = convert(state, repo, &messages)?;
                 evidence.extend(page);
-                ignored += invalid;
+                ignored += i64::try_from(bad.len()).unwrap_or(i64::MAX);
+                invalid.extend(bad);
             }
             if !full {
                 break;
             }
         }
-        Ok((evidence, ignored))
+        Ok(EvidenceRead {
+            evidence,
+            ignored,
+            invalid,
+        })
     }
+}
 
-    /// Evidence messages as the policy's input, and how many were left out
-    /// for a signature that does not verify.
-    fn convert(
-        &self,
-        repo: crate::model::RepoId,
-        messages: &[v1::Evidence],
-    ) -> Result<(Vec<input::Evidence>, i64), Status> {
+/// Evidence messages as the policy's input, and those left out for a
+/// signature that does not verify.
+fn convert(
+    state: &AppState,
+    repo: crate::model::RepoId,
+    messages: &[v1::Evidence],
+) -> Result<(Vec<input::Evidence>, Vec<InvalidEvidence>), Status> {
+    {
         let ids: Vec<&str> = messages.iter().map(|m| m.evidence_id.as_str()).collect();
-        let jobs = self.state.db.evidence_jobs(repo, &ids).map_err(status)?;
-        let mut ignored = 0i64;
+        let jobs = state.db.evidence_jobs(repo, &ids).map_err(status)?;
+        let mut invalid = Vec::new();
         let mut evidence = Vec::with_capacity(messages.len());
         for message in messages {
             if message.signature != v1::SignatureCheck::Valid as i32 {
-                ignored += 1;
+                invalid.push(InvalidEvidence {
+                    id: message.evidence_id.clone(),
+                    kind: message.kind.clone(),
+                    target: message.target.clone(),
+                    why: "signature_invalid",
+                });
                 continue;
             }
             let (job, fresh) = jobs.get(&message.evidence_id).cloned().unwrap_or_default();
@@ -574,16 +680,18 @@ impl PolicyHandler {
                 attestors: Vec::new(),
             });
         }
-        Ok((evidence, ignored))
+        Ok((evidence, invalid))
     }
+}
 
-    /// Every provenance record of `change`, checked again at this read.
-    async fn provenance(
-        &self,
-        repo: crate::model::RepoId,
-        change: &str,
-    ) -> Result<(Vec<input::Provenance>, i64), Status> {
-        let state = &self.state;
+/// Every provenance record of `change`, checked again at this read, and how
+/// many were not read.
+pub(crate) async fn read_provenance(
+    state: &AppState,
+    repo: crate::model::RepoId,
+    change: &str,
+) -> Result<(Vec<input::Provenance>, i64), Status> {
+    {
         let filter = ProvenanceFilter {
             change_ids: vec![change.to_owned()],
             ..ProvenanceFilter::default()
@@ -662,7 +770,7 @@ fn file_status(kind: Option<diff::ChangeKind>) -> &'static str {
     }
 }
 
-fn source_message(
+pub(crate) fn source_message(
     revision: &str,
     commit: &str,
     source: Source<'_>,
@@ -700,15 +808,59 @@ fn rule_kind(kind: RuleKind) -> v1::PolicyRuleKind {
     }
 }
 
+/// What landing `commit` on what `destination` resolves to would do, as
+/// the policy input's `landing` (R3.13); empty when `destination` resolves
+/// to nothing or the preview fails.
+pub(crate) async fn landing_preview(
+    repo: &Arc<ReadonlyRepo>,
+    scope: &RevsetScope<'_>,
+    commit: &CommitIdHex,
+    destination: &str,
+) -> input::Landing {
+    let Ok(resolved) = revset::resolve_revision(repo, destination, scope).await else {
+        return input::Landing::default();
+    };
+    match reef_lib::jj::land::preview_commit(repo, commit, &resolved.commit_id).await {
+        Ok(preview) => landing_input(destination, &preview),
+        Err(error) => {
+            tracing::debug!(error = %reef_lib::error::ErrorChain(&error), "cannot preview a landing for the policy input");
+            input::Landing::default()
+        }
+    }
+}
+
+/// A preview as the policy input's `landing`.
+pub(crate) fn landing_input(
+    destination: &str,
+    preview: &reef_lib::jj::land::Preview,
+) -> input::Landing {
+    input::Landing {
+        destination: destination.to_owned(),
+        destination_commit: preview.destination.as_str().to_owned(),
+        rebased: preview.rebased,
+        overlap: preview.overlap.clone(),
+        overlap_total: i64::try_from(preview.overlap_total).unwrap_or(i64::MAX),
+    }
+}
+
 /// `evaluation` as the API's message.
 pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluation {
+    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
     let need = |need: &reef_policy::Need| v1::PolicyEvidenceNeed {
         kind: need.kind.clone(),
         target: need.target.clone(),
         attestors: need.attestors.clone(),
         evidence_ids: need.evidence_ids.clone(),
+        rejected: need
+            .rejected
+            .iter()
+            .map(|r| v1::PolicyRejectedEvidence {
+                evidence_id: r.evidence_id.clone(),
+                why: r.why.clone(),
+            })
+            .collect(),
+        rejected_total: count(need.rejected_total),
     };
-    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
     v1::PolicyEvaluation {
         decision: match evaluation.decision {
             Decision::Allow => v1::PolicyDecision::Allow,
@@ -835,7 +987,7 @@ impl PolicyService for PolicyHandler {
         let at_operation = request.at_operation.clone();
         let wanted_revision = revision.clone();
         let wanted_policy = policy_revision.clone();
-        let (read, source_commit, source, at_operation) = state
+        let (mut read, source_commit, source, at_operation, landing) = state
             .reads
             .run(&target.handle, move || async move {
                 let target = read_target;
@@ -851,14 +1003,36 @@ impl PolicyService for PolicyHandler {
                 } else {
                     policy_at(&repo, &scope, &wanted_policy).await?
                 };
-                Ok::<_, Status>((read, source_commit, source, op_id(&repo)))
+                // What landing on the policy's commit would do (R3.13).
+                let destination = if from_request {
+                    "trunk()"
+                } else {
+                    wanted_policy.as_str()
+                };
+                let landing =
+                    landing_preview(&repo, &scope, &resolved.commit_id, destination).await;
+                Ok::<_, Status>((read, source_commit, source, op_id(&repo), landing))
             })
             .await
             .map_err(status)??;
         let repo_id = target.repo.id;
-        let (evidence, ignored) = match &read.tree_id {
-            Some(tree) => self.evidence(repo_id, tree).await?,
-            None => (Vec::new(), 0),
+        read.change.state = change_state(
+            state,
+            repo_id,
+            &read.change.id,
+            read.change.state == "landed",
+        )?;
+        let EvidenceRead {
+            evidence,
+            ignored,
+            invalid,
+        } = match &read.tree_id {
+            Some(tree) => read_evidence(state, repo_id, tree).await?,
+            None => EvidenceRead {
+                evidence: Vec::new(),
+                ignored: 0,
+                invalid: Vec::new(),
+            },
         };
         let (provenance, provenance_ignored) = self.provenance(repo_id, &read.change.id).await?;
         let state = Arc::clone(&self.state);
@@ -879,13 +1053,15 @@ impl PolicyService for PolicyHandler {
                 evidence_ignored: ignored,
                 provenance_ignored,
                 proposed_policy: proposed_policy(&state, proposed.as_ref()),
+                landing,
             };
             let policy = if from_request {
                 Source::Text(&request_policy)
             } else {
                 Source::File(source.as_ref())
             };
-            let evaluation = evaluate_source(&state, policy, &input);
+            let mut evaluation = evaluate_source(&state, policy, &input);
+            reject_invalid(&mut evaluation, &invalid);
             let mut message = evaluation_message(&evaluation);
             message.source = Some(source_message(
                 &policy_revision,
@@ -916,5 +1092,62 @@ impl PolicyService for PolicyHandler {
         request: Request<v1::SimulatePolicyRequest>,
     ) -> Result<Response<v1::SimulatePolicyResponse>, Status> {
         simulate::simulate(self, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Invalid signatures join the rejected objects of a missing need of
+    /// their kind and target, first, and nothing else (R3.13).
+    #[test]
+    fn invalid_signatures_are_rejected_first() {
+        let input = Input::default();
+        let mut evaluation = Evaluation::no_policy(&input);
+        let mut rule = reef_policy::RuleResult {
+            name: "tests".to_owned(),
+            kind: RuleKind::Require,
+            status: RuleStatus::Unsatisfied,
+            message: String::new(),
+            paths: Vec::new(),
+            paths_total: 0,
+            missing: vec![reef_policy::Need {
+                kind: "test".to_owned(),
+                rejected: vec![reef_policy::Rejected {
+                    evidence_id: "e1".to_owned(),
+                    why: "untrusted".to_owned(),
+                }],
+                rejected_total: 1,
+                ..reef_policy::Need::default()
+            }],
+            failed: Vec::new(),
+            signoff: None,
+            evidence_ids: Vec::new(),
+        };
+        rule.missing.push(reef_policy::Need {
+            kind: "lint".to_owned(),
+            ..reef_policy::Need::default()
+        });
+        evaluation.rules.push(rule);
+        let invalid = |id: &str, kind: &str| InvalidEvidence {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            target: String::new(),
+            why: "signature_invalid",
+        };
+        reject_invalid(
+            &mut evaluation,
+            &[invalid("e0", "test"), invalid("e2", "build")],
+        );
+        let test = &evaluation.rules[0].missing[0];
+        let found: Vec<(&str, &str)> = test
+            .rejected
+            .iter()
+            .map(|r| (r.evidence_id.as_str(), r.why.as_str()))
+            .collect();
+        assert_eq!(found, [("e0", "signature_invalid"), ("e1", "untrusted")]);
+        assert_eq!(test.rejected_total, 2);
+        assert_eq!(evaluation.rules[0].missing[1].rejected.len(), 0);
     }
 }

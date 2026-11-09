@@ -4,7 +4,7 @@ This document is what an executor author builds against. An executor is a progra
 
 ## 1. Roles
 
-- A **requester** asks for checks on a tree: the landing service (R3.13, R3.14) once it exists, `reef job submit`, or any client that calls `SubmitJob`.
+- A **requester** asks for checks on a tree: the landing service (R3.45, R3.14), `reef job submit`, or any client that calls `SubmitJob`.
 - The **daemon** keeps the queue: it validates requests, leases jobs to executors, checks the evidence they return, and publishes progress. It schedules; it never executes.
 - An **executor** claims jobs, runs whatever it runs for the requested kinds and targets, and returns signed evidence.
 

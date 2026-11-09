@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 22;
+pub const API_REVISION: u32 = 23;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -107,6 +107,10 @@ pub const API_DIGESTS: &[&str] = &[
     "5e6f6fc83757f1a038225f70d2528df25eb5319edf16d20b436c9fa83571ef12",
     // R3.08: `PolicyService.SimulatePolicy`.
     "7db337285320b24ebd6a611443775ec510f7022b5abf2e2ecf7e0f5bdc9b4be7",
+    // R3.13: `landing.proto` (`LandingService`), `TRANSITION_CAUSE_LANDING`,
+    // `OPERATION_KIND_LAND`, `Operation.landing_id`, and
+    // `PolicyEvidenceNeed.rejected` and `rejected_total`.
+    "0c59ea9c3a2de7e203fb67623ba54975938ac4ce069cc2df4e315a784ebc9e6e",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -581,6 +585,15 @@ pub mod error {
     /// allow (R3.07): a client's reason, never a daemon's. The first rule
     /// that blocks is in the error's `hint`.
     pub const POLICY_BLOCKED: &str = "POLICY_BLOCKED";
+    /// `reef land` for a change the gate refused (R3.13): a client's reason,
+    /// never a daemon's. What to do is in the error's `hint`.
+    pub const LANDING_BLOCKED: &str = "LANDING_BLOCKED";
+    /// `reef land` for a change the landing service returned to proposed
+    /// (R3.13): a client's reason, never a daemon's.
+    pub const LANDING_DEQUEUED: &str = "LANDING_DEQUEUED";
+    /// `reef land` whose landing is still queued when its wait ends (R3.13):
+    /// a client's reason, never a daemon's.
+    pub const LANDING_PENDING: &str = "LANDING_PENDING";
     /// `reef policy check` for a file that does not load (R3.07): a
     /// client's reason, never a daemon's, which reports a policy that does
     /// not load as the decision `INVALID_POLICY`.
@@ -634,6 +647,30 @@ pub mod error {
     /// A decline through the remote listener, which cannot verify a human
     /// until R3.43 (R3.09).
     pub const REMOTE_HUMAN_REQUIRED: &str = "REMOTE_HUMAN_REQUIRED";
+    /// `LandChange` of a change that is not PROPOSED or QUEUED (R3.13).
+    /// Metadata: `change_id`, `state`.
+    pub const NOT_PROPOSED: &str = "NOT_PROPOSED";
+    /// `LandChange` of a proposal whose visible commit is not the recorded
+    /// one (R3.13): propose it again first. Metadata: `change_id`,
+    /// `commit_id` (recorded), `visible_commit_id`.
+    pub const PROPOSAL_AMENDED: &str = "PROPOSAL_AMENDED";
+    /// `LandChange` of a proposal for a remote bookmark (`main@origin`)
+    /// (R3.13). Metadata: `destination`.
+    pub const DESTINATION_NOT_LOCAL: &str = "DESTINATION_NOT_LOCAL";
+    /// `LandChange` of a proposal whose destination bookmark does not exist
+    /// (R3.13). Metadata: `destination`.
+    pub const DESTINATION_NOT_FOUND: &str = "DESTINATION_NOT_FOUND";
+    /// `LandChange` of a proposal whose destination bookmark is conflicted
+    /// (R3.13). Metadata: `destination`.
+    pub const DESTINATION_CONFLICTED: &str = "DESTINATION_CONFLICTED";
+    /// `LandChange` when the repository already has 1,000 changes queued
+    /// (R3.13). Metadata: `max`.
+    pub const QUEUE_FULL: &str = "QUEUE_FULL";
+    /// `LandChange.wait_ms` over 600,000 (R3.13). Metadata: `max`.
+    pub const INVALID_WAIT: &str = "INVALID_WAIT";
+    /// `GetLanding` naming no landing, or a change with none (R3.13).
+    /// Metadata: `id` or `change_id`.
+    pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

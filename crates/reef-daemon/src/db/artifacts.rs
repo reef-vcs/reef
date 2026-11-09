@@ -339,7 +339,9 @@ impl Db {
     /// step: evidence in `temp.gc_doomed` counts as gone. Needs the step's
     /// temporary tables ([`Db::create_live_tables`]).
     pub fn plan_artifacts(&self, repo: RepoId) -> Result<Vec<PlannedArtifact>, DbError> {
-        let pinned = super::evidence::PINNED;
+        // Live work pins artifacts; a landing pins only its evidence, so a
+        // landed check's log keeps its own retention (R3.13).
+        let pinned = super::evidence::LIVE_PINNED;
         self.with(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {COLUMNS},

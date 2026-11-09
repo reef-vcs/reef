@@ -8,7 +8,7 @@ A proposal is a change put forward for main. It is not a separate object: it is 
 | --- | --- |
 | `draft` | Not put forward. Every change starts here, and has no record until it is proposed. |
 | `proposed` | Put forward for its destination (a bookmark, `main` by default), waiting on review, evidence, or the landing service. |
-| `queued` | Taken by the landing service, which will land the commit it recorded (R3.13). |
+| `queued` | Taken by the [landing service](landing.md), which lands the commit it recorded. |
 | `landed` | On its destination. Final. |
 | `declined` | A reviewer said no. It can be proposed again. |
 | `withdrawn` | Its proposer took it back. It can be proposed again. |
@@ -40,7 +40,7 @@ reef proposal show [REV]                           # the state and every transit
 
 ## Landing
 
-The landing service (R3.13) queues proposals that policy allows and lands them. Until it exists, land a proposal as you do today (`jj git push`, a merge on the git host and a fetch, `jj bookmark set main`): when the daemon next loads the repository (after a request, a snapshot, or a subscription's poll) and finds one of a proposed or queued change's commits on `trunk()`, it records the change as `landed`, with cause `observed` and actor `daemon`. A withdrawn, declined or superseded change landed by hand keeps its state. That record cannot be undone; move the bookmark back instead. A git host that squashes or rebases on merge writes new commits with new change ids, which Reef cannot follow yet (R3.17); withdraw or supersede such a proposal.
+`reef land` asks the [landing service](landing.md) to land a proposal: it is judged with the policy at its destination, queued if the policy allows it, and landed onto the bookmark, recording `queued` and `landed` (cause `landing`), or returned to `proposed` with a reason. A proposal can also land the way it did before Reef (`jj git push`, a merge on the git host and a fetch, `jj bookmark set main`): when the daemon next loads the repository (after a request, a snapshot, or a subscription's poll) and finds one of a proposed or queued change's commits on `trunk()`, it records the change as `landed`, with cause `observed` and actor `daemon`. A withdrawn, declined or superseded change landed by hand keeps its state. That record cannot be undone; move the bookmark back instead. A git host that squashes or rebases on merge writes new commits with new change ids, which Reef cannot follow yet (R3.17); withdraw or supersede such a proposal.
 
 ## Who may move a change
 
@@ -68,4 +68,4 @@ or, over MCP, `wait_for_operations` with kind `transition` and the change. Kind 
 
 ## What later tickets add
 
-R3.10 proposes a stack in one operation; R3.11 returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one; R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with a cause, and adds the state to the policy input; R3.31 and R3.33 show proposals and transitions; R4.07 publishes them to a store.
+R3.10 proposes a stack in one operation; R3.11 returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one; R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 and R3.33 show proposals and transitions; R4.07 publishes them to a store.

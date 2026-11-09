@@ -1227,6 +1227,7 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::Edit) => "edit",
         Ok(v1::OperationKind::ImportRefs) => "import-refs",
         Ok(v1::OperationKind::Transition) => "transition",
+        Ok(v1::OperationKind::Land) => "land",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
         Err(_) => UNKNOWN,
@@ -1256,7 +1257,8 @@ pub fn lifecycle_state_name_or_unknown(state: i32) -> &'static str {
     lifecycle_state_name(state).unwrap_or(UNKNOWN)
 }
 
-/// A transition's cause (R3.09): `request`, `undo` or `observed`; `None`
+/// A transition's cause (R3.09): `request`, `undo`, `observed` or
+/// `landing` (R3.13); `None`
 /// when unset.
 pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
     let name = match v1::TransitionCause::try_from(cause) {
@@ -1264,6 +1266,7 @@ pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
         Ok(v1::TransitionCause::Request) => "request",
         Ok(v1::TransitionCause::Undo) => "undo",
         Ok(v1::TransitionCause::Observed) => "observed",
+        Ok(v1::TransitionCause::Landing) => "landing",
         Err(_) => UNKNOWN,
     };
     Some(name)

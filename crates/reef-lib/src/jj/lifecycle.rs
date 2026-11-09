@@ -112,6 +112,8 @@ pub enum TransitionCause {
     Undo,
     /// The daemon saw the change on `trunk()`.
     Observed,
+    /// The landing service queued, returned or landed it (R3.13).
+    Landing,
 }
 
 impl TransitionCause {
@@ -121,6 +123,7 @@ impl TransitionCause {
             TransitionCause::Request => "request",
             TransitionCause::Undo => "undo",
             TransitionCause::Observed => "observed",
+            TransitionCause::Landing => "landing",
         }
     }
 }
@@ -133,6 +136,7 @@ impl FromStr for TransitionCause {
             TransitionCause::Request,
             TransitionCause::Undo,
             TransitionCause::Observed,
+            TransitionCause::Landing,
         ]
         .into_iter()
         .find(|cause| cause.as_str() == text)

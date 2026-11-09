@@ -42,6 +42,9 @@ enum TransitionCause {
   TRANSITION_CAUSE_UNDO = 2;
   // The daemon saw the change's commit on `trunk()`, however it got there.
   TRANSITION_CAUSE_OBSERVED = 3;
+  // The landing service queued it, returned it to PROPOSED, or landed it
+  // (R3.13).
+  TRANSITION_CAUSE_LANDING = 4;
 }
 
 // Who performed a transition, as recorded. Over the socket a caller

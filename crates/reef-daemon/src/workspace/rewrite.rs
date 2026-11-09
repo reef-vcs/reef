@@ -39,6 +39,8 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::files;
+use reef_lib::jj::land::LandTarget;
+use reef_lib::jj::lifecycle::TransitionRecord;
 use reef_lib::jj::log::{ChangeInfo, Describer};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError, WorkingCopy};
@@ -76,6 +78,20 @@ pub enum Write {
     Undo {
         /// A full operation id or a unique prefix.
         operation: String,
+    },
+    /// Land a queued change on its destination bookmark (R3.13): rebase
+    /// it onto the bookmark's head when needed, give workspaces on it a new
+    /// working-copy commit, and move the bookmark, with the landing's
+    /// transitions.
+    Land {
+        /// What to land.
+        target: LandTarget,
+        /// The bookmark's head the landing was judged against.
+        destination: CommitIdHex,
+        /// The landing id, for `reef.landing`.
+        landing: String,
+        /// The transitions; one with no commit names the landed one.
+        transitions: Vec<TransitionRecord>,
     },
     /// Edit files without a workspace (R2.04).
     Edit {
@@ -116,6 +132,7 @@ impl Write {
             Write::Abandon { .. } => OpKind::Abandon,
             Write::Undo { .. } => OpKind::Undo,
             Write::Edit { .. } => OpKind::Edit,
+            Write::Land { .. } => OpKind::Land,
         }
     }
 }
@@ -177,15 +194,41 @@ impl Manager {
     /// write and the follow-up.
     #[tracing::instrument(skip_all, fields(repo = %request.repo, kind = request.write.kind().as_str()))]
     pub async fn rewrite(&self, request: WriteRequest) -> Result<Rewritten, ManagerError> {
+        self.rewrite_spawned(request, None).await
+    }
+
+    /// [`Manager::rewrite`] for a caller that already holds the
+    /// repository's create lock shared (`held`, from
+    /// `Manager::repo_lock`), which step 2 then does not take again:
+    /// taking it twice would wait behind GC's queued writer forever. The
+    /// landing service holds it from its evaluation to its record (R3.13),
+    /// and keeps a clone of `held` until then.
+    pub async fn rewrite_held(
+        &self,
+        request: WriteRequest,
+        held: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> Result<Rewritten, ManagerError> {
+        self.rewrite_spawned(request, Some(held)).await
+    }
+
+    async fn rewrite_spawned(
+        &self,
+        request: WriteRequest,
+        held: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    ) -> Result<Rewritten, ManagerError> {
         let manager = self
             .scheduler
             .manager()
             .ok_or(ManagerError::RepoNotOpen(request.repo))?;
-        let task = async move { manager.rewrite_detached(request).await };
+        let task = async move { manager.rewrite_detached(request, held).await };
         tokio::spawn(task.instrument(tracing::Span::current())).await?
     }
 
-    async fn rewrite_detached(&self, request: WriteRequest) -> Result<Rewritten, ManagerError> {
+    async fn rewrite_detached(
+        &self,
+        request: WriteRequest,
+        held: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    ) -> Result<Rewritten, ManagerError> {
         let begun = std::time::Instant::now();
         let WriteRequest {
             repo,
@@ -215,8 +258,10 @@ impl Manager {
         };
 
         // 2.
-        let repo_lock = self.repo_lock(repo);
-        let _shared = repo_lock.read().await;
+        let _shared = match held {
+            Some(held) => held,
+            None => Arc::new(self.repo_lock(repo).read_owned().await),
+        };
         // Locked in id order, as GC does; snapshotted in the plan's order.
         let order: Vec<WorkspaceId> = planned
             .workspaces
@@ -553,7 +598,7 @@ fn check(write: &Write) -> Result<(), ManagerError> {
             }
             files::check_edits(edits)?;
         }
-        Write::Abandon { .. } | Write::Undo { .. } => {}
+        Write::Abandon { .. } | Write::Undo { .. } | Write::Land { .. } => {}
     }
     Ok(())
 }
@@ -650,6 +695,17 @@ async fn plan(
                     .await?;
             Ok(Planned {
                 workspaces: rewrite::descendants_first(&repo, &target.workspaces).await?,
+                undone: None,
+            })
+        }
+        Write::Land { target, .. } => {
+            refresh_for_resolve(head, &import_meta(workspace, agent)).await?;
+            let repo = head.repo.readonly();
+            let found =
+                rewrite::writable(&repo, target.commit.as_str(), None, &scope(head, jj_name))
+                    .await?;
+            Ok(Planned {
+                workspaces: rewrite::descendants_first(&repo, &found.workspaces).await?,
                 undone: None,
             })
         }
@@ -800,6 +856,7 @@ async fn commit_edit(
 
 /// Step 4, on the repository thread: resolve and check again, then write.
 /// Reads after the commit only degrade the answer: the write has happened.
+#[expect(clippy::too_many_lines, reason = "one arm per write")]
 async fn commit(
     head: &mut RepoHead,
     write: &Write,
@@ -855,6 +912,23 @@ async fn commit(
             };
             meta.description = format!("{}{undone}", oplog::REVERT_PREFIX);
             written.op_id = head.repo.revert_operation(&undone, &meta).await?;
+        }
+        Write::Land {
+            target: land,
+            destination,
+            landing,
+            transitions,
+        } => {
+            meta.description = format!(
+                "{} on {}",
+                oplog::transition_description("land", land.change.as_str()),
+                land.bookmark
+            );
+            meta.transitions.clone_from(transitions);
+            meta.landing = Some(landing.clone());
+            let landed = head.repo.land(land, destination, &meta).await?;
+            changed_commit = Some(landed.commit);
+            written.op_id = Some(landed.op_id);
         }
         Write::Edit {
             target: edit_target,

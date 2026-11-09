@@ -38,6 +38,7 @@ mod identity;
 mod init;
 mod input;
 mod job;
+pub(crate) mod land;
 mod log;
 mod op;
 mod out;
@@ -326,6 +327,12 @@ enum Command {
     /// List, show, withdraw, decline and supersede proposals.
     #[command(infer_subcommands = true)]
     Proposal(proposal::Args),
+    /// Land a proposed change on its bookmark, if the policy there allows it.
+    #[command(after_help = "Example: reef land @-   # --no-wait returns once it is queued")]
+    Land(land::LandArgs),
+    /// List and show landings, with what the policy decided.
+    #[command(infer_subcommands = true)]
+    Landing(land::Args),
     /// Revert one operation (`reef op log` lists them).
     Undo(op::UndoArgs),
     /// List the operation log, or show one operation.
@@ -830,6 +837,8 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Propose(args) => {
             Box::pin(proposal::propose(&connect(&global, out).await?, args)).await
         }
+        Command::Land(args) => Box::pin(land::land(&connect(&global, out).await?, args)).await,
+        Command::Landing(args) => Box::pin(land::run(&connect(&global, out).await?, args)).await,
         Command::Proposal(args) => {
             Box::pin(proposal::run(&connect(&global, out).await?, args)).await
         }

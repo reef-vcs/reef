@@ -170,6 +170,10 @@ enum OperationKind {
   // A change's lifecycle state changed (R3.09): `Operation.transitions`
   // says how. It changes nothing in the view.
   OPERATION_KIND_TRANSITION = 12;
+  // The landing service moved a destination bookmark onto a change
+  // (R3.13): `Operation.transitions` has its LANDED transition and
+  // `Operation.landing_id` its landing.
+  OPERATION_KIND_LAND = 13;
 }
 
 // Why a snapshot ran.
@@ -237,6 +241,9 @@ message Operation {
   // attribute `reef.lifecycle`, in order; empty for most operations. Who
   // performed them beyond `agent` and `remote` is in ListTransitions.
   repeated ChangeTransition transitions = 18;
+  // The landing it recorded (R3.13), from the operation attribute
+  // `reef.landing`; empty for most operations. GetLanding reads it.
+  string landing_id = 19;
 }
 
 // What an operation changed, from the difference between its view and its

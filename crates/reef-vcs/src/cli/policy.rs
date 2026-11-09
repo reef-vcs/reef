@@ -286,7 +286,7 @@ fn status_word(status: Status) -> &'static str {
 }
 
 /// The rules that are not satisfied, in text.
-fn render_rules(w: &mut dyn Write, evaluation: &Evaluation) -> io::Result<()> {
+pub(crate) fn render_rules(w: &mut dyn Write, evaluation: &Evaluation) -> io::Result<()> {
     let mut rest = 0;
     for rule in &evaluation.rules {
         if !matches!(rule.status, Status::Unsatisfied | Status::Error) {
@@ -307,6 +307,18 @@ fn render_rules(w: &mut dyn Write, evaluation: &Evaluation) -> io::Result<()> {
         };
         for missing in &rule.missing {
             writeln!(w, "  missing: {}", need(missing))?;
+            for rejected in &missing.rejected {
+                writeln!(
+                    w,
+                    "    rejected: {} ({})",
+                    short(&rejected.evidence_id),
+                    rejected.why
+                )?;
+            }
+            let listed = i64::try_from(missing.rejected.len()).unwrap_or(i64::MAX);
+            if missing.rejected_total > listed {
+                writeln!(w, "    ... {} rejected in all", missing.rejected_total)?;
+            }
         }
         for failed in &rule.failed {
             writeln!(
@@ -572,6 +584,15 @@ fn need_of(need: &v1::PolicyEvidenceNeed) -> Need {
         target: need.target.clone(),
         attestors: need.attestors.clone(),
         evidence_ids: need.evidence_ids.clone(),
+        rejected: need
+            .rejected
+            .iter()
+            .map(|r| reef_policy::Rejected {
+                evidence_id: r.evidence_id.clone(),
+                why: r.why.clone(),
+            })
+            .collect(),
+        rejected_total: i64::from(need.rejected_total),
     }
 }
 

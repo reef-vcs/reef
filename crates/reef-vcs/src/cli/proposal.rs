@@ -1,9 +1,9 @@
 //! `reef propose` and `reef proposal` (R3.09, ADR 0063): a change's
 //! lifecycle. A change is a draft until it is proposed; a proposal can be
 //! withdrawn by its proposer, declined by a reviewer, or superseded by
-//! another change, and proposed again after a withdrawal or a decline. The
-//! landing service (R3.13) queues and lands proposals; until then the daemon
-//! records a proposal as landed when it reaches `trunk()`.
+//! another change, and proposed again after a withdrawal or a decline.
+//! `reef land` (R3.13) lands a proposal the policy allows; the daemon also
+//! records a proposal as landed when it reaches `trunk()` some other way.
 
 use std::io::{self, Write};
 
@@ -285,7 +285,7 @@ async fn transition(
         ));
     } else if to == v1::LifecycleState::Proposed {
         ctx.out.note(
-            "reef: land it as you do today; Reef records it as landed when it reaches trunk(). `reef proposal show` follows it.",
+            "reef: `reef land` when the policy allows it; `reef policy eval` says what it lacks.",
         );
     }
     Ok(())

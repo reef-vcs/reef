@@ -21,7 +21,7 @@ use reef_client::json::{Proposal, ProposalHistory, Transitioned};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use crate::cli::{guide, here, init, policy, presence, provider, remote, ws, ws_run};
+use crate::cli::{guide, here, init, land, policy, presence, provider, remote, ws, ws_run};
 
 /// A schema of what a command prints, built in the document's generator
 /// so each type is defined once.
@@ -268,6 +268,26 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         &["proposal", "supersede"],
         object::<Transitioned>,
         object::<brief::Transitioned<'static>>,
+    ),
+    OutputRow {
+        note: Some(
+            "a blocked or dequeued landing exits 5 (reason LANDING_BLOCKED or LANDING_DEQUEUED, what to do in `hint`), and one still queued when --wait ends exits 6 (LANDING_PENDING): in JSON the error document alone; in text, the landing too",
+        ),
+        ..view(
+            &["land"],
+            object::<land::Landing>,
+            object::<land::BriefLanding<'static>>,
+        )
+    },
+    view(
+        &["landing", "list"],
+        list::<land::Landing>,
+        list::<land::BriefLanding<'static>>,
+    ),
+    view(
+        &["landing", "show"],
+        object::<land::Landing>,
+        object::<land::BriefLanding<'static>>,
     ),
     row(&["undo"], object::<Undone>),
     row(&["op", "log"], list::<Operation>),

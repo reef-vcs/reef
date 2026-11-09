@@ -72,6 +72,13 @@
           ],
           "evidence_ids": [],
           "kind": "test",
+          "rejected": [
+            {
+              "evidence_id": "ev-self",
+              "why": "self"
+            }
+          ],
+          "rejected_total": 1,
           "target": ""
         },
         {
@@ -80,6 +87,13 @@
           ],
           "evidence_ids": [],
           "kind": "lint",
+          "rejected": [
+            {
+              "evidence_id": "ev-nolog",
+              "why": "condition"
+            }
+          ],
+          "rejected_total": 1,
           "target": ""
         }
       ],
