@@ -17,6 +17,7 @@ use reef_client::json::{
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
+use reef_client::json::{OidcMatch, OidcMatchRevoked};
 use reef_client::json::{Proposal, ProposalHistory, Transitioned};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
@@ -392,6 +393,8 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         &["identity", "authority", "rotate"],
         object::<AuthorityRotated>,
     ),
+    row(&["identity", "oidc", "add"], object::<OidcMatch>),
+    row(&["identity", "oidc", "revoke"], object::<OidcMatchRevoked>),
     OutputRow {
         note: Some(
             "`latest_of` is set when the commit has no record of its own and this is its change's newest; `statement` and `envelope` only with --envelope",

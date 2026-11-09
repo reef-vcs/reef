@@ -226,8 +226,16 @@ pub struct Key {
     pub presence: String,
     /// `client` or `daemon`.
     pub custody: String,
-    /// The certifying authority's key id.
+    /// The certifying authority's key id: the daemon's, or for a keyless
+    /// key the Fulcio CA's.
     pub authority: String,
+    /// Who certified it: `reef-daemon`, or `sigstore` for a keyless key
+    /// (R3.42).
+    pub issuer_kind: String,
+    /// A keyless key's OIDC issuer; empty otherwise.
+    pub oidc_issuer: String,
+    /// A keyless key's OIDC subject (an email or a URI); empty otherwise.
+    pub oidc_subject: String,
 }
 
 /// One provenance record of the change (R3.04).

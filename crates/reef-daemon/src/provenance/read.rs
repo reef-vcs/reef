@@ -83,7 +83,8 @@ pub fn read_records(
         HashMap::new()
     } else {
         let rows = db.session_keys_by_id(&key_ids.into_iter().collect::<Vec<_>>())?;
-        read_keys(db, rows)?
+        // Provenance is signed by daemon-held keys, never keyless ones.
+        read_keys(db, rows, None)?
             .into_iter()
             .map(|read| (read.row.key_id.clone(), read))
             .collect()

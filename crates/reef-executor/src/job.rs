@@ -460,7 +460,7 @@ async fn steps(
         keys.renew_if_needed(ctx).await?;
         for claim in claims {
             let label = claim_label(&claim);
-            uplink.push(label, sign(&claim, &tree_digest, keys.current())?);
+            uplink.push(label, sign(&claim, &tree_digest, keys.current()?)?);
         }
         uplink.flush();
         if budget_hit {
@@ -780,43 +780,79 @@ fn sign(claim: &Claim, tree: &TreeDigest, key: &SessionKey) -> Result<v1::Signed
     })
 }
 
-/// The job's session: its keys, renewed within the session.
+/// How long before a keyless key's end it is renewed (R3.42): Fulcio's
+/// certificates live 10 minutes, so it is had when the job first signs.
+const KEYLESS_RENEW_BEFORE: Duration = Duration::from_mins(3);
+
+/// The job's session: its keys, renewed within the session. A daemon-issued
+/// key is had before any work; a keyless one (R3.42) when the job first
+/// signs, since Fulcio's window is minutes.
 struct Keys {
-    current: SessionKey,
+    current: Option<SessionKey>,
     identity: String,
+    keyless: bool,
 }
 
 impl Keys {
     async fn issue(ctx: &Context, _repo: &str) -> Result<Keys, Error> {
         let identity = ctx.config.executor.identity.clone();
-        let current = ctx
-            .client
-            .issue_session_key(&identity, Actor::Executor, None, "")
+        let mut keys = Keys {
+            current: None,
+            identity,
+            keyless: ctx.config.executor.keyless,
+        };
+        if !keys.keyless {
+            keys.current = Some(keys.next(ctx, "").await?);
+        }
+        Ok(keys)
+    }
+
+    /// A new key, in `session` (empty: a new one).
+    async fn next(&self, ctx: &Context, session: &str) -> Result<SessionKey, Error> {
+        if self.keyless {
+            let options = reef_client::keyless::KeylessOptions::from_env();
+            let var = |name: &str| std::env::var(name).ok();
+            return ctx
+                .client
+                .issue_keyless_session_key(Actor::Executor, session, &options, &var)
+                .await
+                .map_err(|e| Error::Keyless(Box::new(e)));
+        }
+        ctx.client
+            .issue_session_key(&self.identity, Actor::Executor, None, session)
             .await
-            .map_err(|e| Error::Key(Box::new(e)))?;
-        Ok(Keys { current, identity })
+            .map_err(|e| Error::Key(Box::new(e)))
     }
 
-    fn current(&self) -> &SessionKey {
-        &self.current
+    fn current(&self) -> Result<&SessionKey, Error> {
+        self.current.as_ref().ok_or_else(|| Error::Config {
+            message: "no session key was had for the job".into(),
+        })
     }
 
-    /// A new key in the same session when less than ten minutes remain.
+    /// A key that will outlive the next signatures: the first, or a new one
+    /// in the same session when less than ten minutes (three for a keyless
+    /// key) remain.
     async fn renew_if_needed(&mut self, ctx: &Context) -> Result<(), Error> {
-        let Some(not_after) = self.current.record.not_after else {
+        let Some(current) = &self.current else {
+            self.current = Some(self.next(ctx, "").await?);
+            return Ok(());
+        };
+        let Some(not_after) = current.record.not_after else {
             return Ok(());
         };
         let not_after = SystemTime::UNIX_EPOCH
             + Duration::from_secs(u64::try_from(not_after.seconds).unwrap_or(0));
-        if SystemTime::now() + RENEW_BEFORE < not_after {
+        let before = if self.keyless {
+            KEYLESS_RENEW_BEFORE
+        } else {
+            RENEW_BEFORE
+        };
+        if SystemTime::now() + before < not_after {
             return Ok(());
         }
-        let session = self.current.record.session_id.clone();
-        self.current = ctx
-            .client
-            .issue_session_key(&self.identity, Actor::Executor, None, &session)
-            .await
-            .map_err(|e| Error::Key(Box::new(e)))?;
+        let session = current.record.session_id.clone();
+        self.current = Some(self.next(ctx, &session).await?);
         Ok(())
     }
 }

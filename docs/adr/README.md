@@ -77,3 +77,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0063](0063-change-lifecycle.md) | Change lifecycle | accepted |
 | [0064](0064-landing-service-local.md) | Landing service, local | accepted |
 | [0065](0065-conflict-objects.md) | Conflict objects | accepted |
+| [0066](0066-sigstore-keyless-session-keys.md) | Sigstore keyless session keys | accepted |

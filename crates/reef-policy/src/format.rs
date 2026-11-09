@@ -136,6 +136,8 @@ struct RawAttestor {
     actors: Option<Spanned<List>>,
     #[serde(default)]
     authorities: List,
+    #[serde(default)]
+    issuer_kinds: List,
     presence: Option<Text>,
     #[serde(rename = "self")]
     self_: Option<Text>,
@@ -310,6 +312,7 @@ pub(crate) struct Attestor {
     pub(crate) identity_kinds: Vec<String>,
     pub(crate) actors: Vec<String>,
     pub(crate) authorities: Vec<String>,
+    pub(crate) issuer_kinds: Vec<String>,
     pub(crate) presence: Presence,
     pub(crate) allow_self: bool,
     pub(crate) when: Option<Expression>,
@@ -1127,6 +1130,13 @@ impl Loader<'_> {
                     );
                 }
             }
+            self.list(&rule, "issuer_kinds", &set.issuer_kinds);
+            let issuer_kinds = self.vocabulary(
+                &rule,
+                "issuer_kinds",
+                &set.issuer_kinds,
+                &["reef-daemon", "sigstore"],
+            );
             let presence = self.presence(&rule, set.presence.as_ref());
             let allow_self = match set
                 .self_
@@ -1153,6 +1163,7 @@ impl Loader<'_> {
                     identity_kinds,
                     actors,
                     authorities,
+                    issuer_kinds,
                     presence,
                     allow_self,
                     when,

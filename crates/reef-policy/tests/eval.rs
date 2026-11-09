@@ -31,6 +31,9 @@ fn key(identity: &str, id: &str, kind: &str, actor: &str) -> Key {
         presence: "none".to_owned(),
         custody: "client".to_owned(),
         authority: AUTHORITY.to_owned(),
+        issuer_kind: "reef-daemon".to_owned(),
+        oidc_issuer: String::new(),
+        oidc_subject: String::new(),
     }
 }
 
@@ -168,6 +171,40 @@ fn attestor_sets_select_by_identity_kind_actor_authority_and_presence() {
             "{status}"
         );
     }
+}
+
+// R3.42: `issuer_kinds` keeps a set to keyless keys (or to the daemon's),
+// and a `when` can read the keyless key's OIDC issuer and subject.
+#[test]
+fn attestor_sets_select_by_issuer_kind() {
+    let pass = |key: Key| evidence("e1", "test", "pass", 1_000, key);
+    let keyless = || Key {
+        issuer_kind: "sigstore".to_owned(),
+        oidc_issuer: "https://token.actions.githubusercontent.com".to_owned(),
+        oidc_subject: "https://github.com/o/r/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+        ..ci()
+    };
+    let keyless_only = "identities = [\"ci-main\"]\nissuer_kinds = [\"sigstore\"]";
+    assert!(attests(keyless_only, pass(keyless())));
+    assert!(!attests(keyless_only, pass(ci())));
+    assert!(attests(r#"identities = ["ci-main"]"#, pass(keyless())));
+    assert!(attests(
+        "identities = [\"ci-main\"]\nissuer_kinds = [\"reef-daemon\"]",
+        pass(ci())
+    ));
+    assert!(attests(
+        "identities = [\"ci-main\"]\nwhen = 'e.key.oidc_subject.endsWith(\"@refs/heads/main\")'",
+        pass(keyless())
+    ));
+    assert!(!attests(
+        "identities = [\"ci-main\"]\nwhen = 'e.key.oidc_subject.endsWith(\"@refs/heads/main\")'",
+        pass(ci())
+    ));
+    // An unknown issuer kind is refused at load.
+    let text = format!(
+        "{HEAD}[attestors.set]\nidentities = [\"ci-main\"]\nissuer_kinds = [\"fulcio\"]\n{REQUIRE_TEST_FROM}"
+    );
+    assert!(Policy::load(text.as_bytes()).is_err());
 }
 
 #[test]

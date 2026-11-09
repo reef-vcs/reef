@@ -251,6 +251,7 @@ fn generate(dir: &Path, host: &str) -> Result<Current, AuthorityError> {
         created_at: Timestamp::now(),
         retired_at: None,
         revocation: None,
+        kind: "reef-daemon".to_owned(),
     };
     Ok(Current { key, row })
 }

@@ -48,6 +48,27 @@ pub struct AuthorityRow {
     pub retired_at: Option<Timestamp>,
     /// Its revocation.
     pub revocation: Option<RevocationRow>,
+    /// `reef-daemon`, or `sigstore` for a Fulcio CA a keyless key came
+    /// from (R3.42), which never issues.
+    pub kind: String,
+}
+
+/// One row of `identity_oidc` (R3.42): an exact OIDC issuer and subject an
+/// identity accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcMatchRow {
+    /// `oidc_` and 16 hex digits.
+    pub id: String,
+    /// The identity it binds to.
+    pub identity_id: String,
+    /// The OIDC issuer, exact.
+    pub issuer: String,
+    /// The certificate's subject (its SAN), exact.
+    pub subject: String,
+    /// When it was added.
+    pub created_at: Timestamp,
+    /// Its revocation.
+    pub revocation: Option<RevocationRow>,
 }
 
 /// One row of `identities`.
@@ -122,6 +143,20 @@ pub struct SessionKeyRow {
     pub remote_token_id: Option<String>,
     /// Its own revocation.
     pub revocation: Option<RevocationRow>,
+    /// `reef-daemon`, or `sigstore` for a keyless key (R3.42), whose
+    /// `certificate` is its Sigstore bundle.
+    pub issuer_kind: String,
+    /// The OIDC match a keyless key was bound through.
+    pub oidc_id: Option<String>,
+}
+
+/// What stopped [`Db::insert_identity_with_oidc`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InTheWay {
+    /// An identity with the name, revoked or not.
+    Identity(IdentityRow),
+    /// A live match with one of the issuers and subjects.
+    Match(OidcMatchRow),
 }
 
 /// What [`Db::insert_session_key`] did.
@@ -143,6 +178,8 @@ pub struct SessionKeyFilter {
     /// Also keys expired before this time, or revoked (they and their
     /// session); `None` lists only those live at the time given.
     pub live_at: Option<Timestamp>,
+    /// Only keys of this issuer kind (`reef-daemon` or `sigstore`).
+    pub issuer_kind: Option<String>,
 }
 
 /// The records reads of session keys need beside the keys: the sessions
@@ -170,7 +207,7 @@ fn revocation_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Revocatio
     }))
 }
 
-const AUTHORITY_COLUMNS: &str = "id, algorithm, public_key, host, created_at, retired_at, revoked_at, invalid_from, revoke_reason";
+const AUTHORITY_COLUMNS: &str = "id, algorithm, public_key, host, created_at, retired_at, revoked_at, invalid_from, revoke_reason, kind";
 
 fn authority_from(row: &Row<'_>) -> rusqlite::Result<AuthorityRow> {
     Ok(AuthorityRow {
@@ -184,6 +221,21 @@ fn authority_from(row: &Row<'_>) -> rusqlite::Result<AuthorityRow> {
             _ => Some(Timestamp(integer_at(row, 5)?)),
         },
         revocation: revocation_at(row, 6)?,
+        kind: text_at(row, 9)?.unwrap_or_default(),
+    })
+}
+
+const OIDC_COLUMNS: &str =
+    "id, identity_id, issuer, subject, created_at, revoked_at, invalid_from, revoke_reason";
+
+fn oidc_from(row: &Row<'_>) -> rusqlite::Result<OidcMatchRow> {
+    Ok(OidcMatchRow {
+        id: text_at(row, 0)?.unwrap_or_default(),
+        identity_id: text_at(row, 1)?.unwrap_or_default(),
+        issuer: text_at(row, 2)?.unwrap_or_default(),
+        subject: text_at(row, 3)?.unwrap_or_default(),
+        created_at: Timestamp(integer_at(row, 4)?),
+        revocation: revocation_at(row, 5)?,
     })
 }
 
@@ -219,7 +271,8 @@ fn session_from(row: &Row<'_>) -> rusqlite::Result<SessionRow> {
 
 const KEY_COLUMNS: &str = "k.key_id, k.session_id, k.identity_id, k.authority_id, k.actor, \
      k.presence, k.custody, k.certificate, k.not_before, k.not_after, k.issued_at, \
-     k.issued_by_agent, k.remote_token_id, k.revoked_at, k.invalid_from, k.revoke_reason";
+     k.issued_by_agent, k.remote_token_id, k.revoked_at, k.invalid_from, k.revoke_reason, \
+     k.issuer_kind, k.oidc_id";
 
 fn key_from(row: &Row<'_>) -> rusqlite::Result<SessionKeyRow> {
     Ok(SessionKeyRow {
@@ -237,6 +290,8 @@ fn key_from(row: &Row<'_>) -> rusqlite::Result<SessionKeyRow> {
         issued_by_agent: text_at(row, 11)?,
         remote_token_id: text_at(row, 12)?,
         revocation: revocation_at(row, 13)?,
+        issuer_kind: text_at(row, 16)?.unwrap_or_default(),
+        oidc_id: text_at(row, 17)?,
     })
 }
 
@@ -262,15 +317,17 @@ fn revoke_in(
 }
 
 /// A session key `k` with what its liveness depends on: its session `s`,
-/// its identity `i` and its authority `a`, by its columns.
+/// its identity `i`, its authority `a` and, for a keyless key, its OIDC
+/// match `o`, by its columns.
 const LIVE_FROM: &str = "FROM session_keys k
      JOIN sessions s ON s.id = k.session_id
      LEFT JOIN identities i ON i.id = k.identity_id
-     LEFT JOIN identity_authorities a ON a.id = k.authority_id";
+     LEFT JOIN identity_authorities a ON a.id = k.authority_id
+     LEFT JOIN identity_oidc o ON o.id = k.oidc_id";
 
-/// That none of `k`, `s`, `i` and `a` is revoked.
+/// That none of `k`, `s`, `i`, `a` and `o` is revoked.
 const LIVE: &str = "k.revoked_at IS NULL AND s.revoked_at IS NULL \
-     AND i.revoked_at IS NULL AND a.revoked_at IS NULL";
+     AND i.revoked_at IS NULL AND a.revoked_at IS NULL AND o.revoked_at IS NULL";
 
 /// `?, ?, …`: `n` placeholders.
 fn placeholders(n: usize) -> String {
@@ -298,7 +355,8 @@ impl Db {
     ) -> Result<(), DbError> {
         self.in_transaction(|tx| {
             tx.execute(
-                "UPDATE identity_authorities SET retired_at = ?1 WHERE retired_at IS NULL",
+                "UPDATE identity_authorities SET retired_at = ?1
+                 WHERE retired_at IS NULL AND kind = 'reef-daemon'",
                 [new.created_at],
             )?;
             if let Some((id, revocation)) = revoke {
@@ -307,7 +365,7 @@ impl Db {
             tx.execute(
                 &format!(
                     "INSERT INTO identity_authorities ({AUTHORITY_COLUMNS})
-                     VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL)"
+                     VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, 'reef-daemon')"
                 ),
                 params![
                     new.id,
@@ -326,7 +384,8 @@ impl Db {
     pub fn retire_authorities(&self, at: Timestamp) -> Result<usize, DbError> {
         self.with(|conn| {
             conn.execute(
-                "UPDATE identity_authorities SET retired_at = ?1 WHERE retired_at IS NULL",
+                "UPDATE identity_authorities SET retired_at = ?1
+                 WHERE retired_at IS NULL AND kind = 'reef-daemon'",
                 [at],
             )
         })
@@ -389,6 +448,73 @@ impl Db {
                     row.created_at
                 ],
             )?;
+            Ok(None)
+        })
+    }
+
+    /// Inserts `row` and its OIDC `matches` in one transaction, unless an
+    /// identity has its name or a live match one of the matches' issuer and
+    /// subject: then nothing is inserted, and the one in the way is returned.
+    pub fn insert_identity_with_oidc(
+        &self,
+        row: &IdentityRow,
+        matches: &[OidcMatchRow],
+    ) -> Result<Option<InTheWay>, DbError> {
+        self.in_transaction(|tx| {
+            if let Some(existing) = tx
+                .query_row(
+                    &format!("SELECT {IDENTITY_COLUMNS} FROM identities WHERE name = ?1"),
+                    [&row.name],
+                    identity_from,
+                )
+                .optional()?
+            {
+                return Ok(Some(InTheWay::Identity(existing)));
+            }
+            for matched in matches {
+                if let Some(existing) = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {OIDC_COLUMNS} FROM identity_oidc
+                             WHERE issuer = ?1 AND subject = ?2 AND revoked_at IS NULL"
+                        ),
+                        params![matched.issuer, matched.subject],
+                        oidc_from,
+                    )
+                    .optional()?
+                {
+                    return Ok(Some(InTheWay::Match(existing)));
+                }
+            }
+            tx.execute(
+                &format!(
+                    "INSERT INTO identities ({IDENTITY_COLUMNS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)"
+                ),
+                params![
+                    row.id,
+                    row.name,
+                    row.kind,
+                    row.display_name,
+                    row.email,
+                    row.created_at
+                ],
+            )?;
+            for matched in matches {
+                tx.execute(
+                    &format!(
+                        "INSERT INTO identity_oidc ({OIDC_COLUMNS})
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)"
+                    ),
+                    params![
+                        matched.id,
+                        row.id,
+                        matched.issuer,
+                        matched.subject,
+                        matched.created_at
+                    ],
+                )?;
+            }
             Ok(None)
         })
     }
@@ -544,8 +670,9 @@ impl Db {
             let inserted = tx.execute(
                 "INSERT INTO session_keys(key_id, session_id, identity_id, authority_id, actor,
                                           presence, custody, certificate, not_before, not_after,
-                                          issued_at, issued_by_agent, remote_token_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                          issued_at, issued_by_agent, remote_token_id,
+                                          issuer_kind, oidc_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(key_id) DO NOTHING",
                 params![
                     key.key_id,
@@ -561,6 +688,8 @@ impl Db {
                     key.issued_at,
                     key.issued_by_agent,
                     key.remote_token_id,
+                    key.issuer_kind,
+                    key.oidc_id,
                 ],
             )?;
             if inserted == 0 {
@@ -654,6 +783,10 @@ impl Db {
         if let Some(session) = &filter.session_id {
             sql.push_str(" AND k.session_id = ?");
             values.push(SqlValue::Text(session.clone()));
+        }
+        if let Some(kind) = &filter.issuer_kind {
+            sql.push_str(" AND k.issuer_kind = ?");
+            values.push(SqlValue::Text(kind.clone()));
         }
         if let Some(now) = filter.live_at {
             sql.push_str(" AND k.not_after >= ? AND ");
@@ -802,6 +935,166 @@ impl Db {
         })
     }
 
+    /// Records a Fulcio CA a keyless key came from as an authority of kind
+    /// `sigstore`, retired from the start so it is never current; nothing
+    /// when it is recorded already. The row as it is after.
+    pub fn record_sigstore_authority(&self, row: &AuthorityRow) -> Result<AuthorityRow, DbError> {
+        self.in_transaction(|tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO identity_authorities ({AUTHORITY_COLUMNS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL, NULL, NULL, 'sigstore')
+                     ON CONFLICT(id) DO NOTHING"
+                ),
+                params![
+                    row.id,
+                    row.algorithm,
+                    row.public_key,
+                    row.host,
+                    row.created_at
+                ],
+            )?;
+            Ok(tx.query_row(
+                &format!("SELECT {AUTHORITY_COLUMNS} FROM identity_authorities WHERE id = ?1"),
+                [&row.id],
+                authority_from,
+            )?)
+        })
+    }
+
+    /// Inserts `row` unless a live match has its issuer and subject, which
+    /// is returned instead.
+    pub fn insert_oidc_match(&self, row: &OidcMatchRow) -> Result<Option<OidcMatchRow>, DbError> {
+        self.in_transaction(|tx| {
+            let existing = tx
+                .query_row(
+                    &format!(
+                        "SELECT {OIDC_COLUMNS} FROM identity_oidc
+                         WHERE issuer = ?1 AND subject = ?2 AND revoked_at IS NULL"
+                    ),
+                    params![row.issuer, row.subject],
+                    oidc_from,
+                )
+                .optional()?;
+            if existing.is_some() {
+                return Ok(existing);
+            }
+            tx.execute(
+                &format!(
+                    "INSERT INTO identity_oidc ({OIDC_COLUMNS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)"
+                ),
+                params![
+                    row.id,
+                    row.identity_id,
+                    row.issuer,
+                    row.subject,
+                    row.created_at
+                ],
+            )?;
+            Ok(None)
+        })
+    }
+
+    /// The live match of `issuer` and `subject`, if any.
+    pub fn live_oidc_match(
+        &self,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<Option<OidcMatchRow>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {OIDC_COLUMNS} FROM identity_oidc
+                     WHERE issuer = ?1 AND subject = ?2 AND revoked_at IS NULL"
+                ),
+                params![issuer, subject],
+                oidc_from,
+            )
+            .optional()
+        })
+    }
+
+    /// The match `id`.
+    pub fn oidc_match(&self, id: &str) -> Result<Option<OidcMatchRow>, DbError> {
+        Ok(self.oidc_matches_by_id(&[id])?.remove(id))
+    }
+
+    /// The matches with these ids, by id.
+    pub fn oidc_matches_by_id(
+        &self,
+        ids: &[&str],
+    ) -> Result<HashMap<String, OidcMatchRow>, DbError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {OIDC_COLUMNS} FROM identity_oidc WHERE id IN ({})",
+                placeholders(ids.len())
+            ))?;
+            stmt.query_map(params_from_iter(ids), oidc_from)?
+                .map(|row| row.map(|row| (row.id.clone(), row)))
+                .collect()
+        })
+    }
+
+    /// Every match of these identities, oldest first, revoked ones included.
+    pub fn oidc_matches_of(&self, identity_ids: &[&str]) -> Result<Vec<OidcMatchRow>, DbError> {
+        if identity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {OIDC_COLUMNS} FROM identity_oidc WHERE identity_id IN ({})
+                 ORDER BY created_at, id",
+                placeholders(identity_ids.len())
+            ))?;
+            stmt.query_map(params_from_iter(identity_ids), oidc_from)?
+                .collect()
+        })
+    }
+
+    /// Records `revocation` on match `id`, keeping an earlier
+    /// `invalid_from`; the match as it is after.
+    pub fn revoke_oidc_match(
+        &self,
+        id: &str,
+        revocation: &RevocationRow,
+    ) -> Result<Option<OidcMatchRow>, DbError> {
+        self.in_transaction(|tx| {
+            revoke_in(tx, "identity_oidc", "id", id, revocation)?;
+            Ok(tx
+                .query_row(
+                    &format!("SELECT {OIDC_COLUMNS} FROM identity_oidc WHERE id = ?1"),
+                    [id],
+                    oidc_from,
+                )
+                .optional()?)
+        })
+    }
+
+    /// The ids of up to `limit` keys bound through match `id`, newest
+    /// issued first.
+    pub fn keys_of_oidc_match(&self, id: &str, limit: usize) -> Result<Vec<String>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT key_id FROM session_keys WHERE oidc_id = ?1
+                 ORDER BY issued_at DESC, key_id LIMIT ?2",
+            )?;
+            stmt.query_map(
+                params![id, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect()
+        })
+    }
+
+    /// Whether a match has the id; for new ids.
+    pub fn oidc_id_taken(&self, id: &str) -> Result<bool, DbError> {
+        Ok(self.oidc_match(id)?.is_some())
+    }
+
     /// How many rows the four identity tables have:
     /// `(authorities, identities, sessions, session_keys)`.
     pub fn identity_counts(&self) -> Result<(u64, u64, u64, u64), DbError> {
@@ -847,6 +1140,7 @@ pub(crate) mod tests {
             created_at: Timestamp(at),
             retired_at: None,
             revocation: None,
+            kind: "reef-daemon".into(),
         }
     }
 
@@ -878,6 +1172,8 @@ pub(crate) mod tests {
             issued_by_agent: None,
             remote_token_id: None,
             revocation: None,
+            issuer_kind: "reef-daemon".into(),
+            oidc_id: None,
         }
     }
 
@@ -1092,5 +1388,100 @@ pub(crate) mod tests {
                 .iter()
                 .all(|a| a.retired_at.is_some())
         );
+    }
+
+    fn oidc(id: &str, identity: &str, subject: &str) -> OidcMatchRow {
+        OidcMatchRow {
+            id: id.to_owned(),
+            identity_id: identity.to_owned(),
+            issuer: "https://issuer.example".into(),
+            subject: subject.to_owned(),
+            created_at: Timestamp(5),
+            revocation: None,
+        }
+    }
+
+    /// R3.42 test 5: OIDC matches are unique among live ones, revocation
+    /// frees the pair, a create with a taken match inserts nothing, and a
+    /// Fulcio CA is an authority that never becomes current.
+    #[test]
+    fn oidc_matches_and_sigstore_authorities() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_identity(&identity("idn_1", "ci-main", 1))
+            .unwrap();
+        assert_eq!(
+            db.insert_oidc_match(&oidc("oidc_1", "idn_1", "s")).unwrap(),
+            None
+        );
+        let taken = db.insert_oidc_match(&oidc("oidc_2", "idn_1", "s")).unwrap();
+        assert_eq!(taken.map(|row| row.id), Some("oidc_1".to_owned()));
+        assert_eq!(
+            db.live_oidc_match("https://issuer.example", "s")
+                .unwrap()
+                .map(|row| row.id),
+            Some("oidc_1".to_owned())
+        );
+        // A create whose match is taken inserts neither.
+        let blocked = db
+            .insert_identity_with_oidc(
+                &identity("idn_2", "ci-other", 2),
+                &[oidc("oidc_3", "", "s")],
+            )
+            .unwrap();
+        assert!(matches!(blocked, Some(InTheWay::Match(row)) if row.id == "oidc_1"));
+        assert!(db.identity("ci-other").unwrap().is_none());
+        // Revoked, the pair is free; the earlier invalid_from is kept.
+        db.revoke_oidc_match("oidc_1", &revocation(20, 10)).unwrap();
+        let revoked = db
+            .revoke_oidc_match("oidc_1", &revocation(30, 25))
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked.revocation.unwrap().invalid_from, Timestamp(10));
+        assert_eq!(
+            db.live_oidc_match("https://issuer.example", "s").unwrap(),
+            None
+        );
+        assert_eq!(
+            db.insert_identity_with_oidc(
+                &identity("idn_2", "ci-other", 2),
+                &[oidc("oidc_3", "", "s")],
+            )
+            .unwrap(),
+            None
+        );
+        let of = db.oidc_matches_of(&["idn_1", "idn_2"]).unwrap();
+        assert_eq!(of.len(), 2);
+        assert_eq!(of[1].identity_id, "idn_2");
+        // A Fulcio CA: recorded once, retired from the start, never current.
+        db.replace_authority(&authority("a1", 1), None).unwrap();
+        let ca = AuthorityRow {
+            kind: "sigstore".into(),
+            ..authority("ca1", 3)
+        };
+        let recorded = db.record_sigstore_authority(&ca).unwrap();
+        assert_eq!(recorded.kind, "sigstore");
+        assert_eq!(recorded.retired_at, Some(Timestamp(3)));
+        db.record_sigstore_authority(&authority("ca1", 9)).unwrap();
+        db.replace_authority(&authority("a2", 4), None).unwrap();
+        let rows = db.authorities().unwrap();
+        let current: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.retired_at.is_none())
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(current, ["a2"]);
+        let ca = rows.iter().find(|row| row.id == "ca1").unwrap();
+        assert_eq!(
+            (ca.created_at, ca.retired_at),
+            (Timestamp(3), Some(Timestamp(3)))
+        );
+        db.retire_authorities(Timestamp(50)).unwrap();
+        let ca = db
+            .authorities()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "ca1")
+            .unwrap();
+        assert_eq!(ca.retired_at, Some(Timestamp(3)));
     }
 }

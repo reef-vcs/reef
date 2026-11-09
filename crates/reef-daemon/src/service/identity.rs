@@ -16,6 +16,10 @@ use reef_api::v1::{
     RevokeSessionKeysRequest, RevokeSessionKeysResponse, RotateAuthorityRequest,
     RotateAuthorityResponse, revoke_session_keys_request,
 };
+use reef_api::v1::{
+    AddOidcMatchRequest, AddOidcMatchResponse, RegisterSigstoreKeyRequest,
+    RegisterSigstoreKeyResponse, RevokeOidcMatchRequest, RevokeOidcMatchResponse,
+};
 use reef_evidence::session::{IdentityKind, is_name};
 use tonic::{Request, Response, Status};
 
@@ -23,10 +27,15 @@ use super::convert::timestamp;
 use super::page::{PageRequest, newest_first};
 use super::reading::bad_token;
 use crate::daemon::AppState;
-use crate::db::{AuthorityRow, IdentityRow, RemoteTokenRow, SessionKeyFilter};
+use crate::db::{
+    AuthorityRow, IdentityRow, InTheWay, OidcMatchRow, RemoteTokenRow, SessionKeyFilter,
+};
 use crate::error::status;
 use crate::identity::issue::Channel;
-use crate::identity::read::{kind_message, revocation_row_message, session_key_message};
+use crate::identity::read::{
+    issuer_kind_message, kind_message, revocation_row_message, session_key_message,
+};
+use crate::identity::sigstore::match_problem;
 use crate::identity::{IdentityError, audit, display_name_problem, email_problem};
 use crate::model::Timestamp;
 
@@ -68,6 +77,18 @@ impl IdentityHandler {
             .map_err(status)?;
         let tokens = self.linked_tokens();
         let default = self.state.identity.default_id();
+        let mut matches: HashMap<String, Vec<v1::OidcMatch>> = HashMap::new();
+        for row in self
+            .state
+            .db
+            .oidc_matches_of(&rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>())
+            .map_err(status)?
+        {
+            matches
+                .entry(row.identity_id.clone())
+                .or_default()
+                .push(oidc_message(&row));
+        }
         Ok(rows
             .iter()
             .map(|row| v1::Identity {
@@ -81,6 +102,7 @@ impl IdentityHandler {
                 is_default: default == Some(row.id.as_str()),
                 live_session_keys: counts.get(&row.id).copied().unwrap_or_default(),
                 remote_token_names: tokens.get(&row.id).cloned().unwrap_or_default(),
+                oidc_matches: matches.remove(&row.id).unwrap_or_default(),
             })
             .collect())
     }
@@ -104,6 +126,23 @@ fn authority_message(row: &AuthorityRow) -> v1::Authority {
         retired_at: row.retired_at.map(timestamp),
         revocation: row.revocation.as_ref().map(revocation_row_message),
         current: row.retired_at.is_none(),
+        kind: issuer_kind_message(
+            reef_evidence::session::IssuerKind::parse(&row.kind)
+                .unwrap_or(reef_evidence::session::IssuerKind::ReefDaemon),
+        )
+        .into(),
+    }
+}
+
+/// An OIDC match in the API (R3.42).
+fn oidc_message(row: &OidcMatchRow) -> v1::OidcMatch {
+    v1::OidcMatch {
+        id: row.id.clone(),
+        identity_id: row.identity_id.clone(),
+        issuer: row.issuer.clone(),
+        subject: row.subject.clone(),
+        created_at: Some(timestamp(row.created_at)),
+        revocation: row.revocation.as_ref().map(revocation_row_message),
     }
 }
 
@@ -173,22 +212,63 @@ impl IdentityService for IdentityHandler {
             }));
         }
         let db = &self.state.db;
+        let now = Timestamp::now();
+        let mut matches: Vec<OidcMatchRow> = Vec::new();
+        for spec in &request.oidc {
+            if let Some(problem) = match_problem(&spec.issuer, &spec.subject) {
+                return Err(status(problem));
+            }
+            if matches
+                .iter()
+                .any(|row| row.issuer == spec.issuer && row.subject == spec.subject)
+            {
+                continue;
+            }
+            matches.push(OidcMatchRow {
+                id: crate::identity::new_id("oidc_"),
+                identity_id: String::new(),
+                issuer: spec.issuer.clone(),
+                subject: spec.subject.clone(),
+                created_at: now,
+                revocation: None,
+            });
+        }
         let row = IdentityRow {
             id: crate::identity::unused_identity_id(db).map_err(status)?,
             name: name.clone(),
             kind: kind.as_str().to_owned(),
             display_name: Some(request.display_name.clone()).filter(|text| !text.is_empty()),
             email: Some(email.to_owned()).filter(|text| !text.is_empty()),
-            created_at: Timestamp::now(),
+            created_at: now,
             revocation: None,
         };
-        if let Some(existing) = db.insert_identity(&row).map_err(status)? {
-            return Err(status(IdentityError::Exists {
-                name,
-                revoked: existing.revocation.is_some(),
-            }));
+        match db
+            .insert_identity_with_oidc(&row, &matches)
+            .map_err(status)?
+        {
+            None => {}
+            Some(InTheWay::Identity(existing)) => {
+                return Err(status(IdentityError::Exists {
+                    name,
+                    revoked: existing.revocation.is_some(),
+                }));
+            }
+            Some(InTheWay::Match(existing)) => {
+                let holder = db
+                    .identity(&existing.identity_id)
+                    .map_err(status)?
+                    .map_or(existing.identity_id, |row| row.name);
+                return Err(status(IdentityError::MatchExists { identity: holder }));
+            }
         }
         audit::identity_changed("create", &row.id, &row.name, &row.kind);
+        for spec in &matches {
+            let added = OidcMatchRow {
+                identity_id: row.id.clone(),
+                ..spec.clone()
+            };
+            audit::oidc_changed("add", &added, &row.name);
+        }
         Ok(Response::new(CreateIdentityResponse {
             identity: Some(self.identity_message(&row)?),
         }))
@@ -321,6 +401,11 @@ impl IdentityService for IdentityHandler {
             identity_id,
             session_id: Some(request.session_id.trim().to_owned()).filter(|id| !id.is_empty()),
             live_at: (!request.include_ended).then(Timestamp::now),
+            issuer_kind: match v1::IssuerKind::try_from(request.issuer_kind) {
+                Ok(v1::IssuerKind::ReefDaemon) => Some("reef-daemon".to_owned()),
+                Ok(v1::IssuerKind::Sigstore) => Some("sigstore".to_owned()),
+                _ => None,
+            },
         };
         let cursor = page.cursor().map(parse_cursor).transpose()?;
         let size = page.size();
@@ -473,6 +558,62 @@ impl IdentityService for IdentityHandler {
             .revoked(&crate::provenance::Revoked::Authority(row.id.clone()));
         Ok(Response::new(RevokeAuthorityResponse {
             authority: Some(authority_message(&row)),
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn register_sigstore_key(
+        &self,
+        request: Request<RegisterSigstoreKeyRequest>,
+    ) -> Result<Response<RegisterSigstoreKeyResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
+        let channel = channel_of(&self.state, &request);
+        let (read, created) = self
+            .state
+            .identity
+            .register(request.into_inner().bundle, channel, agent)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(RegisterSigstoreKeyResponse {
+            key: Some(session_key_message(&read, true)),
+            created,
+        }))
+    }
+
+    async fn add_oidc_match(
+        &self,
+        request: Request<AddOidcMatchRequest>,
+    ) -> Result<Response<AddOidcMatchResponse>, Status> {
+        let request = request.into_inner();
+        let spec = request.r#match.unwrap_or_default();
+        let row = self
+            .state
+            .identity
+            .add_match(&request.identity, &spec.issuer, &spec.subject)
+            .map_err(status)?;
+        Ok(Response::new(AddOidcMatchResponse {
+            r#match: Some(oidc_message(&row)),
+        }))
+    }
+
+    async fn revoke_oidc_match(
+        &self,
+        request: Request<RevokeOidcMatchRequest>,
+    ) -> Result<Response<RevokeOidcMatchResponse>, Status> {
+        let request = request.into_inner();
+        let (row, key_ids) = self
+            .state
+            .identity
+            .revoke_match(
+                &request.id,
+                request.invalid_from.as_ref(),
+                request.since_created,
+                &request.reason,
+            )
+            .map_err(status)?;
+        Ok(Response::new(RevokeOidcMatchResponse {
+            r#match: Some(oidc_message(&row)),
+            key_ids,
         }))
     }
 }

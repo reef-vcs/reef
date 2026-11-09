@@ -1,0 +1,19 @@
+# Warns when the Sigstore trusted root Reef ships is older than the one Sigstore publishes (R3.42,
+# ADR 0066): the job fails, and scripts/sigstore-root.sh --update refreshes it in a pull request.
+name: sigstore-root
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"     # Mondays 06:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/sigstore-root.sh

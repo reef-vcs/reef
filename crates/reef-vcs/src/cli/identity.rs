@@ -7,8 +7,15 @@
 //! credential, printed only as JSON (`-o json`, or on a pipe), and Reef
 //! keeps it nowhere. A certificate says which identity a key is bound to,
 //! never that it should be trusted: policy decides that (R3.07).
+//!
+//! `oidc add|revoke` (R3.42, ADR 0066) set the exact OIDC issuer and
+//! subject whose Sigstore keyless certificates an identity accepts, and
+//! `session issue --keyless` gets a key certified by Fulcio instead of the
+//! daemon, with an OIDC token from a file, `SIGSTORE_ID_TOKEN`, or GitHub
+//! Actions; nothing here opens a browser (ADR 0025).
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use reef_api::v1::{
@@ -17,8 +24,10 @@ use reef_api::v1::{
 };
 use reef_client::evidence::session::Actor;
 use reef_client::json::{
-    self, Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued,
+    self, Authority, AuthorityRotated, Identity, OidcMatch, OidcMatchRevoked, SessionKey,
+    SessionKeyIssued,
 };
+use reef_client::keyless::{KeylessError, KeylessOptions};
 use reef_client::{IssueError, brief};
 use reef_error::{Advice, ErrorKind};
 use serde::Serialize;
@@ -65,6 +74,46 @@ enum IdentityCommand {
     /// Show or rotate the daemon's issuing authority key.
     #[command(subcommand)]
     Authority(AuthorityCommand),
+    /// Add or revoke the OIDC issuers and subjects whose keyless (Sigstore) keys an identity accepts.
+    #[command(subcommand)]
+    Oidc(OidcCommand),
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum OidcCommand {
+    /// Let an identity accept keyless keys Fulcio certified for this exact OIDC issuer and subject.
+    #[command(
+        after_help = "Example: reef identity oidc add ci-main --issuer https://token.actions.githubusercontent.com --subject https://github.com/OWNER/REPO/.github/workflows/ci.yml@refs/heads/main"
+    )]
+    Add {
+        /// The identity's name or id.
+        #[arg(value_name = "IDENTITY")]
+        identity: String,
+        /// The OIDC issuer, exactly as the certificate names it (an https:// URL).
+        #[arg(long, value_name = "URL")]
+        issuer: String,
+        /// The certificate's subject, exactly: an email, or a workflow URI.
+        #[arg(long, value_name = "TEXT")]
+        subject: String,
+    },
+    /// Revoke a match: keys bound through it stop counting from --since.
+    #[command(
+        after_help = "Example: reef identity oidc revoke oidc_41c9e07ab2d35f18 --reason moved"
+    )]
+    Revoke {
+        /// The match's id (`reef identity show` lists them).
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Signatures stop counting from this time (RFC 3339, or a duration ago such as 2h); now by default.
+        #[arg(long, value_name = "TIME", value_parser = super::history::when)]
+        since: Option<SystemTime>,
+        /// From the match's creation: everything its keys signed reads revoked.
+        #[arg(long, conflicts_with = "since")]
+        since_created: bool,
+        /// Why, recorded with the revocation.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+    },
 }
 
 /// `reef identity create`.
@@ -82,6 +131,17 @@ struct CreateArgs {
     /// An email to display, checked for its form only.
     #[arg(long, value_name = "ADDR")]
     email: Option<String>,
+    /// An OIDC issuer and subject whose keyless (Sigstore) keys it accepts; repeatable.
+    #[arg(long, value_name = "ISSUER=SUBJECT", value_parser = oidc_spec)]
+    oidc: Vec<(String, String)>,
+}
+
+/// `ISSUER=SUBJECT`, split at the first `=`.
+fn oidc_spec(text: &str) -> Result<(String, String), String> {
+    text.split_once('=')
+        .filter(|(issuer, subject)| !issuer.is_empty() && !subject.is_empty())
+        .map(|(issuer, subject)| (issuer.to_owned(), subject.to_owned()))
+        .ok_or_else(|| "expected ISSUER=SUBJECT".to_owned())
 }
 
 /// `reef identity revoke`.
@@ -118,6 +178,9 @@ enum SessionCommand {
         /// Also expired and revoked keys.
         #[arg(long)]
         all: bool,
+        /// Only keys certified by this issuer: reef-daemon, or sigstore (keyless).
+        #[arg(long, value_parser = ["reef-daemon", "sigstore"])]
+        issuer: Option<String>,
     },
     /// Show a session key and what its certificate binds it to.
     #[command(after_help = "Example: reef identity session show 9c41")]
@@ -148,6 +211,12 @@ struct IssueArgs {
     /// Renew: a new key in this session, with its identity and actor.
     #[arg(long, value_name = "ID")]
     session: Option<String>,
+    /// Keyless: Sigstore's Fulcio certifies the key against an OIDC token, and its identity is whichever accepts the token's issuer and subject.
+    #[arg(long, conflicts_with_all = ["identity", "lifetime"])]
+    keyless: bool,
+    /// With --keyless, the OIDC token's file (0600); else `SIGSTORE_ID_TOKEN` or GitHub Actions' token.
+    #[arg(long, value_name = "PATH", requires = "keyless", conflicts_with_all = ["identity", "lifetime"])]
+    oidc_token_file: Option<PathBuf>,
 }
 
 /// `reef identity session revoke`.
@@ -235,6 +304,7 @@ impl Args {
                 | IdentityCommand::Authority(
                     AuthorityCommand::Rotate { .. } | AuthorityCommand::Revoke { .. }
                 )
+                | IdentityCommand::Oidc(_)
         )
     }
 }
@@ -263,6 +333,49 @@ pub(crate) async fn issue_key(
     }
 }
 
+/// A keyless session key (R3.42): certified by Fulcio against an OIDC token
+/// and registered with the daemon. Fulcio and Rekor are the public-good
+/// instances unless `REEF_SIGSTORE_FULCIO_URL` and `_REKOR_URL` say
+/// otherwise; each request has its own 30-second timeout.
+pub(crate) async fn keyless_key(
+    ctx: &Ctx,
+    actor: Actor,
+    session: &str,
+    token_file: Option<PathBuf>,
+) -> Result<reef_client::SessionKey, CliError> {
+    let options = KeylessOptions {
+        token_file,
+        ..KeylessOptions::from_env()
+    };
+    let var = |name: &str| std::env::var(name).ok();
+    match ctx
+        .client
+        .issue_keyless_session_key(actor, session, &options, &var)
+        .await
+    {
+        Ok(issued) => Ok(issued),
+        Err(KeylessError::Client(error)) => Err(CliError::Daemon(error)),
+        Err(
+            error @ (KeylessError::NoToken
+            | KeylessError::TokenFile { .. }
+            | KeylessError::Token(_)),
+        ) => Err(CliError::Refused {
+            kind: ErrorKind::InvalidArgument,
+            message: error.to_string(),
+            advice: Some(Advice::hint(
+                "Give --oidc-token-file PATH (mode 0600) with an OIDC token for audience sigstore, set SIGSTORE_ID_TOKEN, or run in GitHub Actions with `permissions: id-token: write`.",
+            )),
+        }),
+        Err(error) => Err(CliError::Refused {
+            kind: ErrorKind::Unavailable,
+            message: error.to_string(),
+            advice: Some(Advice::hint(
+                "Check that Fulcio and Rekor are reachable (REEF_SIGSTORE_FULCIO_URL, REEF_SIGSTORE_REKOR_URL), then run it again.",
+            )),
+        }),
+    }
+}
+
 /// Runs `reef identity`.
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     let advice = AdviceCtx::unscoped();
@@ -275,12 +388,19 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 v1::IdentityKind::Person
             };
             let response = ctx
-                .call(ctx.client.create_identity(CreateIdentityRequest {
-                    name: args.name,
-                    kind: kind.into(),
-                    display_name: args.display_name.unwrap_or_default(),
-                    email: args.email.unwrap_or_default(),
-                }))
+                .call(
+                    ctx.client.create_identity(CreateIdentityRequest {
+                        name: args.name,
+                        kind: kind.into(),
+                        display_name: args.display_name.unwrap_or_default(),
+                        email: args.email.unwrap_or_default(),
+                        oidc: args
+                            .oidc
+                            .into_iter()
+                            .map(|(issuer, subject)| v1::OidcMatchSpec { issuer, subject })
+                            .collect(),
+                    }),
+                )
                 .await
                 .map_err(refine)?;
             let identity = Identity::from(&response.identity.unwrap_or_default());
@@ -323,9 +443,85 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         }
         IdentityCommand::Session(command) => session(ctx, command, &advice).await,
         IdentityCommand::Authority(command) => authority(ctx, command, &advice).await,
+        IdentityCommand::Oidc(command) => oidc(ctx, command, &advice).await,
     }
 }
 
+async fn oidc(ctx: &Ctx, command: OidcCommand, advice: &AdviceCtx) -> Result<(), CliError> {
+    let refine = |error: CliError| advice.refine(error);
+    match command {
+        OidcCommand::Add {
+            identity,
+            issuer,
+            subject,
+        } => {
+            let response = ctx
+                .call(ctx.client.add_oidc_match(&identity, &issuer, &subject))
+                .await
+                .map_err(refine)?;
+            let shown = OidcMatch::from(&response.r#match.unwrap_or_default());
+            ctx.out.object(&AddedMatch(shown))
+        }
+        OidcCommand::Revoke {
+            id,
+            since,
+            since_created,
+            reason,
+        } => {
+            let response = ctx
+                .call(ctx.client.revoke_oidc_match(v1::RevokeOidcMatchRequest {
+                    id,
+                    invalid_from: since.map(timestamp),
+                    since_created,
+                    reason: reason.unwrap_or_default(),
+                }))
+                .await
+                .map_err(refine)?;
+            let shown = OidcMatchRevoked {
+                matched: OidcMatch::from(&response.r#match.unwrap_or_default()),
+                key_ids: response.key_ids,
+            };
+            ctx.out.object(&RevokedMatch(shown))
+        }
+    }
+}
+
+/// `identity oidc add`'s match.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct AddedMatch(OidcMatch);
+
+impl TextRender for AddedMatch {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let m = &self.0;
+        writeln!(w, "match {}: {} {}", m.id, m.issuer, m.subject)
+    }
+}
+
+/// `identity oidc revoke`'s match and the keys it covers.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct RevokedMatch(OidcMatchRevoked);
+
+impl TextRender for RevokedMatch {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let m = &self.0.matched;
+        let from = m
+            .revocation
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), revocation_text);
+        writeln!(
+            w,
+            "revoked match {} ({} {}), {from}; {} keys bound through it",
+            m.id,
+            m.issuer,
+            m.subject,
+            self.0.key_ids.len()
+        )
+    }
+}
+
+#[expect(clippy::too_many_lines, reason = "one arm per command")]
 async fn session(ctx: &Ctx, command: SessionCommand, advice: &AdviceCtx) -> Result<(), CliError> {
     let refine = |error: CliError| advice.refine(error);
     match command {
@@ -341,14 +537,24 @@ async fn session(ctx: &Ctx, command: SessionCommand, advice: &AdviceCtx) -> Resu
                     )),
                 });
             }
-            let issued = issue_key(
-                ctx,
-                args.identity.as_deref().unwrap_or_default(),
-                actor(&args.actor),
-                args.lifetime,
-                args.session.as_deref().unwrap_or_default(),
-            )
-            .await
+            let issued = if args.keyless {
+                keyless_key(
+                    ctx,
+                    actor(&args.actor),
+                    args.session.as_deref().unwrap_or_default(),
+                    args.oidc_token_file,
+                )
+                .await
+            } else {
+                issue_key(
+                    ctx,
+                    args.identity.as_deref().unwrap_or_default(),
+                    actor(&args.actor),
+                    args.lifetime,
+                    args.session.as_deref().unwrap_or_default(),
+                )
+                .await
+            }
             .map_err(refine)?;
             let certificate =
                 serde_json::from_slice(&issued.certificate).unwrap_or(serde_json::Value::Null);
@@ -363,12 +569,19 @@ async fn session(ctx: &Ctx, command: SessionCommand, advice: &AdviceCtx) -> Resu
             identity,
             session,
             all,
+            issuer,
         } => {
+            let issuer_kind = match issuer.as_deref() {
+                Some("sigstore") => v1::IssuerKind::Sigstore,
+                Some(_) => v1::IssuerKind::ReefDaemon,
+                None => v1::IssuerKind::Unspecified,
+            };
             let keys = ctx
                 .call(ctx.client.list_session_keys_all(ListSessionKeysRequest {
                     identity: identity.unwrap_or_default(),
                     session_id: session.unwrap_or_default(),
                     include_ended: all,
+                    issuer_kind: issuer_kind.into(),
                     ..ListSessionKeysRequest::default()
                 }))
                 .await
@@ -535,6 +748,26 @@ fn identity_pairs(identity: &Identity) -> Vec<(&'static str, String)> {
                 identity.remote_token_names.join(" ")
             },
         ),
+        (
+            "oidc",
+            if identity.oidc_matches.is_empty() {
+                "-".to_owned()
+            } else {
+                identity
+                    .oidc_matches
+                    .iter()
+                    .map(|m| {
+                        let state = if m.revocation.is_some() {
+                            " (revoked)"
+                        } else {
+                            ""
+                        };
+                        format!("{} {} {}{state}", m.id, m.issuer, m.subject)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            },
+        ),
     ]
 }
 
@@ -659,7 +892,20 @@ impl TextRender for ShownKey {
                 ("valid from", or_dash(k.not_before.as_deref())),
                 ("valid until", or_dash(k.not_after.as_deref())),
                 ("issued", or_dash(k.issued_at.as_deref())),
+                ("issuer", or_dash(k.issuer_kind.as_deref())),
                 ("authority", k.authority_key_id.clone()),
+                (
+                    "keyless",
+                    k.sigstore.as_ref().map_or_else(
+                        || "-".to_owned(),
+                        |s| {
+                            format!(
+                                "{} {}, log index {}",
+                                s.oidc_issuer, s.oidc_subject, s.log_index
+                            )
+                        },
+                    ),
+                ),
                 (
                     "revoked",
                     k.revocation

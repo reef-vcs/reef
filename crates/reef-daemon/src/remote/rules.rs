@@ -83,6 +83,11 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         "/reef.api.v1.IdentityService/IssueSessionKey",
         Rule::LinkedIdentity,
     ),
+    // R3.42: the OIDC identity in the bundle decides, not the token.
+    (
+        "/reef.api.v1.IdentityService/RegisterSigstoreKey",
+        Rule::None,
+    ),
     (
         "/reef.api.v1.ProvenanceService/DeclareProvenance",
         Rule::OwnWorkspace,

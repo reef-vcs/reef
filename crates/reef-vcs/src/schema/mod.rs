@@ -108,7 +108,10 @@ fn keep_policy(policy: &mut Value, name: &[String]) -> Option<()> {
 /// describes the format; the daemon's checks stay the authority.
 fn evidence_part(defs: &mut Map<String, Value>) -> Value {
     use reef_client::evidence::provenance::{ProvenancePredicate, ProvenanceStatement};
-    use reef_client::evidence::session::{SessionKeyPredicate, SessionKeyStatement};
+    use reef_client::evidence::session::{
+        SessionKeyPredicate, SessionKeyStatement, SigstoreBindingPredicate,
+        SigstoreBindingStatement,
+    };
     use reef_client::evidence::{self as format, Envelope, Predicate, Statement};
     // The deserialize contract: what a producer writes and Reef reads.
     let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
@@ -121,9 +124,12 @@ fn evidence_part(defs: &mut Map<String, Value>) -> Value {
     // R3.04: a provenance record, in the same envelope.
     let provenance_statement = generator.subschema_for::<ProvenanceStatement>();
     let provenance_predicate = generator.subschema_for::<ProvenancePredicate>();
+    // R3.42: a keyless session key's binding statement, logged in Rekor.
+    let sigstore_binding_statement = generator.subschema_for::<SigstoreBindingStatement>();
+    let sigstore_binding_predicate = generator.subschema_for::<SigstoreBindingPredicate>();
     defs.extend(generator.take_definitions(true));
     json!({
-        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds. A session key's certificate (ADR 0057, docs/identity.md) is a second predicate type, urn:reef-vcs:session-key:v1, in the same envelope, signed by an issuing authority. A provenance record (ADR 0058, docs/provenance.md) is a third, urn:reef-vcs:provenance:v1, about one git commit (gitCommit), signed by a key the daemon holds for a workspace's session.",
+        "description": "Evidence objects (ADR 0055): an in-toto Statement v1 about one git tree, with Reef's predicate, signed once with ed25519 in a DSSE envelope. The evidence id is the SHA-256 of the envelope in canonical form; a key id is the SHA-256 of the signer's DER SubjectPublicKeyInfo. docs/evidence.md has the rules these schemas cannot state: the checking order, the canonical form, and the bounds. A session key's certificate (ADR 0057, docs/identity.md) is a second predicate type, urn:reef-vcs:session-key:v1, in the same envelope, signed by an issuing authority. A provenance record (ADR 0058, docs/provenance.md) is a third, urn:reef-vcs:provenance:v1, about one git commit (gitCommit), signed by a key the daemon holds for a workspace's session. A keyless session key's binding statement (ADR 0066), urn:reef-vcs:sigstore-session-key:v1, is signed by the key Sigstore's Fulcio certified and logged in Rekor; its Sigstore bundle is the key's certificate.",
         "format": format::FORMAT,
         "payload_type": format::PAYLOAD_TYPE,
         "statement_type": format::STATEMENT_TYPE,
@@ -138,12 +144,15 @@ fn evidence_part(defs: &mut Map<String, Value>) -> Value {
         "provenance_predicate_type": format::provenance::PROVENANCE_PREDICATE_TYPE,
         "provenance_statement": Value::from(provenance_statement),
         "provenance_predicate": Value::from(provenance_predicate),
+        "sigstore_binding_predicate_type": format::session::SIGSTORE_BINDING_PREDICATE_TYPE,
+        "sigstore_binding_statement": Value::from(sigstore_binding_statement),
+        "sigstore_binding_predicate": Value::from(sigstore_binding_predicate),
     })
 }
 
 /// The `evidence` part's schema members, which `reef schema evidence
 /// <member>` selects one of.
-const EVIDENCE_MEMBERS: [&str; 7] = [
+const EVIDENCE_MEMBERS: [&str; 9] = [
     "statement",
     "predicate",
     "envelope",
@@ -151,12 +160,16 @@ const EVIDENCE_MEMBERS: [&str; 7] = [
     "session_key_predicate",
     "provenance_statement",
     "provenance_predicate",
+    "sigstore_binding_statement",
+    "sigstore_binding_predicate",
 ];
 
 /// Keeps one member of the `evidence` part: `statement`, `predicate`,
 /// `envelope`, a session key certificate's `session_key_statement` or
-/// `session_key_predicate` (R3.03), or a provenance record's
-/// `provenance_statement` or `provenance_predicate` (R3.04).
+/// `session_key_predicate` (R3.03), a provenance record's
+/// `provenance_statement` or `provenance_predicate` (R3.04), or a keyless
+/// key's `sigstore_binding_statement` or `sigstore_binding_predicate`
+/// (R3.42).
 fn keep_evidence(evidence: &mut Value, name: &[String]) -> Option<()> {
     let [name] = name else {
         return None;

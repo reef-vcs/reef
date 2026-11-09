@@ -543,6 +543,7 @@ fn statuses_at_their_boundaries() {
         key: revoked(later, later - 10),
         session: revoked(later, witnessed + 5),
         identity: revoked(later, later),
+        binding: None,
     };
     assert_eq!(
         status_at(&certified, witnessed, &revocations),

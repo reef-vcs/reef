@@ -31,10 +31,23 @@ humantime.workspace = true       # RFC 3339 times, parsed as `reef history`'s ar
 schemars.workspace = true        # the format as JSON Schema, which `reef schema evidence` prints
 thiserror.workspace = true
 zeroize.workspace = true         # a private key's DER, wiped once ring has parsed it (R3.03)
+# Sigstore keyless bundles (R3.42, ADR 0066), only with the `sigstore` feature, which the daemon
+# enables: the `reef` binary does not link the X.509 stack.
+sigstore-verify = { workspace = true, optional = true }
+sigstore-trust-root = { workspace = true, optional = true }
+sigstore-crypto = { workspace = true, optional = true }
+sigstore-types = { workspace = true, optional = true }
+x509-cert = { workspace = true, optional = true }
+der = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }   # the times `sigstore-verify` reports
+
+[features]
+sigstore = ["dep:sigstore-verify", "dep:sigstore-trust-root", "dep:sigstore-crypto", "dep:sigstore-types", "dep:x509-cert", "dep:der", "dep:jiff"]
 
 [dev-dependencies]
 jsonschema.workspace = true      # test 7: the schema against real payloads
 criterion.workspace = true
+reef-testing.workspace = true    # R3.42: the local Sigstore that builds keyless bundles
 
 [[bench]]
 name = "evidence"

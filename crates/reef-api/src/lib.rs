@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 24;
+pub const API_REVISION: u32 = 25;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -113,6 +113,11 @@ pub const API_DIGESTS: &[&str] = &[
     "0c59ea9c3a2de7e203fb67623ba54975938ac4ce069cc2df4e315a784ebc9e6e",
     // R3.25: `ConflictService`.
     "bfa0d1793aad508ef3f3d86723eb8f3f9319fbeb8ec191d8f86b2d6ecdbc4926",
+    // R3.42: `IdentityService.RegisterSigstoreKey`, `AddOidcMatch` and
+    // `RevokeOidcMatch`, `ISSUER_KIND_SIGSTORE`, `SessionKey.sigstore`,
+    // `Identity.oidc_matches`, `Authority.kind`, `CreateIdentityRequest.oidc`,
+    // `ListSessionKeysRequest.issuer_kind`.
+    "8e2d830087b026c18b01fffbc9eaaec35441cf73e0fa1fb97fb409329fa05096",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -513,6 +518,25 @@ pub mod error {
     /// A revocation of the current authority, which would go on issuing
     /// (R3.03): rotate it with `revoke`. Metadata: `key_id`.
     pub const AUTHORITY_IS_CURRENT: &str = "AUTHORITY_IS_CURRENT";
+    /// A keyless bundle that does not verify against the daemon's trusted
+    /// root, or does not carry a binding statement (R3.42). Metadata:
+    /// `step` (`size`, `json`, `chain`, `sct`, `tlog`, `time`, `signature`,
+    /// `statement` or `key`), `problem`.
+    pub const INVALID_SIGSTORE_BUNDLE: &str = "INVALID_SIGSTORE_BUNDLE";
+    /// A keyless certificate whose OIDC issuer and subject no live match
+    /// accepts (R3.42). Metadata: `issuer`, `subject`.
+    pub const SIGSTORE_IDENTITY_UNMATCHED: &str = "SIGSTORE_IDENTITY_UNMATCHED";
+    /// Keyless keys are off, or the trusted root is unusable (R3.42).
+    /// Metadata: `problem` (`disabled` or `trusted_root`).
+    pub const SIGSTORE_UNAVAILABLE: &str = "SIGSTORE_UNAVAILABLE";
+    /// An OIDC match's issuer or subject out of its bounds (R3.42).
+    /// Metadata: `field` (`issuer` or `subject`).
+    pub const INVALID_OIDC_MATCH: &str = "INVALID_OIDC_MATCH";
+    /// A live match already has the issuer and subject (R3.42). Metadata:
+    /// `identity`, the identity holding it.
+    pub const OIDC_MATCH_EXISTS: &str = "OIDC_MATCH_EXISTS";
+    /// No OIDC match has the id (R3.42). Metadata: `id`.
+    pub const OIDC_MATCH_NOT_FOUND: &str = "OIDC_MATCH_NOT_FOUND";
     /// A provenance declaration, or a provenance listing's filter, out of
     /// its bounds (R3.04). Metadata: `field` (`model`, `harness`, `task`,
     /// `instruction_sha256`, `client_session`, `identity`, `actor` or
@@ -815,8 +839,9 @@ mod tests {
         // as ADR 0056 amends it, an artifact's bytes, kept by retention; and,
         // as ADR 0057 amends it, a session key, which changes no jj view;
         // and, as ADR 0059 amends it, executor jobs, which are daemon
-        // metadata, not jj state.
-        const EXCEPT: [&str; 12] = [
+        // metadata, not jj state; and, as ADR 0066 amends it, a keyless
+        // session key's registration, which changes no jj view either.
+        const EXCEPT: [&str; 13] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
@@ -824,6 +849,7 @@ mod tests {
             "AddEvidence",
             "UploadArtifact",
             "IssueSessionKey",
+            "RegisterSigstoreKey",
             "SubmitJob",
             "CancelJob",
             "ClaimJob",

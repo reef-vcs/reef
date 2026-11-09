@@ -8,5 +8,6 @@
 pub mod agent;
 pub mod git;
 pub mod onboarding;
+pub mod sigstore;
 pub mod synth;
 pub mod tokens;

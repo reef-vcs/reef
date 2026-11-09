@@ -386,6 +386,7 @@ fn declared_match(set: &Attestor, e: &Evidence) -> bool {
         && (set.identity_kinds.is_empty() || set.identity_kinds.contains(&e.key.identity_kind))
         && set.actors.contains(&e.key.actor)
         && (set.authorities.is_empty() || set.authorities.contains(&e.key.authority))
+        && (set.issuer_kinds.is_empty() || set.issuer_kinds.contains(&e.key.issuer_kind))
         && Presence::of_key(&e.key.presence).is_some_and(|presence| presence >= set.presence)
         && (set.allow_self || !e.from_self)
 }

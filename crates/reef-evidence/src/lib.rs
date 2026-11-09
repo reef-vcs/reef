@@ -14,6 +14,10 @@
 //!   predicate type in the same envelope, by which an issuing authority
 //!   binds a short-lived key to an operator identity, and what a verifier
 //!   reports for evidence that key signed.
+//! - `sigstore` (feature `sigstore`): Sigstore keyless session keys
+//!   (R3.42, ADR 0066): a key Fulcio certified against an OIDC identity,
+//!   whose binding statement Rekor logged, checked offline against a
+//!   trusted root.
 //! - [`provenance`]: provenance records (R3.04, ADR 0058): a third
 //!   predicate type, by which a daemon signs, with a key it holds for a
 //!   workspace's session, that it recorded a commit and what context a
@@ -33,6 +37,8 @@ pub mod envelope;
 pub mod keys;
 pub mod provenance;
 pub mod session;
+#[cfg(feature = "sigstore")]
+pub mod sigstore;
 pub mod statement;
 pub mod verify;
 

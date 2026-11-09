@@ -506,8 +506,9 @@ pub(crate) async fn messages(
         .session_keys_by_id(&key_ids.into_iter().collect::<Vec<_>>())
         .map_err(status)?;
     let db = Arc::clone(&state.db);
+    let keyless = state.identity.keyless_root();
     let mut messages: Vec<v1::Evidence> = tokio::task::spawn_blocking(move || {
-        let keys: HashMap<String, ReadKey> = read_keys(&db, key_rows)
+        let keys: HashMap<String, ReadKey> = read_keys(&db, key_rows, keyless.as_deref())
             .map_err(status)?
             .into_iter()
             .map(|read| (read.row.key_id.clone(), read))

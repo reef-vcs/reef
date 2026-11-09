@@ -15,6 +15,14 @@
 //
 // Identities, sessions, keys and authorities are machine-wide, as remote
 // tokens are. Issuing or revoking records no operation: no jj view changes.
+//
+// A keyless session key (R3.42, ADR 0066) is certified by Sigstore's Fulcio
+// instead, against an OIDC identity: the key signs a binding statement
+// (`urn:reef-vcs:sigstore-session-key:v1`) that Rekor logs, and the Sigstore
+// bundle is registered here, verified offline against the daemon's trusted
+// root, and bound to the identity whose OIDC match accepts the certificate's
+// issuer and subject. Its window is Fulcio's (10 minutes on the public-good
+// instance).
 syntax = "proto3";
 
 package reef.api.v1;
@@ -34,7 +42,10 @@ service IdentityService {
   // with `idn_` or `ses_` (reserved for ids), or
   // INVALID_IDENTITY (metadata `field`: `kind`, `display_name` or `email`);
   // ALREADY_EXISTS with reason IDENTITY_EXISTS (metadata `name`, and
-  // `revoked`, `true` when the name belongs to a revoked identity).
+  // `revoked`, `true` when the name belongs to a revoked identity). With
+  // `oidc` (R3.42): INVALID_ARGUMENT with reason INVALID_OIDC_MATCH
+  // (metadata `field`), or ALREADY_EXISTS with reason OIDC_MATCH_EXISTS
+  // (metadata `identity`); nothing is created then.
   rpc CreateIdentity(CreateIdentityRequest) returns (CreateIdentityResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
@@ -183,6 +194,59 @@ service IdentityService {
     option (reef.api.v1.access) = ACCESS_ADMIN;
     option idempotency_level = IDEMPOTENT;
   }
+  // Registers a keyless session key (R3.42): a Sigstore bundle whose
+  // content is the DSSE envelope of the key's binding statement, whose
+  // certificate Fulcio issued for the key against an OIDC token, and whose
+  // transparency log entry Rekor wrote. The daemon verifies it offline
+  // against its trusted root, then binds the key to the identity whose live
+  // OIDC match equals the certificate's issuer and subject; the channel
+  // decides nothing, so any `write` caller, the socket included, may
+  // register any identity's bundle (every bound field is signed by the key).
+  // The statement names its session: a known one must have the same
+  // identity and actor and be a keyless session. The same bundle again
+  // returns the record with `created` false. Records no operation.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_SIGSTORE_BUNDLE (metadata
+  // `step`: `size`, `json`, `chain`, `sct`, `tlog`, `time`, `signature`,
+  // `statement` or `key`, and `problem`); FAILED_PRECONDITION with reason
+  // SIGSTORE_IDENTITY_UNMATCHED (metadata `issuer`, `subject`) when no live
+  // match accepts the certificate, SIGSTORE_UNAVAILABLE (metadata `problem`:
+  // `disabled` or `trusted_root`), IDENTITY_REVOKED (metadata `name`,
+  // `revoked_at`), or TOO_MANY_SESSION_KEYS (metadata `identity`, `limit`);
+  // PERMISSION_DENIED with reason SESSION_KEY_REFUSED (metadata `rule`:
+  // `human_for_ci`, `session_mismatch`, `session_revoked` or
+  // `session_channel_mismatch`); ALREADY_EXISTS with reason
+  // SESSION_KEY_EXISTS (metadata `key_id`, and `state`: `certified` for the
+  // key in another bundle, `used` for a key that signed evidence as a bare
+  // key).
+  rpc RegisterSigstoreKey(RegisterSigstoreKeyRequest) returns (RegisterSigstoreKeyResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Lets an identity accept keyless certificates for one exact OIDC issuer
+  // and subject (R3.42). One live match per issuer and subject across all
+  // identities, so a certificate binds to one identity or none. A match
+  // added later never rebinds a key registered before it.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // INVALID_ARGUMENT with reason INVALID_OIDC_MATCH (metadata `field`:
+  // `issuer` or `subject`); ALREADY_EXISTS with reason OIDC_MATCH_EXISTS
+  // (metadata `identity`, the identity holding it); FAILED_PRECONDITION
+  // with reason IDENTITY_REVOKED (metadata `name`, `revoked_at`).
+  rpc AddOidcMatch(AddOidcMatchRequest) returns (AddOidcMatchResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+  // Revokes an OIDC match (R3.42): no key binds through it again, and
+  // signatures by the keys bound through it stop counting from
+  // `invalid_from` (default now; `since_created`: from the match's
+  // creation). Revoking again may move `invalid_from` earlier, never later.
+  //
+  // Errors: NOT_FOUND with reason OIDC_MATCH_NOT_FOUND (metadata `id`);
+  // INVALID_ARGUMENT with reason INVALID_REVOCATION (metadata `field`
+  // `invalid_from`) for a time in the future or one with `since_created`.
+  rpc RevokeOidcMatch(RevokeOidcMatchRequest) returns (RevokeOidcMatchResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
 }
 
 // What an operator identity is.
@@ -237,6 +301,9 @@ enum IssuerKind {
   ISSUER_KIND_UNSPECIFIED = 0;
   // A Reef daemon's authority key.
   ISSUER_KIND_REEF_DAEMON = 1;
+  // Sigstore's Fulcio, against an OIDC identity (R3.42): the key's
+  // certificate is a Sigstore bundle.
+  ISSUER_KIND_SIGSTORE = 2;
 }
 
 // What a verifier reports about the key that signed an evidence object, at
@@ -296,6 +363,59 @@ message Identity {
   uint32 live_session_keys = 9;
   // The live remote tokens linked to it.
   repeated string remote_token_names = 10;
+  // The OIDC issuers and subjects whose keyless certificates it accepts
+  // (R3.42), oldest first, revoked ones included.
+  repeated OidcMatch oidc_matches = 11;
+}
+
+// An exact OIDC issuer and subject an identity accepts keyless
+// certificates for (R3.42).
+message OidcMatch {
+  // `oidc_` and 16 lowercase hex digits; never reused.
+  string id = 1;
+  // The identity's id.
+  string identity_id = 2;
+  // The OIDC issuer, exactly as a Fulcio certificate names it.
+  string issuer = 3;
+  // The certificate's subject (its SAN: an email or a URI), exactly.
+  string subject = 4;
+  // When it was added.
+  google.protobuf.Timestamp created_at = 5;
+  // Its revocation, which applies to every key bound through it; unset
+  // while live.
+  Revocation revocation = 6;
+}
+
+// An OIDC issuer and subject, to add as a match.
+message OidcMatchSpec {
+  // An https:// URL of at most 256 bytes, such as
+  // `https://token.actions.githubusercontent.com`.
+  string issuer = 1;
+  // At most 1,024 bytes of visible ASCII: an email, or a URI such as
+  // `https://github.com/OWNER/REPO/.github/workflows/WF.yml@refs/heads/main`.
+  string subject = 2;
+}
+
+// What a keyless key's Sigstore certificate says (R3.42).
+message SigstoreCertificate {
+  // The certificate's OIDC issuer.
+  string oidc_issuer = 1;
+  // Its subject: an email or a URI.
+  string oidc_subject = 2;
+  // The OIDC match it was bound through.
+  string oidc_match_id = 3;
+  // When the transparency log (or a timestamp authority) witnessed the
+  // binding statement: the earliest verified time.
+  google.protobuf.Timestamp integrated_time = 4;
+  // The log's id, lowercase hex.
+  string log_id = 5;
+  // The entry's index in the log.
+  uint64 log_index = 6;
+  // Fulcio's CI claims, by name (`source_repository_uri`,
+  // `build_trigger`, `run_invocation_uri`, ...), for display.
+  map<string, string> ci_claims = 7;
+  // SHA-256 of the registered bundle, lowercase hex.
+  string bundle_id = 8;
 }
 
 // One of the daemon's issuing authority keys.
@@ -317,6 +437,9 @@ message Authority {
   Revocation revocation = 7;
   // Whether it is the one that issues now.
   bool current = 8;
+  // A daemon's authority, or a Fulcio CA a keyless key came from (R3.42),
+  // recorded at the first key it issued, which never issues here.
+  IssuerKind kind = 9;
 }
 
 // A session key and what its certificate binds it to. Every field but the
@@ -370,9 +493,13 @@ message SessionKey {
   // Its DER SubjectPublicKeyInfo; set by GetSessionKey and
   // IssueSessionKey only.
   bytes public_key = 19;
-  // Its certificate, the canonical DSSE envelope; set by GetSessionKey and
-  // IssueSessionKey only.
+  // Its certificate, the canonical DSSE envelope (a keyless key's: its
+  // Sigstore bundle); set by GetSessionKey, IssueSessionKey and
+  // RegisterSigstoreKey only.
   bytes certificate = 20;
+  // A keyless key's Sigstore certificate (R3.42); unset otherwise, and
+  // when the bundle does not verify at this read.
+  SigstoreCertificate sigstore = 21;
 }
 
 // What a verifier sees about the key that signed an evidence object.
@@ -399,6 +526,8 @@ message CreateIdentityRequest {
   // For display: `local@domain`, checked for its form only; empty for
   // none.
   string email = 4;
+  // OIDC issuers and subjects it accepts keyless certificates for (R3.42).
+  repeated OidcMatchSpec oidc = 5;
 }
 
 // A created identity.
@@ -510,6 +639,8 @@ message ListSessionKeysRequest {
   int32 page_size = 4;
   // The previous page's `next_page_token`; empty for the first page.
   string page_token = 5;
+  // Only keys of this issuer (R3.42); unset for any.
+  IssuerKind issuer_kind = 6;
 }
 
 // A page of session keys.
@@ -599,4 +730,54 @@ message RevokeAuthorityRequest {
 message RevokeAuthorityResponse {
   // The authority, with its revocation.
   Authority authority = 1;
+}
+
+// Register a keyless session key (R3.42).
+message RegisterSigstoreKeyRequest {
+  // A Sigstore bundle v0.3 as JSON, at most 64 KiB.
+  bytes bundle = 1;
+}
+
+// A registered keyless key.
+message RegisterSigstoreKeyResponse {
+  // The key, with its public key and its bundle as `certificate`.
+  SessionKey key = 1;
+  // Whether this call registered it; false when the same bundle was
+  // already registered.
+  bool created = 2;
+}
+
+// Add an OIDC match to an identity (R3.42).
+message AddOidcMatchRequest {
+  // The identity's name or id.
+  string identity = 1;
+  // The issuer and subject it accepts.
+  OidcMatchSpec match = 2;
+}
+
+// An added match.
+message AddOidcMatchResponse {
+  // The match.
+  OidcMatch match = 1;
+}
+
+// Revoke an OIDC match (R3.42).
+message RevokeOidcMatchRequest {
+  // Its id.
+  string id = 1;
+  // From when signatures by keys bound through it stop counting; unset:
+  // now. Not in the future.
+  google.protobuf.Timestamp invalid_from = 2;
+  // From its creation. Not with `invalid_from`.
+  bool since_created = 3;
+  // Why, recorded with the revocation; empty for none.
+  string reason = 4;
+}
+
+// A revoked match.
+message RevokeOidcMatchResponse {
+  // The match, with `revocation` set.
+  OidcMatch match = 1;
+  // The keys bound through it, newest first, up to 1,000.
+  repeated string key_ids = 2;
 }

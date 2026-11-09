@@ -647,6 +647,18 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity` (R3.03)",
     ),
     (
+        "/reef.api.v1.IdentityService/RegisterSigstoreKey",
+        "keyless keys are registered by the process that signs, never by a tool call (R3.42)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/AddOidcMatch",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity oidc` (R3.42)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RevokeOidcMatch",
+        "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity oidc` (R3.42)",
+    ),
+    (
         "/reef.api.v1.ChangeService/TransitionChange",
         "an agent runs `reef propose` and `reef proposal`, then `reef land`; tools/list is at its budget (#116)",
     ),
@@ -1490,7 +1502,7 @@ mod tests {
         assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
     }
 
-    /// R3.01 test 18, R3.02 test 18 and R3.03 test 16: evidence,
+    /// R3.01 test 18, R3.02 test 18, R3.03 test 16 and R3.42: evidence,
     /// artifacts and identities have no tools, and each method says why.
     #[test]
     fn evidence_is_not_a_tool() {
@@ -1501,7 +1513,7 @@ mod tests {
                     || path.starts_with("/reef.api.v1.IdentityService/")
             })
             .collect();
-        assert_eq!(evidence.len(), 17);
+        assert_eq!(evidence.len(), 20);
         for path in evidence {
             assert!(NOT_TOOLS.iter().any(|(rpc, _)| *rpc == path), "{path}");
             assert!(!TOOLS.iter().any(|tool| tool.rpc == path), "{path}");

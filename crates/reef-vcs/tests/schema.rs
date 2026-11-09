@@ -695,6 +695,44 @@ async fn outputs_match_their_schemas() {
     script
         .both(&root, &["identity", "authority", "revoke", &retired])
         .await;
+    // R3.42: OIDC matches (keyless signing itself is `vcs::keyless_cli`'s,
+    // against the fake Fulcio and Rekor, with the schema checked there).
+    // A second add of one pair is refused, so `json` runs it once, and
+    // `run` (brief) adds another subject.
+    script
+        .run(
+            &root,
+            &[
+                "identity",
+                "oidc",
+                "add",
+                "schema-ci",
+                "--issuer",
+                "https://token.actions.githubusercontent.com",
+                "--subject",
+                "https://github.com/o/r/.github/workflows/brief.yml@refs/heads/main",
+            ],
+        )
+        .await;
+    let added = script
+        .json(
+            &root,
+            &[
+                "identity",
+                "oidc",
+                "add",
+                "schema-ci",
+                "--issuer",
+                "https://token.actions.githubusercontent.com",
+                "--subject",
+                "https://github.com/o/r/.github/workflows/schema.yml@refs/heads/main",
+            ],
+        )
+        .await;
+    let match_id = text(&added["id"]);
+    script
+        .both(&root, &["identity", "oidc", "revoke", &match_id])
+        .await;
     script
         .both(&root, &["identity", "revoke", "schema-ci"])
         .await;
