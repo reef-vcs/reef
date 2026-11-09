@@ -181,7 +181,11 @@ jobs:
     # minutes each time) held up every merge. release.yml runs only once a tag is pushed and
     # smoke-tests the binaries, so a tag waits for main's latest run, macOS included, to be
     # green (CONTRIBUTING.md).
-    timeout-minutes: 50
+    #
+    # ubuntu-24.04 took 47 minutes on main at R3.13 (#250), 40 of them in the tests, and
+    # R3.25 (#249) then ran into 50 with one test left; 65 leaves room until the tests are
+    # split across runners (#253).
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -309,12 +313,13 @@ jobs:
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
-  # the runner user after it, or the cache save fails on root-owned files. 45 minutes: main's
-  # runs took 18-29 min by R2.23, the fuse-overlayfs step alone ~19 min.
+  # the runner user after it, or the cache save fails on root-owned files. Main's runs took
+  # 18-29 min by R2.23, the fuse-overlayfs step alone ~19 min, and 42 min by R3.13 (#250),
+  # as did #249 and #251: 60 minutes until the tests are split across runners (#253).
   overlayfs:
     name: overlayfs (ubuntu-24.04, privileged)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
