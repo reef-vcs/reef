@@ -18,6 +18,7 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.LAND]: "landed a change",
   [OperationKind.BATCH]: "tested a batch of changes",
   [OperationKind.COMMENT]: "commented on a change",
+  [OperationKind.PUBLISH]: "published a change",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };
@@ -57,6 +58,7 @@ type WithTransition = Pick<Operation, "kind" | "snapshotKind"> & {
   transitionTo?: LifecycleState;
   transitions?: Operation["transitions"];
   comments?: Pick<Operation["comments"][number], "event">[];
+  effects?: { bookmarks: { name: string; remote: string }[] } | undefined;
 };
 
 /** "described a change": past tense, lower case. */
@@ -76,6 +78,11 @@ export function operationSentence(operation: WithTransition): string {
   // A batch lands several changes in one operation (R3.14).
   if (operation.kind === OperationKind.LAND && (operation.transitions?.length ?? 0) > 1) {
     return `landed ${plural(operation.transitions?.length ?? 0, "change")}`;
+  }
+  // A publish (#258) names where it went: its remote bookmark's effect.
+  if (operation.kind === OperationKind.PUBLISH) {
+    const remote = operation.effects?.bookmarks.find((bookmark) => bookmark.remote !== "");
+    if (remote) return `published a change to ${remote.remote}/${remote.name}`;
   }
   if (operation.kind === OperationKind.COMMENT) {
     const event = operation.comments?.[0]?.event;

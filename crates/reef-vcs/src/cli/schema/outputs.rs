@@ -12,9 +12,9 @@ use reef_client::json::{self, Proposal, ProposalHistory, Transitioned};
 use reef_client::json::{
     Abandoned, Artifact, ArtifactUploaded, BuiltStore, ChangeSummary, Created, CreatedRemoteToken,
     Described, Diff, Evidence, EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History,
-    Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent, Released, RemoteListener,
-    RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status, Store, SymbolOccurrence,
-    SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
+    Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent, Published, Released,
+    RemoteListener, RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status, Store,
+    SymbolOccurrence, SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
@@ -243,6 +243,11 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     view(&["diff"], object::<Diff>, object::<brief::Diff<'static>>),
     row(&["describe"], object::<Described>),
     row(&["abandon"], object::<Abandoned>),
+    view(
+        &["publish"],
+        object::<Published>,
+        object::<brief::Published<'static>>,
+    ),
     view(
         &["propose"],
         object::<Transitioned>,

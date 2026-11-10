@@ -183,6 +183,13 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
             "the landing service owns trial commits; withdraw a change to take it out of its batch",
         );
     }
+    // A publish pushed to a git remote (#258); undoing the bookmarks would
+    // not unpush it.
+    if classify(&entry(op)).kind == Some(OpKind::Publish) {
+        return refuse(
+            "a publish pushed to a git remote; publish again, or delete the branch on the host (`git push <remote> --delete <branch>`)",
+        );
+    }
     // The daemon reverts a lifecycle transition in its own rows (R3.09); a
     // view revert would leave them as they are.
     if op

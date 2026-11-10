@@ -44,6 +44,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/landing.proto",
     "proto/reef/api/v1/comments.proto",
     "proto/reef/api/v1/conflicts.proto",
+    "proto/reef/api/v1/git.proto",
 ];
 
 /// Frozen at 0.1.0 and served only for version detection.

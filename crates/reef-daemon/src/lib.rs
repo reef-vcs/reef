@@ -33,6 +33,7 @@ pub mod offline;
 pub mod policy;
 pub mod presence;
 pub mod provenance;
+pub mod publish;
 pub mod read;
 pub mod remote;
 pub mod repo;

@@ -30,6 +30,8 @@ const KIND_WORDS: [OperationKind, string, string][] = [
   [OperationKind.LAND, "landing", "landings"],
   [OperationKind.COMMENT, "comment", "comments"],
   [OperationKind.BATCH, "batch", "batches"],
+  [OperationKind.CONFLICT_ASSIGNMENT, "assignment", "assignments"],
+  [OperationKind.PUBLISH, "publish", "publishes"],
   [OperationKind.OTHER, "other", "other"],
   [OperationKind.UNSPECIFIED, "unclassified", "unclassified"],
 ];

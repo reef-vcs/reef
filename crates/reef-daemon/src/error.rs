@@ -485,6 +485,9 @@ fn rewrite_reason(error: &RewriteError) -> Option<(&'static str, BTreeMap<String
         ),
         RewriteError::Immutable(id) => (reason::IMMUTABLE_REVISION, commit(id)),
         RewriteError::Hidden(id) => (reason::HIDDEN_REVISION, commit(id)),
+        RewriteError::SignoffWithoutDescription => {
+            (reason::SIGNOFF_WITHOUT_DESCRIPTION, BTreeMap::new())
+        }
         _ => return None,
     })
 }
@@ -981,7 +984,7 @@ pub fn v0_client(path: &str) -> Status {
 
 /// The error's message and each source's, outermost first, skipping a
 /// source whose text repeats its parent's as [`ErrorChain`] does.
-fn chain(error: &(dyn Error + 'static)) -> Vec<String> {
+pub(crate) fn chain(error: &(dyn Error + 'static)) -> Vec<String> {
     let mut messages: Vec<String> = Vec::new();
     let mut current = Some(error);
     while let Some(error) = current {

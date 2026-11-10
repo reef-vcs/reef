@@ -98,6 +98,10 @@
       "description": "Set a change's description (its commit message). Returns {change, operation, workspace}; operation is null when the description was already that."
     },
     {
+      "name": "publish_change",
+      "description": "Push a change to a branch on the repository's git remote, snapshotting its workspace first; publishing it again updates the branch. Returns {publication, operation, next}: next opens the pull request on a known host."
+    },
+    {
       "name": "abandon_change",
       "description": "Abandon a change: its descendants move onto its parents. Returns {abandoned_commit_id, operation, workspace}."
     },

@@ -71,3 +71,22 @@ describe("operationSentence for comments", () => {
     expect(operationSentence(base)).toBe("commented on a change");
   });
 });
+
+// #258: a publish names its remote and branch when its effects say.
+describe("operationSentence for a publish", () => {
+  const base = { kind: OperationKind.PUBLISH, snapshotKind: SnapshotKind.UNSPECIFIED };
+  it("names the remote branch", () => {
+    const effects = {
+      bookmarks: [
+        { name: "reef/kxyzwqrsmtlo", remote: "" },
+        { name: "reef/kxyzwqrsmtlo", remote: "origin" },
+      ],
+    };
+    expect(operationSentence({ ...base, effects })).toBe(
+      "published a change to origin/reef/kxyzwqrsmtlo",
+    );
+  });
+  it("falls back without effects", () => {
+    expect(operationSentence(base)).toBe("published a change");
+  });
+});

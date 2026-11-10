@@ -566,6 +566,50 @@ impl<'a> From<&'a json::WorkspaceStatus> for WorkspaceStatus<'a> {
     }
 }
 
+/// What a publish did (#258). Always `publication.{git_remote, branch,
+/// commit_id, update}`, `dry_run` when set; `notes` when any; `next` when
+/// the host has a command. Dropped: the publication's other fields, the
+/// operations, the change and the workspace; `-o json` has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Published")]
+pub struct Published<'a> {
+    publication: Publication<'a>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    notes: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<&'a str>,
+}
+
+/// [`Published`]'s publication.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Publication")]
+pub struct Publication<'a> {
+    git_remote: &'a str,
+    branch: &'a str,
+    commit_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_false")]
+    dry_run: bool,
+}
+
+impl<'a> From<&'a json::Published> for Published<'a> {
+    fn from(published: &'a json::Published) -> Self {
+        let publication = &published.publication;
+        Self {
+            publication: Publication {
+                git_remote: &publication.git_remote,
+                branch: &publication.branch,
+                commit_id: &publication.commit_id,
+                update: publication.update.as_deref(),
+                dry_run: publication.dry_run,
+            },
+            notes: &published.notes,
+            next: published.next.as_deref(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

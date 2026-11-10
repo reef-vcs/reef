@@ -70,7 +70,8 @@ service ChangeService {
   // `commit_id`) or INVALID_DESCRIPTION (a NUL); FAILED_PRECONDITION with
   // reason EXPECTED_COMMIT_MISMATCH (metadata `expected_commit_id`,
   // `commit_id`), IMMUTABLE_REVISION or HIDDEN_REVISION (metadata
-  // `commit_id`), or for a `workspace` that is not active.
+  // `commit_id`), IDENTITY_UNSET or SIGNOFF_WITHOUT_DESCRIPTION (`signoff`
+  // and `reset_author`, #258), or for a `workspace` that is not active.
   rpc DescribeChange(DescribeChangeRequest) returns (DescribeChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -312,6 +313,19 @@ message DescribeChangeRequest {
   // When non-empty, FAILED_PRECONDITION unless the revision still resolves
   // to this commit.
   string expected_commit_id = 5;
+  // Add a `Signed-off-by:` trailer for the daemon's identity, as
+  // `git commit -s` does, unless the description already has it (#258).
+  // With an empty `description`, the current description is kept and the
+  // trailer added. FAILED_PRECONDITION with reason IDENTITY_UNSET while the
+  // daemon's identity is the default, or SIGNOFF_WITHOUT_DESCRIPTION when
+  // the description would be only the trailer.
+  bool signoff = 6;
+  // Set the commit's author and committer to the daemon's identity and the
+  // current time, as `jj describe --reset-author` does (#258). With an
+  // empty `description`, the current description is kept.
+  // FAILED_PRECONDITION with reason IDENTITY_UNSET while the daemon's
+  // identity is the default.
+  bool reset_author = 7;
 }
 
 // What a describe recorded.

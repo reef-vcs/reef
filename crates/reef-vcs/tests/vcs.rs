@@ -575,7 +575,7 @@ async fn describe() {
 
     let output = run_in(&daemon, &dir, &["describe"]).await;
     output.clone().assert().code(2);
-    assert!(stderr(&output).contains("--message"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("-m"), "{}", stderr(&output));
     let error = err(
         &daemon,
         &dir,
@@ -5492,4 +5492,173 @@ async fn keyless_cli() {
         .await,
     );
     assert_eq!(from_file["key"]["issuer_kind"], "sigstore");
+}
+
+/// A daemon with a real identity over a colocated git checkout whose
+/// `origin` is a bare repository (#258). The checkout, the bare remote and
+/// `main`'s commit.
+async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
+    let daemon = TestDaemon::start_with(|config| {
+        no_automatic_snapshots(config);
+        config.identity = reef_lib::jj::settings::Identity {
+            name: "Pat Example".to_owned(),
+            email: "pat@example.com".to_owned(),
+        };
+        "Pat Example".clone_into(&mut config.file.identity.name);
+        config.file.identity.email = Some("pat@example.com".to_owned());
+    })
+    .await;
+    let root = daemon.tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let base = reef_testing::git::init_repo(&root, &[("README.md", "hello\n")]);
+    let remote = daemon.tmp.path().join("remote.git");
+    let git = |dir: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&remote)
+            .status()
+            .unwrap()
+            .success()
+    );
+    git(
+        &root.join(".git"),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&root.join(".git"), &["push", "--quiet", "origin", "main"]);
+    let registered = daemon
+        .client
+        .register_repository(&root, v1::IfNotJj::InitAlongsideGit)
+        .await
+        .unwrap();
+    let repo = SyntheticRepo {
+        root: root.canonicalize().unwrap(),
+        id: registered.repository.unwrap().id,
+    };
+    (daemon, repo, remote, base)
+}
+
+// #258, 21
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_cli() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let (daemon, repo, remote, base) = publish_fixture().await;
+    let ws = create_at(
+        &daemon,
+        &repo,
+        Some(create_workspace_request::Start::NewOn(base.clone())),
+    )
+    .await
+    .workspace
+    .unwrap();
+    let dir = path(&ws);
+    write(&ws, "notes/cli.txt", "one\n");
+
+    // Undescribed: refused, exit 5, with the -m form in the hint.
+    let error = err(
+        &daemon,
+        &dir,
+        &["publish", "-o", "json"],
+        5,
+        "CHANGE_UNDESCRIBED",
+    )
+    .await;
+    assert!(error["hint"].as_str().unwrap().contains("-m"), "{error}");
+    // An unknown remote: exit 3.
+    err(
+        &daemon,
+        &dir,
+        &["publish", "-m", "x", "--git-remote", "nope", "-o", "json"],
+        3,
+        "GIT_REMOTE_NOT_FOUND",
+    )
+    .await;
+
+    // A dry run pushes nothing.
+    let planned = ok(
+        &daemon,
+        &dir,
+        &["publish", "-m", "Add a note", "--dry-run", "-o", "json"],
+    )
+    .await;
+    assert_eq!(planned["publication"]["dry_run"], true);
+    assert_eq!(planned["publication"]["update"], "created");
+    assert_eq!(planned["operation"], Value::Null);
+
+    // Published, in JSON.
+    let published = ok(
+        &daemon,
+        &dir,
+        &["publish", "-m", "Add a note", "--signoff", "-o", "json"],
+    )
+    .await;
+    let branch = published["publication"]["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(branch.starts_with("reef/"), "{published}");
+    assert_eq!(published["publication"]["update"], "created");
+    assert_eq!(published["operation"]["kind"], "publish");
+    assert_eq!(published["next"], Value::Null, "a file remote has no host");
+    let message = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&remote)
+        .args(["log", "-1", "--format=%B", &branch])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&message.stdout).trim(),
+        "Add a note\n\nSigned-off-by: Pat Example <pat@example.com>"
+    );
+
+    // Brief, asked for and piped.
+    let brief = ok(&daemon, &dir, &["publish", "-o", "brief"]).await;
+    assert_eq!(brief["publication"]["update"], "up-to-date", "{brief}");
+    assert!(brief.get("operation").is_none(), "{brief}");
+    write(&ws, "notes/cli.txt", "two\n");
+    let piped = ok(&daemon, &dir, &["publish"]).await;
+    assert_eq!(piped["publication"]["update"], "rewritten", "{piped}");
+    assert_eq!(piped["publication"]["branch"], branch.as_str());
+
+    // Text.
+    let text = run_in(&daemon, &dir, &["publish", "-o", "text"]).await;
+    text.clone().assert().success();
+    assert!(stdout(&text).starts_with("published "), "{}", stdout(&text));
+    assert!(stdout(&text).contains("(up-to-date, "), "{}", stdout(&text));
+
+    // `reef describe --signoff` without -m keeps the description.
+    let described = ok(&daemon, &dir, &["describe", "--signoff", "-o", "json"]).await;
+    assert_eq!(described["operation"], Value::Null, "already signed off");
+
+    // The operation log filters by kind.
+    let ops = ok(
+        &daemon,
+        &dir,
+        &["op", "log", "--kind", "publish", "-o", "json"],
+    )
+    .await;
+    let ops = ops
+        .as_array()
+        .or_else(|| ops["operations"].as_array())
+        .unwrap();
+    assert_eq!(ops.len(), 2, "{ops:?}");
 }

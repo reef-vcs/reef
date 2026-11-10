@@ -187,6 +187,9 @@ enum OperationKind {
   // A resolver assignment changed (R3.27): `Operation.conflict_events` says
   // how. It changes nothing in the view, and undo refuses it.
   OPERATION_KIND_CONFLICT_ASSIGNMENT = 16;
+  // A change was published to a git remote (#258): the remote and local
+  // bookmarks it set are in the effects.
+  OPERATION_KIND_PUBLISH = 17;
 }
 
 // Why a snapshot ran.

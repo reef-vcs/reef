@@ -271,13 +271,13 @@ async fn first_frame_is_immediate() {
 // 5
 #[tokio::test(flavor = "multi_thread")]
 async fn every_write_path_wakes_subscribers() {
-    every_write_path_wakes(Served::Broker).await;
+    Box::pin(every_write_path_wakes(Served::Broker)).await;
 }
 
 // R2.22, 9
 #[tokio::test(flavor = "multi_thread")]
 async fn every_write_path_wakes_subscribers_from_the_log() {
-    every_write_path_wakes(Served::Log).await;
+    Box::pin(every_write_path_wakes(Served::Log)).await;
 }
 
 #[expect(clippy::too_many_lines, reason = "one write per write path")]
@@ -740,13 +740,13 @@ fn drop_head(root: &Path, dropped: &str, kept: &str) {
 // 10
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_by_cursor() {
-    resume_by_cursor_served(Served::Broker).await;
+    Box::pin(resume_by_cursor_served(Served::Broker)).await;
 }
 
 // R2.22, 9
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_by_cursor_from_the_log() {
-    resume_by_cursor_served(Served::Log).await;
+    Box::pin(resume_by_cursor_served(Served::Log)).await;
 }
 
 #[expect(clippy::too_many_lines, reason = "one case per way to resume")]

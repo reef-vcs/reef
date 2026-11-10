@@ -283,8 +283,8 @@ message Workspace {
   Lease lease = 15;
   // What triggers its snapshots. Fixed at create.
   WatcherKind watcher = 16;
-  // How many of its snapshots have not been published (R1.16): every one,
-  // until publishing exists. Filled in by ListWorkspaces, GetWorkspace and
+  // How many of its snapshots have not been published (R1.16; cleared by
+  // `GitService.PublishChange`, #258). Filled in by ListWorkspaces, GetWorkspace and
   // MoveWorkspace; 0 in CreateWorkspace.
   uint64 local_snapshot_count = 17;
   // The shared stores mounted in it (R1.20). Empty read at an operation

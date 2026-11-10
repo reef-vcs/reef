@@ -122,6 +122,86 @@ pub fn judge(
     }
 }
 
+/// A branch on scenario F's bare remote, as the judge reads it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteBranch {
+    /// Its commit.
+    pub commit: String,
+    /// The commit's parents.
+    pub parents: Vec<String>,
+    /// The commit's message.
+    pub message: String,
+    /// `README.md` in the commit, if it has one.
+    pub readme: Option<String>,
+}
+
+/// Judges a scenario F trial (#258) from the bare remote: the last
+/// non-empty line of the answer names a branch on it (other words around
+/// it are fine, and an `origin/` prefix), the branch's commit has a
+/// message, its only parent is `base_commit`, and its `README.md` is
+/// `base_readme` with something appended. `branch` reads a branch from the
+/// remote (`None` when it has no such branch).
+pub fn judge_published(
+    final_text: &str,
+    base_commit: &str,
+    base_readme: &str,
+    branch: impl Fn(&str) -> Option<RemoteBranch>,
+) -> Verdict {
+    let Some(last_line) = final_text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+    else {
+        return Verdict::fail(None, "the agent gave no answer");
+    };
+    // A branch never starts or ends with `.` (`reef publish`'s rule).
+    let trim = |word: &str| {
+        word.trim_matches(|c: char| "`'\"*()[]<>,;:.".contains(c))
+            .to_owned()
+    };
+    let found = last_line.split_whitespace().rev().find_map(|word| {
+        let word = trim(word);
+        let name = word.strip_prefix("origin/").unwrap_or(&word).to_owned();
+        if name.is_empty() {
+            return None;
+        }
+        branch(&name).map(|found| (name, found))
+    });
+    let Some((name, found)) = found else {
+        return Verdict::fail(
+            None,
+            format!(
+                "the last line ({}) names no branch on the remote",
+                truncate(last_line.trim(), 60)
+            ),
+        );
+    };
+    let fail = |reason: String| Verdict::fail(None, reason);
+    if found.message.trim().is_empty() {
+        return fail(format!("{name}'s commit has no message"));
+    }
+    if found.parents != [base_commit] {
+        return fail(format!("{name}'s commit is not on the clone's base commit"));
+    }
+    let base = base_readme.trim_end();
+    match found.readme {
+        Some(readme) if readme.trim_end().len() > base.len() && readme.starts_with(base) => {
+            Verdict {
+                success: true,
+                workspace: None,
+                reason: format!("{name} on the remote has README.md with a line appended"),
+            }
+        }
+        Some(readme) if readme.trim_end() == base => {
+            fail(format!("README.md is unchanged on {name}"))
+        }
+        Some(_) => fail(format!(
+            "README.md changed on {name} other than by an appended line"
+        )),
+        None => fail(format!("{name} has no README.md")),
+    }
+}
+
 fn judge_oriented(final_text: &str, workspaces: &[WorkspaceRecord]) -> Verdict {
     let Some(workspace) = workspaces
         .iter()
@@ -184,6 +264,58 @@ mod tests {
     }
 
     const BASE: &str = "# Title\n\nBody\n";
+
+    // #258, scenario F.
+    #[test]
+    fn published_branch_is_judged_from_the_remote() {
+        let branches = |name: &str| -> Option<RemoteBranch> {
+            let grown = RemoteBranch {
+                commit: "c1".to_owned(),
+                parents: vec!["base".to_owned()],
+                message: "Append a line\n".to_owned(),
+                readme: Some("# Title\n\nBody\nAppended\n".to_owned()),
+            };
+            match name {
+                "reef/kxyzwqrsmtlo" => Some(grown),
+                "same" => Some(RemoteBranch {
+                    readme: Some(BASE.to_owned()),
+                    ..grown
+                }),
+                "empty" => Some(RemoteBranch {
+                    message: String::new(),
+                    ..grown
+                }),
+                "elsewhere" => Some(RemoteBranch {
+                    parents: vec!["other".to_owned()],
+                    ..grown
+                }),
+                _ => None,
+            }
+        };
+        for answer in [
+            "Pushed.\nreef/kxyzwqrsmtlo",
+            "Pushed.\nBranch: `reef/kxyzwqrsmtlo`.",
+            "Pushed.\norigin/reef/kxyzwqrsmtlo",
+        ] {
+            let verdict = judge_published(answer, "base", BASE, branches);
+            assert!(verdict.success, "{answer:?}: {verdict:?}");
+        }
+        for (answer, why) in [
+            ("Pushed.\nnowhere", "names no branch"),
+            ("Pushed.\nsame", "unchanged"),
+            ("Pushed.\nempty", "no message"),
+            ("Pushed.\nelsewhere", "base commit"),
+            ("", "no answer"),
+        ] {
+            let verdict = judge_published(answer, "base", BASE, branches);
+            assert!(!verdict.success, "{answer:?}");
+            assert!(
+                verdict.reason.contains(why),
+                "{answer:?}: {}",
+                verdict.reason
+            );
+        }
+    }
 
     #[test]
     fn last_line_names_a_grown_workspace() {

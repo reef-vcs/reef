@@ -1,0 +1,187 @@
+// A repository's git remotes (#258, ADR 0070, docs/publishing.md).
+//
+// Publishing pushes one change's commit, and every ancestor the git
+// remote's branches lack, to one branch on a remote configured in the
+// repository's git config, and records it in jj's view: a local bookmark
+// and a tracked remote bookmark at the pushed commit, in one operation of
+// kind PUBLISH. Publishing again updates the same branch. Reef opens no
+// pull request: it returns the command that does, for hosts it knows.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+
+// Pushing changes to git remotes.
+service GitService {
+  // Pushes a change, and every ancestor the remote's branches lack, to a
+  // branch on a git remote configured in the repository, and records the
+  // local and remote-tracking bookmarks in one operation. The workspace's
+  // working copy is snapshotted first when `revision` uses it, and the
+  // change is described first when `description` or `signoff` is set. The
+  // push runs the daemon's git with the user's git configuration and the
+  // daemon's environment, with every prompt disabled; no git hook runs.
+  // The push is always leased on Reef's last-known position of the branch,
+  // and a non-fast-forward update is allowed only when the branch holds an
+  // earlier commit of a change being published, unless `force`. Never
+  // served through the remote listener. Not idempotent: each call pushes.
+  //
+  // Errors: the revision reasons of ChangeService; FAILED_PRECONDITION with
+  // reason EXPECTED_COMMIT_MISMATCH, SNAPSHOT_FAILED (metadata
+  // `workspace_id`), IMMUTABLE_REVISION or HIDDEN_REVISION (metadata
+  // `commit_id`), CHANGE_EMPTY, CHANGE_CONFLICTED, CHANGE_DIVERGENT,
+  // CHANGE_UNDESCRIBED, COMMIT_IDENTITY_MISSING, COMMIT_AUTHOR_DEFAULT or
+  // INCLUDES_WORKING_COPY (metadata `change_id`, `commit_id`, and
+  // `workspace` for the last), RANGE_TOO_LARGE (metadata `count`),
+  // NO_GIT_BACKEND, GIT_REMOTE_REQUIRED (metadata `remotes`),
+  // BRANCH_NOT_PUBLISHABLE (metadata `branch`, `why`: `trunk`,
+  // `remote_head`, `immutable` or `checked_out`), BRANCH_DIVERGED (metadata
+  // `remote_commit_id`, `remote_change_id`, `remote_author`,
+  // `remote_summary`, `remote_hidden`), BRANCH_CONFLICTED, BRANCH_MOVED,
+  // REMOTE_REJECTED (metadata `remote_reason`), GIT_TOO_OLD,
+  // IDENTITY_UNSET or SIGNOFF_WITHOUT_DESCRIPTION; INVALID_ARGUMENT with
+  // reason INVALID_DESCRIPTION, INVALID_BRANCH or INVALID_GIT_REMOTE;
+  // NOT_FOUND with reason GIT_REMOTE_NOT_FOUND (metadata `remotes`);
+  // PERMISSION_DENIED with reason PUBLISH_DISABLED, GIT_REMOTE_NOT_ALLOWED,
+  // REMOTE_PUBLISH_DENIED or GIT_AUTH_FAILED (metadata `git_stderr`,
+  // `ssh_auth_sock`); UNAVAILABLE with reason GIT_UNREACHABLE,
+  // GIT_NOT_FOUND, GIT_PUSH_FAILED (metadata `git_stderr`),
+  // PUBLISH_TIMEOUT or PUBLISH_IN_PROGRESS.
+  rpc PublishChange(PublishChangeRequest) returns (PublishChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+}
+
+// How a publish moved the branch.
+enum PublicationUpdate {
+  // Not set; a server never sends it.
+  PUBLICATION_UPDATE_UNSPECIFIED = 0;
+  // The branch did not exist on the remote.
+  PUBLICATION_UPDATE_CREATED = 1;
+  // The branch held an ancestor of the commit.
+  PUBLICATION_UPDATE_FAST_FORWARD = 2;
+  // The branch held a commit of a change being published (an amendment or
+  // a rebase of the same work).
+  PUBLICATION_UPDATE_REWRITTEN = 3;
+  // The branch held another change's commit and `force` replaced it.
+  PUBLICATION_UPDATE_FORCED = 4;
+  // The branch already held the commit.
+  PUBLICATION_UPDATE_UP_TO_DATE = 5;
+}
+
+// A git host Reef knows how to open a pull request on.
+enum GitHostKind {
+  // Not a host Reef knows.
+  GIT_HOST_KIND_UNSPECIFIED = 0;
+  // github.com, or a host in `[publish] github_hosts`: `gh pr create`.
+  GIT_HOST_KIND_GITHUB = 1;
+  // gitlab.com, or a host in `[publish] gitlab_hosts`: `glab mr create`.
+  GIT_HOST_KIND_GITLAB = 2;
+  // bitbucket.org: a new-pull-request URL only.
+  GIT_HOST_KIND_BITBUCKET = 3;
+  // codeberg.org (Forgejo): a compare URL only.
+  GIT_HOST_KIND_FORGEJO = 4;
+}
+
+// How to open a pull request for a published branch.
+message PullRequestHint {
+  // The host's kind.
+  GitHostKind host_kind = 1;
+  // The host, from the remote's push URL, with no user information.
+  string host = 2;
+  // The repository's path on the host (`owner/name`).
+  string repository = 3;
+  // The branch the pull request targets; empty when none was found.
+  string base = 4;
+  // The command that opens the pull request, one argument per element;
+  // empty when the host has none. Quote it before printing it as a command
+  // line: the title and body come from the change's description.
+  repeated string argv = 5;
+  // A page that opens the pull request; empty when none.
+  string url = 6;
+}
+
+// What a publish pushed, or would push.
+message Publication {
+  // The git remote.
+  string git_remote = 1;
+  // The branch on it.
+  string branch = 2;
+  // The change published.
+  string change_id = 3;
+  // Its commit, now the branch's target.
+  string commit_id = 4;
+  // The branch's target on the remote before; empty when it was created.
+  string previous_commit_id = 5;
+  // How the branch moved.
+  PublicationUpdate update = 6;
+  // The commits the remote's branches lacked, newest first, at most 100.
+  repeated string commit_ids = 7;
+  // How many there are.
+  uint32 commit_count = 8;
+  // Their changes, newest first, at most 100.
+  repeated string change_ids = 9;
+  // How to open the pull request; unset for a host Reef does not know.
+  PullRequestHint pull_request = 10;
+  // The remote's messages, control characters removed, at most 20 lines
+  // of 300 bytes. Text from the remote, not from Reef.
+  repeated string remote_messages = 11;
+  // How many of the repository's snapshot records were marked as having
+  // left the machine (R1.16): those of the pushed commits, and those of a
+  // published change with a pushed commit's tree (a snapshot a describe
+  // rewrote before the push).
+  uint32 local_snapshots_published = 12;
+  // Whether this was a dry run: nothing was pushed or recorded.
+  bool dry_run = 13;
+}
+
+// Publish a change to a git remote.
+message PublishChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision naming the change; required. `@` needs `workspace`.
+  string revision = 3;
+  // The git remote; empty for the only configured remote, else `origin`.
+  string git_remote = 4;
+  // The branch; empty for `[publish] branch_prefix` followed by the first
+  // 12 letters of the change id, which an amendment never changes.
+  string branch = 5;
+  // When non-empty, FAILED_PRECONDITION unless the revision resolves to
+  // this commit.
+  string expected_commit_id = 6;
+  // When non-empty, the change's new description, set first in a describe
+  // operation of its own. An empty one never clears the description.
+  string description = 7;
+  // Add a `Signed-off-by:` trailer for the daemon's identity first, unless
+  // the description already has it.
+  bool signoff = 8;
+  // Replace a branch holding another change's commit, or move a person's
+  // local bookmark of the branch's name. Never past the lease, and never
+  // onto trunk's branch, the remote's HEAD branch, an immutable branch or
+  // git's checked-out branch.
+  bool force = 9;
+  // Plan and check only: no snapshot, describe, push or operation.
+  bool dry_run = 10;
+  // Do not snapshot the workspace first.
+  bool skip_snapshot = 11;
+}
+
+// What a publish did.
+message PublishChangeResponse {
+  // What was pushed, or would be.
+  Publication publication = 1;
+  // The publish operation; unset for a dry run or when nothing changed.
+  Operation operation = 2;
+  // The snapshot taken first, if any.
+  Operation snapshot = 3;
+  // The describe written first, if any.
+  Operation describe = 4;
+  // The change afterwards.
+  Change change = 5;
+  // Sentences for a person, such as why nothing changed.
+  repeated string notes = 6;
+}

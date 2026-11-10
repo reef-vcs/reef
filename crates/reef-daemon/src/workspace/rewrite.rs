@@ -61,11 +61,16 @@ pub enum Write {
     Describe {
         /// The revision naming the commit.
         revision: String,
-        /// The new description, as given.
+        /// The new description, as given; with `signoff` or `reset_author`,
+        /// empty keeps the current one.
         description: String,
         /// The commit the caller expects the revision to name; empty for
         /// no check.
         expected: String,
+        /// Add a `Signed-off-by:` trailer for this identity (#258).
+        signoff: Option<reef_lib::jj::settings::Identity>,
+        /// Set the author to the committer (#258).
+        reset_author: bool,
     },
     /// Abandon a commit, or resolve its divergent change.
     Abandon {
@@ -901,13 +906,24 @@ async fn commit(
             revision,
             description,
             expected,
+            signoff,
+            reset_author,
         } => {
             let found =
                 resolve_target(head, &repo, (revision, Check::Writable), expected, &target).await?;
             meta.description = format!("{}{}", oplog::DESCRIBE_PREFIX, found.commit_id);
+            let keeps = description.is_empty() && (signoff.is_some() || *reset_author);
+            let mut text = if keeps {
+                head.repo.description_of(&found.commit_id).await?
+            } else {
+                description.clone()
+            };
+            if let Some(identity) = signoff {
+                text = rewrite::with_signoff(&text, &identity.name, &identity.email)?;
+            }
             let described = head
                 .repo
-                .describe_commit(&found.commit_id, description, &meta)
+                .describe_commit_with(&found.commit_id, &text, *reset_author, &meta)
                 .await?;
             changed_commit = Some(
                 described

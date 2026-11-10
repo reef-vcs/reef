@@ -25,6 +25,7 @@ The read RPCs (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ListOperatio
 | `reef: edit commit <commit id>`, `reef: new change on <commit id>` | `EDIT` |
 | `reef: propose change <change id>` (and `withdraw`, `decline`, `supersede`, `land`) | `TRANSITION` |
 | `reef: comment comment <id> on change <change id>` (and `instruct`, `confirm`, `claim`, `start`, `finish`, `cancel`, `release`) | `COMMENT` |
+| `reef: publish change <change id> to <remote>/<branch>`, with ` (forced)` for a forced update (#258) | `PUBLISH` |
 | any other `reef: ` description | `OTHER` |
 | anything else, including jj's own `import git head` | `EXTERNAL` |
 
@@ -43,6 +44,7 @@ Since R2.03 every operation Reef records carries the attributes, so the descript
 | a lifecycle transition (R3.09) | `transition` (`undo` for an undo of one) | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner; none for an observed landing |
 | a landing (R3.13) | `land` | | | the `reef-agent` that asked for it |
 | a batch's trial commits written or abandoned (R3.14) | `batch` | | | `reef-landing` |
+| a publish to a git remote (#258) | `publish` | | the request's workspace, if named | the request's `reef-agent`, else that workspace's owner |
 
 A lifecycle transition's operation also carries `reef.lifecycle`, the transitions as compact JSON, format 1 (`reef_lib::jj::lifecycle::LifecycleRecord`), and changes nothing in the view. A landing's operation (`reef: land change <id> on <bookmark>`, or `reef: land <n> changes on <bookmark> (batch <id>)`) carries `reef.lifecycle` with its `landed` transitions, `reef.batch` with the batch's id, and `reef.landing` with the landing's id when it lands one change, and moves the bookmark. A batch's trial commit is written by `reef: test batch <id> on <bookmark> (prefix <k> of <n>)` and its trial commits abandoned without a landing by `reef: end batch <id>`, both with `reef.batch`. A comment's operation (R3.12) carries `reef.comment`, its events as compact JSON, format 1 (`reef_lib::jj::comments::CommentRecord`): ids and states, never a comment's text; it changes nothing in the view.
 

@@ -55,6 +55,7 @@ use reef_api::v1::diff_service_client::DiffServiceClient;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::executor_service_client::ExecutorServiceClient;
 use reef_api::v1::file_service_client::FileServiceClient;
+use reef_api::v1::git_service_client::GitServiceClient;
 use reef_api::v1::history_service_client::HistoryServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::landing_service_client::LandingServiceClient;
@@ -2048,6 +2049,21 @@ impl Client {
 
     fn landing(&self) -> LandingServiceClient<Svc> {
         LandingServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    fn git(&self) -> GitServiceClient<Svc> {
+        GitServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `GitService.PublishChange` (#258): pushes a change to a branch on a
+    /// git remote and records it.
+    pub async fn publish_change(
+        &self,
+        request: v1::PublishChangeRequest,
+    ) -> Result<v1::PublishChangeResponse, ClientError> {
+        let mut client = self.git();
+        self.call("PublishChange", client.publish_change(request))
+            .await
     }
 
     /// `LandingService.LandChange` (R3.13): judges a proposed change, queues

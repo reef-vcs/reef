@@ -142,16 +142,16 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
             argv(&["reef", "ws", "renew", &ws.id]),
         ),
         ("active", "active" | "in_grace") if in_run => (
-            "Work here; `ws run` snapshots and releases this workspace when your command exits."
+            "Work here; `ws run` snapshots and releases this workspace when your command exits. `reef publish` sends its change to a git branch for review."
                 .to_owned(),
             Vec::new(),
         ),
         ("active", "active") if held => (
-            "Work here; the program that created this workspace releases it.".to_owned(),
+            "Work here; the program that created this workspace releases it. `reef publish` sends its change to a git branch for review.".to_owned(),
             Vec::new(),
         ),
         ("active", "active") => (
-            "Work here; release it when done (a final snapshot is taken first).".to_owned(),
+            "Work here; release it when done (a final snapshot is taken first). `reef publish` sends its change to a git branch for review.".to_owned(),
             argv(&["reef", "ws", "release", &ws.id]),
         ),
         ("releasing", _) => (

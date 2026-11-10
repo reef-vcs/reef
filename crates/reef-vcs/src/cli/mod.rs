@@ -44,12 +44,13 @@ mod job;
 pub(crate) mod land;
 mod log;
 mod op;
-mod out;
+pub(crate) mod out;
 pub(crate) mod policy;
 mod presence;
 pub(crate) mod proposal;
 pub(crate) mod provenance;
 mod provider;
+pub(crate) mod publish;
 mod remote;
 mod render;
 mod render_vcs;
@@ -324,6 +325,11 @@ enum Command {
     Describe(changes::DescribeArgs),
     /// Abandon a change: its descendants move onto its parents.
     Abandon(changes::AbandonArgs),
+    /// Push a change to a branch on the repository's git remote for review.
+    #[command(
+        after_help = "Example: reef publish -m 'fix the parser'   # its next opens the pull request"
+    )]
+    Publish(publish::PublishArgs),
     /// Propose a change for main: its lifecycle moves from draft to proposed.
     #[command(after_help = "Example: reef propose @- -m 'ready for review'")]
     Propose(proposal::ProposeArgs),
@@ -843,6 +849,9 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Show(args) => changes::show(&connect(&global, out).await?, args).await,
         Command::Diff(args) => diff::run(&connect(&global, out).await?, args).await,
         Command::Describe(args) => changes::describe(&connect(&global, out).await?, args).await,
+        Command::Publish(args) => {
+            Box::pin(publish::publish(&connect(&global, out).await?, args)).await
+        }
         Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
         Command::Propose(args) => {
             Box::pin(proposal::propose(&connect(&global, out).await?, args)).await

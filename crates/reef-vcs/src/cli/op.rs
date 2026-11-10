@@ -149,6 +149,8 @@ enum KindArg {
     Land,
     Comment,
     Batch,
+    ConflictAssignment,
+    Publish,
     External,
     Other,
 }
@@ -169,6 +171,8 @@ impl From<KindArg> for v1::OperationKind {
             KindArg::Land => Self::Land,
             KindArg::Comment => Self::Comment,
             KindArg::Batch => Self::Batch,
+            KindArg::ConflictAssignment => Self::ConflictAssignment,
+            KindArg::Publish => Self::Publish,
             KindArg::External => Self::External,
             KindArg::Other => Self::Other,
         }
@@ -394,5 +398,40 @@ impl Watcher<'_> {
             return Ok(Some(Stopped::Done));
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use clap::ValueEnum as _;
+    use reef_api::v1;
+
+    use super::KindArg;
+
+    /// Every operation kind has a `--kind` value named as the client names
+    /// it, so a new kind fails here until it is added (#258 found two
+    /// missing).
+    #[test]
+    fn every_kind_is_an_argument() {
+        let names: Vec<String> = KindArg::value_variants()
+            .iter()
+            .map(|kind| kind.to_possible_value().unwrap().get_name().to_owned())
+            .collect();
+        for value in 1..=i32::from(u8::MAX) {
+            let Ok(kind) = v1::OperationKind::try_from(value) else {
+                continue;
+            };
+            let name = reef_client::json::operation_kind_name(kind.into()).unwrap();
+            assert!(names.iter().any(|known| known == name), "--kind {name}");
+        }
+        for kind in KindArg::value_variants() {
+            let name =
+                reef_client::json::operation_kind_name(v1::OperationKind::from(*kind).into());
+            assert_eq!(
+                name,
+                Some(kind.to_possible_value().unwrap().get_name()),
+                "{kind:?}"
+            );
+        }
     }
 }

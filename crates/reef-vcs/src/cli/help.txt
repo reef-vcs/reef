@@ -7,6 +7,6 @@ Usage: reef <command> [--help]
   ws run    run a command in a new workspace, then release it
   history   who changed a file or symbol, landed or open
 
-Also: status log show diff describe abandon undo op presence file
-symbols evidence identity provenance guide init mcp schema ui remote
-repo store daemon config backup. `--help-all` has more.
+Also: status log show diff describe publish abandon undo op presence
+file symbols evidence identity provenance guide init mcp schema ui
+remote repo daemon config. `--help-all` has more.

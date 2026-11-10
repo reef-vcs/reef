@@ -93,10 +93,11 @@ mod tests {
     #[test]
     fn guide_fits_its_budget() {
         // Bytes, not tokens (ADR 0051): 1,566 bytes was 434 `o200k` and 648
-        // Anthropic tokens at #122. 1,750 since R3.44's provenance line,
-        // with the long part, which the skills carry, still within 1,600.
+        // Anthropic tokens at #122. 1,750 since R3.44's provenance line;
+        // the long part, which the skills carry, within 1,700 since #258's
+        // publish line (1,600 before).
         assert!(GUIDE.len() <= 1750, "{} bytes", GUIDE.len());
-        assert!(long().len() <= 1600, "{} bytes", long().len());
+        assert!(long().len() <= 1700, "{} bytes", long().len());
         assert!(GUIDE.contains(LONG_MARKER));
         assert!(short().lines().count() <= 40, "{}", short());
         for line in GUIDE.lines() {

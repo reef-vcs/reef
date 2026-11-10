@@ -384,6 +384,8 @@ pub enum OpKind {
     Comment,
     /// A resolver assignment changed (R3.27).
     ConflictAssignment,
+    /// A change was published to a git remote (#258).
+    Publish,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -392,7 +394,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 15] = [
+    pub const WRITTEN: [OpKind; 16] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -407,6 +409,7 @@ impl OpKind {
         OpKind::Batch,
         OpKind::Comment,
         OpKind::ConflictAssignment,
+        OpKind::Publish,
         OpKind::Other,
     ];
 
@@ -427,6 +430,7 @@ impl OpKind {
             OpKind::Comment => "comment",
             OpKind::Batch => "batch",
             OpKind::ConflictAssignment => "conflict-assignment",
+            OpKind::Publish => "publish",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -601,7 +605,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 23] = [
+const WRITES: [(&str, OpKind); 24] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -625,7 +629,12 @@ const WRITES: [(&str, OpKind); 23] = [
     ("reef: release comment ", OpKind::Comment),
     (TEST_BATCH_PREFIX, OpKind::Batch),
     (END_BATCH_PREFIX, OpKind::Batch),
+    (PUBLISH_PREFIX, OpKind::Publish),
 ];
+/// The description of a publish (#258), before the change id, the remote
+/// and the branch: `reef: publish change <id> to <remote>/<branch>`, with
+/// ` (forced)` after a forced update.
+pub const PUBLISH_PREFIX: &str = "reef: publish change ";
 /// The description of an operation writing a batch's trial commit (R3.14),
 /// before the batch id.
 pub const TEST_BATCH_PREFIX: &str = "reef: test batch ";
