@@ -16,6 +16,7 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.IMPORT_REFS]: "imported git refs",
   [OperationKind.TRANSITION]: "moved a change through its lifecycle",
   [OperationKind.LAND]: "landed a change",
+  [OperationKind.BATCH]: "tested a batch of changes",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };
@@ -57,6 +58,10 @@ export function operationSentence(operation: WithTransition): string {
       return "returned a proposal from the queue";
     }
     if (to !== undefined && TRANSITIONS[to]) return TRANSITIONS[to];
+  }
+  // A batch lands several changes in one operation (R3.14).
+  if (operation.kind === OperationKind.LAND && (operation.transitions?.length ?? 0) > 1) {
+    return `landed ${plural(operation.transitions?.length ?? 0, "change")}`;
   }
   return SENTENCES[operation.kind] ?? "did something else";
 }

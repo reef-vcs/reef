@@ -518,6 +518,9 @@ async fn outputs_match_their_schemas() {
     script.json(&lander_dir, &["land"]).await;
     script.both(&lander_dir, &["landing", "list"]).await;
     script.both(&lander_dir, &["landing", "show", "@-"]).await;
+    // Its batch (R3.14).
+    script.both(&lander_dir, &["landing", "batches"]).await;
+    script.both(&lander_dir, &["landing", "batch", "@-"]).await;
     script.both(&a_dir, &["history", "notes.txt"]).await;
     script.both(&a_dir, &["file", "list"]).await;
     script.json(&a_dir, &["file", "read", "notes.txt"]).await;

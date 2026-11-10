@@ -45,6 +45,11 @@ actors = ["executor"]
 name = "tests"
 kinds = ["test"]
 attestors = ["local"]
+
+# These tests judge submitted trees, as R3.13 landed; batches test theirs
+# in tests/batch.rs (R3.14).
+[landing]
+checks = "proposal"
 "#;
 
 /// A policy that allows everything but a rebase over shared paths.

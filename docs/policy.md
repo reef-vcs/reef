@@ -90,6 +90,12 @@ paths = ["docs/**"]
 tier = "land"
 attempts = 5
 
+[landing]                                  # how landings onto this branch are batched and checked (R3.14)
+checks = "batch"                           # batch | proposal; default batch
+batch_max = 8                              # 1 to 32; default 8
+batch_wait = "0s"                          # "0s" to "10m"; default "0s"
+alone = ["migrations/**"]                  # changes touching these land in a batch of their own
+
 [[rule]]                                   # anything else, in CEL
 name = "provenance"
 when = 'change.files.size() > 0'           # optional: false makes it not apply
@@ -130,7 +136,7 @@ The names of the sets an object satisfies are `e.attestors`, which free rules ca
 
 ## Required evidence, limits, forbidden paths and sign-offs
 
-These tables are evaluated by Reef itself, not compiled to CEL, so their results carry data: a landing's refusal lists the missing evidence and, for each pair, the objects on the tree that did not count and why (`rejected`); R3.45 requests the missing evidence from the named attestor sets, and the proposal view shows who must sign.
+These tables are evaluated by Reef itself, not compiled to CEL, so their results carry data: a landing's refusal lists the missing evidence and, for each pair, the objects on the tree that did not count and why (`rejected`); R3.45 requests the missing evidence from the named attestor sets, and the proposal view shows who must sign. Under `[landing] checks = "batch"` (the default), the landing service judges each change's `[[require]]` rules a second time over the evidence on its batch's tested tree, and asks an executor for the pairs missing there ([landing](landing.md#batches)).
 
 - **`[[require]]`**: for each kind, and each of `targets` (or the whole check, no target, when empty), the objects of that kind and target from a named set decide, and **the newest verdict by witness time wins**: the latest `pass` or `fail` among them is the requirement's outcome. `error` objects never count: R3.01 defines `error` as no verdict. So a flaky run that failed and then passed on the same tree is satisfied, and a pass followed by a fail is not. No object is **missing**; a newest `fail` is **failed**, with its id. A per-target object never satisfies a whole-check requirement: how targets add up to a whole check is R3.19's.
 - **`[limits]`**: `max_files` over the touched paths, `max_lines` over lines added plus removed, `max_file_size` over each added or modified file's new side, all after `except`. A binary file, or one too large to count (over 16 MiB), counts no lines. One rule, `limits`, reports every limit passed and the files over the size limit.
@@ -151,6 +157,7 @@ What a policy sees about one change, built by the daemon. `reef schema policy in
 | `evidence` | the evidence on `change.tree` whose signature verifies, by witness time then id: `id`, `kind`, `result` (`pass`, `fail`, `error`), `target`, `started_at`, `finished_at`, `added_at` (the witness time), `added_by_agent`, `artifacts` (`{name, sha256, media_type, state, size}`, `state` one of `stored`, `collected`, `absent`), `annotations`, `key` (below), `fresh` and `job` (whether an executor job accepted it fresh, R3.05), `self`, `attestors` |
 | `provenance` | every provenance record of `change.id`: `id`, `commit`, `tree`, `workspace`, `session`, `sequence`, `kind`, `agent`, `recorded_at`, `model`, `harness`, `task`, `instruction_sha256`, `client_session`, `signature` (`valid`, `invalid`), `key` |
 | `groups` | the policy's `[groups]`, from name to members as written |
+| `batch` | at landing only (R3.14): `{id, size, position, tree, commit}`, the batch the change lands in, its position from 1, and the tested tree and the trial commit carrying it (empty when none was needed); empty at the gate, in `reef policy eval` and in simulation |
 
 A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
 
@@ -159,7 +166,7 @@ A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, ses
 - **No clock.** Nothing in the input is "now", and identity status is judged at each object's witness time, so an evaluation depends only on the policy's bytes and the input.
 - **Limits**: at most 100,000 touched paths; a larger change is `builtin:input`'s error.
 - **`change.state` and `landing`** (R3.13). `change.state` is the change's lifecycle state (`draft`, `proposed`, `queued`, `landed`, `declined`, `withdrawn`, `superseded`); inside a landing it is `queued`. `landing` is `{destination, destination_commit, rebased, overlap, overlap_total}`: the bookmark the change lands onto, its head, whether the change is rebased onto it (false for a fast-forward), and the paths both the change and the destination changed since the change's parents (at most 1,000, sorted). `reef policy eval` fills it from a preview onto the policy revision (`trunk()` by default, or `trunk()` for `--policy-file`); `reef policy simulate` judges each landing on its own tree (`rebased: false`).
-- **What later tickets add**, each a new field the static check learns: `stack` (R3.10, for R3.24), the `conflict` object's other fields (R3.25 to R3.28), `budget` (R3.20) and `batch` (R3.14). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
+- **What later tickets add**, each a new field the static check learns: `stack` (R3.10, for R3.24), the `conflict` object's other fields (R3.25 to R3.28), and `budget` (R3.20). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
 
 ## CEL
 
@@ -380,7 +387,7 @@ attempts = 5
 ```
 
 
-Landings that are always tested as they land, until R3.14 tests the rebased batch head: refuse a rebase, or a rebase over paths the destination changed ([landing](landing.md)).
+Landings that never rebase: refuse a rebase, or a rebase over paths the destination changed. Under `[landing] checks = "batch"` a rebased landing's required checks run again on its batch's tree, so these are for repositories that want more than that, or use `checks = "proposal"`; `batch_max = 1` makes every landed tree exactly a tested one instead ([landing](landing.md#batches)).
 
 ```toml policy
 version = 1

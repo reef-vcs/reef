@@ -2022,6 +2022,48 @@ impl Client {
         }
     }
 
+    /// `LandingService.GetBatch` (R3.14): one batch, by id or as a change's
+    /// latest.
+    pub async fn get_batch(
+        &self,
+        request: v1::GetBatchRequest,
+    ) -> Result<v1::GetBatchResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("GetBatch", client.get_batch(request)).await
+    }
+
+    /// `LandingService.ListBatches` (R3.14): one page.
+    pub async fn list_batches_page(
+        &self,
+        request: v1::ListBatchesRequest,
+    ) -> Result<v1::ListBatchesResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("ListBatches", client.list_batches(request)).await
+    }
+
+    /// The first `limit` batches `request` asks for (all when 0), newest
+    /// first, and whether more exist.
+    pub async fn list_batches(
+        &self,
+        request: v1::ListBatchesRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::LandingBatch>, ClientError> {
+        let mut request = v1::ListBatchesRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_batches_page(request.clone()).await?;
+            limited.items.extend(response.batches);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
     fn provenance(&self) -> ProvenanceServiceClient<Svc> {
         ProvenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }

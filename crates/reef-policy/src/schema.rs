@@ -42,6 +42,8 @@ struct File {
     signoff: Vec<SignoffArea>,
     /// Conflict resolution tiers and attempt caps (R3.28 applies them).
     conflicts: Option<Conflicts>,
+    /// How the landing service batches and checks landings (R3.14).
+    landing: Option<LandingTable>,
     /// Free rules in CEL.
     #[serde(default)]
     rule: Vec<Rule>,
@@ -153,6 +155,23 @@ struct SignoffArea {
     kinds: Option<Vec<String>>,
     when: Option<String>,
     message: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "policy.file.Landing")]
+struct LandingTable {
+    /// `batch` (default): `[[require]]` evidence must also pass on the
+    /// batch's tested tree; `proposal`: only on the submitted tree.
+    checks: Option<String>,
+    /// The most changes in a batch, 1 to 32; default 8.
+    batch_max: Option<u32>,
+    /// How long a batch waits to fill, `0s` to `10m`; default `0s`.
+    batch_wait: Option<String>,
+    /// Path patterns whose changes land in a batch of their own.
+    #[serde(default)]
+    alone: Vec<String>,
 }
 
 #[allow(dead_code)]

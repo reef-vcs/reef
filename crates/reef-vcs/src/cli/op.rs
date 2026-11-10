@@ -147,6 +147,7 @@ enum KindArg {
     ImportRefs,
     Transition,
     Land,
+    Batch,
     External,
     Other,
 }
@@ -165,6 +166,7 @@ impl From<KindArg> for v1::OperationKind {
             KindArg::ImportRefs => Self::ImportRefs,
             KindArg::Transition => Self::Transition,
             KindArg::Land => Self::Land,
+            KindArg::Batch => Self::Batch,
             KindArg::External => Self::External,
             KindArg::Other => Self::Other,
         }

@@ -1,15 +1,20 @@
-//! `reef land` and `reef landing` (R3.13, ADR 0064): the landing service.
-//! `reef land` asks to land a proposed change: the gate judges it with the
-//! policy at its destination's head, and a change it allows is queued and
-//! landed onto the bookmark. `reef landing list|show` read the records.
+//! `reef land` and `reef landing` (R3.13, ADR 0064; R3.14, ADR 0067): the
+//! landing service. `reef land` asks to land a proposed change: the gate
+//! judges it with the policy at its destination's head, and a change it
+//! allows is queued and landed onto the bookmark in a batch.
+//! `reef landing list|show` read the records, and `reef landing
+//! batches|batch` the batches.
 
 use std::io::{self, Write};
 use std::time::Duration;
 
-use reef_api::v1::{self, GetLandingRequest, LandChangeRequest, ListLandingsRequest};
+use reef_api::v1::{
+    self, GetBatchRequest, GetLandingRequest, LandChangeRequest, ListBatchesRequest,
+    ListLandingsRequest,
+};
 use reef_client::json::{reverse_hex, rfc3339};
 use reef_error::{Advice, ErrorKind};
-use reef_policy::{Decision, Evaluation, Status};
+use reef_policy::{Decision, Evaluation, RuleKind, Status};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -64,6 +69,40 @@ enum LandingCommand {
     /// Show a landing: by id, or a change's latest; its evaluation in full.
     #[command(after_help = "Example: reef landing show @-")]
     Show(ShowArgs),
+    /// List batches, newest first (R3.14).
+    #[command(after_help = "Example: reef landing batches --open")]
+    Batches(BatchesArgs),
+    /// Show a batch: by id, or the latest a change was in; its members and
+    /// trials.
+    #[command(after_help = "Example: reef landing batch @-")]
+    Batch(BatchArgs),
+}
+
+/// `reef landing batches`.
+#[derive(Debug, clap::Args)]
+struct BatchesArgs {
+    /// Only batches onto this bookmark (repeatable).
+    #[arg(long = "to", value_name = "BOOKMARK")]
+    destinations: Vec<String>,
+    /// Only batches not finished.
+    #[arg(long)]
+    open: bool,
+    /// At most this many (0 for all).
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+/// `reef landing batch`.
+#[derive(Debug, clap::Args)]
+struct BatchArgs {
+    /// A batch id (`bat_…`), or a revision naming the change whose latest
+    /// batch to show.
+    #[arg(value_name = "ID_OR_REV", default_value = "@")]
+    target: String,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 /// A landing outcome, as the commands name it.
@@ -149,6 +188,17 @@ pub(crate) struct LandedChange {
     pub(crate) evaluation: Option<Evaluation>,
     /// The evidence a landed change's rules used, kept for good.
     pub(crate) pinned_evidence_ids: Vec<String>,
+    /// The tree its required evidence was judged on in its batch (R3.14);
+    /// `null` when none was.
+    pub(crate) tested_tree_id: Option<String>,
+    /// The trial commit carrying that tree; `null` when none was written.
+    pub(crate) tested_commit_id: Option<String>,
+    /// The evaluation over the tested tree's evidence, of which only the
+    /// `[[require]]` rules count; `null` when there was none. A listing
+    /// carries its decision only.
+    pub(crate) tested_evaluation: Option<Evaluation>,
+    /// Its position in its batch, from 1; `null` when it was never in one.
+    pub(crate) batch_position: Option<u32>,
 }
 
 /// One landing (`reef land`, `reef landing show`, each of `reef landing
@@ -166,8 +216,11 @@ pub(crate) struct Landing {
     /// `blocked`, `queued`, `landed`, `dequeued` or `cancelled`.
     pub(crate) outcome: String,
     /// For blocked and dequeued: `policy`, `conflicted`, `unlanded_parents`,
-    /// `amended`, `destination`, `busy` or `failed`.
+    /// `amended`, `destination`, `busy`, `failed`, `checks` or
+    /// `unavailable`.
     pub(crate) reason: Option<String>,
+    /// The batch it is, or was last, in (R3.14).
+    pub(crate) batch_id: Option<String>,
     /// More about the reason.
     pub(crate) message: Option<String>,
     /// The changes, in landing order.
@@ -248,6 +301,7 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
         destination_after: some(&message.destination_after),
         outcome: word(message.outcome().as_str_name(), "LANDING_OUTCOME_").unwrap_or_default(),
         reason: word(message.reason().as_str_name(), "LANDING_REASON_"),
+        batch_id: some(&message.batch_id),
         message: some(&message.message),
         changes: message
             .changes
@@ -276,6 +330,10 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
                 }),
                 evaluation: change.evaluation.as_ref().map(evaluation_of),
                 pinned_evidence_ids: change.pinned_evidence_ids.clone(),
+                tested_tree_id: some(&change.tested_tree_id),
+                tested_commit_id: some(&change.tested_commit_id),
+                tested_evaluation: change.tested_evaluation.as_ref().map(evaluation_of),
+                batch_position: (change.batch_position > 0).then_some(change.batch_position),
             })
             .collect(),
         attempts: message.attempts,
@@ -351,9 +409,14 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
     };
     let message = match reason {
         reef_api::error::LANDING_PENDING => format!(
-            "landing {} is still queued after {}",
+            "landing {} is still queued after {}{}",
             landing.id,
-            humantime::format_duration(wait)
+            humantime::format_duration(wait),
+            landing
+                .batch_id
+                .as_deref()
+                .map(|batch| format!(", in batch {batch} (`reef landing batch {batch}`)"))
+                .unwrap_or_default()
         ),
         _ => format!(
             "landing {} was {}: {}",
@@ -366,11 +429,28 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
         kind,
         reason,
         message,
-        advice: Advice::run(
-            next_words(&landing),
-            ["reef", "landing", "show", landing.id.as_str()],
-        ),
+        advice: advice_for(&landing),
     })
+}
+
+/// What to do about a landing that did not land, with the command to run
+/// next.
+fn advice_for(landing: &Landing) -> Advice {
+    let words = next_words(landing);
+    match (landing.reason.as_deref(), landing.batch_id.as_deref()) {
+        (Some("unavailable"), _)
+            if landing
+                .message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("no executor claimed")) =>
+        {
+            Advice::run(words, ["reef", "executor", "run"])
+        }
+        (Some("unavailable" | "checks"), Some(batch)) => {
+            Advice::run(words, ["reef", "landing", "batch", batch])
+        }
+        _ => Advice::run(words, ["reef", "landing", "show", landing.id.as_str()]),
+    }
 }
 
 /// What to do about a landing that did not land.
@@ -396,6 +476,30 @@ fn next_words(landing: &Landing) -> String {
         Some("amended") => "The change moved since it was proposed: `reef propose` it again, then land.".to_owned(),
         Some("destination") => "The destination bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`.".to_owned(),
         Some("busy") => "The destination kept moving: land again.".to_owned(),
+        Some("checks") => {
+            let failed: Vec<String> = first
+                .and_then(|change| change.tested_evaluation.as_ref())
+                .map(|evaluation| {
+                    evaluation
+                        .rules
+                        .iter()
+                        .flat_map(|rule| rule.failed.iter())
+                        .map(|need| {
+                            if need.target.is_empty() {
+                                need.kind.clone()
+                            } else {
+                                format!("{}:{}", need.kind, need.target)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!(
+                "Required checks ({}) failed on the batch's tree with this change and passed without it: fix the change, propose it again, then land. `reef landing batch` shows the trials.",
+                if failed.is_empty() { "see the batch".to_owned() } else { failed.join(", ") }
+            )
+        }
+        Some("unavailable") => "No executor gave a verdict on the batch's tree; this is not the change's fault, so land it again. If no executor serves this repository's required evidence kinds (its trusted evidence is added some other way), set `[landing] checks = \"proposal\"` in reef-policy.toml on the destination (a policy change, which needs the owners' sign-off), and landings are judged on the proposed tree alone.".to_owned(),
         Some(_) => "The landing failed; land again.".to_owned(),
         None => "It is still queued; `reef landing show` follows it.".to_owned(),
     }
@@ -406,6 +510,8 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     match args.command {
         LandingCommand::List(args) => Box::pin(list(ctx, args)).await,
         LandingCommand::Show(args) => Box::pin(show(ctx, args)).await,
+        LandingCommand::Batches(args) => Box::pin(batches(ctx, args)).await,
+        LandingCommand::Batch(args) => Box::pin(batch(ctx, args)).await,
     }
 }
 
@@ -528,6 +634,23 @@ impl TextRender for Landing {
             if !change.pinned_evidence_ids.is_empty() {
                 pairs.push(("pinned", change.pinned_evidence_ids.len().to_string()));
             }
+            if let Some(tested) = &change.tested_tree_id {
+                let commit = change
+                    .tested_commit_id
+                    .as_ref()
+                    .map(|commit| format!(" (trial commit {})", short(commit)))
+                    .unwrap_or_default();
+                pairs.push(("tested", format!("tree {}{commit}", short(tested))));
+            }
+        }
+        if let Some(batch) = &self.batch_id {
+            let position = self
+                .changes
+                .first()
+                .and_then(|change| change.batch_position)
+                .map(|position| format!(" (position {position})"))
+                .unwrap_or_default();
+            pairs.push(("batch", format!("{batch}{position}")));
         }
         if let Some(message) = &self.message {
             pairs.push(("why", message.clone()));
@@ -543,6 +666,16 @@ impl TextRender for Landing {
             {
                 writeln!(w)?;
                 render_rules(w, evaluation)?;
+            }
+            if matches!(self.reason.as_deref(), Some("checks" | "unavailable"))
+                && let Some(evaluation) = &change.tested_evaluation
+                && !evaluation.rules.is_empty()
+            {
+                writeln!(w)?;
+                writeln!(w, "on the batch's tested tree:")?;
+                let mut required = evaluation.clone();
+                required.rules.retain(|rule| rule.kind == RuleKind::Require);
+                render_rules(w, &required)?;
             }
         }
         if let Some(policy) = &self.policy {
@@ -569,6 +702,309 @@ impl TextRow for Landing {
             ),
             self.destination.clone(),
             self.finished_at.clone().unwrap_or_else(|| "-".to_owned()),
+        ]
+    }
+}
+
+/// One member of a batch.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BatchMember {
+    /// Its position in the chain, from 1.
+    pub(crate) position: u32,
+    /// Its landing.
+    pub(crate) landing_id: String,
+    /// The change, in hex.
+    pub(crate) change_id: String,
+    /// The same, in jj's reverse hex.
+    pub(crate) change_id_reverse_hex: String,
+    /// The commit it was queued at.
+    pub(crate) queued_commit_id: String,
+    /// The chain's tree with it applied.
+    pub(crate) planned_tree_id: String,
+    /// `landed`, `culprit`, `requeued`, `dequeued`, `left` or
+    /// `unavailable`; `null` while undecided.
+    pub(crate) result: Option<String>,
+}
+
+/// One tested prefix of a batch.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BatchTrial {
+    /// How many members its tree has, from the first.
+    pub(crate) prefix: u32,
+    /// The tested tree.
+    pub(crate) tree_id: String,
+    /// The trial commit carrying it; `null` when no executor run was
+    /// needed.
+    pub(crate) commit_id: Option<String>,
+    /// `passed`, `failed`, `unavailable` or `cancelled`; `null` while open.
+    pub(crate) result: Option<String>,
+    /// The executor jobs asked for its missing evidence.
+    pub(crate) job_ids: Vec<String>,
+    /// For a failed trial the failed pairs, for an unavailable one those
+    /// still missing: `kind` or `kind:target`.
+    pub(crate) needs: Vec<String>,
+    /// How many there are.
+    pub(crate) needs_total: u32,
+    /// How many times its jobs were asked for.
+    pub(crate) attempts: u32,
+}
+
+/// One batch (`reef landing batch`, each of `reef landing batches`).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LandingBatch {
+    /// `bat_` and 16 hex digits.
+    pub(crate) id: String,
+    /// The destination bookmark.
+    pub(crate) destination: String,
+    /// Its head when the batch formed.
+    pub(crate) base_commit_id: String,
+    /// `testing`, `bisecting` or `finished`.
+    pub(crate) state: String,
+    /// For a finished batch: `landed`, `split`, `unavailable`, `reformed`,
+    /// `interrupted` or `busy`.
+    pub(crate) outcome: Option<String>,
+    /// The members, in chain order.
+    pub(crate) members: Vec<BatchMember>,
+    /// The tested prefixes, in the order tested.
+    pub(crate) trials: Vec<BatchTrial>,
+    /// For `split`, the culprit's position.
+    pub(crate) culprit_position: Option<u32>,
+    /// How many members landed.
+    pub(crate) landed_count: u32,
+    /// The destination policy's `[landing] checks`: `batch` or `proposal`.
+    pub(crate) checks: String,
+    /// The operation that landed members.
+    pub(crate) operation_id: Option<String>,
+    /// More about how it ended.
+    pub(crate) message: Option<String>,
+    /// When it formed.
+    pub(crate) created_at: Option<String>,
+    /// When it finished.
+    pub(crate) finished_at: Option<String>,
+}
+
+/// The brief view of a batch.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BriefBatch<'a> {
+    id: &'a str,
+    state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'a str>,
+    size: usize,
+    landed_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    culprit_position: Option<u32>,
+}
+
+impl<'a> BriefBatch<'a> {
+    pub(crate) fn of(batch: &'a LandingBatch) -> BriefBatch<'a> {
+        BriefBatch {
+            id: &batch.id,
+            state: &batch.state,
+            outcome: batch.outcome.as_deref(),
+            size: batch.members.len(),
+            landed_count: batch.landed_count,
+            culprit_position: batch.culprit_position,
+        }
+    }
+}
+
+/// A need as `kind` or `kind:target`.
+fn need_words(need: &v1::PolicyEvidenceNeed) -> String {
+    if need.target.is_empty() {
+        need.kind.clone()
+    } else {
+        format!("{}:{}", need.kind, need.target)
+    }
+}
+
+/// `message` as the CLI's JSON.
+pub(crate) fn batch_of(message: &v1::LandingBatch) -> LandingBatch {
+    LandingBatch {
+        id: message.id.clone(),
+        destination: message.destination.clone(),
+        base_commit_id: message.base_commit_id.clone(),
+        state: word(message.state().as_str_name(), "BATCH_STATE_").unwrap_or_default(),
+        outcome: word(message.outcome().as_str_name(), "BATCH_OUTCOME_"),
+        members: message
+            .members
+            .iter()
+            .map(|member| BatchMember {
+                position: member.position,
+                landing_id: member.landing_id.clone(),
+                change_id: member.change_id.clone(),
+                change_id_reverse_hex: reverse_hex(&member.change_id),
+                queued_commit_id: member.queued_commit_id.clone(),
+                planned_tree_id: member.planned_tree_id.clone(),
+                result: word(member.result().as_str_name(), "BATCH_MEMBER_RESULT_"),
+            })
+            .collect(),
+        trials: message
+            .trials
+            .iter()
+            .map(|trial| BatchTrial {
+                prefix: trial.prefix,
+                tree_id: trial.tree_id.clone(),
+                commit_id: some(&trial.commit_id),
+                result: word(trial.result().as_str_name(), "TRIAL_RESULT_"),
+                job_ids: trial.job_ids.clone(),
+                needs: trial.needs.iter().map(need_words).collect(),
+                needs_total: trial.needs_total,
+                attempts: trial.attempts,
+            })
+            .collect(),
+        culprit_position: (message.culprit_position > 0).then_some(message.culprit_position),
+        landed_count: message.landed_count,
+        checks: message.checks.clone(),
+        operation_id: some(&message.operation_id),
+        message: some(&message.message),
+        created_at: message.created_at.as_ref().map(rfc3339),
+        finished_at: message.finished_at.as_ref().map(rfc3339),
+    }
+}
+
+async fn batches(ctx: &Ctx, args: BatchesArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let listed = ctx
+        .call(ctx.client.list_batches(
+            ListBatchesRequest {
+                repo: scope.repo_id.clone(),
+                destinations: args.destinations.clone(),
+                open_only: args.open,
+                ..ListBatchesRequest::default()
+            },
+            args.limit,
+        ))
+        .await
+        .map_err(|error| advice.refine(error))?;
+    if listed.more {
+        ctx.out.note(&format!(
+            "reef: more batches than --limit {}; raise it, or 0 for all",
+            args.limit
+        ));
+    }
+    let batches: Vec<LandingBatch> = listed.items.iter().map(batch_of).collect();
+    ctx.out.list_with(&batches, |batches| {
+        batches.iter().map(BriefBatch::of).collect::<Vec<_>>()
+    })
+}
+
+async fn batch(ctx: &Ctx, args: BatchArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx {
+        revision: (!args.target.starts_with("bat_")).then(|| args.target.clone()),
+        ..AdviceCtx::new(&scope)
+    };
+    let (id, change) = if args.target.starts_with("bat_") {
+        (args.target.clone(), String::new())
+    } else {
+        let change = ctx
+            .call(ctx.client.get_change(v1::GetChangeRequest {
+                repo: scope.repo_id.clone(),
+                workspace: scope.workspace_id(),
+                revision: args.target.clone(),
+                ..v1::GetChangeRequest::default()
+            }))
+            .await
+            .map_err(|error| advice.refine(error))?
+            .change
+            .unwrap_or_default();
+        (String::new(), change.change_id)
+    };
+    let response = ctx
+        .call(ctx.client.get_batch(GetBatchRequest {
+            repo: scope.repo_id.clone(),
+            id,
+            change,
+        }))
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let batch = batch_of(&response.batch.unwrap_or_default());
+    ctx.out.object_with(&batch, BriefBatch::of)
+}
+
+impl TextRender for LandingBatch {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let mut pairs = vec![
+            ("batch", self.id.clone()),
+            (
+                "state",
+                match &self.outcome {
+                    Some(outcome) => format!("{} ({outcome})", self.state),
+                    None => self.state.clone(),
+                },
+            ),
+            ("destination", self.destination.clone()),
+            ("base", short(&self.base_commit_id)),
+            ("checks", self.checks.clone()),
+            (
+                "landed",
+                format!("{} of {}", self.landed_count, self.members.len()),
+            ),
+        ];
+        if let Some(culprit) = self.culprit_position {
+            pairs.push(("culprit", format!("position {culprit}")));
+        }
+        if let Some(message) = &self.message {
+            pairs.push(("why", message.clone()));
+        }
+        block(w, &pairs)?;
+        writeln!(w)?;
+        for member in &self.members {
+            writeln!(
+                w,
+                "  {:>2}. {}  {}",
+                member.position,
+                short(&member.change_id_reverse_hex),
+                member.result.as_deref().unwrap_or("-")
+            )?;
+        }
+        for trial in &self.trials {
+            writeln!(w)?;
+            let commit = trial
+                .commit_id
+                .as_ref()
+                .map(|commit| format!(", commit {}", short(commit)))
+                .unwrap_or_default();
+            writeln!(
+                w,
+                "trial: prefix {} of {}, tree {}{commit}, {}",
+                trial.prefix,
+                self.members.len(),
+                short(&trial.tree_id),
+                trial.result.as_deref().unwrap_or("testing")
+            )?;
+            if !trial.job_ids.is_empty() {
+                writeln!(w, "  jobs: {}", trial.job_ids.join(", "))?;
+            }
+            if !trial.needs.is_empty() {
+                let label = if trial.result.as_deref() == Some("failed") {
+                    "failed"
+                } else {
+                    "missing"
+                };
+                writeln!(w, "  {label}: {}", trial.needs.join(", "))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TextRow for LandingBatch {
+    const HEADER: &'static [&'static str] = &["BATCH", "STATE", "TO", "SIZE", "LANDED", "CREATED"];
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            match &self.outcome {
+                Some(outcome) => outcome.clone(),
+                None => self.state.clone(),
+            },
+            self.destination.clone(),
+            self.members.len().to_string(),
+            self.landed_count.to_string(),
+            self.created_at.clone().unwrap_or_else(|| "-".to_owned()),
         ]
     }
 }

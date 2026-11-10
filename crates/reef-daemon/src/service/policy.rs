@@ -860,10 +860,9 @@ pub(crate) fn landing_input(
     }
 }
 
-/// `evaluation` as the API's message.
-pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluation {
-    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
-    let need = |need: &reef_policy::Need| v1::PolicyEvidenceNeed {
+/// `need` as the API's message.
+pub(crate) fn need_message(need: &reef_policy::Need) -> v1::PolicyEvidenceNeed {
+    v1::PolicyEvidenceNeed {
         kind: need.kind.clone(),
         target: need.target.clone(),
         attestors: need.attestors.clone(),
@@ -876,8 +875,14 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
                 why: r.why.clone(),
             })
             .collect(),
-        rejected_total: count(need.rejected_total),
-    };
+        rejected_total: u32::try_from(need.rejected_total.max(0)).unwrap_or(u32::MAX),
+    }
+}
+
+/// `evaluation` as the API's message.
+pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluation {
+    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+    let need = need_message;
     v1::PolicyEvaluation {
         decision: match evaluation.decision {
             Decision::Allow => v1::PolicyDecision::Allow,
@@ -1071,6 +1076,7 @@ impl PolicyService for PolicyHandler {
                 provenance_ignored,
                 proposed_policy: proposed_policy(&state, proposed.as_ref()),
                 landing,
+                batch: reef_policy::Batch::default(),
             };
             let policy = if from_request {
                 Source::Text(&request_policy)

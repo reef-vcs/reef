@@ -297,6 +297,9 @@ pub const ATTR_LIFECYCLE: &str = "reef.lifecycle";
 /// The attribute naming the landing an operation recorded (R3.13): its id,
 /// `lnd_<16 hex>`.
 pub const ATTR_LANDING: &str = "reef.landing";
+/// The attribute naming the batch an operation tested or landed (R3.14):
+/// its id, `bat_<16 hex>`.
+pub const ATTR_BATCH: &str = "reef.batch";
 
 /// Separates an agent from the remote token it carries; see
 /// [`RemoteToken::mark`].
@@ -366,6 +369,9 @@ pub enum OpKind {
     /// The landing service moved a destination bookmark onto a change
     /// (R3.13).
     Land,
+    /// The landing service wrote or abandoned a batch's trial commits
+    /// (R3.14).
+    Batch,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -374,7 +380,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 12] = [
+    pub const WRITTEN: [OpKind; 13] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -386,6 +392,7 @@ impl OpKind {
         OpKind::ImportRefs,
         OpKind::Transition,
         OpKind::Land,
+        OpKind::Batch,
         OpKind::Other,
     ];
 
@@ -403,6 +410,7 @@ impl OpKind {
             OpKind::ImportRefs => "import-refs",
             OpKind::Transition => "transition",
             OpKind::Land => "land",
+            OpKind::Batch => "batch",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -437,6 +445,8 @@ pub struct OpMeta {
     pub transitions: Vec<super::lifecycle::TransitionRecord>,
     /// [`ATTR_LANDING`]: the landing it records (R3.13).
     pub landing: Option<String>,
+    /// [`ATTR_BATCH`]: the batch it tests or lands (R3.14).
+    pub batch: Option<String>,
 }
 
 impl OpMeta {
@@ -451,6 +461,7 @@ impl OpMeta {
             agent: None,
             transitions: Vec::new(),
             landing: None,
+            batch: None,
         }
     }
 
@@ -494,6 +505,7 @@ impl OpMeta {
             (ATTR_SNAPSHOT_KIND, self.snapshot_kind.as_deref()),
             (ATTR_WORKSPACE, self.workspace.as_deref()),
             (ATTR_LANDING, self.landing.as_deref()),
+            (ATTR_BATCH, self.batch.as_deref()),
             (ATTR_AGENT, agent),
             (ATTR_REMOTE_TOKEN, remote.as_ref().map(|r| r.id.as_str())),
             (
@@ -553,7 +565,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 13] = [
+const WRITES: [(&str, OpKind); 15] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -567,7 +579,15 @@ const WRITES: [(&str, OpKind); 13] = [
     ("reef: queue change ", OpKind::Transition),
     ("reef: dequeue change ", OpKind::Transition),
     ("reef: unpropose change ", OpKind::Transition),
+    (TEST_BATCH_PREFIX, OpKind::Batch),
+    (END_BATCH_PREFIX, OpKind::Batch),
 ];
+/// The description of an operation writing a batch's trial commit (R3.14),
+/// before the batch id.
+pub const TEST_BATCH_PREFIX: &str = "reef: test batch ";
+/// The description of an operation abandoning a batch's trial commits
+/// without landing (R3.14), before the batch id.
+pub const END_BATCH_PREFIX: &str = "reef: end batch ";
 /// The description of a transition (R3.09): `reef: <verb> change <change
 /// id>`, where the verb is `propose`, `withdraw`, `decline`, `supersede` or
 /// `land`, which [`classify`] reads back.

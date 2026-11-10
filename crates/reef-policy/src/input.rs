@@ -46,6 +46,31 @@ pub struct Input {
     /// Where the change would land (R3.13): the destination and what
     /// rebasing onto it does. Empty outside a landing or its preview.
     pub landing: Landing,
+    /// The batch the change lands in (R3.14): empty at the gate, in
+    /// `EvaluatePolicy` and in simulation; set in a landing's evaluations.
+    pub batch: Batch,
+}
+
+/// The batch a change lands in (R3.14, ADR 0067): its id, how many changes
+/// it has, this change's position from 1, and the tested tree and the trial
+/// commit carrying it (empty when the batch needed no executor run). Judged
+/// at landing only; to land a change by itself, use `[landing] alone`
+/// rather than a rule over `batch.size`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "policy.Batch")]
+pub struct Batch {
+    /// The batch id (`bat_…`); empty outside a landing.
+    pub id: String,
+    /// How many changes the batch has.
+    pub size: i64,
+    /// This change's position in it, from 1.
+    pub position: i64,
+    /// The tree whose evidence the change's `[[require]]` rules were judged
+    /// on under `[landing] checks = "batch"`.
+    pub tree: String,
+    /// The trial commit carrying `tree`; empty when none was written.
+    pub commit: String,
 }
 
 /// What landing the change does (R3.13, ADR 0064): the destination it

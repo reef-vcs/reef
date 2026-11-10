@@ -292,6 +292,16 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<land::Landing>,
         object::<land::BriefLanding<'static>>,
     ),
+    view(
+        &["landing", "batches"],
+        list::<land::LandingBatch>,
+        list::<land::BriefBatch<'static>>,
+    ),
+    view(
+        &["landing", "batch"],
+        object::<land::LandingBatch>,
+        object::<land::BriefBatch<'static>>,
+    ),
     row(&["undo"], object::<Undone>),
     row(&["op", "log"], list::<Operation>),
     row(&["op", "show"], object::<Operation>),

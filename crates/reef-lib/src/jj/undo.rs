@@ -177,6 +177,12 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
     if classify(&entry(op)).kind == Some(OpKind::MoveWorkspace) && !op.metadata().is_snapshot {
         return refuse("it moves a workspace; move the workspace back instead");
     }
+    // A batch's trial commits are the landing service's (R3.14).
+    if classify(&entry(op)).kind == Some(OpKind::Batch) {
+        return refuse(
+            "the landing service owns trial commits; withdraw a change to take it out of its batch",
+        );
+    }
     // The daemon reverts a lifecycle transition in its own rows (R3.09); a
     // view revert would leave them as they are.
     if op

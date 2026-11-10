@@ -520,6 +520,10 @@ pub struct Executor {
     queued: Notify,
     /// Signalled when a due time may have moved earlier.
     timer: Notify,
+    /// Signalled after every committed change to a job: evidence stored,
+    /// a claim, a completion, an expiry, a cancellation (R3.14's batches
+    /// wait on it).
+    changed: Notify,
     /// Waiting claims by remote token.
     waiting: Mutex<HashMap<String, usize>>,
 }
@@ -542,8 +546,15 @@ impl Executor {
             offset_ms: AtomicI64::new(0),
             queued: Notify::new(),
             timer: Notify::new(),
+            changed: Notify::new(),
             waiting: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Signalled after every committed change to a job (R3.14): register
+    /// with `notified()` before reading, then wait.
+    pub fn changed(&self) -> &Notify {
+        &self.changed
     }
 
     /// The configuration.
@@ -700,6 +711,7 @@ impl Executor {
             self.queued.notify_waiters();
         }
         self.timer.notify_one();
+        self.changed.notify_waiters();
     }
 
     /// Claims the best matching queued job for `claimant`, waiting up to

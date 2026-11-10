@@ -16,7 +16,7 @@ A proposal is a change put forward for main. It is not a separate object: it is 
 
 A change Reef never recorded reads `draft`, or `landed` when it is already immutable (on `trunk()` or under a tag), with `recorded: false`: most of a repository's history landed before Reef.
 
-Testing, batching and bisecting are what the landing pipeline does to a queued change (R3.14), shown as presence, not lifecycle states. Accepting a proposal is not a state either: a reviewer signs a `signoff` evidence object on the change's tree (`reef evidence add --kind signoff --result pass --actor human`), and the [policy](policy.md) counts it.
+Testing, batching and bisecting are what the landing pipeline does to a queued change ([batches](landing.md#batches), R3.14): a queued change's batch (`reef landing batch`) says where it is, not its lifecycle state. Accepting a proposal is not a state either: a reviewer signs a `signoff` evidence object on the change's tree (`reef evidence add --kind signoff --result pass --actor human`), and the [policy](policy.md) counts it.
 
 ## Moving a change
 

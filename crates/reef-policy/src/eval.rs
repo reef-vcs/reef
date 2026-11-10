@@ -738,12 +738,14 @@ impl Policy {
         let evidence = serde_json::to_value(&evaluator.input.evidence).unwrap_or_default();
         let provenance = serde_json::to_value(&evaluator.input.provenance).unwrap_or_default();
         let landing = serde_json::to_value(&evaluator.input.landing).unwrap_or_default();
+        let batch = serde_json::to_value(&evaluator.input.batch).unwrap_or_default();
         let shapes = shapes();
         evaluator.sizes = Sizes::of(&[
             ("change", &change, &shapes.change),
             ("evidence", &evidence, &shapes.evidence),
             ("provenance", &provenance, &shapes.provenance),
             ("landing", &landing, &shapes.landing),
+            ("batch", &batch, &shapes.batch),
             ("groups", &groups_json, &shapes.groups),
         ]);
         evaluator.context = env::context(vec![
@@ -751,6 +753,7 @@ impl Policy {
             ("evidence", env::to_value(&evaluator.input.evidence)),
             ("provenance", env::to_value(&evaluator.input.provenance)),
             ("landing", env::to_value(&evaluator.input.landing)),
+            ("batch", env::to_value(&evaluator.input.batch)),
             ("groups", groups_value),
         ]);
         if !problems.is_empty() {

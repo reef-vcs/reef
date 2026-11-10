@@ -1470,6 +1470,16 @@ pub(crate) fn map_operations(
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map landings' operation ids");
         }
     }
+    // And batches' (R3.14).
+    match state.db.map_batch_operations(repo, &map) {
+        Ok((mapped, collected)) if mapped + collected > 0 => {
+            tracing::info!(%repo, mapped, collected, "mapped batches' operation ids");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map batches' operation ids");
+        }
+    }
 }
 
 /// A `ListProposals` page: rows matching `filter` after `after`.

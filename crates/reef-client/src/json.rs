@@ -1228,6 +1228,7 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::ImportRefs) => "import-refs",
         Ok(v1::OperationKind::Transition) => "transition",
         Ok(v1::OperationKind::Land) => "land",
+        Ok(v1::OperationKind::Batch) => "batch",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
         Err(_) => UNKNOWN,

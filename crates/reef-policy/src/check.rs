@@ -144,6 +144,7 @@ pub(crate) struct Shapes {
     pub(crate) evidence: Shape,
     pub(crate) provenance: Shape,
     pub(crate) landing: Shape,
+    pub(crate) batch: Shape,
     pub(crate) groups: Shape,
     pub(crate) e: Shape,
     pub(crate) conflict: Shape,
@@ -162,6 +163,7 @@ pub(crate) fn shapes() -> &'static Shapes {
             evidence: field("evidence"),
             provenance: field("provenance"),
             landing: field("landing"),
+            batch: field("batch"),
             groups: Shape::Map(Box::new(Shape::List(Box::new(Shape::Scalar)))),
             e: Shape::of::<Evidence>(),
             conflict: Shape::of::<ConflictInput>(),
@@ -179,6 +181,7 @@ impl Scope {
                 ("evidence", &shapes.evidence, "evidence"),
                 ("provenance", &shapes.provenance, "provenance"),
                 ("landing", &shapes.landing, "landing"),
+                ("batch", &shapes.batch, "batch"),
                 ("groups", &shapes.groups, "groups"),
             ],
             Scope::Evidence => vec![
@@ -366,7 +369,7 @@ impl Checker {
             (Scope::Change, "e") => {
                 "; `e` is an attestor set's `when` variable: iterate `evidence` instead"
             }
-            (Scope::Evidence, "change" | "evidence" | "provenance" | "landing") => {
+            (Scope::Evidence, "change" | "evidence" | "provenance" | "landing" | "batch") => {
                 "; an attestor set's `when` sees one evidence object, `e`"
             }
             _ => "",
@@ -577,6 +580,8 @@ mod tests {
             "optional.of(1).hasValue()",
             "evidence.map(x, x.kind).exists(k, k == 'test')",
             "[1, 2].exists_one(x, x == 1)",
+            "batch.size <= 1 || batch.tree == change.tree",
+            "batch.position == 1 && batch.id.startsWith('bat_') && batch.commit != ''",
         ] {
             assert_eq!(
                 problems(source, Scope::Change),
@@ -611,6 +616,11 @@ mod tests {
                 "unknown variable `chnage`",
             ),
             ("change.pahts.size() > 0", Scope::Change, "no field `pahts`"),
+            (
+                "batch.members.size() > 0",
+                Scope::Change,
+                "no field `members`",
+            ),
             (
                 "change.files.all(f, f.lines > 0)",
                 Scope::Change,
