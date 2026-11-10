@@ -64,6 +64,10 @@
 //!    ([`crate::executor::retention`]). Open jobs are never touched. A
 //!    failure is logged and reported in [`GcReport::jobs_error`], as step
 //!    7's is.
+//! 10. **Conflict assignments** (R3.27, ADR 0068): assignments closed more
+//!     than 30 days ago (and before `keep_newer`), with their events
+//!     ([`crate::assign::sweep`]). Open ones are never touched. Not in a
+//!     dry run; a failure is logged.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -538,6 +542,13 @@ async fn run_repo(
             }
         };
 
+    // 10. (after 9, below)
+    let sweep_assignments = || {
+        let db = Arc::clone(&state.db);
+        let keep = Timestamp::from(keep_newer);
+        tokio::task::spawn_blocking(move || crate::assign::sweep(&db, id, keep))
+    };
+
     // 9.
     let (jobs_removed, jobs_error) = {
         let db = Arc::clone(&state.db);
@@ -569,6 +580,20 @@ async fn run_repo(
             }
         }
     };
+    if !dry_run {
+        match sweep_assignments().await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(removed)) => {
+                tracing::info!(removed, "closed conflict assignments deleted");
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(error = %ErrorChain(&error), "the conflict assignment step of GC stopped short");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "the conflict assignment step of GC stopped short");
+            }
+        }
+    }
 
     // Session keys are machine-wide: the first report sweeps them, after
     // steps 7 and 8 have deleted the evidence and provenance that named

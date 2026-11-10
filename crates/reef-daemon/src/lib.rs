@@ -11,6 +11,7 @@
 //! See <https://github.com/reef-vcs/reef> for the design document and roadmap.
 
 pub mod artifacts;
+pub mod assign;
 pub mod backend;
 pub mod comments;
 pub mod config;

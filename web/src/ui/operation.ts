@@ -16,6 +16,7 @@ const KINDS: Partial<Record<OperationKind, string>> = {
   [OperationKind.LAND]: "land",
   [OperationKind.COMMENT]: "comment",
   [OperationKind.BATCH]: "batch",
+  [OperationKind.CONFLICT_ASSIGNMENT]: "conflict assignment",
   [OperationKind.EXTERNAL]: "external",
   [OperationKind.OTHER]: "other",
 };

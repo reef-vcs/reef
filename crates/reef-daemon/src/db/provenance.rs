@@ -319,6 +319,24 @@ impl Db {
         })
     }
 
+    /// The live sessions of `repo` whose declared client session is
+    /// `client_session`, newest first (R3.27's following).
+    pub fn live_sessions_by_client(
+        &self,
+        repo: RepoId,
+        client_session: &str,
+    ) -> Result<Vec<ProvenanceSessionRow>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM provenance_sessions
+                 WHERE repo_id = ?1 AND client_session = ?2 AND ended_at IS NULL
+                 ORDER BY started_at DESC, session_id"
+            ))?;
+            stmt.query_map(params![repo, client_session], session_from_row)?
+                .collect()
+        })
+    }
+
     /// The live sessions of `workspace_ids`, with how many records each has,
     /// by workspace id.
     pub fn live_provenance_sessions(

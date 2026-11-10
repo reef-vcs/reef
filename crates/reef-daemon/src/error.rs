@@ -140,6 +140,12 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::assign::AssignError>() {
+            match error {
+                crate::assign::AssignError::Revision(error) => revision_advice(error),
+                crate::assign::AssignError::Db(error) => error.advice(),
+                error => error.advice(),
+            }
         } else if let Some(error) = error.downcast_ref::<RetentionError>() {
             match error {
                 RetentionError::Db(error) => error.advice(),
@@ -639,6 +645,16 @@ fn snapshot_failed(error: &(dyn Error + 'static)) -> Option<String> {
     None
 }
 
+/// An assignment refusal's reason (R3.27).
+fn assign_reason(
+    error: &crate::assign::AssignError,
+) -> Option<(&'static str, BTreeMap<String, String>)> {
+    match error {
+        crate::assign::AssignError::Revision(error) => revision_reason(error),
+        error => error.reason().map(|(reason, pairs)| (reason, meta(&pairs))),
+    }
+}
+
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -722,6 +738,8 @@ fn reason_and_metadata(
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::assign::AssignError>() {
+            assign_reason(error)
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {
             replay_reason(error)
         } else if let Some(error) = error.downcast_ref::<WebError>() {

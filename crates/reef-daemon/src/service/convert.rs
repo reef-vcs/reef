@@ -406,6 +406,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
             .cloned()
             .unwrap_or_default(),
         comments: crate::comments::messages::operation_comments(entry),
+        conflict_events: crate::assign::messages::operation_events(entry),
     }
 }
 
@@ -650,6 +651,7 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::Land) => v1::OperationKind::Land,
         Some(OpKind::Comment) => v1::OperationKind::Comment,
         Some(OpKind::Batch) => v1::OperationKind::Batch,
+        Some(OpKind::ConflictAssignment) => v1::OperationKind::ConflictAssignment,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
     }
@@ -728,6 +730,7 @@ pub(super) fn listed_operation(
             .cloned()
             .unwrap_or_default(),
         comments: crate::comments::messages::operation_comments(entry),
+        conflict_events: crate::assign::messages::operation_events(entry),
     }
 }
 

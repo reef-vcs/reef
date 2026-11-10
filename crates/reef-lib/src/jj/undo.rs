@@ -203,6 +203,17 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
             "it records comments; cancel an instruction with `reef comment cancel` instead",
         );
     }
+    // An assignment's rows are the daemon's (R3.27); its operations only
+    // announce them and change nothing a view revert could undo.
+    if op
+        .metadata()
+        .attributes
+        .contains_key(super::oplog::ATTR_CONFLICT)
+    {
+        return refuse(
+            "it records conflict assignments; release or assign the conflict instead (reef conflict)",
+        );
+    }
     let git = |view: &View| {
         (
             view.git_refs.clone(),

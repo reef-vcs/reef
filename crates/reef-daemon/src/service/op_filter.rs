@@ -96,7 +96,9 @@ impl OpMatcher {
             return false;
         }
         let workspace = class.workspace_id.as_deref();
-        if !self.workspaces.is_empty() && !workspace.is_some_and(|id| self.workspaces.contains(id))
+        if !self.workspaces.is_empty()
+            && !workspace.is_some_and(|id| self.workspaces.contains(id))
+            && !self.owns_an_event(entry)
         {
             return false;
         }
@@ -113,9 +115,22 @@ impl OpMatcher {
         true
     }
 
+    /// Whether `entry` announces a resolver assignment event (R3.27) whose
+    /// owner works in a workspace the filter names.
+    fn owns_an_event(&self, entry: &OpEntry) -> bool {
+        entry.attributes.contains_key(oplog::ATTR_CONFLICT)
+            && reef_lib::jj::assignment::notices_of(&entry.attributes)
+                .iter()
+                .any(|notice| {
+                    self.workspaces.contains(notice.workspace.as_str())
+                        || self.workspaces.contains(notice.from_workspace.as_str())
+                })
+    }
+
     /// Whether `entry`'s `effects`, the lifecycle transitions it records
-    /// (R3.09), or the comment events it records (R3.12), touch a change
-    /// the filter names; false without any.
+    /// (R3.09), the comment events it records (R3.12), or the assignment
+    /// events it announces (R3.27), touch a change the filter names; false
+    /// without any.
     pub(crate) fn touches(&self, entry: &OpEntry, effects: Option<&OpEffects>) -> bool {
         if effects.is_some_and(|effects| self.changes.iter().any(|prefix| effects.touches(prefix)))
         {
@@ -130,6 +145,17 @@ impl OpMatcher {
             && reef_lib::jj::comments::comment_events_of(&entry.attributes)
                 .iter()
                 .any(|event| named(&event.change))
+        {
+            return true;
+        }
+        if entry.attributes.contains_key(oplog::ATTR_CONFLICT)
+            && reef_lib::jj::assignment::notices_of(&entry.attributes)
+                .iter()
+                .any(|notice| {
+                    self.changes
+                        .iter()
+                        .any(|prefix| notice.change.starts_with(prefix.as_str()))
+                })
         {
             return true;
         }

@@ -524,6 +524,21 @@ pub struct WorkspaceStatus<'a> {
     conflicted_path_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
+    /// The open resolver assignments its session owns (R3.27).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    conflict_assignments: Vec<AssignmentRef<'a>>,
+    #[serde(skip_serializing_if = "is_zero")]
+    conflict_assignment_count: u32,
+}
+
+/// A resolver assignment, as a status names it: its id, change and state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.ConflictAssignment")]
+pub struct AssignmentRef<'a> {
+    id: &'a str,
+    change_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a str>,
 }
 
 impl<'a> From<&'a json::WorkspaceStatus> for WorkspaceStatus<'a> {
@@ -537,6 +552,16 @@ impl<'a> From<&'a json::WorkspaceStatus> for WorkspaceStatus<'a> {
             conflicted_paths: &status.conflicted_paths,
             conflicted_path_count: status.conflicted_path_count,
             source: status.source.as_deref(),
+            conflict_assignments: status
+                .conflict_assignments
+                .iter()
+                .map(|row| AssignmentRef {
+                    id: &row.id,
+                    change_id: &row.change_id,
+                    state: row.state.as_deref(),
+                })
+                .collect(),
+            conflict_assignment_count: status.conflict_assignment_count,
         }
     }
 }
@@ -723,6 +748,8 @@ mod tests {
                 source: Some("index".into()),
                 walk_reason: None,
                 snapshot: None,
+                conflict_assignments: Vec::new(),
+                conflict_assignment_count: 0,
             }),
         }
     }

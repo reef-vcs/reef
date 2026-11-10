@@ -38,6 +38,8 @@ const MAX_MAX_FILES: usize = 1000;
 const MAX_LISTED: usize = 100;
 /// Conflicted paths a workspace status lists at most.
 const MAX_CONFLICTED_PATHS: usize = 1000;
+/// Open resolver assignments a workspace's status lists (R3.27).
+const STATUS_ASSIGNMENTS: usize = 10;
 
 /// Serves `StatusService`.
 #[derive(Debug)]
@@ -303,8 +305,24 @@ impl StatusService for StatusHandler {
                 snapshot: None,
                 conflicted_path_count: to_u32(found.conflicted_count),
                 walk_reason: v1::StatusWalkReason::Unspecified.into(),
+                conflict_assignments: Vec::new(),
+                conflict_assignment_count: 0,
             }),
             (Some(record), Some(found)) => {
+                // The open assignments its session owns (R3.27), as the
+                // daemon last looked.
+                let (owned, count) = state
+                    .db
+                    .assignments_owned_by(&record.id.as_hex(), STATUS_ASSIGNMENTS)
+                    .map_err(status)?;
+                let mut names = crate::assign::messages::Names::default();
+                let conflict_assignments = owned
+                    .iter()
+                    .map(|row| {
+                        crate::assign::messages::assignment_message(state, &mut names, row, 0)
+                    })
+                    .collect();
+                let conflict_assignment_count = u32::try_from(count).unwrap_or(u32::MAX);
                 let inspected = state
                     .manager
                     .inspect(record.id, false, false, None)
@@ -334,6 +352,8 @@ impl StatusService for StatusHandler {
                     snapshot: snapshot.and_then(|taken| taken.operation),
                     conflicted_path_count: to_u32(found.conflicted_count),
                     walk_reason: walk_reason.into(),
+                    conflict_assignments,
+                    conflict_assignment_count,
                 })
             }
             _ => None,

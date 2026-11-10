@@ -8,6 +8,7 @@
 
 use reef_client::backup::Manifest;
 use reef_client::brief;
+use reef_client::json::{self, Proposal, ProposalHistory, Transitioned};
 use reef_client::json::{
     Abandoned, Artifact, ArtifactUploaded, BuiltStore, ChangeSummary, Created, CreatedRemoteToken,
     Described, Diff, Evidence, EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History,
@@ -18,12 +19,12 @@ use reef_client::json::{
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
 use reef_client::json::{OidcMatch, OidcMatchRevoked};
-use reef_client::json::{Proposal, ProposalHistory, Transitioned};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    comment, conflict, guide, here, init, land, policy, presence, provider, remote, ws, ws_run,
+    comment, conflict, conflict_assign, guide, here, init, land, policy, presence, provider,
+    remote, ws, ws_run,
 };
 
 /// A schema of what a command prints, built in the document's generator
@@ -577,6 +578,55 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
             object::<conflict::BriefConflict<'static>>,
         )
     },
+    OutputRow {
+        note: Some("the resolver queue in order, until --limit; each with its queue position"),
+        ..view(
+            &["conflict", "queue"],
+            list::<json::ConflictAssignment>,
+            list::<conflict_assign::BriefAssignment<'static>>,
+        )
+    },
+    OutputRow {
+        note: Some("open assignments (or --state's) until --limit, the queue first in its order"),
+        ..view(
+            &["conflict", "assignments"],
+            list::<json::ConflictAssignment>,
+            list::<conflict_assign::BriefAssignment<'static>>,
+        )
+    },
+    OutputRow {
+        note: Some("the assignment and every page of its events, oldest first"),
+        ..view(
+            &["conflict", "assignment"],
+            object::<conflict_assign::AssignmentShown>,
+            object::<conflict_assign::BriefAssignment<'static>>,
+        )
+    },
+    OutputRow {
+        note: Some(
+            "outside a workspace, `workspace` is the one it created on the change; an assignment another session holds is an error (5, reason ASSIGNMENT_HELD)",
+        ),
+        ..view(
+            &["conflict", "claim"],
+            object::<conflict_assign::AssignmentChanged>,
+            object::<conflict_assign::BriefAssignment<'static>>,
+        )
+    },
+    view(
+        &["conflict", "release"],
+        object::<conflict_assign::AssignmentChanged>,
+        object::<conflict_assign::BriefAssignment<'static>>,
+    ),
+    view(
+        &["conflict", "assign"],
+        object::<conflict_assign::AssignmentChanged>,
+        object::<conflict_assign::BriefAssignment<'static>>,
+    ),
+    view(
+        &["conflict", "take"],
+        object::<conflict_assign::AssignmentChanged>,
+        object::<conflict_assign::BriefAssignment<'static>>,
+    ),
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

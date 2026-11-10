@@ -164,6 +164,18 @@ impl TextRender for RepoStatus {
                     "Each side, where it came from and who wrote it: reef conflict show"
                 )?;
             }
+            if ws.conflict_assignment_count > 0 {
+                writeln!(
+                    w,
+                    "Assigned to you: {} conflict{} to resolve: reef conflict assignments --mine",
+                    ws.conflict_assignment_count,
+                    if ws.conflict_assignment_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )?;
+            }
         }
         if let Some(repo) = &self.repository {
             writeln!(w, "Repository {} at {}", repo.id, repo.root)?;

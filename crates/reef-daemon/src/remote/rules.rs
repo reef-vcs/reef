@@ -115,6 +115,18 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         "/reef.api.v1.CommentService/ClaimInstruction",
         Rule::Comment,
     ),
+    // A claim and a release name a workspace the caller's token created
+    // (R3.27).
+    (
+        "/reef.api.v1.ConflictService/ClaimConflict",
+        Rule::OwnWorkspace,
+    ),
+    (
+        "/reef.api.v1.ConflictService/ReleaseConflict",
+        Rule::OwnWorkspace,
+    ),
+    // Any token reassigns or queues; the handler refuses `take` (R3.27).
+    ("/reef.api.v1.ConflictService/AssignConflict", Rule::None),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

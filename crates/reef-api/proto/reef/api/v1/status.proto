@@ -4,6 +4,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "reef/api/v1/changes.proto";
+import "reef/api/v1/conflicts.proto";
 import "reef/api/v1/files.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
@@ -176,4 +177,10 @@ message WorkspaceStatus {
   // Why the tree was walked; set only when `source` is STATUS_SOURCE_WALK
   // (R2.23).
   StatusWalkReason walk_reason = 10;
+  // The open resolver assignments this workspace's live session owns
+  // (R3.27), at most 10, newest first; read as the daemon last looked, at
+  // most a second behind, and empty with `at_operation`.
+  repeated ConflictAssignment conflict_assignments = 11;
+  // Such assignments, in all.
+  uint32 conflict_assignment_count = 12;
 }

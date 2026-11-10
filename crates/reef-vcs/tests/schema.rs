@@ -933,6 +933,39 @@ async fn outputs_match_their_schemas() {
     script
         .both(&root, &["conflict", "show", "-r", &rebased, "--hunks"])
         .await;
+    // R3.27: its assignment, queued, claimed, released and taken over.
+    let left_id = text(&left["id"]);
+    script.both(&root, &["conflict", "assignments"]).await;
+    script
+        .both(&root, &["conflict", "assignment", &rebased])
+        .await;
+    script
+        .json(&root, &["conflict", "assign", &rebased, "--queue"])
+        .await;
+    script
+        .run(&root, &["conflict", "assign", &rebased, "--priority", "5"])
+        .await;
+    script.both(&root, &["conflict", "queue"]).await;
+    script
+        .json(
+            &root,
+            &["conflict", "claim", "--next", "--workspace", &left_id],
+        )
+        .await;
+    script
+        .json(&root, &["conflict", "release", "--workspace", &left_id])
+        .await;
+    script
+        .run(
+            &root,
+            &["conflict", "claim", &rebased, "--workspace", &left_id],
+        )
+        .await;
+    script
+        .run(&root, &["conflict", "release", "--workspace", &left_id])
+        .await;
+    script.json(&root, &["conflict", "take", &rebased]).await;
+    script.run(&root, &["conflict", "take", &rebased]).await;
     script
         .run(&root, &["ws", "release", &text(&left["id"])])
         .await;

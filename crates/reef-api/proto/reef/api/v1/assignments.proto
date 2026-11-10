@@ -1,0 +1,153 @@
+// Resolver assignments (R3.27, ADR 0068; docs/conflicts.md, "Who resolves
+// a conflict"): the types ConflictService's assignment RPCs and
+// `Operation.conflict_events` share.
+//
+// An assignment is the daemon's record that one change introduces a
+// conflict someone must resolve, and who that is: by default the newest
+// live session that recorded the change; the repository's resolver queue
+// when that session has ended; a resolver that claimed it from the queue;
+// or a person who took it over. Every change of an assignment is an event,
+// and an operation in the log announces it.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/lifecycle.proto";
+
+// Where an assignment stands.
+enum ConflictAssignmentState {
+  // Not set; in a request, no state.
+  CONFLICT_ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  // A live session owns it: the change's originating agent, one it was
+  // followed or returned to, a resolver that claimed it, or a workspace a
+  // caller assigned it to.
+  CONFLICT_ASSIGNMENT_STATE_ASSIGNED = 1;
+  // In the repository's resolver queue, waiting for a resolver to claim
+  // it.
+  CONFLICT_ASSIGNMENT_STATE_QUEUED = 2;
+  // A person took it over; no session's end affects it.
+  CONFLICT_ASSIGNMENT_STATE_TAKEN = 3;
+  // Reef never recorded work on the change, so nobody owns it, and it is
+  // queued only by a caller.
+  CONFLICT_ASSIGNMENT_STATE_UNOWNED = 4;
+  // The change no longer carries the conflict; `reason` says how.
+  CONFLICT_ASSIGNMENT_STATE_CLOSED = 5;
+}
+
+// Why an assignment's state and owner are what they are.
+enum ConflictAssignmentReason {
+  // Not set.
+  CONFLICT_ASSIGNMENT_REASON_UNSPECIFIED = 0;
+  // The newest live session that recorded the change, or the live session
+  // of a workspace editing a change with no records.
+  CONFLICT_ASSIGNMENT_REASON_DEFAULT = 1;
+  // The owner's session ended, and a live session of the same identity and
+  // declared client session took it.
+  CONFLICT_ASSIGNMENT_REASON_FOLLOWED = 2;
+  // A queued assignment went back to its ended owner's client session,
+  // live again, before anyone claimed it.
+  CONFLICT_ASSIGNMENT_REASON_RETURNED = 3;
+  // The owner's session ended and its grace passed: queued.
+  CONFLICT_ASSIGNMENT_REASON_OWNER_ENDED = 4;
+  // Reef never recorded the change: unowned.
+  CONFLICT_ASSIGNMENT_REASON_NO_OWNER = 5;
+  // A resolver claimed it from the queue.
+  CONFLICT_ASSIGNMENT_REASON_CLAIMED = 6;
+  // Its owner gave it up: queued.
+  CONFLICT_ASSIGNMENT_REASON_RELEASED = 7;
+  // A caller assigned it to a workspace, queued it, or changed its
+  // priority.
+  CONFLICT_ASSIGNMENT_REASON_ASSIGNED = 8;
+  // A person took it over.
+  CONFLICT_ASSIGNMENT_REASON_TAKEN = 9;
+  // The conflict changed (a new conflict id) and the assignment stayed.
+  CONFLICT_ASSIGNMENT_REASON_CHANGED = 10;
+  // Closed: the change has a visible, mutable commit that introduces no
+  // conflict.
+  CONFLICT_ASSIGNMENT_REASON_RESOLVED = 11;
+  // Closed: every conflicted file is now inherited from a parent, whose
+  // own assignment covers it.
+  CONFLICT_ASSIGNMENT_REASON_INHERITED = 12;
+  // Closed: the change has no visible commit.
+  CONFLICT_ASSIGNMENT_REASON_ABANDONED = 13;
+  // Closed: the change's commit is no longer mutable.
+  CONFLICT_ASSIGNMENT_REASON_IMMUTABLE = 14;
+  // A closed assignment opened again: the same conflict came back within
+  // 24 hours.
+  CONFLICT_ASSIGNMENT_REASON_REOPENED = 15;
+}
+
+// Who owns an assignment, as recorded when it took it. A session owner is a
+// provenance session (R3.04) and its workspace; a person who took it over
+// has an identity and no session.
+message ConflictOwner {
+  // The provenance session, `ses_` and 16 hex digits; empty for a person.
+  string session_id = 1;
+  // The workspace the session belongs to; empty for a person.
+  string workspace_id = 2;
+  // That workspace's owner, such as `claude@host`.
+  string workspace_owner = 3;
+  // The operator identity (R3.03), `idn_` and 16 hex digits; empty when
+  // the session bound none.
+  string identity_id = 4;
+  // Its name.
+  string identity_name = 5;
+  // `human`, `agent` or `ci`.
+  string actor = 6;
+  // The agent label the session declared.
+  string agent = 7;
+  // The client (harness) session the session declared (R3.44); declared,
+  // not verified.
+  string client_session = 8;
+  // The session is live: its workspace is active. Always false for a
+  // person.
+  bool live = 9;
+  // When the session ended; unset while it is live.
+  google.protobuf.Timestamp ended_at = 10;
+}
+
+// One change of an assignment. `Operation.conflict_events` carries the
+// events an operation announces with their ids, states, reason, priority
+// and the owner's workspace and agent only; GetConflictAssignment has the
+// rest.
+message ConflictAssignmentEvent {
+  // `cae_` and 16 hex digits.
+  string id = 1;
+  // Its sequence number in the repository, in the order events were
+  // recorded.
+  uint64 seq = 2;
+  // The assignment, `asg_` and 16 hex digits.
+  string assignment_id = 3;
+  // The change, in hex.
+  string change_id = 4;
+  // The conflict's id when the event was recorded.
+  string conflict_id = 5;
+  // The state before; unset when the assignment opened.
+  ConflictAssignmentState from_state = 6;
+  // The state after.
+  ConflictAssignmentState to_state = 7;
+  // Why.
+  ConflictAssignmentReason reason = 8;
+  // The owner afterwards; unset when nobody owns it.
+  ConflictOwner owner = 9;
+  // The priority afterwards.
+  int32 priority = 10;
+  // The reason the caller gave, if any.
+  string note = 11;
+  // Who caused it: HUMAN, AGENT, or DAEMON for what the daemon observed.
+  TransitionActor by_actor = 12;
+  // The caller's agent, from `reef-agent`.
+  string by_agent = 13;
+  // The caller's operator identity, `idn_` and 16 hex digits.
+  string by_identity_id = 14;
+  // The caller's workspace's provenance session.
+  string by_session_id = 15;
+  // The remote token, for a call through the remote listener.
+  string by_remote_token = 16;
+  // When it was recorded.
+  google.protobuf.Timestamp at = 17;
+  // The owner's workspace before, when the event moved the assignment away
+  // from it, so that workspace's subscribers see it too; empty otherwise.
+  string from_workspace_id = 18;
+}

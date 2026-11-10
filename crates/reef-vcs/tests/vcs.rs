@@ -5130,6 +5130,140 @@ async fn conflict_cli() {
     daemon.stop().await;
 }
 
+/// R3.27 test 13: the resolver queue from the CLI: `queue`, `claim --next`
+/// outside a workspace (which creates one on the change), `status`'s line,
+/// `release`, `take`, `assign --to`, and a refused claim with its `next`.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "each command, in turn")]
+async fn conflict_assignment_cli() {
+    let (daemon, repo) = fixture().await;
+    daemon.handle.state().assignments.set_grace(Duration::ZERO);
+    let (_a_commit, _b_commit, rebased) = conflicted(&daemon, &repo).await;
+    let root = repo.root.clone();
+
+    let queue = ok(&daemon, &root, &["-o", "json", "conflict", "queue"]).await;
+    let queue = queue.as_array().unwrap();
+    assert_eq!(queue.len(), 1, "{queue:?}");
+    assert_eq!(queue[0]["state"], "queued");
+    assert_eq!(queue[0]["reason"], "owner-ended");
+    assert_eq!(queue[0]["queue_position"], 1);
+    let id = queue[0]["id"].as_str().unwrap().to_owned();
+
+    // Outside a workspace, `claim --next` makes one on the change.
+    let claimed = ok(
+        &daemon,
+        &root,
+        &["-o", "json", "conflict", "claim", "--next"],
+    )
+    .await;
+    assert_eq!(claimed["assignment"]["state"], "assigned", "{claimed}");
+    assert_eq!(claimed["assignment"]["reason"], "claimed");
+    let made = PathBuf::from(claimed["workspace"]["path"].as_str().unwrap());
+    assert!(made.is_dir());
+    let made_id = claimed["workspace"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        claimed["assignment"]["owner"]["workspace_id"],
+        made_id.as_str()
+    );
+
+    // `reef status` in it names the assignment.
+    let text = stdout(&run_in(&daemon, &made, &["-o", "text", "status", "--no-snapshot"]).await);
+    assert!(text.contains("Assigned to you: 1 conflict"), "{text}");
+    let status = ok(&daemon, &made, &["-o", "json", "status", "--no-snapshot"]).await;
+    assert_eq!(status["workspace_status"]["conflict_assignment_count"], 1);
+    let mine = ok(
+        &daemon,
+        &made,
+        &["-o", "json", "conflict", "assignments", "--mine"],
+    )
+    .await;
+    assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
+    let listed = stdout(&run_in(&daemon, &root, &["-o", "text", "conflict", "list"]).await);
+    assert!(listed.contains("RESOLVER"), "{listed}");
+
+    // Another workspace cannot claim it while it is held.
+    let other = create_at(&daemon, &repo, None).await.workspace.unwrap();
+    let error = err(
+        &daemon,
+        &path(&other),
+        &["conflict", "claim", &id],
+        5,
+        reef_api::error::ASSIGNMENT_HELD,
+    )
+    .await;
+    assert_eq!(next_of(&error)[..3], ["reef", "conflict", "assign"]);
+
+    // Released from its workspace, back to the queue.
+    let released = ok(
+        &daemon,
+        &made,
+        &[
+            "-o",
+            "json",
+            "conflict",
+            "release",
+            "--reason",
+            "needs a person",
+        ],
+    )
+    .await;
+    assert_eq!(released["assignment"]["state"], "queued");
+
+    // A person takes it over, then hands it to the other workspace.
+    let taken = ok(&daemon, &root, &["-o", "json", "conflict", "take", &id]).await;
+    assert_eq!(taken["assignment"]["state"], "taken");
+    let assigned = ok(
+        &daemon,
+        &root,
+        &[
+            "-o",
+            "json",
+            "conflict",
+            "assign",
+            &id,
+            "--to",
+            &other.id,
+            "--priority",
+            "-3",
+        ],
+    )
+    .await;
+    assert_eq!(assigned["assignment"]["state"], "assigned");
+    assert_eq!(assigned["assignment"]["priority"], -3);
+    assert_eq!(
+        assigned["assignment"]["owner"]["workspace_id"],
+        other.id.as_str()
+    );
+
+    // Its history, by revision.
+    let shown = ok(
+        &daemon,
+        &root,
+        &["-o", "json", "conflict", "assignment", &rebased],
+    )
+    .await;
+    let reasons: Vec<&str> = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "default",
+            "owner-ended",
+            "claimed",
+            "released",
+            "taken",
+            "assigned"
+        ],
+        "{shown}"
+    );
+    assert_eq!(shown["events"][3]["note"], "needs a person");
+    daemon.stop().await;
+}
+
 // R3.42 test 12: `reef identity oidc`, `session issue --keyless` and
 // `evidence add --keyless` against the fake Fulcio and Rekor, every output
 // checked against `reef schema`.
