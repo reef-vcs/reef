@@ -297,6 +297,10 @@ pub const ATTR_LIFECYCLE: &str = "reef.lifecycle";
 /// The attribute naming the landing an operation recorded (R3.13): its id,
 /// `lnd_<16 hex>`.
 pub const ATTR_LANDING: &str = "reef.landing";
+/// The attribute recording comment events (R3.12): a
+/// [`CommentRecord`](super::comments::CommentRecord) as compact JSON, with
+/// ids and states only, never a comment's text.
+pub const ATTR_COMMENT: &str = "reef.comment";
 /// The attribute naming the batch an operation tested or landed (R3.14):
 /// its id, `bat_<16 hex>`.
 pub const ATTR_BATCH: &str = "reef.batch";
@@ -372,6 +376,8 @@ pub enum OpKind {
     /// The landing service wrote or abandoned a batch's trial commits
     /// (R3.14).
     Batch,
+    /// A comment was written or an instruction moved (R3.12).
+    Comment,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -380,7 +386,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 13] = [
+    pub const WRITTEN: [OpKind; 14] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -393,6 +399,7 @@ impl OpKind {
         OpKind::Transition,
         OpKind::Land,
         OpKind::Batch,
+        OpKind::Comment,
         OpKind::Other,
     ];
 
@@ -410,6 +417,7 @@ impl OpKind {
             OpKind::ImportRefs => "import-refs",
             OpKind::Transition => "transition",
             OpKind::Land => "land",
+            OpKind::Comment => "comment",
             OpKind::Batch => "batch",
             OpKind::External => "external",
             OpKind::Other => "other",
@@ -445,6 +453,9 @@ pub struct OpMeta {
     pub transitions: Vec<super::lifecycle::TransitionRecord>,
     /// [`ATTR_LANDING`]: the landing it records (R3.13).
     pub landing: Option<String>,
+    /// [`ATTR_COMMENT`]: the comment events it records (R3.12); empty for
+    /// none.
+    pub comment_events: Vec<super::comments::CommentEventRecord>,
     /// [`ATTR_BATCH`]: the batch it tests or lands (R3.14).
     pub batch: Option<String>,
 }
@@ -461,6 +472,7 @@ impl OpMeta {
             agent: None,
             transitions: Vec::new(),
             landing: None,
+            comment_events: Vec::new(),
             batch: None,
         }
     }
@@ -524,6 +536,12 @@ impl OpMeta {
                 super::lifecycle::LifecycleRecord::encode(&self.transitions),
             );
         }
+        if !self.comment_events.is_empty() {
+            tx.set_attribute(
+                ATTR_COMMENT.to_owned(),
+                super::comments::CommentRecord::encode(&self.comment_events),
+            );
+        }
     }
 
     /// Applies the attributes and commits `tx` with the description.
@@ -565,7 +583,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 15] = [
+const WRITES: [(&str, OpKind); 23] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -579,6 +597,14 @@ const WRITES: [(&str, OpKind); 15] = [
     ("reef: queue change ", OpKind::Transition),
     ("reef: dequeue change ", OpKind::Transition),
     ("reef: unpropose change ", OpKind::Transition),
+    ("reef: comment comment ", OpKind::Comment),
+    ("reef: instruct comment ", OpKind::Comment),
+    ("reef: confirm comment ", OpKind::Comment),
+    ("reef: claim comment ", OpKind::Comment),
+    ("reef: start comment ", OpKind::Comment),
+    ("reef: finish comment ", OpKind::Comment),
+    ("reef: cancel comment ", OpKind::Comment),
+    ("reef: release comment ", OpKind::Comment),
     (TEST_BATCH_PREFIX, OpKind::Batch),
     (END_BATCH_PREFIX, OpKind::Batch),
 ];

@@ -48,6 +48,7 @@ use reef_api::v0::daemon_client::DaemonClient as V0DaemonClient;
 use reef_api::v1;
 use reef_api::v1::artifact_service_client::ArtifactServiceClient;
 use reef_api::v1::change_service_client::ChangeServiceClient;
+use reef_api::v1::comment_service_client::CommentServiceClient;
 use reef_api::v1::conflict_service_client::ConflictServiceClient;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::diff_service_client::DiffServiceClient;
@@ -1963,6 +1964,85 @@ impl Client {
         let mut client =
             PolicyServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
         self.call("SimulatePolicy", client.simulate_policy(request))
+            .await
+    }
+
+    fn comments(&self) -> CommentServiceClient<Svc> {
+        CommentServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
+    }
+
+    /// `CommentService.CreateComment` (R3.12): a note or an instruction on
+    /// a change.
+    pub async fn create_comment(
+        &self,
+        request: v1::CreateCommentRequest,
+    ) -> Result<v1::CreateCommentResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("CreateComment", client.create_comment(request))
+            .await
+    }
+
+    /// `CommentService.GetComment` (R3.12): a comment and its replies.
+    pub async fn get_comment(
+        &self,
+        request: v1::GetCommentRequest,
+    ) -> Result<v1::GetCommentResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("GetComment", client.get_comment(request)).await
+    }
+
+    /// `CommentService.ListComments` (R3.12): one page.
+    pub async fn list_comments_page(
+        &self,
+        request: v1::ListCommentsRequest,
+    ) -> Result<v1::ListCommentsResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("ListComments", client.list_comments(request))
+            .await
+    }
+
+    /// The first `limit` comments `request` asks for (all when 0), oldest
+    /// first, and whether more exist.
+    pub async fn list_comments(
+        &self,
+        request: v1::ListCommentsRequest,
+        limit: usize,
+    ) -> Result<Limited<v1::Comment>, ClientError> {
+        let mut request = v1::ListCommentsRequest {
+            page_size: limited_page_size(limit),
+            page_token: String::new(),
+            ..request
+        };
+        let mut limited = Limited::default();
+        loop {
+            let response = self.list_comments_page(request.clone()).await?;
+            limited.items.extend(response.comments);
+            if limited.cut(limit, &response.next_page_token) {
+                return Ok(limited);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// `CommentService.UpdateInstruction` (R3.12): confirm, start, finish,
+    /// release or cancel an instruction.
+    pub async fn update_instruction(
+        &self,
+        request: v1::UpdateInstructionRequest,
+    ) -> Result<v1::UpdateInstructionResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("UpdateInstruction", client.update_instruction(request))
+            .await
+    }
+
+    /// `CommentService.ClaimInstruction` (R3.12): take an instruction for a
+    /// session.
+    pub async fn claim_instruction(
+        &self,
+        request: v1::ClaimInstructionRequest,
+    ) -> Result<v1::ClaimInstructionResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("ClaimInstruction", client.claim_instruction(request))
             .await
     }
 

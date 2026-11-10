@@ -160,6 +160,8 @@ pub struct AppState {
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
     /// The landing service's workers and waiters (R3.13).
     pub landings: crate::landing::Landings,
+    /// Comment locks and the instruction sweep's queue (R3.12).
+    pub comments: Arc<crate::comments::Comments>,
 }
 
 impl fmt::Debug for AppState {
@@ -449,6 +451,7 @@ impl Daemon {
             policy: Arc::new(crate::policy::Policies::default()),
             lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
             landings: crate::landing::Landings::default(),
+            comments: Arc::new(crate::comments::Comments::default()),
         });
 
         // Before any snapshot can run (R2.10).
@@ -479,6 +482,8 @@ impl Daemon {
         crate::lifecycle::observe::start(&state);
         // Queued landings resume (R3.13).
         crate::landing::start(&state);
+        // Instructions made moot by transitions, and expired ones (R3.12).
+        crate::comments::start(&state);
         let router = server::router(&state);
         let server = tokio::spawn(router.serve_with_incoming_shutdown(
             crate::limits::Accepting::new(listener),
@@ -623,6 +628,8 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     //    Then commit or drop the lifecycle transitions a crash left pending
     //    between their row and their operation (R3.09).
     crate::lifecycle::resolve_pending(state).await;
+    //    And the comment events (R3.12).
+    crate::comments::resolve_pending(state).await;
 
     // 6. Load active workspaces. A database failure here is logged; the
     //    daemon still serves registration and the database's view.

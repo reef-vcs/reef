@@ -23,7 +23,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    conflict, guide, here, init, land, policy, presence, provider, remote, ws, ws_run,
+    comment, conflict, guide, here, init, land, policy, presence, provider, remote, ws, ws_run,
 };
 
 /// A schema of what a command prints, built in the document's generator
@@ -292,6 +292,65 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<land::Landing>,
         object::<land::BriefLanding<'static>>,
     ),
+    view(
+        &["comment", "add"],
+        object::<comment::Written>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    OutputRow {
+        note: Some("pages until --limit comments, oldest first"),
+        ..view(
+            &["comment", "list"],
+            list::<comment::Comment>,
+            list::<comment::BriefComment<'static>>,
+        )
+    },
+    view(
+        &["comment", "show"],
+        object::<comment::Thread>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "confirm"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "cancel"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "start"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "done"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "fail"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    view(
+        &["comment", "release"],
+        object::<comment::Comment>,
+        object::<comment::BriefComment<'static>>,
+    ),
+    OutputRow {
+        note: Some(
+            "`comment` and `frame` are null when there was none to take; with --hook (a harness's hook), the framed instruction as text or a decision object, or nothing, and always exit 0",
+        ),
+        bytes_with: &["hook"],
+        ..view(
+            &["comment", "next"],
+            object::<comment::Next>,
+            object::<comment::BriefNext<'static>>,
+        )
+    },
     view(
         &["landing", "batches"],
         list::<land::LandingBatch>,

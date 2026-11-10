@@ -244,6 +244,7 @@ pub(super) enum Kind {
     ImportRefs,
     Transition,
     Land,
+    Comment,
     Batch,
     External,
     Other,
@@ -263,6 +264,7 @@ impl From<Kind> for v1::OperationKind {
             Kind::ImportRefs => Self::ImportRefs,
             Kind::Transition => Self::Transition,
             Kind::Land => Self::Land,
+            Kind::Comment => Self::Comment,
             Kind::Batch => Self::Batch,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
@@ -340,7 +342,7 @@ pub(super) struct WaitForOperations {
     pub(super) agents: Option<Vec<String>>,
     /// Only these operation kinds.
     pub(super) kinds: Option<Vec<Kind>>,
-    /// Wait for operations after this one (id or prefix), e.g. the last result's last_operation_id [default: the newest now].
+    /// Wait for operations after this one (id or prefix) [default: the newest now].
     pub(super) after_operation: Option<String>,
     /// Give up after this many seconds, 0 to check once [default: 30, at most 300].
     pub(super) timeout_seconds: Option<u64>,

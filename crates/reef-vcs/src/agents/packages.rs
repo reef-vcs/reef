@@ -123,8 +123,23 @@ fn declare_command(event: &HookEvent) -> String {
     )
 }
 
+/// An instruction hook's command (R3.12): `reef comment next --hook`, which
+/// never fails, starts no daemon, and prints only an instruction it took,
+/// in `emit`'s form, so its stdout is kept.
+fn instruct_command(event: &HookEvent, emit: crate::cli::comment::Emit) -> String {
+    let form = match emit {
+        crate::cli::comment::Emit::Context => "context",
+        crate::cli::comment::Emit::Block => "block",
+    };
+    format!(
+        "command -v reef >/dev/null 2>&1 && reef comment next --hook {} --emit {form} 2>/dev/null || true",
+        at(event.at)
+    )
+}
+
 /// The hook commands in `hooks.json`, as a harness runs them, for tests:
-/// the presence hooks', then each declaring event's.
+/// the presence hooks', then each declaring event's, then each
+/// instruction event's.
 fn hook_commands() -> Vec<String> {
     let facts = claude_code();
     let paths: Vec<String> = facts
@@ -142,6 +157,12 @@ fn hook_commands() -> Vec<String> {
         hook_command(&format!("end --session-at {}", facts.session)),
     ];
     commands.extend(facts.declare.iter().map(declare_command));
+    commands.extend(
+        facts
+            .instruct
+            .iter()
+            .map(|(event, emit)| instruct_command(event, *emit)),
+    );
     commands
 }
 
@@ -436,11 +457,18 @@ fn hooks_json() -> Json {
             Json::Array(vec![object(vec![("hooks", hook(&commands[1]))])]),
         ),
     ];
-    for (event, command) in facts.declare.iter().zip(&commands[2..]) {
-        events.push((
-            event.name,
-            Json::Array(vec![object(vec![("hooks", hook(command))])]),
-        ));
+    let names = facts
+        .declare
+        .iter()
+        .map(|event| event.name)
+        .chain(facts.instruct.iter().map(|(event, _)| event.name));
+    for (name, command) in names.zip(&commands[2..]) {
+        let group = object(vec![("hooks", hook(command))]);
+        // An event with several hooks keeps one key, its groups in order.
+        match events.iter_mut().find(|(event, _)| *event == name) {
+            Some((_, Json::Array(groups))) => groups.push(group),
+            _ => events.push((name, Json::Array(vec![group]))),
+        }
     }
     object(vec![("hooks", object(events))])
 }
@@ -745,13 +773,24 @@ mod tests {
         for command in commands {
             let line = command
                 .strip_prefix("command -v reef >/dev/null 2>&1 && ")
-                .and_then(|line| line.strip_suffix(" >/dev/null 2>&1 || true"))
+                .and_then(|line| {
+                    line.strip_suffix(" >/dev/null 2>&1 || true")
+                        .or_else(|| line.strip_suffix(" 2>/dev/null || true"))
+                })
                 .unwrap_or_else(|| panic!("{command}"));
             let words: Vec<&str> = line.split(' ').collect();
             assert!(
                 words[..3] == ["reef", "presence", "hook"]
-                    || words[..4] == ["reef", "provenance", "declare", "--hook"],
+                    || words[..4] == ["reef", "provenance", "declare", "--hook"]
+                    || words[..4] == ["reef", "comment", "next", "--hook"],
                 "{line}"
+            );
+            // Only an instruction hook prints: its stdout is the
+            // instruction the harness hands the model (R3.12).
+            assert_eq!(
+                command.contains(" >/dev/null 2>&1 || true"),
+                words[..3] != ["reef", "comment", "next"],
+                "{command}"
             );
             crate::cli::Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{line}: {e}"));
         }

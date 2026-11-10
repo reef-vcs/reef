@@ -42,6 +42,13 @@ pub(crate) enum Rule {
     /// (`crate::lifecycle::transition`). An undo of a transition needs the
     /// token that recorded it (`crate::lifecycle::undo`).
     Lifecycle,
+    /// Comments and instructions (R3.12), decided by the handler per call
+    /// (`crate::comments`): any token writes a note; an instruction, and a
+    /// claim that takes another session's, need a token linked to an
+    /// operator identity; confirm and cancel need the token that wrote it,
+    /// the later moves the token that claimed it, and a claim without
+    /// taking the token that proposed the change.
+    Comment,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -99,6 +106,15 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ("/reef.api.v1.ExecutorService/ClaimJob", Rule::LinkedToken),
     ("/reef.api.v1.ExecutorService/UpdateJob", Rule::OwnClaim),
     ("/reef.api.v1.ExecutorService/CompleteJob", Rule::OwnClaim),
+    ("/reef.api.v1.CommentService/CreateComment", Rule::Comment),
+    (
+        "/reef.api.v1.CommentService/UpdateInstruction",
+        Rule::Comment,
+    ),
+    (
+        "/reef.api.v1.CommentService/ClaimInstruction",
+        Rule::Comment,
+    ),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

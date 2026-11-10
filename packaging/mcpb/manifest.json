@@ -75,7 +75,7 @@
     },
     {
       "name": "wait_for_operations",
-      "description": "Wait until operations matching the filter are recorded (another agent's describe, edit or snapshot) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out}; pass last_operation_id back as after_operation for the next ones."
+      "description": "Wait until operations matching the filter are recorded (another agent's write) or the timeout passes; over 60 s may hit the client's tool timeout. Returns {operations (oldest first, at most 100), last_operation_id, timed_out, instructions}; pass last_operation_id back as after_operation for the next ones."
     },
     {
       "name": "create_workspace",

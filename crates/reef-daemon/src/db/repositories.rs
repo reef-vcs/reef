@@ -221,6 +221,8 @@ impl Db {
             tx.execute("DELETE FROM landing_batch_trials WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM landing_batch_members WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM landing_batches WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM comment_events WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM comments WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM repositories WHERE id = ?1", [id])?;
             Ok(())
         })

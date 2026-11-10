@@ -192,6 +192,17 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
     {
         return refuse("it records a lifecycle transition, which only the daemon undoes");
     }
+    // A comment's operation records what someone said or did with an
+    // instruction (R3.12); a delivered instruction cannot be unsent.
+    if op
+        .metadata()
+        .attributes
+        .contains_key(super::oplog::ATTR_COMMENT)
+    {
+        return refuse(
+            "it records comments; cancel an instruction with `reef comment cancel` instead",
+        );
+    }
     let git = |view: &View| {
         (
             view.git_refs.clone(),

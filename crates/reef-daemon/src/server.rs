@@ -73,9 +73,10 @@ use crate::service::workspaces::WorkspacesService;
 use crate::web::gate::{Gate, WebGateLayer};
 
 /// Every service [`routes`] registers, by full name.
-pub const SERVED: [&str; 23] = [
+pub const SERVED: [&str; 24] = [
     "reef.api.v1.ArtifactService",
     "reef.api.v1.ChangeService",
+    "reef.api.v1.CommentService",
     "reef.api.v1.ConflictService",
     "reef.api.v1.DaemonService",
     "reef.api.v1.DiffService",
@@ -152,6 +153,11 @@ pub fn routes(state: &Arc<AppState>) -> Routes {
     .add_service(
         reef_api::v1::landing_service_server::LandingServiceServer::new(
             crate::service::landing::LandingHandler::new(Arc::clone(state)),
+        ),
+    )
+    .add_service(
+        reef_api::v1::comment_service_server::CommentServiceServer::new(
+            crate::service::comments::CommentHandler::new(Arc::clone(state)),
         ),
     )
     .add_service(ProvenanceServiceServer::new(

@@ -52,3 +52,22 @@ describe("operationSentence for transitions", () => {
     ).toBe("tested a batch of changes");
   });
 });
+
+// R3.12: a comment operation's sentence names its first event.
+describe("operationSentence for comments", () => {
+  const base = { kind: OperationKind.COMMENT, snapshotKind: SnapshotKind.UNSPECIFIED };
+  it.each([
+    ["comment", "commented on a change"],
+    ["instruct", "wrote an instruction"],
+    ["confirm", "confirmed an instruction"],
+    ["claim", "took an instruction"],
+    ["finish", "finished an instruction"],
+    ["cancel", "cancelled an instruction"],
+  ])("%s", (event, sentence) => {
+    expect(operationSentence({ ...base, comments: [{ event }] })).toBe(sentence);
+  });
+
+  it("falls back without an event", () => {
+    expect(operationSentence(base)).toBe("commented on a change");
+  });
+});

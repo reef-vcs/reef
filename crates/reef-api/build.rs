@@ -19,6 +19,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/options.proto",
     "proto/reef/api/v1/error.proto",
     "proto/reef/api/v1/lifecycle.proto",
+    "proto/reef/api/v1/comment_event.proto",
     "proto/reef/api/v1/operations.proto",
     "proto/reef/api/v1/changes.proto",
     "proto/reef/api/v1/files.proto",
@@ -40,6 +41,7 @@ const V1: &[&str] = &[
     "proto/reef/api/v1/executor.proto",
     "proto/reef/api/v1/policy.proto",
     "proto/reef/api/v1/landing.proto",
+    "proto/reef/api/v1/comments.proto",
     "proto/reef/api/v1/conflicts.proto",
 ];
 

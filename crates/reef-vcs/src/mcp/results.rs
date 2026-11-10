@@ -103,6 +103,22 @@ pub(super) struct Waited {
     /// What to pass back as `after_operation` to wait for what comes next.
     pub(super) last_operation_id: Option<String>,
     pub(super) timed_out: bool,
+    /// Instructions for this server's session that the wait took (R3.12):
+    /// started, and framed for the model. Absent for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) instructions: Vec<Delivered>,
+}
+
+/// An instruction `wait_for_operations` took for the server's session.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "mcp.Delivered")]
+pub(super) struct Delivered {
+    /// The comment's id.
+    pub(super) id: String,
+    /// Its change, in hex.
+    pub(super) change_id: String,
+    /// Who wrote it, its text, and what to do when done.
+    pub(super) frame: String,
 }
 
 /// A page token as the results print it: `null` on the last page.

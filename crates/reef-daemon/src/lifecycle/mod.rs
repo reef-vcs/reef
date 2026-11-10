@@ -597,6 +597,8 @@ async fn record(
             rows.push(row);
         }
     }
+    // Instructions a re-proposal finishes or a final state cancels (R3.12).
+    state.comments.note_transitions(repo, &rows);
     Ok(Recorded { op_id, rows })
 }
 
@@ -626,9 +628,11 @@ pub(crate) fn commit_written_transition(
 ) -> Result<Option<TransitionRow>, LifecycleError> {
     let existing = state.db.lifecycle_row(repo, &row.change_id)?;
     let update = update_for(row, existing.as_ref(), recorded_at, None);
-    Ok(state
+    let committed = state
         .db
-        .commit_transition(repo, &row.id, op_id, recorded_at, &update)?)
+        .commit_transition(repo, &row.id, op_id, recorded_at, &update)?;
+    state.comments.note_transitions(repo, committed.as_slice());
+    Ok(committed)
 }
 
 /// A client's transition request, resolved by the service.

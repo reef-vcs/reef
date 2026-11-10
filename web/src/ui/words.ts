@@ -17,6 +17,7 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.TRANSITION]: "moved a change through its lifecycle",
   [OperationKind.LAND]: "landed a change",
   [OperationKind.BATCH]: "tested a batch of changes",
+  [OperationKind.COMMENT]: "commented on a change",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };
@@ -39,10 +40,23 @@ const TRANSITIONS: Partial<Record<LifecycleState, string>> = {
   [LifecycleState.SUPERSEDED]: "superseded a change",
 };
 
+/** A comment operation's first event (R3.12), by the event's own name. */
+const COMMENT_EVENTS: Record<string, string> = {
+  comment: "commented on a change",
+  instruct: "wrote an instruction",
+  confirm: "confirmed an instruction",
+  claim: "took an instruction",
+  start: "started an instruction",
+  finish: "finished an instruction",
+  cancel: "cancelled an instruction",
+  release: "handed an instruction back",
+};
+
 /** What an operation's first lifecycle transition moved a change to, if any (R3.09). */
 type WithTransition = Pick<Operation, "kind" | "snapshotKind"> & {
   transitionTo?: LifecycleState;
   transitions?: Operation["transitions"];
+  comments?: Pick<Operation["comments"][number], "event">[];
 };
 
 /** "described a change": past tense, lower case. */
@@ -62,6 +76,10 @@ export function operationSentence(operation: WithTransition): string {
   // A batch lands several changes in one operation (R3.14).
   if (operation.kind === OperationKind.LAND && (operation.transitions?.length ?? 0) > 1) {
     return `landed ${plural(operation.transitions?.length ?? 0, "change")}`;
+  }
+  if (operation.kind === OperationKind.COMMENT) {
+    const event = operation.comments?.[0]?.event;
+    if (event !== undefined && COMMENT_EVENTS[event]) return COMMENT_EVENTS[event];
   }
   return SENTENCES[operation.kind] ?? "did something else";
 }

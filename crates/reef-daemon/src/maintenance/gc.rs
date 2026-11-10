@@ -472,6 +472,8 @@ async fn run_repo(
     // still under the create lock, so no transition records meanwhile.
     if !jj.rewritten.is_empty() {
         crate::lifecycle::map_operations(state, id, &jj.rewritten);
+        // And the comments' (R3.12).
+        crate::comments::map_operations(state, id, &jj.rewritten);
     }
 
     let rest = clean_up(state, id, keep_newer, dry_run, store_leftovers).await;

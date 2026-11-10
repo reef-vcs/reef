@@ -183,6 +183,7 @@ fn help_lists_every_command() {
         "backup",
         "restore",
         "completions",
+        "comment",
     ] {
         assert!(
             text.lines()
@@ -1822,7 +1823,8 @@ fn root_help_names_every_command() {
         // `proposal`, until the landing service makes proposing how work
         // lands (R3.13). R3.25's `conflict` is in `--help-all`, and `reef
         // status` and the conflicted refusals name it where an agent meets
-        // a conflict.
+        // a conflict. R3.12's `comment` is in `--help-all`; the MCP server's
+        // instructions and the harness hooks deliver instructions.
         if command == "completions"
             || command == "restore"
             || command == "job"
@@ -1833,6 +1835,7 @@ fn root_help_names_every_command() {
             || command == "land"
             || command == "landing"
             || command == "conflict"
+            || command == "comment"
         {
             continue;
         }

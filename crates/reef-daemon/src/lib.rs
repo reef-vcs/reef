@@ -12,6 +12,7 @@
 
 pub mod artifacts;
 pub mod backend;
+pub mod comments;
 pub mod config;
 pub mod daemon;
 pub mod db;

@@ -178,6 +178,9 @@ names_schema! {
     lifecycle_state_name_schema_or_null = lifecycle_state_name, true;
     transition_actor_name_schema_or_null = transition_actor_name, true;
     transition_cause_name_schema_or_null = transition_cause_name, true;
+    comment_kind_name_schema_or_null = comment_kind_name, true;
+    instruction_state_name_schema_or_null = instruction_state_name, true;
+    instruction_cause_name_schema_or_null = instruction_cause_name, true;
     operation_kind_name_schema_or_null = operation_kind_name, true;
     presence_kind_schema = presence_kind, false;
     snapshot_kind_name_schema = snapshot_kind_name, false;
@@ -1228,6 +1231,7 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::ImportRefs) => "import-refs",
         Ok(v1::OperationKind::Transition) => "transition",
         Ok(v1::OperationKind::Land) => "land",
+        Ok(v1::OperationKind::Comment) => "comment",
         Ok(v1::OperationKind::Batch) => "batch",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
@@ -1268,6 +1272,49 @@ pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
         Ok(v1::TransitionCause::Undo) => "undo",
         Ok(v1::TransitionCause::Observed) => "observed",
         Ok(v1::TransitionCause::Landing) => "landing",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A comment's kind (R3.12): `note` or `instruction`; `None` when unset.
+pub fn comment_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::CommentKind::try_from(kind) {
+        Ok(v1::CommentKind::Unspecified) => return None,
+        Ok(v1::CommentKind::Note) => "note",
+        Ok(v1::CommentKind::Instruction) => "instruction",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// An instruction's state (R3.12): `awaiting_confirmation`, `pending`,
+/// `delivered`, `running`, `done`, `failed` or `cancelled`; `None` when
+/// unset.
+pub fn instruction_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::InstructionState::try_from(state) {
+        Ok(v1::InstructionState::Unspecified) => return None,
+        Ok(v1::InstructionState::AwaitingConfirmation) => "awaiting_confirmation",
+        Ok(v1::InstructionState::Pending) => "pending",
+        Ok(v1::InstructionState::Delivered) => "delivered",
+        Ok(v1::InstructionState::Running) => "running",
+        Ok(v1::InstructionState::Done) => "done",
+        Ok(v1::InstructionState::Failed) => "failed",
+        Ok(v1::InstructionState::Cancelled) => "cancelled",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Why an instruction moved (R3.12): `request`, `reproposed`,
+/// `change_final` or `expired`; `None` when unset.
+pub fn instruction_cause_name(cause: i32) -> Option<&'static str> {
+    let name = match v1::InstructionCause::try_from(cause) {
+        Ok(v1::InstructionCause::Unspecified) => return None,
+        Ok(v1::InstructionCause::Request) => "request",
+        Ok(v1::InstructionCause::Reproposed) => "reproposed",
+        Ok(v1::InstructionCause::ChangeFinal) => "change_final",
+        Ok(v1::InstructionCause::Expired) => "expired",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1667,6 +1714,57 @@ pub struct Operation {
     /// The lifecycle transitions it recorded (R3.09); absent for none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transitions: Vec<ChangeTransition>,
+    /// The comment events it recorded (R3.12); absent for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CommentEvent>,
+}
+
+/// One comment write an operation recorded (R3.12): ids and states, never
+/// the text, which `reef comment show` reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CommentEvent {
+    /// `cev_` and 16 hex digits.
+    pub id: String,
+    /// The comment, `cmt_` and 16 hex digits.
+    pub comment_id: String,
+    /// Its change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// The change's proposal round when the comment was written.
+    pub round: u32,
+    /// `note` or `instruction`.
+    #[schemars(schema_with = "comment_kind_name_schema_or_null")]
+    pub kind: Option<String>,
+    /// `comment`, `instruct`, `confirm`, `claim`, `start`, `finish`,
+    /// `cancel` or `release`.
+    pub event: String,
+    /// An instruction's state before.
+    #[schemars(schema_with = "instruction_state_name_schema_or_null")]
+    pub from: Option<String>,
+    /// Its state after.
+    #[schemars(schema_with = "instruction_state_name_schema_or_null")]
+    pub to: Option<String>,
+    /// Why.
+    #[schemars(schema_with = "instruction_cause_name_schema_or_null")]
+    pub cause: Option<String>,
+}
+
+impl From<&v1::CommentEvent> for CommentEvent {
+    fn from(event: &v1::CommentEvent) -> Self {
+        Self {
+            id: event.id.clone(),
+            comment_id: event.comment_id.clone(),
+            change_id: event.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&event.change_id),
+            round: event.round,
+            kind: name(comment_kind_name(event.kind)),
+            event: event.event.clone(),
+            from: name(instruction_state_name(event.from)),
+            to: name(instruction_state_name(event.to)),
+            cause: name(instruction_cause_name(event.cause)),
+        }
+    }
 }
 
 /// Who called through the remote listener (R2.08).
@@ -1702,6 +1800,7 @@ impl From<&v1::Operation> for Operation {
                 token_name: remote.token_name.clone(),
             }),
             transitions: op.transitions.iter().map(ChangeTransition::from).collect(),
+            comments: op.comments.iter().map(CommentEvent::from).collect(),
         }
     }
 }
