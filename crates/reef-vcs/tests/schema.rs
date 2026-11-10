@@ -225,6 +225,10 @@ const NOT_RUN: &[(&[&str], &str)] = &[
     ),
     (&["remote", "remove"], "needs a saved profile"),
     (&["mcp"], "prints the MCP protocol, not JSON output"),
+    (
+        &["publish"],
+        "needs a git remote and a daemon identity; tests/vcs.rs publish_cli checks its output against the row",
+    ),
     (&["completions"], "prints a shell script"),
     (
         &["executor", "run"],

@@ -38,4 +38,5 @@ Errors: `{"error": {kind, reason, message, hint, next, metadata}}`. Exit 0 ok,
 ## Changes
 
 `reef status`, `log`, `show`, `diff`, `describe -m <text>`, `undo <op>` (`op log`).
-Revisions are jj revsets.
+Revisions are jj revsets. `reef publish -m <text>` pushes a change to a git
+branch; its `next` opens the pull request.

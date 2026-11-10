@@ -23,6 +23,7 @@ pub mod diff;
 pub mod evidence;
 pub mod executor;
 pub mod files;
+pub mod git;
 pub mod history;
 pub mod identity;
 pub mod landing;

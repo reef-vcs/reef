@@ -49,6 +49,10 @@ pub(crate) enum Rule {
     /// the later moves the token that claimed it, and a claim without
     /// taking the token that proposed the change.
     Comment,
+    /// Refused to every remote caller (#258): a publish runs the user's git
+    /// credentials, which a remote token must never reach. The handler
+    /// refuses with `REMOTE_PUBLISH_DENIED`.
+    SocketOnly,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -127,6 +131,8 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ),
     // Any token reassigns or queues; the handler refuses `take` (R3.27).
     ("/reef.api.v1.ConflictService/AssignConflict", Rule::None),
+    // A push uses the user's git credentials (#258, S-167).
+    ("/reef.api.v1.GitService/PublishChange", Rule::SocketOnly),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

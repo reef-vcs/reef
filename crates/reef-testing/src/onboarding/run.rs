@@ -19,7 +19,7 @@ use crate::agent::process::{AgentCommand, output, reef_commit, run_agent, today_
 pub use crate::agent::scrub::scrub;
 use crate::agent::transcript::Transcript;
 
-use super::judge::{WorkspaceRecord, judge};
+use super::judge::{RemoteBranch, WorkspaceRecord, judge, judge_published};
 use super::{Outcome, Pins, SCHEMA, Scenario, TrialResult};
 use crate::synth::{self, Preset, Spec};
 
@@ -302,13 +302,21 @@ fn run_and_judge(
             config.out_dir.join(format!("{stem}.workspaces.json")),
             listed,
         );
-        let mut verdict = judge(
-            scenario,
-            transcript.final_text(),
-            &workspaces,
-            &setup.base_readme,
-            |commit| readme_at(&dir.repo, commit),
-        );
+        let mut verdict = match &setup.remote {
+            Some(origin) => judge_published(
+                transcript.final_text(),
+                &origin.base,
+                &setup.base_readme,
+                |name| remote_branch(&origin.dir, name),
+            ),
+            None => judge(
+                scenario,
+                transcript.final_text(),
+                &workspaces,
+                &setup.base_readme,
+                |commit| readme_at(&dir.repo, commit),
+            ),
+        };
         // The reason may quote the agent's answer.
         verdict.reason = scrub(&verdict.reason);
         result.success = matches!(result.outcome, Outcome::Exited { .. })
@@ -360,8 +368,9 @@ fn never_reached_the_model(outcome: &Outcome, transcript: &Transcript) -> Option
 /// Code did not load the project's files and B would measure A.
 fn skill_missing(scenario: Scenario, transcript: &Transcript) -> Option<String> {
     let commands = transcript.slash_commands.as_ref()?;
-    (scenario == Scenario::B && !commands.iter().any(|command| command == "reef"))
-        .then(|| "the `reef` skill from `reef init` did not load".to_owned())
+    (matches!(scenario, Scenario::B | Scenario::F)
+        && !commands.iter().any(|command| command == "reef"))
+    .then(|| "the `reef` skill from `reef init` did not load".to_owned())
 }
 
 /// The tools a trial's agent may use: a shell and an editor, and for E
@@ -445,8 +454,24 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 struct Setup {
     env: Vec<(String, OsString)>,
     base_readme: String,
+    /// Scenario F's remote (#258).
+    remote: Option<Origin>,
 }
 
+/// Runs git with the trial's environment in a directory.
+type Git<'a> = dyn Fn(&[&str], &Path) -> Result<String, String> + 'a;
+
+/// Scenario F's remote (#258).
+struct Origin {
+    /// The bare repository.
+    dir: PathBuf,
+    /// The commit it was cloned at.
+    base: String,
+    /// The daemon's config file, with a person's `[identity]`.
+    config: PathBuf,
+}
+
+#[expect(clippy::too_many_lines, reason = "one block per scenario's setup")]
 fn setup(
     config: &RunConfig,
     prepared: &Prepared,
@@ -515,7 +540,15 @@ fn setup(
     let base_readme = fs::read_to_string(dir.repo.join("README.md"))
         .map_err(|e| format!("the repository has no README.md: {e}"))?;
 
-    if scenario == Scenario::B {
+    // F (#258): a bare `origin`, and a person's identity for publishing.
+    let remote = (scenario == Scenario::F)
+        .then(|| bare_origin(dir, &git))
+        .transpose()?;
+    if let Some(origin) = &remote {
+        env.push(("REEF_CONFIG".to_owned(), origin.config.clone().into()));
+    }
+
+    if matches!(scenario, Scenario::B | Scenario::F) {
         output(
             Command::new(dir.bin.join("reef"))
                 .args(["init", "--agents", "claude"])
@@ -550,7 +583,40 @@ fn setup(
             .map_err(|e| format!("claude {}: {e}", args.join(" ")))?;
         }
     }
-    Ok(Setup { env, base_readme })
+    Ok(Setup {
+        env,
+        base_readme,
+        remote,
+    })
+}
+
+/// Scenario F's remote (#258): a bare clone of the trial's repository in
+/// its directory, made `origin` and fetched, and a daemon config with a
+/// person's `[identity]`.
+fn bare_origin(dir: &TrialDir, git: &Git<'_>) -> Result<Origin, String> {
+    let origin = dir.root.join("remote.git");
+    git(
+        &["clone", "--bare", "--quiet", "repo", "remote.git"],
+        &dir.root,
+    )?;
+    let _ = git(&["remote", "remove", "origin"], &dir.repo);
+    git(
+        &["remote", "add", "origin", &origin.display().to_string()],
+        &dir.repo,
+    )?;
+    git(&["fetch", "--quiet", "origin"], &dir.repo)?;
+    let base = git(&["rev-parse", "HEAD"], &dir.repo)?.trim().to_owned();
+    let reef_config = dir.root.join("reef.toml");
+    fs::write(
+        &reef_config,
+        "[identity]\nname = \"Onboarding Agent\"\nemail = \"onboarding@example.com\"\n",
+    )
+    .map_err(|e| format!("reef.toml: {e}"))?;
+    Ok(Origin {
+        dir: origin,
+        base,
+        config: reef_config,
+    })
 }
 
 /// `reef` from the build under test, against the trial's daemon, never
@@ -588,6 +654,36 @@ fn readme_at(repo: &Path, commit: &str) -> Option<String> {
             .current_dir(repo),
     )
     .ok()
+}
+
+/// Branch `name` on scenario F's bare remote, read with git; `None` when
+/// the remote has no such branch or `name` is not a plain branch name.
+fn remote_branch(bare: &Path, name: &str) -> Option<RemoteBranch> {
+    let plain = !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
+    if !plain {
+        return None;
+    }
+    let read =
+        |args: &[&str]| output(Command::new("git").arg("--git-dir").arg(bare).args(args)).ok();
+    let reference = format!("refs/heads/{name}");
+    let commit = read(&["rev-parse", "--verify", "--quiet", &reference])?
+        .trim()
+        .to_owned();
+    let parents = read(&["rev-list", "--parents", "-n", "1", &commit])?
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_owned)
+        .collect();
+    Some(RemoteBranch {
+        message: read(&["log", "-1", "--format=%B", &commit]).unwrap_or_default(),
+        readme: read(&["cat-file", "-p", &format!("{commit}:README.md")]),
+        parents,
+        commit,
+    })
 }
 
 /// Releases what the agent left active (on Linux an overlay mount would

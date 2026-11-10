@@ -178,6 +178,8 @@ names_schema! {
     lifecycle_state_name_schema_or_null = lifecycle_state_name, true;
     transition_actor_name_schema_or_null = transition_actor_name, true;
     assignment_state_name_schema_or_null = assignment_state_name, true;
+    publication_update_name_schema_or_null = publication_update_name, true;
+    git_host_kind_name_schema_or_null = git_host_kind_name, true;
     assignment_reason_name_schema_or_null = assignment_reason_name, true;
     transition_cause_name_schema_or_null = transition_cause_name, true;
     comment_kind_name_schema_or_null = comment_kind_name, true;
@@ -1236,6 +1238,7 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::Comment) => "comment",
         Ok(v1::OperationKind::Batch) => "batch",
         Ok(v1::OperationKind::ConflictAssignment) => "conflict-assignment",
+        Ok(v1::OperationKind::Publish) => "publish",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
         Err(_) => UNKNOWN,
@@ -2653,6 +2656,169 @@ impl Described {
             change: response.change.as_ref().map(Change::from),
             operation: operation(response.operation.as_ref()),
             workspace,
+        }
+    }
+}
+
+/// How a publish moved its branch (#258): `created`, `fast-forward`,
+/// `rewritten`, `forced` or `up-to-date`; `None` when unset.
+pub fn publication_update_name(update: i32) -> Option<&'static str> {
+    let name = match v1::PublicationUpdate::try_from(update) {
+        Ok(v1::PublicationUpdate::Unspecified) => return None,
+        Ok(v1::PublicationUpdate::Created) => "created",
+        Ok(v1::PublicationUpdate::FastForward) => "fast-forward",
+        Ok(v1::PublicationUpdate::Rewritten) => "rewritten",
+        Ok(v1::PublicationUpdate::Forced) => "forced",
+        Ok(v1::PublicationUpdate::UpToDate) => "up-to-date",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A git host Reef knows (#258): `github`, `gitlab`, `bitbucket` or
+/// `forgejo`; `None` when unset.
+pub fn git_host_kind_name(kind: i32) -> Option<&'static str> {
+    let name = match v1::GitHostKind::try_from(kind) {
+        Ok(v1::GitHostKind::Unspecified) => return None,
+        Ok(v1::GitHostKind::Github) => "github",
+        Ok(v1::GitHostKind::Gitlab) => "gitlab",
+        Ok(v1::GitHostKind::Bitbucket) => "bitbucket",
+        Ok(v1::GitHostKind::Forgejo) => "forgejo",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// The command and page that open a pull request for a published branch
+/// (#258).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PullRequestHint {
+    /// `github`, `gitlab`, `bitbucket` or `forgejo`.
+    #[schemars(schema_with = "git_host_kind_name_schema_or_null")]
+    pub host_kind: Option<String>,
+    /// The host, without user information.
+    pub host: String,
+    /// The repository's path on the host, such as `owner/name`.
+    pub repository: String,
+    /// The branch the pull request targets; empty when unknown.
+    pub base: String,
+    /// The host CLI's command that opens it; empty when the host has none.
+    pub argv: Vec<String>,
+    /// The page that opens it; empty when none.
+    pub url: String,
+}
+
+impl From<&v1::PullRequestHint> for PullRequestHint {
+    fn from(hint: &v1::PullRequestHint) -> Self {
+        Self {
+            host_kind: name(git_host_kind_name(hint.host_kind)),
+            host: hint.host.clone(),
+            repository: hint.repository.clone(),
+            base: hint.base.clone(),
+            argv: hint.argv.clone(),
+            url: hint.url.clone(),
+        }
+    }
+}
+
+/// A change published to a branch of a git remote (#258).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Publication {
+    /// The git remote.
+    pub git_remote: String,
+    /// The branch on it.
+    pub branch: String,
+    /// The change published, in hex.
+    pub change_id: String,
+    /// The commit pushed.
+    pub commit_id: String,
+    /// The branch's commit before; `null` when the publish created it.
+    pub previous_commit_id: Option<String>,
+    /// `created`, `fast-forward`, `rewritten`, `forced` or `up-to-date`.
+    #[schemars(schema_with = "publication_update_name_schema_or_null")]
+    pub update: Option<String>,
+    /// The commits the remote's branches lacked, newest first, at most 100.
+    pub commit_ids: Vec<String>,
+    /// How many commits that was.
+    pub commit_count: u32,
+    /// Their changes, newest first, at most 100.
+    pub change_ids: Vec<String>,
+    /// How to open a pull request; `null` for a host Reef does not know.
+    pub pull_request: Option<PullRequestHint>,
+    /// The remote's own messages, as it sent them, sanitized.
+    pub remote_messages: Vec<String>,
+    /// Snapshot rows marked as having left the machine.
+    pub local_snapshots_published: u32,
+    /// Planned only: nothing was pushed or recorded.
+    pub dry_run: bool,
+}
+
+impl From<&v1::Publication> for Publication {
+    fn from(publication: &v1::Publication) -> Self {
+        Self {
+            git_remote: publication.git_remote.clone(),
+            branch: publication.branch.clone(),
+            change_id: publication.change_id.clone(),
+            commit_id: publication.commit_id.clone(),
+            previous_commit_id: (!publication.previous_commit_id.is_empty())
+                .then(|| publication.previous_commit_id.clone()),
+            update: name(publication_update_name(publication.update)),
+            commit_ids: publication.commit_ids.clone(),
+            commit_count: publication.commit_count,
+            change_ids: publication.change_ids.clone(),
+            pull_request: publication.pull_request.as_ref().map(PullRequestHint::from),
+            remote_messages: publication.remote_messages.clone(),
+            local_snapshots_published: publication.local_snapshots_published,
+            dry_run: publication.dry_run,
+        }
+    }
+}
+
+/// `reef publish`'s answer (#258).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Published {
+    /// What was published, and where.
+    pub publication: Publication,
+    /// The publish; `null` for a dry run or when nothing changed.
+    pub operation: Option<Operation>,
+    /// The snapshot taken first, if it recorded one.
+    pub snapshot: Option<Operation>,
+    /// The describe run first, if it recorded one.
+    pub describe: Option<Operation>,
+    /// The change published.
+    pub change: Option<Change>,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+    /// Sentences for a person.
+    pub notes: Vec<String>,
+    /// The command that opens the pull request, shell-quoted; `null` when
+    /// the host has none.
+    pub next: Option<String>,
+}
+
+impl Published {
+    /// From the response, the workspace read after it, and `quote`, which
+    /// renders an argv as one shell line.
+    pub fn from_response(
+        response: &v1::PublishChangeResponse,
+        workspace: Option<Workspace>,
+        quote: impl Fn(&[String]) -> String,
+    ) -> Self {
+        let publication = response.publication.clone().unwrap_or_default();
+        let next = publication
+            .pull_request
+            .as_ref()
+            .filter(|hint| !hint.argv.is_empty())
+            .map(|hint| quote(&hint.argv));
+        Self {
+            publication: Publication::from(&publication),
+            operation: operation(response.operation.as_ref()),
+            snapshot: operation(response.snapshot.as_ref()),
+            describe: operation(response.describe.as_ref()),
+            change: response.change.as_ref().map(Change::from),
+            workspace,
+            notes: response.notes.clone(),
+            next,
         }
     }
 }

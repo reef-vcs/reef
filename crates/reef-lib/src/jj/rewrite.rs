@@ -82,6 +82,10 @@ pub enum RewriteError {
     /// A description with a NUL.
     #[error("a description cannot contain a NUL")]
     InvalidDescription,
+    /// A sign-off on a change with no description: it would be only the
+    /// trailer (#258).
+    #[error("describe the change before signing it off")]
+    SignoffWithoutDescription,
     /// Reading or writing a commit failed.
     #[error("failed to read or write a commit")]
     Backend(#[from] BackendError),
@@ -98,7 +102,10 @@ impl Classify for RewriteError {
         match self {
             Self::Revision(error) => error.kind(),
             Self::InvalidCommitId(_) | Self::InvalidDescription => ErrorKind::InvalidArgument,
-            Self::Mismatch { .. } | Self::Immutable(_) | Self::Hidden(_) => ErrorKind::Conflict,
+            Self::Mismatch { .. }
+            | Self::Immutable(_)
+            | Self::Hidden(_)
+            | Self::SignoffWithoutDescription => ErrorKind::Conflict,
             Self::Backend(error) => classify_by_source(error),
             Self::Index(error) => classify_by_source(error),
             Self::Commit(error) => classify_by_source(error),
@@ -136,6 +143,30 @@ pub fn normalize_description(text: &str) -> Result<String, RewriteError> {
         text.push('\n');
     }
     Ok(text)
+}
+
+/// `description` with a `Signed-off-by: <name> <<email>>` trailer, as
+/// `git commit -s` adds it (#258): appended to the trailer block when the
+/// last paragraph is one, else after a blank line; unchanged when that
+/// exact trailer is already there. The result is
+/// [`normalize_description`]d. An empty description is
+/// [`RewriteError::SignoffWithoutDescription`].
+pub fn with_signoff(description: &str, name: &str, email: &str) -> Result<String, RewriteError> {
+    let trailer = format!("Signed-off-by: {name} <{email}>");
+    let text = normalize_description(description)?;
+    let trailers = jj_lib::trailer::parse_description_trailers(&text);
+    if trailers
+        .iter()
+        .any(|found| format!("{}: {}", found.key, found.value.trim()) == trailer)
+    {
+        return Ok(text);
+    }
+    let body = text.trim_end_matches('\n');
+    if body.trim().is_empty() {
+        return Err(RewriteError::SignoffWithoutDescription);
+    }
+    let separator = if trailers.is_empty() { "\n\n" } else { "\n" };
+    normalize_description(&format!("{body}{separator}{trailer}"))
 }
 
 /// Resolves `revision` in `repo` for a describe or an abandon: exactly one
@@ -321,24 +352,44 @@ impl Repo {
         text: &str,
         meta: &OpMeta,
     ) -> Result<Option<Described>, RewriteError> {
+        self.describe_commit_with(commit, text, false, meta).await
+    }
+
+    /// [`Repo::describe_commit`], and with `reset_author` the author set to
+    /// the committer (this repository's identity, now), as
+    /// `jj describe --reset-author` does (#258); a reset always writes.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), commit_id = %commit))]
+    pub async fn describe_commit_with(
+        &mut self,
+        commit: &CommitIdHex,
+        text: &str,
+        reset_author: bool,
+        meta: &OpMeta,
+    ) -> Result<Option<Described>, RewriteError> {
         let text = normalize_description(text)?;
         let old = self.repo.store().get_commit_async(&commit.to_id()).await?;
-        if old.description() == text {
+        if old.description() == text && !reset_author {
             return Ok(None);
         }
         let mut tx = self.repo.start_transaction();
-        let new = tx
-            .repo_mut()
-            .rewrite_commit(&old)
-            .set_description(text)
-            .write()
-            .await?;
+        let mut builder = tx.repo_mut().rewrite_commit(&old).set_description(text);
+        if reset_author {
+            let committer = builder.committer().clone();
+            builder = builder.set_author(committer);
+        }
+        let new = builder.write().await?;
         tx.repo_mut().rebase_descendants().await?;
         self.repo = meta.commit(tx).await?;
         Ok(Some(Described {
             op_id: OperationIdHex::of(self.repo.op_id()),
             commit_id: CommitIdHex::of(new.id()),
         }))
+    }
+
+    /// `commit`'s description.
+    pub async fn description_of(&self, commit: &CommitIdHex) -> Result<String, RewriteError> {
+        let commit = self.repo.store().get_commit_async(&commit.to_id()).await?;
+        Ok(commit.description().to_owned())
     }
 
     /// Abandons `commit` in one operation recorded with `meta`, which this
@@ -416,6 +467,27 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signoff_is_added_once() {
+        let add = |text: &str| with_signoff(text, "A B", "a@b").unwrap();
+        assert_eq!(add("Fix it"), "Fix it\n\nSigned-off-by: A B <a@b>\n");
+        assert_eq!(
+            add("Fix it\n\nBody text."),
+            "Fix it\n\nBody text.\n\nSigned-off-by: A B <a@b>\n"
+        );
+        let trailed = "Fix it\n\nCo-Authored-By: C <c@d>\n";
+        assert_eq!(
+            add(trailed),
+            "Fix it\n\nCo-Authored-By: C <c@d>\nSigned-off-by: A B <a@b>\n"
+        );
+        let signed = add(trailed);
+        assert_eq!(add(&signed), signed);
+        assert!(matches!(
+            with_signoff("", "A B", "a@b"),
+            Err(RewriteError::SignoffWithoutDescription)
+        ));
+    }
 
     #[test]
     fn descriptions_get_a_trailing_newline() {

@@ -1580,3 +1580,36 @@ async fn audit_log_and_no_secrets() {
         assert!(!text.contains(raw), "a secret reached the log");
     }
 }
+
+// #258, 15: a publish runs the user's git credentials, so no remote caller
+// may ask for one (S-167); a `read` token is refused by its scope first.
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_is_socket_only() {
+    let (daemon, repo, addr, fingerprint) = remote_repo().await;
+    let request = v1::PublishChangeRequest {
+        repo: repo.id.clone(),
+        revision: "default@".to_owned(),
+        dry_run: true,
+        ..v1::PublishChangeRequest::default()
+    };
+    let write = connect(
+        addr,
+        &fingerprint,
+        &token(&daemon, "writer", RemoteScope::Write).await,
+    )
+    .await;
+    let error = write.publish_change(request.clone()).await.unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::REMOTE_PUBLISH_DENIED);
+    let read = connect(
+        addr,
+        &fingerprint,
+        &token(&daemon, "reader", RemoteScope::Read).await,
+    )
+    .await;
+    let error = read.publish_change(request).await.unwrap_err();
+    assert_ne!(reason(&error), reef_api::error::REMOTE_PUBLISH_DENIED);
+    assert!(matches!(
+        &error,
+        ClientError::Rpc { status, .. } if status.code() == tonic::Code::PermissionDenied
+    ));
+}

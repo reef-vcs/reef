@@ -29,6 +29,7 @@ pub mod lifecycle;
 pub mod log;
 pub mod materialize;
 pub mod oplog;
+pub mod push;
 pub mod repo;
 pub mod restore;
 pub mod revset;

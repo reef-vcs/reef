@@ -1716,7 +1716,7 @@ fn no_args_prints_guide_and_exits_zero() {
     output.clone().assert().success();
     let text = stdout(&output);
     assert!(text.starts_with("# Reef\n"), "{text}");
-    assert!(text.len() <= 1600, "{} bytes", text.len());
+    assert!(text.len() <= 1700, "{} bytes", text.len());
     assert!(!text.contains("reef:long"), "{text}");
     assert!(text.contains("reef ws run -- <command>"), "{text}");
     for args in [&["guide"][..], &["agent-guide"], &["gui"]] {
@@ -1824,8 +1824,12 @@ fn root_help_names_every_command() {
         // lands (R3.13). R3.25's `conflict` is in `--help-all`, and `reef
         // status` and the conflicted refusals name it where an agent meets
         // a conflict. R3.12's `comment` is in `--help-all`; the MCP server's
-        // instructions and the harness hooks deliver instructions.
+        // instructions and the harness hooks deliver instructions. #258's
+        // `publish` took the place of `store` and `backup`, which an
+        // operator runs; both are in `--help-all`.
         if command == "completions"
+            || command == "store"
+            || command == "backup"
             || command == "restore"
             || command == "job"
             || command == "executor"

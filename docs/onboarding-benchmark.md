@@ -17,8 +17,9 @@ Each trial gets a fresh home directory, a fresh Reef state directory (`REEF_STAT
 | C | From nothing | no `reef` anywhere on `PATH` | `--bare` | [`c.txt`](../crates/reef-testing/onboarding/prompts/c.txt) |
 | D | Oriented | the agent is started by `reef ws run` | `--bare` | [`d.txt`](../crates/reef-testing/onboarding/prompts/d.txt) |
 | E | After the plugin | A's checkout, and Reef's Claude Code plugin installed into the trial's home from the checkout under test ([R2.25](dev-tickets/phase-2/R2.25-harness-packages.md)) | not bare, so the plugin's skill and MCP server load; their tools are allowed | `a.txt` |
+| F | Publish | B's checkout (after `reef init`), with `origin` repointed at a bare clone of it in the trial's directory and fetched, and the daemon's `[identity]` set ([#258](dev-tickets/phase-3/issue-258-reef-publish.md)) | as B | [`f.txt`](../crates/reef-testing/onboarding/prompts/f.txt) |
 
-A, B and E ask the agent to append a line to `README.md` in an isolated workspace and to print the workspace id on its last line. C asks the same and adds where to install Reef from. D asks which workspace and change the agent is in.
+A, B and E ask the agent to append a line to `README.md` in an isolated workspace and to print the workspace id on its last line. C asks the same and adds where to install Reef from. D asks which workspace and change the agent is in. F asks it to append the line in an isolated workspace, push the change to a new branch on the repository's git remote for review, and print the branch name on its last line.
 
 Every trial runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Edit --permission-prompts none --max-budget-usd 2 --no-session-persistence`, so the agent never waits on a prompt. Anything that would still prompt is denied and counted. The prompts are deliberately plain: a prompt that taught Reef would measure the prompt.
 
@@ -29,7 +30,7 @@ Every trial runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Ed
 | Column | Meaning |
 | --- | --- |
 | Success | Trials that succeeded, out of trials in which the agent ran. A trial succeeds when the agent exits by itself, within budget, and the judge confirms the work (below). Hitting the budget or the 10-minute timeout is a failure. |
-| Calls to success | Tool calls up to and including the first `Bash` call that ran `reef ws run` and exited 0. A trial that succeeded another way (`reef ws create`, an edit, `reef ws release`) counts every tool call, and so does D, up to its answer. A failed trial counts as infinitely many, so the median says `failed` when most trials failed. |
+| Calls to success | Tool calls up to and including the first `Bash` call that ran `reef ws run` and exited 0; for F, the first that ran `reef publish` and exited 0. A trial that succeeded another way (`reef ws create`, an edit, `reef ws release`) counts every tool call, and so does D, up to its answer. A failed trial counts as infinitely many, so the median says `failed` when most trials failed. |
 | Tool calls | Every tool call, any tool, subagents' included. |
 | Failed `reef` | `Bash` calls that ran `reef` and exited non-zero. The exit status is the whole call's, so `reef ws run -- <a command that fails>` counts as well. |
 | Turns | Model round trips, from Claude Code's `result` event. |
@@ -37,13 +38,13 @@ Every trial runs with `--permission-mode acceptEdits --allowedTools Bash,Read,Ed
 | Output tokens | Output tokens, thinking included. |
 | Cost | `total_cost_usd` from the `result` event. |
 | Wall | From starting the agent to its exit. |
-| Escaped to git | Trials in which the agent ran `git worktree`, `git stash`, or `git checkout`: it went around Reef. |
+| Escaped to git | Trials in which the agent ran `git worktree`, `git stash`, `git checkout`, `git push` or `jj git push`: it went around Reef. |
 
 Each number is the median over a row's trials. A `Bash` call "runs `reef`" when one of its simple commands (split at `;`, `&`, `|`, `$(`, and backquotes) has `reef`, by name or path, as its program. Variable assignments, `sudo`, `env`, `timeout N`, and `sh -c` are looked through. `reef ws run` is `reef` followed by `ws run` or `workspace run`, after any global options.
 
-**The judge** uses the daemon's records, not the agent's account of what it did. For A to C and E, the last line of the agent's answer must name a workspace that `reef ws list --all` reports (other words on the line are fine). `README.md` in that workspace's commit, which is its final snapshot once released, must be the original with something appended. The judge reads it with `git cat-file` from the clone, where jj keeps its commits. For D, the answer must name the workspace `reef ws run` started the agent in and its change, by hex or jj id, at least eight characters.
+**The judge** uses the daemon's records, not the agent's account of what it did. For A to C and E, the last line of the agent's answer must name a workspace that `reef ws list --all` reports (other words on the line are fine). `README.md` in that workspace's commit, which is its final snapshot once released, must be the original with something appended. The judge reads it with `git cat-file` from the clone, where jj keeps its commits. For D, the answer must name the workspace `reef ws run` started the agent in and its change, by hex or jj id, at least eight characters. For F, the judge reads the bare remote with git: the last line must name a branch on it (other words, and an `origin/` prefix, are fine), the branch's commit must have a message, its only parent must be the clone's base commit, and its `README.md` must be the original with something appended. The file remote is no host Reef knows, so F measures the push, not the pull-request command; `reef publish`'s tests cover that.
 
-**Setup failures are not the agent's.** A trial whose clone, `reef init`, or installer mirror failed is reported as a setup failure, kept out of the medians, and noted in the row. So is one where Claude Code exited non-zero without a tool call or any spend: no credential, an API error, or a crash at startup. So is a B trial whose stream's `init` event doesn't list the `reef` skill that `reef init` wrote: Claude Code didn't load the project's files, and the trial would measure A. An E trial whose `init` event lists neither the plugin's skill nor its MCP server's tools is one too, for the same reason. E's MCP calls count as tool calls; a workspace it made with `create_workspace` and released with `release_workspace` is judged as A's are, from the daemon's records. E is held to B's targets. Like every scenario here it runs Claude Code only: one harness is a gap, not a proof.
+**Setup failures are not the agent's.** A trial whose clone, `reef init`, or installer mirror failed is reported as a setup failure, kept out of the medians, and noted in the row. So is one where Claude Code exited non-zero without a tool call or any spend: no credential, an API error, or a crash at startup. So is a B trial whose stream's `init` event doesn't list the `reef` skill that `reef init` wrote: Claude Code didn't load the project's files, and the trial would measure A. An E trial whose `init` event lists neither the plugin's skill nor its MCP server's tools is one too, for the same reason. E's MCP calls count as tool calls; a workspace it made with `create_workspace` and released with `release_workspace` is judged as A's are, from the daemon's records. E is held to B's targets, and so is F. Like every scenario here they run Claude Code only: one harness is a gap, not a proof.
 
 ## Pins and baselines
 
@@ -58,7 +59,7 @@ ANTHROPIC_API_KEY=... just onboarding scenario=A trials=3
 cat crates/reef-testing/onboarding/results/latest.md
 ```
 
-`just onboarding` builds `reef`, `reef-daemon`, and the harness (`reef-onboarding`, in `crates/reef-testing`), then runs `reef-onboarding run` against the debug build. With no arguments, it runs every scenario three times. Each trial may spend up to $2, so a full run costs at most $24. It also takes the binary's flags: `--model`, `--offline`, `--keep` (keep each trial's home, state, and clone for reading), `--timeout-secs`, `--budget-usd`, and `--claude`.
+`just onboarding` builds `reef`, `reef-daemon`, and the harness (`reef-onboarding`, in `crates/reef-testing`), then runs `reef-onboarding run` against the debug build. With no arguments, it runs every scenario three times. Each trial may spend up to $2, so a full run of all six costs at most $36. It also takes the binary's flags: `--model`, `--offline`, `--keep` (keep each trial's home, state, and clone for reading), `--timeout-secs`, `--budget-usd`, and `--claude`.
 
 The results go to `crates/reef-testing/onboarding/results/`, which git ignores:
 
@@ -130,3 +131,9 @@ The first baseline (2026-10-24, macOS, 12 trials, $0.27 in all) meets both Phase
 | Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 <!-- onboarding-rows:E -->
+
+### Scenario F: publish
+
+| Date | Model | Claude Code | Reef | OS | Success | Calls to success | Tool calls | Failed `reef` | Turns | Input tokens | Output tokens | Cost | Wall | Escaped to git | Notes |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+<!-- onboarding-rows:F -->

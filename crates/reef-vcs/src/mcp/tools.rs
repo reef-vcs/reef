@@ -16,15 +16,15 @@ use reef_api::v1::{
     self, AbandonChangeRequest, CreateWorkspaceRequest, DescribeChangeRequest, EditFilesRequest,
     GetChangeRequest, GetDiffRequest, GetStatusRequest, GetWorkspaceRequest, ListChangesRequest,
     ListFilesRequest, ListOperationsRequest, ListRepositoriesRequest, ListWorkspacesRequest,
-    MoveWorkspaceRequest, OperationFilter, QueryChangesRequest, ReadFileRequest,
-    UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
+    MoveWorkspaceRequest, OperationFilter, PublishChangeRequest, QueryChangesRequest,
+    ReadFileRequest, UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
     move_workspace_request,
 };
 use reef_client::brief;
 use reef_client::json::{
     self, Abandoned, Created, Described, Diff, Edited, ErrorObject, FileEntry, FileRead, History,
-    Inspected, LogEntry, Moved, Operation, Released, RepoStatus, Repository, Snapshotted, Undone,
-    Workspace,
+    Inspected, LogEntry, Moved, Operation, Published, Released, RepoStatus, Repository,
+    Snapshotted, Undone, Workspace,
 };
 use rmcp::handler::server::common::{schema_for_empty_input, schema_for_input};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
@@ -463,6 +463,17 @@ pub(super) const TOOLS: &[ToolDef] = &[
         schema: schema::<args::DescribeChange>,
         output: output::<Described>,
         call: describe_change,
+    },
+    ToolDef {
+        name: "publish_change",
+        title: "Publish change",
+        rpc: "/reef.api.v1.GitService/PublishChange",
+        description: "Push a change to a branch on the repository's git remote, snapshotting its workspace first; publishing it again updates the branch. Returns {publication, operation, next}: next opens the pull request on a known host.",
+        destructive: true,
+        idempotent: false,
+        schema: schema::<args::PublishChange>,
+        output: output::<brief::Published<'static>>,
+        call: publish_change,
     },
     ToolDef {
         name: "abandon_change",
@@ -1327,10 +1338,35 @@ tool!(describe_change, args::DescribeChange, |call, args| {
             revision: at(args.revision),
             description: args.description,
             expected_commit_id: args.expected_commit_id.unwrap_or_default(),
+            signoff: false,
+            reset_author: false,
         }))
         .await?;
     let workspace = workspace_after(ctx, scope.workspace_ref()).await;
     to_value(&Described::from_response(&response, workspace))
+});
+
+tool!(publish_change, args::PublishChange, |call, args| {
+    let ctx = call.ctx;
+    let scope = call
+        .scope(args.repo.as_ref(), args.workspace.as_ref())
+        .await?;
+    let response = Box::pin(ctx.call_within(
+        crate::cli::publish::PUBLISH_DEADLINE,
+        ctx.client.publish_change(PublishChangeRequest {
+            repo: scope.repo_id.clone(),
+            workspace: scope.workspace_id(),
+            revision: at(args.revision),
+            git_remote: args.git_remote.unwrap_or_default(),
+            branch: args.branch.unwrap_or_default(),
+            description: args.description.unwrap_or_default(),
+            ..PublishChangeRequest::default()
+        }),
+    ))
+    .await?;
+    let workspace = workspace_after(ctx, scope.workspace_ref()).await;
+    let published = Published::from_response(&response, workspace, crate::cli::out::shell_line);
+    to_value(&brief::Published::from(&published))
 });
 
 tool!(abandon_change, args::AbandonChange, |call, args| {
@@ -1623,7 +1659,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 22);
     }
 
     #[test]

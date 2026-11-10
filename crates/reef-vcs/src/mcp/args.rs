@@ -246,6 +246,8 @@ pub(super) enum Kind {
     Land,
     Comment,
     Batch,
+    ConflictAssignment,
+    Publish,
     External,
     Other,
 }
@@ -266,6 +268,8 @@ impl From<Kind> for v1::OperationKind {
             Kind::Land => Self::Land,
             Kind::Comment => Self::Comment,
             Kind::Batch => Self::Batch,
+            Kind::ConflictAssignment => Self::ConflictAssignment,
+            Kind::Publish => Self::Publish,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
         }
@@ -429,6 +433,24 @@ pub(super) struct DescribeChange {
     pub(super) description: String,
     /// Refuse unless the revision is still this commit (full id).
     pub(super) expected_commit_id: Option<String>,
+}
+
+/// `publish_change`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PublishChange {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// Workspace: id, prefix, or absolute path in it.
+    pub(super) workspace: Option<String>,
+    /// The change: a change or commit id, bookmark, or revset naming one commit (default: `@`).
+    pub(super) revision: Option<String>,
+    /// The branch on the remote (default: `reef/` and the change id's first 12 letters).
+    pub(super) branch: Option<String>,
+    /// The git remote (default: the only one, else `origin`).
+    pub(super) git_remote: Option<String>,
+    /// Describe the change first with this.
+    pub(super) description: Option<String>,
 }
 
 /// `abandon_change`.

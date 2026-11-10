@@ -418,11 +418,13 @@ async fn reindex_removes_missing() {
 
 // 4
 #[test]
-fn no_writer_of_local_zero() {
+fn local_zero_only_by_publish() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let migrations = src.join("db/migrations");
+    let index = src.join("snapshot/index.rs");
     let mut stack = vec![src];
     let mut offenders = Vec::new();
+    let mut in_index = 0;
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -442,14 +444,21 @@ fn no_writer_of_local_zero() {
                 .filter(|c| !c.is_whitespace())
                 .flat_map(char::to_lowercase)
                 .collect();
-            if squeezed.contains("local=0") {
+            let count = squeezed.matches("local=0").count();
+            if path == index {
+                in_index = count;
+            } else if count > 0 {
                 offenders.push(path);
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "only R4's publish may clear `local`: {offenders:?}"
+        "only a publish (snapshot::index::mark_published) may clear `local`: {offenders:?}"
+    );
+    assert_eq!(
+        in_index, 1,
+        "snapshot/index.rs clears `local` once, in mark_published"
     );
 }
 

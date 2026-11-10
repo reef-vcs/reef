@@ -21,6 +21,10 @@
 //! - **E**, after the plugin: a plain git checkout, and Reef's Claude Code
 //!   plugin installed into the trial's home from the checkout under test
 //!   (R2.25), `claude` without `--bare`, so its skill and MCP server load.
+//! - **F**, publish (#258): B's checkout with `origin` a bare clone of it
+//!   in the trial's directory, and the daemon's `[identity]` set; the agent
+//!   is asked to push its change to a review branch. The judge reads the
+//!   bare remote.
 //!
 //! See `docs/onboarding-benchmark.md`.
 
@@ -64,16 +68,21 @@ pub enum Scenario {
     /// After the plugin: Reef's Claude Code plugin is installed.
     #[value(name = "E", alias = "e")]
     E,
+    /// Publish (#258): after `reef init`, push the change to a review
+    /// branch on the repository's git remote.
+    #[value(name = "F", alias = "f")]
+    F,
 }
 
 impl Scenario {
     /// Every scenario, in order.
-    pub const ALL: [Scenario; 5] = [
+    pub const ALL: [Scenario; 6] = [
         Scenario::A,
         Scenario::B,
         Scenario::C,
         Scenario::D,
         Scenario::E,
+        Scenario::F,
     ];
 
     /// The scenario's letter.
@@ -84,6 +93,7 @@ impl Scenario {
             Scenario::C => 'C',
             Scenario::D => 'D',
             Scenario::E => 'E',
+            Scenario::F => 'F',
         }
     }
 
@@ -95,6 +105,7 @@ impl Scenario {
             Scenario::C => "from nothing",
             Scenario::D => "oriented",
             Scenario::E => "after the plugin",
+            Scenario::F => "publish",
         }
     }
 
@@ -108,6 +119,7 @@ impl Scenario {
             }
             Scenario::C => include_str!("../../onboarding/prompts/c.txt"),
             Scenario::D => include_str!("../../onboarding/prompts/d.txt"),
+            Scenario::F => include_str!("../../onboarding/prompts/f.txt"),
         }
         .trim_end()
     }
@@ -115,7 +127,7 @@ impl Scenario {
     /// Whether Claude Code runs with `--bare` (no `CLAUDE.md`, skills,
     /// hooks, or memory).
     pub fn bare(self) -> bool {
-        !matches!(self, Scenario::B | Scenario::E)
+        !matches!(self, Scenario::B | Scenario::E | Scenario::F)
     }
 }
 

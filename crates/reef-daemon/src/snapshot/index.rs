@@ -3,10 +3,12 @@
 //!
 //! Watcher snapshots stay on the machine; only a change that is explicitly
 //! published leaves it (`docs/design.md`, Workspaces and Durability).
-//! Nothing in Phase 1 exports anything, so this index is what makes that
-//! rule enforceable later: R4's publish clears `local` on the rows of the
-//! change it publishes ([`for_change`]), and an export refuses the rest.
-//! Every row starts local, and nothing in Phase 1 clears it.
+//! Every row starts local. A publish to a git remote (#258, ADR 0070)
+//! clears `local` on the rows whose content it pushed ([`mark_published`]):
+//! a pushed commit, or a snapshot of a published change with the same tree
+//! as the pushed commit (one a describe or sign-off rewrote before the
+//! push). Nothing else clears it; earlier snapshots with other trees stay
+//! local, since git never sent them. R4's publish to a store does the same.
 //!
 //! jj's operation log stays authoritative (ADR 0003). [`reindex`] rebuilds
 //! the index from it at daemon start, after R1.17's GC, and after R1.18's
@@ -19,9 +21,10 @@
 //! GC (R1.17) rewrites the operations it keeps, with new ids, and jj does
 //! not say which old id became which. The reindex after GC therefore drops
 //! the rows of rewritten operations and adds them again under their new
-//! ids, as local and with the kind the log implies. R4's publish, which
-//! clears `local`, has to survive that: carry the flag by commit id, or
-//! record published changes elsewhere.
+//! ids, with the kind the log implies, and local unless their content is
+//! on a remote bookmark by the same rule: published work stays published
+//! through GC, and commits pushed by the jj CLI read as published after the
+//! next reindex.
 //!
 //! As everywhere in the daemon, SQLite stays off the repository thread: the
 //! pipeline writes a row on its blocking half after the repository thread
@@ -96,13 +99,17 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<SnapshotEntry> {
     })
 }
 
-/// Inserts `entry`'s row as local, whatever `entry.local` says: a snapshot
-/// is local when taken, and only R4's publish clears the flag. Returns
-/// whether a row was added; an operation already indexed keeps its row.
-fn insert_in(conn: &Connection, repo: RepoId, entry: &SnapshotEntry) -> rusqlite::Result<bool> {
+/// Inserts `entry`'s row with `local`. Returns whether a row was added; an
+/// operation already indexed keeps its row.
+fn insert_in(
+    conn: &Connection,
+    repo: RepoId,
+    entry: &SnapshotEntry,
+    local: bool,
+) -> rusqlite::Result<bool> {
     let added = conn.execute(
-        "INSERT INTO snapshots(op_id, repo_id, workspace_id, commit_id, change_id, kind, taken_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO snapshots(op_id, repo_id, workspace_id, commit_id, change_id, kind, taken_at, local)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(op_id) DO NOTHING",
         params![
             entry.op_id.as_str(),
@@ -112,18 +119,20 @@ fn insert_in(conn: &Connection, repo: RepoId, entry: &SnapshotEntry) -> rusqlite
             entry.change_id.as_str(),
             entry.kind,
             entry.taken_at,
+            local,
         ],
     )?;
     Ok(added > 0)
 }
 
-/// Indexes a snapshot operation of `repo`, as local. Called by the
+/// Indexes a snapshot operation of `repo`, as local whatever `entry.local`
+/// says: a snapshot is local when taken. Called by the
 /// snapshot pipeline after the operation is committed and before the
 /// working-copy state is saved, so a crash between the two leaves a row
 /// naming an operation that exists, never an operation without a row that
 /// the next start's [`reindex`] cannot restore.
 pub fn record(db: &Db, repo: RepoId, entry: &SnapshotEntry) -> Result<(), DbError> {
-    db.with(|conn| insert_in(conn, repo, entry).map(drop))
+    db.with(|conn| insert_in(conn, repo, entry, true).map(drop))
 }
 
 /// A workspace's snapshot count and how many of them are local.
@@ -212,8 +221,7 @@ pub fn recent_at(
     })
 }
 
-/// Every workspace's snapshots of `change` in `repo`, oldest first: what
-/// R4's publish of the change flips.
+/// Every workspace's snapshots of `change` in `repo`, oldest first.
 pub fn for_change(
     db: &Db,
     repo: RepoId,
@@ -226,6 +234,48 @@ pub fn for_change(
         ))?;
         let rows = stmt.query_map(params![repo, change.as_str()], from_row)?;
         rows.collect()
+    })
+}
+
+/// The distinct commits of `repo`'s local rows whose change is one of
+/// `changes`: the candidates a publish of those changes may clear (#258).
+pub fn local_commits_of(
+    db: &Db,
+    repo: RepoId,
+    changes: &[ChangeIdHex],
+) -> Result<Vec<CommitIdHex>, DbError> {
+    db.with(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT commit_id FROM snapshots
+             WHERE repo_id = ?1 AND change_id = ?2 AND local = 1",
+        )?;
+        let mut commits = Vec::new();
+        for change in changes {
+            let rows = stmt.query_map(params![repo, change.as_str()], |row| hex_column(row, 0))?;
+            for row in rows {
+                commits.push(row?);
+            }
+        }
+        Ok(commits)
+    })
+}
+
+/// Marks the rows of `repo` whose commit is one of `commits` as having left
+/// the machine (#258): a publish pushed their content. Returns how many rows
+/// changed. The only writer of a cleared flag besides [`reindex`].
+pub fn mark_published(db: &Db, repo: RepoId, commits: &[CommitIdHex]) -> Result<u64, DbError> {
+    if commits.is_empty() {
+        return Ok(0);
+    }
+    db.in_transaction(|tx| {
+        let mut update = tx.prepare(
+            "UPDATE snapshots SET local = 0 WHERE repo_id = ?1 AND commit_id = ?2 AND local = 1",
+        )?;
+        let mut changed = 0u64;
+        for commit in commits {
+            changed += u64::try_from(update.execute(params![repo, commit.as_str()])?).unwrap_or(0);
+        }
+        Ok(changed)
     })
 }
 
@@ -343,6 +393,8 @@ struct SnapshotOpRow {
     commit_id: CommitIdHex,
     change_id: ChangeIdHex,
     end_time: Timestamp,
+    /// The commit is reachable from a remote bookmark (#258).
+    published: bool,
 }
 
 /// What the repository thread's walk found.
@@ -407,10 +459,11 @@ pub async fn reindex(
                 commit_id: row.commit_id.clone(),
                 change_id: row.change_id.clone(),
                 kind: row.kind,
-                local: true,
+                local: !row.published,
                 taken_at: row.end_time,
             };
-            if insert_in(tx, repo_id, &entry)? {
+            // The flag derived from the remote bookmarks (#258).
+            if insert_in(tx, repo_id, &entry, entry.local)? {
                 report.added += 1;
             }
         }
@@ -491,7 +544,25 @@ async fn scan(
             commit_id,
             change_id,
             end_time,
+            published: false,
         });
+    }
+    // Published work stays published through GC (#258): a pushed commit,
+    // or a snapshot with a pushed commit's change and tree, is still on a
+    // remote bookmark.
+    if !missing.is_empty() {
+        let ids: Vec<CommitIdHex> = missing.iter().map(|row| row.commit_id.clone()).collect();
+        match reef_lib::jj::push::published_commits(&head.repo.readonly(), &ids).await {
+            Ok(reachable) => {
+                for row in &mut missing {
+                    row.published = reachable.contains(&row.commit_id);
+                }
+            }
+            Err(error) => tracing::warn!(
+                error = %ErrorChain(&error),
+                "cannot tell which snapshots were published; re-adding them as local"
+            ),
+        }
     }
     Ok(Scan {
         missing,

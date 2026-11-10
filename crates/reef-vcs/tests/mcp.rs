@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 21] = [
+const TOOLS: [&str; 22] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -44,6 +44,7 @@ const TOOLS: [&str; 21] = [
     "move_workspace",
     "release_workspace",
     "describe_change",
+    "publish_change",
     "abandon_change",
     "undo_operation",
     "edit_files",
@@ -204,9 +205,13 @@ async fn handshake_and_tools() {
     // tightening `get_diff`'s own texts (ADR 0043). R2.16's `query_changes`
     // answers "who touched this" in one call instead of paging
     // `list_operations` and diffing each change, and took it to 21,191
-    // (ADR 0044). Raising it again needs the same argument in that
-    // ticket's brief.
-    assert!(bytes <= 21_250, "tools/list is {bytes} bytes");
+    // (ADR 0044). #258's `publish_change`, with the `publish` and the
+    // missing `conflict-assignment` kinds, took it to 22,376: publishing is
+    // the one write that takes an agent's work off the machine, and without
+    // the tool an MCP agent leaves Reef for `git push` from the root, the
+    // workaround #194 records. Raising it again needs the same argument in
+    // that ticket's brief.
+    assert!(bytes <= 22_400, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -248,7 +253,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 22);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -1428,6 +1433,12 @@ async fn every_tool_result_matches_its_output_schema() {
     // An error result matches the error result's schema.
     mcp.err("get_operation", json!({"operation_id": "abcdef0123"}))
         .await;
+    // The fixture has no git remote and the default identity: publishing
+    // is refused. tests/vcs.rs publish_cli checks a publish's brief result,
+    // the same type, against its schema.
+    called.insert("publish_change");
+    let refused = mcp.err("publish_change", json!({})).await;
+    assert_eq!(refused["reason"], "IDENTITY_UNSET", "{refused}");
     for tool in TOOLS {
         assert!(called.contains(tool), "{tool} was not called");
     }

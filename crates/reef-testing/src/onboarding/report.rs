@@ -75,7 +75,8 @@ fn default_repository() -> String {
 pub fn target(scenario: Scenario) -> Option<(f64, f64)> {
     match scenario {
         Scenario::A => Some((8.0, 2.0)),
-        Scenario::B | Scenario::E => Some((4.0, 0.0)),
+        // F is held to B's targets (#258).
+        Scenario::B | Scenario::E | Scenario::F => Some((4.0, 0.0)),
         Scenario::C | Scenario::D => None,
     }
 }
@@ -160,8 +161,9 @@ pub fn rows(trials: &[TrialResult]) -> Vec<Row> {
 
 /// A trial's calls to success: for A to C, the first successful `reef ws
 /// run`, or every tool call if the agent got there another way (`ws
-/// create`, an edit, `ws release`); for D, every tool call. `None` if the
-/// trial failed.
+/// create`, an edit, `ws release`); for D, every tool call; for F, the
+/// first successful `reef publish`, or every tool call. `None` if the trial
+/// failed.
 fn calls_to_success(trial: &TrialResult) -> Option<f64> {
     if !trial.success {
         return None;
@@ -169,6 +171,8 @@ fn calls_to_success(trial: &TrialResult) -> Option<f64> {
     let metrics = trial.metrics.as_ref()?;
     let calls = match trial.scenario {
         Scenario::D => None,
+        // Up to the first `reef publish` that worked (#258).
+        Scenario::F => metrics.calls_to_publish,
         _ => metrics.calls_to_success,
     };
     Some(f64::from(calls.unwrap_or(metrics.tool_calls)))

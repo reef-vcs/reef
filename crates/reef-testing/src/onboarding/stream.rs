@@ -30,6 +30,10 @@ impl Transcript {
                 if ran && call.is_error == Some(false) && metrics.calls_to_success.is_none() {
                     metrics.calls_to_success = Some(count(index + 1));
                 }
+                let published = invocations.iter().any(|words| is_publish(words));
+                if published && call.is_error == Some(false) && metrics.calls_to_publish.is_none() {
+                    metrics.calls_to_publish = Some(count(index + 1));
+                }
             }
             if git_escape(command).is_some() {
                 metrics.git_escapes.push(command.to_owned());
@@ -52,14 +56,19 @@ pub struct Metrics {
     /// Tool calls up to and including the first `Bash` call that ran
     /// `reef ws run` and exited 0. `None` if none did.
     pub calls_to_success: Option<u32>,
+    /// Tool calls up to and including the first `Bash` call that ran
+    /// `reef publish` and exited 0 (scenario F, #258). `None` if none did.
+    #[serde(default)]
+    pub calls_to_publish: Option<u32>,
     /// Every tool call, any tool.
     pub tool_calls: u32,
     /// `Bash` calls that ran `reef`.
     pub reef_calls: u32,
     /// Of those, the ones that exited non-zero.
     pub failed_reef_calls: u32,
-    /// `Bash` commands that ran `git worktree`, `git stash`, or
-    /// `git checkout`: the agent went around Reef.
+    /// `Bash` commands that ran `git worktree`, `git stash`,
+    /// `git checkout`, `git push` or `jj git push`: the agent went around
+    /// Reef.
     pub git_escapes: Vec<String>,
     /// Model round trips, from the `result` event.
     pub num_turns: Option<u64>,
@@ -96,13 +105,23 @@ fn is_ws_run(words: &[&str]) -> bool {
     matches!(subcommands.as_slice(), ["ws" | "workspace", "run", ..])
 }
 
-/// The git subcommand if `command` runs `git worktree`, `git stash`, or
-/// `git checkout`.
+/// Whether the words after `reef` start with `publish` (#258).
+fn is_publish(words: &[&str]) -> bool {
+    let subcommands = positional(words, &REEF_VALUE_OPTIONS);
+    matches!(subcommands.as_slice(), ["publish", ..])
+}
+
+/// The git subcommand if `command` runs `git worktree`, `git stash`,
+/// `git checkout` or `git push`, or `jj git push` (#258).
 fn git_escape(command: &str) -> Option<&'static str> {
     simple_commands(command).iter().find_map(|words| {
         let [first, rest @ ..] = program(words) else {
             return None;
         };
+        if program_is(first, "jj") {
+            let subcommands = positional(rest, &["-R", "--repository", "--config"]);
+            return matches!(subcommands.as_slice(), ["git", "push", ..]).then_some("jj git push");
+        }
         if !program_is(first, "git") {
             return None;
         }
@@ -111,6 +130,7 @@ fn git_escape(command: &str) -> Option<&'static str> {
             Some(&"worktree") => Some("worktree"),
             Some(&"stash") => Some("stash"),
             Some(&"checkout") => Some("checkout"),
+            Some(&"push") => Some("push"),
             _ => None,
         }
     })
@@ -169,6 +189,10 @@ mod tests {
         assert_eq!(git_escape("cd a && git -C b stash"), Some("stash"));
         assert_eq!(git_escape("git checkout -b feature"), Some("checkout"));
         assert_eq!(git_escape("git status && git log"), None);
+        assert_eq!(git_escape("git push origin HEAD:review"), Some("push"));
+        assert_eq!(git_escape("jj git push -c @-"), Some("jj git push"));
+        assert_eq!(git_escape("jj -R . git fetch"), None);
+        assert_eq!(git_escape("reef publish -m x"), None);
         assert_eq!(git_escape("reef ws run -- git status"), None);
     }
 

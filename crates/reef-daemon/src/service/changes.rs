@@ -237,10 +237,25 @@ impl ChangeService for ChangesHandler {
         let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
+        if (request.signoff || request.reset_author) && self.state.config.identity_is_default() {
+            let context = crate::publish::Context::new(
+                &self.state,
+                target.repo.root.clone(),
+                &request.revision,
+            );
+            return Err(crate::publish::status(
+                &crate::publish::PublishError::IdentityUnset {
+                    email: self.state.config.identity.email.clone(),
+                },
+                &context,
+            ));
+        }
         let write = Write::Describe {
             revision: request.revision,
             description: request.description,
             expected: request.expected_commit_id,
+            signoff: request.signoff.then(|| self.state.config.identity.clone()),
+            reset_author: request.reset_author,
         };
         let (rewritten, operation) =
             write_change(&self.state, &target, agent, write, OperationKind::Describe).await?;

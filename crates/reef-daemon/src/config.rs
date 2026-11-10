@@ -149,6 +149,17 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "job_retention",
         ],
     ),
+    (
+        "publish",
+        &[
+            "enabled",
+            "remotes",
+            "branch_prefix",
+            "timeout",
+            "github_hosts",
+            "gitlab_hosts",
+        ],
+    ),
     ("ui", &["enabled", "listen"]),
     (
         "remote",
@@ -238,6 +249,8 @@ pub struct FileConfig {
     pub provenance: ProvenanceSection,
     /// `[executor]` (R3.05).
     pub executor: ExecutorSection,
+    /// `[publish]` (#258).
+    pub publish: PublishSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -868,6 +881,81 @@ impl Default for ExecutorSection {
     }
 }
 
+/// `[publish]`: publishing changes to git remotes (#258, ADR 0070).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PublishSection {
+    /// `false` refuses every publish. Default `true`.
+    pub enabled: bool,
+    /// The git remotes a publish may push to; empty allows every remote the
+    /// repository configures. Default empty.
+    pub remotes: Vec<String>,
+    /// The prefix of a published change's default branch. Default `reef/`;
+    /// empty for none.
+    pub branch_prefix: String,
+    /// How long a request waits for the push. Default 5 minutes; from 10
+    /// seconds to 1 hour.
+    #[serde(with = "duration")]
+    pub timeout: Duration,
+    /// Self-hosted hosts treated as GitHub for the pull-request hint.
+    pub github_hosts: Vec<String>,
+    /// Self-hosted hosts treated as GitLab for the pull-request hint.
+    pub gitlab_hosts: Vec<String>,
+}
+
+impl Default for PublishSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            remotes: Vec::new(),
+            branch_prefix: reef_lib::jj::push::DEFAULT_BRANCH_PREFIX.to_owned(),
+            timeout: Duration::from_mins(5),
+            github_hosts: Vec::new(),
+            gitlab_hosts: Vec::new(),
+        }
+    }
+}
+
+impl PublishSection {
+    /// The first invalid key and why.
+    fn invalid(&self) -> Option<(&'static str, String)> {
+        if let Some(remote) = self
+            .remotes
+            .iter()
+            .find(|name| reef_lib::jj::push::check_remote(name).is_err())
+        {
+            return Some((
+                "publish.remotes",
+                format!("{remote:?} is not a git remote name"),
+            ));
+        }
+        if let Err(reason) = reef_lib::jj::push::check_branch_prefix(&self.branch_prefix) {
+            return Some((
+                "publish.branch_prefix",
+                format!("{:?} is {reason}", self.branch_prefix),
+            ));
+        }
+        if !(Duration::from_secs(10)..=Duration::from_hours(1)).contains(&self.timeout) {
+            return Some(("publish.timeout", "must be from 10s to 1h".to_owned()));
+        }
+        let host_ok = |host: &String| {
+            !host.is_empty()
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+        };
+        for (key, hosts) in [
+            ("publish.github_hosts", &self.github_hosts),
+            ("publish.gitlab_hosts", &self.gitlab_hosts),
+        ] {
+            if let Some(host) = hosts.iter().find(|host| !host_ok(host)) {
+                return Some((key, format!("{host:?} is not a host name")));
+            }
+        }
+        None
+    }
+}
+
 /// `[status_index]`: the incremental status index (R2.23, ADR 0048).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -1372,6 +1460,13 @@ impl Paths {
 }
 
 impl Config {
+    /// Whether the effective identity is the default's form, `reef
+    /// <reef@host>`, which a sign-off, an author reset or a publish refuses
+    /// (#258).
+    pub fn identity_is_default(&self) -> bool {
+        reef_lib::jj::push::is_default_identity(&self.identity.name, &self.identity.email)
+    }
+
     /// Resolves the paths, reads and validates the config file, and computes
     /// the effective identity. Reads the environment; creates nothing.
     pub fn load(overrides: &PathOverrides) -> Result<Config, ConfigError> {
@@ -1596,6 +1691,10 @@ impl Config {
             |path: &Option<PathBuf>| s(&path.as_deref().unwrap_or(Path::new("")).to_string_lossy());
         let d = |value: Duration| s(&format_duration(value));
         let n = |value: u64| value.to_string();
+        let strings = |values: &[String]| {
+            toml::Value::Array(values.iter().cloned().map(toml::Value::String).collect())
+                .to_string()
+        };
         let (l, w) = (&f.lease, &f.watcher);
         vec![
             (
@@ -1766,6 +1865,17 @@ impl Config {
                     ("max_attempts", f.executor.max_attempts.to_string()),
                     ("max_open_jobs", f.executor.max_open_jobs.to_string()),
                     ("job_retention", d(f.executor.job_retention)),
+                ],
+            ),
+            (
+                "publish",
+                vec![
+                    ("enabled", f.publish.enabled.to_string()),
+                    ("remotes", strings(&f.publish.remotes)),
+                    ("branch_prefix", s(&f.publish.branch_prefix)),
+                    ("timeout", d(f.publish.timeout)),
+                    ("github_hosts", strings(&f.publish.github_hosts)),
+                    ("gitlab_hosts", strings(&f.publish.gitlab_hosts)),
                 ],
             ),
             (
@@ -2188,6 +2298,13 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             path: path.to_owned(),
             key: "sigstore.trusted_root".to_owned(),
             reason: format!("{:?} must be an absolute path", file.sigstore.trusted_root),
+        });
+    }
+    if let Some((key, reason)) = file.publish.invalid() {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            key: key.to_owned(),
+            reason,
         });
     }
     if let Some((key, reason)) = file.remote.invalid() {

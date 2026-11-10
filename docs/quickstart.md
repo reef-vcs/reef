@@ -116,6 +116,24 @@ reef status --at 1h
 
 `reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, `reef history <path>` (or `--symbol <name>`) lists the changes that touched it, who wrote them and whether they landed, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `--at 1h` (or `--at-op <op>`) reads as of then, from the operation log. `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints brief JSON when piped (`-o json` for every field), and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
+## Publish a change for review
+
+To get a change onto a branch of your git remote as a pull request, set the daemon's identity once (commits are authored as it, and the default `reef <reef@host>` is refused), in the daemon's `config.toml` (`reef config show` prints its path):
+
+```toml
+[identity]
+name = "Pat Example"
+email = "pat@example.com"
+```
+
+Restart the daemon (`reef daemon stop`; the next `reef` command starts it). Then, from inside a workspace:
+
+```sh
+reef ws run -- sh -c 'echo note >> README.md && reef publish -m "Add a note"'
+```
+
+`reef publish` snapshots and describes the change, pushes it and any ancestors the remote lacks to `reef/<change id>` on `origin`, and prints the command that opens the pull request on GitHub or GitLab as `next`. Publishing it again after more edits updates the same branch. It refuses an empty, undescribed, conflicted or divergent change, never pushes to trunk's branch, and never overwrites a branch someone else pushed to without `--force`. [docs/publishing.md](publishing.md) has every rule.
+
 ## Watch the fleet in a browser
 
 ```sh
@@ -311,9 +329,10 @@ The daemon collects garbage daily: old snapshots, unused bases, and unused store
 
 ## Known limitations in Phase 1
 
-- Watcher snapshots are local: they stay in the repository on this machine and are never pushed or exported to git.
+- Watcher snapshots are local: they stay in the repository on this machine and are never pushed or exported to git, until `reef publish` pushes a change.
+- `reef publish` runs no git hook (run your checks first), and pushes with the daemon's environment and your git configuration: a daemon started from a shell without your SSH agent cannot use it ([docs/publishing.md](publishing.md#credentials-and-failures)).
 - New workspaces start on `main`, `origin/HEAD`'s branch, `master` or `trunk` ([ADR 0022](adr/0022-shared-dependency-stores.md) decision 8 has the order). In a repository with none of these they start on the checkout's own working-copy change, and a `jj` command in the checkout rebases them; pass `--new-on <branch>`.
-- In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one ([ADR 0024](adr/0024-repository-onboarding.md)).
+- In a git checkout, Reef imports branches but does not export: an agent's change is a jj change, not a git branch, until you make it one or publish it ([ADR 0024](adr/0024-repository-onboarding.md)).
 - A workspace directory has neither `.git` nor `.jj`, so `git` and `jj` commands inside it fail: agents work on files, and you run `git` and `jj` in your checkout ([ADR 0014](adr/0014-workspace-model-on-jj.md)).
 - `reef.toml` is read from the commit a workspace starts on, not from disk: commit it before it takes effect.
 - A shared store is read-only, so a tool that writes a cache into it fails (Vitest's `node_modules/.vitest-cache`; Vite's `cacheDir` setting moves it).

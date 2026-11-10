@@ -35,9 +35,18 @@ pub(crate) struct DescribeArgs {
     /// The revision.
     #[arg(value_name = "REV", default_value = "@")]
     revision: String,
-    /// The description; several are joined by blank lines, and '' clears it.
-    #[arg(short = 'm', long = "message", value_name = "TEXT", required = true)]
+    /// The description; several are joined by blank lines, and '' clears
+    /// it. Required unless --signoff or --reset-author is given.
+    #[arg(short = 'm', long = "message", value_name = "TEXT")]
     message: Vec<String>,
+    /// Add a `Signed-off-by:` trailer for the daemon's `[identity]`, as
+    /// `git commit -s` does; without -m the description is kept.
+    #[arg(long)]
+    signoff: bool,
+    /// Set the author to the daemon's `[identity]` and the current time;
+    /// without -m the description is kept.
+    #[arg(long)]
+    reset_author: bool,
     /// Refuse unless the revision still names this commit (a full id).
     #[arg(long, value_name = "ID")]
     expected_commit: Option<String>,
@@ -100,6 +109,11 @@ pub(crate) async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
 }
 
 pub(crate) async fn describe(ctx: &Ctx, args: DescribeArgs) -> Result<(), CliError> {
+    if args.message.is_empty() && !args.signoff && !args.reset_author {
+        return Err(CliError::Usage(
+            "give the description with -m (or --signoff or --reset-author to keep it)".to_owned(),
+        ));
+    }
     let scope = scope::resolve(ctx, &args.scope).await?;
     let revision = args.revision;
     let advice = AdviceCtx {
@@ -113,6 +127,8 @@ pub(crate) async fn describe(ctx: &Ctx, args: DescribeArgs) -> Result<(), CliErr
             revision,
             description: join_paragraphs(&args.message),
             expected_commit_id: args.expected_commit.unwrap_or_default(),
+            signoff: args.signoff,
+            reset_author: args.reset_author,
         }))
         .await
         .map_err(|error| advice.refine(error))?;
@@ -161,7 +177,7 @@ pub(crate) async fn abandon(ctx: &Ctx, args: AbandonArgs) -> Result<(), CliError
 
 /// `-m` values as one description, as `jj describe` joins them: each
 /// paragraph ending in a newline, separated by a blank line.
-fn join_paragraphs(paragraphs: &[String]) -> String {
+pub(crate) fn join_paragraphs(paragraphs: &[String]) -> String {
     paragraphs
         .iter()
         .map(|paragraph| {

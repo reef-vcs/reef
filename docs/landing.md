@@ -138,7 +138,7 @@ An agent often proposes `@`. After the landing, that workspace sits on a new emp
 ## What a landing is not
 
 - **Not undoable.** `reef undo` refuses the queue, return and land operations: others build on the destination at once. Land a revert, or move the bookmark back with jj. It refuses a batch's operations too: withdraw a change to take it out of its batch.
-- **Not a push.** The landing moves a local bookmark. In a colocated repository, git sees it when the jj CLI next runs. A local `main` that also follows a git host diverges from it after a landing, and a later `jj git fetch` that moved `main@origin` can leave it conflicted: land onto a bookmark nobody fetches into, or wait for R3.17, which pushes landed history.
+- **Not a push.** The landing moves a local bookmark. In a colocated repository, git sees it when the jj CLI next runs. A local `main` that also follows a git host diverges from it after a landing, and a later `jj git fetch` that moved `main@origin` can leave it conflicted: land onto a bookmark nobody fetches into, or wait for R3.17, which pushes landed history. A team that merges through pull requests publishes each change to a review branch instead, with `reef publish` ([docs/publishing.md](publishing.md)).
 - **Not safe from other jj writers.** A `jj` command that moves the bookmark while a landing writes can leave it conflicted; the operation log shows both, and `jj bookmark set` resolves it.
 
 ## Who may land

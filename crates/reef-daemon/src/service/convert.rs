@@ -652,6 +652,7 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::Comment) => v1::OperationKind::Comment,
         Some(OpKind::Batch) => v1::OperationKind::Batch,
         Some(OpKind::ConflictAssignment) => v1::OperationKind::ConflictAssignment,
+        Some(OpKind::Publish) => v1::OperationKind::Publish,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
     }

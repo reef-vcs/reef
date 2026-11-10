@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 28;
+pub const API_REVISION: u32 = 29;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -131,6 +131,10 @@ pub const API_DIGESTS: &[&str] = &[
     // `conflict_assignment_count`, `OPERATION_KIND_CONFLICT_ASSIGNMENT` and
     // `Operation.conflict_events`.
     "9f940822fdba9c74e5fb7c59f9ac8c2d37f0a27f563ba1c5108d0c2de9f38722",
+    // #258: `git.proto` (`GitService.PublishChange`),
+    // `DescribeChangeRequest.signoff` and `reset_author`, and
+    // `OPERATION_KIND_PUBLISH`.
+    "62c7ec17133adceb5e8a2f53cbce90ea319c5deb790615af302a3444aadddd46",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -800,6 +804,82 @@ pub mod error {
     pub const ASSIGNMENT_REQUIRED: &str = "ASSIGNMENT_REQUIRED";
     /// `AssignConflict` with neither a target nor a priority (R3.27).
     pub const ASSIGNMENT_TARGET_REQUIRED: &str = "ASSIGNMENT_TARGET_REQUIRED";
+    /// `PublishChange` of a commit with an empty description, or whose
+    /// first line is blank (#258). Metadata: `change_id`, `commit_id`.
+    pub const CHANGE_UNDESCRIBED: &str = "CHANGE_UNDESCRIBED";
+    /// `PublishChange` of a commit whose author or committer has no name or
+    /// no email (#258). Metadata: `change_id`, `commit_id`.
+    pub const COMMIT_IDENTITY_MISSING: &str = "COMMIT_IDENTITY_MISSING";
+    /// `PublishChange` of a commit authored or committed as the daemon's
+    /// default identity, `reef <reef@host>` (#258): describe it again with
+    /// `reset_author`. Metadata: `change_id`, `commit_id`.
+    pub const COMMIT_AUTHOR_DEFAULT: &str = "COMMIT_AUTHOR_DEFAULT";
+    /// `PublishChange` of a range holding another active workspace's
+    /// working-copy commit (#258). Metadata: `change_id`, `commit_id`,
+    /// `workspace`.
+    pub const INCLUDES_WORKING_COPY: &str = "INCLUDES_WORKING_COPY";
+    /// `PublishChange` of more commits than the remote's branches lack the
+    /// cap allows (#258). Metadata: `count`.
+    pub const RANGE_TOO_LARGE: &str = "RANGE_TOO_LARGE";
+    /// `PublishChange` in a repository with no git backend (#258).
+    pub const NO_GIT_BACKEND: &str = "NO_GIT_BACKEND";
+    /// `PublishChange` naming no remote in a repository with several and
+    /// none named `origin` (#258). Metadata: `remotes`.
+    pub const GIT_REMOTE_REQUIRED: &str = "GIT_REMOTE_REQUIRED";
+    /// A git remote name Reef does not accept: not a remote name, `git`, or
+    /// a URL (#258). Metadata: `git_remote`.
+    pub const INVALID_GIT_REMOTE: &str = "INVALID_GIT_REMOTE";
+    /// A git remote the repository does not configure (#258). Metadata:
+    /// `git_remote`, `remotes`.
+    pub const GIT_REMOTE_NOT_FOUND: &str = "GIT_REMOTE_NOT_FOUND";
+    /// A git remote the daemon's `[publish] remotes` does not list (#258).
+    /// Metadata: `git_remote`.
+    pub const GIT_REMOTE_NOT_ALLOWED: &str = "GIT_REMOTE_NOT_ALLOWED";
+    /// A branch name Reef does not push to (#258). Metadata: `branch`.
+    pub const INVALID_BRANCH: &str = "INVALID_BRANCH";
+    /// A branch that is trunk's, the remote's HEAD, immutable, or git's
+    /// checked-out branch (#258). Metadata: `branch`, `why`.
+    pub const BRANCH_NOT_PUBLISHABLE: &str = "BRANCH_NOT_PUBLISHABLE";
+    /// A branch holding another change's commit, or a local bookmark of its
+    /// name elsewhere, without `force` (#258). Metadata:
+    /// `remote_commit_id`, `remote_change_id`, `remote_author`,
+    /// `remote_summary`, `remote_hidden`.
+    pub const BRANCH_DIVERGED: &str = "BRANCH_DIVERGED";
+    /// A branch whose remote-tracking bookmark is conflicted (#258).
+    /// Metadata: `branch`.
+    pub const BRANCH_CONFLICTED: &str = "BRANCH_CONFLICTED";
+    /// The push's lease failed: the branch moved on the remote since Reef
+    /// last saw it (#258). Metadata: `branch`, `git_remote`.
+    pub const BRANCH_MOVED: &str = "BRANCH_MOVED";
+    /// The remote refused the push (#258). Metadata: `remote_reason`.
+    pub const REMOTE_REJECTED: &str = "REMOTE_REJECTED";
+    /// The daemon's git is older than jj-lib needs (#258).
+    pub const GIT_TOO_OLD: &str = "GIT_TOO_OLD";
+    /// A sign-off, an author reset or a publish while the daemon's
+    /// `[identity]` is the default `reef <reef@host>` (#258).
+    pub const IDENTITY_UNSET: &str = "IDENTITY_UNSET";
+    /// A sign-off on a change whose description would be only the trailer
+    /// (#258).
+    pub const SIGNOFF_WITHOUT_DESCRIPTION: &str = "SIGNOFF_WITHOUT_DESCRIPTION";
+    /// `PublishChange` while the daemon's `[publish] enabled` is false
+    /// (#258).
+    pub const PUBLISH_DISABLED: &str = "PUBLISH_DISABLED";
+    /// `PublishChange` through the remote listener (#258).
+    pub const REMOTE_PUBLISH_DENIED: &str = "REMOTE_PUBLISH_DENIED";
+    /// The remote refused the push's credentials, or git could not find
+    /// any (#258). Metadata: `git_stderr`, `ssh_auth_sock`.
+    pub const GIT_AUTH_FAILED: &str = "GIT_AUTH_FAILED";
+    /// The remote could not be reached (#258). Metadata: `git_stderr`.
+    pub const GIT_UNREACHABLE: &str = "GIT_UNREACHABLE";
+    /// The daemon's git could not be run (#258).
+    pub const GIT_NOT_FOUND: &str = "GIT_NOT_FOUND";
+    /// The push failed for another reason (#258). Metadata: `git_stderr`.
+    pub const GIT_PUSH_FAILED: &str = "GIT_PUSH_FAILED";
+    /// The push did not finish within `[publish] timeout` (#258); a
+    /// successful push is still recorded when git exits.
+    pub const PUBLISH_TIMEOUT: &str = "PUBLISH_TIMEOUT";
+    /// Another publish of the same branch is still pushing (#258).
+    pub const PUBLISH_IN_PROGRESS: &str = "PUBLISH_IN_PROGRESS";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {
