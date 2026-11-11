@@ -227,8 +227,8 @@ async fn serve_jobs(global: &Global, out: &Out, args: RunArgs) -> Result<(), Cli
 }
 
 /// The paths a check never sees, beyond the home: Reef's state and
-/// configuration, the socket, the runtime directory, the executor's own
-/// configuration and token file.
+/// configuration, the socket, the runtime directory, the default workspace
+/// root `~/.reef` (#260), the executor's own configuration and token file.
 fn hidden(global: &Global, config: &Config, token_file: Option<&Path>) -> Hidden {
     let mut denied = Vec::new();
     if let Ok(client) = global.load_config() {
@@ -238,10 +238,10 @@ fn hidden(global: &Global, config: &Config, token_file: Option<&Path>) -> Hidden
     } else if let Ok(state) = global.state_dir() {
         denied.push(state);
     }
-    if let Ok(defaults) = reef_client::paths::platform_defaults()
-        && let Some(runtime) = defaults.runtime_dir
-    {
-        denied.push(runtime);
+    if let Ok(defaults) = reef_client::paths::platform_defaults() {
+        denied.extend(defaults.runtime_dir);
+        // Every agent's workspace, outside the state directory since #260.
+        denied.extend(defaults.home.map(|home| home.join(".reef")));
     }
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         denied.push(PathBuf::from(runtime));

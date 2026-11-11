@@ -283,8 +283,9 @@ impl RepoRegistry {
             self.open(&existing, settings.clone())?;
             return Ok(registered(existing, true));
         }
+        let taken = db.repositories()?;
         let record = RepositoryRecord {
-            id: RepoId::generate(),
+            id: fresh_repo_id(taken.iter().map(|record| record.id), RepoId::generate),
             jj_repo_path: canonical(repo.repo_path())?,
             colocated: repo.is_colocated(),
             root,
@@ -432,6 +433,25 @@ fn find_git_root(path: &Path) -> Found {
     Found::Nothing
 }
 
+/// Draws a repository id from `draw` whose first
+/// [`REPO_SHORT_LEN`](crate::config::REPO_SHORT_LEN) hex characters no
+/// `taken` id shares, so `~/.reef/<repo-short>` is the new repository's own
+/// (#260). Gives up after 64 draws and keeps the last: with 64-bit ids that
+/// takes billions of registered repositories, and a shared directory is
+/// still harmless (workspace ids are unique).
+fn fresh_repo_id(taken: impl Iterator<Item = RepoId>, mut draw: impl FnMut() -> RepoId) -> RepoId {
+    use crate::config::repo_short;
+    let taken: std::collections::BTreeSet<String> = taken.map(repo_short).collect();
+    let mut id = draw();
+    for _ in 1..64 {
+        if !taken.contains(&repo_short(id)) {
+            break;
+        }
+        id = draw();
+    }
+    id
+}
+
 /// The repository registered at exactly `root`, if any.
 fn registered_at(db: &Db, root: &Path) -> Result<Option<RepositoryRecord>, DbError> {
     Ok(db
@@ -450,6 +470,25 @@ mod tests {
             allow_foreign: false,
             config_file: PathBuf::from("/state/config.toml"),
         }
+    }
+
+    /// #260: a drawn id whose first eight hex characters a registered
+    /// repository has is drawn again.
+    #[test]
+    fn fresh_repo_id_skips_a_taken_prefix() {
+        let id = |hex: &str| hex.parse::<RepoId>().unwrap();
+        let taken = [id("a3dda866c7e8f343"), id("0000000000000001")];
+        let mut draws = [
+            id("a3dda86600000000"),
+            id("0000000000000002"),
+            id("b7eee08cd3560390"),
+        ]
+        .into_iter();
+        let fresh = fresh_repo_id(taken.into_iter(), || draws.next().unwrap());
+        assert_eq!(fresh, id("b7eee08cd3560390"));
+        // A free prefix is taken at the first draw.
+        let fresh = fresh_repo_id(taken.into_iter(), || id("ffffffff00000000"));
+        assert_eq!(fresh, id("ffffffff00000000"));
     }
 
     #[test]

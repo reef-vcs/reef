@@ -17,6 +17,11 @@
 //! left where it is, and only its jj workspace and state directory are
 //! undone.
 //!
+//! Directories are looked for under every root
+//! [`Config::workspace_roots`](crate::config::Config::workspace_roots)
+//! names: the configured one and, since #260 moved the default, the old
+//! default `<state>/repos/<repo-id>/ws`.
+//!
 //! The first start after a restore (`meta.rematerialize_pending`, R1.18)
 //! is the exception: a directory with no row then may be a workspace
 //! created after the backup was taken, holding edits nothing else has. It
@@ -54,11 +59,14 @@ impl Manager {
         {
             tracing::warn!(path = %sync.display(), %error, "cannot remove the sync directories");
         }
-        let ws_root = self.config.workspace_root(repo);
+        // Both roots: a create interrupted before #260 left its directory
+        // under the old one.
+        let ws_roots = self.config.workspace_roots(repo);
         let state_root = self.config.paths.repo_dir(repo).join("wc");
-        let ids: BTreeSet<WorkspaceId> = workspace_ids_in(&ws_root)
-            .into_iter()
-            .chain(workspace_ids_in(&state_root))
+        let ids: BTreeSet<WorkspaceId> = ws_roots
+            .iter()
+            .chain([&state_root])
+            .flat_map(|dir| workspace_ids_in(dir))
             .collect();
         let Ok(handle) = self.handle(repo) else {
             return 0;
@@ -80,22 +88,25 @@ impl Manager {
                     continue;
                 }
             }
-            let root = ws_root.join(id.as_hex());
-            let cleared = if restored {
-                keep_aside(id, &root)
-            } else {
-                match tokio::task::spawn_blocking(move || remove_abandoned(&root)).await {
-                    Ok(Ok(())) => true,
-                    Ok(Err(error)) => {
-                        tracing::error!(workspace_id = %id, %error, "cannot remove the directory of an interrupted create");
-                        false
+            let mut cleared = true;
+            for ws_root in &ws_roots {
+                let root = ws_root.join(id.as_hex());
+                cleared &= if restored {
+                    keep_aside(id, &root)
+                } else {
+                    match tokio::task::spawn_blocking(move || remove_abandoned(&root)).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(error)) => {
+                            tracing::error!(workspace_id = %id, %error, "cannot remove the directory of an interrupted create");
+                            false
+                        }
+                        Err(error) => {
+                            tracing::error!(workspace_id = %id, %error, "removal task failed");
+                            false
+                        }
                     }
-                    Err(error) => {
-                        tracing::error!(workspace_id = %id, %error, "removal task failed");
-                        false
-                    }
-                }
-            };
+                };
+            }
             if let Err(error) = forget_jj_workspace(
                 &handle,
                 id,

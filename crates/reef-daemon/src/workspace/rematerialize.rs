@@ -69,6 +69,7 @@ impl Manager {
         let fresh = std::fs::symlink_metadata(&paths.root).is_err();
         super::manager::remove_state_dir(&paths.state_dir).await;
         let base = if fresh {
+            self.private_parents(&paths.root)?;
             let (base, _) = self
                 .ensure_base_of(handle, &commit, &tree_key, &*backend)
                 .await?;

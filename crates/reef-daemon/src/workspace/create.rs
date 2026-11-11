@@ -355,9 +355,47 @@ impl Manager {
         )
     }
 
+    /// Under the default root (#260, S-185), makes `~/.reef` and the
+    /// directories between it and `root` private (`0700`, the daemon's
+    /// user's) before a backend creates `root`: a create, or a rebuild
+    /// after a restore. Anywhere else, does nothing.
+    pub(super) fn private_parents(&self, root: &Path) -> Result<(), ManagerError> {
+        let Some(base) = &self.config.workspace_base else {
+            return Ok(());
+        };
+        // Rows record canonical paths; `~/.reef` may not exist yet, so its
+        // canonical spelling is its parent's.
+        let canonical = base
+            .parent()
+            .and_then(|home| std::fs::canonicalize(home).ok())
+            .zip(base.file_name())
+            .map(|(home, name)| home.join(name));
+        let Some((parent, base)) = root.parent().and_then(|parent| {
+            [Some(base.as_path()), canonical.as_deref()]
+                .into_iter()
+                .flatten()
+                .find(|base| parent.starts_with(base))
+                .map(|base| (parent, base))
+        }) else {
+            return Ok(());
+        };
+        let mut dirs: Vec<&Path> = parent
+            .ancestors()
+            .take_while(|dir| dir.starts_with(base))
+            .collect();
+        dirs.reverse();
+        for dir in dirs {
+            if let Some(mode) = crate::daemon::ensure_private_dir(dir, true)? {
+                crate::daemon::log_tightened(dir, mode);
+            }
+        }
+        Ok(())
+    }
+
     /// The new workspace's paths: `path` (absolute) or
     /// `<workspace.root>/<id>`, which must not exist; state in
-    /// `<state>/repos/<repo-id>/wc/<id>`.
+    /// `<state>/repos/<repo-id>/wc/<id>`. Under the default root, makes
+    /// `~/.reef` and the repository's directory in it private first.
     fn new_paths(
         &self,
         repo: RepoId,
@@ -369,7 +407,11 @@ impl Manager {
                 return Err(ManagerError::PathNotAbsolute(path.to_owned()));
             }
             Some(path) => path.to_owned(),
-            None => self.config.workspace_root(repo).join(id.as_hex()),
+            None => {
+                let root = self.config.workspace_root(repo).join(id.as_hex());
+                self.private_parents(&root)?;
+                root
+            }
         };
         if std::fs::symlink_metadata(&root).is_ok() {
             return Err(ManagerError::PathExists(root));

@@ -18,16 +18,19 @@
 //! | state directory | `$XDG_STATE_HOME/reef` (default `~/.local/state/reef`) | `~/Library/Application Support/reef` |
 //! | socket | `$XDG_RUNTIME_DIR/reef/daemon.sock`, else `<state>/daemon.sock` | `<state>/daemon.sock` |
 //! | config file | `<state>/config.toml` | `<state>/config.toml` |
+//! | workspaces | `~/.reef/<repo-short>/<ws-id>` | `~/.reef/<repo-short>/<ws-id>` |
 //!
-//! The `$XDG_RUNTIME_DIR` socket is the default only for the default state
-//! directory. A daemon given its own state directory keeps its socket in it,
-//! so two daemons on two state directories never contend for one socket.
+//! The `$XDG_RUNTIME_DIR` socket and the `~/.reef` workspace root (#260,
+//! ADR 0072) are the defaults only for the default state directory. A
+//! daemon given its own state directory keeps its socket and its
+//! workspaces (`<state>/repos/<repo-id>/ws/<ws-id>/`) in it, so two daemons
+//! on two state directories never contend for either.
 //!
 //! Everything else lives under the state directory: `daemon.lock`,
 //! `daemon.pid`, `reef.sqlite3` (with `-wal` and `-shm`), `logs/`,
 //! `repos/<repo-id>/bases/<tree-id>/` (with `<tree-id>.state/` beside each),
-//! `repos/<repo-id>/ws/<ws-id>/`, `repos/<repo-id>/wc/<ws-id>/`, and
-//! `stores/<name>/<lockfile-hash>/`.
+//! `repos/<repo-id>/wc/<ws-id>/`, workspaces created before #260 at
+//! `repos/<repo-id>/ws/<ws-id>/`, and `stores/<name>/<lockfile-hash>/`.
 //!
 //! In `config.toml`, unknown keys are errors, durations are humantime's form
 //! (`"500ms"`, `"30m"`, `"7d"`, `"1h 30m"`; printed back in the largest exact
@@ -65,6 +68,24 @@ pub const REPO_ID_PLACEHOLDER: &str = "<repo-id>";
 /// Placeholder for the state directory, allowed only at the start of
 /// `workspace.root`.
 pub const STATE_PLACEHOLDER: &str = "<state>";
+/// Placeholder for the repository id's first [`REPO_SHORT_LEN`] hex
+/// characters in `workspace.root` (#260), unique among registered
+/// repositories since registration draws ids so.
+pub const REPO_SHORT_PLACEHOLDER: &str = "<repo-short>";
+/// How many hex characters of the repository id [`REPO_SHORT_PLACEHOLDER`]
+/// stands for.
+pub const REPO_SHORT_LEN: usize = 8;
+/// The directory under the home directory that holds the default state
+/// directory's workspaces, `~/.reef` (#260, ADR 0072).
+pub const WORKSPACE_BASE_DIR: &str = ".reef";
+
+/// `id`'s first [`REPO_SHORT_LEN`] hex characters, what
+/// [`REPO_SHORT_PLACEHOLDER`] stands for.
+pub fn repo_short(id: RepoId) -> String {
+    let mut hex = id.as_hex();
+    hex.truncate(REPO_SHORT_LEN);
+    hex
+}
 
 /// Every key `config.toml` accepts, by section, in the order
 /// [`Config::to_effective_toml`] prints them. A test keeps this in step with
@@ -466,8 +487,10 @@ pub struct WorkspaceSection {
     /// Default `auto`.
     pub backend: BackendChoice,
     /// The directory holding a repository's workspaces, a template with
-    /// [`REPO_ID_PLACEHOLDER`] and optionally a leading
-    /// [`STATE_PLACEHOLDER`]; see [`Config::workspace_root`]. Default
+    /// [`REPO_ID_PLACEHOLDER`] or [`REPO_SHORT_PLACEHOLDER`] and optionally
+    /// a leading [`STATE_PLACEHOLDER`]; see [`Config::workspace_root`].
+    /// Default `~/.reef/<repo-short>` for the platform's default state
+    /// directory (resolved at load, #260), else
     /// `<state>/repos/<repo-id>/ws`.
     pub root: String,
     /// The `fuse-overlayfs` binary, a path or a name on `PATH`. Default
@@ -1275,6 +1298,11 @@ pub struct Config {
     /// `--remote`: serve the remote listener for this run, whatever
     /// `[remote] enabled` says (R2.08).
     pub remote_flag: bool,
+    /// `~/.reef` when `workspace.root` is the default state directory's
+    /// default (#260): Reef's own directory, kept `0700` and owned by the
+    /// daemon's user as the state directory is (S-185). `None` for a
+    /// configured root or another state directory.
+    pub workspace_base: Option<PathBuf>,
 }
 
 /// Failure to resolve the configuration.
@@ -1480,7 +1508,8 @@ impl Config {
     ) -> Result<Config, ConfigError> {
         let layered = Layered::resolve(overrides, env, defaults)?;
         let path = layered.config_file.clone();
-        let (file, file_keys, read) = match read_file(&path)? {
+        let home = layered.home.clone();
+        let (mut file, file_keys, read) = match read_file(&path)? {
             Some((file, keys)) => (file, keys, true),
             // Only the implicit `<state>/config.toml` may be absent: a file
             // named by `REEF_CONFIG` or `--config` that is missing is a typo.
@@ -1493,6 +1522,22 @@ impl Config {
             None => (FileConfig::default(), BTreeSet::new(), false),
         };
         validate(&file, &path)?;
+        // The default state directory's workspaces go under `~/.reef`
+        // (#260): short and free of spaces. Another state directory keeps
+        // them inside itself, as it keeps its socket.
+        // A file that names that same root (`reef config show` saved as
+        // `config.toml`) keeps it Reef's own.
+        let workspace_base = home
+            .map(|home| home.join(WORKSPACE_BASE_DIR))
+            .and_then(|base| {
+                let root = base.join(REPO_SHORT_PLACEHOLDER).to_str()?.to_owned();
+                if !file_keys.contains("workspace.root") {
+                    file.workspace.root = root;
+                } else if file.workspace.root != root {
+                    return None;
+                }
+                Some(base)
+            });
         let origin = Origin {
             state_dir: layered.state_dir_source,
             config_file: layered.config_file_source,
@@ -1505,7 +1550,9 @@ impl Config {
         }
         sources.insert("daemon.socket".to_owned(), socket_source);
         sources.insert("daemon.pid_file".to_owned(), pid_source);
-        Ok(Self::build(paths, file, sources, origin))
+        let mut config = Self::build(paths, file, sources, origin);
+        config.workspace_base = workspace_base;
+        Ok(config)
     }
 
     /// The default configuration for `paths`, reading no file and no
@@ -1557,11 +1604,13 @@ impl Config {
             web: crate::web::Limits::default(),
             remote_limits: crate::remote::Limits::default(),
             remote_flag: false,
+            workspace_base: None,
         }
     }
 
     /// The directory holding `repo`'s workspaces: `workspace.root` with
-    /// [`REPO_ID_PLACEHOLDER`] replaced by the id, a leading
+    /// [`REPO_ID_PLACEHOLDER`] replaced by the id,
+    /// [`REPO_SHORT_PLACEHOLDER`] by its first hex characters, a leading
     /// [`STATE_PLACEHOLDER`] by the state directory, and a relative result
     /// taken relative to the state directory.
     pub fn workspace_root(&self, repo: RepoId) -> PathBuf {
@@ -1569,10 +1618,26 @@ impl Config {
             .file
             .workspace
             .root
-            .replace(REPO_ID_PLACEHOLDER, &repo.to_string());
+            .replace(REPO_ID_PLACEHOLDER, &repo.to_string())
+            .replace(REPO_SHORT_PLACEHOLDER, &repo_short(repo));
         match root.strip_prefix(STATE_PLACEHOLDER) {
             Some(rest) => self.paths.state_dir.join(rest.trim_start_matches('/')),
             None => self.paths.state_dir.join(root),
+        }
+    }
+
+    /// Every directory that may hold `repo`'s workspace directories:
+    /// [`Config::workspace_root`], then, under the `~/.reef` default, the
+    /// default from before #260, `<state>/repos/<repo-id>/ws`, where
+    /// workspaces created before the upgrade stay until released. The start
+    /// sweeps read both. A configured root is read alone, as before.
+    pub fn workspace_roots(&self, repo: RepoId) -> Vec<PathBuf> {
+        let root = self.workspace_root(repo);
+        let legacy = self.paths.repo_dir(repo).join("ws");
+        if self.workspace_base.is_none() || root == legacy {
+            vec![root]
+        } else {
+            vec![root, legacy]
         }
     }
 
@@ -2283,11 +2348,11 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             "must be at least 1".to_owned(),
         ),
         (
-            root.contains(REPO_ID_PLACEHOLDER)
+            (root.contains(REPO_ID_PLACEHOLDER) || root.contains(REPO_SHORT_PLACEHOLDER))
                 && root.rfind(STATE_PLACEHOLDER).is_none_or(|at| at == 0),
             "workspace.root",
             format!(
-                "{root:?} must contain {REPO_ID_PLACEHOLDER}, and {STATE_PLACEHOLDER} only at the start"
+                "{root:?} must contain {REPO_ID_PLACEHOLDER} or {REPO_SHORT_PLACEHOLDER}, and {STATE_PLACEHOLDER} only at the start"
             ),
         ),
     ]);
