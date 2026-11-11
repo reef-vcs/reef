@@ -10,8 +10,9 @@
 //!
 //! 1. Create the state directory and the socket's directory (`0700`), or
 //!    refuse one another user owns and tighten one with group or other bits
-//!    (RX.01, S-01); then take the single-instance lock. A root daemon logs
-//!    a warning (S-04).
+//!    (RX.01, S-01); check `~/.reef`, the default workspace root's base,
+//!    the same way without creating it (#260, S-185); then take the
+//!    single-instance lock. A root daemon logs a warning (S-04).
 //! 2. Open the database and apply migrations; write the pid file. Apply the
 //!    lease restart grace (R1.15): every unended lease gets at least
 //!    `lease.restart_grace` from now, before anything can reclaim. If that
@@ -28,7 +29,8 @@
 //!    roots that no workspace owns. Before step 6, which reclaims a
 //!    workspace whose root cannot be `stat`ed and watches every root.
 //!    Then sweep workspace trash (`*.trash-*` and `.reef-probe-*` in each
-//!    repository's workspace root, `repos/*/ws/` by default, R1.07).
+//!    repository's workspace root, R1.07, and in `repos/*/ws/`, the
+//!    default before #260).
 //! 5. Start one repository thread per registered repository. Then rebuild
 //!    each one's `snapshots` index from its operation log (R1.16) and log
 //!    the report, before any snapshot can add a row. Then commit or drop
@@ -351,6 +353,7 @@ impl Daemon {
             log_tightened(&paths.state_dir, mode);
         }
         private_socket_dir(&paths.socket)?;
+        private_workspace_base(&config)?;
         warn_if_root();
         let lock = InstanceLock::acquire(&paths.lock)?;
         crate::web::WebUi::sweep(&paths.ui);
@@ -590,16 +593,18 @@ async fn bring_up(state: &Arc<AppState>) -> Result<UnixListener, StartError> {
     //    directory a crash left mounted is trash only once unmounted.
     #[cfg(target_os = "linux")]
     reconcile_overlays(state, &records).await;
+    //    Both roots: workspaces made before #260 stay under the old one.
     for record in &records {
         let repo = record.id;
-        let ws_root = state.config.workspace_root(record.id);
-        match tokio::task::spawn_blocking(move || sweep_trash(&ws_root)).await {
-            Ok(Ok(0)) => {}
-            Ok(Ok(removed)) => {
-                tracing::info!(%repo, removed_count = removed, "swept workspace trash");
+        for ws_root in state.config.workspace_roots(record.id) {
+            match tokio::task::spawn_blocking(move || sweep_trash(&ws_root)).await {
+                Ok(Ok(0)) => {}
+                Ok(Ok(removed)) => {
+                    tracing::info!(%repo, removed_count = removed, "swept workspace trash");
+                }
+                Ok(Err(error)) => tracing::warn!(%repo, %error, "workspace trash sweep failed"),
+                Err(error) => tracing::warn!(%repo, %error, "workspace trash sweep panicked"),
             }
-            Ok(Err(error)) => tracing::warn!(%repo, %error, "workspace trash sweep failed"),
-            Err(error) => tracing::warn!(%repo, %error, "workspace trash sweep panicked"),
         }
     }
 
@@ -784,7 +789,7 @@ async fn reconcile_overlays(state: &Arc<AppState>, records: &[RepositoryRecord])
     scan_dirs.extend(
         records
             .iter()
-            .map(|record| state.config.workspace_root(record.id)),
+            .flat_map(|record| state.config.workspace_roots(record.id)),
     );
     let overlay = state.config.file.workspace.overlay();
     let begun = Instant::now();
@@ -979,11 +984,14 @@ async fn supervise(
 const STATE_SETTING: &str = "REEF_STATE_DIR (for example /var/lib/reef)";
 /// The same for the socket's directory.
 const SOCKET_SETTING: &str = "REEF_SOCKET";
+/// The same for `~/.reef`, the default workspace root's base (#260).
+const WORKSPACE_SETTING: &str = "[workspace] root in config.toml";
 
-/// Why [`ensure_private_dir`] refused or failed.
+/// Why `ensure_private_dir` refused or failed: the state, socket and log
+/// directories (S-01), and `~/.reef` (S-185).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum PrivateDirError {
+pub enum PrivateDirError {
     /// The directory is another user's.
     #[error("{} is owned by uid {uid}, not by uid {euid}", path.display())]
     NotOwned {
@@ -1003,6 +1011,27 @@ pub(crate) enum PrivateDirError {
         #[source]
         source: io::Error,
     },
+}
+
+impl PrivateDirError {
+    /// The directory refused or not made.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::NotOwned { path, .. } | Self::Io { path, .. } => path,
+        }
+    }
+}
+
+impl Classify for PrivateDirError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NotOwned { .. } => ErrorKind::PermissionDenied,
+            Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied => {
+                ErrorKind::PermissionDenied
+            }
+            Self::Io { .. } => ErrorKind::Io,
+        }
+    }
 }
 
 /// Makes `dir` a directory only the daemon's user can use (RX.01, S-01):
@@ -1063,6 +1092,21 @@ pub(crate) fn log_tightened(dir: &Path, mode: u32) {
 /// calls it before logging starts, so the caller logs a tightened mode.
 pub(crate) fn private_state_dir(dir: &Path) -> Result<Option<u32>, StartError> {
     ensure_private_dir(dir, true).map_err(|error| start_error(error, STATE_SETTING))
+}
+
+/// [`ensure_private_dir`] for `~/.reef` when the default workspace root
+/// applies (#260, S-185), logging a tightened mode. Not created here: the
+/// first workspace's create makes it.
+fn private_workspace_base(config: &Config) -> Result<(), StartError> {
+    let Some(base) = &config.workspace_base else {
+        return Ok(());
+    };
+    match ensure_private_dir(base, false) {
+        Ok(Some(mode)) => log_tightened(base, mode),
+        Ok(None) => {}
+        Err(error) => return Err(start_error(error, WORKSPACE_SETTING)),
+    }
+    Ok(())
 }
 
 /// [`ensure_private_dir`] for the socket's directory, creating it, and

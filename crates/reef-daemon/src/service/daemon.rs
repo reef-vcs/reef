@@ -51,8 +51,10 @@ pub(crate) async fn daemon_status(
     let backends = if skip_backends {
         Vec::new()
     } else {
-        // Workspace roots default to `<state>/repos/<repo-id>/ws`, beside
-        // the base caches, so this reports what a default workspace gets.
+        // The base caches are under `<state>/repos`, so this reports what
+        // a backend can do there. Whether a workspace root on another
+        // volume can clone from them (`~/.reef` symlinked away, #260) is
+        // probed at each create and shows as the workspace's `backend`.
         // Probing touches the filesystem, so it runs off the async workers.
         let repos = paths.repos.clone();
         let overlay = state.config.file.workspace.overlay();

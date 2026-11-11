@@ -6,6 +6,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Upgrading
 
+- New workspaces of the default state directory go in `~/.reef/<repo-short>/<ws-id>` (#260, ADR 0072): `<repo-short>` is the repository id's first 8 hex characters, and the path has no space and leaves room for a socket. Workspaces created before the upgrade stay at `<state>/repos/<repo-id>/ws/<ws-id>` and keep working until released. A configured `[workspace] root`, and a daemon given its own `REEF_STATE_DIR`, are unchanged. `[workspace] root` accepts a `<repo-short>` placeholder.
 - The daemon's database becomes schema 7 (`0007_evidence`, R3.01) the first time this daemon opens it. An older daemon then refuses the database, as with every migration: restore a backup taken before the upgrade to go back.
 - The daemon's database becomes schema 8 (`0008_artifacts`, R3.02) the first time this daemon opens it, and the same start indexes, once, the artifact digests of the evidence already stored.
 - The daemon's database becomes schema 9 (`0009_identity`, R3.03) the first time this daemon opens it. The same start creates a `person` operator identity named after the login user (lowercased; `operator` when the name has nothing usable), which socket requests use when they name none, and the daemon's identity authority key at `<state>/identity/authority.pem` (`0600`). The key is never in a backup: a restore retires the restored authority and the next start makes a new one, while certificates already issued still verify.

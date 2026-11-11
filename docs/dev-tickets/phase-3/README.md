@@ -63,6 +63,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.45 | not yet briefed (Automatic landing and evidence requests) | M | R3.13, R3.05 | none listed |
 | R3.46 | not yet briefed (Instruction webhooks) | M | R3.12 | none listed |
 | #258 | [issue-258-reef-publish.md](issue-258-reef-publish.md) | M | R3.09, R1.16, R2.08, R2.13 | R3.17 (pushes through its push path); through it R4.14 |
+| #260 | [issue-260-macos-workspace-path.md](issue-260-macos-workspace-path.md) | S | R1.04, RX.01 | none listed |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 

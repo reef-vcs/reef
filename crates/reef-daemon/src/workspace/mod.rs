@@ -468,6 +468,10 @@ pub enum ManagerError {
     /// The workspace's path already exists.
     #[error("{} already exists", .0.display())]
     PathExists(PathBuf),
+    /// The default workspace root's directories (`~/.reef`, #260) could
+    /// not be made private, or another user owns one (S-185).
+    #[error("prepare the workspace root")]
+    WorkspaceRoot(#[from] crate::daemon::PrivateDirError),
     /// Another workspace's row records this path. A released or reclaimed
     /// workspace keeps its path until garbage collection deletes the row
     /// (R1.17), because `workspaces.path` is unique.
@@ -657,6 +661,7 @@ impl Classify for ManagerError {
             Self::FinalSnapshotFailed { source, .. } => source.kind(),
             Self::Lease(error) => error.kind(),
             Self::PathExists(_) | Self::PathRecorded { .. } => ErrorKind::AlreadyExists,
+            Self::WorkspaceRoot(error) => error.kind(),
             Self::PathNotAbsolute(_)
             | Self::EmptyOwner
             | Self::InvalidOwner
@@ -696,6 +701,10 @@ impl Advise for ManagerError {
             Self::Register(error) => error.advice(),
             Self::Store(error) => error.advice(),
             Self::NotRegistered(path) => Some(unregistered_advice(path)),
+            Self::WorkspaceRoot(error) => Some(Advice::hint(format!(
+                "Reef keeps {} private to the daemon's user (#260); give it back to that user, or set [workspace] root in config.toml to a directory of your own",
+                error.path().display()
+            ))),
             Self::NotActive { id, repo, state } => match state {
                 WorkspaceState::Released | WorkspaceState::Reclaimed => {
                     Some(gone_advice(*id, *state, *repo))

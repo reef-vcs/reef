@@ -15,6 +15,9 @@
 //! | socket | `$XDG_RUNTIME_DIR/reef/daemon.sock`, else `<state>/daemon.sock` | `<state>/daemon.sock` |
 //! | config file | `<state>/config.toml` | `<state>/config.toml` |
 //!
+//! The daemon keeps the default state directory's workspaces under the home
+//! directory, `~/.reef` ([`PlatformDefaults::home`], #260).
+//!
 //! The `$XDG_RUNTIME_DIR` socket is the default only for the default state
 //! directory. A daemon given its own state directory keeps its socket in it,
 //! so two daemons on two state directories never contend for one socket.
@@ -174,6 +177,10 @@ pub struct PlatformDefaults {
     pub state_dir: PathBuf,
     /// `$XDG_RUNTIME_DIR` on Linux, when set.
     pub runtime_dir: Option<PathBuf>,
+    /// The home directory, under which the daemon keeps the default
+    /// state directory's workspaces (`~/.reef`, #260); `None` keeps them
+    /// in the state directory.
+    pub home: Option<PathBuf>,
 }
 
 /// This platform's defaults, from the home directory and XDG variables.
@@ -184,6 +191,7 @@ pub fn platform_defaults() -> Result<PlatformDefaults, PathsError> {
     Ok(PlatformDefaults {
         state_dir: apple.data_dir().join("reef"),
         runtime_dir: None,
+        home: Some(apple.home_dir().to_owned()),
     })
 }
 
@@ -196,8 +204,14 @@ pub fn platform_defaults() -> Result<PlatformDefaults, PathsError> {
         .state_dir()
         .unwrap_or_else(|| xdg.home_dir().join(".local/state"));
     Ok(PlatformDefaults {
-        state_dir: state.join("reef"),
         runtime_dir: xdg.runtime_dir(),
+        // A state directory outside the home directory (`XDG_STATE_HOME` on
+        // another disk, say) keeps its workspaces: `~/.reef` could be on
+        // another filesystem than its base cache, where reflinks fail.
+        home: state
+            .starts_with(xdg.home_dir())
+            .then(|| xdg.home_dir().to_owned()),
+        state_dir: state.join("reef"),
     })
 }
 
@@ -228,6 +242,9 @@ pub struct Layered {
     /// The platform's runtime directory, for the default state directory
     /// only.
     pub runtime_dir: Option<PathBuf>,
+    /// The home directory, for the default state directory only: its
+    /// workspaces default to `~/.reef` (#260).
+    pub home: Option<PathBuf>,
 }
 
 /// The paths with the file's `[daemon]` section applied.
@@ -270,12 +287,18 @@ impl Layered {
         let socket = given(&overrides.socket, SOCKET_ENV)?;
         let config_file = given(&overrides.config_file, CONFIG_ENV)?;
 
-        let (state_dir, state_dir_source, runtime_dir) = if let Some((dir, source)) = state_dir {
-            (dir, source, None)
-        } else {
-            let defaults = defaults()?;
-            (defaults.state_dir, Source::Default, defaults.runtime_dir)
-        };
+        let (state_dir, state_dir_source, runtime_dir, home) =
+            if let Some((dir, source)) = state_dir {
+                (dir, source, None, None)
+            } else {
+                let defaults = defaults()?;
+                (
+                    defaults.state_dir,
+                    Source::Default,
+                    defaults.runtime_dir,
+                    defaults.home,
+                )
+            };
         let (config_file, config_file_source) =
             config_file.unwrap_or_else(|| (state_dir.join("config.toml"), Source::Default));
         Ok(Layered {
@@ -285,6 +308,7 @@ impl Layered {
             config_file_source,
             socket,
             runtime_dir,
+            home,
         })
     }
 
@@ -514,6 +538,7 @@ mod tests {
                     runtime_dir: defaults
                         .get("runtime_dir")
                         .map(|value| PathBuf::from(fill(value))),
+                    home: None,
                 }),
             };
             let result = ClientConfig::load_with(

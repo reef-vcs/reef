@@ -27,7 +27,9 @@
 //! 5. In the restored database: the repository's new paths with `--root`;
 //!    with `--into` another state directory than the backup's, every path
 //!    under the old one (workspaces, base cache entries, stores) moved to
-//!    the same place under the new one;
+//!    the same place under the new one, and workspaces under `~/.reef`
+//!    (#260) moved to `repos/<repo-id>/ws/` under it unless it is the
+//!    default state directory;
 //!    R1.15's restart grace on every active lease, `meta.last_backup_at`
 //!    set to the backup's time (so GC's retention floor follows it),
 //!    `restored_from`, `restored_at`, and `rematerialize_pending`, which
@@ -403,6 +405,25 @@ pub fn restore(src: &Path, opts: &RestoreOptions) -> Result<RestoreReport, Resto
     })
 }
 
+/// `~/.reef` in its spellings (as given and canonical), unless `to` is the
+/// platform's default state directory, whose workspaces live there (#260).
+fn default_workspace_base_elsewhere(to: &Path) -> Vec<PathBuf> {
+    let Ok(defaults) = reef_client::paths::platform_defaults() else {
+        return Vec::new();
+    };
+    let canonical_or = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let Some(home) = defaults.home else {
+        return Vec::new();
+    };
+    if canonical_or(&defaults.state_dir) == to {
+        return Vec::new();
+    }
+    let base = home.join(crate::config::WORKSPACE_BASE_DIR);
+    let mut spellings = vec![base.clone(), canonical_or(&base)];
+    spellings.dedup();
+    spellings
+}
+
 /// Step 5: the restored database's new paths, lease grace, and `meta`.
 /// Returns the active workspaces kept and the leases extended.
 fn finish_db(
@@ -440,6 +461,20 @@ fn finish_db(
                 to = %to.display(),
                 relocated,
                 "paths moved to the new state directory"
+            );
+        }
+        // Workspaces under `~/.reef` (#260) are outside the state directory.
+        // Restored into a state directory that does not use `~/.reef`,
+        // they move into its own root and are rebuilt there; left where
+        // they were, the restored daemon would adopt, and later remove, a
+        // running daemon's workspace directories.
+        for base in default_workspace_base_elsewhere(&to) {
+            let relocated = db.relocate_workspace_base(&base, &to)?;
+            tracing::debug!(
+                from = %base.display(),
+                to = %to.display(),
+                relocated,
+                "workspaces moved into the new state directory"
             );
         }
     }

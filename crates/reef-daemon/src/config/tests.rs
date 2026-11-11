@@ -17,6 +17,7 @@ fn resolve(
             Ok(PlatformDefaults {
                 state_dir: PathBuf::from("/home/u/.local/state/reef"),
                 runtime_dir: runtime_dir.map(PathBuf::from),
+                home: Some(PathBuf::from("/home/u")),
             })
         },
     )
@@ -381,6 +382,10 @@ fn validation_names_the_key() {
             "[workspace]\nroot = \"/x/<state>/<repo-id>\"\n",
             "workspace.root",
         ),
+        (
+            "[workspace]\nroot = \"/x/<state>/<repo-short>\"\n",
+            "workspace.root",
+        ),
     ] {
         let err = load_file(text).unwrap_err();
         let ConfigError::Invalid { key, .. } = &err else {
@@ -693,12 +698,128 @@ fn workspace_root_substitutes_the_repo_id() {
         config.workspace_root(id),
         Path::new("/srv/ws").join(id.to_string())
     );
+    let config = load_file("[workspace]\nroot = \"/srv/<repo-short>/ws\"\n").unwrap();
+    assert_eq!(
+        config.workspace_root(id),
+        Path::new("/srv").join(&id.as_hex()[..8]).join("ws")
+    );
     let tmp = state_dir(Some("[workspace]\nroot = \"elsewhere/<repo-id>\"\n"));
     let config = load(&tmp, &PathOverrides::default(), &[]).unwrap();
     assert_eq!(
         config.workspace_root(id),
         tmp.path().join("elsewhere").join(id.to_string())
     );
+}
+
+/// [`Config::load_with`] on the platform's default state directory
+/// `state`, with the home directory `home` and no environment.
+fn load_default(state: &Path, home: &Path) -> Result<Config, ConfigError> {
+    let (state, home) = (state.to_owned(), home.to_owned());
+    Config::load_with(
+        &PathOverrides::default(),
+        |_| None,
+        move || {
+            Ok(PlatformDefaults {
+                state_dir: state,
+                runtime_dir: None,
+                home: Some(home),
+            })
+        },
+    )
+}
+
+/// #260 acceptance: the default state directory's workspace paths have no
+/// space and leave at least 50 bytes for a socket name under
+/// [`SOCKET_PATH_MAX`], for a 14-byte user name on macOS and Linux.
+#[test]
+fn default_workspace_root_fits_a_socket() {
+    for (home, state) in [
+        (
+            "/Users/abcdefghijklmn",
+            "/Users/abcdefghijklmn/Library/Application Support/reef",
+        ),
+        (
+            "/home/abcdefghijklmn",
+            "/home/abcdefghijklmn/.local/state/reef",
+        ),
+    ] {
+        let config = load_default(Path::new(state), Path::new(home)).unwrap();
+        let (repo, ws) = (RepoId::generate(), crate::model::WorkspaceId::generate());
+        let path = config.workspace_root(repo).join(ws.as_hex());
+        let text = path.to_str().unwrap();
+        assert_eq!(
+            path,
+            Path::new(home)
+                .join(".reef")
+                .join(&repo.as_hex()[..8])
+                .join(ws.as_hex())
+        );
+        assert!(!text.contains(char::is_whitespace), "{text}");
+        assert!(
+            SOCKET_PATH_MAX - text.len() >= 50,
+            "{text} leaves {} bytes",
+            SOCKET_PATH_MAX - text.len()
+        );
+        assert_eq!(config.workspace_base, Some(Path::new(home).join(".reef")));
+        assert_eq!(config.sources["workspace.root"], Source::Default);
+        assert_eq!(
+            config.workspace_roots(repo),
+            [
+                config.workspace_root(repo),
+                Path::new(state)
+                    .join("repos")
+                    .join(repo.as_hex())
+                    .join("ws")
+            ]
+        );
+    }
+}
+
+/// #260: `~/.reef` is the default only for the default state directory and
+/// only when `config.toml` sets no root; `config show` prints it resolved,
+/// and it loads back.
+#[test]
+fn default_workspace_root_only_for_the_default_state_dir() {
+    let id = RepoId::generate();
+    // An explicit state directory keeps its workspaces.
+    let tmp = state_dir(None);
+    let config = load(&tmp, &PathOverrides::default(), &[]).unwrap();
+    let legacy = tmp.path().join("repos").join(id.to_string()).join("ws");
+    assert_eq!(config.workspace_root(id), legacy);
+    assert_eq!(config.workspace_roots(id), [legacy]);
+    assert_eq!(config.workspace_base, None);
+    assert_eq!(
+        Config::with_defaults(Paths::in_state_dir(tmp.path()).unwrap()).workspace_base,
+        None
+    );
+    // The default state directory without a file: `~/.reef`.
+    let state = state_dir(None);
+    let config = load_default(state.path(), Path::new("/Users/u")).unwrap();
+    assert_eq!(
+        config.workspace_root(id),
+        Path::new("/Users/u/.reef").join(&id.as_hex()[..8])
+    );
+    let text = config.to_effective_toml();
+    assert!(
+        text.contains("root = \"/Users/u/.reef/<repo-short>\"  # source: default"),
+        "{text}"
+    );
+    let back: FileConfig = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert_eq!(back, config.effective_file());
+    // Saved as `config.toml`, it is still Reef's own `~/.reef`.
+    let state = state_dir(Some(&text));
+    let saved = load_default(state.path(), Path::new("/Users/u")).unwrap();
+    assert_eq!(saved.workspace_base, Some(PathBuf::from("/Users/u/.reef")));
+    assert_eq!(saved.workspace_root(id), config.workspace_root(id));
+    // A configured root wins, and Reef does not own it.
+    let state = state_dir(Some("[workspace]\nroot = \"/srv/ws/<repo-short>\"\n"));
+    let config = load_default(state.path(), Path::new("/Users/u")).unwrap();
+    assert_eq!(
+        config.workspace_root(id),
+        Path::new("/srv/ws").join(&id.as_hex()[..8])
+    );
+    assert_eq!(config.workspace_base, None);
+    assert_eq!(config.sources["workspace.root"], Source::File);
 }
 
 /// Test 7, with the companion: a snapshot written with the daemon's
@@ -869,6 +990,7 @@ fn client_and_daemon_paths_agree() {
                         Ok(PlatformDefaults {
                             state_dir: default_state.clone(),
                             runtime_dir: runtime_dir.map(Path::to_owned),
+                            home: None,
                         })
                     };
                     let daemon =
