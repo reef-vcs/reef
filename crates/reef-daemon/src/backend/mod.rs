@@ -208,7 +208,8 @@ pub struct WorkspacePaths {
 }
 
 impl WorkspacePaths {
-    /// The default layout under `repo_dir` (`<state>/repos/<repo-id>`):
+    /// The layout under `repo_dir` (`<state>/repos/<repo-id>`) of a daemon
+    /// given its own state directory, and of every daemon before #260:
     /// `ws/<id>`, `ws/<id>.upper`, `ws/<id>.work`, and `wc/<id>`.
     pub fn under(repo_dir: &Path, id: WorkspaceId) -> Self {
         let hex = id.as_hex();

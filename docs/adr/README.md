@@ -83,3 +83,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0068](0068-resolver-assignment.md) | Resolver assignment and queue | accepted |
 | [0070](0070-publishing-to-a-git-remote.md) | Publishing to a git remote | accepted |
 | [0071](0071-rebasing-and-following-trunk.md) | Rebasing, fetching, and following trunk | accepted |
+| [0072](0072-default-workspace-root.md) | Default workspace root outside the state directory | accepted |

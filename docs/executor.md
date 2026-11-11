@@ -217,7 +217,7 @@ A job submitted by tree alone (`reef job submit --tree`) has no commit to read a
 | a cached check's cache | read and write |
 | the user's home (`HOME`, and the password database's when it differs) | hidden, except `[sandbox] read` (default `~/.rustup`, `~/.cargo`) |
 | `[sandbox] deny` (default `~/.cargo/credentials` and `credentials.toml`, cargo's registry tokens) | hidden, even under a `read` path |
-| Reef's state directory (the socket, the database, keys), its configuration, `REEF_SOCKET`'s path, the runtime directory (`$XDG_RUNTIME_DIR`), the executor's configuration and token file | hidden, even under a `read` path |
+| Reef's state directory (the socket, the database, keys), the default workspace root `~/.reef` (every agent's workspace), its configuration, `REEF_SOCKET`'s path, the runtime directory (`$XDG_RUNTIME_DIR`), the executor's configuration and token file | hidden, even under a `read` path |
 | the executor's work directory but this job's (other jobs, the blob cache, the logs) | hidden |
 | the rest of the filesystem | read only |
 | the network | `none` unless the check asks and the executor allows |

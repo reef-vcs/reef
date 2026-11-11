@@ -492,6 +492,23 @@ impl Manager {
                 "cannot remove the forgotten repository's state directory"
             ),
         }
+        // Under `~/.reef` (#260) only trash and an empty directory go: a
+        // repository registered before #260 may share its directory with
+        // another one's workspaces.
+        if self.config.workspace_base.is_some() {
+            let ws_root = self.config.workspace_root(id);
+            match tokio::task::spawn_blocking(move || clear_workspace_root(&ws_root)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    repo = %id,
+                    %error,
+                    "cannot clear the forgotten repository's workspace directory"
+                ),
+                Err(error) => {
+                    tracing::warn!(repo = %id, %error, "workspace directory cleanup panicked");
+                }
+            }
+        }
         Ok(record)
     }
 
@@ -892,6 +909,24 @@ impl Manager {
     }
 }
 
+/// Removes the trash under `ws_root`, then `ws_root` itself if that left
+/// it empty; never anything else (#260). Gone is fine.
+fn clear_workspace_root(ws_root: &Path) -> io::Result<()> {
+    crate::backend::fs_util::sweep_trash(ws_root)?;
+    match std::fs::remove_dir(ws_root) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Forgets the jj workspace `reef-<id>` on the repository thread with
 /// `description` (`{id}` replaced), caused by `agent`, tolerating one that
 /// is already gone. Returns the operation that forgot it, `None` if it was
@@ -1009,6 +1044,25 @@ mod tests {
 
     use super::*;
     use crate::config::Paths;
+
+    /// #260: forgetting a repository clears trash and an empty directory
+    /// under `~/.reef`, and nothing else.
+    #[test]
+    fn clear_workspace_root_removes_only_trash_and_an_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a3dda866");
+        std::fs::create_dir_all(dir.join("x.trash-1/sub")).unwrap();
+        std::fs::write(dir.join("x.trash-1/sub/file"), b"x").unwrap();
+        std::fs::create_dir(dir.join("00000000000000dd")).unwrap();
+        clear_workspace_root(&dir).unwrap();
+        assert!(!dir.join("x.trash-1").exists());
+        assert!(dir.join("00000000000000dd").is_dir());
+        std::fs::remove_dir(dir.join("00000000000000dd")).unwrap();
+        std::fs::create_dir(dir.join("y.trash-2")).unwrap();
+        clear_workspace_root(&dir).unwrap();
+        assert!(!dir.exists());
+        clear_workspace_root(&dir).unwrap();
+    }
 
     fn manager(state: &Path) -> Arc<Manager> {
         let config = Config::with_defaults(Paths::in_state_dir(state).unwrap());

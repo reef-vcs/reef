@@ -44,7 +44,7 @@ state_dir:         /Users/you/Library/Application Support/reef
 backends:          overlayfs (unavailable: overlayfs is Linux only), ..., apfs (apfs), ..., copy (apfs)
 ```
 
-The state directory holds the daemon's database, logs, and workspaces. On Linux it is `~/.local/state/reef`, with the socket under `$XDG_RUNTIME_DIR` when that is set. `reef daemon stop` stops it.
+The state directory holds the daemon's database, logs, and base cache. On Linux it is `~/.local/state/reef`, with the socket under `$XDG_RUNTIME_DIR` when that is set. Workspaces go in `~/.reef/<first 8 hex of the repository id>/<workspace id>`, on macOS and Linux: a short path with no space, so unquoted shell use and sockets inside a workspace work. `reef config show` prints the `[workspace] root` in use; a daemon given its own `REEF_STATE_DIR` keeps workspaces inside it. `reef daemon stop` stops it.
 
 ## No setup
 

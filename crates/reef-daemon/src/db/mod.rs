@@ -533,6 +533,23 @@ impl Db {
         })
     }
 
+    /// Rewrites the path of every workspace recorded under `base` (the
+    /// default workspace root's `~/.reef`, #260) to
+    /// `<to>/repos/<repo-id>/ws/<ws-id>`, the root of a daemon given its
+    /// own state directory `to`. A restore into another state directory
+    /// does this, so the restored daemon never adopts the live one's
+    /// workspace directories. Returns how many changed.
+    pub fn relocate_workspace_base(&self, base: &Path, to: &Path) -> Result<usize, DbError> {
+        let (base, to) = (path_text(base)?, path_text(to)?);
+        self.in_transaction(|tx| {
+            Ok(tx.execute(
+                "UPDATE workspaces SET path = ?2 || '/repos/' || repo_id || '/ws/' || id
+                 WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'",
+                [base, to],
+            )?)
+        })
+    }
+
     /// Removes `key` from `meta`.
     pub fn delete_meta(&self, key: &str) -> Result<(), DbError> {
         self.with(|conn| {
@@ -1375,6 +1392,38 @@ mod tests {
         let kept = db.workspace(outside.id).unwrap();
         assert_eq!(kept.path, outside.path);
         assert_eq!(kept.state_dir, outside.state_dir);
+    }
+
+    // #260: a restore into another state directory moves workspaces under
+    // `~/.reef` into the new state directory's own root, and only those.
+    #[test]
+    fn relocate_workspace_base_moves_only_workspaces_under_it() {
+        use crate::db::repositories::tests::repo;
+        use crate::db::workspaces::tests::workspace;
+        let db = Db::open_in_memory().unwrap();
+        let record = repo("aaaa000000000001", "/src/app");
+        db.insert_repository(&record).unwrap();
+        let inside = workspace(
+            record.id,
+            "bbbb000000000001",
+            "/home/u/.reef/aaaa0000/bbbb000000000001",
+        );
+        let outside = workspace(
+            record.id,
+            "bbbb000000000002",
+            "/home/u/.reefer/x/bbbb000000000002",
+        );
+        db.insert_workspace(&inside).unwrap();
+        db.insert_workspace(&outside).unwrap();
+        let changed = db
+            .relocate_workspace_base(Path::new("/home/u/.reef"), Path::new("/new/state"))
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(
+            db.workspace(inside.id).unwrap().path,
+            Path::new("/new/state/repos/aaaa000000000001/ws/bbbb000000000001")
+        );
+        assert_eq!(db.workspace(outside.id).unwrap().path, outside.path);
     }
 
     // R1.16: a database from before `0003_snapshots` landed has `0005`
