@@ -192,6 +192,10 @@ async fn rematerialized_workspace_gets_private_parents() {
     let ws = create(&daemon, &repo).await;
     let stopped = daemon.stop_keeping().await;
     let base = home.path().join(".reef");
+    // On Linux an overlay workspace stays mounted after its daemon stops
+    // (R1.09): unmount it first, as a restore onto a new machine finds it.
+    #[cfg(target_os = "linux")]
+    unmount_under(&base);
     std::fs::remove_dir_all(&base).unwrap();
     let db = reef_daemon::db::Db::open(&stopped.config.paths.db).unwrap();
     db.set_meta(reef_daemon::db::META_REMATERIALIZE_PENDING, "1")
@@ -235,4 +239,41 @@ async fn workspace_base_owned_by_another_user_refuses_start() {
     let message = error.to_string();
     assert!(message.contains("[workspace] root"), "{message}");
     assert!(message.contains(".reef"), "{message}");
+}
+
+/// Unmounts every mount at or under `path`, deepest first (as
+/// `tests/backup.rs` does).
+#[cfg(target_os = "linux")]
+fn unmount_under(path: &Path) {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return;
+    };
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+    let mut under: Vec<(String, String)> = mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let (point, fstype) = (fields.nth(1)?, fields.next()?);
+            Path::new(point)
+                .starts_with(&path)
+                .then(|| (point.to_owned(), fstype.to_owned()))
+        })
+        .collect();
+    under.sort_by_key(|(point, _)| std::cmp::Reverse(point.len()));
+    for (point, fstype) in under {
+        let (program, args) = if fstype.starts_with("fuse") {
+            ("fusermount3", vec!["-uz", point.as_str()])
+        } else {
+            ("umount", vec!["-l", point.as_str()])
+        };
+        let output = std::process::Command::new(program)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
