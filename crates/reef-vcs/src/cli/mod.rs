@@ -51,6 +51,7 @@ pub(crate) mod proposal;
 pub(crate) mod provenance;
 mod provider;
 pub(crate) mod publish;
+mod rebase;
 mod remote;
 mod render;
 mod render_vcs;
@@ -325,6 +326,13 @@ enum Command {
     Describe(changes::DescribeArgs),
     /// Abandon a change: its descendants move onto its parents.
     Abandon(changes::AbandonArgs),
+    /// Bring a change, with the changes above it, onto the newest trunk.
+    #[command(
+        after_help = "Example: reef rebase   # fetches trunk first; --onto main@origin, --no-fetch"
+    )]
+    Rebase(rebase::RebaseArgs),
+    /// Fetch trunk's branch, or others, from the repository's git remote.
+    Fetch(rebase::FetchArgs),
     /// Push a change to a branch on the repository's git remote for review.
     #[command(
         after_help = "Example: reef publish -m 'fix the parser'   # its next opens the pull request"
@@ -852,6 +860,10 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Publish(args) => {
             Box::pin(publish::publish(&connect(&global, out).await?, args)).await
         }
+        Command::Rebase(args) => {
+            Box::pin(rebase::rebase(&connect(&global, out).await?, args)).await
+        }
+        Command::Fetch(args) => Box::pin(rebase::fetch(&connect(&global, out).await?, args)).await,
         Command::Abandon(args) => changes::abandon(&connect(&global, out).await?, args).await,
         Command::Propose(args) => {
             Box::pin(proposal::propose(&connect(&global, out).await?, args)).await
@@ -1044,6 +1056,11 @@ fn output_flag(args: &[OsString]) -> Option<Output> {
 /// get here.
 const ORIENTATION_GUESSES: &[&str] = &["info", "where", "whereami", "whoami"];
 
+/// Top-level commands an agent with git or jj habits types to catch up with
+/// trunk (#259): each is a usage error whose `next` is `reef rebase`, never
+/// an alias (ADR 0025). #261 folds these into its table of git verbs.
+const REBASE_GUESSES: &[&str] = &["pull", "sync", "merge"];
+
 /// clap could not parse the command line: help and version print as clap
 /// prints them; anything else is a usage error, exit 2, with the JSON error
 /// object on stdout in JSON mode, its hint the usage line, or `reef here`
@@ -1070,14 +1087,38 @@ fn usage_error(error: &clap::Error, args: &[OsString]) -> ExitCode {
             .trim_start_matches("error: ")
             .to_owned(),
     };
-    let fix = orientation_guess(error, usage).map(|guess| {
-        Advice::run(
-            format!(
-                "Reef has no `{guess}`; `reef here` shows the workspace you are in and its change."
-            ),
-            here_argv(args),
-        )
-    });
+    let fix = orientation_guess(error, usage)
+        .map(|guess| {
+            Advice::run(
+                format!(
+                    "Reef has no `{guess}`; `reef here` shows the workspace you are in and its change."
+                ),
+                here_argv(args),
+            )
+        })
+        .or_else(|| {
+            top_level_guess(error, usage, REBASE_GUESSES).map(|guess| {
+                let why = if guess == "merge" {
+                    " Reef rebases rather than merges:"
+                } else {
+                    ""
+                };
+                Advice::run(
+                    format!(
+                        "Reef has no `{guess}`.{why} `reef rebase` fetches trunk and brings the workspace's change onto it, files and all."
+                    ),
+                    daemon_argv(args, &["rebase"]),
+                )
+            })
+        })
+        .or_else(|| {
+            onto_guess(error, args).map(|_| {
+                Advice::run(
+                    "`-o` is the output format here (json, text, brief); the destination is `--onto`.",
+                    onto_argv(args),
+                )
+            })
+        });
     out.usage_error(&rendered, &message, usage, fix.as_ref());
     ExitCode::from(ErrorKind::InvalidArgument.exit_code())
 }
@@ -1094,6 +1135,13 @@ fn usage_line(rendered: &str) -> Option<&str> {
 /// `--config`, for when clap could not parse them: it asks the daemon the
 /// command line addressed, as [`Global::daemon_start`] does.
 fn here_argv(args: &[OsString]) -> Vec<String> {
+    daemon_argv(args, &["here"])
+}
+
+/// `reef` with the raw arguments' `--state-dir`, `--socket`, and
+/// `--config`, then `rest`: a command line that asks the daemon the failed
+/// one addressed.
+fn daemon_argv(args: &[OsString], rest: &[&str]) -> Vec<String> {
     const FLAGS: [&str; 3] = ["--state-dir", "--socket", "--config"];
     let mut next = vec!["reef".to_owned()];
     let mut iter = args.iter().skip(1).filter_map(|arg| arg.to_str());
@@ -1113,7 +1161,70 @@ fn here_argv(args: &[OsString]) -> Vec<String> {
             }
         }
     }
-    next.push("here".to_owned());
+    next.extend(rest.iter().map(|word| (*word).to_owned()));
+    next
+}
+
+/// The unknown command, if clap rejected one of `guesses` in `reef`'s own
+/// position.
+fn top_level_guess<'a>(
+    error: &'a clap::Error,
+    usage: Option<&str>,
+    guesses: &[&str],
+) -> Option<&'a str> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind as Clap};
+    if error.kind() != Clap::InvalidSubcommand {
+        return None;
+    }
+    let Some(ContextValue::String(name)) = error.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+    let root = command().render_usage().to_string();
+    (guesses.contains(&name.as_str()) && usage == Some(root.trim())).then_some(name.as_str())
+}
+
+/// The value given to `-o`/`--output` on `reef rebase`, when it is not an
+/// output format: jj's `-o` is `--onto` (#259).
+fn onto_guess(error: &clap::Error, args: &[OsString]) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind as Clap};
+    if error.kind() != Clap::InvalidValue {
+        return None;
+    }
+    let Some(ContextValue::String(arg)) = error.get(ContextKind::InvalidArg) else {
+        return None;
+    };
+    if !arg.starts_with("--output") && !arg.starts_with("-o") {
+        return None;
+    }
+    if !args.iter().any(|word| word.to_str() == Some("rebase")) {
+        return None;
+    }
+    match error.get(ContextKind::InvalidValue) {
+        Some(ContextValue::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// The command line with `-o X` (`-oX`, `--output X`, `--output=X`) as
+/// `--onto X`, everything else kept: `reef rebase -o main`'s fix.
+fn onto_argv(args: &[OsString]) -> Vec<String> {
+    let mut next = vec!["reef".to_owned()];
+    let mut words = args.iter().skip(1).filter_map(|arg| arg.to_str());
+    while let Some(word) = words.next() {
+        if word == "-o" || word == "--output" {
+            next.push("--onto".to_owned());
+            if let Some(value) = words.next() {
+                next.push(value.to_owned());
+            }
+        } else if let Some(value) = word
+            .strip_prefix("--output=")
+            .or_else(|| word.strip_prefix("-o").filter(|rest| !rest.is_empty()))
+        {
+            next.extend(["--onto".to_owned(), value.to_owned()]);
+        } else {
+            next.push(word.to_owned());
+        }
+    }
     next
 }
 

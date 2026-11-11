@@ -488,6 +488,21 @@ These issues have no row. To be made in the implementing PR (this brief adds onl
 - **R4.14 hardens the fetch too**: #259 delivers the first fetch (`reef fetch` and `reef rebase`'s, through jj-lib's git subprocess with the user's git credentials, on the push's environment), and R4.14 makes it native. The R4.14 row and a README "Departures" bullet say so.
 - **R3.13's S-121 is closed for observed landings** here; R3.13's brief keeps its decision 10 as history.
 
+## Departures in the implementation
+
+Found while implementing, and listed in the PR:
+
+- **The new-child carry applies to landings that rebased, not observed landings.** jj's freshness check treats a working copy whose recorded tree equals the view's commit's tree as fresh, so an observed landing (same tree) needs none; `follow_trunk::observed_landing_moves_the_workspace` writes an edit before the move to prove it. A Reef landing that rebased the change does (review finding 4): `carries()` hands one for a move onto a new empty change on the change's rewritten commit (unit test `carries_onto_a_new_change_on_the_rewritten_commit`).
+- **Landed includes `trunk()`'s remote bookmark when ahead** (review finding 1): `revset::immutable_head` and the observer count `main@origin` when it is strictly ahead of a local `main`, and a workspace whose `@` is in the default destination's ancestry starts a new change; otherwise a host's merge followed by a fetch read "up to date" and the next edit amended what landed (`rebase::landed_on_the_remote`).
+- **`skip_snapshot` and `--no-snapshot` are gone**: a rebase always snapshots the workspaces it moves (review finding 5).
+- **`start_on` is not extracted.** jj-lib's `MutableRepo::check_out` is the whole helper; `land_chain` keeps calling it, and `Repo::start_on_landed` is the observer's write.
+- **Conflict summaries, not R3.25 objects.** `conflicts.proto` imports `changes.proto`, so `RebaseChangeResponse` cannot embed `Conflict`; it carries `RebaseConflict` (change, commit, first 20 paths, total), and `next` reads the rest. `Fetched` and `FetchedBranch` live in `changes.proto` for the same reason, and `FetchGitRemoteResponse` and `RebaseChangeResponse` carry the fetch's operation at top level (`operation`, `fetch_operation`), as every write returns one.
+- **`push_environment` keeps its name**; the fetch shares it, `subprocess_error` and the callback with the push.
+- **`behind_trunk` counts against the default destination** (`trunk()`, or its remote bookmark when ahead), not `trunk()` alone: a git user's checked-out `main` is never fast-forwarded, and against it the count would read 0.
+- **The fetch never deletes a remote bookmark** for a branch the remote lacks; it reports it missing.
+- **Onboarding scenario G is a follow-up issue.** Its setup needs a daemon and a workspace before the agent starts, and the agent started inside it; the harness runs only against a live agent in CI, so the change could not be exercised here.
+- **No `reef status` "behind" line.** `reef here` carries the hint and `Workspace.behind_trunk` the number.
+
 ## Decisions for the user
 
 Decided 2026-11-11: the user accepted every recommendation, with decision 12 changed (no `-o`). Planned numbers: API revision 30, ADR 0071, threat rows S-177 to S-184, operation kinds 18 (`rebase`) and 19 (`fetch`), no migration (schema stays 17).

@@ -19,6 +19,7 @@ pub mod comments;
 pub mod conflict;
 pub mod diff;
 pub mod effects;
+pub mod fetch;
 pub mod files;
 pub mod gc;
 pub mod git;
@@ -30,6 +31,7 @@ pub mod log;
 pub mod materialize;
 pub mod oplog;
 pub mod push;
+pub mod rebase;
 pub mod repo;
 pub mod restore;
 pub mod revset;
@@ -56,7 +58,7 @@ pub use repo::{
 pub use restore::RecreateWorkingCopyError;
 pub use snapshot::{
     Behind, Carry, FullScanReason, PendingSnapshot, ScannedTree, SnapshotCommit, SnapshotError,
-    SnapshotPlan, commit_snapshot,
+    SnapshotPlan, StartedOn, commit_snapshot,
 };
 pub use tree_names::{CheckedTrees, TreeNameError, check_git_head_tree_names};
 

@@ -592,6 +592,11 @@ impl WorkspaceService for WorkspacesService {
             loaded: manager.entry(inspected.record.id).is_some(),
         })];
         attach_provenance(&self.state, &mut workspace).await?;
+        if let Some(workspace) = workspace.first_mut() {
+            workspace.behind_trunk =
+                crate::rebase::behind_trunk(&self.state, record.repo_id, &workspace.commit_id)
+                    .await;
+        }
         Ok(Response::new(GetWorkspaceResponse {
             workspace: workspace.pop(),
             disk_usage: inspected.disk_usage.as_ref().map(Into::into),
@@ -713,6 +718,11 @@ impl WorkspaceService for WorkspacesService {
             changed: snapshot.changed,
             commit_id: snapshot.commit_id.to_string(),
             scan_ms: snapshot.scan_ms,
+            started_on: snapshot
+                .started_on
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
         }))
     }
 

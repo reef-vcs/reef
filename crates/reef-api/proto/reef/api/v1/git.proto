@@ -52,6 +52,24 @@ service GitService {
   rpc PublishChange(PublishChangeRequest) returns (PublishChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
+  // Fetches branches from a git remote configured in the repository and
+  // records the remote-tracking bookmarks, and tracked local ones (never
+  // git's checked-out branch), in one operation of kind FETCH (#259). Runs
+  // the daemon's git as PublishChange does; the repository is never held
+  // while git runs. Never served through the remote listener. Not
+  // undoable.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_BRANCH or
+  // INVALID_GIT_REMOTE; NOT_FOUND with reason GIT_REMOTE_NOT_FOUND
+  // (metadata `remotes`); FAILED_PRECONDITION with reason NO_GIT_BACKEND,
+  // GIT_REMOTE_REQUIRED (metadata `remotes`) or GIT_TOO_OLD;
+  // PERMISSION_DENIED with reason FETCH_DISABLED, REMOTE_FETCH_DENIED or
+  // GIT_AUTH_FAILED (metadata `git_stderr`); UNAVAILABLE with reason
+  // GIT_UNREACHABLE, GIT_NOT_FOUND, GIT_FETCH_FAILED (metadata
+  // `git_stderr`), FETCH_TIMEOUT or FETCH_IN_PROGRESS.
+  rpc FetchGitRemote(FetchGitRemoteRequest) returns (FetchGitRemoteResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
 }
 
 // How a publish moved the branch.
@@ -184,4 +202,26 @@ message PublishChangeResponse {
   Change change = 5;
   // Sentences for a person, such as why nothing changed.
   repeated string notes = 6;
+}
+
+// Fetch branches from a git remote.
+message FetchGitRemoteRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // A workspace, naming the repository; empty for none.
+  string workspace = 2;
+  // The git remote; empty for trunk's remote, else the only configured
+  // remote, else `origin`.
+  string git_remote = 3;
+  // The branches; empty for trunk()'s bookmark name, else the remote's
+  // HEAD branch.
+  repeated string branches = 4;
+}
+
+// What a fetch did.
+message FetchGitRemoteResponse {
+  // The fetch.
+  Fetched fetched = 1;
+  // The fetch operation; unset when nothing changed.
+  Operation operation = 2;
 }

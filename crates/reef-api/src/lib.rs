@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 29;
+pub const API_REVISION: u32 = 30;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -135,6 +135,10 @@ pub const API_DIGESTS: &[&str] = &[
     // `DescribeChangeRequest.signoff` and `reset_author`, and
     // `OPERATION_KIND_PUBLISH`.
     "62c7ec17133adceb5e8a2f53cbce90ea319c5deb790615af302a3444aadddd46",
+    // #259, #248: `RebaseChange`, `FetchGitRemote`, `OPERATION_KIND_REBASE`
+    // and `FETCH`, `Workspace.behind_trunk`, and
+    // `SnapshotWorkspaceResponse.started_on`.
+    "c444ece360008948a81b4cd86f773effd15ad2dc5983ac0188bdce8d38cecedf",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -880,6 +884,22 @@ pub mod error {
     pub const PUBLISH_TIMEOUT: &str = "PUBLISH_TIMEOUT";
     /// Another publish of the same branch is still pushing (#258).
     pub const PUBLISH_IN_PROGRESS: &str = "PUBLISH_IN_PROGRESS";
+    /// A rebase onto one of the commits it moves, or a descendant of one
+    /// (#259). Metadata: `commit_id`.
+    pub const REBASE_ONTO_DESCENDANT: &str = "REBASE_ONTO_DESCENDANT";
+    /// A rebase of a change the landing service has queued (#259): it
+    /// lands exactly the queued commit. Metadata: `change_id`.
+    pub const CHANGE_QUEUED: &str = "CHANGE_QUEUED";
+    /// The fetch failed for another reason (#259). Metadata: `git_stderr`.
+    pub const GIT_FETCH_FAILED: &str = "GIT_FETCH_FAILED";
+    /// The fetch did not finish within `[fetch] timeout` (#259).
+    pub const FETCH_TIMEOUT: &str = "FETCH_TIMEOUT";
+    /// Another fetch from the same remote is still running (#259).
+    pub const FETCH_IN_PROGRESS: &str = "FETCH_IN_PROGRESS";
+    /// A fetch while the daemon's `[fetch] enabled` is false (#259).
+    pub const FETCH_DISABLED: &str = "FETCH_DISABLED";
+    /// `FetchGitRemote` through the remote listener (#259).
+    pub const REMOTE_FETCH_DENIED: &str = "REMOTE_FETCH_DENIED";
 
     /// A status with `code` and `message` whose details carry `detail`.
     pub fn status(code: tonic::Code, message: String, detail: &v1::ErrorDetail) -> tonic::Status {

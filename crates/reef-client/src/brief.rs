@@ -610,6 +610,46 @@ impl<'a> From<&'a json::Published> for Published<'a> {
     }
 }
 
+/// `reef rebase`'s brief view (#259): where the change is now, whether it
+/// moved, its conflicts, and what next.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Rebased")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "the full type's key, which a brief view keeps (ADR 0045)"
+)]
+pub struct Rebased<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<Change<'a>>,
+    onto: &'a str,
+    #[serde(skip_serializing_if = "is_false")]
+    up_to_date: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    started_new_change: bool,
+    rebased_count: u32,
+    #[serde(skip_serializing_if = "is_zero")]
+    conflict_count: u32,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    notes: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<&'a str>,
+}
+
+impl<'a> From<&'a json::Rebased> for Rebased<'a> {
+    fn from(rebased: &'a json::Rebased) -> Self {
+        Self {
+            change: rebased.change.as_ref().map(Change::from),
+            onto: &rebased.onto,
+            up_to_date: rebased.up_to_date,
+            started_new_change: rebased.started_new_change,
+            rebased_count: rebased.rebased_count,
+            conflict_count: rebased.conflict_count,
+            notes: &rebased.notes,
+            next: rebased.next.as_deref(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -654,6 +694,7 @@ mod tests {
             changed_file_count: Some(3),
             remote_token_id: None,
             provenance: None,
+            behind_trunk: None,
         }
     }
 

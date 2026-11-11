@@ -207,6 +207,10 @@ pub struct SnapshotOutcome {
     /// The view had no working-copy commit for the workspace, so it was
     /// given a new change.
     pub recovered: bool,
+    /// The working-copy commit had landed (on `trunk()` or under a tag), so
+    /// the edits went into a new change on it rather than amending it
+    /// (issue #248): the landed commit.
+    pub started_on: Option<CommitIdHex>,
     /// The new operation when `changed`, else the head the scan ran at.
     pub op_id: OperationIdHex,
     /// The workspace's working-copy commit afterwards.

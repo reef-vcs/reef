@@ -336,6 +336,13 @@ export function WorkspaceDetail({
           <p>
             {String(response.snapshotCount)} in all, {String(workspace.localSnapshotCount)} local.
           </p>
+          {(response.workspace?.behindTrunk ?? 0) > 0 && (
+            <p>
+              Behind trunk by {String(response.workspace?.behindTrunk)}{" "}
+              {response.workspace?.behindTrunk === 1 ? "commit" : "commits"}, as of Reef&apos;s last
+              fetch; <code>reef rebase</code> brings it up to date.
+            </p>
+          )}
           <ul className="activity">
             {response.recentSnapshots.slice(0, SNAPSHOTS_SHOWN).map((s) => (
               <li key={s.operationId}>

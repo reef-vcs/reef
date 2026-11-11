@@ -19,6 +19,8 @@ const SENTENCES: Partial<Record<OperationKind, string>> = {
   [OperationKind.BATCH]: "tested a batch of changes",
   [OperationKind.COMMENT]: "commented on a change",
   [OperationKind.PUBLISH]: "published a change",
+  [OperationKind.REBASE]: "rebased a change",
+  [OperationKind.FETCH]: "fetched from a git remote",
   [OperationKind.EXTERNAL]: "ran a jj command",
   [OperationKind.OTHER]: "did something else",
 };

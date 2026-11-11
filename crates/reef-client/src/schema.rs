@@ -91,6 +91,7 @@ fn full_types() -> Map<String, Value> {
     generator.subschema_for::<json::Proposal>();
     generator.subschema_for::<json::ProposalHistory>();
     generator.subschema_for::<json::Published>();
+    generator.subschema_for::<json::Rebased>();
     generator.take_definitions(true)
 }
 

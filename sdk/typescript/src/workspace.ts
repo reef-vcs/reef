@@ -10,6 +10,10 @@ import type { Duration } from "@bufbuild/protobuf/wkt";
 
 import type { Client } from "./client.js";
 import { ConflictError, isReefError } from "./errors.js";
+import type {
+  RebaseChangeRequestSchema,
+  RebaseChangeResponse,
+} from "./gen/reef/api/v1/changes_pb.js";
 import type { GetDiffRequestSchema, GetDiffResponse } from "./gen/reef/api/v1/diff_pb.js";
 import type {
   EditFilesRequestSchema,
@@ -298,6 +302,23 @@ export class WorkspaceHandle implements AsyncDisposable {
   ): Promise<MoveWorkspaceResponse> {
     const response = await this.#client.moveWorkspace({ ...fields, workspace: this.id });
     this.#update(response.workspace);
+    return response;
+  }
+
+  /**
+   * `rebaseChange` for the workspace's change (`@` unless `revision` names another): fetches
+   * trunk and brings the change, with those above it, onto it (#259). A conflict is written and
+   * returned in `conflicts`. The handle follows its change.
+   */
+  async rebase(
+    fields: MessageInitShape<typeof RebaseChangeRequestSchema> = {},
+  ): Promise<RebaseChangeResponse> {
+    const revision = fields.revision || "@";
+    const response = await this.#client.rebaseChange({ ...fields, revision, workspace: this.id });
+    if (revision === "@" && response.change) {
+      this.workspace.changeId = response.change.changeId;
+      this.workspace.commitId = response.change.commitId;
+    }
     return response;
   }
 

@@ -1,13 +1,17 @@
 //! `reef.api.v1.GitService` (#258, ADR 0070): publishing a change to a
 //! branch on one of the repository's git remotes. The service gates the
 //! request, snapshots and describes first, and builds the response;
-//! [`crate::publish`] plans, pushes and records.
+//! [`crate::publish`] plans, pushes and records. `FetchGitRemote` (#259,
+//! ADR 0071) is [`crate::fetch`]'s.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use reef_api::v1::git_service_server::GitService;
-use reef_api::v1::{self, OperationKind, PublishChangeRequest, PublishChangeResponse};
+use reef_api::v1::{
+    self, FetchGitRemoteRequest, FetchGitRemoteResponse, OperationKind, PublishChangeRequest,
+    PublishChangeResponse,
+};
 use reef_lib::jj::push::{self, PushPlan, PushRequest, PushUpdate};
 use tonic::{Request, Response, Status};
 
@@ -34,6 +38,40 @@ impl GitHandler {
 
 #[tonic::async_trait]
 impl GitService for GitHandler {
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn fetch_git_remote(
+        &self,
+        request: Request<FetchGitRemoteRequest>,
+    ) -> Result<Response<FetchGitRemoteResponse>, Status> {
+        let agent = super::caller_of(&request)?;
+        if super::remote_of(&request).is_some() {
+            return Err(crate::error::status(
+                crate::fetch::FetchFailure::RemoteDenied,
+            ));
+        }
+        let request = request.into_inner();
+        let state = &self.state;
+        let target = target(state, &request.repo, &request.workspace)?;
+        let recorded = crate::fetch::fetch(
+            state,
+            crate::fetch::FetchInput {
+                repo: target.repo.id,
+                handle: target.handle.clone(),
+                workspace: target.workspace.clone(),
+                agent: agent.clone(),
+                remote: request.git_remote.clone(),
+                branches: request.branches.clone(),
+            },
+        )
+        .await
+        .map_err(crate::error::status)?;
+        let operation = fetch_operation(state, &target, agent.as_deref(), &recorded).await?;
+        Ok(Response::new(FetchGitRemoteResponse {
+            fetched: Some(crate::fetch::message(&recorded)),
+            operation,
+        }))
+    }
+
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn publish_change(
         &self,
@@ -278,4 +316,31 @@ fn publication(
         local_snapshots_published: u32::try_from(published_rows).unwrap_or(u32::MAX),
         dry_run,
     }
+}
+
+/// The fetch's operation, read back; `None` when it recorded none.
+pub(super) async fn fetch_operation(
+    state: &AppState,
+    target: &super::reading::Target,
+    agent: Option<&str>,
+    recorded: &reef_lib::jj::fetch::RecordedFetch,
+) -> Result<Option<v1::Operation>, Status> {
+    let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
+    let owner = target
+        .workspace
+        .as_ref()
+        .map(|record| record.owner.as_str());
+    let op_id = recorded.op_id.as_ref().map(ToString::to_string);
+    written_operation(
+        state,
+        target.repo.id,
+        op_id.as_deref(),
+        Written {
+            kind: OperationKind::Fetch,
+            snapshot: None,
+            workspace: workspace_id.as_deref(),
+            agent: agent.or(owner).unwrap_or_default(),
+        },
+    )
+    .await
 }

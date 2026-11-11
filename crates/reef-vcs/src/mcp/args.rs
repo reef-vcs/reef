@@ -248,6 +248,8 @@ pub(super) enum Kind {
     Batch,
     ConflictAssignment,
     Publish,
+    Rebase,
+    Fetch,
     External,
     Other,
 }
@@ -270,6 +272,8 @@ impl From<Kind> for v1::OperationKind {
             Kind::Batch => Self::Batch,
             Kind::ConflictAssignment => Self::ConflictAssignment,
             Kind::Publish => Self::Publish,
+            Kind::Rebase => Self::Rebase,
+            Kind::Fetch => Self::Fetch,
             Kind::External => Self::External,
             Kind::Other => Self::Other,
         }
@@ -451,6 +455,24 @@ pub(super) struct PublishChange {
     pub(super) git_remote: Option<String>,
     /// Describe the change first with this.
     pub(super) description: Option<String>,
+}
+
+/// `rebase_change`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RebaseChange {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// Workspace: id, prefix, or absolute path in it.
+    pub(super) workspace: Option<String>,
+    /// The change (default: `@`).
+    pub(super) revision: Option<String>,
+    /// Destination (default: trunk, fetched).
+    pub(super) onto: Option<String>,
+    /// Leave the changes below it.
+    pub(super) source: Option<bool>,
+    /// Do not fetch first.
+    pub(super) skip_fetch: Option<bool>,
 }
 
 /// `abandon_change`.

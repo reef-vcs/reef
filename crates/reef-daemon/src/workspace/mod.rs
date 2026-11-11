@@ -49,7 +49,7 @@ pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
 pub(crate) use manager::ensure_repo_dir;
-pub use rewrite::{EditTarget, Rewritten, Write, WriteRequest};
+pub use rewrite::{EditTarget, RebaseOutcome, Rewritten, Write, WriteRequest};
 pub use snapshot::{REEFIGNORE, ReadAnswer, ReadSnapshot, ReadSource};
 pub(crate) use stores::StoreTarget;
 
@@ -616,6 +616,9 @@ pub enum ManagerError {
     /// A landing was refused or failed (R3.13).
     #[error("land the change")]
     Land(#[from] reef_lib::jj::land::LandError),
+    /// A rebase was refused or failed (#259).
+    #[error("rebase the change")]
+    Rebase(#[from] reef_lib::jj::rebase::RebaseError),
     /// An edit of files was refused or failed (R2.04).
     #[error("edit the files")]
     Edit(#[from] reef_lib::jj::files::EditError),
@@ -680,6 +683,7 @@ impl Classify for ManagerError {
             Self::Rewrite(error) => error.kind(),
             Self::Undo(error) => error.kind(),
             Self::Land(error) => error.kind(),
+            Self::Rebase(error) => error.kind(),
             Self::Edit(error) => error.kind(),
             Self::OpLookup(error) => error.kind(),
             Self::RewriteSnapshot { .. } => ErrorKind::Conflict,

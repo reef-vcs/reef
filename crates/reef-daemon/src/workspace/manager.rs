@@ -179,6 +179,21 @@ impl Manager {
         self.read_entries().get(&id).cloned()
     }
 
+    /// The active workspaces of `repo`, by id (issue #248's follower).
+    pub(crate) fn active_in(&self, repo: RepoId) -> Vec<WorkspaceId> {
+        let mut ids: Vec<WorkspaceId> = self
+            .read_entries()
+            .values()
+            .filter(|entry| {
+                let record = entry.record();
+                record.repo_id == repo && record.state == WorkspaceState::Active
+            })
+            .map(|entry| entry.paths.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// How many workspaces are loaded.
     pub fn loaded(&self) -> usize {
         self.read_entries().len()

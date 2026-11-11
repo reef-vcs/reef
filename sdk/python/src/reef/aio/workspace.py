@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         GetStatusResponse,
         MoveWorkspaceResponse,
         ReadFileResponse,
+        RebaseChangeResponse,
         ReleaseWorkspaceResponse,
         SnapshotWorkspaceResponse,
         Workspace,
@@ -140,6 +141,18 @@ class AsyncWorkspaceHandle:
         response = await self._client.move_workspace(workspace=self.id, **fields)
         if response.HasField("workspace"):
             self._update(response.workspace)
+        return response
+
+    async def rebase(self, **fields: Any) -> RebaseChangeResponse:
+        """``rebase_change`` for the workspace's change (``@`` unless ``revision`` names
+        another): fetches trunk and brings the change, with those above it, onto it (#259).
+        A conflict is written and returned in ``conflicts``. The handle follows its change.
+        """
+        fields.setdefault("revision", "@")
+        response = await self._client.rebase_change(workspace=self.id, **fields)
+        if fields["revision"] == "@" and response.HasField("change"):
+            self.workspace.change_id = response.change.change_id
+            self.workspace.commit_id = response.change.commit_id
         return response
 
     async def declare(

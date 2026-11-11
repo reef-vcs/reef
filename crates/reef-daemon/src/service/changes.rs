@@ -2,7 +2,8 @@
 //! `DescribeChange` and `AbandonChange` (R2.03, through
 //! [`crate::workspace::Manager::rewrite`]), and the lifecycle's
 //! `TransitionChange`, `ListProposals` and `ListTransitions` (R3.09,
-//! through [`crate::lifecycle`]). Every `Change` returned carries its
+//! through [`crate::lifecycle`]), and `RebaseChange` (#259, in
+//! `service::rebase`). Every `Change` returned carries its
 //! lifecycle.
 //!
 //! A log page token pins the operation the first page read, and its cursor
@@ -19,7 +20,8 @@ use reef_api::v1::{
     self, AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest,
     DescribeChangeResponse, GetChangeRequest, GetChangeResponse, ListChangesRequest,
     ListChangesResponse, ListProposalsRequest, ListProposalsResponse, ListTransitionsRequest,
-    ListTransitionsResponse, OperationKind, TransitionChangeRequest, TransitionChangeResponse,
+    ListTransitionsResponse, OperationKind, RebaseChangeRequest, RebaseChangeResponse,
+    TransitionChangeRequest, TransitionChangeResponse,
 };
 use reef_lib::jj::lifecycle::LifecycleState;
 use reef_lib::jj::log::{self, Describer};
@@ -56,6 +58,14 @@ impl ChangesHandler {
 
 #[tonic::async_trait]
 impl ChangeService for ChangesHandler {
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn rebase_change(
+        &self,
+        request: Request<RebaseChangeRequest>,
+    ) -> Result<Response<RebaseChangeResponse>, Status> {
+        super::rebase::rebase_change(&self.state, request).await
+    }
+
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn list_changes(
         &self,

@@ -190,6 +190,11 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
             "a publish pushed to a git remote; publish again, or delete the branch on the host (`git push <remote> --delete <branch>`)",
         );
     }
+    // A fetch records what a git remote has (#259); undoing it would make
+    // the view disagree with the refs git fetched.
+    if classify(&entry(op)).kind == Some(OpKind::Fetch) {
+        return refuse("a fetch records what the git remote has; fetch again instead");
+    }
     // The daemon reverts a lifecycle transition in its own rows (R3.09); a
     // view revert would leave them as they are.
     if op

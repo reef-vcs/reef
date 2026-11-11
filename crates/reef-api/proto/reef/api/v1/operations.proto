@@ -190,6 +190,14 @@ enum OperationKind {
   // A change was published to a git remote (#258): the remote and local
   // bookmarks it set are in the effects.
   OPERATION_KIND_PUBLISH = 17;
+  // Changes were rebased onto a destination, keeping their change ids, or
+  // a workspace whose change had landed started a new one on it (#259):
+  // the rewritten commits are in the effects. Undoable.
+  OPERATION_KIND_REBASE = 18;
+  // Branches were fetched from a git remote (#259): the remote-tracking
+  // bookmarks it moved are in the effects. Undo refuses it: it records
+  // what the remote has, so fetch again instead.
+  OPERATION_KIND_FETCH = 19;
 }
 
 // Why a snapshot ran.

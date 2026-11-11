@@ -26,7 +26,7 @@ The landing judges the commit the proposal recorded, which is where the evidence
 ## Fast-forward, rebase, and what a clean rebase proves
 
 - **Fast-forward**: the bookmark's head is the change's only parent. The landed commit is the change's commit, and the landed tree is the judged one.
-- **Rebase**: otherwise the change is rebased onto the head, keeping its change id. A rebase that conflicts writes nothing and refuses with the conflicted paths; rebase it yourself (`jj rebase -d main`), resolve, propose again, and land. A clean rebase lands.
+- **Rebase**: otherwise the change is rebased onto the head, keeping its change id. A rebase that conflicts writes nothing and refuses with the conflicted paths; rebase it yourself (`reef rebase --onto main`, [rebasing](rebasing.md)), resolve, propose again, and land. A clean rebase lands.
 - **Overlap**: the paths both the change and the destination changed since the change's parents. They are in the record and in the policy's input.
 
 A clean rebase is not a test: two changes that merge cleanly can still break each other (one changes a function's signature, the other adds a caller). That is why, under `checks = "batch"` (the default), the required evidence must also pass on the rebased tree (below). A repository can still refuse rebases outright:

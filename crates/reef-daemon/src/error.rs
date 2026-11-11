@@ -76,6 +76,7 @@ pub trait Advise {
 /// of the daemon's [`Advise`] types and has advice. Wrapping variants
 /// delegate to what they wrap, since a `#[error(transparent)]` variant's
 /// source is its inner error's source, not the inner error.
+#[expect(clippy::too_many_lines, reason = "one arm per error type that advises")]
 pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
     let mut current = Some(error);
     while let Some(error) = current {
@@ -137,6 +138,12 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
         } else if let Some(error) = error.downcast_ref::<crate::lifecycle::LifecycleError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::landing::LandingError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<reef_lib::jj::rebase::RebaseError>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::rebase::RebaseRefusal>() {
+            error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::fetch::FetchFailure>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.advice()
@@ -658,6 +665,10 @@ fn assign_reason(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per error type that names a reason"
+)]
 fn reason_and_metadata(
     error: &(dyn Error + 'static),
 ) -> Option<(&'static str, BTreeMap<String, String>)> {
@@ -738,6 +749,12 @@ fn reason_and_metadata(
         } else if let Some(error) = error.downcast_ref::<crate::lifecycle::LifecycleError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::landing::LandingError>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<reef_lib::jj::rebase::RebaseError>() {
+            crate::rebase::reason(error).map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::rebase::RebaseRefusal>() {
+            error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::fetch::FetchFailure>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))

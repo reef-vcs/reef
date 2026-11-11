@@ -2066,6 +2066,29 @@ impl Client {
             .await
     }
 
+    /// `GitService.FetchGitRemote` (#259): fetches branches from a git
+    /// remote and records them.
+    pub async fn fetch_git_remote(
+        &self,
+        request: v1::FetchGitRemoteRequest,
+    ) -> Result<v1::FetchGitRemoteResponse, ClientError> {
+        let mut client = self.git();
+        self.call("FetchGitRemote", client.fetch_git_remote(request))
+            .await
+    }
+
+    /// `ChangeService.RebaseChange` (#259): fetches the destination's
+    /// branch, then moves changes onto it, keeping their ids.
+    pub async fn rebase_change(
+        &self,
+        request: v1::RebaseChangeRequest,
+    ) -> Result<v1::RebaseChangeResponse, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        self.call("RebaseChange", client.rebase_change(request))
+            .await
+    }
+
     /// `LandingService.LandChange` (R3.13): judges a proposed change, queues
     /// it, and waits up to `request.wait_ms` for its landing.
     pub async fn land_change(

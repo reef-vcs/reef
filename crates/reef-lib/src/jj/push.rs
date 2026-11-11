@@ -1000,7 +1000,7 @@ pub fn push(
 /// jj-lib's subprocess error, which it does not export, by its message:
 /// "Could not execute …" (spawning failed), "Git does not recognize
 /// required option: …" (too old), "Git process failed: `<stderr>`".
-fn subprocess_error(message: &str, local: &[String], executable: &str) -> PushError {
+pub(crate) fn subprocess_error(message: &str, local: &[String], executable: &str) -> PushError {
     if message.starts_with("Could not execute") {
         PushError::GitNotFound(executable.to_owned())
     } else if message.starts_with("Git does not recognize required option") {
@@ -1028,10 +1028,10 @@ fn subprocess_error(message: &str, local: &[String], executable: &str) -> PushEr
 /// leaves out of the error: it keeps only `error:` and `fatal:` lines, so
 /// ssh's `Permission denied (publickey).` arrives here.
 #[derive(Default)]
-struct Messages {
+pub(crate) struct Messages {
     lines: Vec<String>,
     partial: Vec<u8>,
-    local: Vec<String>,
+    pub(crate) local: Vec<String>,
 }
 
 /// The most of git's local lines kept for an error.

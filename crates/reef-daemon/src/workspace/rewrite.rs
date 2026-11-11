@@ -42,6 +42,7 @@ use reef_lib::jj::files;
 use reef_lib::jj::land::{LandPlan, LandedMember};
 use reef_lib::jj::lifecycle::TransitionRecord;
 use reef_lib::jj::log::{ChangeInfo, Describer};
+use reef_lib::jj::rebase::{self, RebaseMode, RebasePlan, Rebased};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError, WorkingCopy};
 use reef_lib::jj::{Carry, CommitIdHex, OpKind, OpMeta, OperationIdHex, ReadonlyRepo, oplog, undo};
@@ -101,6 +102,37 @@ pub enum Write {
         /// commit.
         transitions: Vec<TransitionRecord>,
     },
+    /// Rebase changes onto a destination, keeping their change ids (#259):
+    /// the set `reef_lib::jj::rebase::plan` computes, with every workspace
+    /// on it snapshotted first and following afterwards.
+    Rebase {
+        /// The revision naming the change.
+        revision: String,
+        /// The destination revision; empty for `trunk()`, or its remote
+        /// bookmark when that is ahead.
+        onto: String,
+        /// Which commits move.
+        mode: RebaseMode,
+        /// As for `Describe`.
+        expected: String,
+        /// The remote whose bookmark may stand for a local `trunk()`
+        /// behind it; `None` for `origin`.
+        remote: Option<String>,
+    },
+    /// Give each of `workspaces` whose working-copy commit has landed (is
+    /// immutable) a new empty change on it, with `transitions` recorded in
+    /// the same operation (issue #248). Takes no step-3 snapshot: it would
+    /// be the amendment this prevents. A working copy's tree is unchanged,
+    /// so its follow is a row update, and its next snapshot is fresh against
+    /// the new commit, so edits made meanwhile go into the new change.
+    StartOnLanded {
+        /// jj workspace names.
+        workspaces: Vec<String>,
+        /// Transitions to record in the operation (an observed landing).
+        transitions: Vec<TransitionRecord>,
+        /// The operation's description.
+        description: String,
+    },
     /// Edit files without a workspace (R2.04).
     Edit {
         /// The commit to rewrite, or to build a new change on.
@@ -141,6 +173,11 @@ impl Write {
             Write::Undo { .. } => OpKind::Undo,
             Write::Edit { .. } => OpKind::Edit,
             Write::Land { .. } => OpKind::Land,
+            Write::StartOnLanded { transitions, .. } if !transitions.is_empty() => {
+                OpKind::Transition
+            }
+            Write::StartOnLanded { .. } => OpKind::MoveWorkspace,
+            Write::Rebase { .. } => OpKind::Rebase,
         }
     }
 }
@@ -177,6 +214,22 @@ pub struct Rewritten {
     pub undone: Option<OperationIdHex>,
     /// For a land, each change as it landed, in order (R3.14).
     pub landed: Vec<LandedMember>,
+    /// For a start on landed commits, each jj workspace given a new change
+    /// and the landed commit it is on (issue #248).
+    pub started: Vec<(String, CommitIdHex)>,
+    /// For a rebase, what it planned and wrote (#259).
+    pub rebase: Option<RebaseOutcome>,
+}
+
+/// What a rebase planned at step 4 and wrote (#259).
+#[derive(Clone, Debug)]
+pub struct RebaseOutcome {
+    /// The plan written.
+    pub plan: RebasePlan,
+    /// What it wrote.
+    pub rebased: Rebased,
+    /// The working copies afterwards, by jj workspace name: commit.
+    pub working_copies: Vec<(String, CommitIdHex)>,
 }
 
 /// What step 1 found.
@@ -194,6 +247,8 @@ struct Written {
     change: Option<ChangeInfo>,
     abandoned: Option<CommitIdHex>,
     landed: Vec<LandedMember>,
+    started: Vec<(String, CommitIdHex)>,
+    rebase: Option<RebaseOutcome>,
     /// Working copies before and after.
     before: Vec<WorkingCopy>,
     after: Vec<WorkingCopy>,
@@ -308,7 +363,7 @@ impl Manager {
         }
 
         // 3.
-        let snapshotted = if matches!(write, Write::Describe { .. }) {
+        let snapshotted = if matches!(write, Write::Describe { .. } | Write::StartOnLanded { .. }) {
             Snapshotted::default()
         } else {
             self.snapshot_moved(&order, &locked, workspace, agent.as_ref())
@@ -350,6 +405,8 @@ impl Manager {
             abandoned: written.abandoned,
             undone: planned.undone,
             landed: written.landed,
+            started: written.started,
+            rebase: written.rebase,
         })
     }
 
@@ -610,7 +667,11 @@ fn check(write: &Write) -> Result<(), ManagerError> {
             }
             files::check_edits(edits)?;
         }
-        Write::Abandon { .. } | Write::Undo { .. } | Write::Land { .. } => {}
+        Write::Abandon { .. }
+        | Write::Undo { .. }
+        | Write::Land { .. }
+        | Write::StartOnLanded { .. }
+        | Write::Rebase { .. } => {}
     }
     Ok(())
 }
@@ -642,11 +703,25 @@ fn carries(
 ) -> Vec<(WorkspaceId, Carry)> {
     moved_copies(before, after)
         .into_iter()
-        .filter(|(was, now)| was.change_id == now.change_id && was.tree != now.tree)
+        .filter(|(was, now)| {
+            let same_change = was.change_id == now.change_id;
+            // A new empty change on the workspace's change as rewritten (a
+            // landing that rebased it, ADR 0071): edits made meanwhile go
+            // into the new change, never into the landed commit.
+            let new_child = now
+                .parent
+                .as_ref()
+                .is_some_and(|(change, tree)| *change == was.change_id && *tree == now.tree);
+            (same_change || new_child) && was.tree != now.tree
+        })
         .filter_map(|(was, now)| {
             let id: WorkspaceId = now.workspace.strip_prefix("reef-")?.parse().ok()?;
             let from = match rows.get(&id) {
-                Some((change, commit)) if *change == now.change_id.as_str() => commit.clone(),
+                Some((change, commit))
+                    if *change == now.change_id.as_str() || *change == was.change_id.as_str() =>
+                {
+                    commit.clone()
+                }
                 _ => was.commit_id.clone(),
             };
             let carry = Carry {
@@ -683,6 +758,7 @@ fn scope<'a>(head: &'a RepoHead, workspace: Option<&'a str>) -> RevsetScope<'a> 
 
 /// Step 1, on the repository thread. The request is checked before a
 /// colocated repository's ref import writes anything.
+#[expect(clippy::too_many_lines, reason = "one arm per write")]
 async fn plan(
     head: &mut RepoHead,
     write: &Write,
@@ -733,6 +809,14 @@ async fn plan(
                 undone: None,
             })
         }
+        Write::StartOnLanded { workspaces, .. } => {
+            let repo = head.refresh().await?;
+            Ok(Planned {
+                workspaces: rewrite::descendants_first(&repo, workspaces).await?,
+                undone: None,
+            })
+        }
+        Write::Rebase { .. } => plan_rebase(head, write, workspace, agent).await,
         Write::Undo { operation } => {
             let repo = head.refresh().await?;
             let op = oplog::resolve_operation(&repo, operation).await?;
@@ -787,6 +871,64 @@ async fn plan(
             })
         }
     }
+}
+
+/// A rebase request over a write's fields.
+fn rebase_request<'a>(
+    revision: &'a str,
+    onto: &'a str,
+    mode: RebaseMode,
+    expected: Option<&'a CommitIdHex>,
+    remote: Option<&'a str>,
+) -> rebase::RebaseRequest<'a> {
+    rebase::RebaseRequest {
+        revision,
+        onto: (!onto.trim().is_empty()).then_some(onto),
+        mode,
+        expected,
+        remote,
+    }
+}
+
+/// Step 1 for a rebase: the plan's workspaces (those on the moved commits,
+/// or the named one for a start on the destination).
+async fn plan_rebase(
+    head: &mut RepoHead,
+    write: &Write,
+    workspace: Option<WorkspaceId>,
+    agent: Option<&str>,
+) -> Result<Planned, ManagerError> {
+    let Write::Rebase {
+        revision,
+        onto,
+        mode,
+        expected,
+        remote,
+    } = write
+    else {
+        return Ok(Planned {
+            workspaces: Vec::new(),
+            undone: None,
+        });
+    };
+    if revision.trim().is_empty() {
+        return Err(RevisionError::Required.into());
+    }
+    let expected = rewrite::parse_expected(&head.repo.readonly(), expected)?;
+    refresh_for_resolve(head, &import_meta(workspace, agent)).await?;
+    let repo = head.repo.readonly();
+    let jj_name = workspace.map(|id| id.jj_workspace_name());
+    let request = rebase_request(revision, onto, *mode, expected.as_ref(), remote.as_deref());
+    let planned = rebase::plan(&repo, &request, &scope(head, jj_name.as_deref())).await?;
+    let workspaces = match planned.action {
+        rebase::Action::Move { workspaces, .. } => workspaces,
+        rebase::Action::StartOn { workspace } => vec![workspace],
+        rebase::Action::UpToDate => Vec::new(),
+    };
+    Ok(Planned {
+        workspaces: rewrite::descendants_first(&repo, &workspaces).await?,
+        undone: None,
+    })
 }
 
 /// How a revision is checked at step 4.
@@ -896,6 +1038,8 @@ async fn commit(
         change: None,
         abandoned: None,
         landed: Vec::new(),
+        started: Vec::new(),
+        rebase: None,
         before,
         after: Vec::new(),
     };
@@ -978,6 +1122,74 @@ async fn commit(
             written.op_id = Some(landed.op_id);
             written.landed = landed.members;
         }
+        Write::Rebase {
+            revision,
+            onto,
+            mode,
+            expected,
+            remote,
+        } => {
+            let expected = rewrite::parse_expected(&repo, expected)?;
+            let jj_name = target.workspace.map(|id| id.jj_workspace_name());
+            let request =
+                rebase_request(revision, onto, *mode, expected.as_ref(), remote.as_deref());
+            let scope = scope(head, jj_name.as_deref());
+            let planned = match rebase::plan(&repo, &request, &scope).await {
+                // A commit step 3's snapshot rewrote (the caller named a
+                // working-copy commit by id) is followed, as `resolve_target`
+                // follows one; with an expected id it is a mismatch.
+                Err(rebase::RebaseError::Hidden(old)) => {
+                    let Some(new) = target.rewritten.get(&old) else {
+                        return Err(rebase::RebaseError::Hidden(old).into());
+                    };
+                    if let Some(expected) = expected {
+                        return Err(rebase::RebaseError::Mismatch {
+                            expected,
+                            actual: new.clone(),
+                        }
+                        .into());
+                    }
+                    let request =
+                        rebase_request(new.as_str(), onto, *mode, None, remote.as_deref());
+                    rebase::plan(&repo, &request, &scope).await?
+                }
+                planned => planned?,
+            };
+            meta.description = format!(
+                "{}{} onto {}",
+                oplog::REBASE_PREFIX,
+                planned
+                    .change_id
+                    .as_str()
+                    .get(..12)
+                    .unwrap_or(planned.change_id.as_str()),
+                planned.destination.name
+            );
+            let rebased = head.repo.rebase(&planned, &meta).await?;
+            changed_commit = Some(
+                rebased
+                    .started
+                    .clone()
+                    .unwrap_or_else(|| rebased.commit_id.clone()),
+            );
+            written.op_id.clone_from(&rebased.op_id);
+            written.rebase = Some(RebaseOutcome {
+                plan: planned,
+                rebased,
+                working_copies: Vec::new(),
+            });
+        }
+        Write::StartOnLanded {
+            workspaces,
+            transitions,
+            description,
+        } => {
+            meta.description.clone_from(description);
+            meta.transitions.clone_from(transitions);
+            let started = head.repo.start_on_landed(workspaces, &meta).await?;
+            written.op_id = started.op_id;
+            written.started = started.started;
+        }
         Write::Edit {
             target: edit_target,
             expected,
@@ -1012,7 +1224,15 @@ async fn commit(
         }
     }
     match rewrite::working_copies(&repo).await {
-        Ok(after) => written.after = after,
+        Ok(after) => {
+            if let Some(outcome) = &mut written.rebase {
+                outcome.working_copies = after
+                    .iter()
+                    .map(|copy| (copy.workspace.clone(), copy.commit_id.clone()))
+                    .collect();
+            }
+            written.after = after;
+        }
         Err(error) => {
             // No follows: each workspace adopts at its next snapshot.
             tracing::warn!(error = %ErrorChain(&error), "cannot read the working copies after the write; workspaces adopt it at their next snapshot");
@@ -1034,7 +1254,32 @@ mod tests {
             change_id: change.parse::<ChangeIdHex>().unwrap(),
             tree: tree.to_owned(),
             divergent: false,
+            parent: None,
         }
+    }
+
+    // A landing that rebased the workspace's change (C to C') and gave it a
+    // new empty change N on C' carries from the row's C to N: edits made
+    // meanwhile go into N, never into the landed commit (ADR 0071).
+    #[test]
+    fn carries_onto_a_new_change_on_the_rewritten_commit() {
+        let a = "reef-00000000000000aa";
+        let before = [copy(a, "c1", "aa", "t1")];
+        let mut moved = copy(a, "e1", "ee", "t2");
+        moved.parent = Some(("aa".parse::<ChangeIdHex>().unwrap(), "t2".to_owned()));
+        let found = carries(&before, &[moved.clone()], &LockedRows::new());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1.from.as_str(), "c1");
+        assert_eq!(found[0].1.to.as_str(), "e1");
+        // The same tree (an observed landing): nothing to carry.
+        let mut same = moved.clone();
+        same.tree = "t1".to_owned();
+        same.parent = Some(("aa".parse::<ChangeIdHex>().unwrap(), "t1".to_owned()));
+        assert_eq!(carries(&before, &[same], &LockedRows::new()), Vec::new());
+        // A new change on another change's commit (an abandon): none.
+        let mut other = moved;
+        other.parent = Some(("bb".parse::<ChangeIdHex>().unwrap(), "t2".to_owned()));
+        assert_eq!(carries(&before, &[other], &LockedRows::new()), Vec::new());
     }
 
     #[test]

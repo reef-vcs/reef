@@ -386,6 +386,11 @@ pub enum OpKind {
     ConflictAssignment,
     /// A change was published to a git remote (#258).
     Publish,
+    /// Changes were rebased onto a destination, or a workspace on a landed
+    /// change started a new one (#259).
+    Rebase,
+    /// Branches were fetched from a git remote (#259).
+    Fetch,
     /// Written by another jj client.
     External,
     /// Written by Reef, and none of the above.
@@ -394,7 +399,7 @@ pub enum OpKind {
 
 impl OpKind {
     /// Every kind Reef writes in [`ATTR_KIND`] (all but `External`).
-    pub const WRITTEN: [OpKind; 16] = [
+    pub const WRITTEN: [OpKind; 18] = [
         OpKind::Snapshot,
         OpKind::CreateWorkspace,
         OpKind::ReleaseWorkspace,
@@ -410,6 +415,8 @@ impl OpKind {
         OpKind::Comment,
         OpKind::ConflictAssignment,
         OpKind::Publish,
+        OpKind::Rebase,
+        OpKind::Fetch,
         OpKind::Other,
     ];
 
@@ -431,6 +438,8 @@ impl OpKind {
             OpKind::Batch => "batch",
             OpKind::ConflictAssignment => "conflict-assignment",
             OpKind::Publish => "publish",
+            OpKind::Rebase => "rebase",
+            OpKind::Fetch => "fetch",
             OpKind::External => "external",
             OpKind::Other => "other",
         }
@@ -605,7 +614,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 24] = [
+const WRITES: [(&str, OpKind); 26] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -630,7 +639,15 @@ const WRITES: [(&str, OpKind); 24] = [
     (TEST_BATCH_PREFIX, OpKind::Batch),
     (END_BATCH_PREFIX, OpKind::Batch),
     (PUBLISH_PREFIX, OpKind::Publish),
+    (REBASE_PREFIX, OpKind::Rebase),
+    (FETCH_PREFIX, OpKind::Fetch),
 ];
+/// The description of a rebase (#259), before the change id:
+/// `reef: rebase change <id> onto <destination>`.
+pub const REBASE_PREFIX: &str = "reef: rebase change ";
+/// The description of a fetch (#259), before the branches:
+/// `reef: fetch <branches> from <remote>`.
+pub const FETCH_PREFIX: &str = "reef: fetch ";
 /// The description of a publish (#258), before the change id, the remote
 /// and the branch: `reef: publish change <id> to <remote>/<branch>`, with
 /// ` (forced)` after a forced update.

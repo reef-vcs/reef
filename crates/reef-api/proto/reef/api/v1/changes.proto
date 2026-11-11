@@ -159,6 +159,35 @@ service ChangeService {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // Moves changes onto a destination commit, keeping their change ids
+  // (#259, ADR 0071; docs/rebasing.md): in branch mode every commit of
+  // `revision`'s ancestry the destination lacks, in source mode
+  // `revision`'s commit, each with its descendants. The destination's
+  // branch is fetched from its git remote first unless `skip_fetch` (never
+  // through the remote listener), and the destination defaults to
+  // `trunk()`, or to its remote-tracking bookmark when that is strictly
+  // ahead of a local one, which is left where it is. Workspaces on the
+  // moved commits are snapshotted first and take their new trees
+  // afterwards, keeping edits made meanwhile (ADR 0039). A rebase that
+  // conflicts is written and succeeds, listing the conflicts it introduced.
+  // Nothing to move records nothing: `operation` is unset and `up_to_date`
+  // true. When `revision` is the workspace's working-copy commit and it has
+  // landed (is immutable), the workspace starts a new empty change on the
+  // destination instead. Writes no lifecycle transition: a PROPOSED change
+  // reads `amended` until proposed again. Not idempotent.
+  //
+  // Errors: as for every revision read, and INVALID_ARGUMENT with reason
+  // REVISION_REQUIRED, INVALID_COMMIT_ID or REBASE_ONTO_DESCENDANT;
+  // FAILED_PRECONDITION with reason EXPECTED_COMMIT_MISMATCH,
+  // SNAPSHOT_FAILED (metadata `workspace_id`), IMMUTABLE_REVISION (metadata
+  // `commit_id`, `change_id`, `head`) or HIDDEN_REVISION (metadata
+  // `commit_id`), CHANGE_DIVERGENT or CHANGE_QUEUED (metadata `change_id`),
+  // INCLUDES_WORKING_COPY (metadata `change_id`, `commit_id`, `workspace`),
+  // RANGE_TOO_LARGE (metadata `count`) or NO_DESTINATION; or a fetch's
+  // reasons, as GitService.FetchGitRemote lists them.
+  rpc RebaseChange(RebaseChangeRequest) returns (RebaseChangeResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
 }
 
 // Who made a commit, and when.
@@ -463,4 +492,130 @@ message ListTransitionsResponse {
   repeated ChangeTransition transitions = 1;
   // Empty on the last page.
   string next_page_token = 2;
+}
+
+// Which commits a rebase moves.
+enum RebaseMode {
+  // Branch mode.
+  REBASE_MODE_UNSPECIFIED = 0;
+  // Every commit of the revision's ancestry the destination lacks, from its
+  // roots, with their descendants: `jj rebase -b`, `git rebase main` on a
+  // branch.
+  REBASE_MODE_BRANCH = 1;
+  // The revision's commit and its descendants: `jj rebase -s`.
+  REBASE_MODE_SOURCE = 2;
+}
+
+// Rebase changes onto a destination.
+message RebaseChangeRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision naming the change; required. `@` needs `workspace`.
+  string revision = 3;
+  // The destination revision; empty for `trunk()` after the fetch, or its
+  // remote-tracking bookmark when that is ahead.
+  string onto = 4;
+  // Which commits move.
+  RebaseMode mode = 5;
+  // When non-empty, FAILED_PRECONDITION unless the revision resolves to
+  // this commit.
+  string expected_commit_id = 6;
+  // Do not fetch the destination's branch first. Every workspace the
+  // rebase moves is snapshotted first, always: a rebase over unrecorded
+  // edits would lose them.
+  bool skip_fetch = 7;
+}
+
+// One change a rebase moved.
+message RebasedChange {
+  // The change, in hex.
+  string change_id = 1;
+  // Its commit before.
+  string old_commit_id = 2;
+  // Its commit after.
+  string new_commit_id = 3;
+  // The new commit has a conflict.
+  bool conflicted = 4;
+  // The change had edits and now has none: the destination already has
+  // them (after a squash merge, typically).
+  bool became_empty = 5;
+  // The Reef workspaces on the new commit.
+  repeated string workspace_ids = 6;
+}
+
+// A conflict a rebase introduced, in brief; `ConflictService.GetConflict`
+// on the change reads all of it.
+message RebaseConflict {
+  // The change, in hex.
+  string change_id = 1;
+  // Its conflicted commit.
+  string commit_id = 2;
+  // The first conflicted paths, in path order, at most 20.
+  repeated string paths = 3;
+  // Conflicted paths in all.
+  uint32 paths_total = 4;
+}
+
+// One branch a fetch read (#259).
+message FetchedBranch {
+  // The branch on the remote.
+  string branch = 1;
+  // Where the remote-tracking bookmark is now; empty when `missing`.
+  string commit_id = 2;
+  // Where it was; empty when it was new.
+  string previous_commit_id = 3;
+  // The tracked local bookmark of the same name was fast-forwarded too.
+  bool local_moved = 4;
+  // The remote has no such branch.
+  bool missing = 5;
+}
+
+// What a fetch did (#259): RebaseChange's first step, and
+// GitService.FetchGitRemote's answer.
+message Fetched {
+  // The git remote.
+  string git_remote = 1;
+  // Each branch asked for.
+  repeated FetchedBranch branches = 2;
+  // Sentences for a person, such as a checked-out branch left as it is.
+  repeated string notes = 3;
+}
+
+// What a rebase did.
+message RebaseChangeResponse {
+  // `revision`'s change afterwards.
+  Change change = 1;
+  // The rebase operation; unset when up to date.
+  Operation operation = 2;
+  // The snapshot of the named workspace taken first, if it recorded one.
+  Operation snapshot = 3;
+  // The fetch; unset when none ran.
+  Fetched fetched = 4;
+  // What the destination resolved from: `main`, `main@origin`, or the
+  // revision given.
+  string onto = 5;
+  // The destination commit.
+  string onto_commit_id = 6;
+  // The changes moved, newest first, at most 100.
+  repeated RebasedChange rebased = 7;
+  // Changes moved in all.
+  uint32 rebased_count = 8;
+  // Conflicts the rebase introduced, newest first, at most 10.
+  repeated RebaseConflict conflicts = 9;
+  // Changes with a conflict the rebase introduced, in all.
+  uint32 conflict_count = 10;
+  // Changes that only inherit one of those conflicts from a parent.
+  uint32 inherited_conflict_count = 11;
+  // Nothing moved: the change is already on the destination.
+  bool up_to_date = 12;
+  // `revision` had landed: the workspace is on a new empty change on the
+  // destination.
+  bool started_new_change = 13;
+  // Sentences for a person: a local bookmark left behind, amended
+  // proposals, empty changes.
+  repeated string notes = 14;
+  // The fetch's operation; unset when no fetch ran or nothing changed.
+  Operation fetch_operation = 15;
 }

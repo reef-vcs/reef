@@ -98,6 +98,8 @@ The push runs in the daemon's process, with your git configuration (credential h
 
 Each carries git's stderr in `git_stderr`, the last 2,048 bytes, with the user information of any URL replaced by `***` and control characters removed.
 
+`BRANCH_MOVED`'s `next` is `reef fetch --git-remote <remote> --branch <branch>` ([rebasing](rebasing.md#the-fetch)), after which a publish sees what the branch holds; `BRANCH_DIVERGED`'s hint names `reef rebase --onto <branch>@<remote>` to build on it. After a host's squash merge of a published change, `reef rebase` reports the change empty: its edits are on trunk.
+
 **A daemon started from another shell has that shell's environment.** If `git push` works in your terminal and a publish says `GIT_AUTH_FAILED`, the daemon probably lacks your SSH agent: `reef daemon stop`, then any `reef` command from your terminal starts it again with that terminal's environment.
 
 ## The pull-request command
@@ -153,5 +155,4 @@ A harness sandbox that denies an agent the network but lets it reach Reef's sock
 - A policy or checks gate before a publish.
 - Stacked pull requests: each change of a stack on its own branch, based on its parent's.
 - Publishing through the remote listener, and forwarding a remote client's SSH agent.
-- Fetching and rebasing from Reef (`reef rebase`, #259); `BRANCH_MOVED`'s fetch is git's or jj's until then.
 - A native gitoxide push (R4.14) and the landing service's push of landed history (R3.17), which reuse this plan, lease and record.
