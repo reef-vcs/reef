@@ -141,6 +141,20 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
                 .to_owned(),
             argv(&["reef", "ws", "renew", &ws.id]),
         ),
+        ("active", "active" | "in_grace") if ws.behind_trunk.is_some_and(|n| n > 0) => {
+            let behind = ws.behind_trunk.unwrap_or_default();
+            let count = match behind {
+                1 => "1 commit".to_owned(),
+                1000.. => "over 1,000 commits".to_owned(),
+                n => format!("{n} commits"),
+            };
+            (
+                format!(
+                    "Its change is {count} behind trunk (as of Reef's last fetch); `reef rebase` fetches and brings it onto trunk's head, files included."
+                ),
+                argv(&["reef", "rebase", "--workspace", &ws.id]),
+            )
+        }
         ("active", "active" | "in_grace") if in_run => (
             "Work here; `ws run` snapshots and releases this workspace when your command exits. `reef publish` sends its change to a git branch for review."
                 .to_owned(),
@@ -299,6 +313,18 @@ mod tests {
             state.clone_into(&mut lease.state);
         }
         ws
+    }
+
+    #[test]
+    fn behind_trunk_suggests_a_rebase() {
+        let mut ws = workspace("active", Some("active"));
+        ws.behind_trunk = Some(3);
+        let (hint, next) = advise(&ws, false, false);
+        assert_eq!(next, ["reef", "rebase", "--workspace", "0123456789abcdef"]);
+        assert!(hint.contains("3 commits behind"), "{hint}");
+        ws.behind_trunk = Some(0);
+        let (_, next) = advise(&ws, false, false);
+        assert_eq!(next, ["reef", "ws", "release", "0123456789abcdef"]);
     }
 
     #[test]

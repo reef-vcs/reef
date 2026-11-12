@@ -170,6 +170,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "job_retention",
         ],
     ),
+    ("fetch", &["enabled", "timeout"]),
     (
         "publish",
         &[
@@ -272,6 +273,8 @@ pub struct FileConfig {
     pub executor: ExecutorSection,
     /// `[publish]` (#258).
     pub publish: PublishSection,
+    /// `[fetch]` (#259).
+    pub fetch: FetchSection,
     /// `[ui]`.
     pub ui: UiSection,
     /// `[remote]`.
@@ -974,6 +977,38 @@ impl PublishSection {
             if let Some(host) = hosts.iter().find(|host| !host_ok(host)) {
                 return Some((key, format!("{host:?} is not a host name")));
             }
+        }
+        None
+    }
+}
+
+/// `[fetch]`: fetching branches from git remotes (#259, ADR 0071).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FetchSection {
+    /// `false` refuses every fetch; `reef rebase` then needs `--no-fetch`.
+    /// Default `true`.
+    pub enabled: bool,
+    /// How long a request waits for git. Default 2 minutes; from 10 seconds
+    /// to 1 hour.
+    #[serde(with = "duration")]
+    pub timeout: Duration,
+}
+
+impl Default for FetchSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout: Duration::from_mins(2),
+        }
+    }
+}
+
+impl FetchSection {
+    /// The first invalid key and why.
+    fn invalid(&self) -> Option<(&'static str, String)> {
+        if !(Duration::from_secs(10)..=Duration::from_hours(1)).contains(&self.timeout) {
+            return Some(("fetch.timeout", "must be from 10s to 1h".to_owned()));
         }
         None
     }
@@ -1933,6 +1968,13 @@ impl Config {
                 ],
             ),
             (
+                "fetch",
+                vec![
+                    ("enabled", f.fetch.enabled.to_string()),
+                    ("timeout", d(f.fetch.timeout)),
+                ],
+            ),
+            (
                 "publish",
                 vec![
                     ("enabled", f.publish.enabled.to_string()),
@@ -2363,6 +2405,13 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             path: path.to_owned(),
             key: "sigstore.trusted_root".to_owned(),
             reason: format!("{:?} must be an absolute path", file.sigstore.trusted_root),
+        });
+    }
+    if let Some((key, reason)) = file.fetch.invalid() {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            key: key.to_owned(),
+            reason,
         });
     }
     if let Some((key, reason)) = file.publish.invalid() {

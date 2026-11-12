@@ -102,6 +102,10 @@
       "description": "Push a change to a branch on the repository's git remote, snapshotting its workspace first; publishing it again updates the branch. Returns {publication, operation, next}: next opens the pull request on a known host."
     },
     {
+      "name": "rebase_change",
+      "description": "Bring a change and those above it onto the newest trunk (fetched first), or onto `onto`; workspaces get the new files; a conflict is data with next. Returns {change, onto, up_to_date, notes, next}."
+    },
+    {
       "name": "abandon_change",
       "description": "Abandon a change: its descendants move onto its parents. Returns {abandoned_commit_id, operation, workspace}."
     },

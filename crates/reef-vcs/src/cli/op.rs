@@ -151,6 +151,8 @@ enum KindArg {
     Batch,
     ConflictAssignment,
     Publish,
+    Rebase,
+    Fetch,
     External,
     Other,
 }
@@ -173,6 +175,8 @@ impl From<KindArg> for v1::OperationKind {
             KindArg::Batch => Self::Batch,
             KindArg::ConflictAssignment => Self::ConflictAssignment,
             KindArg::Publish => Self::Publish,
+            KindArg::Rebase => Self::Rebase,
+            KindArg::Fetch => Self::Fetch,
             KindArg::External => Self::External,
             KindArg::Other => Self::Other,
         }

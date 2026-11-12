@@ -18,6 +18,8 @@ const KINDS: Partial<Record<OperationKind, string>> = {
   [OperationKind.BATCH]: "batch",
   [OperationKind.CONFLICT_ASSIGNMENT]: "conflict assignment",
   [OperationKind.PUBLISH]: "publish",
+  [OperationKind.REBASE]: "rebase",
+  [OperationKind.FETCH]: "fetch",
   [OperationKind.EXTERNAL]: "external",
   [OperationKind.OTHER]: "other",
 };

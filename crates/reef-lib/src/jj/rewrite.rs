@@ -10,8 +10,8 @@ use jj_lib::backend::{BackendError, CommitId};
 use jj_lib::commit::Commit;
 use jj_lib::index::IndexError;
 use jj_lib::object_id::ObjectId;
-use jj_lib::ref_name::WorkspaceName;
-use jj_lib::repo::{ReadonlyRepo, Repo as _};
+use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
+use jj_lib::repo::{CheckOutCommitError, ReadonlyRepo, Repo as _};
 use jj_lib::revset::RevsetExpression;
 use jj_lib::rewrite::{RebaseOptions, RewriteRefsOptions};
 use jj_lib::transaction::TransactionCommitError;
@@ -56,6 +56,16 @@ pub struct Abandoned {
     pub successor: Option<CommitIdHex>,
 }
 
+/// What [`Repo::start_on_landed`] wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedOnLanded {
+    /// The operation; `None` when nothing was written.
+    pub op_id: Option<OperationIdHex>,
+    /// Each jj workspace given a new change, with the immutable commit it
+    /// was on, which is the new change's parent.
+    pub started: Vec<(String, CommitIdHex)>,
+}
+
 /// Failure of a describe or an abandon.
 #[derive(Debug, thiserror::Error)]
 pub enum RewriteError {
@@ -95,6 +105,9 @@ pub enum RewriteError {
     /// Committing the operation failed.
     #[error("failed to commit the operation")]
     Commit(#[from] TransactionCommitError),
+    /// Giving a working copy a new commit failed.
+    #[error("failed to check out a new working-copy commit")]
+    CheckOut(#[from] CheckOutCommitError),
 }
 
 impl Classify for RewriteError {
@@ -109,6 +122,7 @@ impl Classify for RewriteError {
             Self::Backend(error) => classify_by_source(error),
             Self::Index(error) => classify_by_source(error),
             Self::Commit(error) => classify_by_source(error),
+            Self::CheckOut(error) => classify_by_source(error),
         }
     }
 }
@@ -309,6 +323,20 @@ pub struct WorkingCopy {
     pub tree: String,
     /// The change has more than one visible commit.
     pub divergent: bool,
+    /// Its parent's change and tree, when it has exactly one parent: what
+    /// tells a new empty change on a rewritten commit (a landing's new
+    /// working-copy commit) from any other move (ADR 0071).
+    pub parent: Option<(ChangeIdHex, String)>,
+}
+
+/// A commit's tree as comparable text.
+fn tree_text(commit: &Commit) -> String {
+    commit
+        .tree_ids()
+        .iter()
+        .map(ObjectId::hex)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Every working copy in `repo`'s view, by jj workspace name.
@@ -321,17 +349,20 @@ pub async fn working_copies(repo: &ReadonlyRepo) -> Result<Vec<WorkingCopy>, Rew
             .await
             .map_err(|error| RewriteError::Revision(RevisionError::Other(error.into())))?
             .is_some_and(|targets| targets.is_divergent());
+        let parent = match commit.parent_ids() {
+            [only] => {
+                let parent = repo.store().get_commit_async(only).await?;
+                Some((ChangeIdHex::of(parent.change_id()), tree_text(&parent)))
+            }
+            _ => None,
+        };
         copies.push(WorkingCopy {
             workspace: name.as_str().to_owned(),
             commit_id: CommitIdHex::of(commit.id()),
             change_id: ChangeIdHex::of(commit.change_id()),
-            tree: commit
-                .tree_ids()
-                .iter()
-                .map(ObjectId::hex)
-                .collect::<Vec<_>>()
-                .join(","),
+            tree: tree_text(&commit),
             divergent,
+            parent,
         });
     }
     Ok(copies)
@@ -384,6 +415,51 @@ impl Repo {
             op_id: OperationIdHex::of(self.repo.op_id()),
             commit_id: CommitIdHex::of(new.id()),
         }))
+    }
+
+    /// Gives each of `workspaces` (jj names) whose working-copy commit is
+    /// immutable (it has landed: on `trunk()` or under a tag) a new empty
+    /// working-copy commit on it, as `jj new` does, in one operation
+    /// recorded with `meta`, which this [`Repo`] adopts (issue #248). Names
+    /// with no working-copy commit, or a mutable one, are skipped. Writes
+    /// nothing when none moved and `meta` records no transition; with
+    /// transitions the operation is written anyway, so they are recorded.
+    #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display(), workspaces_count = workspaces.len()))]
+    pub async fn start_on_landed(
+        &mut self,
+        workspaces: &[String],
+        meta: &OpMeta,
+    ) -> Result<StartedOnLanded, RewriteError> {
+        let repo = std::sync::Arc::clone(&self.repo);
+        let mut tx = repo.start_transaction();
+        let mut started = Vec::new();
+        for name in workspaces {
+            let Some(id) = repo.view().get_wc_commit_id(WorkspaceName::new(name)) else {
+                continue;
+            };
+            if revset::immutable_head(&repo, &CommitIdHex::of(id))
+                .await?
+                .is_none()
+            {
+                continue;
+            }
+            let commit = repo.store().get_commit_async(id).await?;
+            tx.repo_mut()
+                .check_out(WorkspaceNameBuf::from(name.as_str()), &commit)
+                .await?;
+            started.push((name.clone(), CommitIdHex::of(id)));
+        }
+        if started.is_empty() && meta.transitions.is_empty() {
+            return Ok(StartedOnLanded {
+                op_id: None,
+                started,
+            });
+        }
+        self.repo = meta.commit(tx).await?;
+        Ok(StartedOnLanded {
+            op_id: Some(OperationIdHex::of(self.repo.op_id())),
+            started,
+        })
     }
 
     /// `commit`'s description.

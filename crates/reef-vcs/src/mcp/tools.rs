@@ -23,7 +23,7 @@ use reef_api::v1::{
 use reef_client::brief;
 use reef_client::json::{
     self, Abandoned, Created, Described, Diff, Edited, ErrorObject, FileEntry, FileRead, History,
-    Inspected, LogEntry, Moved, Operation, Published, Released, RepoStatus, Repository,
+    Inspected, LogEntry, Moved, Operation, Published, Rebased, Released, RepoStatus, Repository,
     Snapshotted, Undone, Workspace,
 };
 use rmcp::handler::server::common::{schema_for_empty_input, schema_for_input};
@@ -476,6 +476,17 @@ pub(super) const TOOLS: &[ToolDef] = &[
         call: publish_change,
     },
     ToolDef {
+        name: "rebase_change",
+        title: "Rebase change",
+        rpc: "/reef.api.v1.ChangeService/RebaseChange",
+        description: "Bring a change and those above it onto the newest trunk (fetched first), or onto `onto`; workspaces get the new files; a conflict is data with next. Returns {change, onto, up_to_date, notes, next}.",
+        destructive: true,
+        idempotent: false,
+        schema: schema::<args::RebaseChange>,
+        output: output::<brief::Rebased<'static>>,
+        call: rebase_change,
+    },
+    ToolDef {
         name: "abandon_change",
         title: "Abandon change",
         rpc: "/reef.api.v1.ChangeService/AbandonChange",
@@ -513,6 +524,10 @@ pub(super) const TOOLS: &[ToolDef] = &[
 /// Every v1 method that is not a tool, and why.
 #[cfg_attr(not(test), expect(dead_code, reason = "the test reads it"))]
 pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
+    (
+        "/reef.api.v1.GitService/FetchGitRemote",
+        "rebase_change fetches; an agent rarely needs a fetch alone",
+    ),
     (
         "/reef.api.v1.DaemonService/GetDaemonStatus",
         "for a person running the CLI",
@@ -1369,6 +1384,34 @@ tool!(publish_change, args::PublishChange, |call, args| {
     to_value(&brief::Published::from(&published))
 });
 
+tool!(rebase_change, args::RebaseChange, |call, args| {
+    let ctx = call.ctx;
+    let scope = call
+        .scope(args.repo.as_ref(), args.workspace.as_ref())
+        .await?;
+    let mode = if args.source.unwrap_or(false) {
+        v1::RebaseMode::Source
+    } else {
+        v1::RebaseMode::Branch
+    };
+    let response = Box::pin(ctx.call_within(
+        crate::cli::publish::PUBLISH_DEADLINE,
+        ctx.client.rebase_change(v1::RebaseChangeRequest {
+            repo: scope.repo_id.clone(),
+            workspace: scope.workspace_id(),
+            revision: at(args.revision),
+            onto: args.onto.unwrap_or_default(),
+            mode: mode.into(),
+            skip_fetch: args.skip_fetch.unwrap_or(false),
+            ..v1::RebaseChangeRequest::default()
+        }),
+    ))
+    .await?;
+    let workspace = workspace_after(ctx, scope.workspace_ref()).await;
+    let rebased = Rebased::from_response(&response, workspace, crate::cli::out::shell_line);
+    to_value(&brief::Rebased::from(&rebased))
+});
+
 tool!(abandon_change, args::AbandonChange, |call, args| {
     let ctx = call.ctx;
     let scope = call
@@ -1659,7 +1702,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 23);
     }
 
     #[test]

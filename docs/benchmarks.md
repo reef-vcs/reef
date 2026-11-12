@@ -718,3 +718,18 @@ cargo nextest run -p reef-daemon --test policy --success-output immediate -E 'te
 ```sh
 cargo nextest run -p reef-daemon --test policy --success-output immediate -E 'test(simulate_over_landings)'
 ```
+
+## Rebasing (#259)
+
+The resource criterion ([ADR 0071](adr/0071-rebasing-and-following-trunk.md), #264's budget): a workspace rebased over a trunk that changed 100 files of 4 KiB writes only those files, grows by about their bytes, and the rebase takes under 500 ms on `large`. Measured by `rebase_resource` (`crates/reef-daemon/tests/rebase.rs`, ignored; `REEF_REBASE_PRESET` picks the preset) on the M2 Max, APFS clone backend, with `--no-fetch` (the fetch is git's, and a local bare remote's adds well under a second):
+
+| Preset | Build | `RebaseChange` | Files the workspace differs from its base by | Disk growth |
+| --- | --- | --- | --- | --- |
+| `medium` (10k files) | debug | 465 ms | 1 → 101 | +409,600 bytes (exactly 100 × 4 KiB) |
+| `large` (100k files) | release | 497 ms | 1 → 101 | +409,600 bytes (exactly 100 × 4 KiB) |
+
+```sh
+cargo test --release -p reef-daemon --test rebase -- --ignored rebase_resource --nocapture
+```
+
+Most of the time is the workspace's step-3 snapshot and the follow's full scan of its working copy (ADR 0039's stale arm), O(tracked files) each; the check-out itself writes 100 files. The release run shared the machine with a clippy build, so it is an upper bound. A narrowed follow, and re-basing a workspace's base cache entry after a large trunk jump, are follow-ups if a standard machine (#264) misses the budget.

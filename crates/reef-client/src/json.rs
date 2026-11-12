@@ -394,6 +394,12 @@ pub struct Workspace {
     /// disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Box<ProvenanceSession>>,
+    /// How many commits trunk (or its remote bookmark, when ahead) has that
+    /// its change lacks, at most 1,000, as of the daemon's last fetch or
+    /// ref import (#259); `reef rebase` brings it up to date. Absent
+    /// outside `ws inspect`, `here` and `status`, and without a trunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind_trunk: Option<u32>,
 }
 
 /// A shared store mounted in a workspace (R1.20).
@@ -457,6 +463,7 @@ impl From<&v1::Workspace> for Workspace {
                 .provenance
                 .as_deref()
                 .map(|session| Box::new(ProvenanceSession::from(session))),
+            behind_trunk: ws.behind_trunk,
         }
     }
 }
@@ -1239,6 +1246,8 @@ pub fn operation_kind_name(kind: i32) -> Option<&'static str> {
         Ok(v1::OperationKind::Batch) => "batch",
         Ok(v1::OperationKind::ConflictAssignment) => "conflict-assignment",
         Ok(v1::OperationKind::Publish) => "publish",
+        Ok(v1::OperationKind::Rebase) => "rebase",
+        Ok(v1::OperationKind::Fetch) => "fetch",
         Ok(v1::OperationKind::External) => "external",
         Ok(v1::OperationKind::Other) => "other",
         Err(_) => UNKNOWN,
@@ -5152,4 +5161,199 @@ pub struct ProvenanceDeclared {
     /// The snapshot taken first; `null` when nothing changed or with
     /// `--no-snapshot`.
     pub snapshot_op: Option<String>,
+}
+
+/// One branch a fetch read (#259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct FetchedBranch {
+    /// The branch on the remote.
+    pub branch: String,
+    /// Where the remote-tracking bookmark is now; `null` when missing.
+    pub commit_id: Option<String>,
+    /// Where it was; `null` when it was new.
+    pub previous_commit_id: Option<String>,
+    /// The tracked local bookmark was fast-forwarded too.
+    pub local_moved: bool,
+    /// The remote has no such branch.
+    pub missing: bool,
+}
+
+/// What a fetch did (#259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Fetched {
+    /// The git remote.
+    pub git_remote: String,
+    /// Each branch.
+    pub branches: Vec<FetchedBranch>,
+    /// The fetch; `null` when nothing changed.
+    pub operation: Option<Operation>,
+    /// Sentences for a person.
+    pub notes: Vec<String>,
+}
+
+impl Fetched {
+    /// From the response's fetch and its operation.
+    pub fn from_parts(fetched: &v1::Fetched, op: Option<&v1::Operation>) -> Self {
+        Self {
+            git_remote: fetched.git_remote.clone(),
+            branches: fetched
+                .branches
+                .iter()
+                .map(|branch| FetchedBranch {
+                    branch: branch.branch.clone(),
+                    commit_id: text(&branch.commit_id),
+                    previous_commit_id: text(&branch.previous_commit_id),
+                    local_moved: branch.local_moved,
+                    missing: branch.missing,
+                })
+                .collect(),
+            operation: operation(op),
+            notes: fetched.notes.clone(),
+        }
+    }
+}
+
+/// One change a rebase moved (#259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct RebasedChange {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The change in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its commit before.
+    pub old_commit_id: String,
+    /// Its commit after.
+    pub new_commit_id: String,
+    /// The new commit has a conflict.
+    pub conflicted: bool,
+    /// The change is empty now: the destination already has its edits.
+    pub became_empty: bool,
+    /// The Reef workspaces on the new commit.
+    pub workspace_ids: Vec<String>,
+}
+
+/// A conflict a rebase introduced, in brief (#259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct RebaseConflict {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The change in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its conflicted commit.
+    pub commit_id: String,
+    /// The first conflicted paths, at most 20.
+    pub paths: Vec<String>,
+    /// Conflicted paths in all.
+    pub paths_total: u32,
+}
+
+/// `reef rebase`'s answer (#259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Rebased {
+    /// The revision's change afterwards.
+    pub change: Option<Change>,
+    /// The rebase; `null` when up to date.
+    pub operation: Option<Operation>,
+    /// The snapshot taken first, if it recorded one.
+    pub snapshot: Option<Operation>,
+    /// The fetch; `null` when none ran.
+    pub fetched: Option<Fetched>,
+    /// What the destination resolved from: `main`, `main@origin`, or the
+    /// revision given.
+    pub onto: String,
+    /// The destination commit.
+    pub onto_commit_id: String,
+    /// The changes moved, newest first, at most 100.
+    pub rebased: Vec<RebasedChange>,
+    /// Changes moved in all.
+    pub rebased_count: u32,
+    /// Conflicts the rebase introduced, at most 10.
+    pub conflicts: Vec<RebaseConflict>,
+    /// Changes with a conflict the rebase introduced, in all.
+    pub conflict_count: u32,
+    /// Changes that only inherit one of those conflicts.
+    pub inherited_conflict_count: u32,
+    /// Nothing moved: the change is already on the destination.
+    pub up_to_date: bool,
+    /// The change had landed: the workspace is on a new empty change.
+    pub started_new_change: bool,
+    /// Sentences for a person.
+    pub notes: Vec<String>,
+    /// The scope's workspace afterwards; `null` in repository scope.
+    pub workspace: Option<Workspace>,
+    /// What to run next: `reef conflict show -r <change>` after a conflict,
+    /// `reef propose` for an amended proposal; `null` otherwise.
+    pub next: Option<String>,
+}
+
+impl Rebased {
+    /// From the response, the workspace read after it, and `quote`, which
+    /// renders an argv as one shell line.
+    pub fn from_response(
+        response: &v1::RebaseChangeResponse,
+        workspace: Option<Workspace>,
+        quote: impl Fn(&[String]) -> String,
+    ) -> Self {
+        let change = response.change.as_ref().map(Change::from);
+        let next = match (response.conflicts.first(), &response.change) {
+            (Some(conflict), _) => Some(quote(&[
+                "reef".to_owned(),
+                "conflict".to_owned(),
+                "show".to_owned(),
+                "-r".to_owned(),
+                reverse_hex(&conflict.change_id),
+            ])),
+            (None, Some(change))
+                if change.lifecycle.as_ref().is_some_and(|lifecycle| {
+                    lifecycle.state() == v1::LifecycleState::Proposed && lifecycle.amended
+                }) =>
+            {
+                Some(quote(&["reef".to_owned(), "propose".to_owned()]))
+            }
+            _ => None,
+        };
+        Self {
+            change,
+            operation: operation(response.operation.as_ref()),
+            snapshot: operation(response.snapshot.as_ref()),
+            fetched: response
+                .fetched
+                .as_ref()
+                .map(|fetched| Fetched::from_parts(fetched, response.fetch_operation.as_ref())),
+            onto: response.onto.clone(),
+            onto_commit_id: response.onto_commit_id.clone(),
+            rebased: response
+                .rebased
+                .iter()
+                .map(|change| RebasedChange {
+                    change_id: change.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&change.change_id),
+                    old_commit_id: change.old_commit_id.clone(),
+                    new_commit_id: change.new_commit_id.clone(),
+                    conflicted: change.conflicted,
+                    became_empty: change.became_empty,
+                    workspace_ids: change.workspace_ids.clone(),
+                })
+                .collect(),
+            rebased_count: response.rebased_count,
+            conflicts: response
+                .conflicts
+                .iter()
+                .map(|conflict| RebaseConflict {
+                    change_id: conflict.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&conflict.change_id),
+                    commit_id: conflict.commit_id.clone(),
+                    paths: conflict.paths.clone(),
+                    paths_total: conflict.paths_total,
+                })
+                .collect(),
+            conflict_count: response.conflict_count,
+            inherited_conflict_count: response.inherited_conflict_count,
+            up_to_date: response.up_to_date,
+            started_new_change: response.started_new_change,
+            notes: response.notes.clone(),
+            workspace,
+            next,
+        }
+    }
 }

@@ -308,6 +308,11 @@ message Workspace {
   // ListWorkspaces and CreateWorkspace; unset when `[provenance] enabled`
   // is false, or read at an operation.
   ProvenanceSession provenance = 22;
+  // How many commits `trunk()` has that the workspace's commit lacks, at
+  // most 1,000, as of the daemon's last view of the repository's refs
+  // (#259): 0 on trunk's head. Set by GetWorkspace and GetStatus for one
+  // workspace; unset elsewhere, without a `trunk()`, and at an operation.
+  optional uint32 behind_trunk = 23;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).
@@ -556,6 +561,10 @@ message SnapshotWorkspaceResponse {
   string commit_id = 3;
   // How long jj's scan of the working copy took, in milliseconds.
   uint64 scan_ms = 4;
+  // The commit the snapshot started a new change on, because it had
+  // landed (on `trunk()` or under a tag) and is never amended (#248);
+  // empty otherwise.
+  string started_on = 5;
 }
 
 // Renew a lease.

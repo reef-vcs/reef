@@ -229,6 +229,14 @@ const NOT_RUN: &[(&[&str], &str)] = &[
         &["publish"],
         "needs a git remote and a daemon identity; tests/vcs.rs publish_cli checks its output against the row",
     ),
+    (
+        &["rebase"],
+        "fetches from a git remote; tests/vcs.rs rebase_cli checks its outputs against the row",
+    ),
+    (
+        &["fetch"],
+        "needs a git remote; tests/vcs.rs rebase_cli checks its output against the row",
+    ),
     (&["completions"], "prints a shell script"),
     (
         &["executor", "run"],

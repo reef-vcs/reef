@@ -268,6 +268,8 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             remote_token_id: record.remote_token_id.clone().unwrap_or_default(),
             // Joined by the services that report it (R3.04).
             provenance: None,
+            // Set by GetWorkspace and GetStatus for one workspace (#259).
+            behind_trunk: None,
         }
     }
 }
@@ -653,6 +655,8 @@ pub(super) fn operation_kind(kind: Option<OpKind>) -> v1::OperationKind {
         Some(OpKind::Batch) => v1::OperationKind::Batch,
         Some(OpKind::ConflictAssignment) => v1::OperationKind::ConflictAssignment,
         Some(OpKind::Publish) => v1::OperationKind::Publish,
+        Some(OpKind::Rebase) => v1::OperationKind::Rebase,
+        Some(OpKind::Fetch) => v1::OperationKind::Fetch,
         Some(OpKind::External) => v1::OperationKind::External,
         Some(OpKind::Other) => v1::OperationKind::Other,
     }

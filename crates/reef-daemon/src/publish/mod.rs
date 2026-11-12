@@ -445,7 +445,7 @@ fn describe_push(error: &PushError, context: &Context) -> Option<Described> {
                 )
             } else {
                 format!(
-                    "{branch} on the remote is at {} ({}: {}), which is not part of this change. Rebase onto it, publish to another branch with --branch, or pass --force to replace it.",
+                    "{branch} on the remote is at {} ({}: {}), which is not part of this change. Build on it (`reef rebase --onto {branch}@<remote>`), publish to another branch with --branch, or pass --force to replace it.",
                     foreign.commit, foreign.author, foreign.summary
                 )
             };
@@ -472,18 +472,23 @@ fn describe_push(error: &PushError, context: &Context) -> Option<Described> {
         PushError::BranchConflicted(branch) => (
             reason::BRANCH_CONFLICTED,
             meta(&[("branch", branch.clone())]),
-            hint(format!(
-                "The remote-tracking bookmark of {branch} is conflicted; fetch it again (`jj -R {} git fetch`) or set it with `jj bookmark set`.",
-                context.root.display()
-            )),
+            with(
+                format!(
+                    "The remote-tracking bookmark of {branch} is conflicted; fetch it again, then publish again."
+                ),
+                argv(&["reef", "fetch", "--branch", branch]),
+            ),
         ),
         PushError::Moved { remote, branch } => (
             reason::BRANCH_MOVED,
             meta(&[("git_remote", remote.clone()), ("branch", branch.clone())]),
-            hint(format!(
-                "{remote}/{branch} moved, or was deleted, since Reef last saw it. Fetch it (`jj -R {root} git fetch --remote {remote} --branch {branch}`, which also forgets a branch deleted on the host; or `git -C {root} fetch {remote} {branch}`), then publish again; if the branch holds someone else's work you will be asked for --force.",
-                root = context.root.display()
-            )),
+            with(
+                format!(
+                    "{remote}/{branch} moved, or was deleted, since Reef last saw it. Fetch it, then publish again; if the branch holds someone else's work you will be asked for --force. A branch deleted on the host stays until `jj -R {root} git fetch` forgets it.",
+                    root = context.root.display()
+                ),
+                argv(&["reef", "fetch", "--git-remote", remote, "--branch", branch]),
+            ),
         ),
         PushError::RemoteRejected { reason: why } => (
             reason::REMOTE_REJECTED,

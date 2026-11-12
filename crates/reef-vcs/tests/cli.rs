@@ -1716,7 +1716,8 @@ fn no_args_prints_guide_and_exits_zero() {
     output.clone().assert().success();
     let text = stdout(&output);
     assert!(text.starts_with("# Reef\n"), "{text}");
-    assert!(text.len() <= 1700, "{} bytes", text.len());
+    // The long form's budget (`cli/guide.rs`), 1,750 since #259.
+    assert!(text.len() <= 1750, "{} bytes", text.len());
     assert!(!text.contains("reef:long"), "{text}");
     assert!(text.contains("reef ws run -- <command>"), "{text}");
     for args in [&["guide"][..], &["agent-guide"], &["gui"]] {
@@ -1826,8 +1827,12 @@ fn root_help_names_every_command() {
         // a conflict. R3.12's `comment` is in `--help-all`; the MCP server's
         // instructions and the harness hooks deliver instructions. #258's
         // `publish` took the place of `store` and `backup`, which an
-        // operator runs; both are in `--help-all`.
+        // operator runs; both are in `--help-all`. #259's `rebase` took the
+        // place of `ui`, which a person runs; `fetch` is in `--help-all`
+        // (`rebase` fetches).
         if command == "completions"
+            || command == "ui"
+            || command == "fetch"
             || command == "store"
             || command == "backup"
             || command == "restore"

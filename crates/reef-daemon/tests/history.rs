@@ -672,11 +672,11 @@ async fn backfill_and_restart() {
     assert!(!path.exists(), "a disabled index creates no file");
 
     // Turned on: the backfill finds the workspace's writes.
-    let daemon = restart(
+    let daemon = Box::pin(restart(
         fx.daemon,
         |config| config.file.history.enabled = true,
         || {},
-    )
+    ))
     .await;
     let fx = Fixture {
         daemon,
@@ -836,7 +836,7 @@ async fn recreate_and_forget() {
     let repo_id = fx.repo.parse().unwrap();
     let path = fx.daemon.handle.state().history.path_of(repo_id);
     assert!(path.exists());
-    let daemon = restart(
+    let daemon = Box::pin(restart(
         fx.daemon,
         |_| {},
         || {
@@ -845,7 +845,7 @@ async fn recreate_and_forget() {
             }
             std::fs::write(&path, b"garbage garbage garbage garbage garbage garbage").unwrap();
         },
-    )
+    ))
     .await;
     let fx = Fixture {
         daemon,

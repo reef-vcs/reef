@@ -11,10 +11,10 @@ use reef_client::brief;
 use reef_client::json::{self, Proposal, ProposalHistory, Transitioned};
 use reef_client::json::{
     Abandoned, Artifact, ArtifactUploaded, BuiltStore, ChangeSummary, Created, CreatedRemoteToken,
-    Described, Diff, Evidence, EvidenceAdded, EvidenceKey, FileEntry, FileRead, GcReport, History,
-    Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent, Published, Released,
-    RemoteListener, RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status, Store,
-    SymbolOccurrence, SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
+    Described, Diff, Evidence, EvidenceAdded, EvidenceKey, Fetched, FileEntry, FileRead, GcReport,
+    History, Inspected, LogEntry, Moved, Operation, Presence, PresenceEvent, Published, Rebased,
+    Released, RemoteListener, RemoteToken, RepoStatus, Repository, Restored, Snapshotted, Status,
+    Store, SymbolOccurrence, SymbolStatus, SymbolUpload, Undone, WebSession, Workspace,
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
@@ -248,6 +248,12 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<Published>,
         object::<brief::Published<'static>>,
     ),
+    view(
+        &["rebase"],
+        object::<Rebased>,
+        object::<brief::Rebased<'static>>,
+    ),
+    row(&["fetch"], object::<Fetched>),
     view(
         &["propose"],
         object::<Transitioned>,

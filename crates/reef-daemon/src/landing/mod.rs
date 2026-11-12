@@ -47,6 +47,7 @@ use crate::service::policy as policy_input;
 use crate::workspace::ManagerError;
 
 pub use batch::{AGENT as BATCH_AGENT, BATCH_PRIORITY, BATCH_QUEUE_TIMEOUT, MAX_TRIAL_ATTEMPTS};
+pub(crate) use worker::operation_end;
 pub use worker::start;
 
 /// The most changes a repository has queued at once.

@@ -5527,7 +5527,9 @@ async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
     };
     assert!(
         std::process::Command::new("git")
-            .args(["init", "--bare", "--quiet"])
+            // `main`, not the runner's `init.defaultBranch`: a clone of the
+            // remote checks out its HEAD.
+            .args(["init", "--bare", "--quiet", "--initial-branch=main"])
             .arg(&remote)
             .status()
             .unwrap()
@@ -5661,4 +5663,165 @@ async fn publish_cli() {
         .or_else(|| ops["operations"].as_array())
         .unwrap();
     assert_eq!(ops.len(), 2, "{ops:?}");
+}
+
+/// Commits `files` to the bare `remote`'s `main` from a fresh clone, with
+/// an identity (CI runners have none); the new commit.
+fn advance_remote(tmp: &Path, remote: &Path, files: &[(&str, &str)]) -> String {
+    let clone = tmp.join(format!("clone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&clone);
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Robin")
+            .env("GIT_AUTHOR_EMAIL", "robin@example.com")
+            .env("GIT_COMMITTER_NAME", "Robin")
+            .env("GIT_COMMITTER_EMAIL", "robin@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&[
+        "clone",
+        "--quiet",
+        "--branch",
+        "main",
+        remote.to_str().unwrap(),
+        clone.to_str().unwrap(),
+    ]);
+    for (path, contents) in files {
+        std::fs::write(clone.join(path), contents).unwrap();
+    }
+    let dir = clone.to_str().unwrap();
+    git(&["-C", dir, "add", "-A"]);
+    git(&["-C", dir, "commit", "--quiet", "-m", "upstream"]);
+    git(&["-C", dir, "push", "--quiet", "origin", "HEAD:main"]);
+    git(&["-C", dir, "rev-parse", "HEAD"])
+}
+
+// #259 test 23: `reef rebase` and `reef fetch` from inside a workspace, in
+// JSON, brief, piped and text; the hints for jj's `-o` and `-r`, and for
+// `pull`; `reef here` behind trunk; a failed fetch's `--no-fetch`.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one CLI walk-through")]
+async fn rebase_cli() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let (daemon, repo, remote, base) = publish_fixture().await;
+    let ws = create_at(
+        &daemon,
+        &repo,
+        Some(create_workspace_request::Start::NewOn(base.clone())),
+    )
+    .await
+    .workspace
+    .unwrap();
+    let dir = path(&ws);
+    write(&ws, "mine.txt", "mine\n");
+    let upstream = advance_remote(daemon.tmp.path(), &remote, &[("up.txt", "up\n")]);
+
+    // `reef fetch`, then `reef here` says the change is behind.
+    let fetched = ok(&daemon, &dir, &["fetch", "-o", "json"]).await;
+    assert_eq!(fetched["git_remote"], "origin", "{fetched}");
+    assert_eq!(fetched["branches"][0]["commit_id"], upstream.as_str());
+    assert_eq!(fetched["operation"]["kind"], "fetch");
+    let here = ok(&daemon, &dir, &["here", "-o", "json"]).await;
+    assert_eq!(here["behind_trunk"], 1, "{here}");
+    assert_eq!(
+        here["next"],
+        serde_json::json!(["reef", "rebase", "--workspace", ws.id]),
+        "{here}"
+    );
+
+    // The rebase, in JSON.
+    let rebased = ok(&daemon, &dir, &["rebase", "-o", "json"]).await;
+    assert_eq!(rebased["onto"], "main@origin", "{rebased}");
+    assert_eq!(rebased["onto_commit_id"], upstream.as_str());
+    assert_eq!(rebased["operation"]["kind"], "rebase");
+    assert_eq!(rebased["rebased_count"], 1);
+    assert_eq!(rebased["next"], Value::Null);
+    assert!(dir.join("up.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+
+    // Brief and piped: up to date.
+    let brief = ok(&daemon, &dir, &["rebase", "-o", "brief"]).await;
+    assert_eq!(brief["up_to_date"], true, "{brief}");
+    assert!(brief.get("operation").is_none(), "{brief}");
+    let piped = ok(&daemon, &dir, &["rebase", "--no-fetch"]).await;
+    assert_eq!(piped["up_to_date"], true, "{piped}");
+    let text = run_in(&daemon, &dir, &["rebase", "--no-fetch", "-o", "text"]).await;
+    text.clone().assert().success();
+    assert!(
+        stdout(&text).contains("is already on main@origin's head"),
+        "{}",
+        stdout(&text)
+    );
+
+    // jj's spellings: `-d` works; `-o main` and `-r` are hints, exit 2.
+    let destination = ok(
+        &daemon,
+        &dir,
+        &["rebase", "-d", "main@origin", "--no-fetch", "-o", "json"],
+    )
+    .await;
+    assert_eq!(destination["up_to_date"], true, "{destination}");
+    let wrong = run_in(&daemon, &dir, &["rebase", "@", "-o", "main"]).await;
+    wrong.clone().assert().code(2);
+    assert!(
+        stderr(&wrong).contains("rebase @ --onto main"),
+        "{}",
+        stderr(&wrong)
+    );
+    let single = run_in(&daemon, &dir, &["rebase", "-r", "@", "-o", "json"]).await;
+    single.clone().assert().code(2);
+    let single: Value = serde_json::from_str(&stdout(&single)).unwrap();
+    assert_eq!(next_of(&single["error"]), ["reef", "rebase", "@"]);
+    let pull = run_in(&daemon, &dir, &["pull"]).await;
+    pull.clone().assert().code(2);
+    assert!(stderr(&pull).contains("reef rebase"), "{}", stderr(&pull));
+
+    // The operation log filters by kind.
+    let ops = ok(
+        &daemon,
+        &dir,
+        &["op", "log", "--kind", "rebase", "-o", "json"],
+    )
+    .await;
+    let ops = ops
+        .as_array()
+        .or_else(|| ops["operations"].as_array())
+        .unwrap();
+    assert_eq!(ops.len(), 1, "{ops:?}");
+
+    // A fetch that fails: the next is the same rebase without the fetch.
+    let gone = daemon.tmp.path().join("gone.git");
+    let status = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(repo.root.join(".git"))
+        .args(["remote", "set-url", "origin", gone.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = run_in(&daemon, &dir, &["rebase", "-o", "json"]).await;
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let next = next_of(&value["error"]);
+    assert_eq!(
+        next.last().map(String::as_str),
+        Some("--no-fetch"),
+        "{value}"
+    );
 }

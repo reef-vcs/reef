@@ -73,6 +73,7 @@ use jj_lib::workspace::LockedWorkspace;
 use super::ignore::IgnoreSources;
 use super::oplog::{OpKind, OpMeta};
 use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, ReadError, Repo};
+use super::revset::{self, ImmutableHead, RevisionError};
 use super::settings::{SettingsError, max_new_file_size};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 use crate::telemetry::elapsed_ms;
@@ -192,6 +193,10 @@ pub enum SnapshotError {
     /// after the scan; nothing was checked out (ADR 0039).
     #[error("{0} changed after the scan; not overwriting it")]
     ChangedAfterScan(String),
+    /// Whether the commit to rewrite is immutable could not be learned
+    /// (issue #248).
+    #[error("failed to check whether the working-copy commit is immutable")]
+    Immutability(#[source] RevisionError),
 }
 
 impl Classify for SnapshotError {
@@ -216,6 +221,7 @@ impl Classify for SnapshotError {
             Self::Checkout(error) => classify_by_source(error),
             Self::Backend(error) => classify_by_source(error),
             Self::Commit(error) => classify_by_source(error),
+            Self::Immutability(error) => error.kind(),
         }
     }
 }
@@ -273,6 +279,20 @@ pub struct SnapshotPlan {
     /// commit ([`Carry`]): `tree_ids` is the merge, and `disk` is the tree
     /// on disk it merged, to merge over again if the check-out fails.
     pub carried: Option<ScannedTree>,
+    /// `Some`: `rewrite_of` is immutable (on `trunk()` or under a tag), so
+    /// the scanned tree is recorded as a new commit on it, with a new change
+    /// id, and the working copy moves there, rather than rewriting a commit
+    /// that has landed (issue #248). `divergent` is then false.
+    pub started_on: Option<StartedOn>,
+}
+
+/// The immutable commit a snapshot started a new change on (issue #248).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedOn {
+    /// The commit: the new commit's parent.
+    pub commit: CommitIdHex,
+    /// What made it immutable.
+    pub head: ImmutableHead,
 }
 
 /// The locked working copy after a scan, from [`Repo::begin_snapshot`].
@@ -513,13 +533,19 @@ pub struct SnapshotCommit {
     pub op_id: OperationIdHex,
     /// The new working-copy commit.
     pub commit_id: CommitIdHex,
-    /// Its change: `rewrite_of`'s, or a new one when recovering.
+    /// Its change: `rewrite_of`'s, or a new one when recovering or starting
+    /// on an immutable commit.
     pub change_id: ChangeIdHex,
     /// Its tree, in lowercase hex; `None` when the tree is conflicted
     /// (R3.04's provenance records it).
     pub tree_id: Option<String>,
-    /// The commit it rewrote: `rewrite_of`; `None` when recovering.
+    /// The commit it rewrote: `rewrite_of`; `None` when recovering or
+    /// starting on an immutable commit.
     pub rewrote: Option<CommitIdHex>,
+    /// The immutable commit it started a new change on, instead of
+    /// rewriting it (#248): the plan's, or one that landed between the scan
+    /// and the commit.
+    pub started_on: Option<CommitIdHex>,
     /// The rewritten commit was not the head's working-copy commit for the
     /// workspace, so the change now has more than one visible commit. True
     /// when the plan said so, and also when another workspace rewrote the
@@ -566,7 +592,25 @@ pub async fn commit_snapshot(
     tx.set_is_snapshot(true);
     tx.set_workspace_name(&name);
     let current = tx.base_repo().view().get_wc_commit_id(&name).cloned();
-    let (new_commit, divergent) = if let Some(parents) = &plan.recover {
+    let mut new_parents = match (&plan.recover, &plan.started_on) {
+        (Some(parents), _) => Some(parents.clone()),
+        (None, Some(started_on)) => Some(vec![started_on.commit.clone()]),
+        (None, None) => None,
+    };
+    // `head` may be newer than the scan: a commit that landed since (a
+    // fetch fast-forwarded trunk onto it, a bookmark set by hand) is never
+    // rewritten either (#248).
+    if new_parents.is_none()
+        && revset::immutable_head(head, &plan.rewrite_of)
+            .await
+            .map_err(SnapshotError::Immutability)?
+            .is_some()
+    {
+        new_parents = Some(vec![plan.rewrite_of.clone()]);
+    }
+    let started_on =
+        (plan.recover.is_none() && new_parents.is_some()).then(|| plan.rewrite_of.clone());
+    let (new_commit, divergent) = if let Some(parents) = &new_parents {
         let parents = parents
             .iter()
             .map(|id| commit_id(head, id))
@@ -598,7 +642,8 @@ pub async fn commit_snapshot(
             .tree_ids()
             .as_resolved()
             .map(jj_lib::object_id::ObjectId::hex),
-        rewrote: plan.recover.is_none().then(|| plan.rewrite_of.clone()),
+        rewrote: new_parents.is_none().then(|| plan.rewrite_of.clone()),
+        started_on,
         divergent,
         end_time: super::oplog::system_time(repo.operation().metadata().time.end),
         repo,
@@ -896,7 +941,7 @@ impl Repo {
         };
         let mut adopted = false;
         let mut updated_files = 0;
-        let (rewrite_of, changed, divergent, recover) = match &view_wc {
+        let (rewrite_of, changed, mut divergent, mut recover) = match &view_wc {
             None => {
                 let last = own_last().await?;
                 let parents = last.parent_ids().iter().map(CommitIdHex::of).collect();
@@ -941,6 +986,26 @@ impl Repo {
                 }
             }
         };
+        // Never rewrite a commit that has landed (issue #248): record the
+        // scan as a new change on it instead, as the jj CLI does when a
+        // working-copy commit becomes immutable. Recovering from one builds
+        // on it rather than beside it.
+        let mut started_on = None;
+        if changed
+            && let Some(head) = revset::immutable_head(&repo, &rewrite_of)
+                .await
+                .map_err(SnapshotError::Immutability)?
+        {
+            if recover.is_some() {
+                recover = Some(vec![rewrite_of.clone()]);
+            } else {
+                divergent = false;
+                started_on = Some(StartedOn {
+                    commit: rewrite_of.clone(),
+                    head,
+                });
+            }
+        }
         Ok(PendingSnapshot {
             locked,
             plan: SnapshotPlan {
@@ -951,6 +1016,7 @@ impl Repo {
                 divergent,
                 recover,
                 carried,
+                started_on,
             },
             changed,
             adopted,

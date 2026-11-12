@@ -116,6 +116,16 @@ reef status --at 1h
 
 `reef status` lists a workspace's changed files, or the repository's state outside one; `reef log` lists the changes in view, newest first; `reef show` prints one change and the paths it changes; `reef diff --symbols` lists the functions, classes and other definitions a change added, removed, changed or moved, with where the changed ones are called, and `reef diff --expand <name>` shows one of them line by line; `reef op log` lists what agents did, newest first, with the agent that did it, `reef history <path>` (or `--symbol <name>`) lists the changes that touched it, who wrote them and whether they landed, and `reef op watch` prints operations as they are recorded (`--kind describe --count 1` waits for one describe). `--at 1h` (or `--at-op <op>`) reads as of then, from the operation log. `reef undo <op>` reverts one operation, and `reef describe -m <text>` sets a change's description. Revisions are jj revsets: a change id prefix, a bookmark, `trunk()`. Each command prints brief JSON when piped (`-o json` for every field), and `reef file read -r <rev> <path>` prints a file at any revision without checking it out.
 
+## Bring a change up to date
+
+When trunk moves on the remote while an agent works, from inside its workspace:
+
+```sh
+reef rebase
+```
+
+It fetches trunk's branch, moves the change onto trunk's head, and updates the workspace's files, keeping its own edits. A conflict is written and shown (`next` is `reef conflict show`); `reef undo` takes the rebase back. `reef here` says when a workspace's change is behind trunk. [docs/rebasing.md](rebasing.md) has every rule.
+
 ## Publish a change for review
 
 To get a change onto a branch of your git remote as a pull request, set the daemon's identity once (commits are authored as it, and the default `reef <reef@host>` is refused), in the daemon's `config.toml` (`reef config show` prints its path):

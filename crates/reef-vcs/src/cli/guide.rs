@@ -95,9 +95,10 @@ mod tests {
         // Bytes, not tokens (ADR 0051): 1,566 bytes was 434 `o200k` and 648
         // Anthropic tokens at #122. 1,750 since R3.44's provenance line;
         // the long part, which the skills carry, within 1,700 since #258's
-        // publish line (1,600 before).
-        assert!(GUIDE.len() <= 1750, "{} bytes", GUIDE.len());
-        assert!(long().len() <= 1700, "{} bytes", long().len());
+        // publish line (1,600 before); 1,800 and 1,750 since #259's rebase
+        // sentence (ADR 0071 amends ADR 0025's numbers).
+        assert!(GUIDE.len() <= 1800, "{} bytes", GUIDE.len());
+        assert!(long().len() <= 1750, "{} bytes", long().len());
         assert!(GUIDE.contains(LONG_MARKER));
         assert!(short().lines().count() <= 40, "{}", short());
         for line in GUIDE.lines() {

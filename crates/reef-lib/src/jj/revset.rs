@@ -123,6 +123,120 @@ pub fn trunk(repo: &ReadonlyRepo) -> Option<Trunk> {
     None
 }
 
+/// `trunk()`'s remote-tracking bookmark on `origin`, when `trunk()` is a
+/// local bookmark and that is a strict descendant of it: where a git user's
+/// trunk really is, since their local `main` is rarely fast-forwarded (and
+/// a fetch never moves git's checked-out branch). `None` otherwise.
+pub async fn trunk_ahead(repo: &ReadonlyRepo) -> Result<Option<Trunk>, jj_lib::index::IndexError> {
+    let Some(trunk) = trunk(repo) else {
+        return Ok(None);
+    };
+    if trunk.bookmark.contains('@') {
+        return Ok(None);
+    }
+    let symbol = RefName::new(&trunk.bookmark).to_remote_symbol(RemoteName::new(DEFAULT_REMOTE));
+    let Some(ahead) = repo.view().get_remote_bookmark(symbol).target.as_normal() else {
+        return Ok(None);
+    };
+    let local = trunk.commit_id.to_id();
+    if *ahead == local || !repo.index().is_ancestor(&local, ahead).await? {
+        return Ok(None);
+    }
+    Ok(Some(Trunk {
+        commit_id: CommitIdHex::of(ahead),
+        bookmark: format!("{}@{DEFAULT_REMOTE}", trunk.bookmark),
+    }))
+}
+
+/// What makes a commit immutable: the head of `immutable()` it is under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImmutableHead {
+    /// It is in `::trunk()`; the bookmark, as [`Trunk::bookmark`].
+    Trunk(String),
+    /// It is an ancestor of this tag (or the tag's commit).
+    Tag(String),
+}
+
+impl ImmutableHead {
+    /// The head's name: the bookmark, or the tag.
+    pub fn name(&self) -> &str {
+        match self {
+            ImmutableHead::Trunk(name) | ImmutableHead::Tag(name) => name,
+        }
+    }
+}
+
+impl std::fmt::Display for ImmutableHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImmutableHead::Trunk(bookmark) => f.write_str(bookmark),
+            ImmutableHead::Tag(tag) => write!(f, "tag {tag}"),
+        }
+    }
+}
+
+/// Whether `commit` is in Reef's `immutable()` (`::(trunk() | tags())`,
+/// the root aside), or under [`trunk_ahead`], in `repo`'s view, and under
+/// which head: `trunk()` first, then its remote bookmark when ahead, then
+/// the tags in name order. One index ancestry test for `trunk()`; the
+/// tags are tested with one lazy walk from their heads, which stops at the
+/// commit's position, so a new commit costs little whatever the number of
+/// tags (issue #248's snapshot check).
+pub async fn immutable_head(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+) -> Result<Option<ImmutableHead>, RevisionError> {
+    let commit = &commit.to_id();
+    let index_error = |error: jj_lib::index::IndexError| RevisionError::Other(error.into());
+    if let Some(trunk) = trunk(repo)
+        && repo
+            .index()
+            .is_ancestor(commit, &trunk.commit_id.to_id())
+            .await
+            .map_err(index_error)?
+    {
+        return Ok(Some(ImmutableHead::Trunk(trunk.bookmark)));
+    }
+    // A git user's local `main` is rarely fast-forwarded: what the remote's
+    // `main` has is landed too (#259).
+    if let Some(ahead) = trunk_ahead(repo).await.map_err(index_error)?
+        && repo
+            .index()
+            .is_ancestor(commit, &ahead.commit_id.to_id())
+            .await
+            .map_err(index_error)?
+    {
+        return Ok(Some(ImmutableHead::Trunk(ahead.bookmark)));
+    }
+    let tags: Vec<(String, CommitId)> = repo
+        .view()
+        .local_tags()
+        .filter_map(|(name, target)| Some((name.as_str().to_owned(), target.as_normal()?.clone())))
+        .collect();
+    if tags.is_empty() {
+        return Ok(None);
+    }
+    let heads: Vec<CommitId> = tags.iter().map(|(_, id)| id.clone()).collect();
+    let under = jj_lib::revset::ResolvedRevsetExpression::commits(vec![commit.clone()])
+        .intersection(&jj_lib::revset::ResolvedRevsetExpression::commits(heads).ancestors())
+        .evaluate(repo)
+        .map_err(RevisionError::Evaluation)?;
+    if under.is_empty().await.map_err(RevisionError::Evaluation)? {
+        return Ok(None);
+    }
+    for (name, target) in tags {
+        if repo
+            .index()
+            .is_ancestor(commit, &target)
+            .await
+            .map_err(index_error)?
+        {
+            return Ok(Some(ImmutableHead::Tag(name)));
+        }
+    }
+    Ok(None)
+}
+
 /// What a revset is parsed against besides the view.
 #[derive(Clone, Copy, Debug)]
 pub struct RevsetScope<'a> {

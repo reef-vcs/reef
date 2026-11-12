@@ -46,6 +46,7 @@ use crate::error::{Advice, Advise};
 use crate::model::{RepoId, Timestamp, WorkspaceRecord};
 use crate::repo::RepoThreadError;
 use crate::workspace::ManagerError;
+use crate::workspace::{Write, WriteRequest};
 
 pub mod messages;
 pub mod observe;
@@ -214,6 +215,9 @@ pub enum LifecycleError {
     /// The database failed.
     #[error("read or write lifecycle rows")]
     Db(#[source] DbError),
+    /// A write that records a transition returned no operation.
+    #[error("the transition's operation was not written")]
+    NotWritten,
 }
 
 impl From<DbError> for LifecycleError {
@@ -282,6 +286,7 @@ impl Classify for LifecycleError {
             Self::Thread(error) => error.kind(),
             Self::Record(error) => error.kind(),
             Self::Db(error) => error.kind(),
+            Self::NotWritten => ErrorKind::Internal,
         }
     }
 }
@@ -1275,6 +1280,15 @@ async fn undo_inner(
     })
 }
 
+/// `change`'s lifecycle state in `repo`: DRAFT when it has no row.
+pub(crate) fn state_of_change(
+    state: &AppState,
+    repo: RepoId,
+    change: &str,
+) -> Result<LifecycleState, LifecycleError> {
+    Ok(state_of_row(state.db.lifecycle_row(repo, change)?.as_ref()))
+}
+
 /// `AbandonChange`'s check (R3.09): refuses a change in review.
 pub fn check_abandon(
     state: &AppState,
@@ -1303,10 +1317,10 @@ pub(crate) async fn record_observed(
     repo: RepoId,
     change: &str,
     commit: &str,
-    trunk_bookmark: &str,
+    (trunk_bookmark, workspaces): (&str, Vec<String>),
 ) -> Result<Option<Recorded>, LifecycleError> {
     let create_lock = state.manager.repo_lock(repo);
-    let _shared = create_lock.read().await;
+    let shared = Arc::new(create_lock.read_owned().await);
     let lifecycle_lock = state.lifecycle.lock(repo);
     let _held = lifecycle_lock.lock().await;
     let Some(current) = state.db.lifecycle_row(repo, change)? else {
@@ -1344,13 +1358,93 @@ pub(crate) async fn record_observed(
         created_at: Timestamp::now(),
         recorded_at: None,
     };
-    let meta = OpMeta::new(
-        OpKind::Transition,
-        oplog::transition_description("land", change),
-    );
+    let description = oplog::transition_description("land", change);
+    if !workspaces.is_empty() {
+        // Workspaces on the landed commit get a new change in the operation
+        // that records the landing (issue #248).
+        let recorded = record_with_new_changes(
+            state,
+            repo,
+            Planned { row, owner: None },
+            (description, workspaces),
+            shared,
+        )
+        .await?;
+        tracing::info!(change_id = change, op_id = %recorded.op_id, "recorded a landing seen on trunk(), and started new changes on it");
+        return Ok(Some(recorded));
+    }
+    let meta = OpMeta::new(OpKind::Transition, description);
     let recorded = record(state, repo, vec![Planned { row, owner: None }], meta).await?;
     tracing::info!(change_id = change, op_id = %recorded.op_id, "recorded a landing seen on trunk()");
     Ok(Some(recorded))
+}
+
+/// [`record`] for an observed landing with Reef workspaces on the landed
+/// commit: the transition is written by [`Write::StartOnLanded`], which
+/// gives each workspace a new empty change on it in the same operation
+/// (issue #248). The caller holds the lifecycle lock; `shared` is the
+/// create lock, held shared.
+async fn record_with_new_changes(
+    state: &AppState,
+    repo: RepoId,
+    planned: Planned,
+    (description, workspaces): (String, Vec<String>),
+    shared: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+) -> Result<Recorded, LifecycleError> {
+    state.db.insert_pending_transition(&planned.row)?;
+    let written = state
+        .manager
+        .rewrite_held(
+            WriteRequest {
+                repo,
+                workspace: None,
+                agent: None,
+                write: Write::StartOnLanded {
+                    workspaces,
+                    transitions: vec![planned.record()],
+                    description,
+                },
+            },
+            shared,
+        )
+        .await;
+    let op_id = match written.map(|written| written.op_id.and_then(|id| id.parse().ok())) {
+        Ok(Some(op_id)) => op_id,
+        Ok(None) => {
+            // A write with a transition always writes an operation.
+            drop_pending_row(state, repo, &planned.row.id);
+            return Err(LifecycleError::NotWritten);
+        }
+        Err(error) => {
+            // Refused before anything was written: the row goes now, so a
+            // retry does not leave another. Otherwise the operation may
+            // exist: the next start finds it, or drops the row.
+            let before_writing = match &error {
+                ManagerError::Rewrite(error) => !matches!(error, RewriteError::Commit(_)),
+                ManagerError::RewriteSnapshot { .. }
+                | ManagerError::Revision(_)
+                | ManagerError::NotLoaded(_)
+                | ManagerError::RepoNotOpen(_) => true,
+                _ => false,
+            };
+            if before_writing {
+                drop_pending_row(state, repo, &planned.row.id);
+            }
+            return Err(error.into());
+        }
+    };
+    let op_id: OperationIdHex = op_id;
+    let recorded_at = crate::landing::operation_end(state, repo, op_id.as_str()).await;
+    let rows = commit_written_transition(state, repo, &planned.row, op_id.as_str(), recorded_at)?
+        .into_iter()
+        .collect();
+    Ok(Recorded { op_id, rows })
+}
+
+fn drop_pending_row(state: &AppState, repo: RepoId, id: &str) {
+    if let Err(error) = state.db.delete_pending_transition(repo, id) {
+        tracing::warn!(error = %ErrorChain(&error), "cannot drop a pending transition; the next start does");
+    }
 }
 
 /// At start, before the socket serves: commits every pending transition

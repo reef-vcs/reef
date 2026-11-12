@@ -346,7 +346,7 @@ pub(super) async fn dequeue_locked(
 }
 
 /// When operation `op_id` ended; now when it cannot be read.
-pub(super) async fn operation_end(state: &AppState, repo: RepoId, op_id: &str) -> Timestamp {
+pub(crate) async fn operation_end(state: &AppState, repo: RepoId, op_id: &str) -> Timestamp {
     let Ok(handle) = state.manager.handle(repo) else {
         return Timestamp::now();
     };

@@ -79,6 +79,8 @@ Through the API, `ListConflicts` reads the conflicted commits of a revset in its
 
 ## Who resolves a conflict
 
+A conflict a `reef rebase` introduces is written into the rebased change and assigned like any other: to the session that recorded the change, usually the agent that rebased it ([rebasing](rebasing.md#conflicts)).
+
 Every conflict a change introduces has an **assignment**: the daemon's record of who should resolve it. An agent whose change is conflicted is told so; when that agent has gone, the conflict waits in a **resolver queue** for another agent to claim; a person can step in at any point. The decisions are [ADR 0068](adr/0068-resolver-assignment.md)'s.
 
 ### What is assigned

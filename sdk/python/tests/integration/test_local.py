@@ -129,6 +129,9 @@ def test_workspace_block(client: reef.Client, repo: str) -> None:
         workspace_id, change = ws.id, ws.change_id
         moved = ws.move(new_on=change)
         assert ws.change_id == moved.workspace.change_id != change, "the handle follows a move"
+        rebased = ws.rebase(onto=change, skip_fetch=True)
+        assert rebased.up_to_date, "already on its parent"
+        assert ws.change_id == rebased.change.change_id
         (ws.path / "after-move.txt").write_text("on the new change\n")
     released = client.get_workspace(workspace=workspace_id).workspace
     assert released.state == WorkspaceState.WORKSPACE_STATE_RELEASED

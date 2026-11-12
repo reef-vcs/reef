@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 22] = [
+const TOOLS: [&str; 23] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -45,6 +45,7 @@ const TOOLS: [&str; 22] = [
     "release_workspace",
     "describe_change",
     "publish_change",
+    "rebase_change",
     "abandon_change",
     "undo_operation",
     "edit_files",
@@ -209,9 +210,12 @@ async fn handshake_and_tools() {
     // missing `conflict-assignment` kinds, took it to 22,376: publishing is
     // the one write that takes an agent's work off the machine, and without
     // the tool an MCP agent leaves Reef for `git push` from the root, the
-    // workaround #194 records. Raising it again needs the same argument in
-    // that ticket's brief.
-    assert!(bytes <= 22_400, "tools/list is {bytes} bytes");
+    // workaround #194 records. #259's `rebase_change`, with the `rebase` and
+    // `fetch` kinds, took it to 23,328: without the tool an MCP agent leaves
+    // Reef for `jj rebase` at the root, the workaround #259 records, and acts
+    // on the shared checkout instead of its workspace. Raising it again
+    // needs the same argument in that ticket's brief.
+    assert!(bytes <= 23_350, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -253,7 +257,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 22);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 23);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -1417,6 +1421,14 @@ async fn every_tool_result_matches_its_output_schema() {
     )
     .await;
     call(&mut mcp, "undo_operation", json!({"operation_id": op})).await;
+    // The fixture has no git remote and no trunk: up to date on `@-`.
+    let rebased = call(
+        &mut mcp,
+        "rebase_change",
+        json!({"onto": "@-", "skip_fetch": true}),
+    )
+    .await;
+    assert_eq!(rebased["up_to_date"], true, "{rebased}");
     let change = created["change_id"].as_str().unwrap();
     call(
         &mut mcp,

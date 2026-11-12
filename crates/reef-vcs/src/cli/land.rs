@@ -469,7 +469,7 @@ fn next_words(landing: &Landing) -> String {
             }
         }
         Some("conflicted") => format!(
-            "Rebasing onto {} conflicts: rebase the change yourself (`jj rebase -d {}`), resolve, propose it again, then land.",
+            "Rebasing onto {} conflicts: rebase the change yourself (`reef rebase --onto {}`), resolve the conflict it shows, propose it again, then land.",
             landing.destination, landing.destination
         ),
         Some("unlanded_parents") => "A parent of the change has not landed: land it first.".to_owned(),

@@ -123,6 +123,8 @@ struct Ran {
     recorded: Recorded,
     adopted: bool,
     recovered: bool,
+    /// The landed commit a new change was started on (issue #248).
+    started_on: Option<CommitIdHex>,
     updated_files: u32,
     untracked: Vec<(String, UntrackedReasonKind)>,
     /// jj's scan.
@@ -609,6 +611,7 @@ impl Manager {
             adopted,
             divergent,
             recovered,
+            started_on: ran.started_on.clone(),
             op_id,
             commit_id,
             change_id,
@@ -887,6 +890,7 @@ impl Pipeline<'_> {
                     },
                     adopted,
                     recovered: false,
+                    started_on: None,
                     updated_files,
                     untracked,
                     scan_ms,
@@ -905,7 +909,16 @@ impl Pipeline<'_> {
         let recovered = plan.recover.is_some();
         let carried = plan.carried.clone();
         let conflict = carried.is_some() && !plan.tree_ids.is_resolved();
-        let meta = self.meta.clone();
+        let mut meta = self.meta.clone();
+        if let Some(started) = &plan.started_on {
+            // Issue #248: say so in the operation's description.
+            meta.description = format!(
+                "{} (new change on {}, which is on {})",
+                meta.description,
+                started.commit.short(),
+                started.head
+            );
+        }
         let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
                 let committed = commit_snapshot(head.repo.head(), &plan, &meta).await;
@@ -925,6 +938,7 @@ impl Pipeline<'_> {
             Err(error) => return (Err(error.into()), None),
         };
         self.committed.set(true);
+        let started_on = committed.started_on.clone();
         let new_head = Some(Arc::clone(&committed.repo));
         if pending.carried() {
             // The commit has the write's changes, which are not on disk yet:
@@ -942,6 +956,7 @@ impl Pipeline<'_> {
             recorded: Recorded::Committed(committed),
             adopted: false,
             recovered,
+            started_on,
             updated_files,
             untracked,
             scan_ms,
@@ -1153,6 +1168,15 @@ fn log_outcome(
             op_id = %outcome.op_id,
             change_id = %outcome.change_id,
             "the workspace had no working-copy commit; recovered onto a new change"
+        );
+    } else if let Some(landed) = &outcome.started_on {
+        tracing::info!(
+            workspace_id = %outcome.workspace,
+            %repo,
+            op_id = %outcome.op_id,
+            change_id = %outcome.change_id,
+            commit_id = %landed,
+            "the workspace's commit has landed; its edits went into a new change on it"
         );
     }
     if outcome.changed {

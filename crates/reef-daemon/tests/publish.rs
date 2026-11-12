@@ -650,9 +650,29 @@ async fn lease_and_force() {
         (Code::FailedPrecondition, "BRANCH_MOVED".to_owned())
     );
     assert_eq!(fx.remote_commit("taken").as_deref(), Some(theirs.as_str()));
+    // The advice is Reef's own fetch (#259), which works.
+    assert_eq!(
+        next(&error),
+        [
+            "reef",
+            "fetch",
+            "--git-remote",
+            "origin",
+            "--branch",
+            "taken"
+        ]
+    );
 
     // Fetched, it holds another change's commit: refused without --force.
-    git(&fx.store, &["fetch", "--quiet", "origin"]);
+    fx.client()
+        .fetch_git_remote(v1::FetchGitRemoteRequest {
+            repo: fx.repo.id.clone(),
+            git_remote: "origin".to_owned(),
+            branches: vec!["taken".to_owned()],
+            ..v1::FetchGitRemoteRequest::default()
+        })
+        .await
+        .unwrap();
     let error = fx.publish(request.clone()).await.unwrap_err();
     assert_eq!(
         reason(&error),

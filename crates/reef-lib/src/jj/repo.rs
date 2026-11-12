@@ -114,6 +114,16 @@ impl CommitIdHex {
         Self(id.hex())
     }
 
+    /// A commit id from its bytes, as git's object ids are.
+    pub(crate) fn try_of_bytes(bytes: &[u8]) -> Option<Self> {
+        (!bytes.is_empty()).then(|| Self(jj_lib::backend::CommitId::new(bytes.to_vec()).hex()))
+    }
+
+    /// The first 12 digits, as Reef's operation descriptions name commits.
+    pub fn short(&self) -> &str {
+        self.0.get(..12).unwrap_or(&self.0)
+    }
+
     /// The id as jj-lib's type. The text is valid hex by construction, so
     /// the empty fallback is never taken.
     pub(crate) fn to_id(&self) -> jj_lib::backend::CommitId {
