@@ -1,0 +1,46 @@
+diff --git a/pkg/search/query.go b/pkg/search/query.go
+index c50cc5943..df8e32e24 100644
+--- a/pkg/search/query.go
++++ b/pkg/search/query.go
+@@ -337,14 +337,19 @@ func formatQualifiers(qs Qualifiers, formatter func(qualifier string, vs []strin
+ 	return result
+ }
+ 
++// formatKeywords quotes keywords that need it and drops blank ones, which would
++// otherwise leave stray spaces (or an empty "( )" group) in the query.
+ func formatKeywords(ks []string) []string {
+-	result := make([]string, len(ks))
+-	for i, k := range ks {
++	result := make([]string, 0, len(ks))
++	for _, k := range ks {
++		if strings.TrimSpace(k) == "" {
++			continue
++		}
+ 		before, after, found := strings.Cut(k, ":")
+ 		if !found {
+-			result[i] = quote(k)
++			result = append(result, quote(k))
+ 		} else {
+-			result[i] = fmt.Sprintf("%s:%s", before, quote(after))
++			result = append(result, fmt.Sprintf("%s:%s", before, quote(after)))
+ 		}
+ 	}
+ 	return result
+diff --git a/pkg/search/query_test.go b/pkg/search/query_test.go
+index 1b9572980..15a5101bd 100644
+--- a/pkg/search/query_test.go
++++ b/pkg/search/query_test.go
+@@ -91,6 +91,13 @@ func TestStandardSearchString(t *testing.T) {
+ 			},
+ 			out: `immutable keyword that should be left as is topic:"quote qualifier"`,
+ 		},
++		{
++			name: "drops blank keywords",
++			query: Query{
++				Keywords: []string{"", "foo", " ", "bar"},
++			},
++			out: "foo bar",
++		},
+ 		{
+ 			name: "prioritises immutable keywords over keywords slice",
+ 			query: Query{

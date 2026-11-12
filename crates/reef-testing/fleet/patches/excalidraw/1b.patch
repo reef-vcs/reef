@@ -1,0 +1,27 @@
+diff --git a/packages/math/range.test.ts b/packages/math/range.test.ts
+index 275baebe5..88ddcc589 100644
+--- a/packages/math/range.test.ts
++++ b/packages/math/range.test.ts
+@@ -68,4 +68,9 @@ describe("range clamp", () => {
+     expect(rangeClamp(-3, range1_4)).toBe(1);
+     expect(rangeClamp(10, range1_4)).toBe(4);
+   });
++
++  it("should clamp to a degenerate range", () => {
++    expect(rangeClamp(7, rangeInclusive(3, 3))).toBe(3);
++    expect(rangeClamp(Number.NaN, range1_4)).toBeNaN();
++  });
+ });
+diff --git a/packages/math/range.ts b/packages/math/range.ts
+index d3772c44d..dec78cf39 100644
+--- a/packages/math/range.ts
++++ b/packages/math/range.ts
+@@ -87,6 +87,8 @@ export const rangeIncludesValue = (
+  * @param value The value to clamp
+  * @param range The range to clamp to
+  * @returns The value itself if inside the range, otherwise the nearest bound
++ *
++ * NaN is passed through unchanged so callers can detect invalid input.
+  */
+ export const rangeClamp = (
+   value: number,

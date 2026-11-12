@@ -1,0 +1,31 @@
+diff --git a/fastapi/datastructures.py b/fastapi/datastructures.py
+index 7e9eb6c1e..d6208deb4 100644
+--- a/fastapi/datastructures.py
++++ b/fastapi/datastructures.py
+@@ -168,6 +168,10 @@ class DefaultPlaceholder:
+         return isinstance(o, DefaultPlaceholder) and o.value == self.value
+ 
+     def __repr__(self) -> str:
++        """
++        Show the wrapped value, as `Default(...)`, so that route and app
++        settings that were never overridden are easy to spot when debugging.
++        """
+         return f"Default({self.value!r})"
+ 
+ 
+diff --git a/tests/test_datastructures.py b/tests/test_datastructures.py
+index 9edc36534..1ce17e6a6 100644
+--- a/tests/test_datastructures.py
++++ b/tests/test_datastructures.py
+@@ -33,6 +33,11 @@ def test_default_placeholder_repr():
+     assert repr(Default(None)) == "Default(None)"
+ 
+ 
++def test_default_placeholder_repr_nested():
++    assert repr(Default([Default(None)])) == "Default([Default(None)])"
++    assert repr(Default({"a": 1})) == "Default({'a': 1})"
++
++
+ def test_upload_file_is_closed(tmp_path: Path):
+     path = tmp_path / "test.txt"
+     path.write_bytes(b"<file content>")

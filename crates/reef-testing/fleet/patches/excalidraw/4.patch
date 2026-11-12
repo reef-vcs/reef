@@ -1,0 +1,62 @@
+diff --git a/packages/excalidraw/element/textElement.test.ts b/packages/excalidraw/element/textElement.test.ts
+index 2c23c2b06..2b0ed7fd0 100644
+--- a/packages/excalidraw/element/textElement.test.ts
++++ b/packages/excalidraw/element/textElement.test.ts
+@@ -6,6 +6,7 @@ import {
+   getContainerCoords,
+   getBoundTextMaxWidth,
+   getBoundTextMaxHeight,
++  getTextFromElements,
+ } from "./textElement";
+ import { detectLineHeight, getLineHeightInPx } from "./textMeasurements";
+ import type { ExcalidrawTextElementWithContainer } from "./types";
+@@ -204,3 +205,25 @@ describe("Test getDefaultLineHeight", () => {
+     expect(getLineHeight(FONT_FAMILY.Cascadia)).toBe(1.2);
+   });
+ });
++
++describe("Test getTextFromElements", () => {
++  it("should join text of text elements only", () => {
++    const elements = [
++      API.createElement({ type: "text", text: "first" }),
++      API.createElement({ type: "rectangle" }),
++      API.createElement({ type: "text", text: "second" }),
++    ];
++    expect(getTextFromElements(elements)).toBe("first\n\nsecond");
++  });
++
++  it("should skip empty and whitespace-only text elements", () => {
++    const elements = [
++      API.createElement({ type: "text", text: "first" }),
++      // API.createElement falls back to placeholder text for "", so override
++      { ...API.createElement({ type: "text" }), text: "" },
++      API.createElement({ type: "text", text: "  \n " }),
++      API.createElement({ type: "text", text: "second" }),
++    ];
++    expect(getTextFromElements(elements)).toBe("first\n\nsecond");
++  });
++});
+diff --git a/packages/excalidraw/element/textElement.ts b/packages/excalidraw/element/textElement.ts
+index de948d9ce..142b24955 100644
+--- a/packages/excalidraw/element/textElement.ts
++++ b/packages/excalidraw/element/textElement.ts
+@@ -504,14 +504,17 @@ export const getBoundTextMaxHeight = (
+   return height - BOUND_TEXT_PADDING * 2;
+ };
+ 
+-/** retrieves text from text elements and concatenates to a single string */
++/**
++ * retrieves text from text elements and concatenates to a single string,
++ * skipping text elements that are empty or whitespace-only
++ */
+ export const getTextFromElements = (
+   elements: readonly ExcalidrawElement[],
+   separator = "\n\n",
+ ) => {
+   const text = elements
+     .reduce((acc: string[], element) => {
+-      if (isTextElement(element)) {
++      if (isTextElement(element) && element.text.trim()) {
+         acc.push(element.text);
+       }
+       return acc;

@@ -1,0 +1,36 @@
+diff --git a/fastapi/encoders.py b/fastapi/encoders.py
+index e578768da..02fe858e1 100644
+--- a/fastapi/encoders.py
++++ b/fastapi/encoders.py
+@@ -81,8 +81,14 @@ def decimal_encoder(dec_value: Decimal) -> int | float:
+         return float(dec_value)
+ 
+ 
++def bytes_encoder(value: bytes | bytearray | memoryview) -> str:
++    return bytes(value).decode()
++
++
+ ENCODERS_BY_TYPE: dict[type[Any], Callable[[Any], Any]] = {
+-    bytes: lambda o: o.decode(),
++    bytes: bytes_encoder,
++    bytearray: bytes_encoder,
++    memoryview: bytes_encoder,
+     Color: str,
+     PyExtraColor: str,
+     datetime.date: isoformat,
+diff --git a/tests/test_jsonable_encoder.py b/tests/test_jsonable_encoder.py
+index 28b759f7b..7e6807b85 100644
+--- a/tests/test_jsonable_encoder.py
++++ b/tests/test_jsonable_encoder.py
+@@ -313,6 +313,11 @@ def test_decimal_encoder_infinity():
+     assert isinf(jsonable_encoder(data)["value"])
+ 
+ 
++def test_encode_bytes_like():
++    data = {"raw": b"abc", "buffer": bytearray(b"def"), "view": memoryview(b"ghi")}
++    assert jsonable_encoder(data) == {"raw": "abc", "buffer": "def", "view": "ghi"}
++
++
+ def test_encode_deque_encodes_child_models():
+     class Model(BaseModel):
+         test: str

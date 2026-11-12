@@ -1,0 +1,122 @@
+name: Fleet benchmark
+
+# #264: what five tickets at once cost a machine, in disk, load, memory and responsiveness, on one
+# pinned repository per stack (crates/reef-testing/fleet/repos.toml) and on Reef itself. The
+# ubuntu-24.04 runner (4 vCPUs, 16 GiB) is the `linux` profile: stricter than the standard laptop
+# on cores, equal on memory. Report-only until the follow-on tickets land (#271-#274); RX.06 turns
+# on `--gate`. Weekly and on demand, never on pull requests: a run takes hours of runner time. See
+# docs/fleet-benchmark.md.
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        # `reef` (reported, not gated) is not in the default: five of its debug target
+        # directories need more disk than the runner has.
+        description: Repositories, comma-separated (tokio,cli,excalidraw,fastapi; or reef)
+        default: tokio,cli,excalidraw,fastapi
+        type: string
+      seed:
+        description: How workspaces start (off, sibling, sibling-edited, clone)
+        default: "off"
+        type: string
+      idle_secs:
+        description: Seconds the five stay idle before release
+        default: "300"
+        type: string
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-benchmark
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      repos: ${{ steps.plan.outputs.repos }}
+    steps:
+      - id: plan
+        env:
+          REPOS: ${{ inputs.repos || 'tokio,cli,excalidraw,fastapi' }}
+        run: echo "repos=$(jq -Rc 'split(",") | map(gsub("\\s"; "")) | map(select(. != ""))' <<<"$REPOS")" >>"$GITHUB_OUTPUT"
+
+  run:
+    name: ${{ matrix.repo }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    # Solo tickets, five at once with a review round, idle, release: under two hours per stack on
+    # the runner; the job limit is six.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.plan.outputs.repos) }}
+    steps:
+      # The runner ships about 20 GiB free; five Rust workspaces need far more. Removing the
+      # preinstalled SDKs the benchmark does not use frees about 40 GiB more.
+      - name: Free disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force >/dev/null
+          df -h /
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+      - name: Install fuse-overlayfs
+        run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27"
+          cache: false
+      - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      # Release builds, as installed: a debug daemon's own CPU and latency would load G5 and G7.
+      - name: Build
+        run: cargo build --release -p reef-vcs -p reef-daemon -p reef-testing --bins
+      # Clones, downloads and patch checks, untimed. The run's own build output goes in a fresh
+      # target directory inside each workspace; this one holds only the harness.
+      - name: Set up the repository
+        env:
+          REPO: ${{ matrix.repo }}
+        run: |
+          target/release/reef-fleet run --repo "$REPO" --setup-only \
+            --reef-bin-dir target/release --work-root /tmp/rf
+      - name: Run
+        env:
+          REPO: ${{ matrix.repo }}
+          SEED: ${{ inputs.seed || 'off' }}
+          IDLE: ${{ inputs.idle_secs || '300' }}
+        run: |
+          df -h /
+          target/release/reef-fleet run --repo "$REPO" --profile linux --seed "$SEED" \
+            --idle-secs "$IDLE" --reef-bin-dir target/release --work-root /tmp/rf \
+            --out "results/$REPO"
+          cat "results/$REPO/summary.md" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: fleet-${{ matrix.repo }}-${{ github.run_id }}
+          path: results/
+          retention-days: 90
+          overwrite: true

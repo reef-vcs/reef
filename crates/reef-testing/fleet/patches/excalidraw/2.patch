@@ -1,0 +1,77 @@
+diff --git a/packages/utils/bbox.test.ts b/packages/utils/bbox.test.ts
+new file mode 100644
+index 000000000..207e83ce3
+--- /dev/null
++++ b/packages/utils/bbox.test.ts
+@@ -0,0 +1,46 @@
++import type { Bounds } from "@excalidraw/excalidraw/element/bounds";
++import { pointFrom, type GlobalPoint } from "@excalidraw/math";
++import { doBBoxesIntersect, doLineSegmentsIntersect } from "./bbox";
++
++const box = (
++  minX: number,
++  minY: number,
++  maxX: number,
++  maxY: number,
++): Bounds => [minX, minY, maxX, maxY];
++
++describe("doBBoxesIntersect()", () => {
++  it("should detect overlapping and touching boxes", () => {
++    expect(doBBoxesIntersect(box(0, 0, 10, 10), box(5, 5, 15, 15))).toBe(true);
++    expect(doBBoxesIntersect(box(0, 0, 10, 10), box(10, 0, 20, 10))).toBe(true);
++  });
++
++  it("should reject separate boxes without a tolerance", () => {
++    expect(doBBoxesIntersect(box(0, 0, 10, 10), box(12, 0, 20, 10))).toBe(
++      false,
++    );
++  });
++
++  it("should accept nearby boxes within the tolerance", () => {
++    expect(doBBoxesIntersect(box(0, 0, 10, 10), box(12, 0, 20, 10), 2)).toBe(
++      true,
++    );
++    expect(doBBoxesIntersect(box(0, 0, 10, 10), box(13, 0, 20, 10), 2)).toBe(
++      false,
++    );
++  });
++});
++
++describe("doLineSegmentsIntersect()", () => {
++  it("should detect crossing segments", () => {
++    const a = [
++      pointFrom<GlobalPoint>(0, 0),
++      pointFrom<GlobalPoint>(10, 10),
++    ] as [GlobalPoint, GlobalPoint];
++    const b = [
++      pointFrom<GlobalPoint>(0, 10),
++      pointFrom<GlobalPoint>(10, 0),
++    ] as [GlobalPoint, GlobalPoint];
++    expect(doLineSegmentsIntersect(a, b)).toBe(true);
++  });
++});
+diff --git a/packages/utils/bbox.ts b/packages/utils/bbox.ts
+index 19a1a5430..f776933f2 100644
+--- a/packages/utils/bbox.ts
++++ b/packages/utils/bbox.ts
+@@ -19,8 +19,18 @@ export function getBBox<P extends LocalPoint | GlobalPoint>(
+   ];
+ }
+ 
+-export function doBBoxesIntersect(a: Bounds, b: Bounds) {
+-  return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
++/**
++ * Whether two bounding boxes intersect. Boxes that only touch count as
++ * intersecting. A positive `tolerance` grows `a` on every side, so boxes
++ * that are at most `tolerance` apart also count.
++ */
++export function doBBoxesIntersect(a: Bounds, b: Bounds, tolerance = 0) {
++  return (
++    a[0] - tolerance <= b[2] &&
++    a[2] + tolerance >= b[0] &&
++    a[1] - tolerance <= b[3] &&
++    a[3] + tolerance >= b[1]
++  );
+ }
+ 
+ const EPSILON = 0.000001;

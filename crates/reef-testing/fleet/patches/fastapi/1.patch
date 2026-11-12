@@ -1,0 +1,43 @@
+diff --git a/fastapi/utils.py b/fastapi/utils.py
+index 12eaa2bf0..ca1a42d92 100644
+--- a/fastapi/utils.py
++++ b/fastapi/utils.py
+@@ -26,9 +26,11 @@ if TYPE_CHECKING:  # pragma: nocover
+ def is_body_allowed_for_status_code(status_code: int | str | None) -> bool:
+     if status_code is None:
+         return True
++    if isinstance(status_code, str):
++        status_code = status_code.strip().upper()
+     # Ref: https://github.com/OAI/OpenAPI-Specification/blob/main/versions/3.1.0.md#patterned-fields-1
+     if status_code in {
+-        "default",
++        "DEFAULT",
+         "1XX",
+         "2XX",
+         "3XX",
+diff --git a/tests/test_is_body_allowed_for_status_code.py b/tests/test_is_body_allowed_for_status_code.py
+new file mode 100644
+index 000000000..b4b756df0
+--- /dev/null
++++ b/tests/test_is_body_allowed_for_status_code.py
+@@ -0,0 +1,20 @@
++import pytest
++from fastapi.utils import is_body_allowed_for_status_code
++
++
++@pytest.mark.parametrize(
++    "status_code",
++    [None, 200, "200", 201, 404, "500", "default", "2XX", "4XX"],
++)
++def test_body_allowed(status_code):
++    assert is_body_allowed_for_status_code(status_code) is True
++
++
++@pytest.mark.parametrize("status_code", [100, 101, "199", 204, "205", 304])
++def test_body_not_allowed(status_code):
++    assert is_body_allowed_for_status_code(status_code) is False
++
++
++@pytest.mark.parametrize("status_code", ["2xx", "5xx", " 3XX ", "Default"])
++def test_body_allowed_for_ranges_in_any_case(status_code):
++    assert is_body_allowed_for_status_code(status_code) is True

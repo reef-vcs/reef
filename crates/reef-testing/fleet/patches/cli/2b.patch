@@ -1,0 +1,14 @@
+diff --git a/internal/ghrepo/repo_test.go b/internal/ghrepo/repo_test.go
+index 324236716..3c360566f 100644
+--- a/internal/ghrepo/repo_test.go
++++ b/internal/ghrepo/repo_test.go
+@@ -286,6 +286,9 @@ func TestFullNameWithHost(t *testing.T) {
+ 		{name: "default host", repo: NewWithHost("owner", "repo", "github.com"), want: "owner/repo"},
+ 		{name: "enterprise host", repo: NewWithHost("owner", "repo", "example.org"), want: "example.org/owner/repo"},
+ 		{name: "tenancy host", repo: NewWithHost("owner", "repo", "tenant.ghe.com"), want: "tenant.ghe.com/owner/repo"},
++		// A repository built without NewWithHost keeps its raw host name; the www. prefix
++		// still names the default host, so it must not be spelled out.
++		{name: "www prefix", repo: ghRepo{owner: "owner", name: "repo", hostname: "www.github.com"}, want: "owner/repo"},
+ 	}
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {

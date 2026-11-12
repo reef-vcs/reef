@@ -39,6 +39,10 @@ der.workspace = true
 # the crates that dev-depend on reef-testing never compile it; `just lint` (`--all-features`)
 # type-checks it.
 tiktoken-rs = { version = "0.12.1", optional = true }
+# The fleet benchmark (#264): free space (`statvfs`), the load average, and APFS's private size of
+# each file in a workspace's walk.
+libc.workspace = true
+walkdir.workspace = true
 
 [features]
 tokenizers = ["dep:tiktoken-rs"]
@@ -54,3 +58,7 @@ path = "src/bin/onboarding.rs"   # the agent onboarding benchmark (RX.07)
 [[bin]]
 name = "reef-tokens"
 path = "src/bin/tokens.rs"       # the token-efficiency benchmark (R2.17)
+
+[[bin]]
+name = "reef-fleet"
+path = "src/bin/fleet.rs"        # the laptop resource benchmark (#264)

@@ -1,0 +1,56 @@
+diff --git a/packages/math/range.test.ts b/packages/math/range.test.ts
+index fb4b6a38d..275baebe5 100644
+--- a/packages/math/range.test.ts
++++ b/packages/math/range.test.ts
+@@ -1,4 +1,9 @@
+-import { rangeInclusive, rangeIntersection, rangesOverlap } from "./range";
++import {
++  rangeClamp,
++  rangeInclusive,
++  rangeIntersection,
++  rangesOverlap,
++} from "./range";
+ 
+ describe("range overlap", () => {
+   const range1_4 = rangeInclusive(1, 4);
+@@ -49,3 +54,18 @@ describe("range intersection", () => {
+     expect(rangeIntersection(range1_4, rangeInclusive(5, 7))).toEqual(null);
+   });
+ });
++
++describe("range clamp", () => {
++  const range1_4 = rangeInclusive(1, 4);
++
++  it("should keep values inside the range", () => {
++    expect(rangeClamp(2.5, range1_4)).toBe(2.5);
++    expect(rangeClamp(1, range1_4)).toBe(1);
++    expect(rangeClamp(4, range1_4)).toBe(4);
++  });
++
++  it("should clamp values outside the range to the nearest bound", () => {
++    expect(rangeClamp(-3, range1_4)).toBe(1);
++    expect(rangeClamp(10, range1_4)).toBe(4);
++  });
++});
+diff --git a/packages/math/range.ts b/packages/math/range.ts
+index d90530cba..d3772c44d 100644
+--- a/packages/math/range.ts
++++ b/packages/math/range.ts
+@@ -80,3 +80,17 @@ export const rangeIncludesValue = (
+ ): boolean => {
+   return value >= min && value <= max;
+ };
++
++/**
++ * Clamp a value so that it falls inside the given range.
++ *
++ * @param value The value to clamp
++ * @param range The range to clamp to
++ * @returns The value itself if inside the range, otherwise the nearest bound
++ */
++export const rangeClamp = (
++  value: number,
++  [min, max]: InclusiveRange,
++): number => {
++  return Math.min(Math.max(value, min), max);
++};

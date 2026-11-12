@@ -1,0 +1,61 @@
+diff --git a/pkg/iostreams/color.go b/pkg/iostreams/color.go
+index 903d804a9..0eae1f4ee 100644
+--- a/pkg/iostreams/color.go
++++ b/pkg/iostreams/color.go
+@@ -262,15 +262,19 @@ func (c *ColorScheme) ColorFromString(s string) func(string) string {
+ 	return fn
+ }
+ 
+-// Label stylizes text based on label's RGB hex color.
++// Label stylizes text based on label's RGB hex color, with or without a leading "#".
++// Text is returned unstyled when the color is not six hex digits.
+ func (c *ColorScheme) Label(hex string, x string) string {
++	hex = strings.TrimPrefix(hex, "#")
+ 	if !c.Enabled || !c.TrueColor || !c.ColorLabels || len(hex) != 6 {
+ 		return x
+ 	}
+ 
+-	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+-	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+-	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
++	rgb, err := strconv.ParseUint(hex, 16, 32)
++	if err != nil {
++		return x
++	}
++	r, g, b := rgb>>16, (rgb>>8)&0xff, rgb&0xff
+ 	return fmt.Sprintf("\033[38;2;%d;%d;%dm%s\033[0m", r, g, b, x)
+ }
+ 
+diff --git a/pkg/iostreams/color_test.go b/pkg/iostreams/color_test.go
+index f6a72e2a7..deb13a3d7 100644
+--- a/pkg/iostreams/color_test.go
++++ b/pkg/iostreams/color_test.go
+@@ -56,6 +56,28 @@ func TestLabel(t *testing.T) {
+ 				ColorLabels: true,
+ 			},
+ 		},
++		{
++			name:  "hash prefix",
++			hex:   "#fc0303",
++			text:  "red",
++			wants: "\033[38;2;252;3;3mred\033[0m",
++			cs: &ColorScheme{
++				Enabled:     true,
++				TrueColor:   true,
++				ColorLabels: true,
++			},
++		},
++		{
++			name:  "non-hex digits",
++			hex:   "zz0303",
++			text:  "red",
++			wants: "red",
++			cs: &ColorScheme{
++				Enabled:     true,
++				TrueColor:   true,
++				ColorLabels: true,
++			},
++		},
+ 		{
+ 			name:  "no color labels",
+ 			hex:   "fc0303",

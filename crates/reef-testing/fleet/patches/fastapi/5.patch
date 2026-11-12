@@ -1,0 +1,31 @@
+diff --git a/fastapi/datastructures.py b/fastapi/datastructures.py
+index 1da784cf0..7e9eb6c1e 100644
+--- a/fastapi/datastructures.py
++++ b/fastapi/datastructures.py
+@@ -167,6 +167,9 @@ class DefaultPlaceholder:
+     def __eq__(self, o: object) -> bool:
+         return isinstance(o, DefaultPlaceholder) and o.value == self.value
+ 
++    def __repr__(self) -> str:
++        return f"Default({self.value!r})"
++
+ 
+ DefaultType = TypeVar("DefaultType")
+ 
+diff --git a/tests/test_datastructures.py b/tests/test_datastructures.py
+index 1b5335ea9..9edc36534 100644
+--- a/tests/test_datastructures.py
++++ b/tests/test_datastructures.py
+@@ -27,6 +27,12 @@ def test_default_placeholder_bool():
+     assert not placeholder_b
+ 
+ 
++def test_default_placeholder_repr():
++    assert repr(Default(1)) == "Default(1)"
++    assert repr(Default("text")) == "Default('text')"
++    assert repr(Default(None)) == "Default(None)"
++
++
+ def test_upload_file_is_closed(tmp_path: Path):
+     path = tmp_path / "test.txt"
+     path.write_bytes(b"<file content>")

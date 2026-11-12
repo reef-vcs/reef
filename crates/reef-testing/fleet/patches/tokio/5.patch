@@ -1,0 +1,41 @@
+diff --git a/tokio-test/src/stream_mock.rs b/tokio-test/src/stream_mock.rs
+index 50808596..8f3af6a7 100644
+--- a/tokio-test/src/stream_mock.rs
++++ b/tokio-test/src/stream_mock.rs
+@@ -67,6 +67,15 @@ impl<T: Unpin> StreamMockBuilder<T> {
+         self
+     }
+ 
++    /// Queue every item from `values` to be returned by the stream, in order
++    pub fn next_all<I>(mut self, values: I) -> Self
++    where
++        I: IntoIterator<Item = T>,
++    {
++        self.actions.extend(values.into_iter().map(Action::Next));
++        self
++    }
++
+     // Queue an item to be consumed by the sink,
+     // commented out until Sink is implemented.
+     //
+diff --git a/tokio-test/tests/stream_mock.rs b/tokio-test/tests/stream_mock.rs
+index a54ea838..cc00689a 100644
+--- a/tokio-test/tests/stream_mock.rs
++++ b/tokio-test/tests/stream_mock.rs
+@@ -19,6 +19,16 @@ async fn test_stream_mock_items() {
+     assert_eq!(stream_mock.next().await, None);
+ }
+ 
++#[tokio::test]
++async fn test_stream_mock_next_all() {
++    let mut stream_mock = StreamMockBuilder::new().next(1).next_all([2, 3]).build();
++
++    assert_eq!(stream_mock.next().await, Some(1));
++    assert_eq!(stream_mock.next().await, Some(2));
++    assert_eq!(stream_mock.next().await, Some(3));
++    assert_eq!(stream_mock.next().await, None);
++}
++
+ #[tokio::test]
+ async fn test_stream_mock_wait() {
+     let mut stream_mock = StreamMockBuilder::new()

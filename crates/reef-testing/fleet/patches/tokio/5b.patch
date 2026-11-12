@@ -1,0 +1,36 @@
+diff --git a/tokio-test/src/stream_mock.rs b/tokio-test/src/stream_mock.rs
+index 8f3af6a7..2fb8fb68 100644
+--- a/tokio-test/src/stream_mock.rs
++++ b/tokio-test/src/stream_mock.rs
+@@ -68,6 +68,9 @@ impl<T: Unpin> StreamMockBuilder<T> {
+     }
+ 
+     /// Queue every item from `values` to be returned by the stream, in order
++    ///
++    /// This is the same as calling [`next`](Self::next) once per item; an
++    /// empty iterator queues nothing.
+     pub fn next_all<I>(mut self, values: I) -> Self
+     where
+         I: IntoIterator<Item = T>,
+diff --git a/tokio-test/tests/stream_mock.rs b/tokio-test/tests/stream_mock.rs
+index cc00689a..a6b7841b 100644
+--- a/tokio-test/tests/stream_mock.rs
++++ b/tokio-test/tests/stream_mock.rs
+@@ -29,6 +29,17 @@ async fn test_stream_mock_next_all() {
+     assert_eq!(stream_mock.next().await, None);
+ }
+ 
++#[tokio::test]
++async fn test_stream_mock_next_all_empty() {
++    let mut stream_mock = StreamMockBuilder::new()
++        .next_all(Vec::<u32>::new())
++        .next(7)
++        .build();
++
++    assert_eq!(stream_mock.next().await, Some(7));
++    assert_eq!(stream_mock.next().await, None);
++}
++
+ #[tokio::test]
+ async fn test_stream_mock_wait() {
+     let mut stream_mock = StreamMockBuilder::new()

@@ -1,0 +1,41 @@
+diff --git a/internal/text/text.go b/internal/text/text.go
+index c739b602b..a8b583ca2 100644
+--- a/internal/text/text.go
++++ b/internal/text/text.go
+@@ -74,8 +74,9 @@ func FuzzyIn(a, b time.Time) string {
+ 
+ // FuzzyAgoAbbr is an abbreviated version of FuzzyAgo. It returns a human readable string of the
+ // time duration between a and b that is estimated to the nearest unit of time.
++// A b that lies after a is reported as "0m" rather than as a negative duration.
+ func FuzzyAgoAbbr(a, b time.Time) string {
+-	ago := a.Sub(b)
++	ago := max(a.Sub(b), 0)
+ 
+ 	if ago < time.Hour {
+ 		return fmt.Sprintf("%d%s", int(ago.Minutes()), "m")
+diff --git a/internal/text/text_test.go b/internal/text/text_test.go
+index abd76aafb..e98a34167 100644
+--- a/internal/text/text_test.go
++++ b/internal/text/text_test.go
+@@ -48,6 +48,7 @@ func TestFuzzyAgoAbbr(t *testing.T) {
+ 		"2020-Oct-24 14:00:00": "29d",
+ 		"2020-Oct-23 14:00:00": "Oct 23, 2020",
+ 		"2019-Nov-22 14:00:00": "Nov 22, 2019",
++		"2020-Nov-22 14:05:00": "0m",
+ 	}
+ 	for createdAt, expected := range cases {
+ 		d, err := time.Parse(form, createdAt)
+@@ -57,6 +58,13 @@ func TestFuzzyAgoAbbr(t *testing.T) {
+ 	}
+ }
+ 
++func TestFuzzyAgoAbbrFuture(t *testing.T) {
++	now := time.Date(2020, time.November, 22, 14, 0, 0, 0, time.UTC)
++	for _, d := range []time.Duration{time.Second, 5 * time.Minute, 3 * time.Hour} {
++		assert.Equal(t, "0m", FuzzyAgoAbbr(now, now.Add(d)), "created %s in the future", d)
++	}
++}
++
+ func TestFuzzyIn(t *testing.T) {
+ 	const form = "2006-Jan-02 15:04:05"
+ 	now, _ := time.Parse(form, "2020-Nov-22 14:00:00")

@@ -1,0 +1,47 @@
+diff --git a/packages/excalidraw/data/url.test.tsx b/packages/excalidraw/data/url.test.tsx
+index 9a40aad04..4d463246a 100644
+--- a/packages/excalidraw/data/url.test.tsx
++++ b/packages/excalidraw/data/url.test.tsx
+@@ -1,4 +1,4 @@
+-import { normalizeLink } from "./url";
++import { normalizeLink, toValidURL } from "./url";
+ 
+ describe("normalizeLink", () => {
+   // NOTE not an extensive XSS test suite, just to check if we're not
+@@ -29,3 +29,19 @@ describe("normalizeLink", () => {
+     expect(normalizeLink("test&")).toBe("test&");
+   });
+ });
++
++describe("toValidURL", () => {
++  it("should keep absolute links", () => {
++    expect(toValidURL("https://www.excalidraw.com")).toBe(
++      "https://www.excalidraw.com",
++    );
++  });
++
++  it("should resolve relative links against the current origin", () => {
++    expect(toValidURL("/ola")).toBe(`${window.location.origin}/ola`);
++  });
++
++  it("should resolve protocol-relative links to https", () => {
++    expect(toValidURL("//example.com/board")).toBe("https://example.com/board");
++  });
++});
+diff --git a/packages/excalidraw/data/url.ts b/packages/excalidraw/data/url.ts
+index 2ab553bb8..e28f82e6e 100644
+--- a/packages/excalidraw/data/url.ts
++++ b/packages/excalidraw/data/url.ts
+@@ -20,6 +20,12 @@ export const isLocalLink = (link: string | null) => {
+ export const toValidURL = (link: string) => {
+   link = normalizeLink(link);
+ 
++  // protocol-relative links (//example.com) point to another host, so don't
++  // treat them as paths on the current origin
++  if (link.startsWith("//")) {
++    return `https:${link}`;
++  }
++
+   // make relative links into fully-qualified urls
+   if (link.startsWith("/")) {
+     return `${location.origin}${link}`;

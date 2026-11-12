@@ -1,0 +1,14 @@
+diff --git a/crates/reef-error/tests/fleet_ticket.rs b/crates/reef-error/tests/fleet_ticket.rs
+index c76d125..3fa33ba 100644
+--- a/crates/reef-error/tests/fleet_ticket.rs
++++ b/crates/reef-error/tests/fleet_ticket.rs
+@@ -9,3 +9,9 @@ fn checksum_is_stable() {
+     assert_eq!(checksum(b""), 1);
+     assert_ne!(checksum(b"reef"), checksum(b"feer"));
+ }
++
++/// The review round: one more case.
++#[test]
++fn checksum_differs_by_one_byte() {
++    assert_ne!(checksum(b"a"), checksum(b"b"));
++}
