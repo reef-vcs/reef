@@ -1,0 +1,35 @@
+diff --git a/tokio/src/sync/barrier.rs b/tokio/src/sync/barrier.rs
+index f443f5a1..87f12694 100644
+--- a/tokio/src/sync/barrier.rs
++++ b/tokio/src/sync/barrier.rs
+@@ -113,7 +113,9 @@ impl Barrier {
+     /// Returns the number of tasks currently waiting at the barrier.
+     ///
+     /// The count goes back to zero when the last task arrives and the barrier
+-    /// releases the current generation.
++    /// releases the current generation. A task whose `wait` future was polled
++    /// and then dropped before the barrier released still counts, since
++    /// [`Barrier::wait`] is not cancel safe.
+     pub fn waiting(&self) -> usize {
+         self.state.lock().arrived
+     }
+diff --git a/tokio/tests/sync_barrier.rs b/tokio/tests/sync_barrier.rs
+index 0c5eeafb..f8582e12 100644
+--- a/tokio/tests/sync_barrier.rs
++++ b/tokio/tests/sync_barrier.rs
+@@ -87,6 +87,15 @@ fn waiting_counts_arrivals() {
+     assert_ready!(w2.poll());
+ }
+ 
++#[test]
++fn waiting_is_zero_for_zero_barrier() {
++    let b = Barrier::new(0);
++
++    let mut w = spawn(b.wait());
++    assert!(assert_ready!(w.poll()).is_leader());
++    assert_eq!(b.waiting(), 0);
++}
++
+ #[test]
+ fn lots() {
+     let b = Barrier::new(100);

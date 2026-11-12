@@ -3842,6 +3842,7 @@ dependencies = [
  "clap",
  "der",
  "gix",
+ "libc",
  "rand",
  "rand_chacha",
  "rcgen",
@@ -3854,6 +3855,7 @@ dependencies = [
  "tiktoken-rs",
  "time",
  "toml",
+ "walkdir",
  "x509-cert",
 ]
 

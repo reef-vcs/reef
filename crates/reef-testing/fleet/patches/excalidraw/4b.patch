@@ -1,0 +1,18 @@
+diff --git a/packages/excalidraw/element/textElement.test.ts b/packages/excalidraw/element/textElement.test.ts
+index 2b0ed7fd0..4870ce489 100644
+--- a/packages/excalidraw/element/textElement.test.ts
++++ b/packages/excalidraw/element/textElement.test.ts
+@@ -226,4 +226,13 @@ describe("Test getTextFromElements", () => {
+     ];
+     expect(getTextFromElements(elements)).toBe("first\n\nsecond");
+   });
++
++  // copy-as-text uses the default separator; other callers pass their own
++  it("should use a custom separator", () => {
++    const elements = [
++      API.createElement({ type: "text", text: "a" }),
++      API.createElement({ type: "text", text: "b" }),
++    ];
++    expect(getTextFromElements(elements, " | ")).toBe("a | b");
++  });
+ });

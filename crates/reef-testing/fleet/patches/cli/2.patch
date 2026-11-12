@@ -1,0 +1,55 @@
+diff --git a/internal/ghrepo/repo.go b/internal/ghrepo/repo.go
+index 83baaf476..fbce8b018 100644
+--- a/internal/ghrepo/repo.go
++++ b/internal/ghrepo/repo.go
+@@ -36,6 +36,15 @@ func FullName(r Interface) string {
+ 	return fmt.Sprintf("%s/%s", r.RepoOwner(), r.RepoName())
+ }
+ 
++// FullNameWithHost serializes a GitHub repository into "OWNER/REPO" when it lives on the
++// default host and into "HOST/OWNER/REPO" otherwise, a form FromFullName parses back.
++func FullNameWithHost(r Interface) string {
++	if host := normalizeHostname(r.RepoHost()); host != ghinstance.Default() {
++		return fmt.Sprintf("%s/%s", host, FullName(r))
++	}
++	return FullName(r)
++}
++
+ func defaultHost() string {
+ 	host, _ := ghauth.DefaultHost()
+ 	return host
+diff --git a/internal/ghrepo/repo_test.go b/internal/ghrepo/repo_test.go
+index 7ea6b0598..324236716 100644
+--- a/internal/ghrepo/repo_test.go
++++ b/internal/ghrepo/repo_test.go
+@@ -276,3 +276,30 @@ func TestFormatRemoteURL(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestFullNameWithHost(t *testing.T) {
++	tests := []struct {
++		name string
++		repo Interface
++		want string
++	}{
++		{name: "default host", repo: NewWithHost("owner", "repo", "github.com"), want: "owner/repo"},
++		{name: "enterprise host", repo: NewWithHost("owner", "repo", "example.org"), want: "example.org/owner/repo"},
++		{name: "tenancy host", repo: NewWithHost("owner", "repo", "tenant.ghe.com"), want: "tenant.ghe.com/owner/repo"},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := FullNameWithHost(tt.repo)
++			if got != tt.want {
++				t.Errorf("FullNameWithHost() = %q, want %q", got, tt.want)
++			}
++			parsed, err := FromFullNameWithHost(got, "github.com")
++			if err != nil {
++				t.Fatalf("FromFullNameWithHost(%q) error: %v", got, err)
++			}
++			if !IsSame(parsed, tt.repo) {
++				t.Errorf("round trip of %q gave %q", got, FullNameWithHost(parsed))
++			}
++		})
++	}
++}

@@ -1,0 +1,48 @@
+diff --git a/tokio/src/sync/barrier.rs b/tokio/src/sync/barrier.rs
+index 00fc212d..f443f5a1 100644
+--- a/tokio/src/sync/barrier.rs
++++ b/tokio/src/sync/barrier.rs
+@@ -110,6 +110,14 @@ impl Barrier {
+         }
+     }
+ 
++    /// Returns the number of tasks currently waiting at the barrier.
++    ///
++    /// The count goes back to zero when the last task arrives and the barrier
++    /// releases the current generation.
++    pub fn waiting(&self) -> usize {
++        self.state.lock().arrived
++    }
++
+     /// Does not resolve until all tasks have rendezvoused here.
+     ///
+     /// Barriers are re-usable after all tasks have rendezvoused once, and can
+diff --git a/tokio/tests/sync_barrier.rs b/tokio/tests/sync_barrier.rs
+index a8f8e979..0c5eeafb 100644
+--- a/tokio/tests/sync_barrier.rs
++++ b/tokio/tests/sync_barrier.rs
+@@ -69,6 +69,24 @@ fn tango() {
+     assert!(!(wr1.is_leader() && wr2.is_leader()));
+ }
+ 
++#[test]
++fn waiting_counts_arrivals() {
++    let b = Barrier::new(3);
++    assert_eq!(b.waiting(), 0);
++
++    let mut w1 = spawn(b.wait());
++    assert_pending!(w1.poll());
++    let mut w2 = spawn(b.wait());
++    assert_pending!(w2.poll());
++    assert_eq!(b.waiting(), 2);
++
++    let mut w3 = spawn(b.wait());
++    assert_ready!(w3.poll());
++    assert_eq!(b.waiting(), 0);
++    assert_ready!(w1.poll());
++    assert_ready!(w2.poll());
++}
++
+ #[test]
+ fn lots() {
+     let b = Barrier::new(100);

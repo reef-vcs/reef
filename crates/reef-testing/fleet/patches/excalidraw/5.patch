@@ -1,0 +1,48 @@
+diff --git a/excalidraw-app/data/index.test.ts b/excalidraw-app/data/index.test.ts
+new file mode 100644
+index 000000000..b0f38c707
+--- /dev/null
++++ b/excalidraw-app/data/index.test.ts
+@@ -0,0 +1,23 @@
++import { isCollaborationLink } from ".";
++
++describe("isCollaborationLink", () => {
++  it("should accept room links", () => {
++    expect(
++      isCollaborationLink(
++        "https://excalidraw.com/#room=0123456789abcdef0123,abcdefghijklmnopqrstuv",
++      ),
++    ).toBe(true);
++  });
++
++  it("should reject links without a room", () => {
++    expect(isCollaborationLink("https://excalidraw.com/")).toBe(false);
++    expect(isCollaborationLink("https://excalidraw.com/#json=abc,def")).toBe(
++      false,
++    );
++  });
++
++  it("should reject text that is not a URL instead of throwing", () => {
++    expect(isCollaborationLink("not a link")).toBe(false);
++    expect(isCollaborationLink("")).toBe(false);
++  });
++});
+diff --git a/excalidraw-app/data/index.ts b/excalidraw-app/data/index.ts
+index 6ecb98f77..32d54cb3e 100644
+--- a/excalidraw-app/data/index.ts
++++ b/excalidraw-app/data/index.ts
+@@ -128,7 +128,13 @@ export type SocketUpdateData =
+ const RE_COLLAB_LINK = /^#room=([a-zA-Z0-9_-]+),([a-zA-Z0-9_-]+)$/;
+ 
+ export const isCollaborationLink = (link: string) => {
+-  const hash = new URL(link).hash;
++  let hash: string;
++  try {
++    hash = new URL(link).hash;
++  } catch {
++    // pasted text is not always a URL; it's then not a collab link either
++    return false;
++  }
+   return RE_COLLAB_LINK.test(hash);
+ };
+ 

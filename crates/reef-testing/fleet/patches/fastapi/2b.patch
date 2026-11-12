@@ -1,0 +1,34 @@
+diff --git a/fastapi/security/api_key.py b/fastapi/security/api_key.py
+index 2d61f7fa9..4ef500d7d 100644
+--- a/fastapi/security/api_key.py
++++ b/fastapi/security/api_key.py
+@@ -45,6 +45,12 @@ class APIKeyBase(SecurityBase):
+         )
+ 
+     def check_api_key(self, api_key: str | None) -> str | None:
++        """
++        Return the API key with surrounding whitespace removed.
++
++        A missing, empty or whitespace-only key counts as not provided: it raises
++        a 401 error when `auto_error` is `True`, and returns `None` otherwise.
++        """
+         if api_key is not None:
+             api_key = api_key.strip()
+         if not api_key:
+diff --git a/tests/test_security_api_key_query_optional.py b/tests/test_security_api_key_query_optional.py
+index e9fba3043..e70fcf567 100644
+--- a/tests/test_security_api_key_query_optional.py
++++ b/tests/test_security_api_key_query_optional.py
+@@ -42,6 +42,12 @@ def test_security_api_key_no_key():
+     assert response.json() == {"msg": "Create an account first"}
+ 
+ 
++def test_security_api_key_blank_key():
++    response = client.get("/users/me?key=%20%20")
++    assert response.status_code == 200, response.text
++    assert response.json() == {"msg": "Create an account first"}
++
++
+ def test_openapi_schema():
+     response = client.get("/openapi.json")
+     assert response.status_code == 200, response.text

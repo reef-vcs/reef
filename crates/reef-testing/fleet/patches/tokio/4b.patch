@@ -1,0 +1,34 @@
+diff --git a/tokio-stream/src/stream_map.rs b/tokio-stream/src/stream_map.rs
+index 9cc973fd..19ae69ae 100644
+--- a/tokio-stream/src/stream_map.rs
++++ b/tokio-stream/src/stream_map.rs
+@@ -507,6 +507,9 @@ impl<K, V> StreamMap<K, V> {
+ 
+     /// Returns a reference to the stream for the specified key, if any.
+     ///
++    /// The key may be any borrowed form of the map's key type, but `Hash` and
++    /// `Eq` on the borrowed form must match those for the key type.
++    ///
+     /// # Examples
+     ///
+     /// ```
+diff --git a/tokio-stream/tests/stream_stream_map.rs b/tokio-stream/tests/stream_stream_map.rs
+index b15063f7..77a56e6b 100644
+--- a/tokio-stream/tests/stream_stream_map.rs
++++ b/tokio-stream/tests/stream_stream_map.rs
+@@ -342,6 +342,15 @@ fn get_returns_inserted_stream() {
+     assert!(map.get(&2).is_some());
+ }
+ 
++#[test]
++fn get_borrow() {
++    let mut map = StreamMap::new();
++    map.insert("foo".to_string(), pending::<()>());
++
++    assert!(map.get("foo").is_some());
++    assert!(map.get("bar").is_none());
++}
++
+ #[test]
+ fn contains_key_borrow() {
+     let mut map = StreamMap::new();

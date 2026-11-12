@@ -1,0 +1,35 @@
+diff --git a/tokio/src/time/sleep.rs b/tokio/src/time/sleep.rs
+index 925f37ae..64fef485 100644
+--- a/tokio/src/time/sleep.rs
++++ b/tokio/src/time/sleep.rs
+@@ -299,7 +299,9 @@ impl Sleep {
+ 
+     /// Returns the time left until the deadline.
+     ///
+-    /// Returns [`Duration::ZERO`] once the deadline has passed.
++    /// This is measured against [`Instant::now`], so it respects a paused
++    /// clock, and it follows the new deadline after [`Sleep::reset`]. Returns
++    /// [`Duration::ZERO`] once the deadline has passed.
+     pub fn remaining(&self) -> Duration {
+         self.deadline.saturating_duration_since(Instant::now())
+     }
+diff --git a/tokio/tests/time_sleep.rs b/tokio/tests/time_sleep.rs
+index c541ecd7..9851b824 100644
+--- a/tokio/tests/time_sleep.rs
++++ b/tokio/tests/time_sleep.rs
+@@ -48,6 +48,15 @@ async fn remaining_counts_down() {
+     sleep.await;
+ }
+ 
++#[tokio::test(start_paused = true)]
++async fn remaining_follows_reset() {
++    let sleep = time::sleep(ms(100));
++    tokio::pin!(sleep);
++
++    sleep.as_mut().reset(Instant::now() + ms(250));
++    assert_eq!(sleep.remaining(), ms(250));
++}
++
+ #[tokio::test]
+ async fn is_elapsed() {
+     time::pause();

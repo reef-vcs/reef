@@ -1,0 +1,30 @@
+diff --git a/fastapi/utils.py b/fastapi/utils.py
+index ca1a42d92..99308d807 100644
+--- a/fastapi/utils.py
++++ b/fastapi/utils.py
+@@ -24,6 +24,12 @@ if TYPE_CHECKING:  # pragma: nocover
+ 
+ 
+ def is_body_allowed_for_status_code(status_code: int | str | None) -> bool:
++    """
++    Return whether a response with this status code may have a body.
++
++    OpenAPI range keys ("2XX") and "default" are accepted in any case, and
++    surrounding whitespace is ignored. Any other string must be an integer.
++    """
+     if status_code is None:
+         return True
+     if isinstance(status_code, str):
+diff --git a/tests/test_is_body_allowed_for_status_code.py b/tests/test_is_body_allowed_for_status_code.py
+index b4b756df0..285fd041d 100644
+--- a/tests/test_is_body_allowed_for_status_code.py
++++ b/tests/test_is_body_allowed_for_status_code.py
+@@ -18,3 +18,8 @@ def test_body_not_allowed(status_code):
+ @pytest.mark.parametrize("status_code", ["2xx", "5xx", " 3XX ", "Default"])
+ def test_body_allowed_for_ranges_in_any_case(status_code):
+     assert is_body_allowed_for_status_code(status_code) is True
++
++
++def test_invalid_status_code_string():
++    with pytest.raises(ValueError):
++        is_body_allowed_for_status_code("2YY")

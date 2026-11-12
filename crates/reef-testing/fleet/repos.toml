@@ -1,0 +1,100 @@
+# The fleet benchmark's repositories (#264, decision 3): one per stack, pinned by commit. Each has
+# five tickets in `patches/<name>/<n>.patch` and a review round per ticket in `<n>b.patch`, each
+# in a different package. `setup` runs once in the clone, untimed (downloads); `clean` runs before
+# each scenario (shared build caches); `build` is the timed build and tests, run in the workspace.
+# `{caches}` in `env` and `caches` is the run's own cache directory, `<work-root>/caches`.
+# See docs/fleet-benchmark.md.
+
+[[repo]]
+name = "tokio"
+stack = "rust"
+url = "https://github.com/tokio-rs/tokio"
+rev = "b53b2001ed2ccfd9b87e32a0c6da1a1eebdc80b8" # tokio-1.54.1
+license = "MIT"
+tools = ["cargo", "git"]
+# tokio commits no Cargo.lock; the harness ships one so dependency versions are pinned too.
+setup = [
+    "cp \"$FLEET_PATCHES/Cargo.lock\" Cargo.lock && git add -f Cargo.lock && git -c user.name=Fleet -c user.email=fleet@example.com commit --quiet -m 'reef-fleet: pin Cargo.lock'",
+    "cargo fetch --locked",
+]
+# As tokio's CI runs it off Linux: `--all-features` includes `taskdump`, which is Linux-only.
+# tests-build's trybuild test compares compiler messages, which differ on rustc 1.99.1 (fails at
+# base); `fifo_multiple_writes` hangs at random on macOS (8 of 40 runs).
+build = "cargo test --workspace --exclude tests-build --features full,test-util --locked --offline -- --skip fifo_multiple_writes"
+build_dirs = ["target"]
+env = { RUSTFLAGS = "--cfg tokio_unstable" }
+seed_prepare = "cargo metadata --format-version 1 --no-deps --offline | python3 -c 'import json,sys; print(\" \".join(\"-p \" + p[\"name\"] for p in json.load(sys.stdin)[\"packages\"]))' | xargs cargo clean --offline"
+caches = ["~/.cargo/registry"]
+
+[[repo]]
+name = "cli"
+stack = "go"
+url = "https://github.com/cli/cli"
+rev = "63837fb778d6a39f02be0ce76ff89f2bc8d74bdc" # v2.103.3
+license = "MIT"
+tools = ["go", "git"]
+setup = ["go mod download"]
+# GOCACHE is build output: the run's own (never the user's), emptied before each scenario so the
+# solo run is cold. Without `-trimpath` its entries for cli's own packages are keyed by the
+# workspace's path, so every workspace adds its own (the spike's E5 measures `-trimpath`).
+clean = ["go clean -cache"]
+# As cli's CI runs it, without `-tags=integration` (live sigstore servers).
+build = "go vet ./... && go build ./... && go test -race ./..."
+env = { GOTOOLCHAIN = "local", GOFLAGS = "-mod=readonly", GOCACHE = "{caches}/go-build" }
+caches = ["{caches}/go-build"]
+
+[[repo]]
+name = "excalidraw"
+stack = "typescript"
+url = "https://github.com/excalidraw/excalidraw"
+rev = "a2ec2889babf7d2295469c6d90ebe77fae57df84" # v0.18.1
+license = "MIT"
+tools = ["yarn", "node", "git"]
+# Warms yarn's cache; the clone's own node_modules never reaches a workspace (it is ignored).
+# `--ignore-scripts`: no install script is needed, and the root `prepare` (husky 7) would run
+# `git config core.hooksPath` in a workspace, or fail where there is no `.git`.
+setup = ["yarn install --frozen-lockfile --ignore-scripts"]
+# As the project's CI: typecheck, lint, tests, the app and the packages. Built `dist` directories
+# break the tests (a second copy of the package loads), so they are removed first and built last.
+build = "rm -rf packages/excalidraw/dist packages/math/dist packages/utils/dist && yarn install --frozen-lockfile --prefer-offline --ignore-scripts && yarn test:typecheck && yarn test:code && yarn test:app --watch=false --reporter=verbose && yarn build:app && yarn build:package && yarn --cwd packages/math build:esm && yarn --cwd packages/utils build:esm && yarn --cwd examples/with-script-in-browser build"
+build_dirs = [
+    "node_modules",
+    "packages/excalidraw/node_modules",
+    "excalidraw-app/node_modules",
+    "examples/with-nextjs/node_modules",
+    "examples/with-script-in-browser/node_modules",
+    "excalidraw-app/build",
+    "packages/excalidraw/dist",
+    "packages/math/dist",
+    "packages/utils/dist",
+    "examples/with-script-in-browser/dist",
+]
+caches = ["~/Library/Caches/Yarn", "~/.cache/yarn"]
+
+[[repo]]
+name = "fastapi"
+stack = "python"
+url = "https://github.com/fastapi/fastapi"
+rev = "5add7a458d629b07311d48261f696b5ac2bb9a5f" # 0.162.5
+license = "MIT"
+tools = ["uv", "git"]
+# As the project's CI: the `tests` group and the `all` extra, not the default `dev` group (docs,
+# translations, playwright). `--no-sync`, or `uv run` would sync the dev group, offline.
+setup = ["uv sync --frozen --no-dev --group tests --extra all"]
+build = "uv sync --frozen --no-dev --group tests --extra all --offline && uv run --offline --no-sync mypy fastapi && PYTHONPATH=docs_src uv run --offline --no-sync pytest -q -rA -p no:cacheprovider tests scripts/tests --cov --cov-context=test --cov-report=term-missing --cov-report=html"
+build_dirs = [".venv", "coverage", "htmlcov", ".mypy_cache", ".pdm-build"]
+caches = ["~/.cache/uv"]
+
+# Reef itself: reported, never gated (its build is the heaviest on disk, not a typical repository).
+[[repo]]
+name = "reef"
+stack = "rust"
+url = "self"
+license = "Apache-2.0"
+gated = false
+tools = ["cargo", "cargo-nextest", "git"]
+setup = ["cargo fetch --locked"]
+build = "cargo nextest run --workspace --locked --offline --no-fail-fast"
+build_dirs = ["target"]
+env = { CARGO_INCREMENTAL = "0", CARGO_PROFILE_DEV_DEBUG = "line-tables-only" }
+caches = ["~/.cargo/registry"]

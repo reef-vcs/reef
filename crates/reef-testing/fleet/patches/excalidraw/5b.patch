@@ -1,0 +1,30 @@
+diff --git a/excalidraw-app/data/index.test.ts b/excalidraw-app/data/index.test.ts
+index b0f38c707..f50b2f050 100644
+--- a/excalidraw-app/data/index.test.ts
++++ b/excalidraw-app/data/index.test.ts
+@@ -16,6 +16,13 @@ describe("isCollaborationLink", () => {
+     );
+   });
+ 
++  it("should reject room links with a malformed id or key", () => {
++    expect(isCollaborationLink("https://excalidraw.com/#room=abc")).toBe(false);
++    expect(isCollaborationLink("https://excalidraw.com/#room=a b,c")).toBe(
++      false,
++    );
++  });
++
+   it("should reject text that is not a URL instead of throwing", () => {
+     expect(isCollaborationLink("not a link")).toBe(false);
+     expect(isCollaborationLink("")).toBe(false);
+diff --git a/excalidraw-app/data/index.ts b/excalidraw-app/data/index.ts
+index 32d54cb3e..392705d88 100644
+--- a/excalidraw-app/data/index.ts
++++ b/excalidraw-app/data/index.ts
+@@ -125,6 +125,7 @@ export type SocketUpdateData =
+     _brand: "socketUpdateData";
+   };
+ 
++// #room=<roomId>,<roomKey>; both parts are url-safe base64 or hex
+ const RE_COLLAB_LINK = /^#room=([a-zA-Z0-9_-]+),([a-zA-Z0-9_-]+)$/;
+ 
+ export const isCollaborationLink = (link: string) => {

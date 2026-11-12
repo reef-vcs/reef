@@ -84,3 +84,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0070](0070-publishing-to-a-git-remote.md) | Publishing to a git remote | accepted |
 | [0071](0071-rebasing-and-following-trunk.md) | Rebasing, fetching, and following trunk | accepted |
 | [0072](0072-default-workspace-root.md) | Default workspace root outside the state directory | accepted |
+| [0073](0073-laptop-resource-budget.md) | Five tickets at once on a standard laptop | accepted |

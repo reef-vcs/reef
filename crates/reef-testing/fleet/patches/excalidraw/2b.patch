@@ -1,0 +1,21 @@
+diff --git a/packages/utils/bbox.test.ts b/packages/utils/bbox.test.ts
+index 207e83ce3..683da2049 100644
+--- a/packages/utils/bbox.test.ts
++++ b/packages/utils/bbox.test.ts
+@@ -29,6 +29,16 @@ describe("doBBoxesIntersect()", () => {
+       false,
+     );
+   });
++
++  // scene coordinates can be negative, e.g. after panning left of the origin
++  it("should handle boxes with negative coordinates", () => {
++    expect(doBBoxesIntersect(box(-20, -20, -10, -10), box(-9, -9, 0, 0))).toBe(
++      false,
++    );
++    expect(
++      doBBoxesIntersect(box(-20, -20, -10, -10), box(-9, -9, 0, 0), 1),
++    ).toBe(true);
++  });
+ });
+ 
+ describe("doLineSegmentsIntersect()", () => {

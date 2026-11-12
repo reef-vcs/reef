@@ -1,0 +1,42 @@
+diff --git a/fastapi/openapi/docs.py b/fastapi/openapi/docs.py
+index 0d9242f9f..35d5225bd 100644
+--- a/fastapi/openapi/docs.py
++++ b/fastapi/openapi/docs.py
+@@ -1,3 +1,4 @@
++import html as html_lib
+ import json
+ from typing import Annotated, Any
+ 
+@@ -156,7 +157,7 @@ def get_swagger_ui_html(
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <link type="text/css" rel="stylesheet" href="{swagger_css_url}">
+     <link rel="shortcut icon" href="{swagger_favicon_url}">
+-    <title>{title}</title>
++    <title>{html_lib.escape(title)}</title>
+     </head>
+     <body>
+     <div id="swagger-ui">
+diff --git a/tests/test_swagger_ui_escape.py b/tests/test_swagger_ui_escape.py
+index 6b9851abd..3ee30c0db 100644
+--- a/tests/test_swagger_ui_escape.py
++++ b/tests/test_swagger_ui_escape.py
+@@ -35,3 +35,19 @@ def test_normal_init_oauth_still_works():
+     assert '"clientId": "my-client"' in body
+     assert '"appName": "My App"' in body
+     assert "ui.initOAuth" in body
++
++
++def test_title_html_chars_are_escaped():
++    html = get_swagger_ui_html(
++        openapi_url="/openapi.json",
++        title="Docs</title><script>alert(1)</script>",
++    )
++    body = bytes(html.body).decode()
++    assert "<script>alert(1)</script>" not in body
++    assert "<title>Docs&lt;/title&gt;&lt;script&gt;" in body
++
++
++def test_title_ampersand_is_escaped():
++    html = get_swagger_ui_html(openapi_url="/openapi.json", title="R&D API")
++    body = bytes(html.body).decode()
++    assert "<title>R&amp;D API</title>" in body

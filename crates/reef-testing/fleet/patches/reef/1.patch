@@ -1,0 +1,17 @@
+diff --git a/crates/reef-error/tests/fleet_ticket.rs b/crates/reef-error/tests/fleet_ticket.rs
+new file mode 100644
+index 0000000..c76d125
+--- /dev/null
++++ b/crates/reef-error/tests/fleet_ticket.rs
+@@ -0,0 +1,11 @@
++//! A fleet benchmark ticket (#264): an add-only test, so it applies at any commit.
++
++fn checksum(bytes: &[u8]) -> u32 {
++    bytes.iter().fold(1_u32, |acc, b| acc.wrapping_mul(31).wrapping_add(u32::from(*b)))
++}
++
++#[test]
++fn checksum_is_stable() {
++    assert_eq!(checksum(b""), 1);
++    assert_ne!(checksum(b"reef"), checksum(b"feer"));
++}

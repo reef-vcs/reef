@@ -1,0 +1,36 @@
+diff --git a/tokio-util/src/codec/lines_codec.rs b/tokio-util/src/codec/lines_codec.rs
+index 3d00ee36..a58468e7 100644
+--- a/tokio-util/src/codec/lines_codec.rs
++++ b/tokio-util/src/codec/lines_codec.rs
+@@ -93,7 +93,9 @@ impl LinesCodec {
+     /// Returns `true` while the codec is discarding the rest of a line that
+     /// went over the maximum length.
+     ///
+-    /// Calls to `decode` return `None` until the end of that line is seen.
++    /// Calls to `decode` return `None` until the end of that line is seen. A
++    /// codec made with [`LinesCodec::new`] has no length limit, so this is
++    /// always `false` for it.
+     pub fn is_discarding(&self) -> bool {
+         self.is_discarding
+     }
+diff --git a/tokio-util/tests/codecs.rs b/tokio-util/tests/codecs.rs
+index 86b96da3..13fad50a 100644
+--- a/tokio-util/tests/codecs.rs
++++ b/tokio-util/tests/codecs.rs
+@@ -215,6 +215,16 @@ fn lines_decoder_reports_discarding() {
+     assert!(!codec.is_discarding());
+ }
+ 
++#[test]
++fn lines_decoder_unbounded_never_discards() {
++    let mut codec = LinesCodec::new();
++    let buf = &mut BytesMut::new();
++
++    buf.put_slice(&[b'a'; 4096]);
++    assert_eq!(None, codec.decode(buf).unwrap());
++    assert!(!codec.is_discarding());
++}
++
+ // Regression test for [subsequent calls to LinesCodec decode does not return the desired results bug](https://github.com/tokio-rs/tokio/issues/3555)
+ #[test]
+ fn lines_decoder_max_length_underrun_twice() {

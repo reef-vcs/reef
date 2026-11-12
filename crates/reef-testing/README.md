@@ -6,7 +6,7 @@ It must not depend on any other Reef crate, so that `reef-lib` and the others ca
 
 Only dev-dependencies and benchmarks reach this crate. It is excluded from the workspace's `default-members`, so build it with `--workspace` or `-p reef-testing`.
 
-Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool: `reef-synth`, `reef-onboarding` and `reef-tokens`.
+Unlike the other crates, which have one binary at `src/main.rs`, `reef-testing` hosts its dev binaries under `src/bin/`, one file per tool: `reef-synth`, `reef-onboarding`, `reef-tokens` and `reef-fleet`.
 
 ## Synthetic repositories
 
@@ -100,3 +100,7 @@ The prompts are in `onboarding/prompts/`, and changing one starts a new baseline
 - `report`: the tables, the break-even, and the exit criterion's verdict.
 
 The `o200k` counter needs the `tokenizers` feature, which brings `tiktoken-rs`; nothing but `just tokens` builds it. `tokens/fixtures/` holds a recorded stream with a shell and an MCP call. `just tokens-check` runs the ignored end-to-end test of the fixture and its truth, which needs a full clone.
+
+## The fleet benchmark (`reef-fleet`)
+
+`reef-fleet` measures what five tickets at once cost a machine (#264): disk, load, memory pressure and responsiveness, on one pinned repository per stack in [`fleet/repos.toml`](fleet/repos.toml), each with five ticket patches and a review round per ticket in `fleet/patches/<name>/`. `--repo synthetic` generates a small Cargo workspace instead, offline; `reef-vcs`'s `tests/fleet_smoke.rs` runs it in `just ci`. The toolchains it was set up with: cargo 1.99.1, Go 1.27, Node 22 with yarn 1.22, uv 0.11. See [`docs/fleet-benchmark.md`](../../docs/fleet-benchmark.md).

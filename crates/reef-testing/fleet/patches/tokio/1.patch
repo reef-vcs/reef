@@ -1,0 +1,44 @@
+diff --git a/tokio/src/time/sleep.rs b/tokio/src/time/sleep.rs
+index afda4c4c..925f37ae 100644
+--- a/tokio/src/time/sleep.rs
++++ b/tokio/src/time/sleep.rs
+@@ -297,6 +297,13 @@ impl Sleep {
+         self.deadline
+     }
+ 
++    /// Returns the time left until the deadline.
++    ///
++    /// Returns [`Duration::ZERO`] once the deadline has passed.
++    pub fn remaining(&self) -> Duration {
++        self.deadline.saturating_duration_since(Instant::now())
++    }
++
+     /// Returns `true` if `Sleep` has elapsed.
+     ///
+     /// A `Sleep` instance is elapsed when the requested duration has elapsed.
+diff --git a/tokio/tests/time_sleep.rs b/tokio/tests/time_sleep.rs
+index 538cbc44..c541ecd7 100644
+--- a/tokio/tests/time_sleep.rs
++++ b/tokio/tests/time_sleep.rs
+@@ -33,6 +33,21 @@ async fn immediate_sleep() {
+     assert!(sleep.is_elapsed());
+ }
+ 
++#[tokio::test(start_paused = true)]
++async fn remaining_counts_down() {
++    let sleep = time::sleep(ms(100));
++    tokio::pin!(sleep);
++
++    assert_eq!(sleep.remaining(), ms(100));
++
++    time::advance(ms(40)).await;
++    assert_eq!(sleep.remaining(), ms(60));
++
++    time::advance(ms(100)).await;
++    assert_eq!(sleep.remaining(), Duration::ZERO);
++    sleep.await;
++}
++
+ #[tokio::test]
+ async fn is_elapsed() {
+     time::pause();

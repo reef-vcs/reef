@@ -1,0 +1,24 @@
+diff --git a/pkg/iostreams/color_test.go b/pkg/iostreams/color_test.go
+index deb13a3d7..01182fcbb 100644
+--- a/pkg/iostreams/color_test.go
++++ b/pkg/iostreams/color_test.go
+@@ -78,6 +78,19 @@ func TestLabel(t *testing.T) {
+ 				ColorLabels: true,
+ 			},
+ 		},
++		{
++			// The API returns lowercase colors, but labels created through other
++			// clients can carry uppercase digits.
++			name:  "uppercase hex",
++			hex:   "FC0303",
++			text:  "red",
++			wants: "\033[38;2;252;3;3mred\033[0m",
++			cs: &ColorScheme{
++				Enabled:     true,
++				TrueColor:   true,
++				ColorLabels: true,
++			},
++		},
+ 		{
+ 			name:  "no color labels",
+ 			hex:   "fc0303",

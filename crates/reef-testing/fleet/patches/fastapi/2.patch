@@ -1,0 +1,37 @@
+diff --git a/fastapi/security/api_key.py b/fastapi/security/api_key.py
+index 587b86893..2d61f7fa9 100644
+--- a/fastapi/security/api_key.py
++++ b/fastapi/security/api_key.py
+@@ -45,6 +45,8 @@ class APIKeyBase(SecurityBase):
+         )
+ 
+     def check_api_key(self, api_key: str | None) -> str | None:
++        if api_key is not None:
++            api_key = api_key.strip()
+         if not api_key:
+             if self.auto_error:
+                 raise self.make_not_authenticated_error()
+diff --git a/tests/test_security_api_key_header.py b/tests/test_security_api_key_header.py
+index a53a2a227..3614ce9af 100644
+--- a/tests/test_security_api_key_header.py
++++ b/tests/test_security_api_key_header.py
+@@ -39,6 +39,19 @@ def test_security_api_key_no_key():
+     assert response.headers["WWW-Authenticate"] == "APIKey"
+ 
+ 
++def test_security_api_key_surrounding_whitespace_is_stripped():
++    response = client.get("/users/me", headers={"key": "  secret\t"})
++    assert response.status_code == 200, response.text
++    assert response.json() == {"username": "secret"}
++
++
++def test_security_api_key_blank_key():
++    response = client.get("/users/me", headers={"key": "   "})
++    assert response.status_code == 401, response.text
++    assert response.json() == {"detail": "Not authenticated"}
++    assert response.headers["WWW-Authenticate"] == "APIKey"
++
++
+ def test_openapi_schema():
+     response = client.get("/openapi.json")
+     assert response.status_code == 200, response.text

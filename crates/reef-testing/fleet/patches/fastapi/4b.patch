@@ -1,0 +1,34 @@
+diff --git a/fastapi/openapi/docs.py b/fastapi/openapi/docs.py
+index 35d5225bd..1752cd6e7 100644
+--- a/fastapi/openapi/docs.py
++++ b/fastapi/openapi/docs.py
+@@ -266,7 +266,7 @@ def get_redoc_html(
+     <!DOCTYPE html>
+     <html>
+     <head>
+-    <title>{title}</title>
++    <title>{html_lib.escape(title)}</title>
+     <!-- needed for adaptive design -->
+     <meta charset="utf-8"/>
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+diff --git a/tests/test_swagger_ui_escape.py b/tests/test_swagger_ui_escape.py
+index 3ee30c0db..5bc208902 100644
+--- a/tests/test_swagger_ui_escape.py
++++ b/tests/test_swagger_ui_escape.py
+@@ -1,4 +1,4 @@
+-from fastapi.openapi.docs import get_swagger_ui_html
++from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+ 
+ 
+ def test_init_oauth_html_chars_are_escaped():
+@@ -51,3 +51,10 @@ def test_title_ampersand_is_escaped():
+     html = get_swagger_ui_html(openapi_url="/openapi.json", title="R&D API")
+     body = bytes(html.body).decode()
+     assert "<title>R&amp;D API</title>" in body
++
++
++def test_redoc_title_html_chars_are_escaped():
++    html = get_redoc_html(openapi_url="/openapi.json", title="<b>ReDoc</b>")
++    body = bytes(html.body).decode()
++    assert "<b>ReDoc</b>" not in body
++    assert "<title>&lt;b&gt;ReDoc&lt;/b&gt;</title>" in body

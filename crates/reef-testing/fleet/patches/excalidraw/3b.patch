@@ -1,0 +1,15 @@
+diff --git a/packages/excalidraw/data/url.test.tsx b/packages/excalidraw/data/url.test.tsx
+index 4d463246a..872d158f0 100644
+--- a/packages/excalidraw/data/url.test.tsx
++++ b/packages/excalidraw/data/url.test.tsx
+@@ -44,4 +44,10 @@ describe("toValidURL", () => {
+   it("should resolve protocol-relative links to https", () => {
+     expect(toValidURL("//example.com/board")).toBe("https://example.com/board");
+   });
++
++  // links that don't parse as URLs must never reach an iframe's src
++  it("should replace unparseable links with a blank page", () => {
++    expect(toValidURL("not a url")).toBe("about:blank");
++    expect(toValidURL("")).toBe("about:blank");
++  });
+ });

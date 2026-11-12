@@ -1,0 +1,59 @@
+diff --git a/tokio-stream/src/stream_map.rs b/tokio-stream/src/stream_map.rs
+index 1f390a29..9cc973fd 100644
+--- a/tokio-stream/src/stream_map.rs
++++ b/tokio-stream/src/stream_map.rs
+@@ -504,6 +504,29 @@ impl<K, V> StreamMap<K, V> {
+     {
+         self.entries.iter().any(|e| e.0.borrow() == k)
+     }
++
++    /// Returns a reference to the stream for the specified key, if any.
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// use tokio_stream::{StreamMap, pending};
++    ///
++    /// let mut map = StreamMap::new();
++    /// map.insert(1, pending::<i32>());
++    /// assert!(map.get(&1).is_some());
++    /// assert!(map.get(&2).is_none());
++    /// ```
++    pub fn get<Q>(&self, k: &Q) -> Option<&V>
++    where
++        K: Borrow<Q>,
++        Q: Hash + Eq + ?Sized,
++    {
++        self.entries
++            .iter()
++            .find(|e| e.0.borrow() == k)
++            .map(|e| &e.1)
++    }
+ }
+ 
+ impl<K, V> StreamMap<K, V>
+diff --git a/tokio-stream/tests/stream_stream_map.rs b/tokio-stream/tests/stream_stream_map.rs
+index 1eb59d08..b15063f7 100644
+--- a/tokio-stream/tests/stream_stream_map.rs
++++ b/tokio-stream/tests/stream_stream_map.rs
+@@ -328,6 +328,20 @@ fn clear() {
+     assert!(map.is_empty());
+ }
+ 
++#[test]
++fn get_returns_inserted_stream() {
++    let mut map = StreamMap::new();
++    map.insert(1, stream::iter(vec![10]));
++    map.insert(2, stream::iter(vec![20]));
++
++    assert!(map.get(&1).is_some());
++    assert!(map.get(&3).is_none());
++
++    map.remove(&1);
++    assert!(map.get(&1).is_none());
++    assert!(map.get(&2).is_some());
++}
++
+ #[test]
+ fn contains_key_borrow() {
+     let mut map = StreamMap::new();

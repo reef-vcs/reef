@@ -1,0 +1,22 @@
+diff --git a/pkg/search/query_test.go b/pkg/search/query_test.go
+index 15a5101bd..b64572bc2 100644
+--- a/pkg/search/query_test.go
++++ b/pkg/search/query_test.go
+@@ -147,6 +147,17 @@ func TestAdvancedIssueSearchString(t *testing.T) {
+ 			},
+ 			out: `label:"quote qualifier"`,
+ 		},
++		{
++			// Only blank keywords must not produce an empty "( )" group before the qualifiers.
++			name: "drops blank keywords",
++			query: Query{
++				Keywords: []string{"", "  "},
++				Qualifiers: Qualifiers{
++					Label: []string{"bug"},
++				},
++			},
++			out: "label:bug",
++		},
+ 		{
+ 			name: "respects immutable keywords",
+ 			query: Query{

@@ -1,0 +1,37 @@
+diff --git a/fastapi/encoders.py b/fastapi/encoders.py
+index 02fe858e1..b17d1a049 100644
+--- a/fastapi/encoders.py
++++ b/fastapi/encoders.py
+@@ -82,6 +82,12 @@ def decimal_encoder(dec_value: Decimal) -> int | float:
+ 
+ 
+ def bytes_encoder(value: bytes | bytearray | memoryview) -> str:
++    """
++    Decode a bytes-like value (bytes, bytearray or memoryview) as UTF-8 text.
++
++    >>> bytes_encoder(memoryview(b"abc"))
++    'abc'
++    """
+     return bytes(value).decode()
+ 
+ 
+diff --git a/tests/test_jsonable_encoder.py b/tests/test_jsonable_encoder.py
+index 7e6807b85..c0744de45 100644
+--- a/tests/test_jsonable_encoder.py
++++ b/tests/test_jsonable_encoder.py
+@@ -318,6 +318,15 @@ def test_encode_bytes_like():
+     assert jsonable_encoder(data) == {"raw": "abc", "buffer": "def", "view": "ghi"}
+ 
+ 
++def test_encode_bytes_like_in_dataclass():
++    @dataclass
++    class Item:
++        payload: bytearray
++
++    item = Item(payload=bytearray("café".encode()))
++    assert jsonable_encoder(item) == {"payload": "café"}
++
++
+ def test_encode_deque_encodes_child_models():
+     class Model(BaseModel):
+         test: str
