@@ -5527,7 +5527,9 @@ async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
     };
     assert!(
         std::process::Command::new("git")
-            .args(["init", "--bare", "--quiet"])
+            // `main`, not the runner's `init.defaultBranch`: a clone of the
+            // remote checks out its HEAD.
+            .args(["init", "--bare", "--quiet", "--initial-branch=main"])
             .arg(&remote)
             .status()
             .unwrap()
@@ -5687,6 +5689,8 @@ fn advance_remote(tmp: &Path, remote: &Path, files: &[(&str, &str)]) -> String {
     git(&[
         "clone",
         "--quiet",
+        "--branch",
+        "main",
         remote.to_str().unwrap(),
         clone.to_str().unwrap(),
     ]);
