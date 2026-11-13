@@ -1286,6 +1286,7 @@ async fn chains_trials_and_land_chain() {
     let planned = |commit: &Commit, tree: Option<String>| PlannedMember {
         target: target(commit),
         tree,
+        summary: None,
     };
     let plan = LandPlan {
         bookmark: "main".to_owned(),
@@ -1346,4 +1347,167 @@ async fn chains_trials_and_land_chain() {
             .unwrap(),
         None
     );
+}
+
+// R3.16: the landed history projection summarizes descriptions in the land
+// operation, keeping change ids and trees, and refuses a change that would
+// land empty.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one fixture through each case")]
+async fn projects_summaries_and_refuses_empties() {
+    use jj_lib::repo::Repo as _;
+    use reef_lib::jj::land::{self, LandError, LandPlan, LandTarget, PlannedMember, Summary};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "a")], "base").await;
+    let one = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "a"), ("b", "b")],
+        "One\n\nSigned-off-by: A <a@x>\nReef-Landing: lnd_forged\n",
+    )
+    .await;
+    let two = new_commit(&mut tx, &[&base], &[("a", "a"), ("c", "c")], "Two").await;
+    // The same edit as `one`.
+    let dup = new_commit(&mut tx, &[&base], &[("a", "a"), ("b", "b")], "Dup").await;
+    let kid = new_commit(
+        &mut tx,
+        &[&one],
+        &[("a", "a"), ("b", "b"), ("e", "e")],
+        "Kid",
+    )
+    .await;
+    bookmark(&mut tx, "main", &base);
+    set_wc(&mut tx, "agent", &one);
+    fx.commit(tx, "setup").await;
+    let target = |commit: &Commit| LandTarget {
+        change: hex_change(commit),
+        commit: hex(commit),
+        bookmark: "main".to_owned(),
+    };
+    let summary = |commit: &Commit| Summary {
+        strip: Vec::new(),
+        trailers: vec![
+            ("Reef-Change".to_owned(), commit.change_id().hex()),
+            ("Reef-Landing".to_owned(), "lnd_0000000000000001".to_owned()),
+        ],
+    };
+
+    // A change an earlier member already holds the edits of is empty.
+    let chain = land::preview_chain(&fx.head(), "main", &[target(&one), target(&dup)])
+        .await
+        .unwrap();
+    assert!(chain.members[0].included && !chain.members[0].empty);
+    assert!(!chain.members[1].included && chain.members[1].empty);
+    assert!(
+        !land::preview(&fx.head(), &target(&dup))
+            .await
+            .unwrap()
+            .empty
+    );
+
+    let plan = LandPlan {
+        bookmark: "main".to_owned(),
+        destination: hex(&base),
+        members: vec![
+            PlannedMember {
+                target: target(&one),
+                tree: None,
+                summary: Some(summary(&one)),
+            },
+            PlannedMember {
+                target: target(&two),
+                tree: None,
+                summary: Some(summary(&two)),
+            },
+        ],
+        trials: Vec::new(),
+    };
+    let landed = fx
+        .repo
+        .land_chain(&plan, &meta(OpKind::Land))
+        .await
+        .unwrap();
+    // A summarized fast-forward is a new commit of the same change, tree and
+    // parent, with the summary.
+    let first = fx.get(&landed.members[0].commit).await;
+    assert!(landed.members[0].summarized && !landed.members[0].rebased);
+    assert_ne!(first.id(), one.id());
+    assert_eq!(first.change_id(), one.change_id());
+    assert_eq!(first.tree_ids(), one.tree_ids());
+    assert_eq!(first.parent_ids(), [base.id().clone()]);
+    assert_eq!(first.author().email, one.author().email);
+    assert_eq!(
+        first.description(),
+        format!(
+            "One\n\nSigned-off-by: A <a@x>\nReef-Change: {}\nReef-Landing: lnd_0000000000000001\n",
+            one.change_id().hex()
+        )
+    );
+    // A summarized rebase: one new commit, rebased and described.
+    let second = fx.get(&landed.members[1].commit).await;
+    assert!(landed.members[1].summarized && landed.members[1].rebased);
+    assert_eq!(second.change_id(), two.change_id());
+    assert_eq!(second.parent_ids(), [first.id().clone()]);
+    assert_eq!(
+        second.description(),
+        format!(
+            "Two\n\nReef-Change: {}\nReef-Landing: lnd_0000000000000001\n",
+            two.change_id().hex()
+        )
+    );
+    assert_eq!(
+        fx.local_bookmark("main"),
+        RefTarget::normal(second.id().clone())
+    );
+    // The workspace on the queued commit is on a new change on the
+    // projected one; the descendant follows the projected commit with its
+    // tree unchanged.
+    assert_eq!(landed.new_working_copies, ["agent"]);
+    let wc = fx
+        .get(&fx.wc("agent").unwrap().hex().parse().unwrap())
+        .await;
+    assert_eq!(wc.parent_ids(), [first.id().clone()]);
+    let head = fx.head();
+    let kid_now: Vec<_> = head
+        .resolve_change_id(kid.change_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .visible_with_offsets()
+        .map(|(_, id)| id.clone())
+        .collect();
+    let kid_now = head.store().get_commit(&kid_now[0]).unwrap();
+    assert_eq!(kid_now.parent_ids(), [first.id().clone()]);
+    assert_eq!(kid_now.tree_ids(), kid.tree_ids());
+
+    // `dup` now previews empty, and landing it is refused with nothing
+    // written.
+    assert!(
+        land::preview(&fx.head(), &target(&dup))
+            .await
+            .unwrap()
+            .empty
+    );
+    let op = fx.op();
+    let refused = fx
+        .repo
+        .land_chain(
+            &LandPlan {
+                bookmark: "main".to_owned(),
+                destination: hex(&second),
+                members: vec![PlannedMember {
+                    target: target(&dup),
+                    tree: None,
+                    summary: None,
+                }],
+                trials: Vec::new(),
+            },
+            &meta(OpKind::Land),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, LandError::Empty(_)), "{refused:?}");
+    assert_eq!(fx.op(), op);
 }

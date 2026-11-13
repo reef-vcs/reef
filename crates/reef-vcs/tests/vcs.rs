@@ -4515,7 +4515,7 @@ async fn policy_cli() {
     .unwrap();
     let checked = json(&run(no_daemon(work.path()), &["-o", "json", "policy", "check"]).await);
     assert_eq!(checked["version"], 1);
-    assert_eq!(checked["rules"][4], "tests");
+    assert_eq!(checked["rules"][5], "tests");
     std::fs::write(
         work.path().join("bad.toml"),
         "version = 1\n[owners]\ngroups = [\"x\"]\n",
@@ -4567,6 +4567,14 @@ async fn policy_cli() {
     let ws = create(&daemon, &repo).await;
     let dir = path(&ws);
     write(&ws, "reef-policy.toml", reef_policy::starter("alice"));
+    // The starter summarizes landed history, which needs a description
+    // (R3.16).
+    ok(
+        &daemon,
+        &dir,
+        &["-o", "json", "describe", "-m", "Add a policy"],
+    )
+    .await;
     let at = ok(&daemon, &dir, &["-o", "json", "policy", "check", "-r", "@"]).await;
     assert_eq!(at["path"], "@:reef-policy.toml");
     // No policy on trunk(): nothing lands automatically.
@@ -4721,16 +4729,17 @@ async fn policy_simulate_cli() {
     let dir = path(&ws);
     // `@` adds main's would-be policy and a key; its parent is the
     // synthetic tree.
-    write(&ws, "reef-policy.toml", reef_policy::starter("alice"));
+    // The starter without its `[history]` table: the synthetic history has
+    // no descriptions, which `builtin:description` would block (R3.16).
+    let starter = reef_policy::starter("alice");
+    let starter = &starter[..starter.find("\n# How landed changes").unwrap()];
+    write(&ws, "reef-policy.toml", starter);
     write(&ws, "secrets/key.pem", "-----BEGIN-----\n");
     let work = tempfile::tempdir().unwrap();
     let proposed = work.path().join("proposed.toml");
     std::fs::write(
         &proposed,
-        format!(
-            "{}\n[[forbid]]\nname = \"secrets\"\npaths = [\"secrets/**\"]\n",
-            reef_policy::starter("alice")
-        ),
+        format!("{starter}\n[[forbid]]\nname = \"secrets\"\npaths = [\"secrets/**\"]\n"),
     )
     .unwrap();
     let proposed = proposed.to_str().unwrap();

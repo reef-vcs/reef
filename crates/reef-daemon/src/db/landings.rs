@@ -68,6 +68,8 @@ pub struct LandingRow {
     pub finished_at: Option<Timestamp>,
     /// The batch it is, or was last, in (R3.14).
     pub batch_id: Option<String>,
+    /// The `[history]` table it landed under, as JSON (R3.16).
+    pub history: Option<String>,
 }
 
 /// One change of a landing, as `landing_changes` holds it.
@@ -106,6 +108,9 @@ pub struct LandingChangeRow {
     pub tested_evaluation: Option<String>,
     /// Its position in its batch, from 1.
     pub batch_position: Option<u32>,
+    /// Whether it landed with its description rewritten as a summary
+    /// (R3.16).
+    pub summarized: bool,
 }
 
 /// A landing and its changes.
@@ -135,11 +140,11 @@ pub struct LandingFilter {
 const COLUMNS: &str = "repo_id, id, destination, destination_before, destination_after, outcome,
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
-     remote_token_name, created_at, finished_at, batch_id";
+     remote_token_name, created_at, finished_at, batch_id, history";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
      landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
-     tested_tree, tested_commit, tested_evaluation, batch_position";
+     tested_tree, tested_commit, tested_evaluation, batch_position, summarized";
 
 fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
     Ok(LandingRow {
@@ -166,6 +171,7 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
         created_at: row.get(20)?,
         finished_at: row.get(21)?,
         batch_id: row.get(22)?,
+        history: row.get(23)?,
     })
 }
 
@@ -189,6 +195,7 @@ fn change_from_row(row: &Row<'_>) -> rusqlite::Result<LandingChangeRow> {
         batch_position: row
             .get::<_, Option<i64>>(15)?
             .and_then(|position| u32::try_from(position).ok()),
+        summarized: row.get::<_, i64>(16)? != 0,
     })
 }
 
@@ -197,7 +204,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
         ),
         params![
             row.repo_id,
@@ -223,6 +230,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.created_at,
             row.finished_at,
             row.batch_id,
+            row.history,
         ],
     )?;
     Ok(())
@@ -243,7 +251,7 @@ fn write_changes_in(
             &format!(
                 "INSERT INTO landing_changes(repo_id, landing_id, {CHANGE_COLUMNS})
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18)"
+                         ?17, ?18, ?19)"
             ),
             params![
                 repo,
@@ -264,6 +272,7 @@ fn write_changes_in(
                 change.tested_commit,
                 change.tested_evaluation,
                 change.batch_position.map(i64::from),
+                i64::from(change.summarized),
             ],
         )?;
     }

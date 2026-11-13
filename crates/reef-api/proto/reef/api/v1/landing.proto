@@ -23,6 +23,15 @@
 // carrying that tree. A failing tree is bisected over the batch's
 // prefixes: the passing prefix lands, the first failing change returns to
 // PROPOSED with reason CHECKS, and the rest stay queued.
+//
+// What lands is the landed history projection (R3.16, ADR 0075): one
+// commit per change, with its change id and the tree that was judged and
+// tested. Under the destination policy's `[history] message = "summary"`,
+// each change's description is normalized, `Reef-*` trailers in it are
+// removed, and the trailers the table names are appended; with no
+// `[history]` table, or `message = "keep"`, a change lands as written. A
+// change the destination (or an earlier change of its batch) already
+// holds the edits of returns with reason EMPTY instead of landing empty.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -143,6 +152,10 @@ enum LandingReason {
   // asked for its missing evidence ended without one, or nobody claimed
   // them (R3.14). Not the change's fault; `message` names the jobs.
   LANDING_REASON_UNAVAILABLE = 9;
+  // Rebased onto the destination (and the changes before it in its
+  // batch), the change has nothing left to land: its edits are already
+  // there (R3.16). Withdraw or abandon it.
+  LANDING_REASON_EMPTY = 10;
 }
 
 // One change of a landing.
@@ -185,6 +198,23 @@ message LandedChange {
   PolicyEvaluation tested_evaluation = 15;
   // Its position in the batch, from 1; 0 when it was never in one.
   uint32 batch_position = 16;
+  // Whether it landed with its description rewritten as a summary, under
+  // `[history] message = "summary"` (R3.16): `landed_commit_id` then
+  // differs from `queued_commit_id` even for a fast-forward.
+  bool summarized = 17;
+}
+
+// How a landing wrote its changes on the destination (R3.16): the
+// `[history]` table of the destination's policy it was judged by.
+message LandingHistory {
+  // `summary` (descriptions normalized, with trailers) or `keep` (as
+  // written, the default without a `[history]` table).
+  string message = 1;
+  // The trailer sets a summary appended, in the order written: `change`
+  // (`Reef-Change`), `landing` (`Reef-Landing`, and `Reef-Batch` for a
+  // batch that landed several changes), `agents` (`Reef-Agent`) and
+  // `signoffs` (`Reviewed-by`).
+  repeated string trailers = 2;
 }
 
 // One attempt to land.
@@ -232,6 +262,9 @@ message Landing {
   google.protobuf.Timestamp finished_at = 19;
   // The batch it is, or was last, in (R3.14); empty when none.
   string batch_id = 20;
+  // How it wrote its changes on the destination (R3.16); unset until it
+  // lands, and for landings before R3.16.
+  LandingHistory history = 21;
 }
 
 // Where a batch is (R3.14).

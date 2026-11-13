@@ -102,6 +102,8 @@ pub(crate) enum Next {
 /// The destination policy's `[landing]` table, as a batch reads it.
 struct Settings {
     checks: Checks,
+    /// The `[history]` table (R3.16).
+    history: reef_policy::HistorySettings,
     max: usize,
     wait: Duration,
     loaded: Option<Arc<Loaded>>,
@@ -137,6 +139,8 @@ struct Formed {
     stored: StoredBatch,
     members: Vec<Member>,
     checks: Checks,
+    /// How its members are written on the destination (R3.16).
+    history: reef_policy::HistorySettings,
 }
 
 impl Formed {
@@ -307,6 +311,7 @@ async fn settings(
         .await??;
     let mut settings = Settings {
         checks: Checks::Batch,
+        history: reef_policy::HistorySettings::default(),
         max: usize::try_from(reef_policy::format::DEFAULT_BATCH_MAX).unwrap_or(8),
         wait: Duration::ZERO,
         loaded: None,
@@ -323,6 +328,7 @@ async fn settings(
         if let Loaded::Policy(policy) = &*loaded {
             let table = policy.landing();
             settings.checks = table.checks;
+            settings.history = policy.history().clone();
             settings.max = usize::try_from(table.batch_max).unwrap_or(1).max(1);
             settings.wait = table.batch_wait;
         }
@@ -557,8 +563,11 @@ async fn form(
                 let mut kept = Vec::with_capacity(members.len());
                 for (mut member, found) in members.into_iter().zip(chain.members) {
                     if !found.included {
-                        // It conflicts with an earlier member only: it stays
-                        // queued for the next batch.
+                        // It conflicts with an earlier member only, or an
+                        // earlier member has its edits (R3.16): it stays
+                        // queued for the next batch, which judges it against
+                        // what landed (and returns it `empty` if that is its
+                        // edits).
                         continue;
                     }
                     member.planned = found.tree.unwrap_or_default();
@@ -623,6 +632,7 @@ async fn form(
         stored,
         members,
         checks: settings.checks,
+        history: settings.history.clone(),
     };
     for (index, member) in formed.members.iter_mut().enumerate() {
         member.landing.row.destination_before = Some(base.as_str().to_owned());
@@ -1539,16 +1549,32 @@ async fn land_prefix_part(
     }
     trials.sort();
     trials.dedup();
+    let several = (p > 1).then(|| batch.id().to_owned());
+    let mut planned = Vec::with_capacity(p);
+    for (member, judged) in batch.members[..p].iter().zip(&judged_all) {
+        let facts = super::history::Facts {
+            change: member.target.change.as_str(),
+            landing: &member.landing.row.id,
+            batch: several.as_deref(),
+            evaluation: &judged.evaluation,
+        };
+        let summary = match super::history::summary(&state.db, repo, &batch.history, &facts) {
+            Ok(summary) => summary,
+            Err(error) => {
+                drop_pending(state, &rows);
+                return Err(error.into());
+            }
+        };
+        planned.push(PlannedMember {
+            target: member.target.clone(),
+            tree: Some(member.planned.clone()),
+            summary,
+        });
+    }
     let plan = LandPlan {
         bookmark: batch.destination().to_owned(),
         destination: base,
-        members: batch.members[..p]
-            .iter()
-            .map(|member| PlannedMember {
-                target: member.target.clone(),
-                tree: Some(member.planned.clone()),
-            })
-            .collect(),
+        members: planned,
         trials,
     };
     let written = state
@@ -1568,7 +1594,7 @@ async fn land_prefix_part(
             Arc::clone(&shared),
         )
         .await;
-    let landed: Vec<(String, Option<String>)> = match written {
+    let landed: Vec<(String, Option<String>, bool)> = match written {
         Ok(written) => {
             let Some(op_id) = written.op_id.clone() else {
                 drop_pending(state, &rows);
@@ -1578,7 +1604,13 @@ async fn land_prefix_part(
             written
                 .landed
                 .iter()
-                .map(|member| (member.commit.as_str().to_owned(), member.tree.clone()))
+                .map(|member| {
+                    (
+                        member.commit.as_str().to_owned(),
+                        member.tree.clone(),
+                        member.summarized,
+                    )
+                })
                 .collect()
         }
         Err(error) if !refused_before_writing(&error) => {
@@ -1617,9 +1649,12 @@ async fn land_prefix_part(
                 return Ok(Some(Next::Again));
             }
             batch.stored.row.operation_id = found.first().map(|(op, _)| op.clone());
+            // The operation was this plan's: under `summary` each member's
+            // description was summarized (R3.16).
+            let summarized = batch.history.summarized();
             found
                 .into_iter()
-                .map(|(_, commit)| (commit, None))
+                .map(|(_, commit)| (commit, None, summarized))
                 .collect()
         }
         Err(error) => {
@@ -1640,10 +1675,11 @@ async fn land_prefix_part(
                 .map(Some);
         }
     };
-    let new_head = landed.last().map(|(commit, _)| commit.clone());
+    let new_head = landed.last().map(|(commit, _, _)| commit.clone());
+    let history = super::history::Recorded::of(&batch.history).to_json();
     let op_id = batch.stored.row.operation_id.clone().unwrap_or_default();
     let recorded_at = operation_end(state, repo, &op_id).await;
-    for (index, ((commit, tree), mut row)) in landed.into_iter().zip(rows).enumerate() {
+    for (index, ((commit, tree, summarized), mut row)) in landed.into_iter().zip(rows).enumerate() {
         // The operation is written: a failure to record one change does not
         // stop the others. Start-up commits a pending row from the operation
         // and finishes its landing from the row (`settled`).
@@ -1670,6 +1706,7 @@ async fn land_prefix_part(
             Some(&**judged),
         );
         change.landed_commit = Some(commit);
+        change.summarized = summarized;
         change.landed_tree = tree.or_else(|| Some(member.planned.clone()));
         change.rebased = member.input.rebased;
         change.overlap = Some(
@@ -1685,6 +1722,7 @@ async fn land_prefix_part(
         landing.changes = vec![change];
         record_policy(landing, judged);
         landing.row.destination_after.clone_from(&new_head);
+        landing.row.history = Some(history.clone());
         landing.row.operation_id = Some(op_id.clone());
         Outcome::Landed
             .as_str()
@@ -1751,7 +1789,9 @@ async fn refused(
     };
     let named = match error {
         ManagerError::Land(
-            LandError::Amended { change, .. } | LandError::PlanMismatch { change, .. },
+            LandError::Amended { change, .. }
+            | LandError::PlanMismatch { change, .. }
+            | LandError::Empty(change),
         ) => by_change(change),
         ManagerError::Land(
             LandError::UnlandedParents { commit, .. }
@@ -1767,6 +1807,7 @@ async fn refused(
             Reason::Conflicted
         }
         ManagerError::Land(LandError::UnlandedParents { .. }) => Reason::UnlandedParents,
+        ManagerError::Land(LandError::Empty(_)) => Reason::Empty,
         ManagerError::Land(
             LandError::DestinationNotFound(_)
             | LandError::DestinationConflicted(_)

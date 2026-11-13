@@ -1,0 +1,106 @@
+{
+  "cost": 0,
+  "decision": "block",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 2,
+    "evidence_ignored": 0,
+    "lines_added": 1,
+    "lines_removed": 1,
+    "paths": 1,
+    "provenance": 0
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "a change landing on this branch needs a description, which is its summary in the landed history: `reef describe s1 -m \"<summary>\"`, then propose it again",
+      "missing": [],
+      "name": "builtin:description",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "unsatisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [
+        "ev-new-pass"
+      ],
+      "failed": [],
+      "kind": "require",
+      "message": "",
+      "missing": [],
+      "name": "tests",
+      "paths": [
+        "README.md"
+      ],
+      "paths_total": 1,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "forbid",
+      "message": "",
+      "missing": [],
+      "name": "keys",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    }
+  ],
+  "sha256": "9b3cbe806242561d71859e2b54b964b84834b4fddd928da70cc6a20e2d89e100",
+  "version": 1
+}

@@ -199,6 +199,30 @@ pub(crate) struct LandedChange {
     pub(crate) tested_evaluation: Option<Evaluation>,
     /// Its position in its batch, from 1; `null` when it was never in one.
     pub(crate) batch_position: Option<u32>,
+    /// Whether it landed with its description rewritten as a summary
+    /// (R3.16, the destination policy's `[history] message = "summary"`).
+    pub(crate) summarized: bool,
+}
+
+/// How a landing wrote its changes on the destination (R3.16).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LandingHistory {
+    /// `summary` or `keep`.
+    pub(crate) message: String,
+    /// The trailer sets a summary appended, in order: `change`, `landing`,
+    /// `agents`, `signoffs`.
+    pub(crate) trailers: Vec<String>,
+}
+
+impl LandingHistory {
+    /// `summary (trailers change, landing)`, or `keep`.
+    fn text(&self) -> String {
+        if self.trailers.is_empty() {
+            self.message.clone()
+        } else {
+            format!("{} (trailers {})", self.message, self.trailers.join(", "))
+        }
+    }
 }
 
 /// One landing (`reef land`, `reef landing show`, each of `reef landing
@@ -216,11 +240,14 @@ pub(crate) struct Landing {
     /// `blocked`, `queued`, `landed`, `dequeued` or `cancelled`.
     pub(crate) outcome: String,
     /// For blocked and dequeued: `policy`, `conflicted`, `unlanded_parents`,
-    /// `amended`, `destination`, `busy`, `failed`, `checks` or
-    /// `unavailable`.
+    /// `amended`, `destination`, `busy`, `failed`, `checks`,
+    /// `unavailable` or `empty`.
     pub(crate) reason: Option<String>,
     /// The batch it is, or was last, in (R3.14).
     pub(crate) batch_id: Option<String>,
+    /// How it wrote its changes on the destination (R3.16); `null` until
+    /// it lands.
+    pub(crate) history: Option<LandingHistory>,
     /// More about the reason.
     pub(crate) message: Option<String>,
     /// The changes, in landing order.
@@ -302,6 +329,10 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
         outcome: word(message.outcome().as_str_name(), "LANDING_OUTCOME_").unwrap_or_default(),
         reason: word(message.reason().as_str_name(), "LANDING_REASON_"),
         batch_id: some(&message.batch_id),
+        history: message.history.as_ref().map(|history| LandingHistory {
+            message: history.message.clone(),
+            trailers: history.trailers.clone(),
+        }),
         message: some(&message.message),
         changes: message
             .changes
@@ -334,6 +365,7 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
                 tested_commit_id: some(&change.tested_commit_id),
                 tested_evaluation: change.tested_evaluation.as_ref().map(evaluation_of),
                 batch_position: (change.batch_position > 0).then_some(change.batch_position),
+                summarized: change.summarized,
             })
             .collect(),
         attempts: message.attempts,
@@ -449,6 +481,15 @@ fn advice_for(landing: &Landing) -> Advice {
         (Some("unavailable" | "checks"), Some(batch)) => {
             Advice::run(words, ["reef", "landing", "batch", batch])
         }
+        (Some("empty"), _) if !landing.changes.is_empty() => Advice::run(
+            words,
+            [
+                "reef",
+                "proposal",
+                "withdraw",
+                landing.changes[0].change_id.as_str(),
+            ],
+        ),
         _ => Advice::run(words, ["reef", "landing", "show", landing.id.as_str()]),
     }
 }
@@ -476,6 +517,10 @@ fn next_words(landing: &Landing) -> String {
         Some("amended") => "The change moved since it was proposed: `reef propose` it again, then land.".to_owned(),
         Some("destination") => "The destination bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`.".to_owned(),
         Some("busy") => "The destination kept moving: land again.".to_owned(),
+        Some("empty") => format!(
+            "Its changes are already on {}, so there is nothing to land: withdraw the proposal (`reef proposal withdraw`), or abandon the change.",
+            landing.destination
+        ),
         Some("checks") => {
             let failed: Vec<String> = first
                 .and_then(|change| change.tested_evaluation.as_ref())
@@ -610,6 +655,9 @@ impl TextRender for Landing {
             if change.rebased {
                 words.push_str(" (rebased)");
             }
+            if change.summarized {
+                words.push_str(" (summarized)");
+            }
             pairs.push(("change", words));
             if change.overlap_total > 0 {
                 pairs.push((
@@ -651,6 +699,9 @@ impl TextRender for Landing {
                 .map(|position| format!(" (position {position})"))
                 .unwrap_or_default();
             pairs.push(("batch", format!("{batch}{position}")));
+        }
+        if let Some(history) = &self.history {
+            pairs.push(("history", history.text()));
         }
         if let Some(message) = &self.message {
             pairs.push(("why", message.clone()));
@@ -1006,5 +1057,42 @@ impl TextRow for LandingBatch {
             self.landed_count.to_string(),
             self.created_at.clone().unwrap_or_else(|| "-".to_owned()),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_landing_advises_withdrawing() {
+        let landing = landing_of(&v1::Landing {
+            id: "lnd_0000000000000001".to_owned(),
+            destination: "main".to_owned(),
+            outcome: v1::LandingOutcome::Dequeued.into(),
+            reason: v1::LandingReason::Empty.into(),
+            changes: vec![v1::LandedChange {
+                change_id: "0123456789abcdef0123456789abcdef".to_owned(),
+                ..v1::LandedChange::default()
+            }],
+            history: Some(v1::LandingHistory {
+                message: "summary".to_owned(),
+                trailers: vec!["change".to_owned()],
+            }),
+            ..v1::Landing::default()
+        });
+        assert_eq!(landing.reason.as_deref(), Some("empty"));
+        assert_eq!(landing.history.as_ref().unwrap().message, "summary");
+        let advice = advice_for(&landing);
+        assert!(advice.hint.contains("already on main"), "{advice:?}");
+        assert_eq!(
+            advice.next,
+            [
+                "reef",
+                "proposal",
+                "withdraw",
+                "0123456789abcdef0123456789abcdef"
+            ]
+        );
     }
 }

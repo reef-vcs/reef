@@ -1108,6 +1108,7 @@ async fn simulate_over_landings() {
         [
             "builtin:input",
             "builtin:conflicts",
+            "builtin:description",
             "builtin:policy-file",
             "builtin:owners",
             "tests",

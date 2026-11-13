@@ -42,6 +42,18 @@
       "kind": "builtin",
       "message": "",
       "missing": [],
+      "name": "builtin:description",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
       "name": "builtin:policy-file",
       "paths": [],
       "paths_total": 0,
@@ -89,6 +101,6 @@
       "status": "satisfied"
     }
   ],
-  "sha256": "77289c46df9f6bc3c2c686ee49ee8829d14b3bfa5832a5d4be134a7a43fe6fb6",
+  "sha256": "9b3cbe806242561d71859e2b54b964b84834b4fddd928da70cc6a20e2d89e100",
   "version": 1
 }

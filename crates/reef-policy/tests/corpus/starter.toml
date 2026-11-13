@@ -24,3 +24,7 @@ tier = "approve"
 paths = ["docs/**"]
 tier = "land"
 attempts = 5
+
+[history]
+message = "summary"
+trailers = ["change", "landing"]

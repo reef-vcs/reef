@@ -86,3 +86,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0072](0072-default-workspace-root.md) | Default workspace root outside the state directory | accepted |
 | [0073](0073-laptop-resource-budget.md) | Five tickets at once on a standard laptop | accepted (amended by [0074](0074-build-limit-jobserver.md)) |
 | [0074](0074-build-limit-jobserver.md) | The build limit: one FIFO, recovered by its holders | accepted |
+| [0075](0075-landed-history-projection.md) | Landed history projection | accepted |

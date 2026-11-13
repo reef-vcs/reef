@@ -90,7 +90,7 @@ Five object kinds, all content-addressed and stored in one Merkle structure. Thr
 
 **Provenance.** Each snapshot carries a provenance record: agent identity, model and version, session ID, originating task reference, a hash of the instruction that produced the change, and a signature over all of it. The record is kept beside the snapshot, keyed by its commit and found by its change, never written into it, so git export does not carry it. This is what makes a thousand agent commits auditable after the fact.
 
-**Published versus working history.** The operation log keeps every agent step. Landed history is a curated projection that policy produces at landing time, so squashing is a rule rather than a chore and humans read a legible history without agents losing their undo trail.
+**Published versus working history.** The operation log keeps every agent step. Landed history is a curated projection that policy produces at landing time, so squashing is a rule rather than a chore and humans read a legible history without agents losing their undo trail. The projection keeps one commit per change, its description summarized with trailers when the destination's policy asks for it ([docs/landing.md](landing.md#what-lands-on-the-destination), [ADR 0075](adr/0075-landed-history-projection.md)).
 
 ## Workspaces
 

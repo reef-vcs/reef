@@ -6,6 +6,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Upgrading
 
+- The daemon's database becomes schema 18 (`0018_history`, R3.16) the first time this daemon opens it, and serves API revision 32. Nothing changes in landed commits until a destination's `reef-policy.toml` gains a `[history]` table, which is `invalid_policy` to an older daemon; `reef policy init` now writes one. Under `message = "summary"` a change with no description is blocked at the gate (`builtin:description`), and every evaluation now reports that built-in rule.
 - New workspaces of the default state directory go in `~/.reef/<repo-short>/<ws-id>` (#260, ADR 0072): `<repo-short>` is the repository id's first 8 hex characters, and the path has no space and leaves room for a socket. Workspaces created before the upgrade stay at `<state>/repos/<repo-id>/ws/<ws-id>` and keep working until released. A configured `[workspace] root`, and a daemon given its own `REEF_STATE_DIR`, are unchanged. `[workspace] root` accepts a `<repo-short>` placeholder.
 - The daemon's database becomes schema 7 (`0007_evidence`, R3.01) the first time this daemon opens it. An older daemon then refuses the database, as with every migration: restore a backup taken before the upgrade to go back.
 - The daemon's database becomes schema 8 (`0008_artifacts`, R3.02) the first time this daemon opens it, and the same start indexes, once, the artifact digests of the evidence already stored.
@@ -111,10 +112,13 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 - `DescribeChangeRequest.signoff` and `reset_author`, and `reef describe --signoff` and `--reset-author`: a `Signed-off-by` trailer for the daemon's `[identity]`, and an author reset, each refused while the identity is the default (`IDENTITY_UNSET`).
 - `[publish]` in the daemon's configuration: `enabled`, `remotes`, `branch_prefix`, `timeout`, `github_hosts`, `gitlab_hosts`.
 - Onboarding benchmark scenario F: after `reef init`, push the change to a review branch on a bare `origin`.
+- The landed history projection (R3.16, [ADR 0075](docs/adr/0075-landed-history-projection.md), [docs/landing.md](docs/landing.md#what-lands-on-the-destination)): the destination policy's `[history]` table (`message = "summary"` or `"keep"`, and `trailers`, from `change`, `landing`, `agents` and `signoffs`) decides how each landed change is written, one commit per change with its change id and tree. A summary is the change's own description, normalized, with every `Reef-*` trailer in it (and `Reviewed-by` under `signoffs`) replaced by the projection's `Reef-Change`, `Reef-Landing`, `Reef-Batch`, `Reef-Agent` and `Reviewed-by` trailers; the built-in rule `builtin:description` keeps undescribed changes off a summarized branch. `LandingHistory`, `Landing.history`, `LandedChange.summarized` and `LANDING_REASON_EMPTY` (API revision 32); `reef landing show` prints the history and which changes were summarized.
 
 ### Changed
 
 - `reef ws run` commands and store builds run at niceness 10 (`[build] nice`), never lowering a higher one (#271).
+- A change whose edits are already on its destination no longer lands as an empty commit: it is blocked at the gate, or returned from its batch, with reason `empty` (R3.16); one whose edits an earlier change of its batch makes waits for that change to land first, and `reef land`'s `next` is `reef proposal withdraw`.
+
 - R1.16's `local` flag is cleared for the snapshots a publish pushed, including one a describe in the same publish rewrote without changing its files, and the reindex after GC keeps it cleared by the same rule against every remote bookmark. `reef here`'s in-workspace hints and the agent guide's long form name `reef publish`. `reef op log --kind` and MCP's kind enums gain `conflict-assignment`, which R3.27 left out.
 
 - A landed change's evidence on its batch's tested tree is kept for good too, and every workspace on any change a batch lands gets a new empty change. Trial commits show in the log while their batch tests, and the landing service's `batch` operations cannot be undone.

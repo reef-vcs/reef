@@ -466,6 +466,44 @@ impl Policy {
         })
     }
 
+    /// `builtin:description` (R3.16): on a branch whose `[history]`
+    /// summarizes landed changes, a change needs a description, since the
+    /// summary is its description.
+    fn description(&self, input: &Input) -> RuleResult {
+        const NAME: &str = "builtin:description";
+        if !self.history.summarized() {
+            return RuleResult::new(NAME, RuleKind::Builtin, Status::NotApplicable);
+        }
+        // What the summary keeps (reef_lib::jj::projection::normalize):
+        // anything but whitespace, control characters and invisible
+        // formatting characters.
+        let visible = |c: char| {
+            !c.is_whitespace()
+                && !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{2069}'
+                        | '\u{FEFF}'
+                )
+        };
+        if input.change.description.chars().any(visible) {
+            return RuleResult::new(NAME, RuleKind::Builtin, Status::Satisfied);
+        }
+        let branch = match input.landing.destination.as_str() {
+            "" => "this branch".to_owned(),
+            destination => destination.to_owned(),
+        };
+        let id = match input.change.id.as_str() {
+            "" => "<change>",
+            id => id,
+        };
+        RuleResult::new(NAME, RuleKind::Builtin, Status::Unsatisfied).with_message(format!(
+            "a change landing on {branch} needs a description, which is its summary in the landed history: `reef describe {id} -m \"<summary>\"`, then propose it again"
+        ))
+    }
+
     #[allow(clippy::too_many_lines)]
     fn evaluate_here(&self, input: &Input) -> Evaluation {
         let mut evaluator = self.prepare(input);
@@ -481,6 +519,7 @@ impl Policy {
         } else {
             RuleResult::new("builtin:conflicts", RuleKind::Builtin, Status::Satisfied)
         });
+        rules.push(self.description(&evaluator.input));
         rules.push(policy_file(&evaluator.input));
         rules.push(self.signoff(&mut evaluator, &self.owners, RuleKind::Builtin));
         for entry in &self.entries {
