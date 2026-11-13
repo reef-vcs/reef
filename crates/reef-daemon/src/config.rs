@@ -189,6 +189,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
             "timeout",
             "github_hosts",
             "gitlab_hosts",
+            "landings",
         ],
     ),
     ("ui", &["enabled", "listen"]),
@@ -1044,6 +1045,10 @@ pub struct PublishSection {
     pub github_hosts: Vec<String>,
     /// Self-hosted hosts treated as GitLab for the pull-request hint.
     pub gitlab_hosts: Vec<String>,
+    /// `false` turns off pushing landed history only (R3.17): destinations
+    /// whose policy says `[landing] push` still land, and read `disabled`.
+    /// Default `true`; `enabled = false` turns those pushes off too.
+    pub landings: bool,
 }
 
 impl Default for PublishSection {
@@ -1055,6 +1060,7 @@ impl Default for PublishSection {
             timeout: Duration::from_mins(5),
             github_hosts: Vec::new(),
             gitlab_hosts: Vec::new(),
+            landings: true,
         }
     }
 }
@@ -2220,6 +2226,7 @@ impl Config {
                     ("timeout", d(f.publish.timeout)),
                     ("github_hosts", strings(&f.publish.github_hosts)),
                     ("gitlab_hosts", strings(&f.publish.gitlab_hosts)),
+                    ("landings", f.publish.landings.to_string()),
                 ],
             ),
             (

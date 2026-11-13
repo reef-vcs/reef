@@ -1,6 +1,6 @@
 # Publishing a change to a git remote
 
-`reef publish` sends a change to a branch on one of the repository's git remotes, so it can be reviewed as a pull request on the host. It is how work leaves the machine before the landing service pushes landed history itself (R3.17). The decision record is [ADR 0070](adr/0070-publishing-to-a-git-remote.md); the RPC is `GitService.PublishChange`, and MCP's tool is `publish_change`.
+`reef publish` sends a change to a branch on one of the repository's git remotes, so it can be reviewed as a pull request on the host. It is how a change leaves the machine for review; the landing service pushes landed history itself when the destination's policy says `[landing] push` (R3.17, [landing](landing.md#pushing-landed-history)). The decision record is [ADR 0070](adr/0070-publishing-to-a-git-remote.md); the RPC is `GitService.PublishChange`, and MCP's tool is `publish_change`.
 
 ```sh
 reef ws run -- sh -c 'echo note >> README.md && reef publish -m "Add a note"'
@@ -37,7 +37,7 @@ Publishing again updates the same branch: an amended change replaces its earlier
 
 - **The branch** is `--branch NAME`, or by default `[publish] branch_prefix` (`reef/`) and the first 12 letters of the change id in jj's form: `reef/kxyzwqrsmtlo`. An amendment never changes the change id, so the branch stays the same. A branch is 1 to 200 bytes of letters, digits, `.`, `_`, `/` and `-`, not starting with `-`, `.` or `/`, not ending with `/`, `.` or `.lock`, without `//`, `..` or `@{`, and not `HEAD` (`INVALID_BRANCH`).
 - **The remote** is `--git-remote NAME`, or the only configured remote, or `origin`. With several and no `origin`, name one (`GIT_REMOTE_REQUIRED`, which lists them). It must be a remote the repository configures (`git remote`): a URL is never accepted (`INVALID_GIT_REMOTE`, `GIT_REMOTE_NOT_FOUND`). A remote added while the daemon runs counts at the next publish.
-- **Never trunk.** The branch of `trunk()`'s bookmark, the remote's HEAD branch, a branch whose remote commit is immutable, and the branch checked out in the repository's own git working tree are refused (`BRANCH_NOT_PUBLISHABLE`, with `why`). Landing on `main` is `reef land`, not a review branch. `trunk()` is the first of `main`, origin's HEAD branch, `master` and `trunk` that exists, locally or on `origin` ([ADR 0022](adr/0022-shared-dependency-stores.md) decision 8), and the remote's HEAD is what `refs/remotes/<remote>/HEAD` says, which a `git clone` sets and a `git remote add` does not (`git remote set-head <remote> --auto` sets it). A default branch with another name, or a release branch, is protected only by the host: a publish that fast-forwards it with `--branch` is allowed. Use the host's branch protection for them.
+- **Never trunk.** The branch of `trunk()`'s bookmark, the remote's HEAD branch, a branch whose remote commit is immutable, and the branch checked out in the repository's own git working tree are refused (`BRANCH_NOT_PUBLISHABLE`, with `why`). Landing on `main` is `reef land`, not a review branch, and a destination whose policy says `[landing] push` is pushed by the landing service through this same push path ([landing](landing.md#pushing-landed-history)). `trunk()` is the first of `main`, origin's HEAD branch, `master` and `trunk` that exists, locally or on `origin` ([ADR 0022](adr/0022-shared-dependency-stores.md) decision 8), and the remote's HEAD is what `refs/remotes/<remote>/HEAD` says, which a `git clone` sets and a `git remote add` does not (`git remote set-head <remote> --auto` sets it). A default branch with another name, or a release branch, is protected only by the host: a publish that fast-forwards it with `--branch` is allowed. Use the host's branch protection for them.
 
 ## What is pushed, and what is refused
 
@@ -147,6 +147,7 @@ An operator can limit it:
 | `branch_prefix` | `"reef/"` | the default branch's prefix; empty for none |
 | `timeout` | `"5m"` | how long a request waits for the push, from 10 s to 1 h |
 | `github_hosts`, `gitlab_hosts` | `[]` | self-hosted hosts treated as GitHub or GitLab for the command |
+| `landings` | `true` | `false` stops pushing landed history only (R3.17): pushing destinations still land, and read `disabled`; `enabled`, `remotes` and `timeout` apply to those pushes too |
 
 A harness sandbox that denies an agent the network but lets it reach Reef's socket or `reef mcp` lets it push its change to a configured remote with your credentials: deny the socket, or set `enabled = false` or `remotes` ([threat model](threat-model.md#harness-sandboxes)).
 
@@ -155,4 +156,4 @@ A harness sandbox that denies an agent the network but lets it reach Reef's sock
 - A policy or checks gate before a publish.
 - Stacked pull requests: each change of a stack on its own branch, based on its parent's.
 - Publishing through the remote listener, and forwarding a remote client's SSH agent.
-- A native gitoxide push (R4.14) and the landing service's push of landed history (R3.17), which reuse this plan, lease and record.
+- A native gitoxide push (R4.14), which replaces the subprocess under this push and the landing service's (R3.17).

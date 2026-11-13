@@ -21,6 +21,7 @@
 mod batch;
 mod history;
 pub mod messages;
+pub(crate) mod push;
 mod worker;
 
 use std::collections::HashMap;
@@ -48,6 +49,7 @@ use crate::service::policy as policy_input;
 use crate::workspace::ManagerError;
 
 pub use batch::{AGENT as BATCH_AGENT, BATCH_PRIORITY, BATCH_QUEUE_TIMEOUT, MAX_TRIAL_ATTEMPTS};
+pub use push::Pushes;
 pub(crate) use worker::operation_end;
 pub use worker::start;
 
@@ -251,6 +253,19 @@ pub enum LandingError {
     /// The policy input could not be read.
     #[error("read the policy input: {0}")]
     Input(String),
+    /// The destination pushes to a git remote (R3.17) and the daemon's
+    /// `[identity]` is the default.
+    #[error(
+        "{destination} is pushed to a git remote and the daemon's identity is the default reef <{email}>"
+    )]
+    IdentityUnset {
+        /// The destination.
+        destination: String,
+        /// The default email.
+        email: String,
+        /// The daemon's config file.
+        config: std::path::PathBuf,
+    },
 }
 
 impl Classify for LandingError {
@@ -260,7 +275,8 @@ impl Classify for LandingError {
             | Self::Amended { .. }
             | Self::DestinationNotLocal(_)
             | Self::DestinationNotFound(_)
-            | Self::DestinationConflicted(_) => ErrorKind::Conflict,
+            | Self::DestinationConflicted(_)
+            | Self::IdentityUnset { .. } => ErrorKind::Conflict,
             Self::QueueFull => ErrorKind::Unavailable,
             Self::InvalidWait | Self::Selector => ErrorKind::InvalidArgument,
             Self::NotFound(_) | Self::BatchNotFound(_) => ErrorKind::NotFound,
@@ -329,6 +345,10 @@ impl Advise for LandingError {
                 "List the repository's batches.",
                 ["reef", "landing", "batches"],
             )),
+            Self::IdentityUnset { config, .. } => Some(Advice::hint(format!(
+                "Landed commits on this branch reach its git remote, so the daemon's identity must be yours: set [identity] name and email in {}, then restart the daemon (`reef daemon stop`; the next reef command starts it).",
+                config.display()
+            ))),
             _ => None,
         }
     }
@@ -371,6 +391,10 @@ impl LandingError {
                 vec![("destination", name.clone())],
             ),
             Self::QueueFull => (reason::QUEUE_FULL, vec![("max", MAX_QUEUED.to_string())]),
+            Self::IdentityUnset { destination, .. } => (
+                reason::IDENTITY_UNSET,
+                vec![("destination", destination.clone())],
+            ),
             Self::InvalidWait => (
                 reason::INVALID_WAIT,
                 vec![("max", MAX_WAIT.as_millis().to_string())],
@@ -450,6 +474,13 @@ pub(crate) struct Requester {
     /// The agent as sent, still marked with its remote token, for
     /// `reef.agent`.
     pub(crate) marked: Option<String>,
+}
+
+/// Whether the policy a judgment ran says `[landing] push` (R3.17).
+fn pushes(state: &AppState, policy: &PolicyUsed) -> bool {
+    policy.bytes.as_deref().is_some_and(|bytes| {
+        matches!(&*state.policy.load(bytes), crate::policy::Loaded::Policy(policy) if policy.landing().push.is_some())
+    })
 }
 
 /// The policy bytes a judgment ran, and where they came from.
@@ -962,6 +993,8 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         finished_at: None,
         batch_id: None,
         history: None,
+        pushed_at: None,
+        push_operation_id: None,
     }
 }
 
@@ -1203,6 +1236,15 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
         }
         Verdict::Allow(judged) => judged,
     };
+    // A destination pushed to a git remote takes no landing while the
+    // daemon's identity is the default (R3.17): it would reach the host.
+    if state.config.identity_is_default() && pushes(state, &judged.policy) {
+        return Err(LandingError::IdentityUnset {
+            destination,
+            email: state.config.identity.email.clone(),
+            config: state.config.paths.config_file.clone(),
+        });
+    }
 
     // Queue it: the row must still be proposed at the commit judged.
     let create_lock = state.manager.repo_lock(repo);

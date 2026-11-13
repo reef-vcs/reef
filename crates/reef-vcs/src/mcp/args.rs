@@ -457,6 +457,16 @@ pub(super) struct PublishChange {
     pub(super) description: Option<String>,
 }
 
+/// `push_landed`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PushLanded {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// The landing destination (default: trunk's bookmark).
+    pub(super) destination: Option<String>,
+}
+
 /// `rebase_change`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

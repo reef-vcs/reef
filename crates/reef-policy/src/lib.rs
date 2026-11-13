@@ -43,7 +43,7 @@ pub use eval::{
 };
 pub use format::{
     Checks, Diagnostic, HistorySettings, LandingSettings, Message, Policy, Tier, TrailerSet,
-    VERSION,
+    VERSION, valid_remote_name,
 };
 pub use input::{Batch, Case, ConflictInput, Input};
 
@@ -171,6 +171,9 @@ checks = "batch"
 # batch_max = 8
 # batch_wait = "0s"
 # alone = ["migrations/**"]
+# Push each landing to this git remote, onto the branch of the same name, fast
+# forward only (docs/landing.md "Pushing landed history").
+# push = "origin"
 
 # How landed changes are written on this branch (docs/landing.md). "summary"
 # keeps each change's description, removes Reef-* trailers from it, and adds

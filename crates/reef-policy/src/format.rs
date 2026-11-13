@@ -139,6 +139,7 @@ struct RawLanding {
     batch_wait: Option<Text>,
     #[serde(default)]
     alone: List,
+    push: Option<Text>,
 }
 
 #[derive(Deserialize)]
@@ -431,6 +432,10 @@ pub struct LandingSettings {
     pub batch_wait: std::time::Duration,
     /// Paths whose changes land in a batch of their own.
     pub alone: Patterns,
+    /// The git remote each landing's destination is pushed to, after the
+    /// landing, onto the branch of the destination's own name (R3.17, ADR
+    /// 0077); `None` when the destination does not push.
+    pub push: Option<String>,
 }
 
 impl Default for LandingSettings {
@@ -440,8 +445,21 @@ impl Default for LandingSettings {
             batch_max: DEFAULT_BATCH_MAX,
             batch_wait: std::time::Duration::ZERO,
             alone: Patterns::empty(),
+            push: None,
         }
     }
+}
+
+/// Whether `name` can be `[landing] push`: a git remote's name, never a
+/// URL (R3.17). The same rule as the push path's (#258): a letter or
+/// digit, then up to 99 of letters, digits, `.`, `_` and `-`, and not
+/// `git`, which jj reserves.
+pub fn valid_remote_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.len() <= 100
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && name != "git"
 }
 
 impl LandingSettings {
@@ -1755,6 +1773,21 @@ impl Loader<'_> {
             }
         }
         settings.alone = self.patterns("landing", "alone", &raw.alone);
+        if let Some(push) = &raw.push {
+            if valid_remote_name(push.get_ref()) {
+                settings.push = Some(push.get_ref().clone());
+            } else {
+                self.at(
+                    "landing",
+                    "push",
+                    push.span().start,
+                    format!(
+                        "{:?} is not a git remote's name (letters, digits, '.', '_', '-'; not a URL, not \"git\")",
+                        push.get_ref()
+                    ),
+                );
+            }
+        }
         settings
     }
 
@@ -2117,6 +2150,22 @@ message = "every commit of the change has a signed, bound provenance record"
             "is not a duration",
         );
         one(&with("[landing]\nautomatic = true\n"), "unknown field");
+        assert_eq!(landing.push, None);
+        let pushing = Policy::load(with("[landing]\npush = \"origin\"\n").as_bytes()).unwrap();
+        assert_eq!(pushing.landing().push.as_deref(), Some("origin"));
+        for bad in [
+            "https://github.com/a/b.git",
+            "git@github.com:a/b",
+            "git",
+            "-x",
+            "",
+            "a b",
+        ] {
+            one(
+                &with(&format!("[landing]\npush = {bad:?}\n")),
+                "is not a git remote's name",
+            );
+        }
         one(&with("[landing]\nalone = [\"a/[\"]\n"), "pattern \"a/[\"");
     }
 

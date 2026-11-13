@@ -18,6 +18,13 @@
 //!    reported missing and left as it is in the view: it is never deleted
 //!    by a fetch Reef runs, which may have named the wrong remote. Tags are
 //!    not fetched, and unreachable commits are not abandoned.
+//!
+//! **Followed bookmarks** (R3.17, ADR 0077 decision 7). A landing
+//! destination that pushes to the remote is never merged by a fetch, tracked
+//! or not: it is fast-forwarded to the fetched commit when it is an ancestor
+//! of it and the policy files are unchanged, and otherwise left exactly as it
+//! is ([`Left`]). A merge would leave it conflicted, which stops every
+//! landing onto it.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -71,6 +78,25 @@ pub struct FetchedRefs {
     pub refs: Vec<FetchedRef>,
 }
 
+/// Why a followed bookmark was left where it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// Neither it nor the fetched commit contains the other.
+    Diverged,
+    /// The fetched commit is ahead, but changes a policy file.
+    Policy,
+}
+
+impl Left {
+    /// The word for output and records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Left::Diverged => "diverged",
+            Left::Policy => "policy",
+        }
+    }
+}
+
 /// One branch as [`Repo::record_fetch`] recorded it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedBranch {
@@ -87,6 +113,8 @@ pub struct RecordedBranch {
     /// A tracked local bookmark that is git's checked-out branch, left as
     /// it is.
     pub checked_out_left: bool,
+    /// A followed bookmark left where it is, and why.
+    pub left: Option<Left>,
 }
 
 /// What [`Repo::record_fetch`] wrote.
@@ -339,7 +367,26 @@ impl Repo {
         fetched: &FetchedRefs,
         meta: &OpMeta,
     ) -> Result<RecordedFetch, FetchError> {
+        self.record_fetch_following(fetched, &[], meta).await
+    }
+
+    /// [`Repo::record_fetch`] with `follow`, the local bookmarks that are
+    /// only ever fast-forwarded (see the module docs): a followed bookmark
+    /// behind its remote bookmark is fast-forwarded even when the fetch
+    /// found the remote unchanged.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "jj's import replayed in order, with the followed bookmarks"
+    )]
+    pub async fn record_fetch_following(
+        &mut self,
+        fetched: &FetchedRefs,
+        follow: &[String],
+        meta: &OpMeta,
+    ) -> Result<RecordedFetch, FetchError> {
         let repo = Arc::clone(&self.repo);
+        let followed = |branch: &str| follow.iter().any(|name| name == branch);
+        let mut catch_up: Vec<(usize, CommitId)> = Vec::new();
         let remote = RemoteName::new(&fetched.remote);
         let checked_out = checked_out_branch(&repo);
         let mut branches = Vec::with_capacity(fetched.refs.len());
@@ -356,11 +403,15 @@ impl Repo {
                     local_moved: false,
                     missing: true,
                     checked_out_left: false,
+                    left: None,
                 });
                 continue;
             };
             let new = commit.to_id();
             if old.target.as_normal() == Some(&new) {
+                if followed(&fetched_ref.branch) {
+                    catch_up.push((branches.len(), new.clone()));
+                }
                 branches.push(RecordedBranch {
                     branch: fetched_ref.branch.clone(),
                     commit: Some(commit.clone()),
@@ -368,12 +419,25 @@ impl Repo {
                     local_moved: false,
                     missing: false,
                     checked_out_left: false,
+                    left: None,
                 });
                 continue;
             }
             updates.push((fetched_ref, old, new));
         }
-        if updates.is_empty() {
+        // A followed bookmark the remote is already ahead of, from an
+        // earlier fetch or someone else's: fast-forward it in this one.
+        let mut catch_up_moves: Vec<(usize, CommitId)> = Vec::new();
+        for (position, new) in catch_up {
+            let name = RefName::new(&branches[position].branch);
+            let local = repo.view().get_local_bookmark(name).clone();
+            match follow_target(repo.as_ref(), &local, &new).await? {
+                Follow::Move => catch_up_moves.push((position, new)),
+                Follow::Stay => {}
+                Follow::Leave(why) => branches[position].left = Some(why),
+            }
+        }
+        if updates.is_empty() && catch_up_moves.is_empty() {
             return Ok(RecordedFetch {
                 op_id: None,
                 remote: fetched.remote.clone(),
@@ -395,6 +459,12 @@ impl Repo {
         let mut tx = repo.start_transaction();
         tx.repo_mut().index_commits(&commits).await?;
         tx.repo_mut().add_heads(&commits).await?;
+        for (position, new) in catch_up_moves {
+            let name = RefName::new(&branches[position].branch);
+            tx.repo_mut()
+                .set_local_bookmark_target(name, RefTarget::normal(new));
+            branches[position].local_moved = true;
+        }
         for (fetched_ref, old, new) in updates {
             let name = RefName::new(&fetched_ref.branch);
             let symbol = name.to_remote_symbol(remote);
@@ -410,7 +480,19 @@ impl Repo {
             };
             let is_checked_out = checked_out.as_deref() == Some(fetched_ref.branch.as_str());
             let before = tx.repo().view().get_local_bookmark(name).clone();
-            if new_ref.is_tracked() && !is_checked_out {
+            let mut left = None;
+            if followed(&fetched_ref.branch) {
+                // Fast-forward only, tracked or not, checked out or not: a
+                // landing moves a checked-out destination too (R3.13). The
+                // transaction's index has the fetched commits.
+                match follow_target(tx.repo(), &before, &new).await? {
+                    Follow::Move => tx
+                        .repo_mut()
+                        .set_local_bookmark_target(name, RefTarget::normal(new.clone())),
+                    Follow::Stay => {}
+                    Follow::Leave(why) => left = Some(why),
+                }
+            } else if new_ref.is_tracked() && !is_checked_out {
                 let base = merge_base(&repo, &before, &old).await?;
                 tx.repo_mut()
                     .merge_local_bookmark(name, &base, &target)
@@ -424,7 +506,10 @@ impl Repo {
                 previous: old.target.as_normal().map(CommitIdHex::of),
                 local_moved,
                 missing: false,
-                checked_out_left: is_checked_out && old.state == RemoteRefState::Tracked,
+                checked_out_left: !followed(&fetched_ref.branch)
+                    && is_checked_out
+                    && old.state == RemoteRefState::Tracked,
+                left,
             });
         }
         branches.sort_by(|a, b| {
@@ -458,6 +543,42 @@ async fn merge_base(
         }
         _ => old.tracked_target().clone(),
     })
+}
+
+/// What a fetch does with a followed bookmark.
+enum Follow {
+    /// Fast-forward it to the fetched commit.
+    Move,
+    /// Nothing: it is absent, at the commit, or ahead of it.
+    Stay,
+    /// Leave it, for this reason.
+    Leave(Left),
+}
+
+/// Whether followed bookmark `local` moves to `new`: only forward, and only
+/// when the policy files are the same at both (S-201). An absent bookmark
+/// stays absent: following never creates a destination.
+async fn follow_target(
+    repo: &(impl jj_lib::repo::Repo + ?Sized),
+    local: &RefTarget,
+    new: &CommitId,
+) -> Result<Follow, FetchError> {
+    if local.is_absent() {
+        return Ok(Follow::Stay);
+    }
+    let Some(at) = local.as_normal() else {
+        return Ok(Follow::Leave(Left::Diverged));
+    };
+    if at == new || repo.index().is_ancestor(new, at).await? {
+        return Ok(Follow::Stay);
+    }
+    if !repo.index().is_ancestor(at, new).await? {
+        return Ok(Follow::Leave(Left::Diverged));
+    }
+    if push::policy_files_differ(repo, at, new).await? {
+        return Ok(Follow::Leave(Left::Policy));
+    }
+    Ok(Follow::Move)
 }
 
 /// The branch git's `HEAD` names in a colocated repository, if any.

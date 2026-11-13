@@ -102,6 +102,10 @@
       "description": "Push a change to a branch on the repository's git remote, snapshotting its workspace first; publishing it again updates the branch. Returns {publication, operation, next}: next opens the pull request on a known host."
     },
     {
+      "name": "push_landed",
+      "description": "Push a landing destination's landed history to the git remote its policy names, fast forward only (a no-op when up to date). Returns {state, reason, hint, next}: is landed work on the remote."
+    },
+    {
       "name": "rebase_change",
       "description": "Bring a change and those above it onto the newest trunk (fetched first), or onto `onto`; workspaces get the new files; a conflict is data with next. Returns {change, onto, up_to_date, notes, next}."
     },

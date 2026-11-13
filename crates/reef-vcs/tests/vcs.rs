@@ -5531,6 +5531,13 @@ async fn keyless_cli() {
 /// `origin` is a bare repository (#258). The checkout, the bare remote and
 /// `main`'s commit.
 async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
+    publish_fixture_with(&[("README.md", "hello\n")]).await
+}
+
+/// [`publish_fixture`] with `files` in the first commit.
+async fn publish_fixture_with(
+    files: &[(&str, &str)],
+) -> (TestDaemon, SyntheticRepo, PathBuf, String) {
     let daemon = TestDaemon::start_with(|config| {
         no_automatic_snapshots(config);
         config.identity = reef_lib::jj::settings::Identity {
@@ -5543,7 +5550,7 @@ async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
     .await;
     let root = daemon.tmp.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    let base = reef_testing::git::init_repo(&root, &[("README.md", "hello\n")]);
+    let base = reef_testing::git::init_repo(&root, files);
     let remote = daemon.tmp.path().join("remote.git");
     let git = |dir: &Path, args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -5586,6 +5593,83 @@ async fn publish_fixture() -> (TestDaemon, SyntheticRepo, PathBuf, String) {
 }
 
 // #258, 21
+// R3.17 test 15: `reef landing push|pushes` against a bare remote: pushed
+// (exit 0), retrying while the remote is offline (exit 6), a destination
+// that does not exist (exit 3); each output checked against `reef schema`.
+#[tokio::test(flavor = "multi_thread")]
+async fn landing_push_cli() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let policy = "version = 1\n\n[owners]\nidentities = [\"pat\"]\n\n[landing]\nchecks = \"proposal\"\npush = \"origin\"\n";
+    let (daemon, repo, remote, base) =
+        publish_fixture_with(&[("README.md", "hello\n"), ("reef-policy.toml", policy)]).await;
+    let dir = repo.root.clone();
+    let listed = ok(&daemon, &dir, &["landing", "pushes", "-o", "json"]).await;
+    assert_eq!(listed, serde_json::json!([]));
+    let pushed = ok(&daemon, &dir, &["landing", "push", "main", "-o", "json"]).await;
+    assert_eq!(pushed["state"], "pushed", "{pushed}");
+    assert_eq!(pushed["git_remote"], "origin");
+    let listed = ok(&daemon, &dir, &["landing", "pushes", "-o", "json"]).await;
+    assert_eq!(listed[0]["destination"], "main", "{listed}");
+    let text = stdout(&run_in(&daemon, &dir, &["landing", "pushes", "-o", "text"]).await);
+    assert!(
+        text.contains("origin/main") && text.contains("pushed"),
+        "{text}"
+    );
+
+    // Offline: a landing lands; the push retries, exit 6.
+    let away = remote.with_extension("away");
+    std::fs::rename(&remote, &away).unwrap();
+    let change = daemon
+        .client
+        .edit_files(v1::EditFilesRequest {
+            repo: repo.id.clone(),
+            target: Some(v1::edit_files_request::Target::NewOn(base.clone())),
+            edits: vec![v1::FileEdit {
+                path: "a.txt".to_owned(),
+                action: Some(v1::file_edit::Action::Content(b"a\n".to_vec())),
+                executable: None,
+            }],
+            description: Some("Add a".to_owned()),
+            ..v1::EditFilesRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    ok(&daemon, &dir, &["propose", &change.commit_id, "-o", "json"]).await;
+    let landed = ok(&daemon, &dir, &["land", &change.commit_id, "-o", "json"]).await;
+    assert_eq!(landed["outcome"], "landed", "{landed}");
+    assert!(landed["push"].is_object(), "{landed}");
+    let error = failed(
+        &run_in(&daemon, &dir, &["landing", "push", "main", "-o", "json"]).await,
+        6,
+        // A remote path that is gone reads as a failed push, not an
+        // unreachable host (#258's classification); it retries either way.
+        "GIT_PUSH_FAILED",
+    );
+    assert_eq!(next_of(&error), ["reef", "landing", "pushes"], "{error}");
+    std::fs::rename(&away, &remote).unwrap();
+    let pushed = ok(&daemon, &dir, &["landing", "push", "-o", "json"]).await;
+    assert_eq!(pushed["state"], "pushed", "{pushed}");
+
+    // A destination that does not exist.
+    err(
+        &daemon,
+        &dir,
+        &["landing", "push", "nope", "-o", "json"],
+        3,
+        "DESTINATION_NOT_FOUND",
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn publish_cli() {
     if std::process::Command::new("git")

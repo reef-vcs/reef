@@ -50,8 +50,53 @@ pub(crate) struct Inside {
     /// `ok`, as is the workspace's own `disk`.
     #[serde(skip_serializing_if = "Option::is_none")]
     disk_status: Option<DiskStatus>,
+    /// A landing destination of the repository whose push to its git
+    /// remote needs a person (R3.17): diverged, refused, or retrying on
+    /// failed authentication. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<PushAttention>,
     hint: String,
     next: Vec<String>,
+}
+
+/// A destination whose push needs a person (`reef landing pushes`).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.PushAttention")]
+pub(crate) struct PushAttention {
+    destination: String,
+    git_remote: String,
+    state: String,
+    reason: String,
+}
+
+impl PushAttention {
+    /// The first of `pushes` that needs a person.
+    fn first(pushes: &[v1::DestinationPush]) -> Option<PushAttention> {
+        pushes
+            .iter()
+            .find(|push| match push.state() {
+                v1::PushState::Diverged | v1::PushState::Refused => true,
+                v1::PushState::Retrying => push.reason == reef_api::error::GIT_AUTH_FAILED,
+                _ => false,
+            })
+            .map(|push| PushAttention {
+                destination: push.destination.clone(),
+                git_remote: push.git_remote.clone(),
+                state: push
+                    .state()
+                    .as_str_name()
+                    .trim_start_matches("PUSH_STATE_")
+                    .to_ascii_lowercase(),
+                reason: push.reason.clone(),
+            })
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "{} is not pushed to {}/{}: {} ({}); `reef landing pushes`",
+            self.destination, self.git_remote, self.destination, self.state, self.reason
+        )
+    }
 }
 
 /// Outside every workspace: the directory, the registered repository that
@@ -95,8 +140,16 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), Cl
                     .state_dir()
                     .is_ok_and(|dir| super::holder::current(&dir, &ws).is_some());
             let disk = response.disk_status.as_deref().map(DiskStatus::from);
-            ctx.out
-                .object(&inside(&ws, from_env.is_some(), held, disk.as_ref()))
+            // A push that needs a person is the repository's news, not the
+            // workspace's: one read of the daemon's rows, no git. An older
+            // daemon has no ListPushes, and then there is no line.
+            let pushes = ctx
+                .call(ctx.client.list_pushes(&ws.repo_id))
+                .await
+                .unwrap_or_default();
+            let mut here = inside(&ws, from_env.is_some(), held, disk.as_ref());
+            here.push = PushAttention::first(&pushes);
+            ctx.out.object(&here)
         }
         Err(CliError::Daemon(error)) if from_env.is_none() && is_workspace_not_found(&error) => {
             let repos = ctx.call(ctx.client.list_repositories()).await?;
@@ -120,6 +173,7 @@ fn inside(ws: &v1::Workspace, in_run: bool, held: bool, disk: Option<&DiskStatus
     Inside {
         in_workspace: true,
         held,
+        push: None,
         snapshot_age_ms: ws
             .last_snapshot_at
             .as_ref()
@@ -457,6 +511,9 @@ impl TextRender for Inside {
             });
             pairs.push(("disk", format!("{}{space}", disk.level)));
         }
+        if let Some(push) = &self.push {
+            pairs.push(("push", push.text()));
+        }
         pairs.push(("hint", self.hint.clone()));
         if !self.next.is_empty() {
             pairs.push(("next", shell_line(&self.next)));
@@ -601,6 +658,12 @@ mod tests {
             workspace: ws,
             snapshot_age_ms: Some(12_000),
             disk_status: Some(low_disk(None)),
+            push: Some(PushAttention {
+                destination: "main".into(),
+                git_remote: "origin".into(),
+                state: "diverged".into(),
+                reason: "BRANCH_DIVERGED".into(),
+            }),
             hint,
             next,
         };
@@ -615,6 +678,10 @@ mod tests {
         assert!(text.contains("last snapshot: 12s ago"), "{text}");
         assert!(
             text.contains("disk:          low, 18 GiB free (floor 24 GiB)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("push:          main is not pushed to origin/main: diverged"),
             "{text}"
         );
     }

@@ -100,18 +100,29 @@ pub(crate) enum Next {
 }
 
 /// The destination policy's `[landing]` table, as a batch reads it.
-struct Settings {
+pub(crate) struct Settings {
     checks: Checks,
+    /// `[landing] push`: the git remote the destination is pushed to
+    /// (R3.17).
+    pub(crate) push: Option<String>,
     /// The `[history]` table (R3.16).
     history: reef_policy::HistorySettings,
     max: usize,
     wait: Duration,
     loaded: Option<Arc<Loaded>>,
-    commit: Option<String>,
+    /// The destination's head the policy was read at.
+    pub(crate) commit: Option<String>,
     sha256: Option<String>,
 }
 
 impl Settings {
+    /// Whether the destination has a policy file that does not load.
+    pub(crate) fn policy_invalid(&self) -> bool {
+        self.loaded
+            .as_deref()
+            .is_some_and(|loaded| !matches!(loaded, Loaded::Policy(_)))
+    }
+
     fn alone(&self, paths: &[String]) -> bool {
         let paths = paths.iter().map(String::as_str);
         match self.loaded.as_deref() {
@@ -141,6 +152,8 @@ struct Formed {
     checks: Checks,
     /// How its members are written on the destination (R3.16).
     history: reef_policy::HistorySettings,
+    /// Whether the destination's policy pushes it to a git remote (R3.17).
+    pushes: bool,
 }
 
 impl Formed {
@@ -284,7 +297,7 @@ fn land_error(error: LandError) -> LandingError {
 }
 
 /// Reads the `[landing]` table of the policy at `bookmark`'s head.
-async fn settings(
+pub(crate) async fn settings(
     state: &AppState,
     repo: RepoId,
     bookmark: &str,
@@ -311,6 +324,7 @@ async fn settings(
         .await??;
     let mut settings = Settings {
         checks: Checks::Batch,
+        push: None,
         history: reef_policy::HistorySettings::default(),
         max: usize::try_from(reef_policy::format::DEFAULT_BATCH_MAX).unwrap_or(8),
         wait: Duration::ZERO,
@@ -328,6 +342,7 @@ async fn settings(
         if let Loaded::Policy(policy) = &*loaded {
             let table = policy.landing();
             settings.checks = table.checks;
+            settings.push.clone_from(&table.push);
             settings.history = policy.history().clone();
             settings.max = usize::try_from(table.batch_max).unwrap_or(1).max(1);
             settings.wait = table.batch_wait;
@@ -355,7 +370,15 @@ pub(crate) async fn drive(
         .into_iter()
         .filter(|landing| landing.row.destination == destination)
         .collect();
-    let settings = settings(state, repo, &destination).await?;
+    let mut settings = settings(state, repo, &destination).await?;
+    // A pushing destination follows its remote branch first, so a merge on
+    // the host since the last landing is landed on, not diverged from
+    // (R3.17).
+    if let Some(remote) = settings.push.clone()
+        && super::push::fetch_before_batch(state, repo, &destination, &remote).await
+    {
+        settings = self::settings(state, repo, &destination).await?;
+    }
     // A change that was in a batch before (requeued behind a culprit, or
     // re-formed) has waited already.
     if !settings.wait.is_zero()
@@ -611,6 +634,7 @@ async fn form(
         message: None,
         created_at: now,
         finished_at: None,
+        history: Some(super::history::Recorded::of(&settings.history).to_json()),
     };
     let stored = StoredBatch {
         members: members
@@ -633,6 +657,7 @@ async fn form(
         members,
         checks: settings.checks,
         history: settings.history.clone(),
+        pushes: settings.push.is_some(),
     };
     for (index, member) in formed.members.iter_mut().enumerate() {
         member.landing.row.destination_before = Some(base.as_str().to_owned());
@@ -1676,6 +1701,11 @@ async fn land_prefix_part(
         }
     };
     let new_head = landed.last().map(|(commit, _, _)| commit.clone());
+    // The push worker is claimed before the rows are written, so a `reef
+    // land` that waits for its push never finds no worker (R3.17).
+    let push_claim = batch
+        .pushes
+        .then(|| super::push::claim(state, repo, &batch.stored.row.destination));
     let history = super::history::Recorded::of(&batch.history).to_json();
     let op_id = batch.stored.row.operation_id.clone().unwrap_or_default();
     let recorded_at = operation_end(state, repo, &op_id).await;
@@ -1758,6 +1788,10 @@ async fn land_prefix_part(
     drop(shared);
     batch.stored.row.landed_count = u32::try_from(p).unwrap_or(u32::MAX);
     batch.save(state)?;
+    // Push the destination's new head, after the landing (R3.17).
+    if let Some(claim) = push_claim {
+        claim.start(state);
+    }
     Ok(None)
 }
 

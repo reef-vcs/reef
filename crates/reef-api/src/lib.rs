@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 33;
+pub const API_REVISION: u32 = 34;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -149,6 +149,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `GetWorkspaceResponse`, `ListWorkspacesResponse` and
     // `GetDaemonStatusResponse`.
     "318513440b5e893cf3f0daa62ed12cdbe249a0f1ee0b318f5c7cb9ad9b6256f9",
+    // R3.17: `ListPushes`, `PushLanded`, `PushState`, `DestinationPush`,
+    // `LandingPush`, `Landing.push` and `GetDaemonStatusResponse.pushes_attention`.
+    "36292a201e06ed0ba4cf5d73e0ea99f1ade4bee94dd030651e14a86f62294a2f",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -900,6 +903,13 @@ pub mod error {
     pub const PUBLISH_TIMEOUT: &str = "PUBLISH_TIMEOUT";
     /// Another publish of the same branch is still pushing (#258).
     pub const PUBLISH_IN_PROGRESS: &str = "PUBLISH_IN_PROGRESS";
+    /// `PushLanded` on a destination whose policy has no `[landing] push`
+    /// (R3.17). Metadata: `destination`.
+    pub const DESTINATION_NOT_PUSHED: &str = "DESTINATION_NOT_PUSHED";
+    /// A landing push's state reason (R3.17): the remote branch is ahead of
+    /// the destination with a change to `reef-policy.toml` or
+    /// `reef-checks.toml`, so it is not followed.
+    pub const REMOTE_POLICY_CHANGED: &str = "REMOTE_POLICY_CHANGED";
     /// A rebase onto one of the commits it moves, or a descendant of one
     /// (#259). Metadata: `commit_id`.
     pub const REBASE_ONTO_DESCENDANT: &str = "REBASE_ONTO_DESCENDANT";

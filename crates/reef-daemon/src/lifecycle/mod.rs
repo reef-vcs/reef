@@ -1573,6 +1573,10 @@ pub(crate) fn map_operations(
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map landings' operation ids");
         }
     }
+    // And pushes' (R3.17).
+    if let Err(error) = state.db.map_push_operations(repo, &map) {
+        tracing::warn!(%repo, error = %ErrorChain(&error), "cannot map landing pushes' operation ids");
+    }
     // And batches' (R3.14).
     match state.db.map_batch_operations(repo, &map) {
         Ok((mapped, collected)) if mapped + collected > 0 => {

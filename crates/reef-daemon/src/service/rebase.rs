@@ -146,6 +146,8 @@ async fn fetch_first(
         agent: agent.map(str::to_owned),
         remote,
         branches,
+        follow: Vec::new(),
+        timeout: None,
     };
     match crate::fetch::fetch(state, input).await {
         Ok(recorded) => {

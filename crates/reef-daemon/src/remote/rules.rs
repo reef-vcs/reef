@@ -139,6 +139,9 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     // A push uses the user's git credentials (#258, S-167).
     ("/reef.api.v1.GitService/PublishChange", Rule::SocketOnly),
     ("/reef.api.v1.GitService/FetchGitRemote", Rule::SocketOnly),
+    // Pushing landed history now is a local lever; a remote caller's
+    // landing still pushes, where the signed policy says (R3.17, S-200).
+    ("/reef.api.v1.LandingService/PushLanded", Rule::SocketOnly),
     ("/reef.api.v1.ChangeService/RebaseChange", Rule::NoFetch),
 ];
 

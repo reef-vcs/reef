@@ -1,0 +1,78 @@
+{
+  "cost": 0,
+  "decision": "allow",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 2,
+    "evidence_ignored": 0,
+    "lines_added": 1,
+    "lines_removed": 1,
+    "paths": 1,
+    "provenance": 0
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:description",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    }
+  ],
+  "sha256": "6ceb4ed9f0dd4ae86f4ee2472360934309cf2f5fc200287c8f7f48aebe69b17d",
+  "version": 1
+}

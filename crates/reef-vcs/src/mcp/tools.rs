@@ -476,6 +476,17 @@ pub(super) const TOOLS: &[ToolDef] = &[
         call: publish_change,
     },
     ToolDef {
+        name: "push_landed",
+        title: "Push landed history",
+        rpc: "/reef.api.v1.LandingService/PushLanded",
+        description: "Push a landing destination's landed history to the git remote its policy names, fast forward only (a no-op when up to date). Returns {state, reason, hint, next}: is landed work on the remote.",
+        destructive: false,
+        idempotent: true,
+        schema: schema::<args::PushLanded>,
+        output: output::<crate::cli::land::BriefPush<'static>>,
+        call: push_landed,
+    },
+    ToolDef {
         name: "rebase_change",
         title: "Rebase change",
         rpc: "/reef.api.v1.ChangeService/RebaseChange",
@@ -767,6 +778,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
         "/reef.api.v1.LandingService/GetBatch",
         "an agent runs `reef landing batch`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.LandingService/ListPushes",
+        "push_landed answers for one destination; an agent runs `reef landing pushes` for all; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.LandingService/ListBatches",
@@ -1397,6 +1412,22 @@ tool!(publish_change, args::PublishChange, |call, args| {
     to_value(&brief::Published::from(&published))
 });
 
+tool!(push_landed, args::PushLanded, |call, args| {
+    let ctx = call.ctx;
+    let scope = call.scope(args.repo.as_ref(), None).await?;
+    let response = Box::pin(ctx.call_within(
+        crate::cli::publish::PUBLISH_DEADLINE,
+        ctx.client.push_landed(v1::PushLandedRequest {
+            repo: scope.repo_id.clone(),
+            destination: args.destination.unwrap_or_default(),
+            wait: true,
+        }),
+    ))
+    .await?;
+    let push = crate::cli::land::push_of(&response.push.unwrap_or_default());
+    to_value(&crate::cli::land::BriefPush::of(&push))
+});
+
 tool!(rebase_change, args::RebaseChange, |call, args| {
     let ctx = call.ctx;
     let scope = call
@@ -1715,7 +1746,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
     }
 
     #[test]

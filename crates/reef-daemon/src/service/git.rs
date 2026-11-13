@@ -61,6 +61,8 @@ impl GitService for GitHandler {
                 agent: agent.clone(),
                 remote: request.git_remote.clone(),
                 branches: request.branches.clone(),
+                follow: Vec::new(),
+                timeout: None,
             },
         )
         .await

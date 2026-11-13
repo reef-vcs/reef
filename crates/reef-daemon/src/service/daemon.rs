@@ -97,6 +97,18 @@ pub(crate) async fn daemon_status(
                 .disk_status(crate::disk::Purgeable::Always)
                 .await,
         ))),
+        pushes_attention: {
+            let since = crate::model::Timestamp(
+                crate::model::Timestamp::now().0.saturating_sub(
+                    i64::try_from(crate::landing::push::ATTENTION_AFTER.as_millis())
+                        .unwrap_or(i64::MAX),
+                ),
+            );
+            state
+                .db
+                .pushes_needing_attention(since)
+                .map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
+        },
     })
 }
 

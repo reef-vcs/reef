@@ -3,14 +3,16 @@
 //! judges it with the policy at its destination's head, and a change it
 //! allows is queued and landed onto the bookmark in a batch.
 //! `reef landing list|show` read the records, and `reef landing
-//! batches|batch` the batches.
+//! batches|batch` the batches. `reef landing push|pushes` push a
+//! destination's landed history to its git remote now, and show each
+//! pushing destination's state (R3.17, ADR 0077).
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use reef_api::v1::{
     self, GetBatchRequest, GetLandingRequest, LandChangeRequest, ListBatchesRequest,
-    ListLandingsRequest,
+    ListLandingsRequest, PushLandedRequest,
 };
 use reef_client::json::{reverse_hex, rfc3339};
 use reef_error::{Advice, ErrorKind};
@@ -76,6 +78,36 @@ enum LandingCommand {
     /// trials.
     #[command(after_help = "Example: reef landing batch @-")]
     Batch(BatchArgs),
+    /// Push a destination's landed history to its git remote now.
+    ///
+    /// Its policy's `[landing] push` names the remote (R3.17).
+    #[command(after_help = "Example: reef landing push main")]
+    Push(PushArgs),
+    /// Show each pushing destination's push state.
+    ///
+    /// pushed, pending, retrying, diverged, refused or disabled (R3.17).
+    #[command(after_help = "Example: reef landing pushes")]
+    Pushes(PushesArgs),
+}
+
+/// `reef landing push`.
+#[derive(Debug, clap::Args)]
+struct PushArgs {
+    /// The destination bookmark [default: `trunk()`'s].
+    #[arg(value_name = "DEST")]
+    destination: Option<String>,
+    /// Return at once; the push runs in the daemon.
+    #[arg(long)]
+    no_wait: bool,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+/// `reef landing pushes`.
+#[derive(Debug, clap::Args)]
+struct PushesArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 /// `reef landing batches`.
@@ -225,6 +257,39 @@ impl LandingHistory {
     }
 }
 
+/// Whether a landed landing reached its destination's git remote (R3.17).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LandingPush {
+    /// `pushed` once a push carried it; else its destination's state:
+    /// `pending`, `retrying`, `diverged`, `refused` or `disabled`.
+    pub(crate) state: String,
+    /// The git remote.
+    pub(crate) git_remote: String,
+    /// The remote branch.
+    pub(crate) branch: String,
+    /// When a push first carried it.
+    pub(crate) pushed_at: Option<String>,
+    /// That push's operation.
+    pub(crate) operation_id: Option<String>,
+    /// Not pushed: why.
+    pub(crate) reason: Option<String>,
+    /// Not pushed: what to do about it.
+    pub(crate) hint: Option<String>,
+}
+
+impl LandingPush {
+    /// `origin/main (pushed)`, or `origin/main: retrying (GIT_UNREACHABLE)`.
+    fn text(&self) -> String {
+        let place = format!("{}/{}", self.git_remote, self.branch);
+        match &self.reason {
+            Some(reason) if self.state != "pushed" => {
+                format!("{place}: {} ({reason})", self.state)
+            }
+            _ => format!("{place} ({})", self.state),
+        }
+    }
+}
+
 /// One landing (`reef land`, `reef landing show`, each of `reef landing
 /// list`).
 #[derive(Debug, Serialize, JsonSchema)]
@@ -248,6 +313,9 @@ pub(crate) struct Landing {
     /// How it wrote its changes on the destination (R3.16); `null` until
     /// it lands.
     pub(crate) history: Option<LandingHistory>,
+    /// Whether it reached the destination's git remote (R3.17); `null`
+    /// unless it landed onto a destination that pushes.
+    pub(crate) push: Option<LandingPush>,
     /// More about the reason.
     pub(crate) message: Option<String>,
     /// The changes, in landing order.
@@ -287,6 +355,9 @@ pub(crate) struct BriefLanding<'a> {
     reason: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     destination_after: Option<&'a str>,
+    /// The push's state, when the destination pushes (R3.17).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocking: Vec<&'a str>,
 }
@@ -298,6 +369,7 @@ impl<'a> BriefLanding<'a> {
             outcome: &landing.outcome,
             reason: landing.reason.as_deref(),
             destination_after: landing.destination_after.as_deref(),
+            push: landing.push.as_ref().map(|push| push.state.as_str()),
             blocking: landing
                 .changes
                 .iter()
@@ -332,6 +404,15 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
         history: message.history.as_ref().map(|history| LandingHistory {
             message: history.message.clone(),
             trailers: history.trailers.clone(),
+        }),
+        push: message.push.as_ref().map(|push| LandingPush {
+            state: word(push.state().as_str_name(), "PUSH_STATE_").unwrap_or_default(),
+            git_remote: push.git_remote.clone(),
+            branch: push.branch.clone(),
+            pushed_at: push.pushed_at.as_ref().map(rfc3339),
+            operation_id: some(&push.operation_id),
+            reason: some(&push.reason),
+            hint: some(&push.hint),
         }),
         message: some(&message.message),
         changes: message
@@ -557,6 +638,8 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         LandingCommand::Show(args) => Box::pin(show(ctx, args)).await,
         LandingCommand::Batches(args) => Box::pin(batches(ctx, args)).await,
         LandingCommand::Batch(args) => Box::pin(batch(ctx, args)).await,
+        LandingCommand::Push(args) => Box::pin(push(ctx, args)).await,
+        LandingCommand::Pushes(args) => Box::pin(pushes(ctx, args)).await,
     }
 }
 
@@ -633,6 +716,7 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
 }
 
 impl TextRender for Landing {
+    #[expect(clippy::too_many_lines, reason = "one line per field, in order")]
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let mut pairs = vec![
             ("landing", self.id.clone()),
@@ -702,6 +786,9 @@ impl TextRender for Landing {
         }
         if let Some(history) = &self.history {
             pairs.push(("history", history.text()));
+        }
+        if let Some(push) = &self.push {
+            pairs.push(("push", push.text()));
         }
         if let Some(message) = &self.message {
             pairs.push(("why", message.clone()));
@@ -1095,4 +1182,284 @@ mod tests {
             ]
         );
     }
+}
+
+/// One destination's push state (`reef landing pushes`, `reef landing
+/// push`; R3.17).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct DestinationPush {
+    /// The destination bookmark.
+    pub(crate) destination: String,
+    /// The git remote its policy names.
+    pub(crate) git_remote: String,
+    /// The remote branch: the destination's own name.
+    pub(crate) branch: String,
+    /// `pushed`, `pending`, `retrying`, `diverged`, `refused` or
+    /// `disabled`.
+    pub(crate) state: String,
+    /// The destination's head as last seen.
+    pub(crate) local_commit_id: Option<String>,
+    /// The remote branch as last seen; `null` when absent.
+    pub(crate) remote_commit_id: Option<String>,
+    /// Landings the remote lacks.
+    pub(crate) unpushed_count: u32,
+    /// The last failure's reason constant.
+    pub(crate) reason: Option<String>,
+    /// Its message.
+    pub(crate) message: Option<String>,
+    /// Git's stderr, redacted.
+    pub(crate) git_stderr: Option<String>,
+    /// What to do about it.
+    pub(crate) hint: Option<String>,
+    /// The command that does it, as argv.
+    pub(crate) next: Vec<String>,
+    /// Diverged: the remote's head, `<commit> <author>: <summary>`.
+    pub(crate) remote_head: Option<String>,
+    /// Failed attempts since the last success.
+    pub(crate) attempts: u32,
+    /// Retrying: when it tries again.
+    pub(crate) next_attempt_at: Option<String>,
+    /// The last successful push.
+    pub(crate) pushed_at: Option<String>,
+    /// Its operation.
+    pub(crate) operation_id: Option<String>,
+}
+
+/// The brief view of a destination's push state: its state, and what to
+/// do when it is not pushed.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BriefPush<'a> {
+    destination: &'a str,
+    git_remote: &'a str,
+    state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_zero")]
+    unpushed_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    next: &'a [String],
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+impl<'a> BriefPush<'a> {
+    pub(crate) fn of(push: &'a DestinationPush) -> BriefPush<'a> {
+        BriefPush {
+            destination: &push.destination,
+            git_remote: &push.git_remote,
+            state: &push.state,
+            reason: push.reason.as_deref(),
+            unpushed_count: push.unpushed_count,
+            hint: push.hint.as_deref(),
+            next: &push.next,
+        }
+    }
+}
+
+/// `message` as the CLI's JSON.
+pub(crate) fn push_of(message: &v1::DestinationPush) -> DestinationPush {
+    DestinationPush {
+        destination: message.destination.clone(),
+        git_remote: message.git_remote.clone(),
+        branch: message.branch.clone(),
+        state: word(message.state().as_str_name(), "PUSH_STATE_").unwrap_or_default(),
+        local_commit_id: some(&message.local_commit_id),
+        remote_commit_id: some(&message.remote_commit_id),
+        unpushed_count: message.unpushed_count,
+        reason: some(&message.reason),
+        message: some(&message.message),
+        git_stderr: some(&message.git_stderr),
+        hint: some(&message.hint),
+        next: message.next.clone(),
+        remote_head: some(&message.remote_head),
+        attempts: message.attempts,
+        next_attempt_at: message.next_attempt_at.as_ref().map(rfc3339),
+        pushed_at: message.pushed_at.as_ref().map(rfc3339),
+        operation_id: some(&message.operation_id),
+    }
+}
+
+impl DestinationPush {
+    /// What its state says, in a few words: `pushed 12:03:04Z`,
+    /// `retrying (GIT_UNREACHABLE; attempt 3, next 12:05:00Z)`,
+    /// `diverged (origin/main at 1a2b3c4d5e6f Ana: Fix CI; 2 landings not
+    /// pushed)`.
+    fn detail(&self) -> String {
+        let reason = self.reason.as_deref().unwrap_or("");
+        match self.state.as_str() {
+            "pushed" => match &self.pushed_at {
+                Some(at) => format!("pushed {at}"),
+                None => "pushed".to_owned(),
+            },
+            "retrying" => format!(
+                "retrying ({reason}; attempt {}{})",
+                self.attempts,
+                self.next_attempt_at
+                    .as_deref()
+                    .map(|at| format!(", next {at}"))
+                    .unwrap_or_default()
+            ),
+            "diverged" => format!(
+                "diverged ({}/{} at {}; {} landings not pushed)",
+                self.git_remote,
+                self.branch,
+                self.remote_head.as_deref().unwrap_or("?"),
+                self.unpushed_count
+            ),
+            state if reason.is_empty() => state.to_owned(),
+            state => format!("{state} ({reason})"),
+        }
+    }
+}
+
+impl TextRender for DestinationPush {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let mut pairs = vec![
+            ("destination", self.destination.clone()),
+            ("remote", format!("{}/{}", self.git_remote, self.branch)),
+            ("state", self.detail()),
+        ];
+        if let Some(local) = &self.local_commit_id {
+            pairs.push(("local", short(local)));
+        }
+        if let Some(remote) = &self.remote_commit_id {
+            pairs.push(("remote at", short(remote)));
+        }
+        if self.unpushed_count > 0 {
+            pairs.push(("unpushed", self.unpushed_count.to_string()));
+        }
+        if let Some(message) = &self.message {
+            pairs.push(("why", message.clone()));
+        }
+        if let Some(hint) = &self.hint {
+            pairs.push(("hint", hint.clone()));
+        }
+        block(w, &pairs)
+    }
+}
+
+impl TextRow for DestinationPush {
+    const HEADER: &'static [&'static str] = &["DESTINATION", "REMOTE", "STATE"];
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.destination.clone(),
+            format!("{}/{}", self.git_remote, self.branch),
+            self.detail(),
+        ]
+    }
+}
+
+/// `reef landing push`: exit 0 when pushed or up to date, 6 while it is
+/// pending or retrying, 5 when diverged, refused or disabled, with the
+/// state's reason, hint and next command.
+async fn push(ctx: &Ctx, args: PushArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let request = PushLandedRequest {
+        repo: scope.repo_id.clone(),
+        destination: args.destination.clone().unwrap_or_default(),
+        wait: !args.no_wait,
+    };
+    // A push waits at most the daemon's [publish] timeout (5 minutes by
+    // default, at most an hour).
+    let response = Box::pin(ctx.call_within(
+        Duration::from_hours(1) + ctx.timeout,
+        ctx.client.push_landed(request),
+    ))
+    .await
+    .map_err(|error| advice.refine(error))?;
+    let push = push_of(&response.push.unwrap_or_default());
+    let failed = match push.state.as_str() {
+        "pushed" => None,
+        "pending" if args.no_wait => None,
+        "pending" | "retrying" => Some(ErrorKind::Unavailable),
+        _ => Some(ErrorKind::Conflict),
+    };
+    if failed.is_none() || !ctx.out.is_json() {
+        ctx.out.object_with(&push, BriefPush::of)?;
+    }
+    let Some(kind) = failed else {
+        return Ok(());
+    };
+    let reason = push
+        .reason
+        .as_deref()
+        .map_or(reef_api::error::GIT_PUSH_FAILED, push_reason);
+    let mut next = push.next.clone();
+    if next.is_empty() {
+        next = vec!["reef".into(), "landing".into(), "pushes".into()];
+    }
+    Err(CliError::Precheck {
+        kind,
+        reason,
+        message: format!(
+            "{} is not pushed to {}/{}: {}",
+            push.destination,
+            push.git_remote,
+            push.branch,
+            push.message.clone().unwrap_or_else(|| push.state.clone())
+        ),
+        advice: Advice {
+            hint: push.hint.clone().unwrap_or_default(),
+            next,
+        },
+    })
+}
+
+/// `reef landing pushes`.
+async fn pushes(ctx: &Ctx, args: PushesArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let listed = ctx
+        .call(ctx.client.list_pushes(&scope.repo_id))
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let pushes: Vec<DestinationPush> = listed.iter().map(push_of).collect();
+    if pushes.is_empty() {
+        ctx.out.note(
+            "reef: no destination pushes to a git remote; add `push = \"<remote>\"` to [landing] in its reef-policy.toml",
+        );
+    }
+    ctx.out.list_with(&pushes, |pushes| {
+        pushes.iter().map(BriefPush::of).collect::<Vec<_>>()
+    })
+}
+
+/// A push state's reason as the constant the error carries.
+fn push_reason(text: &str) -> &'static str {
+    use reef_api::error as reason;
+    [
+        reason::GIT_UNREACHABLE,
+        reason::GIT_AUTH_FAILED,
+        reason::GIT_NOT_FOUND,
+        reason::GIT_PUSH_FAILED,
+        reason::GIT_TOO_OLD,
+        reason::GIT_REMOTE_NOT_FOUND,
+        reason::GIT_REMOTE_NOT_ALLOWED,
+        reason::PUBLISH_TIMEOUT,
+        reason::PUBLISH_IN_PROGRESS,
+        reason::PUBLISH_DISABLED,
+        reason::REMOTE_REJECTED,
+        reason::REMOTE_POLICY_CHANGED,
+        reason::BRANCH_DIVERGED,
+        reason::BRANCH_MOVED,
+        reason::BRANCH_CONFLICTED,
+        reason::CHANGE_CONFLICTED,
+        reason::RANGE_TOO_LARGE,
+        reason::IDENTITY_UNSET,
+        reason::DESTINATION_NOT_FOUND,
+        reason::DESTINATION_CONFLICTED,
+    ]
+    .into_iter()
+    .find(|known| *known == text)
+    .unwrap_or(reason::GIT_PUSH_FAILED)
 }

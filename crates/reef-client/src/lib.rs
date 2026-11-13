@@ -2234,6 +2234,37 @@ impl Client {
         }
     }
 
+    /// `LandingService.ListPushes` (R3.17): every pushing destination's
+    /// push state, by destination (all pages).
+    pub async fn list_pushes(&self, repo: &str) -> Result<Vec<v1::DestinationPush>, ClientError> {
+        let mut request = v1::ListPushesRequest {
+            repo: repo.to_owned(),
+            ..v1::ListPushesRequest::default()
+        };
+        let mut pushes = Vec::new();
+        loop {
+            let mut client = self.landing();
+            let response = self
+                .call("ListPushes", client.list_pushes(request.clone()))
+                .await?;
+            pushes.extend(response.pushes);
+            if response.next_page_token.is_empty() {
+                return Ok(pushes);
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
+    /// `LandingService.PushLanded` (R3.17): pushes a destination's landed
+    /// history now.
+    pub async fn push_landed(
+        &self,
+        request: v1::PushLandedRequest,
+    ) -> Result<v1::PushLandedResponse, ClientError> {
+        let mut client = self.landing();
+        self.call("PushLanded", client.push_landed(request)).await
+    }
+
     fn provenance(&self) -> ProvenanceServiceClient<Svc> {
         ProvenanceServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }

@@ -302,3 +302,265 @@ async fn checked_out() {
         Some(fixture.base.as_str())
     );
 }
+
+/// A commit "landed" on the local `main` (R3.17's tests): written with
+/// git's plumbing on `parent` (the working tree is not touched), set as
+/// git's `main`, and imported, as a landing leaves the destination ahead of
+/// the remote.
+async fn land_locally(fixture: &mut Fixture, parent: &str, file: &str) -> String {
+    let index = fixture.root.join(".git/reef-test-index");
+    let plumbing = |args: &[&str], input: Option<&str>| {
+        use std::io::Write as _;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&fixture.root)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Robin")
+            .env("GIT_AUTHOR_EMAIL", "robin@example.com")
+            .env("GIT_COMMITTER_NAME", "Robin")
+            .env("GIT_COMMITTER_EMAIL", "robin@example.com")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.unwrap_or_default().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    plumbing(&["read-tree", parent], None);
+    let blob = plumbing(&["hash-object", "-w", "--stdin"], Some("landed\n"));
+    plumbing(
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},{file}"),
+        ],
+        None,
+    );
+    let tree = plumbing(&["write-tree"], None);
+    let id = plumbing(
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            parent,
+            "-m",
+            &format!("Land {file}"),
+        ],
+        None,
+    );
+    let _ = std::fs::remove_file(&index);
+    git(&fixture.root, &["update-ref", "refs/heads/main", &id]);
+    fixture
+        .repo
+        .import_git_refs(&OpMeta::new(OpKind::ImportRefs, "reef: import git refs"))
+        .await
+        .unwrap();
+    assert_eq!(local_main(&fixture.head()).as_deref(), Some(id.as_str()));
+    id
+}
+
+/// Someone else pushes a commit writing `file` on top of the remote's `main`.
+fn push_on_remote(fixture: &Fixture, file: &str) -> String {
+    git(&fixture.other, &["fetch", "--quiet", "origin"]);
+    git(
+        &fixture.other,
+        &["reset", "--quiet", "--hard", "origin/main"],
+    );
+    std::fs::write(fixture.other.join(file), "theirs\n").unwrap();
+    git(&fixture.other, &["add", "-A"]);
+    git(
+        &fixture.other,
+        &["commit", "--quiet", "-m", &format!("Theirs {file}")],
+    );
+    git(&fixture.other, &["push", "--quiet", "origin", "HEAD:main"]);
+    git(&fixture.other, &["rev-parse", "HEAD"])
+}
+
+fn remote_state(repo: &ReadonlyRepo) -> jj_lib::op_store::RemoteRefState {
+    repo.view()
+        .get_remote_bookmark(RefName::new("main").to_remote_symbol(RemoteName::new("origin")))
+        .state
+}
+
+async fn fetch_following(fixture: &mut Fixture) -> fetch::RecordedFetch {
+    let head = fixture.head();
+    let plan = fetch::plan_fetch(&head, "origin", &["main".to_owned()]).unwrap();
+    let fetched = fetch::fetch(&head, &plan, &|_| None).unwrap();
+    fixture
+        .repo
+        .record_fetch_following(&fetched, &["main".to_owned()], &meta())
+        .await
+        .unwrap()
+}
+
+// R3.17 tests 1 and 2: a landing destination's head is planned against its
+// remote branch (up to date, fast forward, remote ahead, diverged; trunk and
+// immutability are no reason to refuse), pushed, and recorded with the
+// remote bookmark's tracking state kept and the local bookmark untouched.
+#[tokio::test]
+async fn landed_push_plans_and_records() {
+    use reef_lib::jj::push::{self, LandedUpdate, PushError, PushMode};
+    if !has_git() {
+        return;
+    }
+    let mut fixture = Fixture::new(true).await;
+    let plan = |repo: Arc<ReadonlyRepo>| async move {
+        push::plan_landed_push(&repo, "main", "origin", &[], 1_000).await
+    };
+    let up = plan(fixture.head()).await.unwrap();
+    assert_eq!(up.update, LandedUpdate::UpToDate);
+    assert!(up.plan.is_none());
+    assert!(matches!(
+        push::plan_landed_push(&fixture.head(), "nope", "origin", &[], 1_000).await,
+        Err(PushError::DestinationNotFound(_))
+    ));
+    assert!(matches!(
+        push::plan_landed_push(&fixture.head(), "main", "https://h/x", &[], 1_000).await,
+        Err(PushError::InvalidRemote(_))
+    ));
+    assert!(matches!(
+        push::plan_landed_push(
+            &fixture.head(),
+            "main",
+            "origin",
+            &["fork".to_owned()],
+            1_000
+        )
+        .await,
+        Err(PushError::RemoteNotAllowed(_))
+    ));
+
+    let base = fixture.base.clone();
+    let landed = land_locally(&mut fixture, &base, "a.txt").await;
+    let tracking = remote_state(&fixture.head());
+    let ahead = plan(fixture.head()).await.unwrap();
+    assert_eq!(ahead.update, LandedUpdate::FastForward);
+    let push_plan = ahead.plan.clone().unwrap();
+    assert_eq!(push_plan.mode, PushMode::Landing);
+    assert_eq!(push_plan.range.len(), 1);
+    assert_eq!(push_plan.previous.as_ref().unwrap().as_str(), base);
+    assert!(matches!(
+        push::plan_landed_push(&fixture.head(), "main", "origin", &[], 0).await,
+        Err(PushError::RangeTooLarge { .. })
+    ));
+    push::push(&fixture.head(), &push_plan, &|_| None).unwrap();
+    let meta = OpMeta::new(OpKind::Publish, push::push_landed_description(&push_plan));
+    assert_eq!(
+        meta.description,
+        "reef: push landed main to origin/main (1 commit)"
+    );
+    let recorded = fixture.repo.record_push(&push_plan, &meta).await.unwrap();
+    assert!(recorded.op_id.is_some());
+    assert!(recorded.local.is_none());
+    let after = fixture.head();
+    assert_eq!(remote_main(&after).as_deref(), Some(landed.as_str()));
+    assert_eq!(local_main(&after).as_deref(), Some(landed.as_str()));
+    assert_eq!(remote_state(&after), tracking, "tracking state kept");
+    assert_eq!(
+        git(&fixture.other, &["ls-remote", "origin", "refs/heads/main"])
+            .split_whitespace()
+            .next(),
+        Some(landed.as_str())
+    );
+    assert_eq!(
+        plan(after.clone()).await.unwrap().update,
+        LandedUpdate::UpToDate
+    );
+
+    // Someone else pushes on top: a following fetch fast-forwards `main`.
+    let theirs = push_on_remote(&fixture, "theirs.txt");
+    let recorded = fetch_following(&mut fixture).await;
+    assert!(recorded.branches[0].local_moved);
+    assert_eq!(recorded.branches[0].left, None);
+    assert_eq!(
+        local_main(&fixture.head()).as_deref(),
+        Some(theirs.as_str())
+    );
+    assert_eq!(
+        plan(fixture.head()).await.unwrap().update,
+        LandedUpdate::UpToDate
+    );
+
+    // A local landing and a foreign push on the same base: diverged, and the
+    // following fetch leaves `main` exactly where it is, unconflicted.
+    let mine = land_locally(&mut fixture, &theirs, "mine.txt").await;
+    let foreign = push_on_remote(&fixture, "foreign.txt");
+    let recorded = fetch_following(&mut fixture).await;
+    assert_eq!(recorded.branches[0].left, Some(fetch::Left::Diverged));
+    assert!(!recorded.branches[0].local_moved);
+    let head = fixture.head();
+    assert_eq!(local_main(&head).as_deref(), Some(mine.as_str()));
+    assert_eq!(remote_main(&head).as_deref(), Some(foreign.as_str()));
+    let diverged = plan(head.clone()).await.unwrap();
+    assert_eq!(diverged.update, LandedUpdate::Diverged);
+    assert!(diverged.plan.is_none());
+    assert_eq!(
+        diverged.remote_head.unwrap().commit.as_str(),
+        foreign.as_str()
+    );
+}
+
+// R3.17 test 3: a remote ahead that changes a policy file is not followed;
+// a following fetch catches up a bookmark the view already knows is behind;
+// a bookmark not followed merges as before (`record_matches_jj`).
+#[tokio::test]
+async fn following_refuses_policy_changes() {
+    use reef_lib::jj::push::{self, LandedUpdate};
+    if !has_git() {
+        return;
+    }
+    let mut fixture = Fixture::new(true).await;
+    let policy = push_on_remote(&fixture, "reef-policy.toml");
+    let recorded = fetch_following(&mut fixture).await;
+    assert_eq!(recorded.branches[0].left, Some(fetch::Left::Policy));
+    assert_eq!(
+        local_main(&fixture.head()).as_deref(),
+        Some(fixture.base.as_str())
+    );
+    assert_eq!(
+        remote_main(&fixture.head()).as_deref(),
+        Some(policy.as_str())
+    );
+    let planned = push::plan_landed_push(&fixture.head(), "main", "origin", &[], 1_000)
+        .await
+        .unwrap();
+    assert_eq!(planned.update, LandedUpdate::RemoteAhead);
+    assert!(
+        push::policy_files_differ(
+            fixture.head().as_ref(),
+            &jj_lib::backend::CommitId::try_from_hex(&fixture.base).unwrap(),
+            &jj_lib::backend::CommitId::try_from_hex(&policy).unwrap(),
+        )
+        .await
+        .unwrap()
+    );
+
+    // An ordinary commit on top: still behind a policy change, still left.
+    let more = push_on_remote(&fixture, "more.txt");
+    let recorded = fetch_following(&mut fixture).await;
+    assert_eq!(recorded.branches[0].left, Some(fetch::Left::Policy));
+    assert_eq!(remote_main(&fixture.head()).as_deref(), Some(more.as_str()));
+
+    // Once the local destination has the policy change (a person moved it),
+    // the next following fetch catches up with what the view already knows.
+    git(&fixture.root, &["update-ref", "refs/heads/main", &policy]);
+    fixture
+        .repo
+        .import_git_refs(&OpMeta::new(OpKind::ImportRefs, "reef: import git refs"))
+        .await
+        .unwrap();
+    let recorded = fetch_following(&mut fixture).await;
+    assert!(recorded.branches[0].local_moved);
+    assert!(recorded.op_id.is_some());
+    assert_eq!(local_main(&fixture.head()).as_deref(), Some(more.as_str()));
+}
