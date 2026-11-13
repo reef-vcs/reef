@@ -24,6 +24,8 @@ env:
   CARGO_BUILD_WARNINGS: deny
   RUSTDOCFLAGS: -D warnings
   RUST_BACKTRACE: 1
+  # Retries, and a JUnit report that scripts/ci-flaky-tests.py reads: see .config/nextest.toml.
+  NEXTEST_PROFILE: ci
   # Rust caches are saved by main's runs only; a pull request restores main's. The repository's
   # 10 GB of cache had filled with each pull request's own (400 to 900 MB a job), evicting main's,
   # so every pull request built cold; and a run cancelled mid-build (see `cancel`) would save a
@@ -186,6 +188,10 @@ jobs:
     # R3.25 (#249) then ran into 50 with one test left; 65 leaves room until the tests are
     # split across runners (#253).
     timeout-minutes: 65
+    # On a pull request the macOS leg reports and does not block: of the 51 failed attempts from
+    # 2026-11-05 to 11-13, 21 were this leg, on timing bounds, and the self-hosted Mac is a laptop
+    # that is building other things. Its job still shows red, and `main` requires it after the merge.
+    continue-on-error: ${{ matrix.os == 'macos-15' && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
@@ -254,17 +260,26 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/test-remote.sh target/debug/reef target/debug/reef-daemon
       # The daemon builds without Watchman too, and its unit tests (and
-      # reef-lib's) pass that way.
+      # reef-lib's) pass that way. Through nextest, for the `ci` profile's retries.
       - name: Check without default features
         run: |
           cargo check -p reef-daemon --no-default-features
-          cargo test -p reef-daemon -p reef-lib --no-default-features --lib
+          # The self-hosted Mac keeps target/, and with it a report an earlier run did not read.
+          rm -f target/nextest/ci/junit.xml
+          cargo nextest run -p reef-daemon -p reef-lib --no-default-features --lib
+      # The script removes the report it reads, so each of these steps lists one nextest run.
+      - name: Flaky tests (no default features)
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py "${{ matrix.os }}, no default features" || echo "::notice::could not list the flaky tests"
       # A self-hosted runner keeps target/, so a shape file from an earlier run must not pass for
       # this one's.
       - name: Test
         run: |
           rm -f target/cli-shape-*.json
           just test
+      - name: Flaky tests
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py "${{ matrix.os }}" || echo "::notice::could not list the flaky tests"
       - name: Docs
         run: just doc
       # The synthetic repo generator must write byte-identical trees on every platform (R0.05).
@@ -308,8 +323,14 @@ jobs:
           tool: cargo-nextest@0.9
       - name: The executor's tests, sandboxed
         run: cargo nextest run -p reef-executor
+      - name: Flaky tests (executor)
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py "executor sandbox, macOS"
       - name: The CLI's executor tests and probes
         run: cargo nextest run -p reef-vcs -E 'test(/executor/)'
+      - name: Flaky tests (CLI)
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py "executor sandbox, macOS, CLI"
 
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
@@ -337,10 +358,21 @@ jobs:
         run: |
           cargo nextest run -p reef-daemon --features privileged-tests --no-run
           cargo build -p reef-vcs --bin reef
-      # Unfiltered: with fuse-overlayfs installed, `auto` picks it, so every
-      # daemon test also runs on overlay workspaces.
+      # With fuse-overlayfs installed, `auto` picks it, so these daemon tests also run on overlay
+      # workspaces. Unfiltered on main and on a manual run: every daemon test. A pull request runs
+      # the unit tests and the binaries whose subject is a workspace's files (materializing,
+      # snapshots and their watchers, stores, file reads and writes, leases' final snapshots, GC,
+      # backups, restarts); the others (API pages, policy, evidence, landing, subscriptions and the
+      # like) passed through the same daemon on the `check` job's backend, and took about 12 of this
+      # step's 26 minutes. To run them all
+      # on a branch, start the workflow by hand: `gh workflow run ci.yml --ref <branch>`.
       - name: Daemon tests on fuse-overlayfs (unprivileged)
-        run: cargo nextest run -p reef-daemon --features privileged-tests
+        env:
+          FILTER: ${{ github.event_name == 'pull_request' && 'kind(lib) | binary(/^(backend_conformance|base_cache|backup|disk|disk_full|files|gc|hostile_repo|inotify_instances|integration|leases|narrowed|overlay_restart|reads|snapshots|status_index|stores|watchman|workspace_root|workspaces|writes)$/)' || 'all()' }}
+        run: cargo nextest run -p reef-daemon --features privileged-tests -E "$FILTER"
+      - name: Flaky tests (fuse-overlayfs)
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py fuse-overlayfs
       # The runner's disk is ext4, which cannot reflink, so the reflink backend (R1.10) runs on
       # loop-mounted btrfs and XFS images. Mounting needs root; the tests do not. Both run even
       # if the first fails.
@@ -359,6 +391,7 @@ jobs:
             sudo chown "$(id -un)" "/mnt/reef-$fs"
             echo "::group::reflink on $fs"
             REEF_TEST_REFLINK_DIR="/mnt/reef-$fs" cargo nextest run -p reef-daemon --features privileged-tests --no-capture -E 'test(/reflink/)' || failed="$failed $fs"
+            python3 scripts/ci-flaky-tests.py "reflink on $fs"
             echo "::endgroup::"
             sudo umount "/mnt/reef-$fs"
           done
@@ -375,6 +408,9 @@ jobs:
       - name: Give target/ back to the runner user
         if: always()
         run: sudo chown -R "$(id -un)" target
+      - name: Flaky tests (kernel overlayfs)
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py "kernel overlayfs"
 
   # The web UI (R2.18, ADR 0047): lint, typecheck, Vitest and the build, then reef-web's tests
   # against the real assets. The TypeScript is generated from the protos at every build, so a
@@ -407,6 +443,9 @@ jobs:
         run: npm ci
       - name: Check
         run: just web-check
+      - name: Flaky tests
+        if: always()
+        run: python3 scripts/ci-flaky-tests.py reef-web
       # Reported, not failing, as `deny-advisories` is.
       - name: npm audit
         working-directory: web
@@ -466,6 +505,8 @@ jobs:
     needs: plan
     runs-on: ${{ matrix.os == 'macos-15' && fromJSON(needs.plan.outputs.macos_runner) || matrix.os }}
     timeout-minutes: 30
+    # As `check`: the macOS legs do not block a pull request.
+    continue-on-error: ${{ matrix.os == 'macos-15' && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
@@ -517,6 +558,8 @@ jobs:
     needs: plan
     runs-on: ${{ matrix.os == 'macos-15' && fromJSON(needs.plan.outputs.macos_runner) || matrix.os }}
     timeout-minutes: 30
+    # As `check`: the macOS legs do not block a pull request.
+    continue-on-error: ${{ matrix.os == 'macos-15' && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
@@ -578,6 +621,7 @@ jobs:
     timeout-minutes: 5
     env:
       MACOS: ${{ needs.plan.outputs.macos }}
+      EVENT: ${{ github.event_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -590,7 +634,15 @@ jobs:
           merge-multiple: true
       - run: |
           head digest-*.txt crates/reef-testing/synth-small-seed1.sha256
-          [[ "$(ls digest-*.txt | wc -l)" -eq "$([[ "$MACOS" == true ]] && echo 2 || echo 1)" ]]
+          # A macOS leg that failed on a pull request uploads no digest and does not block (see
+          # `check`): Linux's is compared alone.
+          if [[ "$(ls digest-*.txt | wc -l)" -ne "$([[ "$MACOS" == true ]] && echo 2 || echo 1)" ]]; then
+            if [[ "$EVENT" == pull_request && -f digest-ubuntu-24.04.txt ]]; then
+              echo "::warning::no macOS digest (its leg failed); only Linux's is compared with the pin"
+            else
+              exit 1
+            fi
+          fi
           [[ "$(cat digest-*.txt crates/reef-testing/synth-small-seed1.sha256 | sort -u | wc -l)" -eq 1 ]]
 
   # The CLI's JSON has the same keys on both platforms (R1.23, test 12).
@@ -601,6 +653,7 @@ jobs:
     timeout-minutes: 5
     env:
       MACOS: ${{ needs.plan.outputs.macos }}
+      EVENT: ${{ github.event_name }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -611,6 +664,11 @@ jobs:
           if [[ "$MACOS" != true ]]; then
             echo "macOS did not run on this pull request; nothing to compare"
             [[ "$(ls cli-shape-*.json | wc -l)" -eq 1 && -f cli-shape-linux.json ]]
+            exit 0
+          fi
+          # As `synth-determinism`: a failed macOS leg does not block a pull request.
+          if [[ "$EVENT" == pull_request && -f cli-shape-linux.json && ! -f cli-shape-macos.json ]]; then
+            echo "::warning::no macOS shape (its leg failed); nothing to compare"
             exit 0
           fi
           [[ "$(ls cli-shape-*.json | wc -l)" -eq 2 ]]

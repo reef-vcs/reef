@@ -37,3 +37,16 @@ test-group = "heavy"
 [[profile.default.overrides]]
 filter = "package(reef-daemon) & binary(backend_conformance)"
 success-output = "immediate"
+
+# CI's profile (`NEXTEST_PROFILE=ci` in ci.yml): a test that fails is run again, twice at
+# most, and one that then passes is reported FLAKY in the summary instead of failing a run of 30
+# minutes or more. Since 2026-11-05, 29 different tests had failed CI, none more than three times,
+# nearly all on a timing bound that a busy runner missed. A retry can hide a real race, so CI lists
+# each run's flaky tests in the job summary (scripts/ci-flaky-tests.py reads the JUnit report), and
+# a test that keeps appearing there is a bug to file. Local runs use the default profile: no
+# retries. The overrides above apply to this profile too.
+[profile.ci]
+retries = 2
+
+[profile.ci.junit]
+path = "junit.xml"

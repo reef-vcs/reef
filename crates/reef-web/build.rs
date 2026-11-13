@@ -28,7 +28,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no CARGO_MANIFEST_DIR")?);
     let built = manifest.join("assets");
     let placeholder = manifest.join("placeholder");
-    println!("cargo:rerun-if-changed=assets");
+    // Cargo takes a path that does not exist as changed, every time: with no `assets/`, naming it
+    // re-ran this script, and so recompiled this crate and the daemon, on every cargo command.
+    // Without it the crate's directory is watched instead, whose own mtime changes when
+    // `npm run build` creates `assets/`.
+    if built.exists() {
+        println!("cargo:rerun-if-changed=assets");
+    } else {
+        println!("cargo:rerun-if-changed=.");
+    }
     println!("cargo:rerun-if-changed=placeholder");
     let is_built = built.join("index.html").is_file();
     let root = if is_built { built } else { placeholder };
