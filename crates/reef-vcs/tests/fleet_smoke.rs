@@ -45,6 +45,8 @@ fn config(root: &Path, seed: SeedMode, tickets: u32) -> RunConfig {
         idle: Duration::from_secs(1),
         stagger: Duration::from_millis(300),
         keep_state: false,
+        // A CI runner's free space may be under any floor (#272).
+        disk_floor: Some("0".to_owned()),
     }
 }
 
@@ -104,12 +106,17 @@ fn five_synthetic_tickets_at_once() {
         assert_eq!(t.workspace_id, first.workspace_id);
         assert!(t.outcomes.keys().any(|k| k.contains("doubled_is_patched")));
         assert!(t.disk.as_ref().unwrap().build.files > 0);
+        // The daemon's own figure beside the harness's walk (#272).
+        let daemon = t.daemon_disk.as_ref().expect("the daemon's figure");
+        assert!(daemon.build_bytes > 0, "{daemon:?}");
     }
     let s = &repo.summary;
     assert_eq!(s.compared, 5);
     assert!(s.mismatches.is_empty(), "{:?}", s.mismatches);
     assert!(s.five_peak_bytes.is_some() && s.load_p95.is_some());
     assert!(!repo.list_ms.is_empty(), "the canary listed workspaces");
+    assert!(!repo.daemon_disk.is_empty(), "the daemon's disk was read");
+    assert_eq!(repo.refused_for_disk, 0);
     // Every gate shows a figure; a dev run is never judged.
     let gates = report::gates(repo, report.profile, &report.host.os);
     assert_eq!(gates.len(), 9);

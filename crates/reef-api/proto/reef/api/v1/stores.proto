@@ -21,7 +21,9 @@ service StoreService {
   // `force`. Errors: NOT_FOUND (no such store at the revision),
   // ALREADY_EXISTS (a build of the same store and hash is running),
   // INTERNAL (timed out; the process group was killed), UNAVAILABLE (the
-  // daemon is shutting down, or builds are off).
+  // daemon is shutting down, or builds are off), FAILED_PRECONDITION with
+  // reason DISK_SPACE_LOW (free space under `[disk] floor`, #272; metadata
+  // as CreateWorkspace's).
   rpc BuildStore(BuildStoreRequest) returns (stream BuildStoreResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }

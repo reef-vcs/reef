@@ -908,6 +908,31 @@ impl Client {
         }
     }
 
+    /// [`Client::list_workspaces`], with the machine's disk status from
+    /// the first page (#272); `None` from a daemon before it, or at an
+    /// operation.
+    pub async fn list_workspaces_with_disk(
+        &self,
+        request: ListWorkspacesRequest,
+    ) -> Result<(Vec<Workspace>, Option<Box<v1::DiskStatus>>), ClientError> {
+        let mut workspaces = Vec::new();
+        let mut disk = None;
+        let mut request = ListWorkspacesRequest {
+            page_size: ALL_PAGE_SIZE,
+            page_token: String::new(),
+            ..request
+        };
+        loop {
+            let response = self.list_workspaces_page(request.clone()).await?;
+            workspaces.extend(response.workspaces);
+            disk = disk.or(response.disk_status);
+            if response.next_page_token.is_empty() {
+                return Ok((workspaces, disk));
+            }
+            request.page_token = response.next_page_token;
+        }
+    }
+
     /// `WorkspaceService.GetWorkspace` with every field of the request:
     /// `workspace` may also be a path inside the workspace (R1.26).
     pub async fn get_workspace(

@@ -398,7 +398,7 @@ fn copy_tree_without_jj(from: &Path, to: &Path) {
 /// holds the tree and its first snapshot finds nothing to record.
 #[tokio::test(flavor = "multi_thread")]
 async fn second_tree_gets_its_own_base() {
-    second_tree(false).await;
+    Box::pin(second_tree(false)).await;
 }
 
 /// As [`second_tree_gets_its_own_base`], with the first base's
@@ -406,7 +406,7 @@ async fn second_tree_gets_its_own_base() {
 /// back to the full check-out.
 #[tokio::test(flavor = "multi_thread")]
 async fn second_tree_falls_back_to_a_full_check_out() {
-    second_tree(true).await;
+    Box::pin(second_tree(true)).await;
 }
 
 async fn second_tree(damage_first_base: bool) {

@@ -378,6 +378,8 @@ impl Db {
                 params![id, state],
             )?;
             insert_reclaim_in(tx, reclaim)?;
+            // Its kept disk figure ends with it (#272).
+            tx.execute("DELETE FROM workspace_disk WHERE workspace_id = ?1", [id])?;
             Ok(())
         })
     }
@@ -501,6 +503,7 @@ impl Db {
             }
             tx.execute("UPDATE workspaces SET lease_id = NULL WHERE id = ?1", [id])?;
             tx.execute("DELETE FROM leases WHERE workspace_id = ?1", [id])?;
+            tx.execute("DELETE FROM workspace_disk WHERE workspace_id = ?1", [id])?;
             tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
             Ok(())
         })

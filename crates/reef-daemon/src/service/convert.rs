@@ -270,6 +270,7 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             provenance: None,
             // Set by GetWorkspace and GetStatus for one workspace (#259).
             behind_trunk: None,
+            disk: None,
         }
     }
 }
@@ -736,6 +737,87 @@ pub(super) fn listed_operation(
             .unwrap_or_default(),
         comments: crate::comments::messages::operation_comments(entry),
         conflict_events: crate::assign::messages::operation_events(entry),
+    }
+}
+
+/// A kept disk figure (#272).
+impl From<&crate::disk::DiskFigure> for v1::WorkspaceDisk {
+    fn from(figure: &crate::disk::DiskFigure) -> Self {
+        v1::WorkspaceDisk {
+            tracked_bytes: figure.tracked_bytes,
+            build_bytes: figure.build_bytes,
+            unshared_bytes: figure.unshared_bytes,
+            files: figure.files,
+            measured_at: Some(timestamp(figure.measured_at)),
+            incomplete: figure.incomplete,
+            largest: figure
+                .largest
+                .iter()
+                .map(|dir| v1::DiskPath {
+                    path: dir.path.clone(),
+                    bytes: dir.bytes,
+                })
+                .collect(),
+            missing_dependencies: figure.missing_dependencies.clone(),
+        }
+    }
+}
+
+fn disk_level(level: crate::disk::Level) -> v1::DiskLevel {
+    match level {
+        crate::disk::Level::Ok => v1::DiskLevel::Ok,
+        crate::disk::Level::Warn => v1::DiskLevel::Warn,
+        crate::disk::Level::Low => v1::DiskLevel::Low,
+    }
+}
+
+/// The machine's disk status (#272).
+impl From<&crate::disk::Status> for v1::DiskStatus {
+    fn from(status: &crate::disk::Status) -> Self {
+        use crate::disk::Reason;
+
+        v1::DiskStatus {
+            level: disk_level(status.level).into(),
+            reasons: status
+                .reasons
+                .iter()
+                .map(|reason| {
+                    match reason {
+                        Reason::BelowFloor => v1::DiskReason::FreeBelowFloor,
+                        Reason::NearFloor => v1::DiskReason::FreeNearFloor,
+                        Reason::OverBudget => v1::DiskReason::OverBudget,
+                    }
+                    .into()
+                })
+                .collect(),
+            volumes: status
+                .volumes
+                .iter()
+                .map(|volume| v1::DiskVolume {
+                    path: volume.path.display().to_string(),
+                    holds: volume.holds.iter().map(|hold| (*hold).to_owned()).collect(),
+                    total_bytes: volume.space.total,
+                    free_bytes: volume.space.free,
+                    purgeable_free_bytes: volume.purgeable_free,
+                    floor_bytes: volume.floor,
+                    level: disk_level(volume.level).into(),
+                })
+                .collect(),
+            budget_bytes: status.budget,
+            workspaces_bytes: status.workspaces,
+            bases_bytes: status.bases,
+            stores_bytes: status.stores,
+            state_bytes: status.state,
+            reef_bytes: status.reef(),
+            largest_idle: status.largest_idle.as_ref().map(|idle| v1::IdleWorkspace {
+                workspace: idle.workspace.as_hex(),
+                repo_id: idle.repo.to_string(),
+                owner: idle.owner.clone(),
+                bytes: idle.bytes,
+                idle_since: Some(timestamp(idle.since)),
+            }),
+            stale_workspaces: status.stale,
+        }
     }
 }
 

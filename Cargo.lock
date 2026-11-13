@@ -3643,6 +3643,7 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "clap",
+ "core-foundation-sys",
  "criterion",
  "etcetera",
  "futures 0.3.34",

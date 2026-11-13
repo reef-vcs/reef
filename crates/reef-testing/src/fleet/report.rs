@@ -98,6 +98,13 @@ pub struct RepoReport {
     /// first: G8 compares against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off: Option<Box<RepoReport>>,
+    /// Of them, refused with `DISK_SPACE_LOW` (#272).
+    #[serde(default)]
+    pub refused_for_disk: u32,
+    /// The daemon's own disk figures over the scenario (#272); empty from a
+    /// daemon before it.
+    #[serde(default)]
+    pub daemon_disk: Vec<super::sample::DaemonDiskSample>,
     /// The figures the gates read.
     pub summary: Summary,
 }
@@ -118,6 +125,23 @@ pub struct Summary {
     pub after_bytes: Option<i64>,
     /// The sum of [`RepoReport::kept`].
     pub kept_bytes: u64,
+    /// The sum of [`RepoReport::caches`]: reported, not counted by G4
+    /// (#272, decision 17).
+    #[serde(default)]
+    pub caches_bytes: u64,
+    /// The daemon's lowest usable free space over the scenario (#272).
+    #[serde(default)]
+    pub daemon_min_free_bytes: Option<u64>,
+    /// The daemon's floor on that volume.
+    #[serde(default)]
+    pub daemon_floor_bytes: Option<u64>,
+    /// The daemon's readings at level `low`.
+    #[serde(default)]
+    pub daemon_low_readings: Option<u32>,
+    /// What Reef held at the scenario's start, at peak and at its end, by
+    /// the daemon's own figures.
+    #[serde(default)]
+    pub reef_bytes: Option<(u64, u64, u64)>,
     /// Logical cores.
     pub cores: u32,
     /// The 1-minute load's p95 during the five tickets.
@@ -295,6 +319,26 @@ pub fn summarize(repo: &RepoReport, cores: u32) -> Summary {
             i64::try_from(*first).unwrap_or(i64::MAX) - i64::try_from(*last).unwrap_or(i64::MAX)
         }),
         kept_bytes,
+        caches_bytes: repo.caches.values().sum(),
+        daemon_min_free_bytes: repo.daemon_disk.iter().map(|d| d.free_bytes).min(),
+        daemon_floor_bytes: repo.daemon_disk.iter().map(|d| d.floor_bytes).max(),
+        daemon_low_readings: (!repo.daemon_disk.is_empty()).then(|| {
+            u32::try_from(repo.daemon_disk.iter().filter(|d| d.level == "low").count())
+                .unwrap_or(u32::MAX)
+        }),
+        reef_bytes: repo
+            .daemon_disk
+            .first()
+            .zip(repo.daemon_disk.last())
+            .map(|(first, last)| {
+                let peak = repo
+                    .daemon_disk
+                    .iter()
+                    .map(|d| d.reef_bytes)
+                    .max()
+                    .unwrap_or(0);
+                (first.reef_bytes, peak, last.reef_bytes)
+            }),
         cores,
         load_p95: percentile(loads.clone(), 95.0),
         load_max: loads.iter().copied().reduce(f64::max),
@@ -440,17 +484,31 @@ pub fn gates(repo: &RepoReport, profile: Profile, os: &str) -> Vec<Gate> {
             id: "G1",
             name: "disk safety",
             threshold: format!(
-                "no refused create or ENOSPC; free ≥ floor ({:.0} GiB)",
-                gib(s.floor_bytes)
+                "no refused create or ENOSPC; free ≥ floor ({:.0} GiB); the daemon never low",
+                gib(s.daemon_floor_bytes.unwrap_or(s.floor_bytes))
             ),
             value: format!(
-                "{} refused, {} ENOSPC, min free {}",
+                "{} refused ({} for disk), {} ENOSPC, min free {}{}",
                 repo.creates_refused,
+                repo.refused_for_disk,
                 s.enospc_builds,
-                opt(s.min_free_bytes, |b| format!("{:.1} GiB", gib(b)))
+                opt(s.min_free_bytes, |b| format!("{:.1} GiB", gib(b))),
+                s.daemon_min_free_bytes
+                    .zip(s.daemon_low_readings)
+                    .map_or_else(String::new, |(free, low)| format!(
+                        "; daemon: min free {:.1} GiB, {low} low readings",
+                        gib(free)
+                    ))
             ),
             verdict: met(s.min_free_bytes.map(|free| {
-                repo.creates_refused == 0 && s.enospc_builds == 0 && free >= s.floor_bytes
+                let daemon_ok = s.daemon_low_readings.is_none_or(|low| low == 0)
+                    && s.daemon_min_free_bytes
+                        .zip(s.daemon_floor_bytes)
+                        .is_none_or(|(free, floor)| free >= floor);
+                repo.creates_refused == 0
+                    && s.enospc_builds == 0
+                    && free >= s.floor_bytes
+                    && daemon_ok
             })),
         },
         Gate {
@@ -479,19 +537,32 @@ pub fn gates(repo: &RepoReport, profile: Profile, os: &str) -> Vec<Gate> {
         }),
         verdict: met(ratio.map(|r| r <= limit)),
     });
-    let left = s
-        .after_bytes
-        .map(|after| after - i64::try_from(s.kept_bytes).unwrap_or(i64::MAX));
+    // Shared tool caches' growth is reported, not counted (#272, decision
+    // 17): Reef cannot change what `GOCACHE` keys by.
+    let left = s.after_bytes.map(|after| {
+        after
+            - i64::try_from(s.kept_bytes).unwrap_or(i64::MAX)
+            - i64::try_from(s.caches_bytes).unwrap_or(i64::MAX)
+    });
     out.push(Gate {
         id: "G4",
         name: "disk after",
-        threshold: format!("≤ {:.0} GiB beyond Reef's bases and stores", gib(G4_AFTER)),
+        threshold: format!(
+            "≤ {:.0} GiB beyond Reef's bases and stores and the tool caches",
+            gib(G4_AFTER)
+        ),
         value: opt(s.after_bytes, |after| {
             format!(
-                "{:.2} GiB used, {:.2} GiB Reef kept, {:.2} GiB tool caches grew",
+                "{:.2} GiB used, {:.2} GiB Reef kept, {:.2} GiB tool caches grew (not counted){}",
                 signed_gib(after),
                 gib(s.kept_bytes),
-                gib(repo.caches.values().sum())
+                gib(s.caches_bytes),
+                s.reef_bytes
+                    .map_or_else(String::new, |(start, _, end)| format!(
+                        "; the daemon's Reef total {:.2} → {:.2} GiB",
+                        gib(start),
+                        gib(end)
+                    ))
             )
         }),
         verdict: met(left.map(|l| l <= i64::try_from(G4_AFTER).unwrap_or(i64::MAX))),
@@ -743,11 +814,11 @@ pub fn render(report: &Report) -> String {
         }
         let _ = writeln!(
             md,
-            "\n| Run | Ticket | Round | Exit | Wall (s) | Units | Peak RSS (GiB) | Build (GiB) | Build unshared (GiB) | Other unshared (GiB) |"
+            "\n| Run | Ticket | Round | Exit | Wall (s) | Units | Peak RSS (GiB) | Build (GiB) | Build unshared (GiB) | Other unshared (GiB) | Daemon's figure (GiB) |"
         );
         let _ = writeln!(
             md,
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
         );
         let rows = repo
             .seed
@@ -759,7 +830,7 @@ pub fn render(report: &Report) -> String {
             let disk = t.disk.as_ref();
             let _ = writeln!(
                 md,
-                "| {run} | {} | {} | {} | {} | {} | {:.2} | {} | {} | {} |",
+                "| {run} | {} | {} | {} | {} | {} | {:.2} | {} | {} | {} | {} |",
                 t.ticket,
                 t.round,
                 t.exit_code
@@ -775,6 +846,10 @@ pub fn render(report: &Report) -> String {
                 opt(disk.and_then(|d| d.other.unshared_bytes), |b| format!(
                     "{:.2}",
                     gib(b)
+                )),
+                opt(t.daemon_disk.as_ref(), |d| format!(
+                    "{:.2}",
+                    gib(d.unshared_bytes.unwrap_or(d.tracked_bytes + d.build_bytes))
                 )),
             );
         }
@@ -933,6 +1008,47 @@ mod tests {
         }
     }
 
+    fn daemon_reading(
+        level: &str,
+        free_gib: u64,
+        floor_gib: u64,
+    ) -> super::super::sample::DaemonDiskSample {
+        super::super::sample::DaemonDiskSample {
+            t_ms: 3000,
+            level: level.to_owned(),
+            free_bytes: free_gib * GIB,
+            floor_bytes: floor_gib * GIB,
+            reef_bytes: 2 * GIB,
+            workspaces_bytes: GIB,
+        }
+    }
+
+    /// G4 counts what Reef holds; tool caches are reported apart (#272).
+    #[test]
+    fn g4_leaves_tool_caches_out() {
+        let mut repo = passing();
+        repo.samples[5].free_bytes = vec![140 * GIB];
+        repo.caches = [("GOCACHE".to_owned(), 9 * GIB)].into();
+        repo.daemon_disk = vec![daemon_reading("ok", 140, 25)];
+        repo.summary = summarize(&repo, 8);
+        let report = report(Profile::Standard, repo);
+        let g4 = gates(&report.repos[0], report.profile, "macos")
+            .into_iter()
+            .find(|g| g.id == "G4")
+            .unwrap();
+        assert_eq!(g4.verdict, Verdict::Pass, "{g4:?}");
+        assert!(
+            g4.value.contains("9.00 GiB tool caches grew (not counted)"),
+            "{}",
+            g4.value
+        );
+        assert!(
+            g4.value.contains("the daemon's Reef total 2.00 → 2.00 GiB"),
+            "{}",
+            g4.value
+        );
+    }
+
     /// A repository that passes every gate on an 8-core, 512 GB machine.
     fn passing() -> RepoReport {
         let mut repo = RepoReport {
@@ -1027,8 +1143,11 @@ mod tests {
     #[test]
     fn each_gate_can_fail() {
         type Breaker = fn(&mut RepoReport);
-        let breakers: [(&str, Breaker); 10] = [
+        let breakers: [(&str, Breaker); 12] = [
             ("G1", |r| r.creates_refused = 1),
+            // The daemon's own figures (#272).
+            ("G1", |r| r.daemon_disk.push(daemon_reading("low", 10, 20))),
+            ("G1", |r| r.daemon_disk.push(daemon_reading("warn", 19, 20))),
             ("G2", |r| {
                 r.samples[4].free_bytes = vec![10 * GIB];
                 r.samples[3].free_bytes = vec![10 * GIB];

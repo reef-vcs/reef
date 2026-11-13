@@ -138,6 +138,15 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ("repo", &["auto_register", "allow_foreign_owner"]),
     ("store", &["allow_builds"]),
     (
+        "disk",
+        &[
+            "floor",
+            "budget",
+            "measure_interval",
+            "exclude_from_backups",
+        ],
+    ),
+    (
         "symbols",
         &[
             "enabled",
@@ -259,6 +268,8 @@ pub struct FileConfig {
     pub repo: RepoSection,
     /// `[store]`.
     pub store: StoreSection,
+    /// `[disk]` (#272).
+    pub disk: DiskSection,
     /// `[symbols]`.
     pub symbols: SymbolsSection,
     /// `[history]`.
@@ -651,6 +662,106 @@ pub struct StoreSection {
 impl Default for StoreSection {
     fn default() -> Self {
         Self { allow_builds: true }
+    }
+}
+
+/// `[disk]`: disk accounting, the free-space floor and the budget (#272,
+/// ADR 0076; `docs/disk.md`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiskSection {
+    /// Free space under which creates and store builds are refused, per
+    /// volume. Default `auto`: the larger of 20 GiB and 5% of the volume.
+    /// `"0"` turns the floor off.
+    pub floor: DiskAmount,
+    /// What Reef may hold before it warns: workspaces, bases, stores and
+    /// its state. Default `auto`: 25% of the workspace root's volume. `"0"`
+    /// turns it off. Never refuses anything.
+    pub budget: DiskAmount,
+    /// The least time between two background walks of a workspace written
+    /// to since its last. Default 5 minutes; from 1 minute to 24 hours.
+    #[serde(with = "duration")]
+    pub measure_interval: Duration,
+    /// macOS: mark the default workspace root, the base cache and the
+    /// stores excluded from Time Machine, once each. Default true.
+    pub exclude_from_backups: bool,
+}
+
+impl Default for DiskSection {
+    fn default() -> Self {
+        Self {
+            floor: DiskAmount::Auto,
+            budget: DiskAmount::Auto,
+            measure_interval: Duration::from_mins(5),
+            exclude_from_backups: true,
+        }
+    }
+}
+
+/// `[disk] floor` and `budget`: `auto`, or a size (0 for none).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskAmount {
+    /// Computed from the volume's size.
+    Auto,
+    /// This many bytes; 0 for none.
+    Bytes(ByteSize),
+}
+
+impl DiskAmount {
+    /// The bytes on a volume of `total` bytes, with `auto` as `auto(total)`.
+    pub fn resolve(self, total: u64, auto: impl FnOnce(u64) -> u64) -> u64 {
+        match self {
+            Self::Auto => auto(total),
+            Self::Bytes(bytes) => bytes.0,
+        }
+    }
+}
+
+impl fmt::Display for DiskAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Bytes(bytes) => bytes.fmt(f),
+        }
+    }
+}
+
+impl Serialize for DiskAmount {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for DiskAmount {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = DiskAmount;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("\"auto\", a number of bytes, or a size such as \"20GiB\"")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, bytes: u64) -> Result<DiskAmount, E> {
+                Ok(DiskAmount::Bytes(ByteSize(bytes)))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, bytes: i64) -> Result<DiskAmount, E> {
+                u64::try_from(bytes)
+                    .map(|bytes| DiskAmount::Bytes(ByteSize(bytes)))
+                    .map_err(|_| E::custom("a size cannot be negative"))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<DiskAmount, E> {
+                if text == "auto" {
+                    return Ok(DiskAmount::Auto);
+                }
+                parse_byte_size(text)
+                    .map(|bytes| DiskAmount::Bytes(ByteSize(bytes)))
+                    .map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -2014,6 +2125,18 @@ impl Config {
                 vec![("allow_builds", f.store.allow_builds.to_string())],
             ),
             (
+                "disk",
+                vec![
+                    ("floor", s(&f.disk.floor.to_string())),
+                    ("budget", s(&f.disk.budget.to_string())),
+                    ("measure_interval", d(f.disk.measure_interval)),
+                    (
+                        "exclude_from_backups",
+                        f.disk.exclude_from_backups.to_string(),
+                    ),
+                ],
+            ),
+            (
                 "symbols",
                 vec![
                     ("enabled", f.symbols.enabled.to_string()),
@@ -2381,6 +2504,12 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             file.gc.interval.is_zero() || file.gc.interval >= Duration::from_hours(1),
             "gc.interval",
             "must be 0s (off) or at least 1h".to_owned(),
+        ),
+        (
+            (Duration::from_mins(1)..=Duration::from_hours(24))
+                .contains(&file.disk.measure_interval),
+            "disk.measure_interval",
+            "must be from 1m to 24h".to_owned(),
         ),
         (
             file.log.keep_days >= 1,

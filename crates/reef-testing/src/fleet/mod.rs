@@ -244,6 +244,18 @@ pub struct Host {
     pub spotlight: Option<String>,
 }
 
+/// The daemon's figure for one workspace (#272), as `ws inspect` prints
+/// its `disk`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonWorkspaceDisk {
+    /// Tracked files that differ from the base.
+    pub tracked_bytes: u64,
+    /// Untracked files: build output and dependencies.
+    pub build_bytes: u64,
+    /// What releasing it frees; absent where the filesystem cannot tell.
+    pub unshared_bytes: Option<u64>,
+}
+
 /// One timed `reef ws run`: a ticket's round in a workspace.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TicketRun {
@@ -271,6 +283,14 @@ pub struct TicketRun {
     pub peak_rss_bytes: u64,
     /// The workspace's disk after this round, if it was kept.
     pub disk: Option<disk::WorkspaceDisk>,
+    /// The daemon's kept figure for the workspace after this round
+    /// (#272), from `reef ws inspect`, which walks it; absent from a
+    /// daemon before it.
+    #[serde(default)]
+    pub daemon_disk: Option<DaemonWorkspaceDisk>,
+    /// The create was refused with `DISK_SPACE_LOW` (#272).
+    #[serde(default)]
+    pub refused_for_disk: bool,
     /// Whether the log says a write failed for disk (`ENOSPC`).
     pub enospc: bool,
     /// Why `ws run` failed, when it did (a refused create, for example).

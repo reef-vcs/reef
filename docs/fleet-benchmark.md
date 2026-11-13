@@ -56,13 +56,14 @@ Sampled every second into `report.json`; `summary.md` renders it.
 | Metric | How |
 | --- | --- |
 | Free space | `statvfs` on the volume holding the workspaces (and the clone's, if different). macOS's "available for important usage" figure, which counts purgeable space such as Time Machine's local snapshots, every 5 seconds |
-| Disk per workspace | the harness's own walk after each round: allocated and unshared bytes, build output apart from the rest. The daemon's figure counts every changed file at full size and does not split build output (#146, built by #272) |
+| Disk per workspace | after each round, the daemon's kept figure from `reef ws inspect` (#272: tracked, build output, unshared), beside the harness's own walk (allocated and unshared bytes, build output apart from the rest); `summary.md` shows both |
+| The daemon's disk | `reef daemon status -o json`'s `disk` every 10 seconds (#272): its level, the lowest usable free space and that volume's floor, and what Reef holds (`reef_bytes`) |
 | Load | the 1-minute load average; CPU busy share from `/proc/stat` on Linux and summed `ps %cpu` on macOS |
 | Memory | macOS: `kern.memorystatus_vm_pressure_level` (normal, warn, critical), swap-outs and compressor bytes from `vm_stat`, swap in use. Linux: PSI `memory some` and `full` `avg10`, swap in use. Each ticket's process-tree RSS from `ps` |
 | Time | each run's wall time from `reef ws run` to its exit; the five tickets' makespan |
 | Usability | a canary: `reef ws list -o json` every 5 seconds (its p99), and a 10 ms sleep loop (its lateness p99) |
 | Correctness | each test's outcome from the log (libtest, `go test`, pytest `-rA`, TAP, Vitest's verbose reporter), compared with the same patch's solo run |
-| Refusals | creates `ws run` could not make; builds whose log shows `ENOSPC` |
+| Refusals | creates `ws run` could not make, and of them those refused with `DISK_SPACE_LOW` (#272); builds whose log shows `ENOSPC` |
 
 The run records Time Machine's local snapshots (`tmutil listlocalsnapshots /`) and Spotlight's state, because a local snapshot keeps a released workspace's blocks for up to a day and `statvfs` does not count them as free.
 
@@ -72,10 +73,10 @@ Judged per repository, on the `standard` and `linux` profiles only. `reef-fleet 
 
 | Gate | Threshold |
 | --- | --- |
-| G1 disk safety | no create refused and no build failed for disk; free space never below the floor, the larger of 20 GiB and 5% of the volume |
+| G1 disk safety | no create refused (none with `DISK_SPACE_LOW`) and no build failed for disk; free space never below the floor, the larger of 20 GiB and 5% of the volume; the daemon's own level never `low` and its free space never under its floor (#272) |
 | G2 disk peak | five tickets consume at most 100 GiB at peak |
 | G3 disk scaling | five tickets cost at most 2× one ticket's peak (3× for Rust: linked test binaries are per workspace whatever is shared) |
-| G4 disk after | after release and `ws gc`, within 2 GiB of the start beyond what Reef kept on purpose (bases and stores it made during the run). Growth of the shared tool caches (`GOCACHE`, yarn's) counts as used, and is reported apart |
+| G4 disk after | after release and `ws gc`, within 2 GiB of the start beyond what Reef kept on purpose (bases and stores it made during the run). Growth of the shared tool caches (`GOCACHE`, yarn's) is reported apart and not counted (#272, the user's decision 2026-11-13): Reef cannot change what a tool keys its cache by. The daemon's `reef_bytes` at the start and the end is reported beside it |
 | G5 load | 1-minute load p95 at most 2× the cores, maximum at most 3× |
 | G6 memory | macOS: no time at critical pressure and at most 2 GiB swapped out; Linux: PSI `memory full avg10` never above 10% |
 | G7 usability | the canary's `ws list` p99 under 1 s, and none failed or ran past 30 s; the sleep's lateness p99 under 50 ms |

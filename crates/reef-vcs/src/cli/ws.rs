@@ -427,14 +427,14 @@ async fn list(
         ]
     };
     let list = |repo| {
-        ctx.client.list_workspaces(ListWorkspacesRequest {
+        ctx.client.list_workspaces_with_disk(ListWorkspacesRequest {
             repo,
             states: states.clone(),
             changed_file_counts: true,
             ..ListWorkspacesRequest::default()
         })
     };
-    let listed = if at.given() {
+    let (listed, disk) = if at.given() {
         // One repository's, at one of its operations (R2.12).
         let scope = scope::resolve_repo_only(ctx, repo.as_deref()).await?;
         let at_operation = at.at_operation(ctx, &scope).await?;
@@ -442,13 +442,15 @@ async fn list(
             operation_given: true,
             ..AdviceCtx::new(&scope)
         };
-        ctx.call(ctx.client.list_workspaces(ListWorkspacesRequest {
-            repo: scope.repo_id.clone(),
-            at_operation,
-            ..ListWorkspacesRequest::default()
-        }))
-        .await
-        .map_err(|error| advice.refine(error))?
+        let listed = ctx
+            .call(ctx.client.list_workspaces(ListWorkspacesRequest {
+                repo: scope.repo_id.clone(),
+                at_operation,
+                ..ListWorkspacesRequest::default()
+            }))
+            .await
+            .map_err(|error| advice.refine(error))?;
+        (listed, None)
     } else {
         match repo {
             Some(repo) => ctx.call_with_repo(&RepoArg::parse(&repo)?, list).await?,
@@ -464,7 +466,23 @@ async fn list(
         ));
     }
     let listed: Vec<Workspace> = listed.iter().map(Workspace::from).collect();
-    ctx.out.list_with(&listed, brief::workspaces)
+    // The disk level only when it is not `ok` (#272): one line on stderr,
+    // and each brief element's figure.
+    let disk = disk
+        .as_deref()
+        .map(json::DiskStatus::from)
+        .filter(|disk| disk.level != "ok");
+    if let Some(disk) = &disk {
+        ctx.out.note(&super::render::disk_note(disk));
+    }
+    let show_disk = disk.is_some();
+    ctx.out.list_with(&listed, |list| {
+        let mut views = brief::workspaces(list);
+        if show_disk {
+            brief::show_disk(&mut views, list);
+        }
+        views
+    })
 }
 
 /// `reef ws release`.

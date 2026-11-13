@@ -892,7 +892,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         }
         Command::Ui(args) => ui::run(&connect(&global, out).await?, args).await,
         Command::Remote(args) => remote::run(&global, out, args).await,
-        Command::File(args) => file::run(&connect(&global, out).await?, args).await,
+        Command::File(args) => Box::pin(file::run(&connect(&global, out).await?, args)).await,
         Command::Symbols(args) => symbols::run(&connect(&global, out).await?, args).await,
         Command::Evidence(args) if args.is_offline() => args.run_offline(out),
         Command::Evidence(args) => Box::pin(evidence::run(&global, out, args)).await,

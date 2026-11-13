@@ -92,6 +92,11 @@ impl Manager {
         missing_stores: MissingStores,
         agent: Option<String>,
     ) -> Result<Moved, ManagerError> {
+        // Never refused for disk (#272): an agent mid-ticket must go on, and
+        // a rebase is how a stale workspace comes back. Said in the log.
+        if let Err(error) = self.disk.check_floor(|| None) {
+            tracing::warn!(workspace_id = %id, %error, "moving a workspace below the disk floor");
+        }
         let manager = self
             .scheduler
             .manager()

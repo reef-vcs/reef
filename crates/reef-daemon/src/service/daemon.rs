@@ -91,6 +91,12 @@ pub(crate) async fn daemon_status(
         backends,
         remote: Some(state.remote.status(&state.config)),
         build: Some(state.build.status()),
+        disk: Some(Box::new(reef_api::v1::DiskStatus::from(
+            &state
+                .manager
+                .disk_status(crate::disk::Purgeable::Always)
+                .await,
+        ))),
     })
 }
 

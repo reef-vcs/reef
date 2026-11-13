@@ -254,7 +254,7 @@ impl std::fmt::Debug for SymbolIndex {
 
 /// Lowers the calling thread's priority, so a first index never competes
 /// with agents' snapshots.
-fn lower_priority() {
+pub(crate) fn lower_priority() {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: plain syscalls on the calling thread, with no pointers.

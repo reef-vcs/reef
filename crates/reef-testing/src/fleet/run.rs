@@ -16,9 +16,13 @@ use serde::Deserialize;
 
 use super::report::{self, RepoReport, Report};
 use super::repos::{self, Prepared, RepoSpec};
-use super::sample::{self, BuildSampler, Canary, CanaryReadings, Phase, Sampler, Tracked, millis};
+use super::sample::{
+    self, BuildSampler, Canary, CanaryReadings, DiskWatch, Phase, Sampler, Tracked, millis,
+};
 use super::seed::{self, quote};
-use super::{Host, LimitMode, Profile, TicketRun, Toggle, Variant, disk, outcomes};
+use super::{
+    DaemonWorkspaceDisk, Host, LimitMode, Profile, TicketRun, Toggle, Variant, disk, outcomes,
+};
 
 /// What a run does.
 #[derive(Clone, Debug)]
@@ -58,6 +62,10 @@ pub struct RunConfig {
     pub stagger: Duration,
     /// Keep the run's state directory (the clones are always kept).
     pub keep_state: bool,
+    /// `[disk] floor` for the run's daemon (#272), written to its
+    /// `config.toml`; `None` for the daemon's default. The smoke test sets
+    /// `"0"`, since a CI runner's free space may be under any floor.
+    pub disk_floor: Option<String>,
 }
 
 /// Prefixes of variables the harness drops from its own environment before
@@ -146,6 +154,11 @@ pub fn run(config: &RunConfig) -> Result<Report, String> {
     let root = crate::agent::env::short_tempdir(&config.work_root, "f")?;
     let state = root.join("s");
     fs::create_dir_all(&state).map_err(|e| format!("{}: {e}", state.display()))?;
+    if let Some(floor) = &config.disk_floor {
+        let text = format!("[disk]\nfloor = {}\n", toml_string(floor));
+        fs::write(state.join("config.toml"), text)
+            .map_err(|e| format!("{}: {e}", state.display()))?;
+    }
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(|e| format!("{}: {e}", logs.display()))?;
     let ctx = Ctx {
@@ -217,6 +230,11 @@ pub fn run(config: &RunConfig) -> Result<Report, String> {
         write(&report, &config.out)?;
     }
     Ok(report)
+}
+
+/// `text` as a TOML basic string.
+fn toml_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 struct DaemonGuard<'a> {
@@ -412,6 +430,22 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             epoch,
         )
     };
+    // The daemon's own disk figures (#272), which G1 and G4 read.
+    let disk_watch = {
+        let program = config.reef_bin_dir.join("reef");
+        let env = ctx.env.clone();
+        DiskWatch::start(
+            move || {
+                let mut command = Command::new(&program);
+                command
+                    .env_clear()
+                    .envs(env.iter().cloned())
+                    .args(["daemon", "status", "-o", "json"]);
+                command
+            },
+            epoch,
+        )
+    };
     let mut phases = Vec::new();
     let mark = |phases: &mut Vec<Phase>, name: &str, start: u64| {
         phases.push(Phase {
@@ -447,6 +481,7 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
                 }
                 if run.workspace_id.is_none() {
                     repo.creates_refused += 1;
+                    repo.refused_for_disk += u32::from(run.refused_for_disk);
                 }
                 repo.solo.push(run);
             }
@@ -522,6 +557,7 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             for run in runs {
                 if run.round == 1 && run.workspace_id.is_none() {
                     repo.creates_refused += 1;
+                    repo.refused_for_disk += u32::from(run.refused_for_disk);
                 }
                 repo.five.push(run);
             }
@@ -578,6 +614,7 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
     })();
 
     let readings = canary.finish();
+    repo.daemon_disk = disk_watch.finish();
     let taken = sampler.finish();
     repo.build_samples = build_sampler.finish();
     repo.lateness_p99_us = lateness_by_phase(&readings, &phases);
@@ -764,6 +801,7 @@ fn ws_run(
     } else {
         None
     };
+    let (daemon_disk, refused_for_disk) = daemon_figures(ctx, &parsed, keep);
     Ok(TicketRun {
         ticket,
         round,
@@ -775,10 +813,52 @@ fn ws_run(
         units_compiled: outcomes::units_compiled(&text),
         peak_rss_bytes: 0,
         disk,
+        daemon_disk,
+        refused_for_disk,
         enospc: outcomes::enospc(&text),
         error,
         log: format!("logs/{}/{label}.log", prepared.spec.name),
     })
+}
+
+/// The daemon's figure for a kept workspace, beside the harness's own walk,
+/// and whether `ws run`'s create was refused for disk (#272).
+fn daemon_figures(
+    ctx: &Ctx<'_>,
+    parsed: &WsRunReport,
+    keep: bool,
+) -> (Option<DaemonWorkspaceDisk>, bool) {
+    let daemon_disk = if keep {
+        parsed
+            .workspace_id
+            .as_deref()
+            .and_then(|id| daemon_workspace_disk(ctx, id))
+    } else {
+        None
+    };
+    let refused = parsed
+        .error
+        .as_ref()
+        .and_then(|error| error.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        == Some("DISK_SPACE_LOW");
+    (daemon_disk, refused)
+}
+
+/// `reef ws inspect <id>`'s `disk`: the daemon walks the workspace and
+/// keeps the figure (#272). `None` from a daemon before it.
+fn daemon_workspace_disk(ctx: &Ctx<'_>, id: &str) -> Option<DaemonWorkspaceDisk> {
+    #[derive(Deserialize)]
+    struct Inspect {
+        disk: Option<DaemonWorkspaceDisk>,
+    }
+    let json = ctx
+        .reef_ok(
+            &["ws", "inspect", id, "--no-snapshot", "-o", "json"],
+            &ctx.state,
+        )
+        .ok()?;
+    serde_json::from_str::<Inspect>(&json).ok()?.disk
 }
 
 fn workspace_path(ctx: &Ctx<'_>, id: Option<&str>) -> Option<PathBuf> {

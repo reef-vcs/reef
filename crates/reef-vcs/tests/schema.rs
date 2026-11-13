@@ -395,8 +395,17 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
         "127.0.0.1:0".clone_into(&mut config.file.remote.listen);
         config.file.remote.names = vec!["localhost".to_owned()];
         no_automatic_snapshots(config);
+        // A floor, for the disk's not-ok shapes (#272); free space is the
+        // test's, below.
+        config.file.disk.floor = reef_daemon::config::DiskAmount::Auto;
     })
     .await;
+    daemon
+        .handle
+        .state()
+        .manager
+        .disk()
+        .set_free_for_tests(Some(1 << 43));
     let deadline = Instant::now() + Duration::from_secs(10);
     while daemon.handle.state().remote.bound_addr().is_none() {
         assert!(Instant::now() < deadline, "the remote listener never bound");
@@ -809,6 +818,14 @@ async fn outputs_match_their_schemas() {
         .await;
     script.both(&a_dir, &["here"]).await;
     script.both(&root, &["here"]).await;
+    // The disk's shapes when its level is not `ok` (#272): `here`'s
+    // `disk_status` and `disk`, and `ws list`'s brief `disk`.
+    let disk = daemon.handle.state().manager.disk();
+    disk.set_free_for_tests(Some(0));
+    script.both(&a_dir, &["here"]).await;
+    script.both(&root, &["ws", "list"]).await;
+    script.both(&root, &["daemon", "status"]).await;
+    disk.set_free_for_tests(Some(1 << 43));
 
     // Presence.
     let reported = script

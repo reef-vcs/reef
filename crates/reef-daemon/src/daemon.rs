@@ -736,6 +736,16 @@ fn start_loops(state: &Arc<AppState>, gc_timer: &GcTimer) {
         })
     });
 
+    // The disk loop (#272): background walks, the machine figures, the Time
+    // Machine exclusions. Stopped with the other loops.
+    let disk = state.manager.start_disk_loop(state.shutdown.clone());
+    state.hooks.add("disk loop", move || {
+        Box::pin(async move {
+            disk.abort();
+            let _ = disk.await;
+        })
+    });
+
     // 10. The GC timer.
     gc_timer.start(
         state.config.file.gc.interval,

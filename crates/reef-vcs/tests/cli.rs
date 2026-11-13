@@ -360,6 +360,7 @@ async fn ws_list_and_inspect() {
             "STATE",
             "CHANGE",
             "FILES",
+            "DISK",
             "OWNER",
             "LEASE",
             "BACKEND",
@@ -2845,4 +2846,84 @@ async fn ws_env_and_build_status() {
     assert_eq!(status["build"]["jobserver"], fifo.display().to_string());
     let output = run(reef(&daemon), &["-o", "text", "daemon", "status"]).await;
     assert!(stdout(&output).contains("build:"), "{}", stdout(&output));
+}
+
+/// #272: the disk level shows only when it is not `ok`; the figures always
+/// show where they are asked for; a create below the floor is refused with
+/// `next`.
+#[tokio::test(flavor = "multi_thread")]
+async fn disk_shown_only_when_not_ok() {
+    // The default floor, which TestDaemon turns off.
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        config.file.disk.floor = reef_daemon::config::DiskAmount::Auto;
+    })
+    .await;
+    let disk = daemon.handle.state().manager.disk();
+    // Plenty free, whatever the machine has.
+    disk.set_free_for_tests(Some(1 << 43));
+    let created = create(&daemon, &repo).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let path = PathBuf::from(created["path"].as_str().unwrap());
+
+    // Ok: nothing about the disk where agents look every turn.
+    let here = json(&run(reef_at(&daemon, &path), &["here"]).await);
+    assert!(
+        here.get("disk").is_none() && here.get("disk_status").is_none(),
+        "{here}"
+    );
+    let output = run(reef(&daemon), &["ws", "list"]).await;
+    output.clone().assert().success();
+    assert!(!stdout(&output).contains("\"disk\""), "{}", stdout(&output));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("reef: disk"));
+    let full = json(&run(reef(&daemon), &["ws", "list", "-o", "json"]).await);
+    assert!(full[0]["disk"]["tracked_bytes"].is_u64(), "{full}");
+    let table = stdout(&run(reef(&daemon), &["ws", "list", "-o", "text"]).await);
+    assert!(table.lines().next().unwrap().contains(" DISK "), "{table}");
+    let inspect = stdout(&run(reef(&daemon), &["ws", "inspect", &id, "-o", "text"]).await);
+    assert!(inspect.contains("\ndisk:"), "{inspect}");
+    let status = json(&run(reef(&daemon), &["daemon", "status", "-o", "json"]).await);
+    assert_eq!(status["disk"]["level"], "ok", "{status}");
+    let status = stdout(&run(reef(&daemon), &["daemon", "status", "-o", "text"]).await);
+    assert!(
+        status.contains("\ndisk:") && status.contains("floor"),
+        "{status}"
+    );
+
+    // Low.
+    disk.set_free_for_tests(Some(1 << 20));
+    let here = json(&run(reef_at(&daemon, &path), &["here"]).await);
+    assert_eq!(here["disk_status"]["level"], "low", "{here}");
+    assert!(here["disk"].is_object(), "{here}");
+    assert!(
+        here["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The disk is nearly full"),
+        "{here}"
+    );
+    // The only workspace is held (its lease is fresh): nothing idle.
+    assert_eq!(here["next"], serde_json::json!(["reef", "ws", "list"]));
+    let text = stdout(&run(reef_at(&daemon, &path), &["-o", "text", "here"]).await);
+    assert!(text.lines().count() <= 12, "{text}");
+    assert!(
+        text.contains("\ndisk:          low, 1.0 MiB free"),
+        "{text}"
+    );
+    let output = run(reef(&daemon), &["ws", "list"]).await;
+    output.clone().assert().success();
+    assert!(
+        stdout(&output).contains("\"disk\":{"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("reef: disk low: 1.0 MiB free"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(reef(&daemon), &["ws", "create", "--repo", &repo.id]).await;
+    failed(&output, 5, "conflict");
+    let refused: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(refused["error"]["reason"], "DISK_SPACE_LOW", "{refused}");
+    assert_eq!(next_of(&output), ["reef", "ws", "list"]);
 }

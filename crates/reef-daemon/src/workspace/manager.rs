@@ -70,6 +70,8 @@ pub struct Manager {
     pub(super) provenance: std::sync::OnceLock<Arc<crate::provenance::Provenance>>,
     /// The build limit (#271), once set: store builds run under it.
     pub(super) build: std::sync::OnceLock<Arc<crate::build::BuildLimit>>,
+    /// Disk accounting and the floor (#272).
+    pub(super) disk: Arc<crate::disk::Disk>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -112,6 +114,7 @@ impl Manager {
                 Arc::clone(&presence),
             ));
             let stores = Arc::new(StoreManager::new(&config.paths.state_dir, Arc::clone(&db)));
+            let disk = Arc::new(crate::disk::Disk::new(&config));
             Manager {
                 config,
                 db,
@@ -127,6 +130,7 @@ impl Manager {
                 presence,
                 provenance: std::sync::OnceLock::new(),
                 build: std::sync::OnceLock::new(),
+                disk,
             }
         })
     }
@@ -590,11 +594,16 @@ impl Manager {
         };
         let record = self.db.workspace(id)?;
         let lease = self.lease_of(&record)?;
-        let disk_usage = match self.entry(id) {
-            Some(entry) if measure_disk && record.state == WorkspaceState::Active => {
-                self.disk_usage(entry, &record).await
-            }
-            _ => None,
+        // One walk (#272): `DiskUsage` as always, and the kept figure.
+        let disk_usage = if measure_disk && record.state == WorkspaceState::Active {
+            self.measure_disk(id, super::disk::Priority::Request)
+                .await
+                .map(|walked| crate::backend::DiskUsage {
+                    allocated_bytes: walked.changed_bytes(),
+                    files_changed: walked.files_changed,
+                })
+        } else {
+            None
         };
         let other_workspaces_on_change = self
             .db
@@ -620,44 +629,6 @@ impl Manager {
             recent_snapshots,
             stores,
         })
-    }
-
-    /// The backend's estimate, or `None` (logged) when the base is no
-    /// longer cached or the walk fails: inspect still answers.
-    pub(super) async fn disk_usage(
-        &self,
-        entry: Arc<WorkspaceEntry>,
-        record: &WorkspaceRecord,
-    ) -> Option<crate::backend::DiskUsage> {
-        let base = match self.base_cache(record.repo_id).get(&record.base_tree_id) {
-            Ok(Some(base)) => base,
-            Ok(None) => {
-                tracing::warn!(workspace_id = %record.id, "base is no longer cached; no disk usage");
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(workspace_id = %record.id, error = %ErrorChain(&error), "cannot read the base");
-                return None;
-            }
-        };
-        // The stores mounted now: a move (R1.06) may have changed them.
-        let paths = entry
-            .paths
-            .clone()
-            .with_store_mounts(entry.stores().iter().map(|store| store.mount.as_str()));
-        let measured =
-            tokio::task::spawn_blocking(move || entry.backend.disk_usage(&base, &paths)).await;
-        match measured {
-            Ok(Ok(usage)) => Some(usage),
-            Ok(Err(error)) => {
-                tracing::warn!(workspace_id = %record.id, error = %ErrorChain(&error), "cannot measure disk usage");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(workspace_id = %record.id, %error, "disk usage task failed");
-                None
-            }
-        }
     }
 
     /// Loads every `active` workspace at daemon start (a `releasing` one,
@@ -758,6 +729,8 @@ impl Manager {
             };
             self.insert_entry(id, Arc::new(entry));
             self.scheduler.track(id, TrackReason::Loaded).await;
+            // Writes while the daemon was down are unknown (#272).
+            self.disk.track(id, true);
             loaded += 1;
         }
         if rematerialize && !rematerialize_failed {
@@ -915,6 +888,7 @@ impl Manager {
         {
             tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
         }
+        self.disk.forget(id);
         self.presence.end_workspace(id);
         if let Some(provenance) = self.provenance.get() {
             provenance.end(id);

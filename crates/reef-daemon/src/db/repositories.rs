@@ -203,6 +203,7 @@ impl Db {
             )?;
             tx.execute("DELETE FROM leases WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM workspaces WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM workspace_disk WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM base_cache WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM evidence_artifacts WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM artifacts WHERE repo_id = ?1", [id])?;

@@ -106,7 +106,7 @@ Keyed by repository (ADR 0003), copied by backups. Persisted rather than kept in
 
 **Volumes.** The daemon tracks the volume of the workspace root (`Config::workspace_root`, or its nearest existing ancestor) and the state directory's (bases, stores, the database); under #260's default they are usually one volume, told apart by `st_dev`. Each volume's figures: total, `free` (`statvfs`), on macOS `purgeable_free` (CoreFoundation's important-usage capacity, D1), the floor, the level.
 
-**Usable free space** is `statvfs` free, or on macOS the larger of it and the important-usage capacity. **The fast path is `statvfs`** (2 µs): at or above the floor it decides alone, since the important-usage figure is never smaller; only below it does the daemon ask CoreFoundation (9 to 43 ms), cached 5 s. `reef daemon status` always asks, to show it.
+**Usable free space** is `statvfs` free, or on macOS the larger of it and the important-usage capacity. **The fast path is `statvfs`** (2 µs): at or above the floor it decides alone, since usable free space is the larger of the two; only below it does the daemon ask CoreFoundation (9 to 43 ms), cached 5 s. `reef daemon status` always asks, to show it.
 
 **The floor** (decision 7): `[disk] floor = "auto"`, the larger of 20 GiB and 5% of the volume's total (24 GiB on a 512 GB disk, 46 GiB on the dev machine's 926 GiB), or a size (`"30GiB"`), or `"0"` for none. Below it on either volume:
 
@@ -233,7 +233,7 @@ ADR 0073: agents see the level as data only when it is not `ok`, so the token be
 
 The walk sees every directory, so detection is free: a directory with `package.json` and one of `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` but no `node_modules`; or `uv.lock` or `poetry.lock` with `pyproject.toml` but no `.venv`. Not `Cargo.lock` or `go.sum`: their build directories appear at the first build, and they have no install step. At most 8 directories, at depth 0 to 3, skipping anything under an untracked directory (a dependency's own `package.json` in `node_modules` is not the repository's).
 
-`reef here` turns it into its hint: "web has package-lock.json but no node_modules: each workspace installs its own (`npm ci` there), or the repository can declare a shared store in reef.toml (docs/stores.md)." `next`: the install command for that manager in that directory (`npm ci --prefix web`, `pnpm install --frozen-lockfile --dir web`, `yarn --cwd web install --immutable`, `uv sync --frozen --directory <dir>`). Not the `reef.toml` block: symlink stores are read-only, and `npm ci` against one fails (#278) until #273's clone stores make them writable; the docs carry the block. It shows while the directory is missing, then disappears; it costs nothing when there is nothing to say.
+`reef here` turns it into its hint: "web has package-lock.json but no node_modules: each workspace installs its own (`npm ci` there), or the repository can declare a shared store in reef.toml (`reef store --help`)." `next`: the install command for that manager in that directory (`npm ci --prefix web`, `pnpm install --frozen-lockfile --dir web`, `yarn --cwd web install --immutable`, `uv sync --frozen --directory <dir>`). Not the `reef.toml` block: symlink stores are read-only, and `npm ci` against one fails (#278) until #273's clone stores make them writable; the docs carry the block. It shows while the directory is missing, then disappears; it costs nothing when there is nothing to say.
 
 The ADR's other hint, `CARGO_INCREMENTAL=0` and line-tables-only debug info, goes into `here`'s `warn` and `low` hints when the workspace's `largest` names a `target` directory over 2 GiB: "Rust build output is most of this; CARGO_INCREMENTAL=0 and line-tables-only debug info cut it about fourfold (docs/fleet-benchmark.md)." Reef never sets them (ADR 0073).
 
@@ -431,7 +431,7 @@ just doc && just ci
 
 ## Choices this brief made, and why
 
-- **`statvfs` first, CoreFoundation near the floor**, because D1 shows the second costs 10,000 times the first and can only raise the figure.
+- **`statvfs` first, CoreFoundation near the floor**, because D1 shows the second costs 10,000 times the first, and the floor takes the larger of the two.
 - **Classification by the working copy's own `tree_state`**, because jj already decided what is tracked and an ignore matcher would cost more and could disagree.
 - **Dirty-driven walks**, because build output changes without snapshots but always with watch events (D2's cost makes a walk per 5 min of activity negligible).
 - **A table, not memory**, so restarts cost no walks and #274 needs no migration.
@@ -496,3 +496,20 @@ No departure from `dev-phases.md` beyond G4's tool caches (decision 17), which `
 16. **Acceptance.** G1, G2 and G4 from the daemon's own figures (refusals by reason, the daemon's floor and level, `reef_bytes`), on the standard VM for fastapi, excalidraw and cli and on the Linux runner for all four; tokio's VM row stays with #264's pending results PR (host disk). *Recommended*: as stated. Alternative: also tokio on the VM after freeing host disk to 150 GiB.
 17. **G4 and tool caches.** G4 counts what Reef holds; shared tool caches' growth (cli's `GOCACHE`, 7.9 GiB in the baseline, which Reef cannot affect without setting `-trimpath`) reported apart. *Recommended*: as stated (the gate judges this ticket's work). Alternative: G4 unchanged, and cli's row keeps failing for Go's cache.
 18. **Numbers.** API revision 33, schema 19 (18 if R3.16 has none), ADR 0076, threat rows S-196 to S-199. *Recommended*: as stated.
+
+## Departures in the implementation
+
+- **The watch-event check (the condition on decision 5)** held: `disk::disk_figures` writes build output under an ignored `target/` and waits for the background walk that only a watch event triggers, on macOS (`FSEvents`) and in the Linux container (inotify). Events under `[snapshot] exclude` paths are dropped before the scheduler, and Watchman's subscriptions may omit ignored paths, so the fallback is general: **every held workspace** (a live presence entry) is walked every three intervals, written to or not, not only Watchman workspaces.
+- **`Backend::disk_usage` stays** for the backend conformance suite; the daemon's answers (`disk_usage`, `Workspace.disk`, `freed_bytes`) come from the walk. `disk_usage` is now set even when the workspace's base is no longer cached (its tracked files then count in full), where it was unset.
+- **A file whose APFS private size cannot be read counts its allocated size** in `unshared_bytes`, instead of unsetting the whole figure as `Footprint` does.
+- **No start-time refusal of `floor` over 50% of the volume or `budget` under the floor**: a floor above the free space is how a test (and a person) stops new work, and the budget measures what Reef holds, not free space, so the two do not compare. `measure_interval` is checked (1 minute to 24 hours).
+- **The machine figures** (stores and the state directory's own files) are walked hourly and at start, not also after each GC.
+- **`reef here`'s `next` at `low` with nothing idle** is `reef ws list`, not "this workspace" (releasing the agent's own workspace mid-ticket is not advice).
+- **The web UI still reads the selected workspace** (`GetWorkspace` without a walk) for its snapshots and the other workspaces on its change; only "Measure again" walks, and then the list refreshes. The background walks of every workspace (#146) are gone.
+- **`DiskStatus` and its messages live in `workspaces.proto`**: `daemon.proto` imports it, and the other way round would be a cycle. The four new message fields are boxed in the generated Rust (`large_futures`).
+- **Request walks are serialized, not joined**: a `GetWorkspace` that arrives during a walk of the same workspace waits for it and walks again, so its answer covers what was written before it asked; at most two request walks run at once. A walk clears the dirty mark when it starts, so a write during the walk marks it again.
+- **Idle excludes recent writes**: a workspace with a watch event within the idle period (a build writing output without snapshots) is never the largest idle one.
+- **Moves log a warning below the floor**; rebases update workspaces without a move and log nothing.
+- **#195's detection leaves Poetry out** (its environment is outside the project by default) and counts Yarn's Plug'n'Play (`.pnp.cjs`) as installed; `next` names the directory in full, since `reef here` runs from any subdirectory, and Yarn's frozen flag follows `.yarnrc.yml` (2 and later) or not (classic).
+- **A workspace whose directory is gone has no figure**: the walk fails rather than recording zeros.
+- **Numbers**: API revision 33, schema 19 (`0019_workspace_disk`), as planned, on `main` after #271 (revision 31) and R3.16 (revision 32, `0018_history`).

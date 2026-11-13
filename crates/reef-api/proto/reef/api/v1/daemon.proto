@@ -90,6 +90,9 @@ message GetDaemonStatusResponse {
   RemoteListener remote = 12;
   // The machine-wide build limit (#271).
   BuildStatus build = 13;
+  // How full the disk is, by Reef's floor and budget (#272); each volume's
+  // purgeable free space is read.
+  DiskStatus disk = 14;
 }
 
 // The machine-wide build limit (#271, ADR 0074).

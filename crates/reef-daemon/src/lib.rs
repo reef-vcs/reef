@@ -18,6 +18,7 @@ pub mod comments;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod disk;
 pub mod error;
 pub mod executor;
 pub mod fetch;

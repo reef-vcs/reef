@@ -340,9 +340,11 @@ interval = "1d"      # how often the daemon collects garbage by itself; "0s" tur
 [build]
 jobs = "auto"        # the machine's job count for every workspace's builds together
 limit = true         # false: no jobserver, no job counts, no priority change
+[disk]
+floor = "auto"       # refuse new workspaces under this much free space: the larger of 20 GiB and 5%
 ```
 
-The daemon collects garbage daily: old snapshots, unused bases, and unused stores. `reef ws gc` runs it now, and `--dry-run` reports what it would free.
+Below `[disk] floor`, creates and store builds are refused with `DISK_SPACE_LOW` and a `next` that releases the idle workspace freeing the most; snapshots and releases never are ([docs/disk.md](disk.md)). The daemon collects garbage daily: old snapshots, unused bases, and unused stores. `reef ws gc` runs it now, and `--dry-run` reports what it would free.
 
 ## Known limitations in Phase 1
 

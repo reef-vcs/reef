@@ -75,6 +75,11 @@ impl TestDaemon {
         // Serve the placeholder through the full gate: the web listener's
         // tests run on builds without the app (R2.18).
         config.web.assets_built = true;
+        // No floor and no budget unless a test asks (#272): a machine's
+        // free space must not decide another test's outcome, nor a CI
+        // runner's refuse its creates.
+        config.file.disk.floor = crate::config::DiskAmount::Bytes(crate::config::ByteSize(0));
+        config.file.disk.budget = crate::config::DiskAmount::Bytes(crate::config::ByteSize(0));
         configure(&mut config);
         let handle = Daemon::start(config.clone())
             .await

@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 32;
+pub const API_REVISION: u32 = 33;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -144,6 +144,11 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.16: `LandingHistory`, `Landing.history`, `LandedChange.summarized`
     // and `LANDING_REASON_EMPTY`.
     "bec82ba1364dea5b9c1e3577db43caee93289e82f1dee9a877675c5d8b6fd9cb",
+    // #272: `Workspace.disk` (`WorkspaceDisk`, `DiskPath`), `DiskStatus`
+    // (`DiskLevel`, `DiskReason`, `DiskVolume`, `IdleWorkspace`) on
+    // `GetWorkspaceResponse`, `ListWorkspacesResponse` and
+    // `GetDaemonStatusResponse`.
+    "318513440b5e893cf3f0daa62ed12cdbe249a0f1ee0b318f5c7cb9ad9b6256f9",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -305,6 +310,12 @@ pub mod error {
     /// A workspace id, prefix, or path that names no workspace (R2.05).
     /// Metadata: `workspace`, the id, prefix, or path looked up.
     pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";
+    /// Free space on a volume Reef writes to is under `[disk] floor`, so a
+    /// create or a store build is refused (#272). Kind `Conflict`.
+    /// Metadata: `volume`, `free_bytes`, `floor_bytes`, and when a
+    /// workspace is idle, `largest_idle`, `largest_idle_owner`,
+    /// `largest_idle_bytes`.
+    pub const DISK_SPACE_LOW: &str = "DISK_SPACE_LOW";
     /// A malformed edit: no action and no `executable`, an empty
     /// `old_text`, `executable` with a delete, `copy_from` naming its own
     /// path, or more than 1,000 edits. Metadata: `edit_index`, except for

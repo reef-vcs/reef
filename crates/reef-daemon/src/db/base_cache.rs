@@ -105,6 +105,18 @@ impl Db {
         })
     }
 
+    /// The recorded bytes of every entry of every repository (#272).
+    pub fn base_cache_total_bytes(&self) -> Result<u64, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM base_cache",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|sum| u64::try_from(sum).unwrap_or(0))
+        })
+    }
+
     /// Sets the entry's `last_used_at` to `at`. [`DbError::NotFound`] if
     /// there is no entry.
     pub fn touch_base(&self, repo: RepoId, tree_id: &str, at: Timestamp) -> Result<(), DbError> {
