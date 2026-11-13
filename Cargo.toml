@@ -183,7 +183,7 @@ cel = { version = "=0.15.0", default-features = false, features = ["regex"] }
 sigstore-verify = { version = "=0.15.1", default-features = false }
 sigstore-trust-root = { version = "=0.15.1", default-features = false }
 sigstore-crypto = { version = "=0.15.1", default-features = false }
-sigstore-types = { version = "=0.15.1", default-features = false }
+sigstore-types = { version = "=0.16.0", default-features = false }
 x509-cert = { version = "0.2", default-features = false }   # a Fulcio leaf's issuer and key, the CA it chains to (R3.42)
 der = "0.7"
 
