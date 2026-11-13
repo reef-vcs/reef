@@ -803,14 +803,17 @@ impl DiskWatch {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            while !flag.load(Ordering::Relaxed) {
-                let started = Instant::now();
+            let read = |out: &mut Vec<DaemonDiskSample>| {
                 if let Ok(output) = status().stdin(Stdio::null()).stderr(Stdio::null()).output()
                     && let Some(sample) = daemon_disk(&output.stdout, millis(epoch.elapsed()))
                 {
                     out.push(sample);
                 }
+            };
+            let mut out = Vec::new();
+            while !flag.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                read(&mut out);
                 let mut left = DISK_EVERY.saturating_sub(started.elapsed());
                 while !left.is_zero() && !flag.load(Ordering::Relaxed) {
                     let nap = left.min(Duration::from_millis(100));
@@ -818,6 +821,9 @@ impl DiskWatch {
                     left = left.saturating_sub(nap);
                 }
             }
+            // The last reading follows the stop, so it is taken after the
+            // run's release and `ws gc` however the 10 s fell.
+            read(&mut out);
             out
         });
         Self {
@@ -826,7 +832,7 @@ impl DiskWatch {
         }
     }
 
-    /// Stops and returns the readings.
+    /// Stops, takes a last reading, and returns the readings.
     pub fn finish(mut self) -> Vec<DaemonDiskSample> {
         self.stop.store(true, Ordering::Relaxed);
         self.handle
