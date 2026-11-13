@@ -438,6 +438,7 @@ async fn outputs_match_their_schemas() {
     std::fs::write(a_dir.join("py/a.py"), "def f():\n    return 1\n\nf()\n").unwrap();
     std::fs::write(a_dir.join("notes.txt"), "one\ntwo\n").unwrap();
     script.both(&root, &["ws", "snapshot", &a_id]).await;
+    script.both(&root, &["ws", "env", &a_id]).await;
     script.both(&root, &["ws", "renew", &a_id]).await;
     script
         .json(

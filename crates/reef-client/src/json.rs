@@ -756,6 +756,117 @@ pub struct Status {
     /// The remote listener (R2.08); absent from a daemon before it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteListener>,
+    /// The machine-wide build limit (#271); absent from a daemon before
+    /// it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildStatus>,
+}
+
+/// The machine-wide build limit, as `daemon status` prints it (#271).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct BuildStatus {
+    /// `[build] limit`.
+    pub enabled: bool,
+    /// The machine's job count.
+    pub jobs: u32,
+    /// The jobserver's pool when no build runs: `jobs - 1`.
+    pub tokens: u32,
+    /// Tokens in the FIFO now.
+    pub available: u32,
+    /// Workspaces whose leases are heartbeating.
+    pub builders: u32,
+    /// What each tool without a jobserver gets: max(2, jobs / builders).
+    pub share: u32,
+    /// The jobserver FIFO; `null` when there is none.
+    pub jobserver: Option<String>,
+    /// 1 when this daemon run made the FIFO, 0 when it reused one.
+    pub generation: u32,
+    /// Times lost tokens were written back.
+    pub top_ups: u64,
+    /// Tokens written back in all.
+    pub tokens_restored: u64,
+    /// Surplus tokens drained in all.
+    pub tokens_drained: u64,
+    /// The cargo configuration file kept above the workspaces; `null` when
+    /// there is none.
+    pub cargo_config: Option<String>,
+    /// Why the jobserver or the cargo file is missing.
+    pub note: Option<String>,
+}
+
+impl From<&v1::BuildStatus> for BuildStatus {
+    fn from(build: &v1::BuildStatus) -> Self {
+        Self {
+            enabled: build.enabled,
+            jobs: build.jobs,
+            tokens: build.tokens,
+            available: build.available,
+            builders: build.builders,
+            share: build.share,
+            jobserver: text(&build.jobserver),
+            generation: build.generation,
+            top_ups: build.top_ups,
+            tokens_restored: build.tokens_restored,
+            tokens_drained: build.tokens_drained,
+            cargo_config: text(&build.cargo_config),
+            note: text(&build.note),
+        }
+    }
+}
+
+/// The environment `reef ws env` prints (#271).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct BuildEnvironment {
+    /// The variables to set, by name: each one the asking environment
+    /// lacks.
+    pub variables: BTreeMap<String, String>,
+    /// `[build] limit`.
+    pub enabled: bool,
+    /// The machine's job count.
+    pub jobs: u32,
+    /// max(2, jobs / builders).
+    pub share: u32,
+    /// Workspaces whose leases are heartbeating.
+    pub builders: u32,
+    /// The niceness commands run at; 0 for none.
+    pub nice: u32,
+    /// The jobserver FIFO; `null` when there is none.
+    pub jobserver: Option<String>,
+    /// Why there is no jobserver: `disabled`, `remote`, `repository`,
+    /// `make_too_old`, `cargo_jobs_set` or `unavailable`; `null` when there
+    /// is one.
+    pub jobserver_skip: Option<String>,
+    /// One sentence on why, when there is no jobserver.
+    pub note: Option<String>,
+}
+
+impl BuildEnvironment {
+    /// `response` with the `variables` a client would set.
+    pub fn new(
+        response: &v1::GetBuildEnvironmentResponse,
+        variables: Vec<(String, String)>,
+    ) -> Self {
+        let skip = match v1::JobserverSkip::try_from(response.jobserver_skip) {
+            Ok(v1::JobserverSkip::Disabled) => Some("disabled"),
+            Ok(v1::JobserverSkip::Remote) => Some("remote"),
+            Ok(v1::JobserverSkip::Repository) => Some("repository"),
+            Ok(v1::JobserverSkip::MakeTooOld) => Some("make_too_old"),
+            Ok(v1::JobserverSkip::CargoJobsSet) => Some("cargo_jobs_set"),
+            Ok(v1::JobserverSkip::Unavailable) => Some("unavailable"),
+            _ => None,
+        };
+        Self {
+            variables: variables.into_iter().collect(),
+            enabled: response.enabled,
+            jobs: response.jobs,
+            share: response.share,
+            builders: response.builders,
+            nice: response.nice,
+            jobserver: text(&response.jobserver),
+            jobserver_skip: skip.map(str::to_owned),
+            note: text(&response.note),
+        }
+    }
 }
 
 /// The remote listener, as `daemon status` and `remote show` print it
@@ -929,6 +1040,7 @@ impl From<&v1::GetDaemonStatusResponse> for Status {
             active_workspaces: status.active_workspace_count,
             backends: status.backends.iter().map(BackendProbe::from).collect(),
             remote: status.remote.as_ref().map(RemoteListener::from),
+            build: status.build.as_ref().map(BuildStatus::from),
         }
     }
 }
@@ -957,6 +1069,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
                 })
                 .collect(),
             remote: None,
+            build: None,
         }
     }
 }

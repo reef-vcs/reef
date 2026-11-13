@@ -8,11 +8,12 @@ use std::time::Duration;
 
 use reef_api::v1::workspace_service_server::WorkspaceService;
 use reef_api::v1::{
-    self, CreateWorkspaceRequest, CreateWorkspaceResponse, GetWorkspaceRequest,
-    GetWorkspaceResponse, ListWorkspacesRequest, ListWorkspacesResponse, MoveWorkspaceRequest,
-    MoveWorkspaceResponse, OperationKind, ReleaseWorkspaceRequest, ReleaseWorkspaceResponse,
-    RenewLeaseRequest, RenewLeaseResponse, SnapshotWorkspaceRequest, SnapshotWorkspaceResponse,
-    Workspace, create_workspace_request, move_workspace_request,
+    self, CreateWorkspaceRequest, CreateWorkspaceResponse, GetBuildEnvironmentRequest,
+    GetBuildEnvironmentResponse, GetWorkspaceRequest, GetWorkspaceResponse, ListWorkspacesRequest,
+    ListWorkspacesResponse, MoveWorkspaceRequest, MoveWorkspaceResponse, OperationKind,
+    ReleaseWorkspaceRequest, ReleaseWorkspaceResponse, RenewLeaseRequest, RenewLeaseResponse,
+    SnapshotWorkspaceRequest, SnapshotWorkspaceResponse, Workspace, create_workspace_request,
+    move_workspace_request,
 };
 use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
 use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
@@ -819,5 +820,55 @@ impl WorkspaceService for WorkspacesService {
             files_removed: moved.checkout.removed,
             tree_replaced: moved.tree_replaced,
         }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn get_build_environment(
+        &self,
+        request: Request<GetBuildEnvironmentRequest>,
+    ) -> Result<Response<GetBuildEnvironmentResponse>, Status> {
+        let remote = super::remote_of(&request).is_some();
+        let request = request.into_inner();
+        let limit = Arc::clone(&self.state.build);
+        if remote {
+            return Ok(Response::new(limit.remote_environment()));
+        }
+        let workspace = if request.workspace.trim().is_empty() {
+            None
+        } else {
+            let manager = &self.state.manager;
+            let record = manager
+                .resolve_workspace(&request.repo, &request.workspace)
+                .map_err(status)?;
+            record_ids(record.repo_id, record.id);
+            if record.state != WorkspaceState::Active {
+                return Err(status(crate::db::DbError::NotFound {
+                    what: "workspace",
+                    id: record.id.as_hex(),
+                }));
+            }
+            let spec = if let Some(spec) = limit.cached_spec(&record.base_tree_id) {
+                spec
+            } else {
+                let handle = manager.handle(record.repo_id).map_err(status)?;
+                // A read that failed is not remembered: the next asks again.
+                match crate::workspace::base_reef_spec(&handle, &record).await {
+                    Some(spec) => {
+                        let spec = spec.unwrap_or_default().build;
+                        limit.remember_spec(&record.base_tree_id, spec.clone());
+                        spec
+                    }
+                    None => reef_lib::spec::BuildSpec::default(),
+                }
+            };
+            Some((record.path, record.id, spec))
+        };
+        let response = tokio::task::spawn_blocking(move || match &workspace {
+            Some((path, id, spec)) => limit.environment(Some((path, *id)), spec),
+            None => limit.environment(None, &reef_lib::spec::BuildSpec::default()),
+        })
+        .await
+        .map_err(|error| Status::internal(format!("the build environment task failed: {error}")))?;
+        Ok(Response::new(response))
     }
 }

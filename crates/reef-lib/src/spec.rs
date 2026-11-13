@@ -16,6 +16,10 @@
 //! build = ["pnpm", "install", "--frozen-lockfile"]   # argv, no shell
 //! [store.env]                        # optional, added to the build command's environment
 //! CI = "1"
+//!
+//! [build]                            # the machine-wide build limit (#271, ADR 0074)
+//! jobs_env = { VITEST_MAX_WORKERS = "{share}" }   # more job-count variables: "{share}" or "{jobs}"
+//! jobserver = true                   # false: no jobserver for this repository's builds
 //! ```
 //!
 //! [`Spec::parse`] checks everything that can be checked without the tree;
@@ -53,6 +57,116 @@ pub struct Spec {
     /// `[[store]]`, in file order.
     #[serde(rename = "store")]
     pub stores: Vec<StoreSpec>,
+    /// `[build]` (#271).
+    pub build: BuildSpec,
+}
+
+/// The most `[build] jobs_env` names.
+pub const MAX_JOBS_ENV: usize = 16;
+
+/// The values a `[build] jobs_env` variable may take.
+pub const JOBS_ENV_VALUES: [&str; 2] = ["{share}", "{jobs}"];
+
+/// Variables the build limit sets itself, which `jobs_env` cannot name.
+pub const BUILD_LIMIT_VARIABLES: [&str; 7] = [
+    "CARGO_MAKEFLAGS",
+    "CARGO_BUILD_JOBS",
+    "RUST_TEST_THREADS",
+    "NEXTEST_TEST_THREADS",
+    "GOFLAGS",
+    "MAKEFLAGS",
+    "MFLAGS",
+];
+
+/// `[build]`: what a repository adds to the machine-wide build limit
+/// (#271, ADR 0074).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BuildSpec {
+    /// More variables for the job count of tools without a jobserver, each
+    /// `"{share}"` (the machine's jobs divided among its builders) or
+    /// `"{jobs}"` (the machine's jobs). At most [`MAX_JOBS_ENV`]; names are
+    /// restricted (S-188) and never override a variable a command already
+    /// has.
+    pub jobs_env: BTreeMap<String, String>,
+    /// The daemon's jobserver is offered to this repository's builds.
+    /// False for a build that hands it to a `make` too old to read it.
+    /// Default true.
+    pub jobserver: bool,
+}
+
+impl Default for BuildSpec {
+    fn default() -> Self {
+        Self {
+            jobs_env: BTreeMap::new(),
+            jobserver: true,
+        }
+    }
+}
+
+impl BuildSpec {
+    fn validate(&self) -> Result<(), SpecError> {
+        if self.jobs_env.len() > MAX_JOBS_ENV {
+            return Err(SpecError::JobsEnv {
+                key: self
+                    .jobs_env
+                    .keys()
+                    .nth(MAX_JOBS_ENV)
+                    .cloned()
+                    .unwrap_or_default(),
+                reason: "more than 16 names",
+            });
+        }
+        for (key, value) in &self.jobs_env {
+            let reason = if let Err(reason) = check_jobs_env_name(key) {
+                reason
+            } else if !JOBS_ENV_VALUES.contains(&value.as_str()) {
+                "the value must be \"{share}\" or \"{jobs}\""
+            } else {
+                continue;
+            };
+            return Err(SpecError::JobsEnv {
+                key: key.clone(),
+                reason,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Names `jobs_env` refuses: the shell's and the login's.
+const DENIED_NAMES: [&str; 10] = [
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "PWD", "TMPDIR", "IFS", "ENV", "BASH_ENV",
+];
+/// Prefixes `jobs_env` refuses: Reef's, the loader's, git's, SSH's, cargo's and rustc's.
+const DENIED_PREFIXES: [&str; 7] = ["REEF_", "LD_", "DYLD_", "GIT_", "SSH_", "CARGO_", "RUSTC"];
+
+/// `Ok` if `name` may be a `[build] jobs_env` variable (S-188): an
+/// upper-case name of at most 64 characters that no shell, loader, git,
+/// SSH, cargo or Reef reads for anything but a job count.
+fn check_jobs_env_name(name: &str) -> Result<(), &'static str> {
+    let bytes = name.as_bytes();
+    if !(bytes.first().is_some_and(u8::is_ascii_uppercase)
+        && bytes.len() <= 64
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_'))
+    {
+        return Err("the name must match [A-Z][A-Z0-9_]{0,63}");
+    }
+    if BUILD_LIMIT_VARIABLES.contains(&name) {
+        return Err("the build limit sets this variable itself");
+    }
+    if DENIED_NAMES.contains(&name)
+        || DENIED_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_OPTIONS")
+        || name.ends_with("FLAGS")
+    {
+        return Err("a variable that changes more than a job count");
+    }
+    Ok(())
 }
 
 /// `[workspace]`.
@@ -159,6 +273,14 @@ pub enum SpecError {
         /// Its index in the array.
         index: usize,
     },
+    /// A `[build] jobs_env` entry that is not allowed (S-188).
+    #[error("build.jobs_env {key:?}: {reason}")]
+    JobsEnv {
+        /// The variable.
+        key: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// `workspace.lease` below [`MIN_LEASE`].
     #[error("workspace.lease {0:?} is shorter than one minute")]
     LeaseTooShort(Duration),
@@ -187,6 +309,7 @@ impl Classify for SpecError {
             | Self::StoreBuild { .. }
             | Self::StoreEnv { .. }
             | Self::Exclude { .. }
+            | Self::JobsEnv { .. }
             | Self::LeaseTooShort(_) => ErrorKind::InvalidArgument,
             Self::LockfileMissing { .. } => ErrorKind::NotFound,
             Self::Read(error) => error.kind(),
@@ -240,6 +363,7 @@ impl Spec {
         {
             return Err(SpecError::LeaseTooShort(lease));
         }
+        self.build.validate()?;
         for (index, entry) in self.snapshot.exclude.iter().enumerate() {
             if entry.trim().is_empty() || entry.contains(['\0', '\n', '\r']) {
                 return Err(SpecError::Exclude { index });
@@ -406,6 +530,74 @@ fn overlaps(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobs_env_accepts() {
+        let spec = Spec::parse(
+            "[build]\njobs_env = { VITEST_MAX_WORKERS = \"{share}\", CMAKE_BUILD_PARALLEL_LEVEL = \"{jobs}\" }\njobserver = false\n",
+        )
+        .unwrap();
+        assert_eq!(spec.build.jobs_env.len(), 2);
+        assert!(!spec.build.jobserver);
+        assert!(Spec::parse("").unwrap().build.jobserver);
+    }
+
+    #[test]
+    fn jobs_env_refuses() {
+        let refused = |name: &str, value: &str| {
+            let text = format!("[build]\njobs_env = {{ {name} = \"{value}\" }}\n");
+            match Spec::parse(&text) {
+                Err(error @ SpecError::JobsEnv { .. }) => {
+                    assert!(error.to_string().contains("build.jobs_env"), "{error}");
+                }
+                other => panic!("{name}={value}: {other:?}"),
+            }
+        };
+        for name in [
+            "PATH",
+            "HOME",
+            "SHELL",
+            "USER",
+            "LOGNAME",
+            "PWD",
+            "TMPDIR",
+            "IFS",
+            "ENV",
+            "BASH_ENV",
+            "REEF_X",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "GIT_DIR",
+            "SSH_AUTH_SOCK",
+            "CARGO_HOME",
+            "RUSTC_WRAPPER",
+            "RUSTFLAGS",
+            "NODE_OPTIONS",
+            "CARGO_MAKEFLAGS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "GOFLAGS",
+            "lower",
+            "1X",
+            "A-B",
+        ] {
+            refused(name, "{share}");
+        }
+        refused(&"A".repeat(65), "{share}");
+        refused("JOBS", "4");
+        refused("JOBS", "{share} ");
+        let many: Vec<String> = (0..17).map(|i| format!("V{i} = \"{{share}}\"")).collect();
+        let text = format!("[build]\njobs_env = {{ {} }}\n", many.join(", "));
+        assert!(matches!(Spec::parse(&text), Err(SpecError::JobsEnv { .. })));
+        assert!(matches!(
+            Spec::parse("[build]\njobserver = \"no\"\n"),
+            Err(SpecError::Parse(_))
+        ));
+        assert!(matches!(
+            Spec::parse("[build]\nlimit = false\n"),
+            Err(SpecError::Parse(_))
+        ));
+    }
 
     #[test]
     fn overlap_is_by_component() {

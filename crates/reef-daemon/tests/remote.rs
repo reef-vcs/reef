@@ -1613,3 +1613,24 @@ async fn publish_is_socket_only() {
         ClientError::Rpc { status, .. } if status.code() == tonic::Code::PermissionDenied
     ));
 }
+
+/// #271: through the remote listener, the build environment names no
+/// jobserver and no variable: the daemon's machine is not the caller's.
+#[tokio::test]
+async fn build_environment_is_local_only() {
+    let (daemon, addr, fingerprint) = daemon_with(|_| {}).await;
+    let secret = token(&daemon, "laptop", RemoteScope::Read).await;
+    let remote = connect(addr, &fingerprint, &secret).await;
+    let response = remote.get_build_environment("", "").await.unwrap();
+    assert!(response.variables.is_empty(), "{response:?}");
+    assert!(response.jobserver.is_empty(), "{response:?}");
+    assert_eq!(response.nice, 0);
+    assert_eq!(
+        response.jobserver_skip,
+        i32::from(v1::JobserverSkip::Remote)
+    );
+    // Over the socket, the same daemon offers its jobserver.
+    let local = daemon.client.get_build_environment("", "").await.unwrap();
+    assert!(!local.jobserver.is_empty(), "{local:?}");
+    daemon.stop().await;
+}

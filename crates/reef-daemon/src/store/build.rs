@@ -415,6 +415,7 @@ async fn build_in_scratch(
             );
             announce(store, commit, &lines).await;
             progress.phase("build", 0);
+            let limit = build_limit(manager, &created.record, store).await;
             run_command(
                 manager,
                 ws,
@@ -426,6 +427,7 @@ async fn build_in_scratch(
                 lines,
                 progress,
                 shutdown,
+                &limit,
             )
             .await
         }
@@ -504,6 +506,66 @@ async fn announce(
     let _ = lines.send(BuildOutput::Started(started)).await;
 }
 
+/// The build limit's variables and niceness for a store build in
+/// `record`'s scratch workspace (#271): the variables its environment
+/// (the inherited few and `[store.env]`, which wins) lacks.
+async fn build_limit(
+    manager: &Arc<Manager>,
+    record: &crate::model::WorkspaceRecord,
+    store: &StoreSpec,
+) -> (Vec<(String, String)>, u32) {
+    let Some(limit) = manager.build().cloned() else {
+        return (Vec::new(), 0);
+    };
+    let spec = match manager.handle(record.repo_id) {
+        Ok(handle) => crate::workspace::base_reef_spec(&handle, record)
+            .await
+            .flatten()
+            .map(|spec| spec.build)
+            .unwrap_or_default(),
+        Err(_) => reef_lib::spec::BuildSpec::default(),
+    };
+    let (root, id, env) = (record.path.clone(), record.id, store.env.clone());
+    let response =
+        tokio::task::spawn_blocking(move || limit.environment(Some((&root, id)), &spec)).await;
+    let Ok(response) = response else {
+        return (Vec::new(), 0);
+    };
+    let variables = reef_client::build::assemble(&response, |name| {
+        env.get(name).map(std::ffi::OsString::from).or_else(|| {
+            INHERITED_ENV
+                .contains(&name)
+                .then(|| std::env::var_os(name))
+                .flatten()
+        })
+    });
+    (variables, response.nice)
+}
+
+/// Runs `command` at niceness `nice` (#271), never lowering a higher one;
+/// 0 leaves it alone.
+fn lower_priority(command: &mut tokio::process::Command, nice: u32) {
+    if nice == 0 {
+        return;
+    }
+    let nice = libc::c_int::try_from(nice.min(19)).unwrap_or(19);
+    // SAFETY: between fork and exec the closure makes two syscalls and
+    // allocates nothing.
+    #[allow(
+        unsafe_code,
+        reason = "the closure only calls getpriority(2) and setpriority(2), which are async-signal-safe"
+    )]
+    unsafe {
+        command.pre_exec(move || {
+            let current = libc::getpriority(libc::PRIO_PROCESS, 0);
+            if current < nice {
+                let _ = libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Step 4: runs the build command to completion, the timeout, or shutdown,
 /// then kills whatever is left of its process group either way: a
 /// background process the build started must not keep writing into the
@@ -523,6 +585,7 @@ async fn run_command(
     lines: mpsc::Sender<BuildOutput>,
     progress: &Progress,
     shutdown: &CancellationToken,
+    (limit_env, nice): &(Vec<(String, String)>, u32),
 ) -> Result<std::process::ExitStatus, StoreError> {
     let (program, args) = store.build.split_first().ok_or_else(|| StoreError::Spawn {
         name: store.name.clone(),
@@ -544,7 +607,9 @@ async fn run_command(
             command.env(name, value);
         }
     }
+    lower_priority(&mut command, *nice);
     command
+        .envs(limit_env.iter().map(|(name, value)| (name, value)))
         .envs(&store.env)
         .env("REEF_STORE_DIR", contents)
         .env("REEF_STORE_NAME", &store.name);

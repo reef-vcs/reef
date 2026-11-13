@@ -273,6 +273,10 @@ node_modules  9571f160d298  151 MiB  0       2026-10-23T20:09:01.140Z  ~/Library
 
 The daemon runs the build once per lockfile, seals the result read-only, and mounts it into every workspace whose lockfile matches. A workspace whose lockfile has no build fails to create, naming the `reef store build` to run. The mount is a read-only bind mount when the workspace is on kernel overlayfs (Linux as root), and a symlink otherwise (macOS, fuse-overlayfs).
 
+## Builds share the machine
+
+Five agents building at once would each start one compiler per core. The daemon bounds them together: `reef ws run` hands cargo the daemon's jobserver, sets job counts for tools without one (`RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, `GOFLAGS -p`) only where nothing already sets them, and runs the command at `nice` 10. A lone build still gets the whole machine. `reef daemon status` shows the jobs, the builders and the tokens free; `ws run`'s `--no-build-limit` flag runs one command without it. [docs/build-limit.md](build-limit.md) has the details, including the one case where it withholds the jobserver (a crate that hands it to macOS's old `make`).
+
 ## Move a workspace
 
 A workspace can move to another change and keep its lease, path, and stores: `reef ws move <id> --new-on master`, or `--change <id>` to edit an existing one.
@@ -333,6 +337,9 @@ backend = "auto"     # Watchman for repositories over 50,000 files when it is in
 [gc]
 undo_window = "7d"   # snapshots and operations kept at least this long
 interval = "1d"      # how often the daemon collects garbage by itself; "0s" turns it off
+[build]
+jobs = "auto"        # the machine's job count for every workspace's builds together
+limit = true         # false: no jobserver, no job counts, no priority change
 ```
 
 The daemon collects garbage daily: old snapshots, unused bases, and unused stores. `reef ws gc` runs it now, and `--dry-run` reports what it would free.

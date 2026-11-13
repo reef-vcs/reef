@@ -161,6 +161,11 @@ pub(crate) struct Provided {
     attached: bool,
     /// The revision a new workspace started on when none was given.
     start: Option<String>,
+    /// The machine-wide build limit's variables (#271): each one this
+    /// command's environment lacks, for an adapter to set in the session
+    /// it starts. Fixed at the session's start except the jobserver, which
+    /// adapts; empty when the daemon cannot say.
+    env: std::collections::BTreeMap<String, String>,
 }
 
 /// Who holds a provided workspace.
@@ -364,7 +369,7 @@ async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliE
         && let Some(existing) = named(ctx, &repo, &request.owner).await?
     {
         let ws = attach_rule(ctx, &existing.id, Some(&request.owner)).await?;
-        return provide(ctx, global, &ws, holder, true, None);
+        return provide(ctx, global, &ws, holder, true, None).await;
     }
     let again = if request.name.is_some() && request.start.is_none() && outer.is_none() {
         kept_change(ctx, &repo, &request.owner).await?
@@ -417,7 +422,7 @@ async fn create(ctx: &Ctx, global: &Global, args: CreateArgs) -> Result<(), CliE
     let start = (!response.start.is_empty()).then_some(response.start);
     let ws = response.workspace.ok_or_else(|| missing("workspace"))?;
     let id = ws.id.clone();
-    match provide(ctx, global, &ws, holder, false, start) {
+    match provide(ctx, global, &ws, holder, false, start).await {
         Ok(()) => Ok(()),
         Err(error) => {
             // A program that got an error must not have a workspace left.
@@ -556,7 +561,7 @@ async fn change_kept(ctx: &Ctx, ws: &v1::Workspace) -> bool {
 /// and prints the workspace. A workspace may have several holders, each
 /// with its follower: it is held while any of them runs, and no holder
 /// takes it from another.
-fn provide(
+async fn provide(
     ctx: &Ctx,
     global: &Global,
     ws: &v1::Workspace,
@@ -590,6 +595,17 @@ fn provide(
         }
         None => None,
     };
+    // Assembled against this command's own environment: a hook inherits
+    // its program's.
+    let env = match ctx.client.get_build_environment("", &ws.id).await {
+        Ok(response) => reef_client::build::assemble(&response, |name| std::env::var_os(name))
+            .into_iter()
+            .collect(),
+        Err(error) => {
+            tracing::debug!(error = %reef_error::ErrorChain(&error), "no build environment");
+            std::collections::BTreeMap::new()
+        }
+    };
     ctx.out.object(&Provided {
         contract: CONTRACT,
         workspace_id: ws.id.clone(),
@@ -602,6 +618,7 @@ fn provide(
         holder,
         attached,
         start,
+        env,
     })
 }
 
@@ -618,7 +635,7 @@ async fn attach(ctx: &Ctx, global: &Global, args: AttachArgs) -> Result<(), CliE
         owner.as_deref(),
     )
     .await?;
-    provide(ctx, global, &ws, holder, true, None)
+    provide(ctx, global, &ws, holder, true, None).await
 }
 
 fn required(

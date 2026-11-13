@@ -533,6 +533,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "for a person running the CLI",
     ),
     (
+        "/reef.api.v1.WorkspaceService/GetBuildEnvironment",
+        "a tool result cannot set a shell's environment; the cargo file under ~/.reef reaches cargo",
+    ),
+    (
         "/reef.api.v1.DaemonService/CreateWebSession",
         "ADMIN; a person runs reef ui",
     ),

@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 30;
+pub const API_REVISION: u32 = 31;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -139,6 +139,8 @@ pub const API_DIGESTS: &[&str] = &[
     // and `FETCH`, `Workspace.behind_trunk`, and
     // `SnapshotWorkspaceResponse.started_on`.
     "c444ece360008948a81b4cd86f773effd15ad2dc5983ac0188bdce8d38cecedf",
+    // #271: `GetBuildEnvironment` and `GetDaemonStatusResponse.build`.
+    "b7b9820b232e8d7a2e62a24f0c16c99cfe72d0daac6168fcff7ad4d30818ebb2",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

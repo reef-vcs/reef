@@ -88,6 +88,41 @@ message GetDaemonStatusResponse {
   repeated BackendProbe backends = 11;
   // The remote listener (R2.08).
   RemoteListener remote = 12;
+  // The machine-wide build limit (#271).
+  BuildStatus build = 13;
+}
+
+// The machine-wide build limit (#271, ADR 0074).
+message BuildStatus {
+  // `[build] limit`.
+  bool enabled = 1;
+  // The machine's job count.
+  uint32 jobs = 2;
+  // The tokens the jobserver's pool holds when no build runs: jobs - 1,
+  // since every client has one implicit token.
+  uint32 tokens = 3;
+  // Tokens in the FIFO now.
+  uint32 available = 4;
+  // Workspaces whose leases are heartbeating.
+  uint32 builders = 5;
+  // max(2, jobs / builders).
+  uint32 share = 6;
+  // The jobserver FIFO's absolute path; empty when there is none.
+  string jobserver = 7;
+  // 1 when this daemon run made the FIFO, 0 when it reused one an earlier
+  // run left (and refilled it).
+  uint32 generation = 8;
+  // How many times lost tokens were written back.
+  uint64 top_ups = 9;
+  // Tokens written back in all.
+  uint64 tokens_restored = 10;
+  // Surplus tokens read out and dropped in all.
+  uint64 tokens_drained = 11;
+  // The cargo configuration file the daemon keeps above the workspaces;
+  // empty when there is none.
+  string cargo_config = 12;
+  // Why the jobserver or the cargo file is missing; empty otherwise.
+  string note = 13;
 }
 
 // One materialization backend's probe.

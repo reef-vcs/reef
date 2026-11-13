@@ -68,6 +68,8 @@ pub struct Manager {
     /// Provenance records (R3.04), set once the identity state is up,
     /// before any snapshot can run.
     pub(super) provenance: std::sync::OnceLock<Arc<crate::provenance::Provenance>>,
+    /// The build limit (#271), once set: store builds run under it.
+    pub(super) build: std::sync::OnceLock<Arc<crate::build::BuildLimit>>,
 }
 
 impl std::fmt::Debug for Manager {
@@ -124,6 +126,7 @@ impl Manager {
                 stores,
                 presence,
                 provenance: std::sync::OnceLock::new(),
+                build: std::sync::OnceLock::new(),
             }
         })
     }
@@ -136,6 +139,16 @@ impl Manager {
     /// The provenance state, once set.
     pub fn provenance(&self) -> Option<&Arc<crate::provenance::Provenance>> {
         self.provenance.get()
+    }
+
+    /// Sets the build limit (#271) store builds run under; once, at start.
+    pub fn set_build(&self, build: Arc<crate::build::BuildLimit>) {
+        let _ = self.build.set(build);
+    }
+
+    /// The build limit, once set.
+    pub fn build(&self) -> Option<&Arc<crate::build::BuildLimit>> {
+        self.build.get()
     }
 
     /// The snapshot scheduler.
@@ -982,6 +995,23 @@ pub(super) async fn remove_state_dir(state_dir: &Path) {
 /// one edited inside it, which beats snapshotting `target/` and store
 /// mounts. If that fails too, the defaults. `Repo` logs each failure.
 async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::SnapshotSpec {
+    if let Some(spec) = base_reef_spec(handle, record).await {
+        return crate::spec::resolve(spec).snapshot;
+    }
+    tracing::error!(
+        workspace_id = %record.id,
+        "no reef.toml readable for the workspace; its snapshots use no excludes"
+    );
+    super::SnapshotSpec::default()
+}
+
+/// The `reef.toml` `record`'s workspace was created with, read as
+/// [`base_spec`] reads it: `Some(None)` when that tree has none, `None`
+/// when neither its base tree nor its commit can be read.
+pub(crate) async fn base_reef_spec(
+    handle: &RepoHandle,
+    record: &WorkspaceRecord,
+) -> Option<Option<reef_lib::spec::Spec>> {
     let key = record.base_tree_id.clone();
     let commit = record.commit_id.parse::<CommitIdHex>().ok();
     let read = handle
@@ -997,7 +1027,7 @@ async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::Snap
         })
         .await;
     match read {
-        Ok(Some((spec, true))) => return crate::spec::resolve(spec).snapshot,
+        Ok(Some((spec, true))) => return Some(spec),
         Ok(Some((spec, false))) => {
             tracing::warn!(
                 workspace_id = %record.id,
@@ -1005,7 +1035,7 @@ async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::Snap
                 commit_id = %record.commit_id,
                 "cannot read reef.toml from the workspace's base tree; using its current commit's"
             );
-            return crate::spec::resolve(spec).snapshot;
+            return Some(spec);
         }
         Ok(None) => {}
         Err(error) => tracing::error!(
@@ -1014,11 +1044,7 @@ async fn base_spec(handle: &RepoHandle, record: &WorkspaceRecord) -> super::Snap
             "cannot read the workspace's reef.toml on the repository thread"
         ),
     }
-    tracing::error!(
-        workspace_id = %record.id,
-        "no reef.toml readable for the workspace; its snapshots use no excludes"
-    );
-    super::SnapshotSpec::default()
+    None
 }
 
 /// Makes a registered repository's state directory, `<state>/repos/<id>`,

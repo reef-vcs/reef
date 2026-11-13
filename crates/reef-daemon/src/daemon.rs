@@ -166,6 +166,8 @@ pub struct AppState {
     pub comments: Arc<crate::comments::Comments>,
     /// Resolver assignments' locks and follower (R3.27).
     pub assignments: Arc<crate::assign::Assignments>,
+    /// The machine-wide build limit (#271).
+    pub build: Arc<crate::build::BuildLimit>,
 }
 
 impl fmt::Debug for AppState {
@@ -428,6 +430,23 @@ impl Daemon {
             Arc::clone(manager.presence()),
             config.file.executor.clone(),
         ));
+        // The build limit's jobserver and cargo file (#271), after the
+        // state directory's checks and before anything can start a build.
+        let build = {
+            let (config, presence) = (config.clone(), Arc::clone(manager.presence()));
+            match tokio::task::spawn_blocking(move || {
+                crate::build::BuildLimit::start(&config, presence)
+            })
+            .await
+            {
+                Ok(build) => Arc::new(build),
+                Err(error) => {
+                    remove_if_present(&paths.pid);
+                    return Err(StartError::Task(error));
+                }
+            }
+        };
+        manager.set_build(Arc::clone(&build));
         let state = Arc::new(AppState {
             config,
             db,
@@ -458,6 +477,7 @@ impl Daemon {
             landings: crate::landing::Landings::default(),
             comments: Arc::new(crate::comments::Comments::default()),
             assignments: Arc::new(crate::assign::Assignments::default()),
+            build,
         });
 
         // Before any snapshot can run (R2.10).
@@ -703,7 +723,20 @@ fn start_loops(state: &Arc<AppState>, gc_timer: &GcTimer) {
         })
     });
 
-    // 9. The GC timer.
+    // 9. The build limit's check, and the FIFO's removal at a graceful
+    //    stop (#271).
+    let checks = state.build.spawn_checks(state.shutdown.clone());
+    let build = Arc::clone(&state.build);
+    state.hooks.add("build limit", move || {
+        Box::pin(async move {
+            build.stop();
+            if let Err(error) = checks.await {
+                tracing::error!(%error, "the build limit's check task panicked");
+            }
+        })
+    });
+
+    // 10. The GC timer.
     gc_timer.start(
         state.config.file.gc.interval,
         state.config.gc_timer,

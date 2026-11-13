@@ -13,7 +13,9 @@ use reef_api::v1::{
 use reef_client::ROOT_CHECKOUT;
 use reef_client::brief;
 use reef_client::default_owner;
-use reef_client::json::{Created, GcReport, Inspected, Lease, Released, Snapshotted, Workspace};
+use reef_client::json::{
+    self, Created, GcReport, Inspected, Lease, Released, Snapshotted, Workspace,
+};
 use reef_error::{Advice, ErrorKind};
 use serde::Serialize;
 
@@ -21,6 +23,7 @@ use super::advice::AdviceCtx;
 use super::changes::{note_divergence, short, workspace_after};
 use super::heartbeat::{Heartbeater, heartbeats};
 use super::holder::{self, HoldWhile};
+use super::out::TextRender;
 use super::render::{GcReports, lease_text, now_ms, span};
 use super::repo::missing;
 use super::{CliError, Ctx, Global, RepoArg, absolute, provider, scope, ws_move, ws_run};
@@ -111,6 +114,16 @@ enum WsCommand {
     Run(ws_run::Args),
     /// Create, attach and release workspaces for a program, JSON in and out.
     Provider(provider::Args),
+    /// Print the machine-wide build limit's variables for a workspace.
+    ///
+    /// The jobserver for cargo and job counts for tools without one, each
+    /// only where this environment lacks it: what `ws run` sets for its
+    /// command, for a shell Reef did not start (#271).
+    #[command(after_help = "Example: eval \"$(reef ws env -o text)\"   # inside the workspace")]
+    Env {
+        /// A workspace id, unique prefix, or path inside it [default: the one you are in].
+        workspace: Option<String>,
+    },
     /// Delete old operations, unused bases, and released workspace records.
     ///
     /// Snapshots every active workspace, then removes what is older than
@@ -263,6 +276,7 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCo
         WsCommand::Snapshot { workspace, message } => {
             snapshot(ctx, workspace.as_deref(), message.as_deref()).await
         }
+        WsCommand::Env { workspace } => build_env(ctx, workspace.as_deref()).await,
         WsCommand::Renew {
             workspace,
             lease_id,
@@ -623,6 +637,33 @@ struct RecordGuard {
 impl Drop for RecordGuard {
     fn drop(&mut self) {
         holder::remove(&self.state_dir, &self.workspace_id, &self.follower);
+    }
+}
+
+/// `ws env` (#271): the build limit's variables this environment lacks.
+async fn build_env(ctx: &Ctx, workspace: Option<&str>) -> Result<(), CliError> {
+    let id = named_or_current(ctx, workspace).await?;
+    let response = ctx.call(ctx.client.get_build_environment("", &id)).await?;
+    let variables = reef_client::build::assemble(&response, |name| std::env::var_os(name));
+    ctx.out
+        .object(&BuildEnv(json::BuildEnvironment::new(&response, variables)))
+}
+
+/// `ws env`'s output: `export` lines in text, the object in JSON.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct BuildEnv(json::BuildEnvironment);
+
+impl TextRender for BuildEnv {
+    fn render(&self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+        for (name, value) in &self.0.variables {
+            writeln!(
+                w,
+                "export {name}={}",
+                reef_client::build::shell_quote(value)
+            )?;
+        }
+        Ok(())
     }
 }
 

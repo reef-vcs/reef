@@ -792,3 +792,69 @@ async fn ws_run_reports_for_an_attached_workspace() {
         "the attached workspace's owner"
     );
 }
+
+/// The build variables, cleared from a command so a test sees only what
+/// `ws run` sets (#271).
+const BUILD_VARIABLES: [&str; 7] = [
+    "CARGO_MAKEFLAGS",
+    "MAKEFLAGS",
+    "MFLAGS",
+    "CARGO_BUILD_JOBS",
+    "RUST_TEST_THREADS",
+    "NEXTEST_TEST_THREADS",
+    "GOFLAGS",
+];
+
+/// #271 test 17: the command runs under the machine-wide build limit: the
+/// jobserver, the job counts and `nice` 10; `--env` and inherited values
+/// win; `GOFLAGS` is merged; `--no-build-limit` sets nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_run_build_env() {
+    let (daemon, repo) = with_repo().await;
+    let script = r#"echo "${CARGO_MAKEFLAGS-unset}"; echo "${RUST_TEST_THREADS-unset}"; echo "${NEXTEST_TEST_THREADS-unset}"; echo "${GOFLAGS-unset}"; perl -e 'print getpriority(0, 0), "\n"'"#;
+    let run = |args: &[&str], inherited: &[(&str, &str)]| {
+        let mut command = ws_run(&daemon, &repo, args);
+        for name in BUILD_VARIABLES {
+            command.env_remove(name);
+        }
+        command.envs(inherited.iter().copied());
+        command.args(["--", "sh", "-c", script]);
+        command
+    };
+    let lines = |output: &Output| -> Vec<String> {
+        assert_eq!(code(output), 0, "{}", stderr(output));
+        stdout(output).lines().map(str::to_owned).collect()
+    };
+
+    let off = lines(&finish(run(&["--no-build-limit"], &[])).await);
+    assert_eq!(off[..4], ["unset", "unset", "unset", "unset"], "{off:?}");
+    let base: i32 = off[4].parse().unwrap();
+
+    let on = lines(&finish(run(&[], &[])).await);
+    let fifo = daemon.state_dir().join("build").join("jobserver");
+    assert_eq!(
+        on[0],
+        format!("-j --jobserver-auth=fifo:{}", fifo.display()),
+        "{on:?}"
+    );
+    let share: u32 = on[1].parse().unwrap();
+    assert!(share >= 2, "{on:?}");
+    assert_eq!(on[2], on[1]);
+    assert!(on[3].ends_with(&format!("-p={share}")), "{on:?}");
+    assert_eq!(on[4].parse::<i32>().unwrap(), base.max(10), "{on:?}");
+
+    // What the command's environment or --env already says wins.
+    let kept = lines(
+        &finish(run(
+            &["--env", "NEXTEST_TEST_THREADS=7"],
+            &[("RUST_TEST_THREADS", "5"), ("GOFLAGS", "-mod=mod")],
+        ))
+        .await,
+    );
+    assert_eq!(kept[1], "5", "{kept:?}");
+    assert_eq!(kept[2], "7", "{kept:?}");
+    assert_eq!(kept[3], format!("-mod=mod -p={share}"), "{kept:?}");
+    // An empty CARGO_MAKEFLAGS is the per-command way out.
+    let empty = lines(&finish(run(&[], &[("CARGO_MAKEFLAGS", "")])).await);
+    assert_eq!(empty[0], "", "{empty:?}");
+}

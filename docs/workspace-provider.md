@@ -35,10 +35,13 @@ It prints:
 {"contract": 1, "workspace_id": "3f2a…", "repo_id": "a3dd…", "path": "/…/ws/3f2a…",
  "change_id": "…", "owner": "me@host:fix-parser", "purpose": "fix-parser",
  "lease": {…}, "holder": {"pid": 4242, "follower_pid": 4250}, "attached": false,
- "start": "main"}
+ "start": "main",
+ "env": {"CARGO_MAKEFLAGS": "-j --jobserver-auth=fifo:/…/build/jobserver", "NEXTEST_TEST_THREADS": "2"}}
 ```
 
 With `-o text` it prints the path alone, one line.
+
+`env` holds the machine-wide build limit's variables ([build-limit.md](build-limit.md)): each one the provider command's own environment lacks, which a hook inherits from its program. An adapter whose program can set a session's environment applies each variable the session lacks. The job counts are fixed at the session's start; the jobserver adapts as builders come and go. `env` is empty when the daemon cannot say, or with `[build] limit = false`.
 
 ### `attach`
 

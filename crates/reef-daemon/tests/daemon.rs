@@ -358,6 +358,7 @@ fn log_file_is_json_lines() {
         "made the daemon's authority key",
         "authority key changed",
         "loaded the Sigstore trusted root for keyless keys",
+        "the build limit's jobserver is ready",
         // The temporary directory may be created 0755.
         "a private directory had group or other permissions; changed it to 0700",
         reef_daemon::daemon::ROOT_WARNING,

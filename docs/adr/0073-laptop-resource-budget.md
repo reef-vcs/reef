@@ -1,6 +1,6 @@
 # 0073. Five tickets at once on a standard laptop
 
-- Status: accepted
+- Status: accepted; decisions 9 and 10 amended by [ADR 0074](0074-build-limit-jobserver.md)
 - Date: 2026-11-12
 - Ticket: [#264](https://github.com/reef-vcs/reef/issues/264) ([brief](../dev-tickets/phase-3/issue-264-laptop-resource-budget.md))
 - Follow-ons: [#271](https://github.com/reef-vcs/reef/issues/271) build limit, [#272](https://github.com/reef-vcs/reef/issues/272) disk accounting and floor, [#273](https://github.com/reef-vcs/reef/issues/273) clone stores, [#274](https://github.com/reef-vcs/reef/issues/274) idle eviction

@@ -47,7 +47,7 @@ The daemon deletes a released workspace in the background, so before the five st
 
 The harness sets no Reef variable and drops its own build settings (`CARGO_TARGET_DIR`, `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_PROFILE_*`) so each repository builds with its own defaults plus its `env` in `repos.toml`.
 
-Variants are flags: `--seed off|sibling|sibling-edited|clone` (the build-output spike), `--stores on` (a repository's `reef.toml` stores), and `--limit on` (the build limit, refused until #271 lands).
+Variants are flags: `--seed off|sibling|sibling-edited|clone` (the build-output spike), `--stores on` (a repository's `reef.toml` stores), and `--limit off|on|both` (the build limit, #271; default `on`). `--limit off` passes `--no-build-limit` to every `ws run`, which reproduces the #264 baseline. `--limit both` runs each repository's scenario twice against one daemon, without the limit and then with it: the report judges the second and compares the two. The first skips its `ws gc`, so the second starts from the same objects. `--solo-runs <n>` runs solo ticket 1 `n` times, and the report takes the median: use 3 for a gated `--limit both` run, and warm the caches with `--setup-only` first so neither half pays the downloads. A sampler reads `reef daemon status`'s `build` every 5 s: the tokens free and the builders.
 
 ## What is measured
 
@@ -79,7 +79,7 @@ Judged per repository, on the `standard` and `linux` profiles only. `reef-fleet 
 | G5 load | 1-minute load p95 at most 2× the cores, maximum at most 3× |
 | G6 memory | macOS: no time at critical pressure and at most 2 GiB swapped out; Linux: PSI `memory full avg10` never above 10% |
 | G7 usability | the canary's `ws list` p99 under 1 s, and none failed or ran past 30 s; the sleep's lateness p99 under 50 ms |
-| G8 throughput | the median five-at-once ticket at most 5× its solo time. The second half, the makespan with the limit at most 1.1× without it, needs #271 |
+| G8 throughput | the median five-at-once ticket at most 5× its solo time; with `--limit both`, the five tickets' makespan with the limit and the solo ticket's median with it each at most 1.1× without it (`n/a` without `both`) |
 | G9 correctness | every ticket's test outcomes equal its solo run's |
 
 ## Running it

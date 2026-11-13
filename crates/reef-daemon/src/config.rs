@@ -188,6 +188,10 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["enabled", "listen", "names", "tls_cert", "tls_key"],
     ),
     ("status_index", &["enabled", "sync_timeout"]),
+    (
+        "build",
+        &["limit", "jobs", "nice", "make_jobserver", "cargo_config"],
+    ),
 ];
 
 /// The metadata database's file name in the state directory.
@@ -281,6 +285,8 @@ pub struct FileConfig {
     pub remote: RemoteSection,
     /// `[status_index]`.
     pub status_index: StatusIndexSection,
+    /// `[build]` (#271).
+    pub build: BuildSection,
 }
 
 /// `[daemon]`: where the daemon listens and records its pid.
@@ -1014,6 +1020,109 @@ impl FetchSection {
     }
 }
 
+/// `[build] jobs`: how many jobs the machine runs at once for every
+/// workspace's builds together (#271, ADR 0074).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildJobs {
+    /// The smaller of the logical cores and the memory in GiB ÷ 2, at
+    /// least 1.
+    #[default]
+    Auto,
+    /// A fixed count, from 1 to 1,024.
+    Count(u32),
+}
+
+impl BuildJobs {
+    /// The largest fixed count.
+    pub const MAX: u32 = 1024;
+
+    /// The count for a machine with `cores` logical cores and `memory`
+    /// bytes of memory.
+    pub fn resolve(self, cores: usize, memory: u64) -> u32 {
+        match self {
+            Self::Count(count) => count,
+            Self::Auto => {
+                // Rounded to the nearest GiB first: Linux's MemTotal is
+                // below the machine's nominal size.
+                let by_memory = ((memory + (1 << 29)) >> 30) / 2;
+                let cores = u64::try_from(cores).unwrap_or(u64::MAX);
+                u32::try_from(cores.min(by_memory).max(1)).unwrap_or(Self::MAX)
+            }
+        }
+    }
+}
+
+impl Serialize for BuildJobs {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Count(count) => serializer.serialize_u32(*count),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BuildJobs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Text(String),
+            Count(i64),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Text(text) if text == "auto" => Ok(Self::Auto),
+            Raw::Text(text) => Err(serde::de::Error::custom(format!(
+                "{text:?} is not \"auto\" or a number"
+            ))),
+            Raw::Count(count) => u32::try_from(count)
+                .ok()
+                .filter(|count| (1..=Self::MAX).contains(count))
+                .map(Self::Count)
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!("{count} must be from 1 to {}", Self::MAX))
+                }),
+        }
+    }
+}
+
+/// `[build]`: the machine-wide build limit (#271, ADR 0074): the daemon's
+/// jobserver for cargo, job counts for tools without one, the priority of
+/// `reef ws run` commands and store builds, and a cargo configuration
+/// above the workspaces.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BuildSection {
+    /// The limit applies. False: no jobserver, no job counts, no priority
+    /// change and no cargo file. Default true.
+    pub limit: bool,
+    /// The machine's job count. Default `"auto"`. A change takes effect at
+    /// the next daemon start.
+    pub jobs: BuildJobs,
+    /// The niceness `reef ws run` commands and store builds run at, never
+    /// lowering one already higher; 0 for none. Default 10; at most 19.
+    pub nice: u32,
+    /// Also hand the jobserver to `make` as `MAKEFLAGS`. Only for a `make`
+    /// that is GNU make 4.4 or later, which the daemon checks at start.
+    /// Default false.
+    pub make_jobserver: bool,
+    /// Write `~/.reef/.cargo/config.toml` with the job counts for cargo
+    /// commands Reef did not start; only under the default workspace root.
+    /// Default true.
+    pub cargo_config: bool,
+}
+
+impl Default for BuildSection {
+    fn default() -> Self {
+        Self {
+            limit: true,
+            jobs: BuildJobs::Auto,
+            nice: 10,
+            make_jobserver: false,
+            cargo_config: true,
+        }
+    }
+}
+
 /// `[status_index]`: the incremental status index (R2.23, ADR 0048).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -1330,6 +1439,10 @@ pub struct Config {
     /// The remote listener's limits (R2.08). Not a configuration-file key
     /// and not in `config show`: set here by tests only.
     pub remote_limits: crate::remote::Limits,
+    /// How often the build limit checks its jobserver's tokens and its
+    /// cargo file (#271): 5 s. Not a configuration-file key and not in
+    /// `config show`: set here by tests only.
+    pub build_interval: Duration,
     /// `--remote`: serve the remote listener for this run, whatever
     /// `[remote] enabled` says (R2.08).
     pub remote_flag: bool,
@@ -1638,6 +1751,7 @@ impl Config {
             gc_timer: crate::maintenance::timer::Limits::default(),
             web: crate::web::Limits::default(),
             remote_limits: crate::remote::Limits::default(),
+            build_interval: Duration::from_secs(5),
             remote_flag: false,
             workspace_base: None,
         }
@@ -2019,6 +2133,22 @@ impl Config {
                     ("sync_timeout", d(f.status_index.sync_timeout)),
                 ],
             ),
+            (
+                "build",
+                vec![
+                    ("limit", f.build.limit.to_string()),
+                    (
+                        "jobs",
+                        match f.build.jobs {
+                            BuildJobs::Auto => s("auto"),
+                            BuildJobs::Count(count) => count.to_string(),
+                        },
+                    ),
+                    ("nice", f.build.nice.to_string()),
+                    ("make_jobserver", f.build.make_jobserver.to_string()),
+                    ("cargo_config", f.build.cargo_config.to_string()),
+                ],
+            ),
         ]
     }
 }
@@ -2383,6 +2513,11 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
                 .contains(&file.status_index.sync_timeout),
             "status_index.sync_timeout",
             "must be from 10ms to 60s".to_owned(),
+        ),
+        (
+            file.build.nice <= 19,
+            "build.nice",
+            "must be from 0 to 19".to_owned(),
         ),
         (
             file.backup.sqlite_pages_per_step >= 1,

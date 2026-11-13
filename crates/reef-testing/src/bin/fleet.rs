@@ -21,7 +21,7 @@ use clap::{Args, Parser, Subcommand};
 use reef_testing::fleet::report::{self, Report};
 use reef_testing::fleet::repos::{self, Manifest, RepoSpec};
 use reef_testing::fleet::run::{self, RunConfig};
-use reef_testing::fleet::{Profile, SeedMode, Toggle, Variant, sample};
+use reef_testing::fleet::{LimitMode, Profile, SeedMode, Toggle, Variant, sample};
 
 #[derive(Parser)]
 #[command(about = "Measure what five tickets at once cost a standard laptop (#264)")]
@@ -49,9 +49,11 @@ struct RunArgs {
     /// judged.
     #[arg(long, value_enum, default_value_t = Profile::Dev)]
     profile: Profile,
-    /// The machine-wide build limit (#271; only `off` until it lands).
-    #[arg(long, value_enum, default_value_t = Toggle::Off)]
-    limit: Toggle,
+    /// The machine-wide build limit (#271): `off` passes `--no-build-limit`
+    /// to every `ws run` (the #264 baseline); `both` runs each repository
+    /// off, then on, and G8 compares them.
+    #[arg(long, value_enum, default_value_t = LimitMode::On)]
+    limit: LimitMode,
     /// How each of the five tickets' workspaces starts (the spike, E1-E3).
     #[arg(long, value_enum, default_value_t = SeedMode::Off)]
     seed: SeedMode,
@@ -68,6 +70,10 @@ struct RunArgs {
     /// How many tickets also run alone first, as the correctness reference.
     #[arg(long, default_value_t = 5)]
     solo_tickets: u32,
+    /// How many times solo ticket 1 runs; the report takes the median (3
+    /// for a gated `--limit both` run).
+    #[arg(long, default_value_t = 1)]
+    solo_runs: u32,
     /// How long the five stay idle before release, seconds.
     #[arg(long, default_value_t = 300)]
     idle_secs: u64,
@@ -185,12 +191,18 @@ fn run(args: RunArgs) -> Result<ExitCode> {
         out: absolute(&args.out)?,
         profile: args.profile,
         variant: Variant {
-            limit: args.limit,
+            limit: if args.limit == LimitMode::Off {
+                Toggle::Off
+            } else {
+                Toggle::On
+            },
             seed: args.seed,
             stores: args.stores,
         },
         tickets: args.tickets,
         solo_tickets: args.solo_tickets,
+        solo_runs: args.solo_runs,
+        limits: args.limit,
         idle: Duration::from_secs(args.idle_secs),
         stagger: Duration::from_millis(args.stagger_ms),
         keep_state: args.keep_state,

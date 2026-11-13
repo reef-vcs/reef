@@ -16,9 +16,9 @@ use serde::Deserialize;
 
 use super::report::{self, RepoReport, Report};
 use super::repos::{self, Prepared, RepoSpec};
-use super::sample::{self, Canary, CanaryReadings, Phase, Sampler, Tracked, millis};
+use super::sample::{self, BuildSampler, Canary, CanaryReadings, Phase, Sampler, Tracked, millis};
 use super::seed::{self, quote};
-use super::{Host, Profile, TicketRun, Toggle, Variant, disk, outcomes};
+use super::{Host, LimitMode, Profile, TicketRun, Toggle, Variant, disk, outcomes};
 
 /// What a run does.
 #[derive(Clone, Debug)]
@@ -47,6 +47,11 @@ pub struct RunConfig {
     /// How many tickets also run alone first (the correctness reference);
     /// at least 1, the "one workspace" of every ratio.
     pub solo_tickets: u32,
+    /// How many times solo ticket 1 runs; the report takes the median
+    /// (#271's lone-build criterion). At least 1.
+    pub solo_runs: u32,
+    /// Which build limits to measure (#271).
+    pub limits: LimitMode,
     /// How long the five stay idle before release.
     pub idle: Duration,
     /// The five tickets start this far apart.
@@ -67,7 +72,7 @@ pub const DROPPED_PREFIXES: [&str; 6] = [
     "NEXTEST_",
 ];
 /// Variables dropped by name, for the same reason as [`DROPPED_PREFIXES`].
-pub const DROPPED: [&str; 6] = [
+pub const DROPPED: [&str; 12] = [
     "CARGO_INCREMENTAL",
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
@@ -75,6 +80,14 @@ pub const DROPPED: [&str; 6] = [
     "RUSTC_WRAPPER",
     // Colored output would hide cargo's lines from the log parser.
     "CARGO_TERM_COLOR",
+    // A harness started inside `reef ws run` measures its own daemon's
+    // build limit, not the one it runs under (#271).
+    "CARGO_MAKEFLAGS",
+    "MAKEFLAGS",
+    "MFLAGS",
+    "RUST_TEST_THREADS",
+    "GOFLAGS",
+    "VITEST_MAX_WORKERS",
 ];
 
 /// The environment every command gets: the harness's own, less
@@ -106,6 +119,8 @@ struct Ctx<'a> {
     tracked: Tracked,
     epoch: Instant,
     logs: PathBuf,
+    /// Whether this scenario's `ws run`s use the build limit (#271).
+    limit: Toggle,
 }
 
 impl Ctx<'_> {
@@ -124,12 +139,6 @@ impl Ctx<'_> {
 /// `report.json` and `summary.md` to `config.out`. A repository that fails
 /// is recorded with its error, and the run goes on to the next.
 pub fn run(config: &RunConfig) -> Result<Report, String> {
-    if config.variant.limit == Toggle::On {
-        return Err(
-            "--limit on needs the machine-wide build limit (#271), which Reef does not have yet"
-                .to_owned(),
-        );
-    }
     if config.tickets == 0 {
         return Err("--tickets must be at least 1".to_owned());
     }
@@ -146,6 +155,7 @@ pub fn run(config: &RunConfig) -> Result<Report, String> {
         tracked: Tracked::default(),
         epoch: Instant::now(),
         logs,
+        limit: Toggle::On,
     };
     let (_, started_at) = crate::agent::process::today_and_now();
     let host = host(&ctx, &state);
@@ -176,8 +186,33 @@ pub fn run(config: &RunConfig) -> Result<Report, String> {
         repos: vec![],
     };
     for spec in &config.repos {
-        let mut repo = scenario(&ctx, spec);
-        repo.summary = report::summarize(&repo, report.host.cores);
+        // With `--limit both`, the scenario without the limit first, then
+        // with it; the report judges the second and compares the two.
+        let mut runs = Vec::new();
+        for &limit in config.limits.runs() {
+            let logs = if config.limits == LimitMode::Both {
+                ctx.logs.join(format!("limit-{limit}"))
+            } else {
+                ctx.logs.clone()
+            };
+            let ctx = Ctx {
+                config,
+                env: ctx.env.clone(),
+                state: ctx.state.clone(),
+                tracked: Tracked::default(),
+                epoch: ctx.epoch,
+                logs,
+                limit,
+            };
+            let mut repo = scenario(&ctx, spec);
+            repo.limit = Some(limit);
+            repo.summary = report::summarize(&repo, report.host.cores);
+            runs.push(repo);
+        }
+        let Some(mut repo) = runs.pop() else {
+            continue;
+        };
+        repo.off = runs.pop().map(Box::new);
         report.repos.push(repo);
         write(&report, &config.out)?;
     }
@@ -297,10 +332,17 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
         // Workspaces start on the commit that declares the stores.
         prepared.head = declare_stores(ctx, &prepared)?;
     }
-    ctx.reef_ok(
+    // `--limit both` runs the scenario twice against one daemon: the
+    // second finds the repository registered.
+    match ctx.reef_ok(
         &["repo", "register", &prepared.dir.to_string_lossy()],
         &prepared.dir,
-    )?;
+    ) {
+        Err(error) if error.contains("already registered") => {}
+        other => {
+            other?;
+        }
+    }
     if config.variant.stores == Toggle::On {
         build_stores(ctx, &prepared)?;
     }
@@ -333,6 +375,7 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
         tracked: Tracked::default(),
         epoch,
         logs: ctx.logs.join(&spec.name),
+        limit: ctx.limit,
     };
     fs::create_dir_all(&ctx.logs).map_err(|e| format!("{}: {e}", ctx.logs.display()))?;
     settle(&ctx.state);
@@ -354,6 +397,21 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             epoch,
         )
     };
+    let build_sampler = {
+        let program = config.reef_bin_dir.join("reef");
+        let env = ctx.env.clone();
+        BuildSampler::start(
+            move || {
+                let mut command = Command::new(&program);
+                command
+                    .env_clear()
+                    .envs(env.iter().cloned())
+                    .args(["daemon", "status", "-o", "json"]);
+                command
+            },
+            epoch,
+        )
+    };
     let mut phases = Vec::new();
     let mark = |phases: &mut Vec<Phase>, name: &str, start: u64| {
         phases.push(Phase {
@@ -369,15 +427,29 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
         // 1. Solo, one ticket at a time.
         let solo_start = millis(epoch.elapsed());
         for ticket in 1..=config.solo_tickets.clamp(1, config.tickets) {
-            let start = millis(epoch.elapsed());
-            let run = ticket_run(&ctx, &prepared, "solo", ticket, 1, None, false, "")?;
-            if ticket == 1 {
-                mark(&mut phases, "solo-1", start);
+            // Ticket 1, the ratios' reference, runs `--solo-runs` times
+            // for its median; a repeat logs as `solo<n>`.
+            let attempts = if ticket == 1 {
+                config.solo_runs.max(1)
+            } else {
+                1
+            };
+            for attempt in 1..=attempts {
+                let start = millis(epoch.elapsed());
+                let name = if attempt == 1 {
+                    "solo".to_owned()
+                } else {
+                    format!("solo{attempt}")
+                };
+                let run = ticket_run(&ctx, &prepared, &name, ticket, 1, None, false, "")?;
+                if ticket == 1 && attempt == 1 {
+                    mark(&mut phases, "solo-1", start);
+                }
+                if run.workspace_id.is_none() {
+                    repo.creates_refused += 1;
+                }
+                repo.solo.push(run);
             }
-            if run.workspace_id.is_none() {
-                repo.creates_refused += 1;
-            }
-            repo.solo.push(run);
         }
         mark(&mut phases, "solo", solo_start);
 
@@ -481,10 +553,17 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             .collect();
         mark(&mut phases, "release", release_start);
         let gc_start = millis(epoch.elapsed());
-        if let Err(e) = ctx.reef_ok(
-            &["ws", "gc", "--repo", &prepared.dir.to_string_lossy()],
-            &prepared.dir,
-        ) {
+        // `--limit both`'s first scenario keeps its objects: a `ws gc`
+        // between two scenarios on one repository left the second's
+        // identical trees unwritten (a pruned tree a commit still names),
+        // and the off run only provides G8's reference.
+        let gc_now = !(config.limits == LimitMode::Both && ctx.limit == Toggle::Off);
+        if gc_now
+            && let Err(e) = ctx.reef_ok(
+                &["ws", "gc", "--repo", &prepared.dir.to_string_lossy()],
+                &prepared.dir,
+            )
+        {
             errors.push(format!("ws gc: {e}"));
         }
         // The released workspaces are deleted in the background.
@@ -500,6 +579,7 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
 
     let readings = canary.finish();
     let taken = sampler.finish();
+    repo.build_samples = build_sampler.finish();
     repo.lateness_p99_us = lateness_by_phase(&readings, &phases);
     repo.list_ms = readings.list_ms;
     repo.list_failures = readings.list_failures;
@@ -511,13 +591,14 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             *peak = (*peak).max(*rss);
         }
     }
-    for (run, list) in [("solo", &mut repo.solo), ("five", &mut repo.five)] {
-        for t in list.iter_mut() {
-            t.peak_rss_bytes = peaks
-                .get(&label(run, t.ticket, t.round))
-                .copied()
-                .unwrap_or(0);
-        }
+    // Each run's own label is its log's name: a repeated solo run's
+    // (`solo2-1-1`) is not the first's.
+    for t in repo.solo.iter_mut().chain(repo.five.iter_mut()) {
+        let own = Path::new(&t.log)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        t.peak_rss_bytes = peaks.get(&own).copied().unwrap_or(0);
     }
     if let Some(t) = &mut repo.seed {
         t.peak_rss_bytes = peaks.get(&label("seed", 0, 1)).copied().unwrap_or(0);
@@ -639,6 +720,9 @@ fn ws_run(
     }
     if keep {
         args.push("--keep");
+    }
+    if ctx.limit == Toggle::Off {
+        args.push("--no-build-limit");
     }
     args.extend(["--", "sh", "-c", &script]);
     let started_ms = millis(ctx.epoch.elapsed());

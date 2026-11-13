@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use reef_testing::fleet::report::{self, Verdict};
 use reef_testing::fleet::run::{self, RunConfig};
-use reef_testing::fleet::{Profile, SeedMode, Toggle, Variant, repos};
+use reef_testing::fleet::{LimitMode, Profile, SeedMode, Toggle, Variant, repos};
 
 fn config(root: &Path, seed: SeedMode, tickets: u32) -> RunConfig {
     // `reef` and `reef-daemon` side by side, as an install has them.
@@ -34,12 +34,14 @@ fn config(root: &Path, seed: SeedMode, tickets: u32) -> RunConfig {
         out: root.join("out"),
         profile: Profile::Dev,
         variant: Variant {
-            limit: Toggle::Off,
+            limit: Toggle::On,
             seed,
             stores: Toggle::Off,
         },
         tickets,
         solo_tickets: tickets,
+        solo_runs: 1,
+        limits: LimitMode::On,
         idle: Duration::from_secs(1),
         stagger: Duration::from_millis(300),
         keep_state: false,
@@ -60,9 +62,28 @@ fn five_synthetic_tickets_at_once() {
         .prefix("fl")
         .tempdir_in("/tmp")
         .unwrap();
-    let config = config(root.path(), SeedMode::Off, 5);
+    // #271 test 22: off, then on, in one run; both halves reported.
+    let mut config = config(root.path(), SeedMode::Off, 5);
+    config.limits = LimitMode::Both;
     let report = run::run(&config).unwrap();
     let repo = &report.repos[0];
+    assert_eq!(repo.limit, Some(Toggle::On));
+    let off = repo.off.as_ref().expect("the off run");
+    assert_eq!(off.limit, Some(Toggle::Off));
+    assert_eq!(off.error, None, "{}", report::render(&report));
+    assert_eq!(off.five.len(), 10);
+    assert!(
+        !repo.build_samples.is_empty(),
+        "the build limit was sampled: off {}, phases {:?}, error {:?}",
+        off.build_samples.len(),
+        repo.phases,
+        repo.error
+    );
+    let halves = report::limit_halves(repo).expect("both halves");
+    assert!(
+        halves.makespan.is_some() && halves.solo.is_some(),
+        "{halves:?}"
+    );
     assert_eq!(repo.error, None, "{}", report::render(&report));
     assert_eq!(repo.solo.len(), 5);
     assert_eq!(repo.five.len(), 10, "{}", report::render(&report));

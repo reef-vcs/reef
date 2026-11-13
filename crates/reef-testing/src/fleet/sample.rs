@@ -553,6 +553,97 @@ impl Drop for Canary {
     }
 }
 
+/// How often the build limit is read.
+pub const BUILD_EVERY: Duration = Duration::from_secs(5);
+
+/// One reading of the daemon's build limit (#271), from `reef daemon
+/// status -o json`'s `build`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSample {
+    /// Milliseconds since the scenario started.
+    pub t_ms: u64,
+    /// Tokens in the jobserver's FIFO.
+    pub available: u32,
+    /// The pool when no build runs.
+    pub tokens: u32,
+    /// Workspaces whose leases are heartbeating.
+    pub builders: u32,
+    /// What each tool without a jobserver gets.
+    pub share: u32,
+}
+
+/// Reads the build limit every [`BUILD_EVERY`] until finished.
+pub struct BuildSampler {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Vec<BuildSample>>>,
+}
+
+impl BuildSampler {
+    /// Starts reading; `status` builds the `reef daemon status -o json`
+    /// command. A daemon without a build limit gives no readings.
+    pub fn start(status: impl Fn() -> Command + Send + 'static, epoch: Instant) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            while !flag.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                if let Ok(output) = status().stdin(Stdio::null()).stderr(Stdio::null()).output()
+                    && let Some(sample) = parse_build(&output.stdout, millis(epoch.elapsed()))
+                {
+                    out.push(sample);
+                }
+                let mut left = BUILD_EVERY.saturating_sub(started.elapsed());
+                while !left.is_zero() && !flag.load(Ordering::Relaxed) {
+                    let nap = left.min(Duration::from_millis(100));
+                    std::thread::sleep(nap);
+                    left = left.saturating_sub(nap);
+                }
+            }
+            out
+        });
+        BuildSampler {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops and returns the readings.
+    pub fn finish(mut self) -> Vec<BuildSample> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for BuildSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The `build` object of `daemon status -o json`'s output, at `t_ms`.
+pub fn parse_build(stdout: &[u8], t_ms: u64) -> Option<BuildSample> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let build = value.get("build")?;
+    let number = |key: &str| {
+        build
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    Some(BuildSample {
+        t_ms,
+        available: number("available"),
+        tokens: number("tokens"),
+        builders: number("builders"),
+        share: number("share"),
+    })
+}
+
 /// The `p`th percentile (0 to 100) of `values`, nearest rank; `None` if
 /// empty.
 #[allow(
