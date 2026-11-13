@@ -347,10 +347,15 @@ mod tests {
         assert_eq!(smaller.jobserver.available().unwrap(), 3);
         drop((opened, again, smaller));
 
-        // Everything closed: the buffer is gone; a reopen refills it.
+        // Everything closed: a reopen fills the pool to the new size. The
+        // kernel usually drops the buffer with the last descriptor, but a
+        // process another test forks at that moment holds the descriptors
+        // until its exec and keeps the tokens in it (#290's macOS CI), so
+        // only the pool is asserted, not how much of it was restored.
         let reopened = Jobserver::open(&dir, 5).unwrap();
         assert!(!reopened.created);
-        assert_eq!(reopened.restored, 5);
+        assert!(reopened.restored <= 5);
+        assert_eq!(reopened.jobserver.available().unwrap(), 5);
         drop(reopened);
 
         // A FIFO with group bits, a regular file and a symlink are replaced.
