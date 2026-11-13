@@ -131,6 +131,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- A change's lifecycle no longer lags its operation (#293): a read made while a transition is being written, such as an observed landing that has already moved its workspaces onto new changes, waits up to five seconds for the transition's record instead of showing the change in its old state (`GetChange`, `ListChanges`, `GetStatus`, `ListProposals` and every other read that returns a change's lifecycle).
 - A workspace whose change landed by an observed landing (a merge on the host and a fetch, a bookmark moved by hand) or a tag no longer amends the landed commit on its next snapshot, moving `main` past every gate (#248, S-178): the daemon gives it a new empty change in the landing's operation, and a snapshot never rewrites a commit on `trunk()` or under a tag.
 
 - A workspace whose release failed on a full disk is reclaimed once there is room. When the final snapshot failed and the daemon could not record the workspace as active again either (SQLite cannot write on a full disk), it stayed `releasing`, and every later release or lease expiry refused it until the daemon restarted. The next attempt now puts it back to active and reclaims it ([#229](https://github.com/reef-vcs/reef/pull/229)).

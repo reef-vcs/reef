@@ -13,7 +13,10 @@
 //! Every transition of a repository runs under its lifecycle lock
 //! ([`Lifecycle::lock`]), taken after the repository's create lock shared,
 //! so a state check and its record cannot interleave with another
-//! transition; R3.13's landing will hold it too.
+//! transition; R3.13's landing will hold it too. Reads that return
+//! lifecycle rows wait for it, briefly and holding no other lock, when a
+//! change they read has a pending transition
+//! ([`messages::await_pending`], #293).
 //!
 //! Clients propose, withdraw, decline and supersede ([`transition`]); the
 //! daemon records a recorded change as landed when it reaches `trunk()`
@@ -66,7 +69,9 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     /// `repo`'s lifecycle lock: held from a transition's state check to its
-    /// commit, by every transition and by R3.13's landing.
+    /// commit, by every transition and by R3.13's landing. A read waiting
+    /// for a pending transition takes it alone and drops it at once
+    /// ([`messages::await_pending`]).
     pub fn lock(&self, repo: RepoId) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(locks.entry(repo).or_default())

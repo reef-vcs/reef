@@ -284,7 +284,8 @@ impl FileService for FilesHandler {
             .await;
         }
         let mut change = rewritten.change.as_ref().map(convert::change);
-        crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None);
+        crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None)
+            .await;
         Ok(Response::new(EditFilesResponse { change, operation }))
     }
 }

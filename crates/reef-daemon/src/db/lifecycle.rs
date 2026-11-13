@@ -8,7 +8,7 @@
 //! ([`Db::delete_repository`]); GC maps operation ids
 //! ([`Db::map_transition_operations`]) and deletes nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use rusqlite::{OptionalExtension as _, Row, Transaction, params, params_from_iter};
@@ -334,6 +334,27 @@ impl Db {
             ))?;
             statement
                 .query_map([], transition_from_row)?
+                .collect::<Result<_, _>>()
+        })
+    }
+
+    /// The change ids of `repo`'s pending transitions created after
+    /// `since`: transitions whose operations are being written, under the
+    /// lifecycle lock (#293). Older pending rows are a write that failed
+    /// and left its row for the next start, not one in progress. Pending
+    /// rows are few; they are read through their partial index.
+    pub fn pending_changes(
+        &self,
+        repo: RepoId,
+        since: Timestamp,
+    ) -> Result<HashSet<String>, DbError> {
+        self.with(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT change_id FROM lifecycle_transitions
+                 WHERE status = 'pending' AND repo_id = ?1 AND created_at > ?2",
+            )?;
+            statement
+                .query_map(params![repo, since.0], |row| row.get(0))?
                 .collect::<Result<_, _>>()
         })
     }
@@ -955,5 +976,38 @@ mod tests {
         .unwrap();
         assert!(db.lifecycle_row(record.id, &change).unwrap().is_none());
         assert_eq!(db.lifecycle_counts().unwrap(), (0, 2));
+    }
+
+    // #293: a read waits only for recent pending rows of its repository.
+    #[test]
+    fn pending_changes_are_recent_pending_rows_of_the_repository() {
+        let db = Db::open_in_memory().unwrap();
+        let record = repo("aaaa000000000001", "/src/app");
+        let other = repo("aaaa000000000002", "/src/other");
+        db.insert_repository(&record).unwrap();
+        db.insert_repository(&other).unwrap();
+        let change = "ef".repeat(16);
+        let row = pending(
+            record.id,
+            "trn_0000000000000005",
+            &change,
+            "proposed",
+            "landed",
+        );
+        let before = Timestamp(row.created_at.0 - 1);
+        assert!(db.pending_changes(record.id, before).unwrap().is_empty());
+        db.insert_pending_transition(&row).unwrap();
+        let found = db.pending_changes(record.id, before).unwrap();
+        assert_eq!(found, HashSet::from([change.clone()]));
+        assert!(db.pending_changes(other.id, before).unwrap().is_empty());
+        // A row as old as `since` is a stranded write, not one in progress.
+        assert!(
+            db.pending_changes(record.id, row.created_at)
+                .unwrap()
+                .is_empty()
+        );
+        db.commit_transition(record.id, &row.id, "op", Timestamp(5), &state_of(&row))
+            .unwrap();
+        assert!(db.pending_changes(record.id, before).unwrap().is_empty());
     }
 }

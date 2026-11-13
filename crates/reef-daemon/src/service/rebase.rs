@@ -97,7 +97,7 @@ pub(super) async fn rebase_change(
     )
     .await?;
     let mut change = rewritten.change.as_ref().map(convert::change);
-    crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None);
+    crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
     let Some(outcome) = rewritten.rebase else {
         return Ok(Response::new(RebaseChangeResponse {
             change,

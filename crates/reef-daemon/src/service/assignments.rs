@@ -351,7 +351,8 @@ async fn change_of(state: &AppState, target: &Target, change_id: &str) -> Option
         .await
         .ok()??;
     let mut change = super::convert::change(&info);
-    crate::lifecycle::messages::fill(state, target.repo.id, std::iter::once(&mut change), None);
+    crate::lifecycle::messages::fill(state, target.repo.id, std::iter::once(&mut change), None)
+        .await;
     Some(change)
 }
 
