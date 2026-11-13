@@ -66,6 +66,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | #259, #248 | [issue-259-reef-rebase.md](issue-259-reef-rebase.md) | L | R3.09, R3.13, R3.25, R3.27, #258 | #262, #261, R3.10, R3.11, R3.17 (fetches through its fetch path); through it R4.14 |
 | #260 | [issue-260-macos-workspace-path.md](issue-260-macos-workspace-path.md) | S | R1.04, RX.01 | none listed |
 | #264 | [issue-264-laptop-resource-budget.md](issue-264-laptop-resource-budget.md) | M | R1.12, R1.20, R1.21, R1.23, RX.07 | four follow-on tickets (build limit, disk accounting and floor, clone stores, idle eviction); RX.06's gate for this goal |
+| #271 | [issue-271-build-limit.md](issue-271-build-limit.md) | M | #264, R1.21, R2.26, #260 | #273 (clone-store builds run under the pool); RX.06's G5 to G8; R3.20 (reads the limit) |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 
