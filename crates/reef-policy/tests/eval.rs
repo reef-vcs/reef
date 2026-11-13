@@ -696,6 +696,47 @@ fn a_conflicted_change_is_refused() {
     assert_eq!(evaluation.decision, Decision::Block);
 }
 
+#[test]
+fn a_summarized_branch_needs_a_description() {
+    let mut undescribed = input(&["a"], Vec::new());
+    undescribed.change.description = " \n\t\n".to_owned();
+    undescribed.change.id = "0123".to_owned();
+    undescribed.landing.destination = "main".to_owned();
+    // Without [history], or with message = "keep", it does not apply.
+    for keep in [policy(""), policy("[history]\nmessage = \"keep\"\n")] {
+        let evaluation = keep.evaluate(&undescribed);
+        assert_eq!(
+            rule(&evaluation, "builtin:description").status,
+            Status::NotApplicable
+        );
+        assert_eq!(evaluation.decision, Decision::Allow);
+    }
+    let summary = policy("[history]\n");
+    let evaluation = summary.evaluate(&undescribed);
+    let description = rule(&evaluation, "builtin:description");
+    assert_eq!(description.status, Status::Unsatisfied);
+    assert!(
+        description.message.contains("on main")
+            && description.message.contains("reef describe 0123"),
+        "{}",
+        description.message
+    );
+    assert_eq!(evaluation.decision, Decision::Block);
+    // Control and invisible characters only: still no description.
+    undescribed.change.description = "\u{1b}\u{7}\u{202e}\n".to_owned();
+    assert_eq!(
+        rule(&summary.evaluate(&undescribed), "builtin:description").status,
+        Status::Unsatisfied
+    );
+    undescribed.change.description = "Fix it\n".to_owned();
+    let evaluation = summary.evaluate(&undescribed);
+    assert_eq!(
+        rule(&evaluation, "builtin:description").status,
+        Status::Satisfied
+    );
+    assert_eq!(evaluation.decision, Decision::Allow);
+}
+
 // Test 6.
 #[test]
 fn free_rules_and_the_decision() {
@@ -727,6 +768,7 @@ expr = "change.files[3].size > 0"
         [
             "builtin:input",
             "builtin:conflicts",
+            "builtin:description",
             "builtin:policy-file",
             "builtin:owners",
             "off",
@@ -736,7 +778,10 @@ expr = "change.files[3].size > 0"
             "error"
         ]
     );
-    let statuses: Vec<Status> = evaluation.rules[4..].iter().map(|r| r.status).collect();
+    let statuses: Vec<Status> = evaluation.rules[reef_policy::BUILTIN_RULES.len()..]
+        .iter()
+        .map(|r| r.status)
+        .collect();
     assert_eq!(
         statuses,
         [

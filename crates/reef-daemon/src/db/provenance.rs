@@ -590,6 +590,29 @@ impl Db {
         })
     }
 
+    /// The distinct non-empty agents of `repo`'s records of the change
+    /// `change_id`, by when each first recorded it, at most `limit` (R3.16:
+    /// the landed history's `Reef-Agent` trailers).
+    pub fn provenance_agents(
+        &self,
+        repo: RepoId,
+        change_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT agent FROM provenance
+                 WHERE repo_id = ?1 AND change_id = ?2 AND agent IS NOT NULL AND agent != ''
+                 GROUP BY agent ORDER BY MIN(recorded_at), agent LIMIT ?3",
+            )?;
+            stmt.query_map(
+                params![repo, change_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )?
+            .collect()
+        })
+    }
+
     /// The distinct change ids of `repo`'s records recorded before
     /// `before`: what GC's eighth step resolves in the head's view.
     pub fn provenance_changes_before(

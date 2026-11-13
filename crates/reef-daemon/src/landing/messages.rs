@@ -43,6 +43,7 @@ pub fn reason_message(text: Option<&str>) -> v1::LandingReason {
         Some(Reason::Failed) => v1::LandingReason::Failed,
         Some(Reason::Checks) => v1::LandingReason::Checks,
         Some(Reason::Unavailable) => v1::LandingReason::Unavailable,
+        Some(Reason::Empty) => v1::LandingReason::Empty,
         None => v1::LandingReason::Unspecified,
     }
 }
@@ -127,6 +128,7 @@ fn change_message(
         tested_commit_id: change.tested_commit.clone().unwrap_or_default(),
         tested_evaluation,
         batch_position: change.batch_position.unwrap_or_default(),
+        summarized: change.summarized,
     }
 }
 
@@ -162,6 +164,14 @@ pub fn landing_message(landing: &StoredLanding, whole: bool) -> v1::Landing {
         created_at: Some(timestamp(row.created_at)),
         finished_at: row.finished_at.map(timestamp),
         batch_id: row.batch_id.clone().unwrap_or_default(),
+        history: row
+            .history
+            .as_deref()
+            .and_then(super::history::Recorded::parse)
+            .map(|history| v1::LandingHistory {
+                message: history.message,
+                trailers: history.trailers,
+            }),
     }
 }
 

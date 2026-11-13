@@ -112,7 +112,7 @@ The daemon generates the session's key in memory at its first record, has its au
 GC compacts and expires records (`[provenance]` in the daemon's `config.toml`):
 
 - `compact_after` (7 days, `0s` never): of each run of a session's records of one change under one context, keep the first and the last, and any of a visible commit.
-- `retention` (90 days, `0s` never): delete records of changes with no visible commit. A visible change's records are kept, and a landed change's are never compacted or expired (R3.13). A change squashed into another (`jj squash`) has no visible commit, so its records expire too, until the landed projection pins the changes it consumed (R3.16).
+- `retention` (90 days, `0s` never): delete records of changes with no visible commit. A visible change's records are kept, and a landed change's are never compacted or expired (R3.13). A change squashed into another (`jj squash`) has no visible commit, so its records expire too. The landed history projection (R3.16) keeps one commit per change with its change id, so a landed change stays visible and its landing row pins its records; when stacks (R3.10) squash several changes into one commit, each squashed change is to be recorded on its landing row, which will pin it the same way.
 - `enabled = false` records nothing and refuses declarations; stored records stay readable.
 
 Nothing younger than GC's undo window is touched. Records are in `reef.sqlite3` and in backups; `reef repo forget` deletes them.

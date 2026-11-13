@@ -119,8 +119,16 @@ struct RawFile {
     signoff: Vec<Spanned<RawSignoff>>,
     conflicts: Option<Spanned<RawConflicts>>,
     landing: Option<Spanned<RawLanding>>,
+    history: Option<Spanned<RawHistory>>,
     #[serde(default)]
     rule: Vec<Spanned<RawRule>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHistory {
+    message: Option<Text>,
+    trailers: Option<Spanned<List>>,
 }
 
 #[derive(Deserialize)]
@@ -269,12 +277,113 @@ pub struct Policy {
     pub(crate) entries: Vec<Entry>,
     pub(crate) conflicts: Conflicts,
     pub(crate) landing: LandingSettings,
+    pub(crate) history: HistorySettings,
 }
 
 impl Policy {
     /// The `[landing]` table, or its defaults (R3.14, ADR 0067).
     pub fn landing(&self) -> &LandingSettings {
         &self.landing
+    }
+
+    /// The `[history]` table, or its defaults (R3.16, ADR 0075).
+    pub fn history(&self) -> &HistorySettings {
+        &self.history
+    }
+}
+
+/// `[history] message`: how a landed change's description is written on
+/// the destination (R3.16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Message {
+    /// As the change has it: the commit lands as written. The default when
+    /// the policy has no `[history]` table.
+    #[default]
+    Keep,
+    /// The change's description normalized, the trailers the projection
+    /// owns removed and its own appended. The default in a `[history]`
+    /// table.
+    Summary,
+}
+
+impl Message {
+    /// Its text in the file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Message::Keep => "keep",
+            Message::Summary => "summary",
+        }
+    }
+
+    /// The value `text` names.
+    pub fn parse(text: &str) -> Option<Message> {
+        match text {
+            "keep" => Some(Message::Keep),
+            "summary" => Some(Message::Summary),
+            _ => None,
+        }
+    }
+}
+
+/// A set of trailers `[history] trailers` names (R3.16), in the order the
+/// projection writes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TrailerSet {
+    /// `Reef-Change: <change id>`.
+    Change,
+    /// `Reef-Landing: lnd_…`, and `Reef-Batch: bat_…` for a batch that
+    /// landed more than one change.
+    Landing,
+    /// `Reef-Agent: <name>` for each agent of the change's provenance.
+    Agents,
+    /// `Reviewed-by: <name> <<email>>` for each person whose sign-off
+    /// counted.
+    Signoffs,
+}
+
+impl TrailerSet {
+    /// Every set, in the order they are written.
+    pub const ALL: [TrailerSet; 4] = [
+        TrailerSet::Change,
+        TrailerSet::Landing,
+        TrailerSet::Agents,
+        TrailerSet::Signoffs,
+    ];
+
+    /// Its text in the file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrailerSet::Change => "change",
+            TrailerSet::Landing => "landing",
+            TrailerSet::Agents => "agents",
+            TrailerSet::Signoffs => "signoffs",
+        }
+    }
+
+    /// The value `text` names.
+    pub fn parse(text: &str) -> Option<TrailerSet> {
+        TrailerSet::ALL.into_iter().find(|set| set.as_str() == text)
+    }
+}
+
+/// `[history]`: how landed changes are written on the destination whose
+/// tree has this policy (R3.16, ADR 0075).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistorySettings {
+    /// How each landed change's description is written.
+    pub message: Message,
+    /// The trailer sets a summary appends, in the order written; empty
+    /// under [`Message::Keep`].
+    pub trailers: Vec<TrailerSet>,
+}
+
+impl HistorySettings {
+    /// The trailers a `[history]` table writes when it names none.
+    pub const DEFAULT_TRAILERS: [TrailerSet; 2] = [TrailerSet::Change, TrailerSet::Landing];
+
+    /// Whether landed changes are summarized.
+    pub fn summarized(&self) -> bool {
+        self.message == Message::Summary
     }
 }
 
@@ -1526,6 +1635,7 @@ impl Loader<'_> {
         };
 
         let landing = self.landing(raw.landing.as_ref());
+        let history = self.history(raw.history.as_ref());
 
         Policy {
             sha256: crate::sha256_hex(text.as_bytes()),
@@ -1535,7 +1645,66 @@ impl Loader<'_> {
             entries: entries.into_iter().map(|(_, entry)| entry).collect(),
             conflicts,
             landing,
+            history,
         }
+    }
+
+    fn history(&mut self, raw: Option<&Spanned<RawHistory>>) -> HistorySettings {
+        let Some(raw) = raw else {
+            return HistorySettings::default();
+        };
+        let raw = raw.get_ref();
+        let mut settings = HistorySettings {
+            message: Message::Summary,
+            trailers: Vec::new(),
+        };
+        if let Some(message) = &raw.message {
+            match Message::parse(message.get_ref()) {
+                Some(parsed) => settings.message = parsed,
+                None => self.at(
+                    "history",
+                    "message",
+                    message.span().start,
+                    format!("{:?} is not summary or keep", message.get_ref()),
+                ),
+            }
+        }
+        match &raw.trailers {
+            None if settings.summarized() => {
+                settings.trailers = HistorySettings::DEFAULT_TRAILERS.to_vec();
+            }
+            None => {}
+            Some(trailers) if !settings.summarized() => self.at(
+                "history",
+                "trailers",
+                trailers.span().start,
+                "trailers are written only with message = \"summary\"".to_owned(),
+            ),
+            Some(trailers) => {
+                for name in trailers.get_ref() {
+                    match TrailerSet::parse(name.get_ref()) {
+                        Some(set) if settings.trailers.contains(&set) => self.at(
+                            "history",
+                            "trailers",
+                            name.span().start,
+                            format!("{:?} is named twice", name.get_ref()),
+                        ),
+                        Some(set) => settings.trailers.push(set),
+                        None => self.at(
+                            "history",
+                            "trailers",
+                            name.span().start,
+                            format!(
+                                "{:?} is not a trailer set: change, landing, agents or signoffs",
+                                name.get_ref()
+                            ),
+                        ),
+                    }
+                }
+                settings.trailers.sort();
+            }
+        }
+        settings
     }
 
     fn landing(&mut self, raw: Option<&Spanned<RawLanding>>) -> LandingSettings {
@@ -1867,6 +2036,48 @@ message = "every commit of the change has a signed, bound provenance record"
         );
         let found = errors(&text);
         assert!(found.len() >= 3, "{found:#?}");
+    }
+
+    #[test]
+    fn the_history_table() {
+        let defaults = Policy::load(with("").as_bytes()).unwrap();
+        assert_eq!(*defaults.history(), HistorySettings::default());
+        assert!(!defaults.history().summarized());
+        let bare = Policy::load(with("[history]\n").as_bytes()).unwrap();
+        assert!(bare.history().summarized());
+        assert_eq!(bare.history().trailers, HistorySettings::DEFAULT_TRAILERS);
+        let set = Policy::load(
+            with("[history]\nmessage = \"summary\"\ntrailers = [\"signoffs\", \"change\", \"agents\"]\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            set.history().trailers,
+            [TrailerSet::Change, TrailerSet::Agents, TrailerSet::Signoffs]
+        );
+        let none = Policy::load(with("[history]\ntrailers = []\n").as_bytes()).unwrap();
+        assert!(none.history().summarized());
+        assert_eq!(none.history().trailers, [] as [TrailerSet; 0]);
+        let keep = Policy::load(with("[history]\nmessage = \"keep\"\n").as_bytes()).unwrap();
+        assert_eq!(keep.history().message, Message::Keep);
+        assert_eq!(keep.history().trailers, [] as [TrailerSet; 0]);
+        one(
+            &with("[history]\nmessage = \"squash\"\n"),
+            "is not summary or keep",
+        );
+        one(
+            &with("[history]\nmessage = \"keep\"\ntrailers = [\"change\"]\n"),
+            "only with message",
+        );
+        one(
+            &with("[history]\ntrailers = [\"change\", \"change\"]\n"),
+            "named twice",
+        );
+        one(
+            &with("[history]\ntrailers = [\"authors\"]\n"),
+            "is not a trailer set",
+        );
+        one(&with("[history]\nsquash = \"stack\"\n"), "unknown field");
     }
 
     #[test]

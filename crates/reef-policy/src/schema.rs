@@ -44,6 +44,8 @@ struct File {
     conflicts: Option<Conflicts>,
     /// How the landing service batches and checks landings (R3.14).
     landing: Option<LandingTable>,
+    /// How landed changes are written on this branch (R3.16).
+    history: Option<HistoryTable>,
     /// Free rules in CEL.
     #[serde(default)]
     rule: Vec<Rule>,
@@ -172,6 +174,20 @@ struct LandingTable {
     /// Path patterns whose changes land in a batch of their own.
     #[serde(default)]
     alone: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "policy.file.History")]
+struct HistoryTable {
+    /// `summary` (the default in the table): each landed change's own
+    /// description, normalized, with `Reef-*` trailers replaced by the
+    /// projection's; `keep`: as written.
+    message: Option<String>,
+    /// The trailer sets a summary appends: `change`, `landing`, `agents`,
+    /// `signoffs`; default `change` and `landing`.
+    trailers: Option<Vec<String>>,
 }
 
 #[allow(dead_code)]

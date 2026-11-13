@@ -96,6 +96,10 @@ batch_max = 8                              # 1 to 32; default 8
 batch_wait = "0s"                          # "0s" to "10m"; default "0s"
 alone = ["migrations/**"]                  # changes touching these land in a batch of their own
 
+[history]                                  # how landed changes are written on this branch (R3.16)
+message = "summary"                        # summary | keep; "summary" when the table is there, "keep" without it
+trailers = ["change", "landing"]           # change | landing | agents | signoffs; default change, landing
+
 [[rule]]                                   # anything else, in CEL
 name = "provenance"
 when = 'change.files.size() > 0'           # optional: false makes it not apply
@@ -141,6 +145,7 @@ These tables are evaluated by Reef itself, not compiled to CEL, so their results
 - **`[[require]]`**: for each kind, and each of `targets` (or the whole check, no target, when empty), the objects of that kind and target from a named set decide, and **the newest verdict by witness time wins**: the latest `pass` or `fail` among them is the requirement's outcome. `error` objects never count: R3.01 defines `error` as no verdict. So a flaky run that failed and then passed on the same tree is satisfied, and a pass followed by a fail is not. No object is **missing**; a newest `fail` is **failed**, with its id. A per-target object never satisfies a whole-check requirement: how targets add up to a whole check is R3.19's.
 - **`[limits]`**: `max_files` over the touched paths, `max_lines` over lines added plus removed, `max_file_size` over each added or modified file's new side, all after `except`. A binary file, or one too large to count (over 16 MiB), counts no lines. One rule, `limits`, reports every limit passed and the files over the size limit.
 - **`[[forbid]]`**: unsatisfied when a touched path matches, listing up to 20 and the total.
+- **`[history]`** (R3.16): how the landed history projection writes each landed change's description ([landing](landing.md#what-lands-on-the-destination)). `summary` keeps the change's description, normalized, removes `Reef-*` trailers from it (and `Reviewed-by` with `signoffs`), and appends the trailer sets `trailers` names; `keep`, or no table, lands commits as written. `trailers` with `keep` is an error, as is an unknown or repeated set. **`builtin:description`** applies under `summary`: a change with no description is `unsatisfied`, since its description is its summary in the landed history.
 - **`[[signoff]]`** and **`builtin:owners`**: a sign-off is evidence on the change's tree of one of `kinds` (default `signoff`), `pass`, from a bound key with actor `human` certified for a `person` identity in `groups` or `identities`, with at least `presence`; `count` distinct identities are needed. Self-exclusion does not apply: a person signs off their own agents' work. Sign with `reef evidence add --kind signoff --result pass --actor human` today; R3.09 and R3.31 will sign from the proposal view, and R3.43 adds verified presence. A sign-off is on one exact tree; carrying it across a later edit is R3.15's.
 
 ## Free rules
@@ -215,7 +220,7 @@ An evaluation waits its turn behind at most three others in one daemon. An expre
 | `no_policy` | the policy revision has no `reef-policy.toml` |
 | `invalid_policy` | the file does not load; `diagnostics` has every problem |
 
-Every rule is evaluated and reported, so a blocked change sees every reason at once: the built-in rules first (`builtin:input`, the input was within its limits; `builtin:conflicts`, the change's tree has no conflict; `builtin:policy-file`; `builtin:owners`), then the file's in file order. A rule result has its `status` (`satisfied`, `unsatisfied`, `not_applicable`, `error`), a `message`, the touched `paths` it is about (at most 20, and `paths_total`), the `missing` and `failed` evidence (each `{kind, target, attestors, evidence_ids}`), the `signoff` it needs and has, and the `evidence_ids` that satisfied it. **Everything fails closed**: a rule that errors blocks, and nothing means "allow because the policy could not tell". `reef schema policy evaluation` prints the shape.
+Every rule is evaluated and reported, so a blocked change sees every reason at once: the built-in rules first (`builtin:input`, the input was within its limits; `builtin:conflicts`, the change's tree has no conflict; `builtin:description`, a change landing on a summarized branch has a description; `builtin:policy-file`; `builtin:owners`), then the file's in file order. A rule result has its `status` (`satisfied`, `unsatisfied`, `not_applicable`, `error`), a `message`, the touched `paths` it is about (at most 20, and `paths_total`), the `missing` and `failed` evidence (each `{kind, target, attestors, evidence_ids}`), the `signoff` it needs and has, and the `evidence_ids` that satisfied it. **Everything fails closed**: a rule that errors blocks, and nothing means "allow because the policy could not tell". `reef schema policy evaluation` prints the shape.
 
 **Conflict tiers.** `[conflicts]` and `[[conflicts.rule]]` are not part of a change's evaluation. For a conflict, the first `[[conflicts.rule]]` whose `paths` match one of the conflict's paths (or that names none) and whose `when` holds gives the tier and attempt cap; else `[conflicts]` does (`approve` and 3 without the table). A `when` that errors is the error, which R3.28 treats as the strictest tier, `ask`. `reef policy check --input` with `{"conflict": {...}}` prints the tier; `reef conflict show -r <rev> --policy-input` prints that input for a real conflict, its sides' identity and agent from their [provenance](conflicts.md#who-wrote-each-side).
 
@@ -403,6 +408,24 @@ message = "rebase onto the destination and run the checks again"
 [[rule]]
 name = "queued-changes"
 expr = 'change.state == "queued" || change.state == "proposed"'
+```
+
+A summarized landed history whose every change carries a Developer Certificate of Origin sign-off, as `git commit -s` writes it (`reef describe --signoff` adds one for the daemon's `[identity]`). The projection never adds one itself: only the person signing certifies the DCO.
+
+```toml policy
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[history]
+message = "summary"
+trailers = ["change", "landing"]
+
+[[rule]]
+name = "dco"
+expr = 'change.description.matches("(?m)^Signed-off-by: .+ <.+>$")'
+message = "sign off the change: reef describe --signoff"
 ```
 
 ## Upgrading

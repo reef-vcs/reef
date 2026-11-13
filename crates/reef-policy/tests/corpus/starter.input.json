@@ -1,5 +1,5 @@
 {
-  "change": {"id": "s1", "commit": "c", "tree": "t", "paths": ["README.md"],
+  "change": {"id": "s1", "commit": "c", "tree": "t", "description": "Fix the README\n", "paths": ["README.md"],
              "files": [{"path": "README.md", "status": "modified", "lines_added": 1, "lines_removed": 1, "size": 10}],
              "lines_added": 1, "lines_removed": 1},
   "evidence": [

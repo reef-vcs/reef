@@ -26,7 +26,9 @@ use jj_lib::ref_name::RefName;
 use jj_lib::repo::{CheckOutCommitError, MutableRepo};
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::revset::RevsetExpression;
-use jj_lib::rewrite::{RebaseOptions, RewriteRefsOptions, merge_commit_trees, rebase_commit};
+use jj_lib::rewrite::{
+    CommitRewriter, RebaseOptions, RewriteRefsOptions, merge_commit_trees, rebase_commit,
+};
 use jj_lib::transaction::TransactionCommitError;
 
 use super::oplog::OpMeta;
@@ -73,6 +75,9 @@ pub struct Preview {
     /// How many there are (a lower bound when a side passed
     /// [`MAX_COMPARED_PATHS`]).
     pub overlap_total: usize,
+    /// Whether the rebase leaves the change with nothing to land: the
+    /// destination already has its edits (R3.16).
+    pub empty: bool,
 }
 
 impl Preview {
@@ -146,6 +151,12 @@ pub enum LandError {
     /// The rebase onto the destination conflicts (at write time).
     #[error("rebasing onto the destination conflicts")]
     RebaseConflicts,
+    /// The change would land with nothing in it: the destination, or an
+    /// earlier change of the chain, already has its edits (R3.16).
+    #[error(
+        "change {0} would land empty: the destination, or a change landing before it, already has its edits"
+    )]
+    Empty(ChangeIdHex),
     /// A landed tree is not the one the batch planned and tested
     /// (R3.14): nothing was written.
     #[error("change {change} would land as tree {actual}, not the planned {planned}")]
@@ -187,7 +198,8 @@ impl Classify for LandError {
             | LandError::UnlandedParents { .. }
             | LandError::Conflicted(_)
             | LandError::AlreadyOnDestination(_)
-            | LandError::RebaseConflicts => ErrorKind::Conflict,
+            | LandError::RebaseConflicts
+            | LandError::Empty(_) => ErrorKind::Conflict,
             LandError::Resolve(_) | LandError::PlanMismatch { .. } | LandError::NoTree(_) => {
                 ErrorKind::Internal
             }
@@ -321,6 +333,7 @@ pub async fn preview_commit(
             conflicts_total: 0,
             overlap: Vec::new(),
             overlap_total: 0,
+            empty: false,
         });
     }
     preview_onto(repo, &commit, destination.clone()).await
@@ -345,6 +358,8 @@ async fn preview_onto(
             }
         }
     }
+    let head = repo.store().get_commit_async(&destination.to_id()).await?;
+    let empty = rebased && !landed.has_conflict() && landed.tree_ids() == head.tree_ids();
     let (overlap, overlap_total) = if rebased {
         let parents: Vec<Commit> = {
             let mut parents = Vec::new();
@@ -354,7 +369,6 @@ async fn preview_onto(
             parents
         };
         let base = merge_commit_trees(repo.as_ref(), &parents).await?;
-        let head = repo.store().get_commit_async(&destination.to_id()).await?;
         let (ours, _) = changed(&base, &commit.tree()).await;
         let (theirs, _) = changed(&base, &head.tree()).await;
         let both: Vec<String> = ours.intersection(&theirs).cloned().collect();
@@ -371,6 +385,7 @@ async fn preview_onto(
         conflicts_total,
         overlap,
         overlap_total,
+        empty,
     })
 }
 
@@ -378,8 +393,12 @@ async fn preview_onto(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainMember {
     /// Whether it is in the chain: false when rebasing it onto the earlier
-    /// members conflicts, though it merges onto the destination alone.
+    /// members conflicts, though it merges onto the destination alone, or
+    /// when it is [`ChainMember::empty`].
     pub included: bool,
+    /// Whether the chain leaves it with nothing to land: the destination
+    /// or an earlier member already has its edits (R3.16).
+    pub empty: bool,
     /// Whether it is rebased; false only for a first member whose only
     /// parent is the destination's head.
     pub rebased: bool,
@@ -433,10 +452,24 @@ pub async fn preview_chain(
             let (conflicts, conflicts_total) = conflicted_paths(&landed).await;
             members.push(ChainMember {
                 included: false,
+                empty: false,
                 rebased,
                 tree: None,
                 conflicts,
                 conflicts_total,
+                overlap: Vec::new(),
+                overlap_total: 0,
+            });
+            continue;
+        }
+        if rebased && landed.tree_ids() == tip.tree_ids() {
+            members.push(ChainMember {
+                included: false,
+                empty: true,
+                rebased,
+                tree: None,
+                conflicts: Vec::new(),
+                conflicts_total: 0,
                 overlap: Vec::new(),
                 overlap_total: 0,
             });
@@ -449,6 +482,7 @@ pub async fn preview_chain(
         };
         members.push(ChainMember {
             included: true,
+            empty: false,
             rebased,
             tree: landed.tree_ids().as_resolved().map(ObjectId::hex),
             conflicts: Vec::new(),
@@ -516,6 +550,33 @@ pub struct PlannedMember {
     pub target: LandTarget,
     /// The tree it must land as, when a batch planned and tested one.
     pub tree: Option<String>,
+    /// How the landed history projection summarizes its description
+    /// (R3.16); `None` keeps the description as written.
+    pub summary: Option<Summary>,
+}
+
+/// What [`super::projection::summarize`] is given for one landed change
+/// (R3.16): the trailer keys to remove besides `Reef-*`, and the trailers
+/// to append, in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Keys removed from the change's trailer block besides `Reef-*`.
+    pub strip: Vec<String>,
+    /// `(key, value)` pairs appended.
+    pub trailers: Vec<(String, String)>,
+}
+
+impl Summary {
+    /// `description` summarized.
+    pub fn apply(&self, description: &str) -> String {
+        let strip: Vec<&str> = self.strip.iter().map(String::as_str).collect();
+        let trailers: Vec<(&str, String)> = self
+            .trailers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+        super::projection::summarize(description, &strip, &trailers)
+    }
 }
 
 /// What [`Repo::land_chain`] lands: changes in order, each rebased onto
@@ -542,6 +603,8 @@ pub struct LandedMember {
     pub tree: Option<String>,
     /// Whether it was rebased.
     pub rebased: bool,
+    /// Whether its description was rewritten (R3.16).
+    pub summarized: bool,
 }
 
 /// What [`Repo::land_chain`] wrote.
@@ -659,6 +722,7 @@ impl Repo {
             members: vec![PlannedMember {
                 target: target.clone(),
                 tree: None,
+                summary: None,
             }],
             trials: Vec::new(),
         };
@@ -678,9 +742,11 @@ impl Repo {
     }
 
     /// Lands `plan` in one operation recorded with `meta`, which this
-    /// [`Repo`] adopts (R3.13, R3.14): each change rebased onto the
+    /// [`Repo`] adopts (R3.13, R3.14, R3.16): each change rebased onto the
     /// previous (the first onto the destination's head; none for a
-    /// fast-forward), refused unless each lands as its planned tree, every
+    /// fast-forward) and its description summarized when the plan says so, in
+    /// one new commit with the same change id, refused when it would land
+    /// empty and unless each lands as its planned tree, every
     /// jj workspace on a landed commit given a new empty working-copy commit
     /// on it, the plan's trial commits abandoned, and the bookmark set to
     /// the last landed commit. Each of `meta.transitions` with no commit
@@ -701,19 +767,15 @@ impl Repo {
             });
         }
         let mut tx = repo.start_transaction();
-        let mut tip = plan.destination.to_id();
-        let mut pairs: Vec<(Commit, Commit, bool)> = Vec::with_capacity(plan.members.len());
+        let mut tip = repo
+            .store()
+            .get_commit_async(&plan.destination.to_id())
+            .await?;
+        let mut pairs: Vec<(Commit, Commit, bool, bool)> = Vec::with_capacity(plan.members.len());
         for member in &plan.members {
             let commit = checked_commit(&repo, &member.target, &plan.destination).await?;
-            let rebased = commit.parent_ids() != [tip.clone()];
-            let landed = if rebased {
-                rebase_commit(tx.repo_mut(), commit.clone(), vec![tip.clone()]).await?
-            } else {
-                commit.clone()
-            };
-            if landed.has_conflict() {
-                return Err(LandError::RebaseConflicts);
-            }
+            let (landed, rebased, summarized) =
+                project(tx.repo_mut(), &commit, &tip, member.summary.as_ref()).await?;
             let tree = landed.tree_ids().as_resolved().map(ObjectId::hex);
             if let Some(planned) = &member.tree
                 && tree.as_ref() != Some(planned)
@@ -724,18 +786,22 @@ impl Repo {
                     actual: tree.unwrap_or_default(),
                 });
             }
-            tip = landed.id().clone();
-            pairs.push((commit, landed, rebased));
+            tip = landed.clone();
+            pairs.push((commit, landed, rebased, summarized));
         }
-        let Some((_, last, _)) = pairs.last().cloned() else {
+        let Some((_, last, _, _)) = pairs.last().cloned() else {
             return Err(LandError::Resolve("nothing to land".to_owned()));
         };
         let abandoned = abandon_visible(&repo, tx.repo_mut(), &plan.trials).await?;
-        if !abandoned && pairs.iter().any(|(_, _, rebased)| *rebased) {
+        if !abandoned
+            && pairs
+                .iter()
+                .any(|(commit, landed, _, _)| commit.id() != landed.id())
+        {
             tx.repo_mut().rebase_descendants().await?;
         }
         let mut new_working_copies = Vec::new();
-        for (commit, landed, _) in &pairs {
+        for (commit, landed, _, _) in &pairs {
             let on_landed: Vec<_> = tx
                 .repo()
                 .view()
@@ -764,7 +830,7 @@ impl Repo {
                 .zip(&pairs)
                 .find(|(member, _)| member.target.change.as_str() == transition.change)
                 .or_else(|| (plan.members.len() == 1).then(|| (&plan.members[0], &pairs[0])));
-            if let Some((_, (_, landed, _))) = landed {
+            if let Some((_, (_, landed, _, _))) = landed {
                 CommitIdHex::of(landed.id())
                     .as_str()
                     .clone_into(&mut transition.commit);
@@ -775,15 +841,62 @@ impl Repo {
             op_id: OperationIdHex::of(self.repo.op_id()),
             members: pairs
                 .iter()
-                .map(|(_, landed, rebased)| LandedMember {
+                .map(|(_, landed, rebased, summarized)| LandedMember {
                     commit: CommitIdHex::of(landed.id()),
                     tree: landed.tree_ids().as_resolved().map(ObjectId::hex),
                     rebased: *rebased,
+                    summarized: *summarized,
                 })
                 .collect(),
             new_working_copies,
         })
     }
+}
+
+/// `commit` as it lands on `tip` (R3.13, R3.16): rebased onto it unless
+/// `tip` is its only parent, with its description summarized when
+/// `summary` says so, in one rewrite (none for an unchanged
+/// fast-forward); whether it was rebased, and whether its description
+/// changed. Refused when the rebase conflicts or leaves it empty.
+async fn project(
+    mut_repo: &mut MutableRepo,
+    commit: &Commit,
+    tip: &Commit,
+    summary: Option<&Summary>,
+) -> Result<(Commit, bool, bool), LandError> {
+    let rebased = commit.parent_ids() != [tip.id().clone()];
+    let description = summary.map(|summary| summary.apply(commit.description()));
+    let summarized = description
+        .as_ref()
+        .is_some_and(|description| description != commit.description());
+    let landed = match (rebased, description) {
+        (false, _) if !summarized => commit.clone(),
+        (false, description) => {
+            mut_repo
+                .rewrite_commit(commit)
+                .set_description(description.unwrap_or_default())
+                .write()
+                .await?
+        }
+        (true, description) => {
+            let builder = CommitRewriter::new(mut_repo, commit.clone(), vec![tip.id().clone()])
+                .rebase()
+                .await?;
+            match description {
+                Some(description) if summarized => {
+                    builder.set_description(description).write().await?
+                }
+                _ => builder.write().await?,
+            }
+        }
+    };
+    if landed.has_conflict() {
+        return Err(LandError::RebaseConflicts);
+    }
+    if rebased && landed.tree_ids() == tip.tree_ids() {
+        return Err(LandError::Empty(ChangeIdHex::of(commit.change_id())));
+    }
+    Ok((landed, rebased, summarized))
 }
 
 /// Records each of `trials` that is still its change's visible commit as

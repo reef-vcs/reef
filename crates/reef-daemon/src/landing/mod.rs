@@ -19,6 +19,7 @@
 //! widen it; this ticket lands one change per landing.
 
 mod batch;
+mod history;
 pub mod messages;
 mod worker;
 
@@ -139,6 +140,9 @@ pub enum Reason {
     Checks,
     /// No verdict could be had on the batch's tested tree (R3.14).
     Unavailable,
+    /// The change would land with nothing in it: the destination, or an
+    /// earlier change of its batch, already has its edits (R3.16).
+    Empty,
 }
 
 impl Reason {
@@ -154,6 +158,7 @@ impl Reason {
             Reason::Failed => "failed",
             Reason::Checks => "checks",
             Reason::Unavailable => "unavailable",
+            Reason::Empty => "empty",
         }
     }
 
@@ -169,6 +174,7 @@ impl Reason {
             Reason::Failed,
             Reason::Checks,
             Reason::Unavailable,
+            Reason::Empty,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == text)
@@ -591,6 +597,16 @@ pub(crate) async fn judge_with(
             problem: None,
         });
     }
+    if preview.empty {
+        return Ok(Verdict::Block {
+            reason: Reason::Empty,
+            message: empty_message(&target.bookmark),
+            destination: Some(preview.destination.as_str().to_owned()),
+            preview: Some(preview),
+            judged: None,
+            problem: None,
+        });
+    }
     let Some(mut change) = read.change else {
         return Err(LandingError::Input("the change was not read".to_owned()));
     };
@@ -804,8 +820,14 @@ fn refusal(error: LandError) -> Result<Verdict, LandingError> {
             block(Reason::Conflicted, error.to_string())
         }
         error @ LandError::DestinationMoved { .. } => block(Reason::Busy, error.to_string()),
+        error @ LandError::Empty(_) => block(Reason::Empty, error.to_string()),
         error => Err(LandingError::Input(ErrorChain(&error).to_string())),
     }
+}
+
+/// Why a change that would land empty is returned (R3.16).
+pub(crate) fn empty_message(bookmark: &str) -> String {
+    format!("its changes are already on {bookmark}: there is nothing left to land")
 }
 
 /// The ids of the evidence each satisfied rule of `evaluation` used.
@@ -859,6 +881,7 @@ pub(crate) fn change_row(
         tested_commit: None,
         tested_evaluation: None,
         batch_position: None,
+        summarized: false,
     }
 }
 
@@ -938,6 +961,7 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         created_at: Timestamp::now(),
         finished_at: None,
         batch_id: None,
+        history: None,
     }
 }
 

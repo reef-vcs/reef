@@ -93,8 +93,8 @@ enum PolicyDecision {
 enum PolicyRuleKind {
   // Not set: never a kind the daemon returns.
   POLICY_RULE_KIND_UNSPECIFIED = 0;
-  // `builtin:input`, `builtin:conflicts`, `builtin:policy-file` or
-  // `builtin:owners`.
+  // `builtin:input`, `builtin:conflicts`, `builtin:description` (R3.16),
+  // `builtin:policy-file` or `builtin:owners`.
   POLICY_RULE_KIND_BUILTIN = 1;
   // A `[[require]]` entry.
   POLICY_RULE_KIND_REQUIRE = 2;

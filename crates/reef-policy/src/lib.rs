@@ -41,16 +41,20 @@ pub use conflict::ConflictDecision;
 pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
 };
-pub use format::{Checks, Diagnostic, LandingSettings, Policy, Tier, VERSION};
+pub use format::{
+    Checks, Diagnostic, HistorySettings, LandingSettings, Message, Policy, Tier, TrailerSet,
+    VERSION,
+};
 pub use input::{Batch, Case, ConflictInput, Input};
 
 /// Where a tree's policy file is: at its root.
 pub const POLICY_PATH: &str = "reef-policy.toml";
 
 /// The built-in rules, in the order every evaluation reports them.
-pub const BUILTIN_RULES: [&str; 4] = [
+pub const BUILTIN_RULES: [&str; 5] = [
     "builtin:input",
     "builtin:conflicts",
+    "builtin:description",
     "builtin:policy-file",
     "builtin:owners",
 ];
@@ -167,6 +171,14 @@ checks = "batch"
 # batch_max = 8
 # batch_wait = "0s"
 # alone = ["migrations/**"]
+
+# How landed changes are written on this branch (docs/landing.md). "summary"
+# keeps each change's description, removes Reef-* trailers from it, and adds
+# the trailers below; "keep" lands each commit as written. A summarized
+# change needs a description (`reef describe -m`).
+[history]
+message = "summary"
+trailers = ["change", "landing"]       # change | landing | agents | signoffs
 "#;
 
 #[cfg(test)]
@@ -181,11 +193,17 @@ mod tests {
             [
                 "builtin:input",
                 "builtin:conflicts",
+                "builtin:description",
                 "builtin:policy-file",
                 "builtin:owners",
                 "tests",
                 "keys"
             ]
+        );
+        assert!(policy.history().summarized());
+        assert_eq!(
+            policy.history().trailers,
+            [TrailerSet::Change, TrailerSet::Landing]
         );
     }
 

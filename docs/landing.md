@@ -1,6 +1,6 @@
 # Landing
 
-The landing service puts a proposed change onto its destination, a local bookmark (`main` by default), when the repository's [policy](policy.md) at that bookmark allows it ([ADR 0064](adr/0064-landing-service-local.md)). Nothing lands without a policy: a destination with no `reef-policy.toml`, or one that does not load, lands nothing. Queued changes land in batches, and the required checks run again on the tree they land as ([ADR 0067](adr/0067-batching-and-bisect.md)).
+The landing service puts a proposed change onto its destination, a local bookmark (`main` by default), when the repository's [policy](policy.md) at that bookmark allows it ([ADR 0064](adr/0064-landing-service-local.md)). Nothing lands without a policy: a destination with no `reef-policy.toml`, or one that does not load, lands nothing. Queued changes land in batches, and the required checks run again on the tree they land as ([ADR 0067](adr/0067-batching-and-bisect.md)). What lands is the landed history projection: one commit per change, written as the destination's `[history]` table says ([below](#what-lands-on-the-destination), [ADR 0075](adr/0075-landed-history-projection.md)).
 
 ```
 reef propose @- -m 'ready'                 # draft -> proposed
@@ -19,7 +19,7 @@ reef landing batch [ID|REV]                # one batch: its members and the tree
 1. **The gate.** The change must be proposed, at the commit its proposal recorded (`reef propose` again after an edit). Its destination must be a local bookmark that exists and is not conflicted. The gate previews the landing at the bookmark's head and evaluates the policy there over the recorded commit. Anything but `allow` is a landing with outcome `blocked`; the change stays proposed. A retry with nothing new counts on the same record (`attempts`).
 2. **The queue.** A change the gate allows is queued (the `queued` state, recorded by the daemon), and the repository's landing worker lands queued changes one at a time, oldest first. At most 1,000 changes are queued per repository.
 3. **The batch.** The worker takes queued changes for one destination together (below), judges each again at the bookmark's head (the destination may have moved, and its policy with it), and rebases them one on another onto it. Under `checks = "batch"`, the required checks must also pass on the tree the batch lands as: the executor is asked for whatever evidence that tree lacks.
-4. **The landing.** In one operation: rebases the changes onto the head (none for a change already on it), gives every workspace sitting on a landed change a new empty change on top, moves the bookmark to the last landed commit, and records each change `landed`. If something stops a change, it returns to `proposed` with a reason.
+4. **The landing.** In one operation: rebases the changes onto the head (none for a change already on it), writes each one's description as the destination's `[history]` table says (below), gives every workspace sitting on a landed change a new empty change on top, moves the bookmark to the last landed commit, and records each change `landed`. If something stops a change, it returns to `proposed` with a reason.
 
 The landing judges the commit the proposal recorded, which is where the evidence and sign-offs are: evidence binds to a tree ([evidence](evidence.md)).
 
@@ -89,6 +89,42 @@ Nothing is locked while checks run. Every few seconds, and whenever a job change
 
 A change whose parents have not landed is refused (`unlanded_parents`): land the parent first. Stacks land together with R3.10.
 
+## What lands on the destination
+
+The destination is the published history: what `jj log` and git show, what R3.17 will push and R4.16 export. The working history is the operation log, which keeps every snapshot of every change. The landed history projection decides what each landed change looks like on the destination ([ADR 0075](adr/0075-landed-history-projection.md)):
+
+- **One commit per change**, with its change id and the tree that was judged and tested. A change already is the squash of its working history: every snapshot rewrote the same change, and the change lands as its last commit. A batch lands one commit per change, in chain order. Squashing a stack into one commit comes with stacks (R3.10).
+- **The description, by policy.** The destination's `reef-policy.toml` says how it is written:
+
+```toml
+[history]
+message = "summary"                # summary | keep; "summary" when the table is there
+trailers = ["change", "landing"]   # change | landing | agents | signoffs
+```
+
+With no `[history]` table (or `message = "keep"`), a change lands as written: a fast-forward lands the very commit that was proposed, and a rebase only rebases. Under `message = "summary"`:
+
+1. The change's own description is the summary; Reef writes no prose. It is normalized: `\r\n` becomes `\n`, control characters other than newline and tab go, trailing whitespace and leading and trailing blank lines go.
+2. Trailers the projection owns are removed from the description's last paragraph (after its title), as git reads trailers: every `Reef-*` key, and `Reviewed-by` when `signoffs` is on. Other trailers, `Signed-off-by` and `Co-Authored-By` among them, stay. Invisible formatting characters (bidirectional overrides, zero-width characters) go with the control characters.
+3. The trailers `trailers` names are appended to that block, in this order:
+
+| Set | Writes |
+| --- | --- |
+| `change` | `Reef-Change: <change id>` (jj's `change-id` header carries it too, where git hosts do not show it) |
+| `landing` | `Reef-Landing: lnd_…`, and `Reef-Batch: bat_…` when the batch landed more than one change |
+| `agents` | `Reef-Agent: <name>` for each agent of the change's provenance records, at most 5 |
+| `signoffs` | `Reviewed-by: <name> <<email>>` for each person whose sign-off the landing's evaluation counted, at most 10 |
+
+A summarized change is a new commit even for a fast-forward (same change, tree and author; the committer is the daemon at landing), and changes on top of it are rebased onto it in the same operation, their trees unchanged. A proposal on top of it reads `amended` and is proposed again.
+
+**A summarized branch needs descriptions.** The built-in rule `builtin:description` blocks a change with no description at the gate (`reef describe <id> -m "<summary>"`). The default trailers are ids only, because the destination is what leaves the machine; `agents` and `signoffs` put names and emails in it. A trailer is a reference into Reef's records, not proof: evidence, sign-offs and provenance stay local.
+
+**Sign-offs (DCO).** The projection never adds `Signed-off-by`: a sign-off certifies the [Developer Certificate of Origin](https://developercertificate.org/) in a person's name, so that person adds it (`reef describe --signoff`). A repository that requires one says so in a rule ([policy recipes](policy.md#recipes)).
+
+**Nothing left to land.** A change whose edits the destination already has would land as an empty commit; it returns to `proposed` with reason `empty` instead, at the gate or from its batch. One whose edits an earlier change of its batch makes stays queued for the next batch, which returns it `empty` once those edits have landed. Withdraw it, or abandon it.
+
+**The working history stays reachable** through the operation log: the land operation records each queued commit as the predecessor of the commit that replaced it, so `reef show <commit> --at-operation <the operation before the land>` and `reef diff --from <queued commit> --to <landed commit>` read the original while GC keeps the operation (`gc.undo_window`, 7 days by default). After that the landing record keeps the queued and landed commits and trees, whether the change was summarized and the `[history]` it landed under; the change keeps its change id, and its provenance and pinned evidence are kept for good.
+
 ## Outcomes and reasons
 
 | Outcome | Means |
@@ -110,6 +146,7 @@ A change whose parents have not landed is refused (`unlanded_parents`): land the
 | `failed` | An internal error, in `message`. |
 | `checks` | A required check failed on the batch's tree with this change and passed without it: fix it, propose again, land again. `reef landing batch` shows the trees and the failed checks. |
 | `unavailable` | No executor gave a verdict on the batch's tree: land again, run an executor, or set `[landing] checks = "proposal"` (above). |
+| `empty` | Its edits are already on the destination: withdraw the proposal (`reef proposal withdraw`), or abandon the change. |
 
 `reef land` exits 0 when the change landed (or was queued, with `--no-wait`), 5 when it was blocked or dequeued (reason `LANDING_BLOCKED` or `LANDING_DEQUEUED`, with what to do in `hint`), and 6 when it is still queued as the wait ends (`LANDING_PENDING`).
 
@@ -129,7 +166,7 @@ The policy evaluation is the structured refusal. For every evidence pair a `[[re
 
 ## What a landing keeps
 
-Every attempt is a record: `reef landing show` prints it, with the evaluation in full (and the evaluation on the batch's tested tree), the policy commit, blob and SHA-256, the operations, the batch, and who asked. For a landed change, the evidence its satisfied rules used, on its own tree and on the tested tree, is kept until the repository is forgotten, whatever `[evidence] retention` says, and linked to the change; the policy text is kept (`reef landing show --policy`); and the change's provenance records are kept whole. Artifacts that evidence names keep their own retention (`[artifacts] retention`), and read as collected once it passes.
+Every attempt is a record: `reef landing show` prints it, with the evaluation in full (and the evaluation on the batch's tested tree), the policy commit, blob and SHA-256, the operations, the batch, the `[history]` it landed under and whether each change was summarized, and who asked. For a landed change, the evidence its satisfied rules used, on its own tree and on the tested tree, is kept until the repository is forgotten, whatever `[evidence] retention` says, and linked to the change; the policy text is kept (`reef landing show --policy`); and the change's provenance records are kept whole. Artifacts that evidence names keep their own retention (`[artifacts] retention`), and read as collected once it passes.
 
 ## Workspaces on the landed commit
 

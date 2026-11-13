@@ -42,6 +42,18 @@
       "kind": "builtin",
       "message": "",
       "missing": [],
+      "name": "builtin:description",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
       "name": "builtin:policy-file",
       "paths": [],
       "paths_total": 0,
