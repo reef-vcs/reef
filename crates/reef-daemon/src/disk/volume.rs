@@ -69,8 +69,8 @@ pub fn auto_budget(total: u64) -> u64 {
 }
 
 /// macOS: free space plus what the system would purge for an important
-/// write, for the volume holding `path`; `None` elsewhere or if it cannot
-/// be read.
+/// write, for the volume holding `path`; `None` elsewhere, if it cannot be
+/// read, or when it reads 0 (a process without a login session).
 #[cfg(target_os = "macos")]
 pub fn purgeable_free(path: &Path) -> Option<u64> {
     cf::important_usage_capacity(path)
@@ -148,7 +148,9 @@ mod cf {
                 (&raw mut value).cast(),
             );
             CFRelease(number);
-            if read {
+            // A process with no login session (a LaunchDaemon, such as a CI
+            // runner's) reads 0: unknown, not a full disk.
+            if read && value > 0 {
                 u64::try_from(value).ok()
             } else {
                 None
@@ -188,6 +190,7 @@ mod tests {
     fn purgeable_is_read() {
         // Usually above `statvfs`'s free space, but not always (a CI
         // runner's was below it): the floor takes the larger of the two.
+        // Without a login session it is unknown (`None`), never 0.
         let temp = tempfile::tempdir().unwrap();
         let Some(purgeable) = purgeable_free(temp.path()) else {
             return;
