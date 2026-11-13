@@ -1016,3 +1016,62 @@ fn client_and_daemon_paths_agree() {
         }
     }
 }
+
+/// `[build]` (#271): defaults, each key, bounds, and `config show`.
+#[test]
+fn build_section() {
+    let defaults = load_file("").unwrap();
+    assert_eq!(defaults.file.build, BuildSection::default());
+    assert!(defaults.file.build.limit);
+    assert_eq!(defaults.file.build.jobs, BuildJobs::Auto);
+    assert_eq!(defaults.file.build.nice, 10);
+    assert!(
+        defaults
+            .to_effective_toml()
+            .contains("jobs = \"auto\"  # source: default")
+    );
+
+    let set = load_file(
+        "[build]\nlimit = false\njobs = 6\nnice = 0\nmake_jobserver = true\ncargo_config = false\n",
+    )
+    .unwrap();
+    assert_eq!(
+        set.file.build,
+        BuildSection {
+            limit: false,
+            jobs: BuildJobs::Count(6),
+            nice: 0,
+            make_jobserver: true,
+            cargo_config: false,
+        }
+    );
+    let shown = set.to_effective_toml();
+    assert!(shown.contains("jobs = 6  # source: file"), "{shown}");
+    assert!(shown.contains("limit = false  # source: file"), "{shown}");
+    // What `config show` prints loads back.
+    let reloaded = load_file(&shown).unwrap();
+    assert_eq!(reloaded.file.build, set.file.build);
+
+    let err = load_file("[build]\nnice = 20\n").unwrap_err();
+    let ConfigError::Invalid { key, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(key, "build.nice");
+    for text in [
+        "[build]\njobs = 0\n",
+        "[build]\njobs = 1025\n",
+        "[build]\njobs = \"many\"\n",
+        "[build]\njobs = -1\n",
+    ] {
+        assert!(load_file(text).is_err(), "{text}");
+    }
+    assert_eq!(
+        load_file("[build]\njobs = 1024\n").unwrap().file.build.jobs,
+        BuildJobs::Count(1024)
+    );
+    let err = load_file("[build]\nworkers = 2\n").unwrap_err();
+    let ConfigError::UnknownKey { key, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(key, "build.workers");
+}

@@ -226,6 +226,10 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         )
     },
     OutputRow {
+        note: Some("-o text prints `export NAME='value'` lines, for eval"),
+        ..row(&["ws", "env"], object::<ws::BuildEnv>)
+    },
+    OutputRow {
         note: Some(
             "exits 8 (io), with the reports, when the jj step or the evidence and artifacts step of a repository's GC failed",
         ),

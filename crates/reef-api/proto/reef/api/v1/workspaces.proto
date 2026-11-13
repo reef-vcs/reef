@@ -90,6 +90,96 @@ service WorkspaceService {
   rpc MoveWorkspace(MoveWorkspaceRequest) returns (MoveWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
+  // The environment that puts a command in `workspace` under the machine's
+  // build limit (#271, ADR 0074; docs/build-limit.md): the daemon's
+  // jobserver for cargo, job counts for tools without one, and the
+  // priority. A client sets each variable its command's environment lacks,
+  // merging as `merge` says; `reef ws run`, `reef ws env` and the provider
+  // contract's `env` do. With `[build] limit = false`, `enabled` is false
+  // and `variables` empty. Through the remote listener there is no
+  // jobserver and no variable (`jobserver_skip` REMOTE). Answering changes
+  // nothing; the workspace's files are read, never written.
+  //
+  // Errors: the workspace reasons.
+  rpc GetBuildEnvironment(GetBuildEnvironmentRequest) returns (GetBuildEnvironmentResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Ask for a command's build environment (#271).
+message GetBuildEnvironmentRequest {
+  // The repository; may be empty.
+  string repo = 1;
+  // The workspace the command runs in. Empty: the machine's figures and
+  // the default variables, without the workspace's own checks.
+  string workspace = 2;
+}
+
+// What a command's environment should hold to run under the build limit.
+message GetBuildEnvironmentResponse {
+  // `[build] limit`: false means no variable and no priority change.
+  bool enabled = 1;
+  // The variables, in the order to apply them.
+  repeated BuildVariable variables = 2;
+  // The machine's job count (`[build] jobs`).
+  uint32 jobs = 3;
+  // The count each tool without a jobserver gets: max(2, jobs / builders).
+  uint32 share = 4;
+  // Workspaces whose leases are heartbeating, this one included.
+  uint32 builders = 5;
+  // The niceness to run the command at; 0 for none. A client never lowers
+  // a niceness already higher.
+  uint32 nice = 6;
+  // The jobserver's absolute path; empty when there is none.
+  string jobserver = 7;
+  // Why there is no jobserver; UNSPECIFIED when there is one.
+  JobserverSkip jobserver_skip = 8;
+  // One sentence for a person: which package and make, or which setting,
+  // took the jobserver away; empty otherwise.
+  string note = 9;
+}
+
+// One variable of a build environment.
+message BuildVariable {
+  // The variable's name, such as `CARGO_MAKEFLAGS`.
+  string name = 1;
+  // Its value.
+  string value = 2;
+  // How a client applies it when its environment already has the name.
+  BuildVariableMerge merge = 3;
+}
+
+// How a client applies a build variable its environment already has.
+enum BuildVariableMerge {
+  // Not set; a client treats it as IF_UNSET.
+  BUILD_VARIABLE_MERGE_UNSPECIFIED = 0;
+  // Keep the environment's value.
+  BUILD_VARIABLE_MERGE_IF_UNSET = 1;
+  // `GOFLAGS`: when the environment has the name, append ` -p=<share>` to
+  // its value unless it already has a `-p` flag; otherwise set `value`
+  // (the user's go environment flags and `-p`), unless it is empty.
+  BUILD_VARIABLE_MERGE_GOFLAGS = 2;
+}
+
+// Why a build environment has no jobserver.
+enum JobserverSkip {
+  // There is a jobserver.
+  JOBSERVER_SKIP_UNSPECIFIED = 0;
+  // `[build] limit = false`.
+  JOBSERVER_SKIP_DISABLED = 1;
+  // Asked through the remote listener: the jobserver is on another machine.
+  JOBSERVER_SKIP_REMOTE = 2;
+  // The repository's `reef.toml` says `[build] jobserver = false`.
+  JOBSERVER_SKIP_REPOSITORY = 3;
+  // A dependency hands the jobserver to a `make` older than 4.4, which
+  // cannot read it.
+  JOBSERVER_SKIP_MAKE_TOO_OLD = 4;
+  // `build.jobs` is set in the workspace's or the user's cargo
+  // configuration, a cap a jobserver would silently lift.
+  JOBSERVER_SKIP_CARGO_JOBS_SET = 5;
+  // The daemon could not keep the FIFO; `note` says why.
+  JOBSERVER_SKIP_UNAVAILABLE = 6;
 }
 
 // How a workspace's directory is materialized.

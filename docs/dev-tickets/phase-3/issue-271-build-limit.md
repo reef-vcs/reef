@@ -531,3 +531,15 @@ No departure from `dev-phases.md`: #271's row already describes this ticket, and
 14. **Acceptance.** G5 to G8 (the issue says G6 to G8) for tokio on the standard VM and the Linux runner with `--limit both`, plus the lone ticket within 10% (median of three solo runs); the other stacks reported, not gated. *Recommended*: as stated, because ADR 0073 and `dev-phases.md` say this ticket turns on G5, the gate it most directly addresses. Alternative: the issue's G6 to G8 only.
 15. **Numbers.** API revision 31, ADR 0074, threat rows S-188 to S-190, schema 17 unchanged (nothing is persisted). *Recommended*: as stated.
 16. **Priority.** `nice` 10 for `ws run` commands and store builds, never raising a priority, `[build] nice` to change it. *Recommended*: as stated (J26: no cost alone). Alternatives: no `nice`; `nice` for store builds only.
+
+## Departures in the implementation
+
+- **The FIFO is `~/.reef/.build/jobserver` under the default workspace root**, not `<state>/build/jobserver`: cargo's jobserver client reads the path up to the first space, and the macOS state directory (`~/Library/Application Support/reef`) has one (review finding 1, reproduced). Elsewhere it stays `<state>/build/jobserver`; a path with whitespace gets `UNAVAILABLE` and a note. The FIFO and the cargo file wait for `~/.reef`, which a start never makes (S-185); the first `GetBuildEnvironment` after a create opens it.
+- **The make check is per package**: `gmake` for `cmake` when there is one (CMake's Makefile generator looks for it first), `make` for the others. The probe never runs macOS's command-line-tools stub. The list is `cmake`, `openssl-src`, `autotools`, `tikv-jemalloc-sys`.
+- **The amendment also covers `CARGO_BUILD_JOBS`**, and a cargo file counts only while Reef's file is in place and current (`active_keys`); it is compared against the canonical `~/.reef` too.
+- **A FIFO removed or replaced while the daemon runs is remade** at the next check (`generation` counts the FIFOs this run made); a pool short for 10 minutes while processes hold the FIFO is named in `daemon status`'s note.
+- **`--no-build-limit` is hidden from `--help`** (the 2,176-byte budget) and so from `--help-all`; `reef ws env` is listed in `reef ws --help`.
+- **`GOFLAGS` is always sent** (an empty value when the go environment file has a `-p` or cannot be read), so a `GOFLAGS` in the command's environment still gets `-p`.
+- **`ws run` falls back to `nice` 10 only for `UNIMPLEMENTED`**; any other failure runs the command without the limit.
+- **Workspace files are read per request** (no mtime cache); **`--solo-runs` repeats solo ticket 1 only**; **`--limit both`'s off run skips its `ws gc`** (a pre-existing GC bug corrupted the second run's repository).
+- **`jobs = "auto"` rounds memory to the nearest GiB** before halving it: Linux's `MemTotal` is below the nominal size.

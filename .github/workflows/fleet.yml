@@ -23,6 +23,16 @@ on:
         description: Seconds the five stay idle before release
         default: "300"
         type: string
+      limit:
+        # #271: `both` runs each repository without the build limit, then with it, and G8
+        # compares them; about twice a single run's time.
+        description: The build limit (off, on, both)
+        default: both
+        type: string
+      solo_runs:
+        description: How many times solo ticket 1 runs (the median is the lone-build reference)
+        default: "3"
+        type: string
   schedule:
     - cron: "17 4 * * 1"
 
@@ -56,8 +66,8 @@ jobs:
     needs: plan
     runs-on: ubuntu-24.04
     # Solo tickets, five at once with a review round, idle, release: under two hours per stack on
-    # the runner; the job limit is six.
-    timeout-minutes: 300
+    # the runner, about twice that with `--limit both`; the job limit is six hours.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -107,9 +117,12 @@ jobs:
           REPO: ${{ matrix.repo }}
           SEED: ${{ inputs.seed || 'off' }}
           IDLE: ${{ inputs.idle_secs || '300' }}
+          LIMIT: ${{ inputs.limit || 'both' }}
+          SOLO_RUNS: ${{ inputs.solo_runs || '3' }}
         run: |
           df -h /
           target/release/reef-fleet run --repo "$REPO" --profile linux --seed "$SEED" \
+            --limit "$LIMIT" --solo-runs "$SOLO_RUNS" \
             --idle-secs "$IDLE" --reef-bin-dir target/release --work-root /tmp/rf \
             --out "results/$REPO"
           cat "results/$REPO/summary.md" >>"$GITHUB_STEP_SUMMARY"

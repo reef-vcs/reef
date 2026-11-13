@@ -146,11 +146,60 @@ impl std::fmt::Display for SeedMode {
     }
 }
 
+/// Which build limits a run measures (#271): `both` runs each repository's
+/// scenario without the limit and then with it, against one daemon, so the
+/// report compares them.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitMode {
+    /// Every `ws run` with `--no-build-limit`: the #264 baseline.
+    Off,
+    /// The daemon's build limit, as an agent gets it.
+    #[default]
+    On,
+    /// Off, then on.
+    Both,
+}
+
+impl LimitMode {
+    /// The limits to run, in order.
+    pub fn runs(self) -> &'static [Toggle] {
+        match self {
+            LimitMode::Off => &[Toggle::Off],
+            LimitMode::On => &[Toggle::On],
+            LimitMode::Both => &[Toggle::Off, Toggle::On],
+        }
+    }
+}
+
+impl std::fmt::Display for LimitMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LimitMode::Off => "off",
+            LimitMode::On => "on",
+            LimitMode::Both => "both",
+        })
+    }
+}
+
 /// What a run varied, so reports compare like with like.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Variant {
-    /// The machine-wide build limit (#271). Reef has none yet, so only
-    /// `off` runs.
+    /// The machine-wide build limit (#271): `on` for a `both` run, whose
+    /// repositories each carry their `off` scenario too.
     pub limit: Toggle,
     /// How workspaces start.
     pub seed: SeedMode,

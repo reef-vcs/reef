@@ -2783,3 +2783,66 @@ async fn ws_list_brief_names_the_repository_when_several() {
     assert_eq!(one.as_array().unwrap().len(), 1, "{one}");
     assert!(one[0].get("repo_id").is_none(), "{one}");
 }
+
+/// #271 tests 19 and 20: `reef ws env` prints the build limit's variables
+/// as `export` lines a shell round-trips, and as an object in JSON;
+/// outside a workspace without one named it is `not_found` with a `next`.
+/// `daemon status` has the `build` object and line.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_env_and_build_status() {
+    let (daemon, repo) = with_repo().await;
+    let ws = create(&daemon, &repo).await;
+    let id = ws["id"].as_str().unwrap();
+    let clean = || {
+        let mut command = reef(&daemon);
+        for name in [
+            "CARGO_MAKEFLAGS",
+            "MAKEFLAGS",
+            "MFLAGS",
+            "CARGO_BUILD_JOBS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "GOFLAGS",
+        ] {
+            command.env_remove(name);
+        }
+        command
+    };
+    let value = json(&run(clean(), &["-o", "json", "ws", "env", id]).await);
+    let fifo = daemon.state_dir().join("build").join("jobserver");
+    assert_eq!(value["jobserver"], fifo.display().to_string(), "{value}");
+    assert_eq!(value["nice"], 10);
+    assert_eq!(value["jobserver_skip"], Value::Null);
+    let flags = value["variables"]["CARGO_MAKEFLAGS"].as_str().unwrap();
+    assert!(flags.ends_with("build/jobserver"), "{value}");
+
+    // Text is `export` lines that a shell's eval round-trips.
+    let output = run(clean(), &["-o", "text", "ws", "env", id]).await;
+    let text = stdout(&output);
+    assert!(
+        text.lines().all(|line| line.starts_with("export ")),
+        "{text}"
+    );
+    let round_trip = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{text}\necho \"$CARGO_MAKEFLAGS\""))
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&round_trip).trim_end(), flags);
+
+    // Inside the workspace, no argument needed; outside, not_found.
+    let mut inside = clean();
+    inside.current_dir(ws["path"].as_str().unwrap());
+    let here = json(&run(inside, &["-o", "json", "ws", "env"]).await);
+    assert_eq!(here["variables"], value["variables"]);
+    let mut outside = clean();
+    outside.current_dir(daemon.state_dir());
+    let output = run(outside, &["-o", "json", "ws", "env"]).await;
+    assert!(!output.status.success());
+
+    let status = json(&run(reef(&daemon), &["-o", "json", "daemon", "status"]).await);
+    assert_eq!(status["build"]["enabled"], true, "{status}");
+    assert_eq!(status["build"]["jobserver"], fifo.display().to_string());
+    let output = run(reef(&daemon), &["-o", "text", "daemon", "status"]).await;
+    assert!(stdout(&output).contains("build:"), "{}", stdout(&output));
+}

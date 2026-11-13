@@ -13,6 +13,7 @@
 pub mod artifacts;
 pub mod assign;
 pub mod backend;
+pub mod build;
 pub mod comments;
 pub mod config;
 pub mod daemon;

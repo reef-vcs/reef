@@ -1,6 +1,7 @@
 //! Text forms of the [`reef_client::json`] types, so each command's
 //! `run` stays a call and an [`Out`](super::Out) method.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -337,9 +338,47 @@ impl TextRender for Status {
                 ("active_workspaces", self.active_workspaces.to_string()),
                 ("backends", backends),
                 ("remote", remote_line(self.remote.as_ref())),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                self.build
+                    .as_ref()
+                    .map(|build| ("build", build_line(build))),
+            )
+            .collect::<Vec<_>>(),
         )
     }
+}
+
+/// `daemon status`'s build limit line (#271).
+fn build_line(build: &reef_client::json::BuildStatus) -> String {
+    if !build.enabled {
+        return "off ([build] limit = false)".to_owned();
+    }
+    let mut line = format!(
+        "{} jobs, {} builder{} (share {})",
+        build.jobs,
+        build.builders,
+        if build.builders == 1 { "" } else { "s" },
+        build.share
+    );
+    match &build.jobserver {
+        Some(path) => {
+            let _ = write!(
+                line,
+                "; jobserver {path}, {} of {} tokens free",
+                build.available, build.tokens
+            );
+        }
+        None => line.push_str("; no jobserver"),
+    }
+    if let Some(cargo) = &build.cargo_config {
+        let _ = write!(line, "; cargo config {cargo}");
+    }
+    if let Some(note) = &build.note {
+        let _ = write!(line, " ({note})");
+    }
+    line
 }
 
 /// A byte count in binary units, as `du -h` would: `0 B`, `512 B`,

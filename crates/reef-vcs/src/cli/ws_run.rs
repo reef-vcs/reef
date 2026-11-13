@@ -12,6 +12,12 @@
 //! While the command runs, `ws run` reports it as an `ACTIVITY` presence
 //! entry (R2.11), cleared when it exits, before the release.
 //!
+//! The command runs under the machine-wide build limit (#271, ADR 0074):
+//! the daemon's jobserver for cargo, job counts for tools without one, each
+//! only where the environment lacks it, and `nice` 10. `--no-build-limit`
+//! turns all of it off. If the daemon cannot say (an older one), the command
+//! runs with the niceness alone and one `reef:` note.
+//!
 //! The release (or `--keep`'s snapshot) waits up to `--timeout` or
 //! [`FINISH_DEADLINE`], whichever is longer: a final snapshot of a large
 //! tree can outlast the usual RPC deadline, and the daemon finishes it
@@ -82,6 +88,12 @@ pub(crate) struct Args {
     /// Add KEY=VALUE to the command's environment, as given (repeatable).
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_key_val)]
     env: Vec<(String, String)>,
+    // Hidden from `--help`, which agents read first (#122);
+    // `docs/build-limit.md` names it.
+    /// Run without the machine-wide build limit: no jobserver, no job
+    /// counts, normal priority.
+    #[arg(long, hide = true)]
+    no_build_limit: bool,
     #[command(flatten)]
     provenance: super::provenance::SessionFlags,
     /// The command and its arguments; put `--` before a command that starts
@@ -200,7 +212,8 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCo
             return Err(error);
         }
     };
-    let end = match spawn(ctx, &args, &ws) {
+    let limit = build_limit(ctx, &args, &ws).await;
+    let end = match spawn(ctx, &args, &ws, &limit) {
         Ok(child) => {
             let reporter = report_command(ctx, &ws, &args.command);
             let heartbeats = tokio::spawn(heartbeats(heartbeater));
@@ -385,22 +398,114 @@ fn conflict(message: String) -> CliError {
     }
 }
 
-/// Starts the command in the workspace with the `REEF_*` variables and
-/// `--env`'s.
-fn spawn(ctx: &Ctx, args: &Args, ws: &Workspace) -> io::Result<Child> {
+/// The niceness used when the daemon cannot say: `[build] nice`'s default.
+const DEFAULT_NICE: u32 = 10;
+
+/// What the build limit adds to the command (#271).
+#[derive(Debug, Default)]
+struct BuildLimit {
+    /// The variables its environment lacks.
+    variables: Vec<(String, String)>,
+    /// The niceness to run at; 0 for none.
+    nice: u32,
+}
+
+/// The build limit for `ws`'s command: the daemon's environment, applied
+/// to this process's environment and `--env`'s; the niceness alone, with a
+/// note, when the daemon cannot say.
+async fn build_limit(ctx: &Ctx, args: &Args, ws: &Workspace) -> BuildLimit {
+    if args.no_build_limit {
+        return BuildLimit::default();
+    }
+    match ctx.client.get_build_environment("", &ws.id).await {
+        Ok(response) => {
+            let variables = reef_client::build::assemble(&response, |name| {
+                args.env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into())
+                    .or_else(|| std::env::var_os(name))
+            });
+            BuildLimit {
+                variables,
+                nice: response.nice,
+            }
+        }
+        Err(error) => {
+            // An older daemon has no build limit to ask: the command runs
+            // at the default niceness. Any other failure may hide a `nice
+            // = 0` or `limit = false`, so the command runs as it would
+            // without the limit.
+            let older = error.is_unimplemented();
+            let nice = if older { DEFAULT_NICE } else { 0 };
+            ctx.out.error_line(&format!(
+                "reef: no build limit for this command ({}); it runs {}",
+                ErrorChain(&error),
+                if older {
+                    format!("at nice {DEFAULT_NICE} only")
+                } else {
+                    "without it".to_owned()
+                }
+            ));
+            BuildLimit {
+                variables: Vec::new(),
+                nice,
+            }
+        }
+    }
+}
+
+/// Starts the command in the workspace with the build limit's variables,
+/// the `REEF_*` variables and `--env`'s, which win, at the limit's
+/// niceness.
+fn spawn(ctx: &Ctx, args: &Args, ws: &Workspace, limit: &BuildLimit) -> io::Result<Child> {
     let (program, rest) = args
         .command
         .split_first()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(rest)
         .current_dir(&ws.path)
+        .envs(limit.variables.iter().map(|(key, value)| (key, value)))
         .envs(reef_env(ws, ctx.client.socket(), ctx.agent.as_deref()))
         .envs(args.provenance.env())
         .envs(args.env.iter().map(|(key, value)| (key, value)))
         // A panic in `ws run` must not kill an agent mid-write.
-        .kill_on_drop(false)
-        .spawn()
+        .kill_on_drop(false);
+    if limit.nice > 0 {
+        let nice = libc::c_int::try_from(limit.nice.min(19)).unwrap_or(19);
+        #[allow(
+            unsafe_code,
+            reason = "the closure only calls getpriority(2) and setpriority(2), which are async-signal-safe"
+        )]
+        // SAFETY: between fork and exec the closure makes two syscalls and
+        // allocates nothing.
+        unsafe {
+            command.pre_exec(move || {
+                lower_priority(nice);
+                Ok(())
+            });
+        }
+    }
+    command.spawn()
+}
+
+/// Sets the calling process's niceness to `nice`, never lowering one
+/// already higher (never raising its priority).
+fn lower_priority(nice: libc::c_int) {
+    // SAFETY: plain syscalls on the calling process, with no pointers.
+    #[allow(
+        unsafe_code,
+        reason = "getpriority(2) and setpriority(2) on the calling process"
+    )]
+    unsafe {
+        let current = libc::getpriority(libc::PRIO_PROCESS, 0);
+        if current < nice {
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+        }
+    }
 }
 
 /// The signals `ws run` forwards. tokio merges deliveries of one signal

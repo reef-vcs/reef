@@ -48,7 +48,7 @@ pub(crate) use create::{import_meta, refresh_for_resolve};
 pub use gc::JjStep;
 pub(crate) use gc::measure;
 pub use manager::Manager;
-pub(crate) use manager::ensure_repo_dir;
+pub(crate) use manager::{base_reef_spec, ensure_repo_dir};
 pub use rewrite::{EditTarget, RebaseOutcome, Rewritten, Write, WriteRequest};
 pub use snapshot::{REEFIGNORE, ReadAnswer, ReadSnapshot, ReadSource};
 pub(crate) use stores::StoreTarget;

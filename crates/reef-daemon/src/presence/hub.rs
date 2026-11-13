@@ -435,6 +435,19 @@ impl PresenceHub {
             .collect()
     }
 
+    /// The workspaces with a live lease entry: those whose leases are
+    /// heartbeating (#271's builders).
+    pub fn leased_workspaces(&self) -> Vec<WorkspaceId> {
+        self.lock()
+            .daemon_keys
+            .keys()
+            .filter_map(|key| match key {
+                DaemonKey::Lease(workspace) => Some(*workspace),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The daemon's live entry `key`.
     pub fn daemon_entry(&self, key: DaemonKey) -> Option<v1::Presence> {
         let inner = self.lock();

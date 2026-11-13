@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::disk::gib;
 use super::outcomes;
 use super::repos::Stack;
-use super::sample::{Phase, Sample, percentile};
-use super::{Host, Profile, TicketRun, Variant};
+use super::sample::{BuildSample, Phase, Sample, percentile};
+use super::{Host, Profile, TicketRun, Toggle, Variant};
 
 /// [`Report::schema`] for files this build writes.
 pub const SCHEMA: u32 = 1;
@@ -88,6 +88,16 @@ pub struct RepoReport {
     pub caches: BTreeMap<String, u64>,
     /// Creates `ws run` reported refused.
     pub creates_refused: u32,
+    /// The build limit this scenario ran with (#271); absent before it.
+    #[serde(default)]
+    pub limit: Option<Toggle>,
+    /// The daemon's build limit every 5 s (#271).
+    #[serde(default)]
+    pub build_samples: Vec<BuildSample>,
+    /// With `--limit both`, the same scenario without the limit, run
+    /// first: G8 compares against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off: Option<Box<RepoReport>>,
     /// The figures the gates read.
     pub summary: Summary,
 }
@@ -134,8 +144,15 @@ pub struct Summary {
     pub list_failures: u32,
     /// The canary's sleep lateness p99 during the five tickets, ms.
     pub lateness_p99_ms: Option<f64>,
-    /// Solo ticket 1's wall time, ms.
+    /// Solo ticket 1's wall time, ms: the median of its runs
+    /// (`--solo-runs`).
     pub solo_ms: Option<u64>,
+    /// The fewest jobserver tokens free during the five tickets (#271).
+    #[serde(default)]
+    pub tokens_free_min: Option<u32>,
+    /// The most builders the daemon counted during the five tickets.
+    #[serde(default)]
+    pub builders_max: Option<u32>,
     /// The median five-at-once ticket's round 1, ms.
     pub median_ticket_ms: Option<u64>,
     /// The five tickets' makespan, both rounds, ms.
@@ -309,7 +326,34 @@ pub fn summarize(repo: &RepoReport, cores: u32) -> Summary {
             .lateness_p99_us
             .get("five")
             .map(|us| f64::from(*us) / 1000.0),
-        solo_ms: repo.solo.iter().find(|t| t.ticket == 1).map(|t| t.wall_ms),
+        solo_ms: {
+            let mut walls: Vec<u64> = repo
+                .solo
+                .iter()
+                .filter(|t| t.ticket == 1 && t.passed())
+                .map(|t| t.wall_ms)
+                .collect();
+            if walls.is_empty() {
+                repo.solo.iter().find(|t| t.ticket == 1).map(|t| t.wall_ms)
+            } else {
+                walls.sort_unstable();
+                walls.get(walls.len().saturating_sub(1) / 2).copied()
+            }
+        },
+        tokens_free_min: phase("five").and_then(|five| {
+            repo.build_samples
+                .iter()
+                .filter(|b| b.t_ms >= five.start_ms && b.t_ms <= five.end_ms)
+                .map(|b| b.available)
+                .min()
+        }),
+        builders_max: phase("five").and_then(|five| {
+            repo.build_samples
+                .iter()
+                .filter(|b| b.t_ms >= five.start_ms && b.t_ms <= five.end_ms)
+                .map(|b| b.builders)
+                .max()
+        }),
         median_ticket_ms: round1.get(round1.len().saturating_sub(1) / 2).copied(),
         makespan_ms: phase("five").map(|p| p.end_ms.saturating_sub(p.start_ms)),
         enospc_builds: u32::try_from(
@@ -522,19 +566,45 @@ pub fn gates(repo: &RepoReport, profile: Profile, os: &str) -> Vec<Gate> {
         .median_ticket_ms
         .zip(s.solo_ms.filter(|ms| *ms > 0))
         .map(|(median, solo)| median as f64 / solo as f64);
+    let halves = limit_halves(repo);
+    let value = opt(slowdown, |r| {
+        let mut value = format!(
+            "{r:.2}× (median {:.0} s, solo {:.0} s, makespan {:.0} s)",
+            s.median_ticket_ms.unwrap_or(0) as f64 / 1000.0,
+            s.solo_ms.unwrap_or(0) as f64 / 1000.0,
+            s.makespan_ms.unwrap_or(0) as f64 / 1000.0
+        );
+        match halves {
+            Some(LimitHalves {
+                makespan: Some(makespan),
+                solo: Some(solo),
+            }) => {
+                let _ = write!(
+                    value,
+                    "; limit on/off: makespan {makespan:.2}×, solo {solo:.2}×"
+                );
+            }
+            Some(_) => value.push_str("; limit on/off: not measured"),
+            None => value.push_str("; limit on/off: n/a (needs --limit both)"),
+        }
+        value
+    });
+    let verdict = match halves {
+        None => slowdown.map(|r| r <= 5.0),
+        Some(LimitHalves {
+            makespan: Some(makespan),
+            solo: Some(solo),
+        }) => slowdown.map(|r| r <= 5.0 && makespan <= G8_LIMIT && solo <= G8_LIMIT),
+        Some(_) => None,
+    };
     out.push(Gate {
         id: "G8",
         name: "throughput",
-        threshold: "median ticket ≤ 5× solo (the limit's 1.1× makespan needs #271)".to_owned(),
-        value: opt(slowdown, |r| {
-            format!(
-                "{r:.2}× (median {:.0} s, solo {:.0} s, makespan {:.0} s)",
-                s.median_ticket_ms.unwrap_or(0) as f64 / 1000.0,
-                s.solo_ms.unwrap_or(0) as f64 / 1000.0,
-                s.makespan_ms.unwrap_or(0) as f64 / 1000.0
-            )
-        }),
-        verdict: met(slowdown.map(|r| r <= 5.0)),
+        threshold: format!(
+            "median ticket ≤ 5× solo; with --limit both, the limit's five-ticket makespan and solo ticket each ≤ {G8_LIMIT}× without it"
+        ),
+        value,
+        verdict: met(verdict),
     });
     out.push(Gate {
         id: "G9",
@@ -738,6 +808,29 @@ pub fn render(report: &Report) -> String {
             opt(s.cpu_busy_mean, |c| format!("{:.0}%", c * 100.0)),
             opt(s.swap_used_max_bytes, |b| format!("{:.2} GiB", gib(b)))
         );
+        if let Some(limit) = repo.limit {
+            let _ = writeln!(
+                md,
+                "Build limit {limit}: fewest tokens free (five) {}, most builders {}.",
+                opt(s.tokens_free_min, |n| n.to_string()),
+                opt(s.builders_max, |n| n.to_string())
+            );
+        }
+        if let Some(off) = &repo.off {
+            let o = &off.summary;
+            let _ = writeln!(
+                md,
+                "Without the limit (run first): load p95 {}, max {}; makespan {}; solo {}; median ticket {}; swap max {}{}.",
+                opt(o.load_p95, |l| format!("{l:.1}")),
+                opt(o.load_max, |l| format!("{l:.1}")),
+                opt(o.makespan_ms, |ms| format!("{} s", secs(ms))),
+                opt(o.solo_ms, |ms| format!("{} s", secs(ms))),
+                opt(o.median_ticket_ms, |ms| format!("{} s", secs(ms))),
+                opt(o.swap_used_max_bytes, |b| format!("{:.2} GiB", gib(b))),
+                o.psi_full_max
+                    .map_or_else(String::new, |p| format!(", PSI full max {p:.1}%"))
+            );
+        }
         for (run, t) in repo
             .seed
             .iter()
@@ -763,6 +856,36 @@ pub fn render(report: &Report) -> String {
         }
     }
     md
+}
+
+/// G8's second half (#271): with the limit, at most this much slower than
+/// without it, both for five tickets' makespan and for a lone ticket.
+pub const G8_LIMIT: f64 = 1.1;
+
+/// With-limit over without-limit ratios, from a `--limit both` run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LimitHalves {
+    /// Five tickets' makespan, on / off.
+    pub makespan: Option<f64>,
+    /// Solo ticket 1's median, on / off.
+    pub solo: Option<f64>,
+}
+
+/// `None` unless `repo` ran with the limit and carries its `off` run.
+#[allow(clippy::cast_precision_loss, reason = "ratios of milliseconds")]
+pub fn limit_halves(repo: &RepoReport) -> Option<LimitHalves> {
+    let off = repo.off.as_ref()?;
+    if repo.limit != Some(Toggle::On) {
+        return None;
+    }
+    let ratio = |on: Option<u64>, off: Option<u64>| {
+        on.zip(off.filter(|ms| *ms > 0))
+            .map(|(on, off)| on as f64 / off as f64)
+    };
+    Some(LimitHalves {
+        makespan: ratio(repo.summary.makespan_ms, off.summary.makespan_ms),
+        solo: ratio(repo.summary.solo_ms, off.summary.solo_ms),
+    })
 }
 
 #[allow(clippy::cast_precision_loss, reason = "a display figure")]
@@ -998,5 +1121,97 @@ mod tests {
         let report = report(Profile::Linux, passing());
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(serde_json::from_str::<Report>(&json).unwrap(), report);
+    }
+
+    /// #271 test 21: G8's halves from a `--limit both` report, the solo
+    /// median, and `n/a` without `both`.
+    #[test]
+    fn g8_limit_halves() {
+        let g8 = |repo: &RepoReport| {
+            gates(repo, Profile::Standard, "macos")
+                .into_iter()
+                .find(|g| g.id == "G8")
+                .unwrap()
+        };
+        // Without `both`: the first half alone, the second n/a.
+        let alone = passing();
+        let gate = g8(&alone);
+        assert_eq!(gate.verdict, Verdict::Pass);
+        assert!(
+            gate.value.contains("n/a (needs --limit both)"),
+            "{}",
+            gate.value
+        );
+
+        let both = |on_makespan: u64, on_solo: u64| {
+            let mut off = passing();
+            off.limit = Some(Toggle::Off);
+            let mut on = passing();
+            on.limit = Some(Toggle::On);
+            on.phases[1].end_ms = on.phases[1].start_ms + on_makespan;
+            for t in &mut on.solo {
+                t.wall_ms = on_solo;
+            }
+            on.summary = summarize(&on, 8);
+            on.off = Some(Box::new(off));
+            on
+        };
+        // Off: makespan 2000 ms, solo 1000 ms.
+        let gate = g8(&both(2100, 1050));
+        assert_eq!(gate.verdict, Verdict::Pass, "{}", gate.value);
+        assert!(gate.value.contains("makespan 1.05×"), "{}", gate.value);
+        assert_eq!(g8(&both(2220, 1000)).verdict, Verdict::Fail);
+        assert_eq!(g8(&both(2000, 1110)).verdict, Verdict::Fail);
+
+        // The solo time is ticket 1's median over its runs.
+        let mut repeated = passing();
+        repeated.solo = vec![ticket(1, 1, 900), ticket(1, 1, 1300), ticket(1, 1, 1000)];
+        assert_eq!(summarize(&repeated, 8).solo_ms, Some(1000));
+    }
+
+    #[test]
+    fn build_samples() {
+        let json = br#"{"version":"0.4.2","build":{"enabled":true,"jobs":8,"tokens":7,"available":3,"builders":5,"share":2}}"#;
+        let sample = crate::fleet::sample::parse_build(json, 1500).unwrap();
+        assert_eq!(
+            (
+                sample.t_ms,
+                sample.available,
+                sample.tokens,
+                sample.builders,
+                sample.share
+            ),
+            (1500, 3, 7, 5, 2)
+        );
+        assert!(crate::fleet::sample::parse_build(br#"{"version":"0.4.1"}"#, 0).is_none());
+        let mut repo = passing();
+        repo.limit = Some(Toggle::On);
+        repo.build_samples = vec![
+            BuildSample {
+                t_ms: 1000,
+                available: 7,
+                tokens: 7,
+                builders: 1,
+                share: 8,
+            },
+            BuildSample {
+                t_ms: 3000,
+                available: 1,
+                tokens: 7,
+                builders: 5,
+                share: 2,
+            },
+        ];
+        let summary = summarize(&repo, 8);
+        assert_eq!(
+            (summary.tokens_free_min, summary.builders_max),
+            (Some(1), Some(5))
+        );
+        repo.summary = summary;
+        let md = render(&report(Profile::Standard, repo));
+        assert!(
+            md.contains("fewest tokens free (five) 1, most builders 5"),
+            "{md}"
+        );
     }
 }

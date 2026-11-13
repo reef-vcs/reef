@@ -67,6 +67,9 @@ fn reef(daemon: &TestDaemon) -> std::process::Command {
         "CLAUDE_CODE_SESSION_ID",
         "REEF_WORKSPACE",
         "REEF_REMOTE",
+        "CARGO_MAKEFLAGS",
+        "MAKEFLAGS",
+        "MFLAGS",
     ] {
         command.env_remove(var);
     }
@@ -314,6 +317,13 @@ async fn create_attach_release() {
     let created = ok(&daemon, &create).await;
     assert_eq!(created["contract"], 1, "{created}");
     assert_eq!(created["attached"], false);
+    // #271 test 18: the build limit's variables, for the adapter to set.
+    assert!(
+        created["env"]["CARGO_MAKEFLAGS"]
+            .as_str()
+            .is_some_and(|flags| flags.contains("--jobserver-auth=fifo:")),
+        "{created}"
+    );
     assert_eq!(created["holder"]["pid"], holder);
     assert!(text(&created["owner"]).ends_with(":t1"), "{created}");
     assert_eq!(created["purpose"], "t1");

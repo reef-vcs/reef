@@ -277,3 +277,56 @@ fn unmount_under(path: &Path) {
         );
     }
 }
+
+/// #271: under the default root the jobserver and the cargo file live in
+/// `~/.reef` (a path without the macOS state directory's space), made by
+/// the first create, never by a start (S-185). Where the cargo file
+/// carries a count, the command's environment does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_limit_waits_for_the_workspace_base() {
+    let home = short_tempdir();
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        home_root(config, home.path());
+        config.build_interval = Duration::from_millis(100);
+    })
+    .await;
+    let base = home.path().join(".reef");
+    assert!(!base.exists(), "a start makes no ~/.reef");
+    let before = daemon.client.get_build_environment("", "").await.unwrap();
+    assert!(before.jobserver.is_empty(), "{before:?}");
+    let ws = create(&daemon, &repo).await;
+    let after = daemon
+        .client
+        .get_build_environment("", &ws.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(&after.jobserver),
+        base.join(".build").join("jobserver"),
+        "{after:?}"
+    );
+    let cargo = base.join(".cargo").join("config.toml");
+    let begun = Instant::now();
+    while !cargo.exists() {
+        assert!(begun.elapsed() < Duration::from_secs(10), "no cargo file");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let text = std::fs::read_to_string(&cargo).unwrap();
+    let later = daemon
+        .client
+        .get_build_environment("", &ws.id)
+        .await
+        .unwrap();
+    for (key, variable) in [
+        ("RUST_TEST_THREADS", "RUST_TEST_THREADS"),
+        ("jobs =", "CARGO_BUILD_JOBS"),
+    ] {
+        if text.contains(key) {
+            assert!(
+                !later.variables.iter().any(|v| v.name == variable),
+                "{variable} comes from the cargo file: {later:?}"
+            );
+        }
+    }
+    daemon.stop().await;
+}

@@ -22,6 +22,7 @@
 
 pub mod backup;
 pub mod brief;
+pub mod build;
 pub mod error;
 pub mod json;
 pub mod keyless;
@@ -312,6 +313,12 @@ impl From<tonic::Status> for ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon does not serve the method: a daemon older than
+    /// the call.
+    pub fn is_unimplemented(&self) -> bool {
+        matches!(self, ClientError::Rpc { status, .. } if status.code() == tonic::Code::Unimplemented)
+    }
+
     /// The fix the daemon attached to its error (`ErrorDetail.hint` and
     /// `next`, R1.26), if any.
     pub fn advice(&self) -> Option<Advice> {
@@ -909,6 +916,25 @@ impl Client {
     ) -> Result<GetWorkspaceResponse, ClientError> {
         self.call("GetWorkspace", self.workspaces().get_workspace(request))
             .await
+    }
+
+    /// `WorkspaceService.GetBuildEnvironment` (#271): the environment that
+    /// puts a command in `workspace` under the machine's build limit; an
+    /// empty `workspace` for the machine's defaults.
+    pub async fn get_build_environment(
+        &self,
+        repo: &str,
+        workspace: &str,
+    ) -> Result<v1::GetBuildEnvironmentResponse, ClientError> {
+        let request = v1::GetBuildEnvironmentRequest {
+            repo: repo.to_owned(),
+            workspace: workspace.to_owned(),
+        };
+        self.call(
+            "GetBuildEnvironment",
+            self.workspaces().get_build_environment(request),
+        )
+        .await
     }
 
     /// `WorkspaceService.GetWorkspace`. `repo` may be empty to look the
