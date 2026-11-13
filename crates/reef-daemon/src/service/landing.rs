@@ -127,7 +127,7 @@ impl LandingService for LandingHandler {
             None
         };
         let mut change = outcome.change.as_ref().map(convert::change);
-        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None);
+        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
         Ok(Response::new(LandChangeResponse {
             landing: Some(landing_message(&outcome.landing, true)),
             enqueue,

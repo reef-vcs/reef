@@ -2,6 +2,7 @@
 //! `Change.lifecycle` on every change the daemon returns (R3.09).
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use reef_api::v1;
 use reef_lib::jj::lifecycle::{LifecycleState, TransitionCause};
@@ -12,6 +13,52 @@ use crate::daemon::AppState;
 use crate::db::{DbError, LifecycleRow, TransitionRow};
 use crate::model::{RepoId, Timestamp};
 use crate::service::convert::timestamp;
+
+/// How long a read waits for a pending transition to commit (#293). A
+/// transition's operation is usually one jj write; a batch landing or an
+/// observed landing that moves many workspaces can take longer, and a read
+/// past this answers with the committed rows, as before.
+const PENDING_WAIT: Duration = Duration::from_secs(5);
+
+/// How recent a pending row must be for a read to wait for it: an older
+/// one is a write that failed and left its row for the next start.
+const PENDING_RECENT: Duration = Duration::from_secs(30);
+
+/// Waits, for at most five seconds, until no transition of `changes`
+/// (every change of `repo` when `None`) is being written, so a read never
+/// shows a transition's operation without its row (#293). A writer holds
+/// `repo`'s lifecycle lock from the pending row to its commit, so the wait
+/// is for that lock; it is taken alone and dropped at once. The caller
+/// holds no other lock: a reader never stalls a writer for longer than one
+/// acquire and release. Most reads find no pending row and do not wait.
+pub async fn await_pending(state: &AppState, repo: RepoId, changes: Option<&[String]>) {
+    let since = Timestamp(
+        Timestamp::now()
+            .0
+            .saturating_sub(i64::try_from(PENDING_RECENT.as_millis()).unwrap_or(i64::MAX)),
+    );
+    let pending = match state.db.pending_changes(repo, since) {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot read pending transitions; answering without waiting for them");
+            return;
+        }
+    };
+    let wait = match changes {
+        None => !pending.is_empty(),
+        Some(changes) => changes.iter().any(|change| pending.contains(change)),
+    };
+    if !wait {
+        return;
+    }
+    let lock = state.lifecycle.lock(repo);
+    if tokio::time::timeout(PENDING_WAIT, lock.lock())
+        .await
+        .is_err()
+    {
+        tracing::warn!(repo = %repo, "a pending transition outlasted a read's wait; answering with the committed rows");
+    }
+}
 
 /// A state as the v1 enum.
 pub fn state_message(state: LifecycleState) -> v1::LifecycleState {
@@ -202,7 +249,13 @@ fn as_lifecycle(row: &TransitionRow) -> LifecycleRow {
 /// read at an operation: the latest transition it or an earlier operation
 /// recorded). A database failure leaves them unset and is logged: a read
 /// never fails for it.
-pub fn fill<'a>(
+///
+/// A change with a pending transition is being written: its operation may
+/// already be visible (an observed landing's workspaces are on their new
+/// changes) while its row is not yet committed. The read first waits for
+/// it ([`await_pending`]); at an operation too, since the row, once
+/// committed, is found by that operation's id.
+pub async fn fill<'a>(
     state: &AppState,
     repo: RepoId,
     changes: impl IntoIterator<Item = &'a mut v1::Change>,
@@ -216,6 +269,7 @@ pub fn fill<'a>(
         .iter()
         .map(|change| change.change_id.clone())
         .collect();
+    await_pending(state, repo, Some(&ids)).await;
     match lookup(state, repo, &ids, at) {
         Ok(found) => {
             for change in &mut changes {

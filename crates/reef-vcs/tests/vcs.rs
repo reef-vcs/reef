@@ -3423,6 +3423,17 @@ async fn evidence_cli_artifacts() {
     daemon.stop().await;
 }
 
+/// The regular files directly in `dir`, not in its subdirectories.
+fn files_directly_under(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .collect()
+}
+
 /// Every file under `dir`, recursively, for a scan before and after.
 fn files_under(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
     let mut files = std::collections::BTreeSet::new();
@@ -3705,17 +3716,36 @@ async fn evidence_cli_session() {
     let ws = create(&daemon, &repo).await;
     let dir = path(&ws);
     let login = reef_daemon::identity::default_name(&reef_daemon::client::os_username());
-    let tmp_dir = std::env::temp_dir();
-    let before = (files_under(&dir), files_under(&tmp_dir));
+    // The CLI gets a private temp dir (#294): other tests, run at the same
+    // time, write keys of their own under the shared one. Of the shared one
+    // only its top-level files are compared, where a key left by this
+    // test's in-process daemon would land; other tests' are in their own
+    // directories.
+    let cli_tmp = daemon.tmp.path().join("cli-tmp");
+    std::fs::create_dir(&cli_tmp).unwrap();
+    let cli = || {
+        let mut command = reef(&daemon, &dir);
+        command.env("TMPDIR", &cli_tmp);
+        command
+    };
+    let scanned = || {
+        let mut files = files_under(&dir);
+        files.extend(files_under(&cli_tmp));
+        files.extend(files_under(daemon.tmp.path()));
+        files.extend(files_directly_under(&std::env::temp_dir()));
+        files
+    };
+    let before = scanned();
 
-    let added = ok(
-        &daemon,
-        &dir,
-        &[
-            "-o", "json", "evidence", "add", "--kind", "test", "--result", "pass",
-        ],
-    )
-    .await;
+    let added = json(
+        &run(
+            cli(),
+            &[
+                "-o", "json", "evidence", "add", "--kind", "test", "--result", "pass",
+            ],
+        )
+        .await,
+    );
     let evidence = &added["evidence"];
     assert_eq!(evidence["identity"]["status"], "bound", "{evidence}");
     assert_eq!(evidence["identity"]["key"]["identity"], login.as_str());
@@ -3732,7 +3762,7 @@ async fn evidence_cli_session() {
     };
     assert_eq!(window(&evidence["identity"]["key"]), 300, "five minutes");
     let id = evidence["id"].as_str().unwrap().to_owned();
-    let text = run_in(&daemon, &dir, &["-o", "text", "evidence", "show", &id]).await;
+    let text = run(cli(), &["-o", "text", "evidence", "show", &id]).await;
     let shown = stdout(&text);
     assert!(
         shown.lines().any(|line| line.starts_with("identity:")
@@ -3741,22 +3771,18 @@ async fn evidence_cli_session() {
     );
     assert!(shown.contains("policy decides whom to trust"), "{shown}");
 
-    let human = ok(
-        &daemon,
-        &dir,
-        &[
-            "-o", "json", "evidence", "add", "--kind", "manual", "--result", "pass", "--actor",
-            "human",
-        ],
-    )
-    .await;
+    let human = json(
+        &run(
+            cli(),
+            &[
+                "-o", "json", "evidence", "add", "--kind", "manual", "--result", "pass", "--actor",
+                "human",
+            ],
+        )
+        .await,
+    );
     let human_id = human["evidence"]["id"].as_str().unwrap().to_owned();
-    let text = run_in(
-        &daemon,
-        &dir,
-        &["-o", "text", "evidence", "show", &human_id],
-    )
-    .await;
+    let text = run(cli(), &["-o", "text", "evidence", "show", &human_id]).await;
     assert!(
         stdout(&text).contains("presence none (not verified)"),
         "{}",
@@ -3767,7 +3793,7 @@ async fn evidence_cli_session() {
     // No session key file was left anywhere. A daemon's own authority key
     // (`<state>/identity/authority.pem`) is expected: this daemon's, or that of
     // another test's daemon running in parallel under the same temp dir.
-    let after = (files_under(&dir), files_under(&tmp_dir));
+    let after = scanned();
     let is_authority = |path: &PathBuf| {
         path.file_name().is_some_and(|name| name == "authority.pem")
             && path
@@ -3776,9 +3802,7 @@ async fn evidence_cli_session() {
                 .is_some_and(|name| name == "identity")
     };
     let new_files: Vec<&PathBuf> = after
-        .0
-        .difference(&before.0)
-        .chain(after.1.difference(&before.1))
+        .difference(&before)
         .filter(|path| !is_authority(path))
         .filter(|path| std::fs::read_to_string(path).is_ok_and(|text| text.contains("PRIVATE KEY")))
         .collect();

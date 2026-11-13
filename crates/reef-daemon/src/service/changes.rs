@@ -155,7 +155,8 @@ impl ChangeService for ChangesHandler {
             target.repo.id,
             entries.iter_mut().filter_map(|entry| entry.change.as_mut()),
             as_of,
-        );
+        )
+        .await;
         let mut kept = Vec::with_capacity(entries.len());
         let mut bytes = 0;
         let mut trimmed = false;
@@ -232,7 +233,8 @@ impl ChangeService for ChangesHandler {
             target.repo.id,
             std::iter::once(&mut change),
             as_of,
-        );
+        )
+        .await;
         Ok(Response::new(GetChangeResponse {
             change: Some(change),
             at_operation: at,
@@ -270,7 +272,8 @@ impl ChangeService for ChangesHandler {
         let (rewritten, operation) =
             write_change(&self.state, &target, agent, write, OperationKind::Describe).await?;
         let mut change = rewritten.change.as_ref().map(convert::change);
-        crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None);
+        crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None)
+            .await;
         Ok(Response::new(DescribeChangeResponse { change, operation }))
     }
 
@@ -364,7 +367,7 @@ impl ChangeService for ChangesHandler {
         )
         .await?;
         let mut change = outcome.change.as_ref().map(convert::change);
-        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None);
+        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
         let lifecycle = match &change {
             Some(change) => change.lifecycle.clone(),
             // A recorded change with no visible commit.
@@ -433,6 +436,8 @@ impl ChangeService for ChangesHandler {
             }
         };
         let size = page.size();
+        // Rows read here and changes read after must agree (#293).
+        crate::lifecycle::messages::await_pending(state, target.repo.id, None).await;
         let mut rows = crate::lifecycle::proposals(state, target.repo.id, &filter, after, size + 1)
             .map_err(status)?;
         let more = rows.len() > size;

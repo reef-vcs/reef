@@ -654,6 +654,124 @@ async fn queued_is_reserved() {
     );
 }
 
+// #293: a read of a change whose transition is being written waits for
+// its commit, holding the lifecycle lock as a writer does; a pending row
+// old enough to be a failed write's does not hold reads up.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "a stranded row, then a pending one")]
+async fn reads_wait_for_a_pending_transition() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let Setup { change, .. } = setup(&daemon, &repo).await;
+    transition(client, &repo.id, to(&change.commit_id, State::Proposed))
+        .await
+        .unwrap();
+    let state = daemon.handle.state();
+    let repo_id = repo.id.parse().unwrap();
+    let pending = |id: &str, created_at| reef_daemon::db::TransitionRow {
+        repo_id,
+        id: id.to_owned(),
+        seq: None,
+        committed: false,
+        change_id: change.change_id.clone(),
+        commit_id: change.commit_id.clone(),
+        from_state: "proposed".to_owned(),
+        to_state: "withdrawn".to_owned(),
+        cause: "request".to_owned(),
+        round: 1,
+        reason: None,
+        superseded_by: None,
+        destination: None,
+        undoes_operation_id: None,
+        undoes_transition_id: None,
+        operation_id: None,
+        operation_collected: false,
+        agent: None,
+        actor: "daemon".to_owned(),
+        identity_id: None,
+        identity_name: None,
+        session_id: None,
+        remote_token: None,
+        remote_token_name: None,
+        created_at,
+        recorded_at: None,
+    };
+    let proposals = || async {
+        client
+            .list_proposals(
+                ListProposalsRequest {
+                    repo: repo.id.clone(),
+                    ..ListProposalsRequest::default()
+                },
+                0,
+            )
+            .await
+            .unwrap()
+            .items
+            .len()
+    };
+    let lock = state.lifecycle.lock(repo_id);
+
+    // A stranded pending row, a minute old: reads answer at once.
+    let stranded = pending(
+        "trn_00000000000000b1",
+        reef_daemon::model::Timestamp(reef_daemon::model::Timestamp::now().0 - 60_000),
+    );
+    let held = lock.lock().await;
+    state.db.insert_pending_transition(&stranded).unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        state_of(&change_at(client, &repo.id, &change.commit_id).await),
+        State::Proposed
+    );
+    assert_eq!(proposals().await, 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    state
+        .db
+        .delete_pending_transition(repo_id, &stranded.id)
+        .unwrap();
+    drop(held);
+
+    // A transition being written: both reads wait for its commit.
+    let written = pending("trn_00000000000000b2", reef_daemon::model::Timestamp::now());
+    let held = lock.lock().await;
+    state.db.insert_pending_transition(&written).unwrap();
+    let delay = Duration::from_millis(700);
+    let writer = async {
+        tokio::time::sleep(delay).await;
+        let mut row = state
+            .db
+            .lifecycle_row(repo_id, &change.change_id)
+            .unwrap()
+            .unwrap();
+        "withdrawn".clone_into(&mut row.state);
+        row.transition_id.clone_from(&written.id);
+        state
+            .db
+            .commit_transition(
+                repo_id,
+                &written.id,
+                "00",
+                reef_daemon::model::Timestamp::now(),
+                &reef_daemon::db::LifecycleUpdate::Set(Box::new(row)),
+            )
+            .unwrap();
+        drop(held);
+    };
+    let started = Instant::now();
+    let ((read, listed), ()) = tokio::join!(
+        async { tokio::join!(change_at(client, &repo.id, &change.commit_id), proposals()) },
+        writer
+    );
+    assert!(started.elapsed() >= delay, "{:?}", started.elapsed());
+    assert_eq!(state_of(&read), State::Withdrawn);
+    assert_eq!(listed, 0);
+}
+
 // 7.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_transitions() {

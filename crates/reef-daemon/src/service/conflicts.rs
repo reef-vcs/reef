@@ -588,7 +588,7 @@ impl ConflictService for ConflictHandler {
         let as_of = (!request.at_operation.is_empty() || page.pinned().is_some())
             .then(|| (ended, at.clone()));
         let mut changes: Vec<v1::Change> = found.iter().map(|read| read.change.clone()).collect();
-        crate::lifecycle::messages::fill(state, target.repo.id, changes.iter_mut(), as_of);
+        crate::lifecycle::messages::fill(state, target.repo.id, changes.iter_mut(), as_of).await;
         for (read, change) in found.iter_mut().zip(changes) {
             read.change = change;
         }
@@ -789,7 +789,8 @@ impl ConflictService for ConflictHandler {
             target.repo.id,
             std::iter::once(&mut read.change),
             as_of,
-        );
+        )
+        .await;
         let (read, summaries) = {
             let state = Arc::clone(state);
             let repo = target.repo.id;

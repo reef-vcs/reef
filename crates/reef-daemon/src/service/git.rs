@@ -256,7 +256,7 @@ impl GitService for GitHandler {
             request.dry_run,
         );
         let mut change = outcome.info.as_ref().map(convert::change);
-        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None);
+        crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
         Ok(Response::new(PublishChangeResponse {
             publication: Some(publication),
             operation,

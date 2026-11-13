@@ -372,8 +372,9 @@ impl StatusService for StatusHandler {
                         .working_copy
                         .iter_mut()
                         .chain(status.parents.iter_mut())
-                }));
-            crate::lifecycle::messages::fill(state, target.repo.id, changes, None);
+                }))
+                .collect::<Vec<_>>();
+            crate::lifecycle::messages::fill(state, target.repo.id, changes, None).await;
         }
         Ok(Response::new(GetStatusResponse {
             repository: Some(v1::Repository::from(&target.repo)),
