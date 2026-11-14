@@ -230,6 +230,14 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
+# Dependencies are optimized even in dev: the tests spend their time in jj-lib, gix, SQLite and the
+# hashes, not in this workspace's code. A test's fixture (1,000 generated files, `jj` init, one
+# snapshot) took 3.4 s unoptimized and 0.7 s this way on an M-series Mac, and about 550 tests build
+# one. Dependencies compile once and are cached, so the cost is a cold build: about twice as long.
+# The workspace's own crates stay unoptimized, so an edit rebuilds as fast as before.
+[profile.dev.package."*"]
+opt-level = 2
+
 # Generating synthetic trees dominates test time in debug builds (46 s for the large preset
 # unoptimized, about 10 s optimized), so the generator and its RNG are optimized even in dev.
 [profile.dev.package.reef-testing]
