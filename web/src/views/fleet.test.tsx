@@ -4,7 +4,15 @@ import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LeaseSchema, Attention, WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
+import {
+  Attention,
+  DiskLevel,
+  DiskStatusSchema,
+  DiskVolumeSchema,
+  IdleWorkspaceSchema,
+  LeaseSchema,
+  WorkspaceState,
+} from "../gen/reef/api/v1/workspaces_pb";
 import { OperationKind } from "../gen/reef/api/v1/operations_pb";
 import { PresenceEndReason, PresenceKind } from "../gen/reef/api/v1/presence_pb";
 import { OperationStore } from "../live/operations";
@@ -169,15 +177,16 @@ describe("Fleet", () => {
     expect(row("Workspaces", "w1000000").getAttribute("aria-current")).toBe("true");
   });
 
-  it("shows disk once measured, in the CLI's units", async () => {
-    setup();
+  it("shows the daemon's disk figure, in the CLI's units, walking nothing (#272)", async () => {
+    const t = setup();
     await flush();
     await flush();
     const w2 = row("Workspaces", "w2000000");
     expect(cells(w2)[5]).toBe("18 MiB");
     expect(within(w2).getAllByRole("cell")[5]!.getAttribute("title")).toMatch(
-      /^3 files differ from the base, measured \d\d:\d\d:\d\d$/,
+      /^tracked 1\.0 MiB, build output 17 MiB; largest: target 17 MiB; measured \d\d:\d\d:\d\d$/,
     );
+    expect(t.daemon.getCalls.filter((c) => !c.skipDiskUsage)).toEqual([]);
   });
 
   it("joins agents to workspaces and counts each once", async () => {
@@ -285,6 +294,32 @@ describe("Fleet", () => {
     expect(rows()).toHaveLength(count);
   });
 
+  it("says when the disk is nearly full, naming the idle workspace (#272)", async () => {
+    const daemon = withTwo();
+    daemon.diskStatus = create(DiskStatusSchema, {
+      level: DiskLevel.LOW,
+      volumes: [
+        create(DiskVolumeSchema, {
+          path: "/",
+          freeBytes: 18n * 1024n ** 3n,
+          floorBytes: 24n * 1024n ** 3n,
+          totalBytes: 480n * 1024n ** 3n,
+        }),
+      ],
+      largestIdle: create(IdleWorkspaceSchema, {
+        workspace: "w2000000",
+        bytes: 5n * 1024n ** 3n,
+      }),
+    });
+    setup(daemon);
+    await flush();
+    await flush();
+    const notice = screen.getByRole("status");
+    expect(notice.textContent).toBe(
+      "Disk nearly full: new workspaces are refused. 18 GiB free, floor 24 GiB. Releasing the idle w2000000 would free 5.0 GiB.",
+    );
+  });
+
   it("shows the workspace pane with Measure again, and a message for an unknown selection", async () => {
     setup(withTwo(), { query: "workspace=w1000000" });
     await flush();
@@ -292,7 +327,7 @@ describe("Fleet", () => {
     const pane = screen.getByRole("complementary", { name: "Selection" });
     expect(pane.textContent).toContain("w1000000");
     expect(pane.textContent).toContain("reef ws inspect w1000000");
-    expect(pane.textContent).toContain("18 MiB, 3 files differ from the base");
+    expect(pane.textContent).toContain("18 MiB unshared: tracked 1.0 MiB, build output 17 MiB");
     expect(within(pane).getByRole("button", { name: "Measure again" })).toBeTruthy();
     cleanup();
     setup(withTwo(), { query: "workspace=gone0000" });
@@ -530,6 +565,6 @@ describe("Fleet, outside developer mode (the design pass)", () => {
     expect(pane.textContent).not.toContain("reef ws inspect");
     expect(within(pane).queryByText("Backend")).toBeNull();
     expect(within(pane).queryByText("Id")).toBeNull();
-    expect(pane.textContent).toContain("18 MiB, 3 files differ from the base");
+    expect(pane.textContent).toContain("18 MiB unshared: tracked 1.0 MiB, build output 17 MiB");
   });
 });

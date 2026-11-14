@@ -31,6 +31,14 @@ service WorkspaceService {
   // (R3.03), NOT_FOUND with reason IDENTITY_NOT_FOUND, FAILED_PRECONDITION
   // with reason IDENTITY_REVOKED, or PERMISSION_DENIED with reason
   // SESSION_KEY_REFUSED (metadata `rule`).
+  //
+  // Errors (disk, #272): FAILED_PRECONDITION with reason DISK_SPACE_LOW
+  // when free space on the workspace root's or the state directory's
+  // volume is under `[disk] floor` (metadata `volume`, `free_bytes`,
+  // `floor_bytes`, and when one is idle `largest_idle`,
+  // `largest_idle_owner`, `largest_idle_bytes`). Checked before anything
+  // is made. Nothing else is refused for disk: snapshots, releases, moves
+  // and renewals go on below the floor.
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -403,6 +411,137 @@ message Workspace {
   // (#259): 0 on trunk's head. Set by GetWorkspace and GetStatus for one
   // workspace; unset elsewhere, without a `trunk()`, and at an operation.
   optional uint32 behind_trunk = 23;
+  // What its directory costs on disk, from the daemon's last walk (#272,
+  // ADR 0076; docs/disk.md). Set by ListWorkspaces and GetWorkspace for an
+  // active workspace (all zero until its first walk, as at create); unset
+  // otherwise and at an operation.
+  WorkspaceDisk disk = 24;
+}
+
+// What a workspace's directory costs on disk, as of `measured_at` (#272).
+// Tracked and build output are told apart by the working copy as of its
+// last snapshot.
+message WorkspaceDisk {
+  // Allocated bytes of tracked files that differ from the base.
+  uint64 tracked_bytes = 1;
+  // Allocated bytes of files the working copy does not track: ignored
+  // build output and dependencies, and new files not yet snapshotted.
+  uint64 build_bytes = 2;
+  // What releasing it frees at once: APFS's private size of every file,
+  // an overlay's upper directory, every file of a copy. Unset where the
+  // filesystem cannot tell (reflink); `tracked_bytes + build_bytes` bounds
+  // it then.
+  optional uint64 unshared_bytes = 3;
+  // Entries walked.
+  uint64 files = 4;
+  // When the walk ended; the create, before the first walk.
+  google.protobuf.Timestamp measured_at = 5;
+  // The walk stopped at a cap (2,000,000 entries or 30 s): every figure
+  // is a lower bound.
+  bool incomplete = 6;
+  // Up to three of the largest untracked directories, largest first.
+  repeated DiskPath largest = 7;
+  // Directories with a dependency manifest and lockfile but no dependency
+  // directory, such as `web` with `package-lock.json` and no
+  // `node_modules` (#195); `.` for the root. At most 8.
+  repeated string missing_dependencies = 8;
+}
+
+// A directory and its allocated bytes.
+message DiskPath {
+  // Repository-root relative, `/`-separated.
+  string path = 1;
+  // Allocated bytes under it.
+  uint64 bytes = 2;
+}
+
+// How full the disk is, by Reef's floor and budget (#272, ADR 0076;
+// docs/disk.md).
+message DiskStatus {
+  // The worst of the volumes' levels, or WARN when Reef is over its budget.
+  DiskLevel level = 1;
+  // Why it is not OK; empty when it is.
+  repeated DiskReason reasons = 2;
+  // The workspace root's volume and, if different, the state directory's.
+  repeated DiskVolume volumes = 3;
+  // `[disk] budget` in bytes; 0 for none.
+  uint64 budget_bytes = 4;
+  // Active workspaces' unshared bytes (else tracked plus build output).
+  uint64 workspaces_bytes = 5;
+  // The base cache's recorded bytes (an upper bound: bases share blocks
+  // where the filesystem clones).
+  uint64 bases_bytes = 6;
+  // Shared stores, as last walked.
+  uint64 stores_bytes = 7;
+  // The state directory's own files (database, artifacts, evidence, logs)
+  // apart from bases and stores, as last walked.
+  uint64 state_bytes = 8;
+  // The four above summed: what Reef holds.
+  uint64 reef_bytes = 9;
+  // The idle workspace whose release would free the most; unset if none
+  // is idle.
+  IdleWorkspace largest_idle = 10;
+  // Active workspaces written to since their last walk began, or whose
+  // last walk was incomplete.
+  uint32 stale_workspaces = 11;
+}
+
+// A disk level.
+enum DiskLevel {
+  // Not set.
+  DISK_LEVEL_UNSPECIFIED = 0;
+  // Free space is at least twice the floor, and Reef within its budget.
+  DISK_LEVEL_OK = 1;
+  // Free space is under twice the floor, or Reef over its budget.
+  DISK_LEVEL_WARN = 2;
+  // Free space is under the floor: creates and store builds are refused.
+  DISK_LEVEL_LOW = 3;
+}
+
+// Why a disk level is not OK.
+enum DiskReason {
+  // Not set.
+  DISK_REASON_UNSPECIFIED = 0;
+  // Free space is under the floor.
+  DISK_REASON_FREE_BELOW_FLOOR = 1;
+  // Free space is under twice the floor.
+  DISK_REASON_FREE_NEAR_FLOOR = 2;
+  // What Reef holds is over `[disk] budget`.
+  DISK_REASON_OVER_BUDGET = 3;
+}
+
+// One volume Reef writes to.
+message DiskVolume {
+  // A directory on it: the workspace root, or the state directory.
+  string path = 1;
+  // What Reef keeps there: `workspaces`, `state`, or both.
+  repeated string holds = 2;
+  // Its size.
+  uint64 total_bytes = 3;
+  // Available to an unprivileged user (`statvfs`).
+  uint64 free_bytes = 4;
+  // macOS: free plus what the system purges under pressure (its
+  // important-usage capacity), read near the floor and by GetDaemonStatus;
+  // unset elsewhere or when not read.
+  optional uint64 purgeable_free_bytes = 5;
+  // `[disk] floor` for this volume; 0 for none.
+  uint64 floor_bytes = 6;
+  // Its level by free space alone.
+  DiskLevel level = 7;
+}
+
+// An active workspace nobody is using.
+message IdleWorkspace {
+  // Its id.
+  string workspace = 1;
+  // Its repository.
+  string repo_id = 2;
+  // Its owner.
+  string owner = 3;
+  // Its unshared bytes, else tracked plus build output.
+  uint64 bytes = 4;
+  // Since when: its last snapshot, or its create.
+  google.protobuf.Timestamp idle_since = 5;
 }
 
 // A shared dependency store mounted in a workspace (R1.20).
@@ -561,6 +700,8 @@ message ListWorkspacesResponse {
   string next_page_token = 2;
   // The full id of `at_operation`; empty for now.
   string at_operation = 3;
+  // The machine's disk level and figures (#272); unset at an operation.
+  DiskStatus disk_status = 4;
 }
 
 // One workspace.
@@ -573,7 +714,8 @@ message GetWorkspaceRequest {
   // default, so a read of the record has no side effects.
   bool snapshot_first = 3;
   // Leave `disk_usage` unset instead of walking the directory to measure
-  // it, for a caller that must be cheap (`reef here`).
+  // it, for a caller that must be cheap (`reef here`). A walk also updates
+  // the daemon's kept figure, `Workspace.disk` (#272).
   bool skip_disk_usage = 4;
   // The workspace as it was at this operation (R2.12), as ListWorkspaces
   // lists it then; NOT_FOUND with reason WORKING_COPY_NOT_FOUND when that
@@ -600,6 +742,8 @@ message GetWorkspaceResponse {
   repeated SnapshotEntry recent_snapshots = 6;
   // The full id of `at_operation`; empty for now.
   string at_operation = 7;
+  // The machine's disk level and figures (#272); unset at an operation.
+  DiskStatus disk_status = 8;
 }
 
 // Release a workspace.

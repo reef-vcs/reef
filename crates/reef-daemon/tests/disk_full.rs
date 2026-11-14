@@ -45,6 +45,9 @@ fn configure(config: &mut FileConfig) {
     lease.tick = Duration::from_millis(500);
     config.watcher.debounce = Duration::from_millis(200);
     config.watcher.fallback_interval = FALLBACK;
+    // A 256 MB volume is under any floor (#272): this tests what happens
+    // when the disk fills anyway.
+    config.disk.floor = reef_daemon::config::DiskAmount::Bytes(reef_daemon::config::ByteSize(0));
 }
 
 /// A 256 MB filesystem mounted at a short temporary path; unmounted on

@@ -168,7 +168,15 @@ export function WorkspaceDetail({
   const dev = useDevMode();
   const change = row.change;
   const attention = ATTENTION_WORDS[workspace.attention];
-  const usage = response?.diskUsage;
+  // The daemon's kept figure (#272), from the listing or a "Measure again".
+  const answered = response?.workspace?.disk;
+  const listed = workspace.disk;
+  const msOf = (t: { seconds: bigint; nanos: number } | undefined) =>
+    t ? Number(t.seconds) * 1000 + t.nanos / 1e6 : -1;
+  const figure =
+    answered && (!listed || msOf(answered.measuredAt) >= msOf(listed.measuredAt))
+      ? answered
+      : listed;
   const command = `reef ws inspect ${workspace.id}`;
   const lease = view?.lease ?? workspace.lease;
   return (
@@ -299,14 +307,17 @@ export function WorkspaceDetail({
                 <dt>Disk</dt>
                 <dd>
                   {result?.notMeasurable
-                    ? "not measurable: its base is no longer cached"
-                    : usage
-                      ? `${size(usage.allocatedBytes)}, ${String(usage.filesChanged)} files differ from the base`
+                    ? "not measurable: its directory is gone"
+                    : figure
+                      ? `${size(figure.unsharedBytes ?? figure.trackedBytes + figure.buildBytes)}${figure.unsharedBytes === undefined ? "" : " unshared"}: tracked ${size(figure.trackedBytes)}, build output ${size(figure.buildBytes)}${figure.incomplete ? " (incomplete)" : ""}`
                       : "not measured yet"}
-                  {result?.measuredAt !== undefined && (
+                  {figure?.largest.length ? (
                     <div className="secondary">
-                      measured {clock(timestampFromMs(result.measuredAt)).text}
+                      {figure.largest.map((dir) => `${dir.path} ${size(dir.bytes)}`).join(", ")}
                     </div>
+                  ) : null}
+                  {figure?.measuredAt && (
+                    <div className="secondary">measured {clock(figure.measuredAt).text}</div>
                   )}{" "}
                   <button type="button" onClick={onMeasure}>
                     Measure again

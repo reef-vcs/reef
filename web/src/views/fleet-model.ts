@@ -1,7 +1,7 @@
 // The workspaces page's data (R2.20): a repository's active workspaces with
 // their changes, live from the shared operation stream, plus what the page
 // keeps across refreshes (each workspace's cause, rows that ended, the
-// agents' order) and the disk scheduler.
+// agents' order) and the selection's reader (fleet/disk.ts).
 //
 // Nothing is read while the stream is not live, so an operation recorded
 // after a read arrives on the stream and asks for another. The first reads
@@ -36,6 +36,7 @@ import { OperationKind, type Operation } from "../gen/reef/api/v1/operations_pb"
 import type { Repository } from "../gen/reef/api/v1/repositories_pb";
 import {
   WorkspaceState,
+  type DiskStatus,
   type GetWorkspaceResponse,
   type Workspace,
 } from "../gen/reef/api/v1/workspaces_pb";
@@ -106,6 +107,8 @@ export interface FleetSnapshot {
   frozenWorkspace: GetWorkspaceResponse | undefined;
   /** Bumped by every change, disk answers included. */
   version: number;
+  /** The machine's disk status from the last live listing (#272). */
+  diskStatus: DiskStatus | undefined;
 }
 
 export interface FleetOptions {
@@ -170,6 +173,9 @@ export class FleetModel {
       },
       onSessionInvalid,
       now,
+      () => {
+        this.paced.requestNow();
+      },
     );
     this.snapshot = {
       rows: null,
@@ -183,6 +189,7 @@ export class FleetModel {
       agentOrder: [],
       frozenWorkspace: undefined,
       version: 0,
+      diskStatus: undefined,
     };
   }
 
@@ -342,6 +349,7 @@ export class FleetModel {
         this.listChanges(repo, ""),
       ]);
       if (this.isStopped()) return;
+      this.update({ diskStatus: workspaces.diskStatus });
       await this.apply(workspaces.workspaces, workspaces.more, changes, true);
     } catch (thrown) {
       this.fail(thrown);
@@ -457,6 +465,7 @@ export class FleetModel {
     const out: Workspace[] = [];
     let pageToken = "";
     let at = atOperation;
+    let diskStatus: DiskStatus | undefined;
     do {
       const page = await this.connection.clients.workspaces.listWorkspaces({
         repo,
@@ -469,8 +478,9 @@ export class FleetModel {
       out.push(...page.workspaces);
       pageToken = page.nextPageToken;
       at = page.atOperation || at;
+      diskStatus ??= page.diskStatus;
     } while (pageToken && out.length < WORKSPACES_SHOWN);
-    return { workspaces: out, more: pageToken !== "", atOperation: at };
+    return { workspaces: out, more: pageToken !== "", atOperation: at, diskStatus };
   }
 
   private async listChanges(repo: string, atOperation: string): Promise<Map<string, Change>> {

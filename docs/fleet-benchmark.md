@@ -56,13 +56,14 @@ Sampled every second into `report.json`; `summary.md` renders it.
 | Metric | How |
 | --- | --- |
 | Free space | `statvfs` on the volume holding the workspaces (and the clone's, if different). macOS's "available for important usage" figure, which counts purgeable space such as Time Machine's local snapshots, every 5 seconds |
-| Disk per workspace | the harness's own walk after each round: allocated and unshared bytes, build output apart from the rest. The daemon's figure counts every changed file at full size and does not split build output (#146, built by #272) |
+| Disk per workspace | after each round, the daemon's kept figure from `reef ws inspect` (#272: tracked, build output, unshared), beside the harness's own walk (allocated and unshared bytes, build output apart from the rest); `summary.md` shows both |
+| The daemon's disk | `reef daemon status -o json`'s `disk` every 10 seconds (#272): its level, the lowest usable free space and that volume's floor, and what Reef holds (`reef_bytes`) |
 | Load | the 1-minute load average; CPU busy share from `/proc/stat` on Linux and summed `ps %cpu` on macOS |
 | Memory | macOS: `kern.memorystatus_vm_pressure_level` (normal, warn, critical), swap-outs and compressor bytes from `vm_stat`, swap in use. Linux: PSI `memory some` and `full` `avg10`, swap in use. Each ticket's process-tree RSS from `ps` |
 | Time | each run's wall time from `reef ws run` to its exit; the five tickets' makespan |
 | Usability | a canary: `reef ws list -o json` every 5 seconds (its p99), and a 10 ms sleep loop (its lateness p99) |
 | Correctness | each test's outcome from the log (libtest, `go test`, pytest `-rA`, TAP, Vitest's verbose reporter), compared with the same patch's solo run |
-| Refusals | creates `ws run` could not make; builds whose log shows `ENOSPC` |
+| Refusals | creates `ws run` could not make, and of them those refused with `DISK_SPACE_LOW` (#272); builds whose log shows `ENOSPC` |
 
 The run records Time Machine's local snapshots (`tmutil listlocalsnapshots /`) and Spotlight's state, because a local snapshot keeps a released workspace's blocks for up to a day and `statvfs` does not count them as free.
 
@@ -72,10 +73,10 @@ Judged per repository, on the `standard` and `linux` profiles only. `reef-fleet 
 
 | Gate | Threshold |
 | --- | --- |
-| G1 disk safety | no create refused and no build failed for disk; free space never below the floor, the larger of 20 GiB and 5% of the volume |
+| G1 disk safety | no create refused (none with `DISK_SPACE_LOW`) and no build failed for disk; free space never below the floor, the larger of 20 GiB and 5% of the volume; the daemon's own level never `low` and its free space never under its floor (#272) |
 | G2 disk peak | five tickets consume at most 100 GiB at peak |
 | G3 disk scaling | five tickets cost at most 2× one ticket's peak (3× for Rust: linked test binaries are per workspace whatever is shared) |
-| G4 disk after | after release and `ws gc`, within 2 GiB of the start beyond what Reef kept on purpose (bases and stores it made during the run). Growth of the shared tool caches (`GOCACHE`, yarn's) counts as used, and is reported apart |
+| G4 disk after | after release and `ws gc`, within 2 GiB of the start beyond what Reef kept on purpose (bases and stores it made during the run). Growth of the shared tool caches (`GOCACHE`, yarn's) is reported apart and not counted (#272, the user's decision 2026-11-13): Reef cannot change what a tool keys its cache by. The daemon's `reef_bytes` at the start and the end is reported beside it |
 | G5 load | 1-minute load p95 at most 2× the cores, maximum at most 3× |
 | G6 memory | macOS: no time at critical pressure and at most 2 GiB swapped out; Linux: PSI `memory full avg10` never above 10% |
 | G7 usability | the canary's `ws list` p99 under 1 s, and none failed or ran past 30 s; the sleep's lateness p99 under 50 ms |
@@ -185,3 +186,48 @@ The first standard run, on the harness before the review's fixes, read lower pea
 | Five at once: median round 1, makespan | 320 s, 597 s | 848 s, 1643 s | 879 s, 923 s | 1011 s, 1817 s |
 
 On ext4 nothing is cloned: every workspace's `.venv`, `node_modules` and `target/` is a full copy, so G3 fails for every stack, and Rust worst. tokio's five tickets took 38.8 GiB (each workspace compiled all 121 units) and pushed the runner into memory stalls (PSI `full` 29.6%, the first G6 failure): at 4 cores and 16 GiB, five Rust builds are the case #271's job limit (`jobs = min(cores, GiB / 2)`) exists for.
+
+## With disk accounting (#272), 2026-11-13
+
+Release `reef`, `reef-daemon` and `reef-fleet` with #272 and #271's build limit (on), no seeding, no stores, 5 tickets, 300 s idle. G1, G2 and G4 are #272's gates; G1 now also requires the daemon's own level never `low`, and G4 reports the daemon's `reef_bytes` beside the harness's walk. In every round on both machines, the daemon's figure for a workspace (`reef ws inspect`'s unshared bytes) matched the harness's own walk to within 0.01 GiB: on APFS the private bytes (fastapi 0.14 GiB against 0.13 built plus 0.01 other), on ext4 the full copies (tokio 7.69 GiB against 7.69).
+
+### Standard (macOS VM, 8 vCPUs, 16 GiB)
+
+`077e1ccc` in a fresh Lume VM (macOS 26.4, 512 GB sparse disk). The auto floor on its 507 GiB volume is 25 GiB. tokio's row is still pending, for the same reason as the baseline's.
+
+| Gate | fastapi | excalidraw | cli |
+| --- | --- | --- | --- |
+| G1 disk safety | pass: min free 474.0 GiB, daemon 0 low readings | pass: 468.9 GiB, 0 low | pass: 463.6 GiB, 0 low |
+| G2 disk peak | pass: 0.75 GiB | pass: 5.64 GiB | pass: 6.16 GiB |
+| G3 disk scaling (2×) | pass: 1.41× (0.75 / 0.53 GiB) | **fail: 3.97×** (5.64 / 1.42) | **fail: 2.15×** (6.16 / 2.86) |
+| G4 disk after | pass: 0.35 GiB, daemon's Reef total 0.00 → 0.03 GiB | pass: 0.27 GiB, 0.03 → 0.08 | pass: 8.24 GiB used, of it `GOCACHE` 7.86 (not counted); 0.08 → 0.58 |
+| G5 load (16) | pass: p95 7.5 | **fail: p95 37.1** | **fail: p95 35.3** |
+| G6 memory | pass | pass | pass |
+| G7 usability | **fail: `ws list` p99 2473 ms**, late 20.3 ms | **fail: 4524 ms**, 10.0 ms | **fail: 1050 ms**, 14.1 ms |
+| G8 throughput | pass: 1.29× | pass: 1.73× | pass: 2.65× |
+| G9 correctness | pass | **fail: 1 of 5** (a 20,000-index sync test) | pass |
+
+G7's failures are 12 of 859 `ws list` calls (median 30 ms). Every call over 500 ms came while the host's self-hosted CI runner was running a job, and the slowest (excalidraw, 4.5 s) during 4 seconds in which the VM's CPUs were idle and the daemon logged nothing, with five installs in flight, then resumed all at once: a stall of the VM's disk, not of the daemon. The same build's `ws list` p99 on Linux is 45 to 48 ms for every stack. A rerun on a quiet host would settle it.
+
+### Linux (`ubuntu-24.04`, 4 vCPUs, 16 GiB)
+
+[Run 43496597183](https://github.com/reef-vcs/reef/actions/runs/43496597183), `e7aea9db` (this pull request's implementation before its rebase), `--limit both`: each stack ran without the limit and then with it, and the gates judge the second.
+
+| Gate | fastapi | excalidraw | cli | tokio |
+| --- | --- | --- | --- | --- |
+| G1 disk safety | pass: min free 107.1 GiB, 0 low | pass: 98.8 GiB, 0 low | pass: 97.8 GiB, 0 low | pass: 70.4 GiB, 0 low |
+| G2 disk peak | pass: 1.79 GiB | pass: 5.75 GiB | pass: 5.48 GiB | pass: 38.71 GiB |
+| G3 disk scaling | **fail: 5.26×** | **fail: 5.00×** | **fail: 2.31×** | **fail: 4.97×** (3× for Rust) |
+| G4 disk after | pass: 0.01 GiB, daemon 0.03 → 1.74 GiB (its last reading came before the release) | pass: 0.13 GiB, 0.22 → 0.22 | pass: 8.69 GiB used, of it `GOCACHE` 8.67 (not counted); 0.02 → 0.27 | pass: 0.01 GiB, 0.14 → 0.15 |
+| G5 load (8) | pass: p95 7.1 | **fail: p95 24.4** | **fail: p95 31.4** | **fail: p95 16.4** |
+| G6 memory | pass | pass: PSI full max 1.3% | pass | pass: PSI full max 10.0%, 0.58 GiB swap |
+| G7 usability | pass: 45 ms, 2.9 ms | pass: 45 ms, 2.9 ms | pass: 46 ms, 2.9 ms | pass: 48 ms, 3.0 ms |
+| G8 throughput | pass: 1.91× | pass: 2.83×; limit on/off makespan 1.01× | pass: 3.69×; 1.03× | pass: 4.74×; 0.96× |
+| G9 correctness | pass | **fail: 5 of 5** | pass | pass |
+
+What the runs say for #272:
+
+- **G1, G2 and G4 pass on every stack on both machines**, with no create refused and the daemon never `low`. G4's cli row passes only because the user's decision of 2026-11-13 stops counting the shared `GOCACHE` (7.9 to 8.7 GiB that outlives the workspaces); `-trimpath` remains the fix for that.
+- **The daemon's figures agree with an independent walk**, workspace by workspace, on both filesystems.
+- The harness read the daemon every 10 s and stopped at the end of `ws gc`, so fastapi's Linux "end" (1.74 GiB, its five workspaces) came before the release. It now takes one more reading after `ws gc`.
+- **G3 is unchanged and was not this ticket's to fix**: every workspace still installs its own dependencies (#273 and #274 are next).

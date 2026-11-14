@@ -106,6 +106,11 @@ struct RunArgs {
     /// Keep the run's state directory afterwards.
     #[arg(long)]
     keep_state: bool,
+    /// The run's daemon's `[disk] floor` (#272), such as `0` on a machine
+    /// whose free space is under the default; the daemon's default when
+    /// absent.
+    #[arg(long)]
+    disk_floor: Option<String>,
     /// Clone and set up the repositories, check their patches, and stop.
     #[arg(long)]
     setup_only: bool,
@@ -206,6 +211,7 @@ fn run(args: RunArgs) -> Result<ExitCode> {
         idle: Duration::from_secs(args.idle_secs),
         stagger: Duration::from_millis(args.stagger_ms),
         keep_state: args.keep_state,
+        disk_floor: args.disk_floor,
     };
     if args.setup_only {
         run::setup_only(&config).map_err(anyhow::Error::msg)?;

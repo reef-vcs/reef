@@ -84,6 +84,9 @@ blake3 = "1.8"
 # The APFS clone backend (R1.08): `clonefile(2)` on a whole directory through `libc`, and per-file
 # clones through `reflink-copy` (`clonefile` on macOS, `FICLONE` on Linux for R1.10).
 libc = "0.2"
+# Disk accounting (#272): macOS's important-usage capacity, through CoreFoundation. 0.8.7, the
+# version security-framework already pulls in.
+core-foundation-sys = "0.8.7"
 reflink-copy = "0.1"
 # The backend conformance suite's tree digest (R1.11, dev-only). 0.11, the version jj-lib's
 # dependencies already pull in, rather than the brief's 0.10, so the lockfile gains no second copy.

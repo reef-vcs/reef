@@ -1370,6 +1370,25 @@ async fn list_workspaces_is_brief_with_counts() {
     assert!(diff.get("at_operation").is_none(), "{diff}");
 }
 
+/// #272: `list_workspaces` adds each workspace's `disk` only while the disk
+/// level is not `ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_workspaces_shows_disk_only_when_low() {
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.disk.floor = reef_daemon::config::DiskAmount::Auto;
+    })
+    .await;
+    let disk = daemon.handle.state().manager.disk();
+    disk.set_free_for_tests(Some(1 << 43));
+    let mut mcp = server(&daemon, &repo.root).await;
+    create(&mut mcp).await;
+    let listed = mcp.ok("list_workspaces", json!({})).await;
+    assert!(listed["workspaces"][0].get("disk").is_none(), "{listed}");
+    disk.set_free_for_tests(Some(0));
+    let listed = mcp.ok("list_workspaces", json!({})).await;
+    assert!(listed["workspaces"][0]["disk"].is_object(), "{listed}");
+}
+
 // R2.24 11: every tool's result matches its `outputSchema` in `reef schema
 // mcp`; `Mcp::tool` checks each call, and this test calls every tool.
 #[tokio::test(flavor = "multi_thread")]

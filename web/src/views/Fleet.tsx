@@ -12,7 +12,12 @@ import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } fr
 import type { Connection } from "../api/connection";
 import { timestampDate, timestampFromMs } from "@bufbuild/protobuf/wkt";
 import type { Presence } from "../gen/reef/api/v1/presence_pb";
-import { LeaseState, WorkspaceState } from "../gen/reef/api/v1/workspaces_pb";
+import {
+  DiskLevel,
+  LeaseState,
+  WorkspaceState,
+  type DiskStatus,
+} from "../gen/reef/api/v1/workspaces_pb";
 import { agentsOfWorkspace, joinAgents } from "../fleet/agents";
 import { durationMs, expiry, type Health } from "../fleet/lease";
 import type { FrameScheduler } from "../live/frame";
@@ -404,6 +409,31 @@ function AgentCard({
 
 const timestampOf = timestampFromMs;
 
+/** A notice while the disk level is not ok (#272), as `reef here` says it. */
+function DiskNotice({ status }: { status: DiskStatus | undefined }) {
+  if (!status || (status.level !== DiskLevel.WARN && status.level !== DiskLevel.LOW)) return null;
+  // Free space as the floor counts it: purgeable space included.
+  const usable = (v: DiskStatus["volumes"][number]) =>
+    (v.purgeableFreeBytes ?? 0n) > v.freeBytes ? (v.purgeableFreeBytes ?? 0n) : v.freeBytes;
+  const tightest = [...status.volumes].sort(
+    (a, b) => Number(usable(a) - a.floorBytes) - Number(usable(b) - b.floorBytes),
+  )[0];
+  const free = tightest
+    ? ` ${size(usable(tightest))} free, floor ${size(tightest.floorBytes)}.`
+    : "";
+  const idle = status.largestIdle
+    ? ` Releasing the idle ${shortId(status.largestIdle.workspace)} would free ${size(status.largestIdle.bytes)}.`
+    : "";
+  return (
+    <p className="notice" role="status">
+      <strong>{status.level === DiskLevel.LOW ? "Disk nearly full" : "Disk getting full"}</strong>
+      {status.level === DiskLevel.LOW ? ": new workspaces are refused." : "."}
+      {free}
+      {idle}
+    </p>
+  );
+}
+
 export function Fleet({
   connection,
   live,
@@ -508,16 +538,22 @@ export function Fleet({
         attention && `${String(attention)} ${attention === 1 ? "needs" : "need"} attention`,
       ].filter(Boolean);
 
+  // The daemon's kept figure (#272): what releasing the workspace frees.
   const disk = (row: WorkspaceRow) => {
-    const result = model.disk.results.get(row.id);
-    const usage = result?.response?.diskUsage;
-    if (result?.notMeasurable)
-      return { text: "not measurable", title: "its base is no longer cached" };
-    if (result?.error && !usage) return { text: "failed", title: result.error.message };
-    if (!usage || result.measuredAt === undefined) return { text: "-", title: "not measured yet" };
+    const figure = row.workspace.disk;
+    if (!figure) return { text: "-", title: "not measured yet" };
+    const cost = figure.unsharedBytes ?? figure.trackedBytes + figure.buildBytes;
+    const largest = figure.largest.map((dir) => `${dir.path} ${size(dir.bytes)}`).join(", ");
     return {
-      text: size(usage.allocatedBytes),
-      title: `${String(usage.filesChanged)} files differ from the base, measured ${clock(timestampOf(result.measuredAt)).text}`,
+      text: `${size(cost)}${figure.incomplete ? "~" : ""}`,
+      title: [
+        `tracked ${size(figure.trackedBytes)}, build output ${size(figure.buildBytes)}`,
+        largest && `largest: ${largest}`,
+        figure.measuredAt && `measured ${clock(figure.measuredAt).text}`,
+        figure.incomplete && "incomplete: the walk stopped at a cap",
+      ]
+        .filter(Boolean)
+        .join("; "),
     };
   };
 
@@ -549,6 +585,7 @@ export function Fleet({
         </p>
       )}
       {snapshot.error && <ErrorView error={snapshot.error} />}
+      {!frozen && <DiskNotice status={snapshot.diskStatus} />}
       <div className="smartlog-body">
         <div>
           {!frozen && (

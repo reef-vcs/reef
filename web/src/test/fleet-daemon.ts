@@ -30,14 +30,17 @@ import {
   type GetRepositoryRequest,
 } from "../gen/reef/api/v1/repositories_pb";
 import {
+  DiskPathSchema,
   DiskUsageSchema,
   GetWorkspaceResponseSchema,
   LeaseSchema,
   LeaseState,
   ListWorkspacesResponseSchema,
+  WorkspaceDiskSchema,
   WorkspaceSchema,
   WorkspaceService,
   WorkspaceState,
+  type DiskStatus,
   type GetWorkspaceRequest,
   type ListWorkspacesRequest,
   type Workspace,
@@ -74,6 +77,15 @@ export function workspace(
       grace: durationFromMs(300_000),
     }),
     changedFileCount: 2,
+    // The daemon's kept figure (#272).
+    disk: create(WorkspaceDiskSchema, {
+      trackedBytes: 1024n * 1024n,
+      buildBytes: 17n * 1024n * 1024n,
+      unsharedBytes: 18n * 1024n * 1024n,
+      files: 40n,
+      measuredAt: timestampFromMs(T),
+      largest: [create(DiskPathSchema, { path: "target", bytes: 17n * 1024n * 1024n })],
+    }),
     ...init,
   });
 }
@@ -95,6 +107,8 @@ export class FakeFleetDaemon {
   uptimeMs = 3_600_000;
   /** `GetWorkspace` answers without `disk_usage`. */
   noDisk = false;
+  /** The disk status every listing carries (#272). */
+  diskStatus: DiskStatus | undefined = undefined;
   /** Each page holds at most this many workspaces. */
   pageCap = Number.POSITIVE_INFINITY;
   failList: Error | undefined;
@@ -144,6 +158,7 @@ export class FakeFleetDaemon {
             workspaces: page,
             nextPageToken: next < this.workspaces.length ? String(next) : "",
             atOperation: request.atOperation,
+            diskStatus: request.atOperation ? undefined : this.diskStatus,
           });
         },
         getWorkspace: async (request) => {

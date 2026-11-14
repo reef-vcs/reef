@@ -84,6 +84,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0070](0070-publishing-to-a-git-remote.md) | Publishing to a git remote | accepted |
 | [0071](0071-rebasing-and-following-trunk.md) | Rebasing, fetching, and following trunk | accepted |
 | [0072](0072-default-workspace-root.md) | Default workspace root outside the state directory | accepted |
-| [0073](0073-laptop-resource-budget.md) | Five tickets at once on a standard laptop | accepted (amended by [0074](0074-build-limit-jobserver.md)) |
+| [0073](0073-laptop-resource-budget.md) | Five tickets at once on a standard laptop | accepted (amended by [0074](0074-build-limit-jobserver.md), [0076](0076-disk-accounting.md)) |
 | [0074](0074-build-limit-jobserver.md) | The build limit: one FIFO, recovered by its holders | accepted |
 | [0075](0075-landed-history-projection.md) | Landed history projection | accepted |
+| [0076](0076-disk-accounting.md) | Disk accounting: one walk per workspace, a floor that reads statvfs first | accepted |

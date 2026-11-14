@@ -50,7 +50,8 @@ fn is_zero(value: &u32) -> bool {
 /// `change_id`, `change_id_reverse_hex`, `commit_id`, `backend`, `path`,
 /// `created_at`, `last_snapshot_at`, `last_snapshot_op`, `lease`,
 /// `watcher`, `watch_state`, `local_snapshot_count`, `stores`; `ws inspect
-/// <id>` has them.
+/// <id>` has them. `disk` only while the disk level is not `ok` (#272), as
+/// [`Disk`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Workspace")]
 pub struct Workspace<'a> {
@@ -66,6 +67,49 @@ pub struct Workspace<'a> {
     attention: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     changed_file_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk: Option<Disk>,
+}
+
+/// A workspace's disk figure, while the disk level is not `ok` (#272):
+/// `unshared_bytes` where the filesystem tells, else `tracked_bytes` and
+/// `build_bytes`. Dropped: `files`, `measured_at`, `incomplete`, `largest`,
+/// `missing_dependencies`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.WorkspaceDisk")]
+#[expect(clippy::struct_field_names, reason = "the full type's keys")]
+pub struct Disk {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unshared_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tracked_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_bytes: Option<u64>,
+}
+
+impl From<&json::WorkspaceDisk> for Disk {
+    fn from(disk: &json::WorkspaceDisk) -> Self {
+        match disk.unshared_bytes {
+            Some(unshared) => Self {
+                unshared_bytes: Some(unshared),
+                tracked_bytes: None,
+                build_bytes: None,
+            },
+            None => Self {
+                unshared_bytes: None,
+                tracked_bytes: Some(disk.tracked_bytes),
+                build_bytes: Some(disk.build_bytes),
+            },
+        }
+    }
+}
+
+/// Adds each workspace's `disk` to `views`, made from `list` in order: for
+/// a list printed while the disk level is not `ok`.
+pub fn show_disk<'a>(views: &mut [Workspace<'a>], list: &'a [json::Workspace]) {
+    for (view, ws) in views.iter_mut().zip(list) {
+        view.disk = ws.disk.as_ref().map(Disk::from);
+    }
 }
 
 impl<'a> From<&'a json::Workspace> for Workspace<'a> {
@@ -78,6 +122,7 @@ impl<'a> From<&'a json::Workspace> for Workspace<'a> {
             divergent: ws.divergent,
             attention: ws.attention.as_deref(),
             changed_file_count: ws.changed_file_count,
+            disk: None,
         }
     }
 }
@@ -695,6 +740,7 @@ mod tests {
             remote_token_id: None,
             provenance: None,
             behind_trunk: None,
+            disk: None,
         }
     }
 

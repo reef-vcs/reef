@@ -140,6 +140,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         // R3.04: a workspace's session would grow every future that holds a
         // `Workspace` past clippy's `large_futures` bound.
         .boxed(".reef.api.v1.Workspace.provenance")
+        // #272: likewise the disk figure and the disk status.
+        .boxed(".reef.api.v1.Workspace.disk")
+        .boxed(".reef.api.v1.GetDaemonStatusResponse.disk")
+        .boxed(".reef.api.v1.GetWorkspaceResponse.disk_status")
+        .boxed(".reef.api.v1.ListWorkspacesResponse.disk_status")
         .compile_fds(everything.file_descriptor_set())?;
     println!("cargo:rerun-if-changed=proto");
     Ok(())

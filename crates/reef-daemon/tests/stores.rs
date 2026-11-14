@@ -1249,3 +1249,28 @@ async fn store_build_progress() {
         .unwrap();
     assert_eq!(lease_end.end_reason(), v1::PresenceEndReason::Gone);
 }
+
+/// #272: below the floor a build is refused with `DISK_SPACE_LOW`; a
+/// sealed store still answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_refused_below_the_floor() {
+    let (daemon, repo) = fixture_with(|config| {
+        config.file.disk.floor = reef_daemon::config::DiskAmount::Auto;
+    })
+    .await;
+    let disk = daemon.handle.state().manager.disk();
+    disk.set_free_for_tests(Some(0));
+    let plenty = Some(1_u64 << 43);
+    let refused = build_with(&daemon, &repo, Duration::from_mins(5)).await;
+    let Some(ClientError::Rpc { status, .. }) = &refused.error else {
+        panic!("not refused: {refused:?}");
+    };
+    let detail = reef_daemon::error::detail_of(status).unwrap();
+    assert_eq!(detail.reason, reef_api::error::DISK_SPACE_LOW);
+    assert!(refused.done.is_none());
+    disk.set_free_for_tests(plenty);
+    assert!(build(&daemon, &repo).await.sealed);
+    disk.set_free_for_tests(Some(0));
+    let again = build(&daemon, &repo).await;
+    assert!(again.sealed && again.already_built);
+}

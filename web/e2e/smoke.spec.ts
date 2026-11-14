@@ -211,14 +211,16 @@ test("smoke", async ({ reef, context, page }) => {
     await expect(agentCard).toContainText(/finished (just now|\d+ min ago)/);
     expect(await cards.count()).toBe(order);
 
-    // A write is snapshotted: Files rises, and the selection measures its disk.
+    // A write is snapshotted: Files rises, and "Measure again" has the
+    // daemon walk the selection and keep its figure (#272).
     await writeFile(join(wsA.path, "e2e-fleet.txt"), "fleet\n");
     await expect(wsRow(wsA).getByRole("cell").nth(4)).toHaveText("1", { timeout: 20_000 });
     await wsRow(wsA)
       .getByRole("link", { name: wsA.id.slice(0, 8) })
       .click();
     const pane = page.getByRole("complementary", { name: "Selection" });
-    await expect(pane).toContainText(/[1-9]\d* files? differ from the base/);
+    await pane.getByRole("button", { name: "Measure again" }).click();
+    await expect(pane).toContainText(/tracked [1-9][\d.]* (B|KiB), build output/);
 
     // A release keeps its row, in place.
     const before = await workspaces.getByRole("row").count();

@@ -175,6 +175,7 @@ impl Manager {
             detail: (!details.is_empty()).then(|| details.join("; ")),
         };
         self.db.finish_workspace(id, state, lease_end, &reclaim)?;
+        self.disk.forget(id);
         self.end_sessions(id);
         entry.update_record(|record| {
             record.state = state;
@@ -431,9 +432,17 @@ impl Manager {
     async fn freed_bytes(&self, entry: &Arc<WorkspaceEntry>, root_exists: bool) -> Option<u64> {
         let tree = if root_exists {
             let record = entry.record();
-            self.disk_usage(Arc::clone(entry), &record)
-                .await?
-                .allocated_bytes
+            // The kept figure (#272) when it is current, else a walk.
+            match self.db.workspace_disk(record.id) {
+                Ok(Some(figure)) if !figure.incomplete && !self.disk.is_dirty(record.id) => {
+                    figure.cost()
+                }
+                _ => self
+                    .measure_disk(record.id, super::disk::Priority::Request)
+                    .await?
+                    .figure
+                    .cost(),
+            }
         } else {
             0
         };

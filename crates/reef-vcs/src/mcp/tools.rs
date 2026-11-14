@@ -915,14 +915,23 @@ tool!(list_workspaces, args::ListWorkspaces, |call, args| {
         }))
         .await?;
     let workspaces: Vec<Workspace> = response.workspaces.iter().map(Workspace::from).collect();
+    // A page across repositories names each one's: other pages may hold
+    // the others.
+    let mut views = if all_repositories {
+        brief::workspaces_with_repo(&workspaces)
+    } else {
+        brief::workspaces(&workspaces)
+    };
+    // Each workspace's disk figure while the disk level is not `ok` (#272).
+    if response
+        .disk_status
+        .as_deref()
+        .is_some_and(|status| status.level() != v1::DiskLevel::Ok)
+    {
+        brief::show_disk(&mut views, &workspaces);
+    }
     to_value(&Workspaces {
-        // A page across repositories names each one's: other pages may hold
-        // the others.
-        workspaces: if all_repositories {
-            brief::workspaces_with_repo(&workspaces)
-        } else {
-            brief::workspaces(&workspaces)
-        },
+        workspaces: views,
         next_page_token: token(response.next_page_token),
     })
 });

@@ -209,6 +209,10 @@ pub async fn run(
         });
     }
 
+    // Free space under the floor refuses a build (#272); a sealed store
+    // above still answers.
+    manager.check_disk_floor()?;
+
     // A forced rebuild moves the store aside when it seals, which a bind
     // mount would not follow.
     if let Some(&count) = manager.stores_in_use().get(&key) {

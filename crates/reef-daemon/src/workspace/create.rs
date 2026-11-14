@@ -132,6 +132,9 @@ impl Manager {
         }
         // Checked before any work; the length is settled at step 2.
         self.leases.length_for(spec.lease)?;
+        // Free space under the floor refuses before anything is made
+        // (#272). Snapshots, releases and moves are never refused.
+        self.check_disk_floor()?;
         // Held until the row is written, so the repository is not forgotten
         // under this create.
         let repo_lock = self.repo_lock(spec.repo);
@@ -331,6 +334,8 @@ impl Manager {
         };
         self.insert_entry(record.id, Arc::new(entry));
         self.scheduler.track(record.id, TrackReason::Created).await;
+        // A new clone costs nothing yet: no walk until it is written to.
+        self.disk.track(record.id, false);
     }
 
     /// Step 1's backend: `choice`, or `workspace.backend`, probed (on the

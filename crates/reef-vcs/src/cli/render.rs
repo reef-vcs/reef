@@ -108,6 +108,7 @@ impl TextRow for Workspace {
         "STATE",
         "CHANGE",
         "FILES",
+        "DISK",
         "OWNER",
         "LEASE",
         "BACKEND",
@@ -122,6 +123,7 @@ impl TextRow for Workspace {
             short_change(self),
             self.changed_file_count
                 .map_or_else(|| "-".to_owned(), |count| count.to_string()),
+            disk_cell(self.disk.as_ref()),
             truncate(&self.owner, NAME_WIDTH),
             lease_text(self.lease.as_ref(), now_ms()),
             self.backend.clone(),
@@ -232,6 +234,127 @@ impl TextRender for Moved {
     }
 }
 
+/// `ws list`'s DISK cell (#272): what the workspace costs, `~` after it
+/// when the walk was incomplete, `-` when unmeasured.
+fn disk_cell(disk: Option<&reef_client::json::WorkspaceDisk>) -> String {
+    disk.map_or_else(
+        || "-".to_owned(),
+        |disk| {
+            let mut cell = size(disk.cost());
+            if disk.incomplete {
+                cell.push('~');
+            }
+            cell
+        },
+    )
+}
+
+/// `ws inspect`'s disk line (#272): `1.2 GiB unshared; tracked 40 KiB,
+/// build output 1.2 GiB (target 1.1 GiB, node_modules 80 MiB); 12,034
+/// entries; measured 2026-11-13T10:00:00.000Z`.
+fn disk_line(disk: &reef_client::json::WorkspaceDisk) -> String {
+    let unshared = disk.unshared_bytes.map_or_else(
+        || "unshared not known on this filesystem".to_owned(),
+        |bytes| format!("{} unshared", size(bytes)),
+    );
+    let largest = if disk.largest.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ({})",
+            disk.largest
+                .iter()
+                .map(|dir| format!("{} {}", dir.path, size(dir.bytes)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut line = format!(
+        "{unshared}; tracked {}, build output {}{largest}; {} entries; measured {}",
+        size(disk.tracked_bytes),
+        size(disk.build_bytes),
+        disk.files,
+        or_dash(disk.measured_at.as_deref())
+    );
+    if disk.incomplete {
+        line.push_str("; incomplete (a cap stopped the walk)");
+    }
+    if !disk.missing_dependencies.is_empty() {
+        line.push_str("; dependencies not installed in ");
+        line.push_str(&disk.missing_dependencies.join(", "));
+    }
+    line
+}
+
+/// One line for a disk level that is not `ok` (#272), as `ws list` prints
+/// it on stderr: `reef: disk low: 18 GiB free (floor 24 GiB); new
+/// workspaces are refused; next: reef ws release <id>`.
+pub(crate) fn disk_note(disk: &reef_client::json::DiskStatus) -> String {
+    let space = disk.tightest().map_or_else(String::new, |volume| {
+        format!(
+            ": {} free (floor {})",
+            size(volume.usable_free_bytes()),
+            size(volume.floor_bytes)
+        )
+    });
+    let budget = if disk.reasons.iter().any(|reason| reason == "over_budget") {
+        format!(
+            "; Reef holds {} (budget {})",
+            size(disk.reef_bytes),
+            size(disk.budget_bytes)
+        )
+    } else {
+        String::new()
+    };
+    let refused = if disk.level == "low" {
+        "; new workspaces are refused"
+    } else {
+        ""
+    };
+    let next = disk.largest_idle.as_ref().map_or_else(String::new, |idle| {
+        format!("; next: reef ws release {}", idle.workspace)
+    });
+    format!("reef: disk {}{space}{budget}{refused}{next}", disk.level)
+}
+
+/// `daemon status`'s disk line (#272): `ok, 96 GiB free (141 GiB with
+/// purgeable) of 926 GiB, floor 46 GiB; Reef 12 GiB of a 232 GiB budget`.
+fn disk_status_line(disk: Option<&reef_client::json::DiskStatus>) -> String {
+    let Some(disk) = disk else {
+        return "-".to_owned();
+    };
+    let volumes = disk
+        .volumes
+        .iter()
+        .map(|volume| {
+            let purgeable = volume
+                .purgeable_free_bytes
+                .filter(|bytes| *bytes > volume.free_bytes)
+                .map_or_else(String::new, |bytes| {
+                    format!(" ({} with purgeable)", size(bytes))
+                });
+            format!(
+                "{} free{purgeable} of {}, floor {} ({})",
+                size(volume.free_bytes),
+                size(volume.total_bytes),
+                size(volume.floor_bytes),
+                volume.holds.join(" and ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let budget = if disk.budget_bytes == 0 {
+        String::new()
+    } else {
+        format!(" of a {} budget", size(disk.budget_bytes))
+    };
+    format!(
+        "{}, {volumes}; Reef {}{budget}",
+        disk.level,
+        size(disk.reef_bytes)
+    )
+}
+
 impl TextRender for Inspected {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let mut pairs = workspace_pairs(&self.workspace);
@@ -247,6 +370,9 @@ impl TextRender for Inspected {
                 },
             ),
         ));
+        if let Some(disk) = &self.workspace.disk {
+            pairs.push(("disk", disk_line(disk)));
+        }
         pairs.push((
             "others_on_change",
             if self.other_workspaces_on_change.is_empty() {
@@ -338,6 +464,7 @@ impl TextRender for Status {
                 ("active_workspaces", self.active_workspaces.to_string()),
                 ("backends", backends),
                 ("remote", remote_line(self.remote.as_ref())),
+                ("disk", disk_status_line(self.disk.as_ref())),
             ]
             .into_iter()
             .chain(
@@ -383,25 +510,8 @@ fn build_line(build: &reef_client::json::BuildStatus) -> String {
 
 /// A byte count in binary units, as `du -h` would: `0 B`, `512 B`,
 /// `1.2 GiB`, `41 MiB` (one decimal below ten).
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a rounded display; f64 is exact far past any disk"
-)]
 pub(crate) fn size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else if value < 10.0 {
-        format!("{value:.1} {}", UNITS[unit])
-    } else {
-        format!("{value:.0} {}", UNITS[unit])
-    }
+    reef_client::json::human_bytes(bytes)
 }
 
 /// One `ws gc` line after its label: `jj 120 MiB -> 41 MiB, bases 3

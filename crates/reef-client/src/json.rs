@@ -34,6 +34,29 @@ pub fn rfc3339(time: &prost_types::Timestamp) -> String {
     rfc3339_millis(millis_of(time))
 }
 
+/// A byte count in binary units, as `du -h` would: `0 B`, `512 B`,
+/// `1.2 GiB`, `41 MiB` (one decimal below ten).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a rounded display; f64 is exact far past any disk"
+)]
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else if value < 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
 /// Unix milliseconds as RFC 3339 UTC with exactly three fraction digits,
 /// such as `2026-10-16T18:31:17.040Z`, so that timestamps sort as strings;
 /// `<millis>ms` for an instant RFC 3339 cannot write (outside the years 0
@@ -183,6 +206,7 @@ names_schema! {
     assignment_reason_name_schema_or_null = assignment_reason_name, true;
     transition_cause_name_schema_or_null = transition_cause_name, true;
     comment_kind_name_schema_or_null = comment_kind_name, true;
+    disk_level_name_schema = disk_level_name, false;
     instruction_state_name_schema_or_null = instruction_state_name, true;
     instruction_cause_name_schema_or_null = instruction_cause_name, true;
     operation_kind_name_schema_or_null = operation_kind_name, true;
@@ -400,6 +424,222 @@ pub struct Workspace {
     /// outside `ws inspect`, `here` and `status`, and without a trunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind_trunk: Option<u32>,
+    /// What its directory costs on disk, from the daemon's last walk
+    /// (#272): set for an active workspace by `ws list`, `ws inspect` and
+    /// `here` (`here` prints it only when the disk level is not `ok`).
+    /// Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<WorkspaceDisk>,
+}
+
+/// What a workspace's directory costs on disk, as of `measured_at`
+/// (#272). Tracked and build output are told apart by the working copy as
+/// of its last snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct WorkspaceDisk {
+    /// Allocated bytes of tracked files that differ from the base.
+    pub tracked_bytes: u64,
+    /// Allocated bytes of files the working copy does not track: build
+    /// output, installed dependencies, new files not yet snapshotted.
+    pub build_bytes: u64,
+    /// What releasing it frees at once (APFS's private size, an overlay's
+    /// upper directory, a copy's every file); `null` where the filesystem
+    /// cannot tell.
+    pub unshared_bytes: Option<u64>,
+    /// Entries walked.
+    pub files: u64,
+    /// When the walk ended; the create before the first walk.
+    pub measured_at: Option<String>,
+    /// The walk stopped at a cap; every figure is a lower bound.
+    pub incomplete: bool,
+    /// Up to three of the largest untracked directories, largest first.
+    pub largest: Vec<DiskPath>,
+    /// Directories with a dependency manifest and lockfile but nothing
+    /// installed (#195), `.` for the root.
+    pub missing_dependencies: Vec<String>,
+}
+
+impl WorkspaceDisk {
+    /// What the workspace costs: its unshared bytes, else everything that
+    /// differs from the base.
+    pub fn cost(&self) -> u64 {
+        self.unshared_bytes
+            .unwrap_or(self.tracked_bytes + self.build_bytes)
+    }
+}
+
+/// A directory and its allocated bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct DiskPath {
+    /// Repository-root relative.
+    pub path: String,
+    /// Allocated bytes under it.
+    pub bytes: u64,
+}
+
+impl From<&v1::WorkspaceDisk> for WorkspaceDisk {
+    fn from(disk: &v1::WorkspaceDisk) -> Self {
+        Self {
+            tracked_bytes: disk.tracked_bytes,
+            build_bytes: disk.build_bytes,
+            unshared_bytes: disk.unshared_bytes,
+            files: disk.files,
+            measured_at: time(disk.measured_at.as_ref()),
+            incomplete: disk.incomplete,
+            largest: disk
+                .largest
+                .iter()
+                .map(|dir| DiskPath {
+                    path: dir.path.clone(),
+                    bytes: dir.bytes,
+                })
+                .collect(),
+            missing_dependencies: disk.missing_dependencies.clone(),
+        }
+    }
+}
+
+/// How full the disk is, by Reef's floor and budget (#272).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct DiskStatus {
+    /// `ok`, `warn` (free space under twice the floor, or Reef over its
+    /// budget) or `low` (under the floor: creates and store builds are
+    /// refused).
+    #[schemars(schema_with = "disk_level_name_schema")]
+    pub level: String,
+    /// Why it is not `ok`: `free_below_floor`, `free_near_floor`,
+    /// `over_budget`.
+    pub reasons: Vec<String>,
+    /// The workspace root's volume and, if different, the state
+    /// directory's.
+    pub volumes: Vec<DiskVolume>,
+    /// `[disk] budget`; 0 for none.
+    pub budget_bytes: u64,
+    /// Active workspaces' cost.
+    pub workspaces_bytes: u64,
+    /// The base cache's recorded bytes.
+    pub bases_bytes: u64,
+    /// Shared stores, as last walked.
+    pub stores_bytes: u64,
+    /// The state directory's own files, as last walked.
+    pub state_bytes: u64,
+    /// The four summed: what Reef holds.
+    pub reef_bytes: u64,
+    /// The idle workspace whose release frees the most; `null` if none.
+    pub largest_idle: Option<IdleWorkspace>,
+    /// Active workspaces written to since their last walk, or whose walk
+    /// was incomplete.
+    pub stale_workspaces: u32,
+}
+
+impl DiskStatus {
+    /// The volume nearest its floor.
+    pub fn tightest(&self) -> Option<&DiskVolume> {
+        self.volumes.iter().min_by_key(|volume| {
+            i128::from(volume.usable_free_bytes()) - i128::from(volume.floor_bytes)
+        })
+    }
+}
+
+/// One volume Reef writes to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct DiskVolume {
+    /// A directory on it.
+    pub path: String,
+    /// `workspaces`, `state`, or both.
+    pub holds: Vec<String>,
+    /// Its size.
+    pub total_bytes: u64,
+    /// Available to an unprivileged user (`statvfs`).
+    pub free_bytes: u64,
+    /// macOS: free plus purgeable space; `null` when not read.
+    pub purgeable_free_bytes: Option<u64>,
+    /// The floor here; 0 for none.
+    pub floor_bytes: u64,
+    /// Its level by free space alone.
+    #[schemars(schema_with = "disk_level_name_schema")]
+    pub level: String,
+}
+
+impl DiskVolume {
+    /// Free space as the floor counts it.
+    pub fn usable_free_bytes(&self) -> u64 {
+        self.free_bytes
+            .max(self.purgeable_free_bytes.unwrap_or_default())
+    }
+}
+
+/// An active workspace nobody is using.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct IdleWorkspace {
+    /// Its id.
+    pub workspace: String,
+    /// Its repository.
+    pub repo_id: String,
+    /// Its owner.
+    pub owner: String,
+    /// What releasing it frees.
+    pub bytes: u64,
+    /// Its last snapshot, or its create.
+    pub idle_since: Option<String>,
+}
+
+/// `ok`, `warn`, `low`.
+pub fn disk_level_name(level: i32) -> &'static str {
+    match v1::DiskLevel::try_from(level) {
+        Ok(v1::DiskLevel::Ok) => "ok",
+        Ok(v1::DiskLevel::Warn) => "warn",
+        Ok(v1::DiskLevel::Low) => "low",
+        Ok(v1::DiskLevel::Unspecified) | Err(_) => UNKNOWN,
+    }
+}
+
+impl From<&v1::DiskStatus> for DiskStatus {
+    fn from(status: &v1::DiskStatus) -> Self {
+        Self {
+            level: disk_level_name(status.level).to_owned(),
+            reasons: status
+                .reasons
+                .iter()
+                .map(|reason| {
+                    match v1::DiskReason::try_from(*reason) {
+                        Ok(v1::DiskReason::FreeBelowFloor) => "free_below_floor",
+                        Ok(v1::DiskReason::FreeNearFloor) => "free_near_floor",
+                        Ok(v1::DiskReason::OverBudget) => "over_budget",
+                        Ok(v1::DiskReason::Unspecified) | Err(_) => UNKNOWN,
+                    }
+                    .to_owned()
+                })
+                .collect(),
+            volumes: status
+                .volumes
+                .iter()
+                .map(|volume| DiskVolume {
+                    path: volume.path.clone(),
+                    holds: volume.holds.clone(),
+                    total_bytes: volume.total_bytes,
+                    free_bytes: volume.free_bytes,
+                    purgeable_free_bytes: volume.purgeable_free_bytes,
+                    floor_bytes: volume.floor_bytes,
+                    level: disk_level_name(volume.level).to_owned(),
+                })
+                .collect(),
+            budget_bytes: status.budget_bytes,
+            workspaces_bytes: status.workspaces_bytes,
+            bases_bytes: status.bases_bytes,
+            stores_bytes: status.stores_bytes,
+            state_bytes: status.state_bytes,
+            reef_bytes: status.reef_bytes,
+            largest_idle: status.largest_idle.as_ref().map(|idle| IdleWorkspace {
+                workspace: idle.workspace.clone(),
+                repo_id: idle.repo_id.clone(),
+                owner: idle.owner.clone(),
+                bytes: idle.bytes,
+                idle_since: time(idle.idle_since.as_ref()),
+            }),
+            stale_workspaces: status.stale_workspaces,
+        }
+    }
 }
 
 /// A shared store mounted in a workspace (R1.20).
@@ -464,6 +704,7 @@ impl From<&v1::Workspace> for Workspace {
                 .as_deref()
                 .map(|session| Box::new(ProvenanceSession::from(session))),
             behind_trunk: ws.behind_trunk,
+            disk: ws.disk.as_deref().map(WorkspaceDisk::from),
         }
     }
 }
@@ -760,6 +1001,9 @@ pub struct Status {
     /// it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildStatus>,
+    /// How full the disk is (#272); absent from a daemon before it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskStatus>,
 }
 
 /// The machine-wide build limit, as `daemon status` prints it (#271).
@@ -1041,6 +1285,7 @@ impl From<&v1::GetDaemonStatusResponse> for Status {
             backends: status.backends.iter().map(BackendProbe::from).collect(),
             remote: status.remote.as_ref().map(RemoteListener::from),
             build: status.build.as_ref().map(BuildStatus::from),
+            disk: status.disk.as_deref().map(DiskStatus::from),
         }
     }
 }
@@ -1070,6 +1315,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
                 .collect(),
             remote: None,
             build: None,
+            disk: None,
         }
     }
 }

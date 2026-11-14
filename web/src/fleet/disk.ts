@@ -1,16 +1,14 @@
-// Disk usage on a budget (R2.20). Each figure is a `GetWorkspace` that walks
-// the workspace's directory on the daemon, so the page measures one
-// workspace at a time, paced like every other read (live/paced.ts): one open
-// page costs the daemon at most a quarter of one core in walks, whatever the
-// fleet's size.
-//
-// Order: what the user asked to measure again, then the selected workspace if
-// it needs a figure, then workspaces never measured (in list order), then
-// those an operation touched since their figure (oldest figure first).
-// Nothing else re-measures a workspace: build output grows one without any
-// event, which is what "Measure again" is for. A measurement starts from an
-// animation frame, so a hidden tab measures nothing. `snapshot_first` is never
-// sent: the page never makes the daemon write.
+// The selected workspace's `GetWorkspace`, and "Measure again" (R2.20,
+// #272). The daemon keeps every active workspace's disk figure itself and
+// `ListWorkspaces` carries it (`Workspace.disk`), so the Disk column walks
+// nothing (#146). This reads only the selected workspace, for its snapshots
+// and the other workspaces on its change, without a walk; when an operation
+// touched it, again. "Measure again" asks the daemon to walk that one
+// workspace now (`GetWorkspace` with its walk), which updates the kept
+// figure; `onMeasured` then refreshes the list. Reads are paced like every
+// other (live/paced.ts) and start from an animation frame, so a hidden tab
+// reads nothing. `snapshot_first` is never sent: the page never makes the
+// daemon write.
 import type { Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import type { GetWorkspaceResponse } from "../gen/reef/api/v1/workspaces_pb";
@@ -18,11 +16,11 @@ import type { FrameScheduler } from "../live/frame";
 import { Paced } from "../live/paced";
 
 export interface DiskResult {
-  /** The last good answer; it carries `disk_usage` unless not measurable. */
+  /** The last good answer; with `disk_usage` after "Measure again". */
   response: GetWorkspaceResponse | undefined;
   /** When the last good answer came, in milliseconds since the epoch. */
   measuredAt: number | undefined;
-  /** The daemon answered without a figure (its base is no longer cached). */
+  /** "Measure again" answered without a figure (the directory is gone). */
   notMeasurable: boolean;
   /** The last call failed; the last good answer stays. */
   error: ReefError | null;
@@ -51,12 +49,13 @@ export class DiskScheduler {
     private readonly onChange: () => void,
     private readonly onSessionInvalid: () => void,
     private readonly now: () => number = Date.now,
+    private readonly onMeasured: () => void = () => undefined,
   ) {
     // Spaced runs start from a frame too: a hidden tab measures nothing.
     this.paced = new Paced(() => this.measureNext(), now, frame);
   }
 
-  /** The active workspaces, in list order: only these are measured. */
+  /** The active workspaces, in list order: only these are read. */
   setWorkspaces(ids: string[]) {
     this.ids = ids;
     this.ask();
@@ -89,29 +88,15 @@ export class DiskScheduler {
     this.paced.stop();
   }
 
-  /** What would be measured next, or undefined. */
+  /** What would be read next, or undefined: a "Measure again", else the
+   * selection when it was never read or an operation touched it. */
   next(): string | undefined {
     const active = new Set(this.ids);
     for (const id of this.forced) if (active.has(id)) return id;
-    const needs = (id: string) => {
-      const result = this.results.get(id);
-      return !result || result.dirty;
-    };
-    if (this.selected && active.has(this.selected) && needs(this.selected)) return this.selected;
-    const never = this.ids.find((id) => !this.results.has(id));
-    if (never !== undefined) return never;
-    let oldest: string | undefined;
-    let oldestAt = Number.POSITIVE_INFINITY;
-    for (const id of this.ids) {
-      const result = this.results.get(id);
-      if (!result?.dirty) continue;
-      const at = result.measuredAt ?? Number.NEGATIVE_INFINITY;
-      if (at < oldestAt) {
-        oldest = id;
-        oldestAt = at;
-      }
-    }
-    return oldest;
+    const result = this.selected ? this.results.get(this.selected) : undefined;
+    if (this.selected && active.has(this.selected) && (!result || result.dirty))
+      return this.selected;
+    return undefined;
   }
 
   /** Asks for a measurement at the next frame, if one is due. */
@@ -128,11 +113,11 @@ export class DiskScheduler {
     if (this.stopped) return undefined;
     const id = this.next();
     if (id === undefined) return undefined;
-    this.forced.delete(id);
-    return this.measure(id);
+    const walk = this.forced.delete(id);
+    return this.measure(id, walk);
   }
 
-  private async measure(id: string) {
+  private async measure(id: string, walk: boolean) {
     const before = this.results.get(id);
     const mark = this.marks.get(id) ?? 0;
     // An operation that touched it while the walk ran may postdate what it saw.
@@ -142,16 +127,18 @@ export class DiskScheduler {
         repo: this.repo(),
         workspace: id,
         snapshotFirst: false,
-        skipDiskUsage: false,
+        skipDiskUsage: !walk,
       });
       if (this.stopped) return;
       this.results.set(id, {
         response,
-        measuredAt: this.now(),
-        notMeasurable: !response.diskUsage,
+        measuredAt: walk ? this.now() : before?.measuredAt,
+        notMeasurable: walk && !response.diskUsage,
         error: null,
         dirty: touched(),
       });
+      // The walk updated the daemon's figure: the list shows it.
+      if (walk) this.onMeasured();
     } catch (thrown) {
       if (this.stopped) return;
       const error = reefError(thrown);

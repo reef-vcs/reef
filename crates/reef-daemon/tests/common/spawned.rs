@@ -143,6 +143,17 @@ impl SpawnedDaemon {
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let config_file = state_dir.join("config.toml");
+        // No disk floor or budget unless the test sets one (#272): a
+        // runner's free space must not refuse this test's creates.
+        let mut config = config;
+        if config.disk.floor == reef_daemon::config::DiskAmount::Auto {
+            config.disk.floor =
+                reef_daemon::config::DiskAmount::Bytes(reef_daemon::config::ByteSize(0));
+        }
+        if config.disk.budget == reef_daemon::config::DiskAmount::Auto {
+            config.disk.budget =
+                reef_daemon::config::DiskAmount::Bytes(reef_daemon::config::ByteSize(0));
+        }
         std::fs::write(&config_file, toml::to_string(&config).unwrap()).unwrap();
         let socket = state_dir.join("daemon.sock");
         let stderr = std::fs::OpenOptions::new()

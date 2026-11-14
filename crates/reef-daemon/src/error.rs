@@ -145,6 +145,8 @@ pub fn advice_of(error: &(dyn Error + 'static)) -> Option<Advice> {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::fetch::FetchFailure>() {
             error.advice()
+        } else if let Some(error) = error.downcast_ref::<crate::disk::DiskError>() {
+            Some(error.advice())
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.advice()
         } else if let Some(error) = error.downcast_ref::<crate::assign::AssignError>() {
@@ -756,6 +758,14 @@ fn reason_and_metadata(
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::fetch::FetchFailure>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::disk::DiskError>().or_else(|| {
+            match error.downcast_ref::<ManagerError>() {
+                Some(ManagerError::Disk(error)) => Some(error),
+                _ => None,
+            }
+        }) {
+            let (reason, pairs) = error.reason();
+            Some((reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::assign::AssignError>() {

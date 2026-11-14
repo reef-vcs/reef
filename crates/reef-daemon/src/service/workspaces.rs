@@ -133,6 +133,7 @@ impl WorkspacesService {
             workspaces,
             next_page_token,
             at_operation: view.id,
+            disk_status: None,
         }))
     }
 
@@ -171,6 +172,7 @@ impl WorkspacesService {
             snapshot_count,
             recent_snapshots: recent.iter().map(v1::SnapshotEntry::from).collect(),
             at_operation: view.id,
+            disk_status: None,
         }))
     }
 
@@ -340,6 +342,32 @@ fn record_ids(repo: impl std::fmt::Display, workspace: impl std::fmt::Display) {
 
 fn non_empty(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
+}
+
+/// Each active workspace's kept disk figure (#272): read from the
+/// database, never walked here.
+fn attach_disk(
+    state: &AppState,
+    repo: Option<RepoId>,
+    rows: &[WorkspaceRecord],
+    workspaces: &mut [Workspace],
+) {
+    let figures = state.manager.disk_figures(repo, rows);
+    for (record, workspace) in rows.iter().zip(workspaces) {
+        workspace.disk = figures
+            .get(&record.id)
+            .map(|figure| Box::new(v1::WorkspaceDisk::from(figure)));
+    }
+}
+
+/// The machine's disk status for a list or a get (#272): free space read
+/// with `statvfs`, purgeable space only under twice the floor.
+async fn disk_status(state: &AppState) -> Option<Box<v1::DiskStatus>> {
+    let status = state
+        .manager
+        .disk_status(crate::disk::Purgeable::NearFloor)
+        .await;
+    Some(Box::new(v1::DiskStatus::from(&status)))
 }
 
 /// Sets each of `workspaces`' `provenance` to its live session (R3.04), in
@@ -534,6 +562,8 @@ impl WorkspaceService for WorkspacesService {
         );
         let mut workspaces = listed(&self.state, repo, &rows)?;
         attach_provenance(&self.state, &mut workspaces).await?;
+        let records: Vec<WorkspaceRecord> = rows.iter().map(|(record, _)| record.clone()).collect();
+        attach_disk(&self.state, repo, &records, &mut workspaces);
         if request.changed_file_counts {
             count_changed_files(&self.state, &rows, &mut workspaces).await;
         }
@@ -541,6 +571,7 @@ impl WorkspaceService for WorkspacesService {
             workspaces,
             next_page_token,
             at_operation: String::new(),
+            disk_status: disk_status(&self.state).await,
         }))
     }
 
@@ -593,6 +624,12 @@ impl WorkspaceService for WorkspacesService {
             loaded: manager.entry(inspected.record.id).is_some(),
         })];
         attach_provenance(&self.state, &mut workspace).await?;
+        attach_disk(
+            &self.state,
+            Some(record.repo_id),
+            std::slice::from_ref(&inspected.record),
+            &mut workspace,
+        );
         if let Some(workspace) = workspace.first_mut() {
             workspace.behind_trunk =
                 crate::rebase::behind_trunk(&self.state, record.repo_id, &workspace.commit_id)
@@ -614,6 +651,7 @@ impl WorkspaceService for WorkspacesService {
                 .map(v1::SnapshotEntry::from)
                 .collect(),
             at_operation: String::new(),
+            disk_status: disk_status(&self.state).await,
         }))
     }
 

@@ -19,6 +19,7 @@
 
 mod abandoned;
 mod create;
+pub(crate) mod disk;
 mod gc;
 mod manager;
 mod move_;
@@ -589,6 +590,9 @@ pub enum ManagerError {
     /// A shared store could not be found, mounted, or built (R1.20).
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// Free space is under the floor (#272).
+    #[error(transparent)]
+    Disk(#[from] crate::disk::DiskError),
     /// A lockfile could not be read from the tree (R1.20).
     #[error("read a store's lockfile")]
     ReadFile(#[from] reef_lib::jj::spec::ReadFileError),
@@ -681,6 +685,7 @@ impl Classify for ManagerError {
             Self::WorkingCopyCheck { source, .. } => source.kind(),
             Self::Rebind { source, .. } => classify_by_source(source),
             Self::Store(error) => error.kind(),
+            Self::Disk(error) => error.kind(),
             Self::ReadFile(error) => error.kind(),
             Self::MovePointer(error) => error.kind(),
             Self::CheckoutTree(error) => error.kind(),
@@ -704,6 +709,7 @@ impl Advise for ManagerError {
             Self::Lease(error) => error.advice(),
             Self::Register(error) => error.advice(),
             Self::Store(error) => error.advice(),
+            Self::Disk(error) => Some(error.advice()),
             Self::NotRegistered(path) => Some(unregistered_advice(path)),
             Self::WorkspaceRoot(error) => Some(Advice::hint(format!(
                 "Reef keeps {} private to the daemon's user (#260); give it back to that user, or set [workspace] root in config.toml to a directory of your own",

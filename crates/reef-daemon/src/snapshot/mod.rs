@@ -1283,6 +1283,11 @@ impl Inner {
     /// here (jj narrows its scans, so they only count), and one that starts
     /// over marks the journal `events-lost` (see the module docs).
     fn record_event(&self, event: &WatchEvent) {
+        // Build output changes without snapshots, never without events
+        // (#272): the disk loop walks the workspace again.
+        if let Some(manager) = self.manager.upgrade() {
+            manager.disk().mark_dirty(event.workspace);
+        }
         let mut entries = self.lock_entries();
         // Events for an untracked workspace (released, or racing its
         // unwatch) are ignored.

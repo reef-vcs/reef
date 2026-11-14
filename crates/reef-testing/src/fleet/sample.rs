@@ -665,6 +665,22 @@ pub fn percentile(mut values: Vec<f64>, p: f64) -> Option<f64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn daemon_disk_reads_the_tightest_volume() {
+        let json =
+            br#"{"version":"0.4.2","disk":{"level":"warn","reef_bytes":7,"workspaces_bytes":5,
+            "volumes":[{"free_bytes":100,"purgeable_free_bytes":null,"floor_bytes":20},
+                       {"free_bytes":30,"purgeable_free_bytes":45,"floor_bytes":20}]}}"#;
+        let sample = daemon_disk(json, 9).unwrap();
+        assert_eq!(sample.level, "warn");
+        assert_eq!((sample.free_bytes, sample.floor_bytes), (45, 20));
+        assert_eq!(
+            (sample.reef_bytes, sample.workspaces_bytes, sample.t_ms),
+            (7, 5, 9)
+        );
+        assert!(daemon_disk(br#"{"version":"0.4.1"}"#, 0).is_none());
+    }
+
     const VM_STAT: &str = "\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                                    20257.
@@ -750,4 +766,108 @@ Swapouts:                                       1000.
         assert_eq!(readings.list_ms, Vec::new());
         assert_eq!(readings.list_failures.len(), 1);
     }
+}
+
+/// The daemon's own disk figures (#272), read with `reef daemon status`
+/// every 10 seconds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonDiskSample {
+    /// Milliseconds since the scenario started.
+    pub t_ms: u64,
+    /// `ok`, `warn` or `low`.
+    pub level: String,
+    /// The lowest usable free space over the daemon's volumes (purgeable
+    /// space counted on macOS).
+    pub free_bytes: u64,
+    /// That volume's floor.
+    pub floor_bytes: u64,
+    /// What Reef holds: workspaces, bases, stores and its state.
+    pub reef_bytes: u64,
+    /// Of it, the workspaces' unshared bytes.
+    pub workspaces_bytes: u64,
+}
+
+/// How often [`DiskWatch`] reads the daemon's figures.
+const DISK_EVERY: Duration = Duration::from_secs(10);
+
+/// Reads `reef daemon status -o json`'s `disk` in a thread of its own.
+#[derive(Debug)]
+pub struct DiskWatch {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Vec<DaemonDiskSample>>>,
+}
+
+impl DiskWatch {
+    /// Starts reading; `status` builds the `reef daemon status` command.
+    pub fn start(status: impl Fn() -> Command + Send + 'static, epoch: Instant) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let read = |out: &mut Vec<DaemonDiskSample>| {
+                if let Ok(output) = status().stdin(Stdio::null()).stderr(Stdio::null()).output()
+                    && let Some(sample) = daemon_disk(&output.stdout, millis(epoch.elapsed()))
+                {
+                    out.push(sample);
+                }
+            };
+            let mut out = Vec::new();
+            while !flag.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                read(&mut out);
+                let mut left = DISK_EVERY.saturating_sub(started.elapsed());
+                while !left.is_zero() && !flag.load(Ordering::Relaxed) {
+                    let nap = left.min(Duration::from_millis(100));
+                    std::thread::sleep(nap);
+                    left = left.saturating_sub(nap);
+                }
+            }
+            // The last reading follows the stop, so it is taken after the
+            // run's release and `ws gc` however the 10 s fell.
+            read(&mut out);
+            out
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops, takes a last reading, and returns the readings.
+    pub fn finish(mut self) -> Vec<DaemonDiskSample> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+/// One reading from `reef daemon status -o json`; `None` without a `disk`
+/// object (a daemon before #272).
+pub fn daemon_disk(json: &[u8], t_ms: u64) -> Option<DaemonDiskSample> {
+    let status: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let disk = status.get("disk")?;
+    let number = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let tightest = disk
+        .get("volumes")?
+        .as_array()?
+        .iter()
+        .map(|volume| {
+            let free = number(volume, "free_bytes").max(number(volume, "purgeable_free_bytes"));
+            (free, number(volume, "floor_bytes"))
+        })
+        .min_by_key(|(free, floor)| i128::from(*free) - i128::from(*floor))?;
+    Some(DaemonDiskSample {
+        t_ms,
+        level: disk.get("level")?.as_str()?.to_owned(),
+        free_bytes: tightest.0,
+        floor_bytes: tightest.1,
+        reef_bytes: number(disk, "reef_bytes"),
+        workspaces_bytes: number(disk, "workspaces_bytes"),
+    })
 }
