@@ -604,7 +604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730"
 dependencies = [
  "const-oid 0.9.6",
- "der",
+ "der 0.7.10",
  "spki",
  "x509-cert",
 ]
@@ -838,6 +838,12 @@ dependencies = [
  "pem-rfc7468",
  "zeroize",
 ]
+
+[[package]]
+name = "der"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a996a108feb8b427a6e12fcf6af4aa83409b79d72c15337d7741368131ee004"
 
 [[package]]
 name = "der-parser"
@@ -3715,7 +3721,7 @@ version = "0.4.2"
 dependencies = [
  "base64 0.23.1",
  "criterion",
- "der",
+ "der 0.8.3",
  "humantime",
  "jiff",
  "jsonschema",
@@ -3841,7 +3847,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
- "der",
+ "der 0.8.3",
  "gix",
  "libc",
  "rand",
@@ -4387,7 +4393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "045039ae523e86a8b856470a6fc8e9a4567bb61e723ec08a4d23fa8ce40167e9"
 dependencies = [
  "const-oid 0.9.6",
- "der",
+ "der 0.7.10",
  "futures-io",
  "jiff",
  "rustls-pki-types",
@@ -4446,7 +4452,7 @@ checksum = "36aa9c47f3480420ccb90753c5f3aae07823c489ab20762f0c96070ba35cd5cb"
 dependencies = [
  "cms",
  "const-oid 0.9.6",
- "der",
+ "der 0.7.10",
  "hex",
  "jiff",
  "rustls-pki-types",
@@ -4540,7 +4546,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
 ]
 
 [[package]]
@@ -5790,7 +5796,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid 0.9.6",
- "der",
+ "der 0.7.10",
  "spki",
  "tls_codec",
 ]
