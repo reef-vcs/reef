@@ -164,9 +164,12 @@ pub fn landing_message(landing: &StoredLanding, whole: bool) -> v1::Landing {
         created_at: Some(timestamp(row.created_at)),
         finished_at: row.finished_at.map(timestamp),
         batch_id: row.batch_id.clone().unwrap_or_default(),
+        push: landing_push(row, None),
+        // Only a landed landing landed under a `[history]` table.
         history: row
             .history
             .as_deref()
+            .filter(|_| row.outcome == Outcome::Landed.as_str())
             .and_then(super::history::Recorded::parse)
             .map(|history| v1::LandingHistory {
                 message: history.message,
@@ -296,5 +299,134 @@ pub fn batch_message(batch: &StoredBatch) -> v1::LandingBatch {
         message: row.message.clone().unwrap_or_default(),
         created_at: Some(timestamp(row.created_at)),
         finished_at: row.finished_at.map(timestamp),
+    }
+}
+
+/// A push state as the v1 enum.
+pub fn push_state_message(text: &str) -> v1::PushState {
+    match text {
+        "pushed" => v1::PushState::Pushed,
+        "pending" => v1::PushState::Pending,
+        "retrying" => v1::PushState::Retrying,
+        "diverged" => v1::PushState::Diverged,
+        "refused" => v1::PushState::Refused,
+        "disabled" => v1::PushState::Disabled,
+        _ => v1::PushState::Unspecified,
+    }
+}
+
+/// A destination's push state as the v1 message (R3.17).
+pub fn destination_push_message(row: &crate::db::DestinationPushRow) -> v1::DestinationPush {
+    let next: Vec<String> = row
+        .next
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let remote_head = row
+        .remote_head
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .map(|head| {
+            let field = |name: &str| head[name].as_str().unwrap_or_default().to_owned();
+            let commit = field("commit_id");
+            format!(
+                "{} {}: {}",
+                commit.get(..12).unwrap_or(&commit),
+                field("author"),
+                field("summary")
+            )
+        })
+        .unwrap_or_default();
+    v1::DestinationPush {
+        repo: row.repo_id.as_hex(),
+        destination: row.destination.clone(),
+        git_remote: row.git_remote.clone(),
+        branch: row.branch.clone(),
+        state: push_state_message(&row.state).into(),
+        local_commit_id: row.local_commit.clone().unwrap_or_default(),
+        remote_commit_id: row.remote_commit.clone().unwrap_or_default(),
+        unpushed_count: row.unpushed_count.min(1_000),
+        reason: row.reason.clone().unwrap_or_default(),
+        message: row.message.clone().unwrap_or_default(),
+        git_stderr: row.git_stderr.clone().unwrap_or_default(),
+        hint: row.hint.clone().unwrap_or_default(),
+        next,
+        remote_head,
+        attempts: row.attempts,
+        next_attempt_at: row.next_attempt_at.map(timestamp),
+        pushed_at: row.pushed_at.map(timestamp),
+        operation_id: if row.operation_collected {
+            String::new()
+        } else {
+            row.operation_id.clone().unwrap_or_default()
+        },
+        updated_at: Some(timestamp(row.updated_at)),
+    }
+}
+
+/// A landed landing's push (R3.17): PUSHED once a push carried it; else,
+/// with `destination` (its destination's push row), that row's state;
+/// `None` when it did not land, or landed onto a destination that does not
+/// push.
+pub fn landing_push(
+    row: &crate::db::LandingRow,
+    destination: Option<&crate::db::DestinationPushRow>,
+) -> Option<v1::LandingPush> {
+    if row.outcome != Outcome::Landed.as_str() {
+        return None;
+    }
+    if let Some(at) = row.pushed_at {
+        return Some(v1::LandingPush {
+            state: v1::PushState::Pushed.into(),
+            git_remote: destination
+                .map(|push| push.git_remote.clone())
+                .unwrap_or_default(),
+            branch: row.destination.clone(),
+            pushed_at: Some(timestamp(at)),
+            operation_id: row.push_operation_id.clone().unwrap_or_default(),
+            reason: String::new(),
+            hint: String::new(),
+        });
+    }
+    let push = destination?;
+    let state = match push_state_message(&push.state) {
+        // The destination is pushed, but not this landing: it is about to be.
+        v1::PushState::Pushed => v1::PushState::Pending,
+        state => state,
+    };
+    Some(v1::LandingPush {
+        state: state.into(),
+        git_remote: push.git_remote.clone(),
+        branch: push.branch.clone(),
+        pushed_at: None,
+        operation_id: String::new(),
+        reason: push.reason.clone().unwrap_or_default(),
+        hint: push.hint.clone().unwrap_or_default(),
+    })
+}
+
+/// Fills `landings`' `push` from their destinations' push rows in `state`
+/// (one read per destination).
+pub fn fill_pushes<'a>(
+    state: &crate::daemon::AppState,
+    rows: impl IntoIterator<Item = (&'a crate::db::LandingRow, &'a mut v1::Landing)>,
+) {
+    let mut cache: std::collections::HashMap<String, Option<crate::db::DestinationPushRow>> =
+        std::collections::HashMap::new();
+    for (row, message) in rows {
+        if row.outcome != Outcome::Landed.as_str() {
+            continue;
+        }
+        let push = cache
+            .entry(row.destination.clone())
+            .or_insert_with(|| {
+                state
+                    .db
+                    .destination_push(row.repo_id, &row.destination)
+                    .ok()
+                    .flatten()
+            })
+            .as_ref();
+        message.push = landing_push(row, push);
     }
 }

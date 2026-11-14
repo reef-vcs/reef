@@ -162,6 +162,8 @@ pub struct AppState {
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
     /// The landing service's workers and waiters (R3.13).
     pub landings: crate::landing::Landings,
+    /// The landing push workers (R3.17).
+    pub pushes: crate::landing::Pushes,
     /// Comment locks and the instruction sweep's queue (R3.12).
     pub comments: Arc<crate::comments::Comments>,
     /// Resolver assignments' locks and follower (R3.27).
@@ -475,6 +477,7 @@ impl Daemon {
             policy: Arc::new(crate::policy::Policies::default()),
             lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
             landings: crate::landing::Landings::default(),
+            pushes: crate::landing::Pushes::default(),
             comments: Arc::new(crate::comments::Comments::default()),
             assignments: Arc::new(crate::assign::Assignments::default()),
             build,

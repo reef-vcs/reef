@@ -1004,6 +1004,11 @@ pub struct Status {
     /// How full the disk is (#272); absent from a daemon before it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskStatus>,
+    /// Landing destinations whose push to a git remote needs a person
+    /// (R3.17: diverged, refused, or retrying for over an hour); absent
+    /// when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pushes_attention: Option<u32>,
 }
 
 /// The machine-wide build limit, as `daemon status` prints it (#271).
@@ -1286,6 +1291,7 @@ impl From<&v1::GetDaemonStatusResponse> for Status {
             remote: status.remote.as_ref().map(RemoteListener::from),
             build: status.build.as_ref().map(BuildStatus::from),
             disk: status.disk.as_deref().map(DiskStatus::from),
+            pushes_attention: (status.pushes_attention > 0).then_some(status.pushes_attention),
         }
     }
 }
@@ -1316,6 +1322,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
             remote: None,
             build: None,
             disk: None,
+            pushes_attention: None,
         }
     }
 }

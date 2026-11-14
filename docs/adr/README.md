@@ -88,3 +88,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0074](0074-build-limit-jobserver.md) | The build limit: one FIFO, recovered by its holders | accepted |
 | [0075](0075-landed-history-projection.md) | Landed history projection | accepted |
 | [0076](0076-disk-accounting.md) | Disk accounting: one walk per workspace, a floor that reads statvfs first | accepted |
+| [0077](0077-pushing-landed-history.md) | Pushing landed history to a git remote | accepted |

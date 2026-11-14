@@ -208,6 +208,10 @@ const NOT_RUN: &[(&[&str], &str)] = &[
         "would start a second daemon; tests/cli.rs checks it",
     ),
     (&["daemon", "stop"], "would signal this process"),
+    (
+        &["landing", "push"],
+        "needs a git remote; tests/vcs.rs landing_push_cli checks its outputs",
+    ),
     (&["restore"], "needs the daemon stopped"),
     (&["store", "build"], "needs a store spec and a build"),
     (&["symbols", "upload"], "needs a SCIP index"),
@@ -586,6 +590,8 @@ async fn outputs_match_their_schemas() {
     // Its batch (R3.14).
     script.both(&lander_dir, &["landing", "batches"]).await;
     script.both(&lander_dir, &["landing", "batch", "@-"]).await;
+    // No destination pushes here (R3.17): an empty list.
+    script.both(&lander_dir, &["landing", "pushes"]).await;
     script.both(&a_dir, &["history", "notes.txt"]).await;
     script.both(&a_dir, &["file", "list"]).await;
     script.json(&a_dir, &["file", "read", "notes.txt"]).await;

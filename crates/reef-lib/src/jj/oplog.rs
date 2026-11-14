@@ -614,7 +614,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 26] = [
+const WRITES: [(&str, OpKind); 27] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -639,6 +639,7 @@ const WRITES: [(&str, OpKind); 26] = [
     (TEST_BATCH_PREFIX, OpKind::Batch),
     (END_BATCH_PREFIX, OpKind::Batch),
     (PUBLISH_PREFIX, OpKind::Publish),
+    (PUSH_LANDED_PREFIX, OpKind::Publish),
     (REBASE_PREFIX, OpKind::Rebase),
     (FETCH_PREFIX, OpKind::Fetch),
 ];
@@ -652,6 +653,9 @@ pub const FETCH_PREFIX: &str = "reef: fetch ";
 /// and the branch: `reef: publish change <id> to <remote>/<branch>`, with
 /// ` (forced)` after a forced update.
 pub const PUBLISH_PREFIX: &str = "reef: publish change ";
+/// The description of a landing push (R3.17), before the destination:
+/// `reef: push landed <branch> to <remote>/<branch> (<n> commits)`.
+pub const PUSH_LANDED_PREFIX: &str = "reef: push landed ";
 /// The description of an operation writing a batch's trial commit (R3.14),
 /// before the batch id.
 pub const TEST_BATCH_PREFIX: &str = "reef: test batch ";

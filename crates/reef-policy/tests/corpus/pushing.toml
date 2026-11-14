@@ -1,0 +1,14 @@
+# A branch pushed to a git remote (R3.17): landed commits keep their own
+# messages ("keep"), and an undescribed change is blocked at the gate, since
+# its commit would reach the host as it is.
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[landing]
+checks = "proposal"
+push = "origin"
+
+[history]
+message = "keep"

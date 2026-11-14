@@ -256,6 +256,12 @@ pub struct FetchInput {
     pub remote: String,
     /// The branches; empty for trunk's.
     pub branches: Vec<String>,
+    /// Local bookmarks to follow fast forward only, besides the
+    /// repository's pushing destinations, which every fetch follows
+    /// (R3.17): a batch's own destination before its first push.
+    pub follow: Vec<String>,
+    /// A wait shorter than `[fetch] timeout` (a batch's fetch, R3.17).
+    pub timeout: Option<Duration>,
 }
 
 /// Plans, fetches and records `input`'s fetch. Refused when `[fetch]
@@ -269,7 +275,11 @@ pub async fn fetch(
             config: state.config.paths.config_file.clone(),
         });
     }
-    let timeout = state.config.file.fetch.timeout;
+    let timeout = input
+        .timeout
+        .map_or(state.config.file.fetch.timeout, |wait| {
+            wait.min(state.config.file.fetch.timeout)
+        });
     let deadline = tokio::time::Instant::now() + timeout;
     let (plan, readonly) = plan_job(state, &input).await?;
     let lock = lock_for((input.repo, plan.remote.clone()));
@@ -402,6 +412,23 @@ async fn record(
         .agent
         .clone()
         .or_else(|| input.workspace.as_ref().map(|record| record.owner.clone()));
+    // A pushing destination is only ever fast-forwarded by a fetch, never
+    // merged into a conflict that would stop its landings (R3.17).
+    let mut follow = input.follow.clone();
+    match state.db.destination_pushes(Some(input.repo)) {
+        // Only the destinations that push to the remote fetched from: a
+        // fetch of another remote never moves them.
+        Ok(rows) => follow.extend(
+            rows.into_iter()
+                .filter(|row| row.git_remote == fetched.remote)
+                .map(|row| row.destination),
+        ),
+        Err(error) => {
+            tracing::warn!(error = %ErrorChain(&error), "cannot read the pushing destinations; following only the request's");
+        }
+    }
+    follow.sort();
+    follow.dedup();
     let create_lock = state.manager.repo_lock(input.repo);
     let _shared = create_lock.read().await;
     let fetched = fetched.clone();
@@ -410,7 +437,11 @@ async fn record(
         .call_async(move |head| {
             async move {
                 head.refresh().await.map_err(ManagerError::from)?;
-                Ok::<_, FetchFailure>(head.repo.record_fetch(&fetched, &meta).await?)
+                Ok::<_, FetchFailure>(
+                    head.repo
+                        .record_fetch_following(&fetched, &follow, &meta)
+                        .await?,
+                )
             }
             .boxed_local()
         })
@@ -436,6 +467,17 @@ pub fn message(recorded: &RecordedFetch) -> v1::Fetched {
                     "{} has no branch {}; nothing was changed for it",
                     recorded.remote, branch.branch
                 ));
+            }
+            match branch.left {
+                Some(fetch::Left::Diverged) => notes.push(format!(
+                    "{} pushes landed history to {}, so it is only fast-forwarded: it and {}@{} have diverged, and it was left as it is (`reef landing pushes`)",
+                    branch.branch, recorded.remote, branch.branch, recorded.remote
+                )),
+                Some(fetch::Left::Policy) => notes.push(format!(
+                    "{}@{} changes reef-policy.toml or reef-checks.toml, so {} was not fast-forwarded to it (`reef landing pushes`)",
+                    branch.branch, recorded.remote, branch.branch
+                )),
+                None => {}
             }
             if branch.checked_out_left {
                 notes.push(format!(

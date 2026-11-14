@@ -93,6 +93,10 @@ message GetDaemonStatusResponse {
   // How full the disk is, by Reef's floor and budget (#272); each volume's
   // purgeable free space is read.
   DiskStatus disk = 14;
+  // Landing destinations, across repositories, whose push to a git remote
+  // needs a person: DIVERGED, REFUSED, or RETRYING for over an hour
+  // (R3.17; `reef landing pushes`). Field 14 is #272's.
+  uint32 pushes_attention = 15;
 }
 
 // The machine-wide build limit (#271, ADR 0074).

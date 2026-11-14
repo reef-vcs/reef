@@ -472,6 +472,12 @@ impl TextRender for Status {
                     .as_ref()
                     .map(|build| ("build", build_line(build))),
             )
+            .chain(self.pushes_attention.map(|count| {
+                (
+                    "pushes",
+                    format!("{count} need attention (`reef landing pushes`)"),
+                )
+            }))
             .collect::<Vec<_>>(),
         )
     }

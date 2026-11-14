@@ -728,7 +728,18 @@ fn a_summarized_branch_needs_a_description() {
         rule(&summary.evaluate(&undescribed), "builtin:description").status,
         Status::Unsatisfied
     );
+    // R3.17: a branch pushed to a git remote needs one under "keep" too.
+    let pushed = policy("[history]\nmessage = \"keep\"\n[landing]\npush = \"origin\"\n");
+    undescribed.change.description = String::new();
+    assert_eq!(
+        rule(&pushed.evaluate(&undescribed), "builtin:description").status,
+        Status::Unsatisfied
+    );
     undescribed.change.description = "Fix it\n".to_owned();
+    assert_eq!(
+        rule(&pushed.evaluate(&undescribed), "builtin:description").status,
+        Status::Satisfied
+    );
     let evaluation = summary.evaluate(&undescribed);
     assert_eq!(
         rule(&evaluation, "builtin:description").status,

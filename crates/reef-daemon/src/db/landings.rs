@@ -70,6 +70,11 @@ pub struct LandingRow {
     pub batch_id: Option<String>,
     /// The `[history]` table it landed under, as JSON (R3.16).
     pub history: Option<String>,
+    /// When a push first carried its landed commit to the destination's git
+    /// remote (R3.17).
+    pub pushed_at: Option<Timestamp>,
+    /// That push's operation.
+    pub push_operation_id: Option<String>,
 }
 
 /// One change of a landing, as `landing_changes` holds it.
@@ -140,7 +145,7 @@ pub struct LandingFilter {
 const COLUMNS: &str = "repo_id, id, destination, destination_before, destination_after, outcome,
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
-     remote_token_name, created_at, finished_at, batch_id, history";
+     remote_token_name, created_at, finished_at, batch_id, history, pushed_at, push_operation_id";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
      landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
@@ -172,6 +177,8 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
         finished_at: row.get(21)?,
         batch_id: row.get(22)?,
         history: row.get(23)?,
+        pushed_at: row.get(24)?,
+        push_operation_id: row.get(25)?,
     })
 }
 
@@ -204,7 +211,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
         ),
         params![
             row.repo_id,
@@ -231,6 +238,8 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.finished_at,
             row.batch_id,
             row.history,
+            row.pushed_at,
+            row.push_operation_id,
         ],
     )?;
     Ok(())

@@ -33,6 +33,7 @@ By default a rebase first fetches the destination's branch (trunk's, or the book
 
 - The remote-tracking bookmark (`main@origin`) moves to what the remote has.
 - A tracked local bookmark of the same name is fast-forwarded, **except git's checked-out branch** in a colocated repository: a person's checkout is never moved under them; the note says so, and the rebase targets the remote bookmark.
+- A landing destination whose policy pushes it (`[landing] push`, R3.17) is only ever fast-forwarded by a fetch, tracked or not: when it and the remote have diverged, or the remote changes a policy file, it is left where it is and a note says so, rather than merged into a conflict that would stop its landings ([landing](landing.md#pushing-landed-history)).
 - A branch the remote does not have is reported `missing` and left as it is. Run `jj git fetch` to forget a branch deleted on the host.
 - A fetch is not undoable: it records what the remote has. Fetch again instead.
 

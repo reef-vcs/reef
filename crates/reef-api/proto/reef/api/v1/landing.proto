@@ -32,6 +32,15 @@
 // `[history]` table, or `message = "keep"`, a change lands as written. A
 // change the destination (or an earlier change of its batch) already
 // holds the edits of returns with reason EMPTY instead of landing empty.
+//
+// A destination whose policy says `[landing] push = "<remote>"` is pushed
+// to the branch of its own name on that git remote after each landing
+// (R3.17, ADR 0077): fast forward only, in the background, so a landing
+// never waits for or fails with the push. A remote someone else moved is
+// fetched and followed fast forward when the destination is behind it, and
+// reported DIVERGED, never overwritten, when each has commits the other
+// lacks. ListPushes reads each destination's push state; PushLanded
+// pushes now.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -106,6 +115,31 @@ service LandingService {
   rpc ListBatches(ListBatchesRequest) returns (ListBatchesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // The push state of each of the repository's destinations whose policy
+  // pushes it to a git remote (R3.17), by destination.
+  //
+  // Errors: the repository reasons.
+  rpc ListPushes(ListPushesRequest) returns (ListPushesResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Pushes a destination's landed history to its git remote now, waiting
+  // up to `[publish] timeout` when `wait`; a push that is up to date writes
+  // nothing. A failed push is the destination's state in the response
+  // (RETRYING, DIVERGED, REFUSED), not an error. Never through the remote
+  // listener.
+  //
+  // Errors: NOT_FOUND with reason DESTINATION_NOT_FOUND, FAILED_PRECONDITION
+  // with reason DESTINATION_NOT_PUSHED (metadata `destination`: its policy
+  // has no `[landing] push`); PERMISSION_DENIED with reason
+  // REMOTE_PUBLISH_DENIED through the remote listener; the repository
+  // reasons.
+  rpc PushLanded(PushLandedRequest) returns (PushLandedResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
   }
 }
 
@@ -265,6 +299,130 @@ message Landing {
   // How it wrote its changes on the destination (R3.16); unset until it
   // lands, and for landings before R3.16.
   LandingHistory history = 21;
+  // Whether its landed commit reached the destination's git remote
+  // (R3.17); unset unless it landed onto a destination that pushes.
+  LandingPush push = 22;
+}
+
+// Whether a destination's landed history is on its git remote (R3.17).
+enum PushState {
+  // Not set: the destination does not push.
+  PUSH_STATE_UNSPECIFIED = 0;
+  // The remote branch is at the destination's head.
+  PUSH_STATE_PUSHED = 1;
+  // A push is due or running.
+  PUSH_STATE_PENDING = 2;
+  // The last attempt failed for a reason that may pass (an unreachable
+  // remote, failed authentication); `next_attempt_at` says when it tries
+  // again.
+  PUSH_STATE_RETRYING = 3;
+  // The remote branch and the destination each have commits the other
+  // lacks: pushing pauses, landings go on locally, and a person chooses
+  // (`hint`).
+  PUSH_STATE_DIVERGED = 4;
+  // A person must act: `reason`, `hint` and `next` say what.
+  PUSH_STATE_REFUSED = 5;
+  // The daemon's `[publish] enabled` or `landings` turns it off.
+  PUSH_STATE_DISABLED = 6;
+}
+
+// One destination's push state (R3.17).
+message DestinationPush {
+  // The repository's id.
+  string repo = 1;
+  // The destination bookmark.
+  string destination = 2;
+  // The git remote its policy names.
+  string git_remote = 3;
+  // The remote branch: the destination's own name.
+  string branch = 4;
+  // Its state.
+  PushState state = 5;
+  // The destination's head as last seen.
+  string local_commit_id = 6;
+  // The remote branch as last seen; empty when absent.
+  string remote_commit_id = 7;
+  // Landings onto the destination the remote lacks, at most 1000.
+  uint32 unpushed_count = 8;
+  // The last failure's reason constant (#258's, BRANCH_DIVERGED, or
+  // REMOTE_POLICY_CHANGED); empty when PUSHED.
+  string reason = 9;
+  // Its message.
+  string message = 10;
+  // Git's stderr, redacted and capped at 2048 bytes.
+  string git_stderr = 11;
+  // What to do about it.
+  string hint = 12;
+  // The command that does it, as argv.
+  repeated string next = 13;
+  // DIVERGED or REFUSED by a remote ahead: the remote's head, as
+  // `<commit> <author>: <summary>`, sanitized.
+  string remote_head = 14;
+  // Failed attempts since the last success.
+  uint32 attempts = 15;
+  // RETRYING: when it tries again.
+  google.protobuf.Timestamp next_attempt_at = 16;
+  // The last successful push.
+  google.protobuf.Timestamp pushed_at = 17;
+  // Its operation; empty once GC dropped it.
+  string operation_id = 18;
+  // When the state last changed.
+  google.protobuf.Timestamp updated_at = 19;
+}
+
+// Whether a landed landing reached its destination's git remote (R3.17).
+message LandingPush {
+  // PUSHED once a push carried its landed commit; else its destination's
+  // state.
+  PushState state = 1;
+  // The git remote.
+  string git_remote = 2;
+  // The remote branch.
+  string branch = 3;
+  // When a push first carried it.
+  google.protobuf.Timestamp pushed_at = 4;
+  // That push's operation.
+  string operation_id = 5;
+  // Not PUSHED: why, from the destination's state.
+  string reason = 6;
+  // Not PUSHED: what to do about it.
+  string hint = 7;
+}
+
+// `ListPushes`: a repository, paged.
+message ListPushesRequest {
+  // The repository's id; empty for the one the server was started in.
+  string repo = 1;
+  // At most this many destinations; 0 for the default (100), at most 1000.
+  int32 page_size = 2;
+  // From an earlier response's `next_page_token`.
+  string page_token = 3;
+}
+
+// `ListPushes`: one page of destinations.
+message ListPushesResponse {
+  // By destination.
+  repeated DestinationPush pushes = 1;
+  // Pass as `page_token` for the next page; empty on the last.
+  string next_page_token = 2;
+}
+
+// `PushLanded`: the destination to push now.
+message PushLandedRequest {
+  // The repository's id; empty for the one the server was started in.
+  string repo = 1;
+  // The destination; empty for `trunk()`'s bookmark.
+  string destination = 2;
+  // Wait for the push, up to `[publish] timeout`.
+  bool wait = 3;
+}
+
+// `PushLanded`: the destination's state afterwards.
+message PushLandedResponse {
+  // The destination's push state afterwards.
+  DestinationPush push = 1;
+  // The push's operation, when one was written.
+  Operation operation = 2;
 }
 
 // Where a batch is (R3.14).

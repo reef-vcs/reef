@@ -25,6 +25,7 @@ use crate::workspace::ManagerError;
 /// no open landing one, and wakes each repository's worker.
 pub fn start(state: &Arc<AppState>) {
     super::batch::interrupt_open(state);
+    super::push::sweep(state);
     let repos = match state.db.repos_with_queued() {
         Ok(repos) => repos,
         Err(error) => {
@@ -190,7 +191,7 @@ pub(super) fn record_policy(landing: &mut StoredLanding, judged: &Judged) {
 /// When the landing has nothing left to do (its change is no longer queued
 /// at the queued commit), finishes it and returns how; `None` to go on.
 pub(super) fn settled(
-    state: &AppState,
+    state: &Arc<AppState>,
     repo: RepoId,
     landing: &mut StoredLanding,
     target: &LandTarget,
@@ -236,6 +237,21 @@ pub(super) fn settled(
                     .collect()
             })
             .unwrap_or_default();
+        // The `[history]` its batch formed under (#297): what a landing
+        // finished in its batch records.
+        let history = landing
+            .row
+            .batch_id
+            .as_deref()
+            .and_then(|id| state.db.batch(repo, id).ok().flatten())
+            .and_then(|batch| batch.row.history);
+        if let Some(recorded) = history.as_deref().and_then(super::history::Recorded::parse) {
+            let summarized = recorded.message == reef_policy::Message::Summary.as_str();
+            if let Some(first) = landing.changes.first_mut() {
+                first.summarized = summarized;
+            }
+            landing.row.history = history;
+        }
         Outcome::Landed
             .as_str()
             .clone_into(&mut landing.row.outcome);
@@ -243,6 +259,18 @@ pub(super) fn settled(
         state
             .db
             .finish_landing(&landing.row, &landing.changes, &pinned, None)?;
+        if state
+            .db
+            .destination_push(repo, &landing.row.destination)
+            .is_ok_and(|row| row.is_some())
+        {
+            super::push::wake(
+                state,
+                repo,
+                &landing.row.destination,
+                super::push::Trigger::Landing,
+            );
+        }
         return Ok(Some(Ok(())));
     }
     let message = format!("the change is now {}", row.state);

@@ -54,6 +54,8 @@ pub struct BatchRow {
     pub created_at: Timestamp,
     /// When it finished.
     pub finished_at: Option<Timestamp>,
+    /// The `[history]` table it formed under, as JSON (#297).
+    pub history: Option<String>,
 }
 
 /// One member of a batch.
@@ -127,7 +129,7 @@ pub struct BatchFilter {
 
 const COLUMNS: &str = "repo_id, id, destination, base_commit, state, outcome, size,
      culprit_position, landed_count, checks, policy_commit, policy_sha256, operation_id,
-     operation_collected, message, created_at, finished_at";
+     operation_collected, message, created_at, finished_at, history";
 
 const MEMBER_COLUMNS: &str = "position, landing_id, change_id, queued_commit, planned_tree, result";
 
@@ -157,6 +159,7 @@ fn batch_from_row(row: &Row<'_>) -> rusqlite::Result<BatchRow> {
         message: row.get(14)?,
         created_at: row.get(15)?,
         finished_at: row.get(16)?,
+        history: row.get(17)?,
     })
 }
 
@@ -242,7 +245,7 @@ fn write_batch_in(tx: &Transaction<'_>, batch: &StoredBatch) -> rusqlite::Result
     tx.execute(
         &format!(
             "INSERT OR REPLACE INTO landing_batches({COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
         ),
         params![
             row.repo_id,
@@ -262,6 +265,7 @@ fn write_batch_in(tx: &Transaction<'_>, batch: &StoredBatch) -> rusqlite::Result
             row.message,
             row.created_at,
             row.finished_at,
+            row.history,
         ],
     )?;
     tx.execute(

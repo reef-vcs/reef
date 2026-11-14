@@ -174,6 +174,9 @@ struct LandingTable {
     /// Path patterns whose changes land in a batch of their own.
     #[serde(default)]
     alone: Vec<String>,
+    /// The git remote (a remote's name, never a URL) each landing is
+    /// pushed to, fast-forward onto the branch of the destination's name.
+    push: Option<String>,
 }
 
 #[allow(dead_code)]

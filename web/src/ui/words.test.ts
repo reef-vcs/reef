@@ -86,6 +86,14 @@ describe("operationSentence for a publish", () => {
       "published a change to origin/reef/kxyzwqrsmtlo",
     );
   });
+  it("names a landing push (R3.17)", () => {
+    const effects = { bookmarks: [{ name: "main", remote: "origin" }] };
+    const description = "reef: push landed main to origin/main (3 commits)";
+    expect(operationSentence({ ...base, effects, description })).toBe(
+      "pushed landed history to origin/main",
+    );
+    expect(operationSentence({ ...base, description })).toBe("pushed landed history");
+  });
   it("falls back without effects", () => {
     expect(operationSentence(base)).toBe("published a change");
   });

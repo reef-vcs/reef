@@ -468,10 +468,12 @@ impl Policy {
 
     /// `builtin:description` (R3.16): on a branch whose `[history]`
     /// summarizes landed changes, a change needs a description, since the
-    /// summary is its description.
+    /// summary is its description; and on a branch that is pushed to a git
+    /// remote (`[landing] push`, R3.17), whose landed commits reach the host
+    /// as they are.
     fn description(&self, input: &Input) -> RuleResult {
         const NAME: &str = "builtin:description";
-        if !self.history.summarized() {
+        if !self.history.summarized() && self.landing.push.is_none() {
             return RuleResult::new(NAME, RuleKind::Builtin, Status::NotApplicable);
         }
         // What the summary keeps (reef_lib::jj::projection::normalize):

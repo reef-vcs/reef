@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 23] = [
+const TOOLS: [&str; 24] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -45,6 +45,7 @@ const TOOLS: [&str; 23] = [
     "release_workspace",
     "describe_change",
     "publish_change",
+    "push_landed",
     "rebase_change",
     "abandon_change",
     "undo_operation",
@@ -213,9 +214,13 @@ async fn handshake_and_tools() {
     // workaround #194 records. #259's `rebase_change`, with the `rebase` and
     // `fetch` kinds, took it to 23,328: without the tool an MCP agent leaves
     // Reef for `jj rebase` at the root, the workaround #259 records, and acts
-    // on the shared checkout instead of its workspace. Raising it again
-    // needs the same argument in that ticket's brief.
-    assert!(bytes <= 23_350, "tools/list is {bytes} bytes");
+    // on the shared checkout instead of its workspace. R3.17's
+    // `push_landed` took it to 23,960 (the user's decision 10): an MCP agent
+    // has no landing tool and otherwise cannot tell whether its landed work
+    // reached the team's git remote without leaving Reef for `git ls-remote`
+    // or `git push` at the root. Raising it again needs the same argument
+    // in that ticket's brief.
+    assert!(bytes <= 23_960, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -257,7 +262,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 23);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 24);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -1470,6 +1475,15 @@ async fn every_tool_result_matches_its_output_schema() {
     called.insert("publish_change");
     let refused = mcp.err("publish_change", json!({})).await;
     assert_eq!(refused["reason"], "IDENTITY_UNSET", "{refused}");
+    // Its trunk does not push (R3.17); tests/vcs.rs landing_push_cli checks
+    // a push's brief result, the same type, against its schema.
+    called.insert("push_landed");
+    let refused = mcp.err("push_landed", json!({})).await;
+    assert!(
+        refused["reason"] == "DESTINATION_NOT_PUSHED"
+            || refused["reason"] == "DESTINATION_NOT_FOUND",
+        "{refused}"
+    );
     for tool in TOOLS {
         assert!(called.contains(tool), "{tool} was not called");
     }

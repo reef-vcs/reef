@@ -160,6 +160,15 @@ pub fn status(error: &PublishError, context: &Context) -> tonic::Status {
 
 type Described = (&'static str, BTreeMap<String, String>, Advice);
 
+/// The reason constant and advice of `error`, as a landing push's row keeps
+/// them (R3.17); `None` for an error the daemon's general mapping reads.
+pub(crate) fn reason_and_advice(
+    error: &PublishError,
+    context: &Context,
+) -> Option<(&'static str, Advice)> {
+    describe(error, context).map(|(reason, _, advice)| (reason, advice))
+}
+
 fn meta(pairs: &[(&str, String)]) -> BTreeMap<String, String> {
     pairs
         .iter()
@@ -540,8 +549,9 @@ fn describe_push(error: &PushError, context: &Context) -> Option<Described> {
 }
 
 /// One branch's publish lock, and whether a push past its timeout holds it.
+/// Landing pushes (R3.17) take the same lock: one push path.
 #[derive(Default)]
-struct BranchLock {
+pub(crate) struct BranchLock {
     mutex: Arc<tokio::sync::Mutex<()>>,
     stuck: AtomicBool,
 }
@@ -555,7 +565,7 @@ fn locks() -> &'static Mutex<HashMap<LockKey, Arc<BranchLock>>> {
     LOCKS.get_or_init(Mutex::default)
 }
 
-fn lock_for(key: LockKey) -> Arc<BranchLock> {
+pub(crate) fn lock_for(key: LockKey) -> Arc<BranchLock> {
     let mut locks = locks()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -636,7 +646,23 @@ pub async fn publish(
             key = (plan.remote, plan.branch);
             continue;
         }
-        return push_and_record(state, &input, plan, info, readonly, (lock, guard), deadline).await;
+        let target = PushTarget::of_publish(&input, &plan);
+        let (pushed, recorded, published_rows) = push_and_record(
+            state,
+            target,
+            plan.clone(),
+            readonly,
+            (lock, guard),
+            deadline,
+        )
+        .await?;
+        return Ok(PublishOutcome {
+            plan,
+            info,
+            pushed: Some(pushed),
+            recorded: Some(recorded),
+            published_rows,
+        });
     }
     Err(PublishError::InProgress {
         remote: key.0,
@@ -646,7 +672,7 @@ pub async fn publish(
 
 /// The branch's lock, waiting at most until `deadline`; at once
 /// [`PublishError::InProgress`] while a push past its timeout holds it.
-async fn acquire(
+pub(crate) async fn acquire(
     lock: &Arc<BranchLock>,
     key: &(String, String),
     deadline: tokio::time::Instant,
@@ -669,21 +695,53 @@ async fn acquire(
     }
 }
 
+/// Where a push is recorded: the repository, its thread, the operation's
+/// metadata, and the request's timeout.
+#[derive(Clone, Debug)]
+pub(crate) struct PushTarget {
+    /// The repository.
+    pub(crate) repo: RepoId,
+    /// Its thread.
+    pub(crate) handle: RepoHandle,
+    /// The record's operation.
+    pub(crate) meta: OpMeta,
+    /// `[publish] timeout`, for [`PublishError::Timeout`].
+    pub(crate) timeout: Duration,
+}
+
+impl PushTarget {
+    /// A publish's: kind `publish`, its workspace and agent.
+    fn of_publish(input: &PublishInput, plan: &PushPlan) -> PushTarget {
+        let mut meta = OpMeta::new(OpKind::Publish, push::publish_description(plan));
+        meta.workspace = input.workspace.as_ref().map(|record| record.id.as_hex());
+        meta.agent = input
+            .agent
+            .clone()
+            .or_else(|| input.workspace.as_ref().map(|record| record.owner.clone()));
+        PushTarget {
+            repo: input.repo,
+            handle: input.handle.clone(),
+            meta,
+            timeout: input.timeout,
+        }
+    }
+}
+
 /// Pushes and records `plan` in a task that holds `held`'s guard until it
-/// ends; waits for it until `deadline`.
-async fn push_and_record(
+/// ends; waits for it until `deadline`. The one push path: publishes and
+/// landing pushes (R3.17) both run here.
+pub(crate) async fn push_and_record(
     state: &Arc<AppState>,
-    input: &PublishInput,
+    target: PushTarget,
     plan: PushPlan,
-    info: Option<ChangeInfo>,
     readonly: Arc<reef_lib::jj::ReadonlyRepo>,
     held: (Arc<BranchLock>, OwnedMutexGuard<()>),
     deadline: tokio::time::Instant,
-) -> Result<PublishOutcome, PublishError> {
+) -> Result<(Pushed, RecordedPush, u64), PublishError> {
     let (lock, guard) = held;
+    let timeout = target.timeout;
     let mut work = {
         let state = Arc::clone(state);
-        let input = input.clone();
         let plan = plan.clone();
         let lock = Arc::clone(&lock);
         tokio::spawn(async move {
@@ -693,7 +751,7 @@ async fn push_and_record(
                 tokio::task::spawn_blocking(move || push::push(&readonly, &plan, &env))
             };
             let result = match pushing.await {
-                Ok(Ok(pushed)) => record(&state, &input, &plan)
+                Ok(Ok(pushed)) => record(&state, &target, &plan)
                     .await
                     .map(|(recorded, rows)| (pushed, recorded, rows)),
                 Ok(Err(error)) => Err(PublishError::from(error)),
@@ -716,14 +774,7 @@ async fn push_and_record(
         })
     };
     match tokio::time::timeout_at(deadline, &mut work).await {
-        Ok(Ok(Ok((pushed, recorded, published_rows)))) => Ok(PublishOutcome {
-            plan,
-            info,
-            pushed: Some(pushed),
-            recorded: Some(recorded),
-            published_rows,
-        }),
-        Ok(Ok(Err(error))) => Err(error),
+        Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(PublishError::Panicked),
         Err(_) => {
             lock.stuck.store(true, Ordering::Release);
@@ -737,7 +788,7 @@ async fn push_and_record(
                 branch = %plan.branch,
                 "a push outlived [publish] timeout; it is recorded if git succeeds"
             );
-            Err(PublishError::Timeout(input.timeout))
+            Err(PublishError::Timeout(timeout))
         }
     }
 }
@@ -802,20 +853,15 @@ async fn plan_job(
 /// The record job, then R1.16's flag.
 async fn record(
     state: &AppState,
-    input: &PublishInput,
+    target: &PushTarget,
     plan: &PushPlan,
 ) -> Result<(RecordedPush, u64), PublishError> {
-    let mut meta = OpMeta::new(OpKind::Publish, push::publish_description(plan));
-    meta.workspace = input.workspace.as_ref().map(|record| record.id.as_hex());
-    meta.agent = input
-        .agent
-        .clone()
-        .or_else(|| input.workspace.as_ref().map(|record| record.owner.clone()));
+    let meta = target.meta.clone();
     // The local rows of the published changes, read before the record so
     // the repository thread can tell which of them the push carried.
     let candidates = {
         let db = Arc::clone(&state.db);
-        let repo = input.repo;
+        let repo = target.repo;
         let changes: Vec<_> = plan
             .range
             .iter()
@@ -826,10 +872,10 @@ async fn record(
             .map_err(|_| PublishError::Panicked)??
     };
     let (recorded, commits) = {
-        let create_lock = state.manager.repo_lock(input.repo);
+        let create_lock = state.manager.repo_lock(target.repo);
         let _shared = create_lock.read().await;
         let plan = plan.clone();
-        input
+        target
             .handle
             .call_async(move |head| {
                 async move {
@@ -856,7 +902,7 @@ async fn record(
             .await??
     };
     let db = Arc::clone(&state.db);
-    let repo = input.repo;
+    let repo = target.repo;
     let published = tokio::task::spawn_blocking(move || index::mark_published(&db, repo, &commits))
         .await
         .map_err(|_| PublishError::Panicked)??;
@@ -866,7 +912,8 @@ async fn record(
         update = plan.update.as_str(),
         commit_count = plan.range.len(),
         published_count = published,
-        "change published"
+        mode = ?plan.mode,
+        "pushed"
     );
     Ok((recorded, published))
 }

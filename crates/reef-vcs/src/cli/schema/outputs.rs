@@ -377,6 +377,21 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<land::LandingBatch>,
         object::<land::BriefBatch<'static>>,
     ),
+    view(
+        &["landing", "pushes"],
+        list::<land::DestinationPush>,
+        list::<land::BriefPush<'static>>,
+    ),
+    OutputRow {
+        note: Some(
+            "exit 0 when pushed or up to date (and with --no-wait while pending); 6 while pending or retrying; 5 when diverged, refused or disabled, with the state's reason, hint and next",
+        ),
+        ..view(
+            &["landing", "push"],
+            object::<land::DestinationPush>,
+            object::<land::BriefPush<'static>>,
+        )
+    },
     row(&["undo"], object::<Undone>),
     row(&["op", "log"], list::<Operation>),
     row(&["op", "show"], object::<Operation>),

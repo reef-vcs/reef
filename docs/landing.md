@@ -164,6 +164,24 @@ The policy evaluation is the structured refusal. For every evidence pair a `[[re
 | `condition` | An attestor set's `when` was false for it. |
 | `untrusted` | No attestor set of the rule accepts its signer. |
 
+## Pushing landed history
+
+A destination whose policy names a git remote is pushed to the branch of its own name on that remote after each landing ([ADR 0077](adr/0077-pushing-landed-history.md)):
+
+```toml
+[landing]          # reef-policy.toml at the destination's head
+push = "origin"    # a configured remote's name, never a URL
+```
+
+- **When.** After the land operation, by a worker of the daemon's that pushes the destination's head, fast forward only; a batch is one push, and landings during a push go in the next. `reef land` waits, within its own `--wait`, for the push that carries its landing and prints a `push:` line; its exit code is the landing's.
+- **What.** Exactly the projection ([What lands on the destination](#what-lands-on-the-destination)): the commits the remote lacks (at most 1,000), never tags, never `--force`. A conflicted commit is refused. Undescribed changes (`builtin:description`) and a default `[identity]` (`IDENTITY_UNSET`) are stopped at the gate, where they can still be fixed: set the daemon's `[identity]` before landing onto a pushing destination, and `reef describe --reset-author` a change written before it was set.
+- **Someone else pushed.** Every Reef fetch moves a pushing destination fast forward only: never merged into a conflict that would stop its landings. A batch fetches its destination's branch first, so a pull request merged on the host is landed on. A push the remote rejects fetches and looks again: a remote at the head is up to date, a rewound one is pushed again, one ahead is followed (unless it changes `reef-policy.toml` or `reef-checks.toml`: `REMOTE_POLICY_CHANGED`, a person reviews it), and one with commits the destination lacks while lacking the destination's is **diverged**.
+- **Diverged.** Pushing pauses; landings go on locally, and each new landing tries again (the state clears if someone resets the remote). A person chooses: make the remote include the local landings (at the root, `jj rebase -b main -d main@origin --ignore-immutable`, then `reef landing push`), or make `main` the remote's (`jj bookmark set main -r main@origin`, then land the unpushed changes again). Re-landing them automatically is #304.
+- **Offline.** A failure that may pass (an unreachable host, a failed push) retries at 30 seconds, doubling to 15 minutes; failed authentication or a missing git every 15 minutes. Nothing polls, and a restart resumes the schedule. `reef landing push` tries at once.
+- **The state.** `reef landing pushes` lists each pushing destination: `pushed`, `pending`, `retrying`, `diverged`, `refused` (a person must act: the reason, hint and next say what) or `disabled` (the daemon's `[publish] enabled` or `landings` is false). `reef here` adds a line when a destination is diverged, refused or failing authentication; `reef daemon status` counts those, and those retrying for over an hour. MCP agents call `push_landed`.
+- **jj and git at the root.** A tracked `main@origin` makes jj's own `jj git fetch`, and a plain `git fetch` or an editor's autofetch in a colocated root (imported at the next Reef command that reads git's refs), merge into `main`, which can leave it conflicted and stop its landings. Reef records the remote bookmark untracked unless it already was, and the push worker never imports git's refs itself. Untrack it (`jj bookmark untrack main@origin`), turn off autofetch in the root checkout, and let Reef's fetches follow it.
+- **Through the remote listener**, a landing pushes like any other (the policy decides where); `PushLanded` (`reef landing push`) is the daemon's machine's only.
+
 ## What a landing keeps
 
 Every attempt is a record: `reef landing show` prints it, with the evaluation in full (and the evaluation on the batch's tested tree), the policy commit, blob and SHA-256, the operations, the batch, the `[history]` it landed under and whether each change was summarized, and who asked. For a landed change, the evidence its satisfied rules used, on its own tree and on the tested tree, is kept until the repository is forgotten, whatever `[evidence] retention` says, and linked to the change; the policy text is kept (`reef landing show --policy`); and the change's provenance records are kept whole. Artifacts that evidence names keep their own retention (`[artifacts] retention`), and read as collected once it passes.
@@ -175,7 +193,7 @@ An agent often proposes `@`. After the landing, that workspace sits on a new emp
 ## What a landing is not
 
 - **Not undoable.** `reef undo` refuses the queue, return and land operations: others build on the destination at once. Land a revert, or move the bookmark back with jj. It refuses a batch's operations too: withdraw a change to take it out of its batch.
-- **Not a push.** The landing moves a local bookmark. In a colocated repository, git sees it when the jj CLI next runs. A local `main` that also follows a git host diverges from it after a landing, and a later `jj git fetch` that moved `main@origin` can leave it conflicted: land onto a bookmark nobody fetches into, or wait for R3.17, which pushes landed history. A team that merges through pull requests publishes each change to a review branch instead, with `reef publish` ([docs/publishing.md](publishing.md)).
+- **Not a push, unless the destination's policy says so.** The landing moves a local bookmark. With `[landing] push` the destination is pushed to its git remote after the landing, in the background ("Pushing landed history" below); a push failure never undoes or blocks a landing. Without it, git sees the bookmark when the jj CLI next runs, and a team that merges through pull requests publishes each change to a review branch with `reef publish` ([docs/publishing.md](publishing.md)).
 - **Not safe from other jj writers.** A `jj` command that moves the bookmark while a landing writes can leave it conflicted; the operation log shows both, and `jj bookmark set` resolves it.
 
 ## Who may land

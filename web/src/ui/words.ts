@@ -61,7 +61,11 @@ type WithTransition = Pick<Operation, "kind" | "snapshotKind"> & {
   transitions?: Operation["transitions"];
   comments?: Pick<Operation["comments"][number], "event">[];
   effects?: { bookmarks: { name: string; remote: string }[] } | undefined;
+  description?: string;
 };
+
+/** A landing push's description (R3.17), before the destination. */
+const PUSH_LANDED_PREFIX = "reef: push landed ";
 
 /** "described a change": past tense, lower case. */
 export function operationSentence(operation: WithTransition): string {
@@ -81,9 +85,16 @@ export function operationSentence(operation: WithTransition): string {
   if (operation.kind === OperationKind.LAND && (operation.transitions?.length ?? 0) > 1) {
     return `landed ${plural(operation.transitions?.length ?? 0, "change")}`;
   }
-  // A publish (#258) names where it went: its remote bookmark's effect.
+  // A publish (#258) names where it went: its remote bookmark's effect. A
+  // landing push (R3.17) is a publish of the destination's landed history.
   if (operation.kind === OperationKind.PUBLISH) {
     const remote = operation.effects?.bookmarks.find((bookmark) => bookmark.remote !== "");
+    const landed = operation.description?.startsWith(PUSH_LANDED_PREFIX) ?? false;
+    if (landed) {
+      return remote
+        ? `pushed landed history to ${remote.remote}/${remote.name}`
+        : "pushed landed history";
+    }
     if (remote) return `published a change to ${remote.remote}/${remote.name}`;
   }
   if (operation.kind === OperationKind.COMMENT) {

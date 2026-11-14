@@ -22,6 +22,14 @@
 //! plain git) is the change id of the published commit or of one in the
 //! range. Never "a change in `::C`", which would include all of trunk.
 //! Predecessors are never used: they live in operations, which GC bounds.
+//!
+//! **Landing mode** (R3.17, ADR 0077). [`plan_landed_push`] plans pushing a
+//! landing destination's head to the branch of its own name, fast forward
+//! only, with none of a publish's branch rules (a destination is trunk and
+//! immutable by definition) and only the conflict check on the range: the
+//! other checks ran at the landing's gate. Its record keeps the remote
+//! bookmark's tracking state and never touches the local bookmark, which is
+//! the destination itself.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -132,9 +140,21 @@ pub struct RangeCommit {
     pub change: ChangeIdHex,
 }
 
+/// What a [`PushPlan`] pushes for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PushMode {
+    /// A change, to a review branch (#258).
+    #[default]
+    Publish,
+    /// A landing destination's head, to the branch of its own name (R3.17).
+    Landing,
+}
+
 /// What [`plan_push`] decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushPlan {
+    /// What it pushes for: the record reads it.
+    pub mode: PushMode,
     /// The git remote.
     pub remote: String,
     /// The branch.
@@ -327,6 +347,12 @@ pub enum PushError {
     /// The remote bookmark is conflicted.
     #[error("the remote bookmark of {0:?} is conflicted")]
     BranchConflicted(String),
+    /// A landing destination has no local bookmark (R3.17).
+    #[error("no bookmark {0:?} to push")]
+    DestinationNotFound(String),
+    /// A landing destination's local bookmark is conflicted (R3.17).
+    #[error("bookmark {0:?} is conflicted")]
+    DestinationConflicted(String),
     /// The lease failed.
     #[error("{remote}/{branch} moved since Reef last saw it")]
     Moved {
@@ -390,7 +416,9 @@ impl Classify for PushError {
             PushError::Rewrite(error) => error.kind(),
             PushError::Revision(error) => error.kind(),
             PushError::InvalidRemote(_) | PushError::InvalidBranch(_) => ErrorKind::InvalidArgument,
-            PushError::RemoteNotFound { .. } => ErrorKind::NotFound,
+            PushError::RemoteNotFound { .. } | PushError::DestinationNotFound(_) => {
+                ErrorKind::NotFound
+            }
             PushError::RemoteNotAllowed(_)
             | PushError::Git {
                 failure: GitFailure::Auth,
@@ -627,6 +655,7 @@ pub async fn plan_push(
 
     let base = base_branch(repo, &remote);
     Ok(PushPlan {
+        mode: PushMode::Publish,
         push_url: push_url(repo, &remote),
         remote,
         branch,
@@ -641,6 +670,202 @@ pub async fn plan_push(
         description,
         base,
     })
+}
+
+/// How a landing destination's head `H` stands against its remote branch
+/// `T` as the view knows it (R3.17, ADR 0077 decision 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandedUpdate {
+    /// `T` is `H`: nothing to push.
+    UpToDate,
+    /// `T` is absent: the push creates it.
+    Created,
+    /// `T` is an ancestor of `H`.
+    FastForward,
+    /// `H` is an ancestor of `T`: the remote has landed history the
+    /// destination lacks, to follow, not to push.
+    RemoteAhead,
+    /// Neither contains the other.
+    Diverged,
+}
+
+impl LandedUpdate {
+    /// The word for text output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LandedUpdate::UpToDate => "up to date",
+            LandedUpdate::Created => "created",
+            LandedUpdate::FastForward => "fast-forward",
+            LandedUpdate::RemoteAhead => "remote ahead",
+            LandedUpdate::Diverged => "diverged",
+        }
+    }
+}
+
+/// What [`plan_landed_push`] decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandedPlan {
+    /// The remote.
+    pub remote: String,
+    /// The destination, which is also the remote branch's name.
+    pub branch: String,
+    /// The destination's head (`H`).
+    pub head: CommitIdHex,
+    /// The remote branch as the view knows it (`T`); `None` when absent.
+    pub remote_commit: Option<CommitIdHex>,
+    /// How `H` stands against `T`.
+    pub update: LandedUpdate,
+    /// The push, for [`LandedUpdate::Created`] and
+    /// [`LandedUpdate::FastForward`]; its range is what the remote lacks.
+    pub plan: Option<PushPlan>,
+    /// `T`'s commit, for [`LandedUpdate::RemoteAhead`] and
+    /// [`LandedUpdate::Diverged`].
+    pub remote_head: Option<ForeignCommit>,
+    /// For [`LandedUpdate::RemoteAhead`]: `T` differs from `H` in a policy
+    /// file ([`policy_files_differ`]), so following it is refused (S-201).
+    pub policy_changed: bool,
+}
+
+/// Plans pushing landing destination `destination`'s head to `remote`'s
+/// branch of the same name (R3.17): fast forward only, the range checked
+/// for conflicts and capped at `max` commits. `remote` is the name the
+/// destination's policy gives, checked, configured and allowed. Writes
+/// nothing.
+#[tracing::instrument(skip_all)]
+pub async fn plan_landed_push(
+    repo: &ReadonlyRepo,
+    destination: &str,
+    remote: &str,
+    allowed: &[String],
+    max: usize,
+) -> Result<LandedPlan, PushError> {
+    let names = remote_names(repo)?;
+    check_remote(remote)?;
+    let remote = choose_remote(&names, remote, allowed)?;
+    check_branch(destination)?;
+    let local = repo.view().get_local_bookmark(RefName::new(destination));
+    if local.is_absent() {
+        return Err(PushError::DestinationNotFound(destination.to_owned()));
+    }
+    let Some(head) = local.as_normal().cloned() else {
+        return Err(PushError::DestinationConflicted(destination.to_owned()));
+    };
+    let remote_ref = repo
+        .view()
+        .get_remote_bookmark(RefName::new(destination).to_remote_symbol(RemoteName::new(&remote)));
+    if !remote_ref.target.is_resolved() {
+        return Err(PushError::BranchConflicted(destination.to_owned()));
+    }
+    let previous = remote_ref.target.as_normal().cloned();
+    let index = repo.index();
+    let update = match &previous {
+        None => LandedUpdate::Created,
+        Some(id) if *id == head => LandedUpdate::UpToDate,
+        Some(id) if index.is_ancestor(id, &head).await? => LandedUpdate::FastForward,
+        Some(id) if index.is_ancestor(&head, id).await? => LandedUpdate::RemoteAhead,
+        Some(_) => LandedUpdate::Diverged,
+    };
+    let scope = RevsetScope {
+        workspace: None,
+        user_email: "",
+        root: std::path::Path::new("/"),
+    };
+    let describer = Describer::new(repo, &scope)?;
+    let remote_head = match (&previous, update) {
+        (Some(id), LandedUpdate::RemoteAhead | LandedUpdate::Diverged) => {
+            let remote_commit = repo.store().get_commit_async(id).await?;
+            Some(foreign(&describer, &remote_commit, false).await?)
+        }
+        _ => None,
+    };
+    let plan = match update {
+        LandedUpdate::Created | LandedUpdate::FastForward => {
+            let range = range(repo, &remote, &head, max).await?;
+            for commit in &range {
+                if describer.describe(&commit.commit).await?.conflict {
+                    return Err(PushError::Conflicted(Offending {
+                        commit: commit.commit.clone(),
+                        change: commit.change.clone(),
+                        is_target: commit.commit == CommitIdHex::of(&head),
+                    }));
+                }
+            }
+            let commit = repo.store().get_commit_async(&head).await?;
+            Some(PushPlan {
+                mode: PushMode::Landing,
+                remote: remote.clone(),
+                branch: destination.to_owned(),
+                commit: CommitIdHex::of(&head),
+                change: ChangeIdHex::of(commit.change_id()),
+                previous: previous.as_ref().map(CommitIdHex::of),
+                update: if update == LandedUpdate::Created {
+                    PushUpdate::Created
+                } else {
+                    PushUpdate::FastForward
+                },
+                range,
+                move_local: false,
+                local_before: Some(CommitIdHex::of(&head)),
+                local_forced: false,
+                description: commit.description().to_owned(),
+                base: None,
+                push_url: push_url(repo, &remote),
+            })
+        }
+        _ => None,
+    };
+    let policy_changed = match (&previous, update) {
+        (Some(id), LandedUpdate::RemoteAhead) => policy_files_differ(repo, &head, id).await?,
+        _ => false,
+    };
+    Ok(LandedPlan {
+        remote,
+        branch: destination.to_owned(),
+        head: CommitIdHex::of(&head),
+        remote_commit: previous.as_ref().map(CommitIdHex::of),
+        update,
+        plan,
+        remote_head,
+        policy_changed,
+    })
+}
+
+/// The files whose change in a tree makes a landing alone (reef-policy's
+/// `POLICY_FILES`, repeated here: reef-lib does not depend on it).
+pub const POLICY_FILES: [&str; 2] = ["reef-policy.toml", "reef-checks.toml"];
+
+/// Whether commits `a` and `b` differ in any of [`POLICY_FILES`]: two path
+/// lookups per tree (R3.17, S-201).
+pub async fn policy_files_differ(
+    repo: &(impl jj_lib::repo::Repo + ?Sized),
+    a: &CommitId,
+    b: &CommitId,
+) -> Result<bool, BackendError> {
+    let a = repo.store().get_commit_async(a).await?.tree();
+    let b = repo.store().get_commit_async(b).await?.tree();
+    for file in POLICY_FILES {
+        let Ok(path) = jj_lib::repo_path::RepoPathBuf::from_internal_string(file) else {
+            continue;
+        };
+        if a.path_value(&path).await? != b.path_value(&path).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The description of a landing push's operation: `reef: push landed
+/// <branch> to <remote>/<branch> (<n> commits)`.
+pub fn push_landed_description(plan: &PushPlan) -> String {
+    let count = plan.range.len();
+    let commits = if count == 1 { "commit" } else { "commits" };
+    format!(
+        "{}{} to {}/{} ({count} {commits})",
+        super::oplog::PUSH_LANDED_PREFIX,
+        plan.branch,
+        plan.remote,
+        plan.branch
+    )
 }
 
 /// The branch a plan publishes to, for [`branch_update`] and
@@ -1254,6 +1479,9 @@ impl Repo {
         plan: &PushPlan,
         meta: &OpMeta,
     ) -> Result<RecordedPush, PushError> {
+        if plan.mode == PushMode::Landing {
+            return self.record_landed_push(plan, meta).await;
+        }
         let pushed = plan.commit.to_id();
         let targets = self
             .repo
@@ -1311,6 +1539,46 @@ impl Repo {
             local: local.as_ref().filter(|_| set_local).map(CommitIdHex::of),
             local_left: plan.move_local && local.is_none(),
             local_moved,
+        };
+        if !tx.repo().has_changes() {
+            return Ok(outcome);
+        }
+        self.repo = meta.commit(tx).await?;
+        Ok(RecordedPush {
+            op_id: Some(OperationIdHex::of(self.repo.op_id())),
+            ..outcome
+        })
+    }
+
+    /// [`Repo::record_push`] for a landing push (R3.17): the remote
+    /// bookmark at the pushed commit, tracked if it was and not tracked
+    /// otherwise (so neither jj's nor Reef's next fetch merges the
+    /// destination), and the local bookmark untouched.
+    async fn record_landed_push(
+        &mut self,
+        plan: &PushPlan,
+        meta: &OpMeta,
+    ) -> Result<RecordedPush, PushError> {
+        let symbol = RefName::new(&plan.branch).to_remote_symbol(RemoteName::new(&plan.remote));
+        let old = self.repo.view().get_remote_bookmark(symbol).clone();
+        let state = if old.state == RemoteRefState::Tracked {
+            RemoteRefState::Tracked
+        } else {
+            RemoteRefState::New
+        };
+        let mut tx = self.repo.start_transaction();
+        tx.repo_mut().set_remote_bookmark(
+            symbol,
+            RemoteRef {
+                target: RefTarget::normal(plan.commit.to_id()),
+                state,
+            },
+        );
+        let outcome = RecordedPush {
+            op_id: None,
+            local: None,
+            local_left: false,
+            local_moved: false,
         };
         if !tx.repo().has_changes() {
             return Ok(outcome);
@@ -1411,6 +1679,29 @@ pub async fn published_commits(
         }
     }
     Ok(found)
+}
+
+/// The commits of `ids` in `::head`, in one revset evaluation; commits
+/// the repository does not know are left out (R3.17: the landings a push
+/// carried).
+pub async fn reachable_from(
+    repo: &ReadonlyRepo,
+    head: &CommitIdHex,
+    ids: &[CommitIdHex],
+) -> Result<HashSet<CommitIdHex>, PushError> {
+    let index = repo.index();
+    let mut known = Vec::with_capacity(ids.len());
+    for id in ids {
+        let commit = id.to_id();
+        if index.has_id(&commit).await? {
+            known.push(commit);
+        }
+    }
+    Ok(reachable(repo, &[head.to_id()], known)
+        .await?
+        .iter()
+        .map(CommitIdHex::of)
+        .collect())
 }
 
 /// The commits of `ids` that are ancestors of `heads`: one evaluation of
