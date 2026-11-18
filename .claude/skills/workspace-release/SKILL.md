@@ -185,7 +185,7 @@ modeling error.
 the code change fixes it. Then:
 
 1. Change the row to `pass`, set its `fixed` column to `-`, and remove the
-   finding.
+   finding and its issue number here.
 2. Delete the finding's file in `fixes/`, or the edits in it that the code
    now does.
 3. Add a mutant for the property if it has none that runs on the model
@@ -239,7 +239,7 @@ SQLite write, a failed tear-down, or a daemon death, and some need more than
 one of these. They are rare. They matter because when one happens, only a
 restart or a person's command gets the workspace out, as before #229.
 
-**F1. A retried release can roll a torn-down workspace back to `active`.**
+**F1 (#311). A retried release can roll a torn-down workspace back to `active`.**
 Rows: `ActiveHasDirectory`, `ActiveHasJjWorkspace`, `ActiveIsTracked`.
 
 1. A release forgets the jj workspace and tears down the directory, then
@@ -266,7 +266,7 @@ The cause is that a retry publishes `active` without knowing whether an
 earlier attempt got past the forget. `fixes/F1.fix` keeps such a workspace
 `releasing` instead.
 
-**F2. A daemon death after the forget brings the workspace back `active`
+**F2 (#312). A daemon death after the forget brings the workspace back `active`
 without its jj workspace.** Row: `ActiveHasJjWorkspace` (`crash`).
 
 1. A release forgets the jj workspace.
@@ -278,7 +278,7 @@ without its jj workspace.** Row: `ActiveHasJjWorkspace` (`crash`).
 The model assumes `reopen` gets a jj handle. What snapshots of the workspace
 then do is untested, so finding out needs a test against the real daemon.
 
-**F3. A failed `finish_workspace` in `reclaim_missing` strands the workspace
+**F3 (#313). A failed `finish_workspace` in `reclaim_missing` strands the workspace
 until the next restart.** Rows: `ActiveHasDirectory`, `AbandonedIsReclaimed`
 (`crash`). This needs a daemon death and a failed write.
 
@@ -292,7 +292,7 @@ tick gets `NotLoaded` for it. The code's comment at
 `workspace/manager.rs` `reclaim_missing` accepts this ("the next start
 retries").
 
-**F4. A failed write in `load_active` strands a `releasing` workspace until
+**F4 (#314). A failed write in `load_active` strands a `releasing` workspace until
 the next restart.** Row: `ReleasingResolves` (`crash`). This needs a daemon
 death and a failed write.
 
@@ -303,7 +303,7 @@ death and a failed write.
 3. The row stays `releasing` and unloaded. Every tick and every release gets
    `NotActive` for it.
 
-**F5. A failed tear-down followed by a failed `finish_workspace` leaves a
+**F5 (#315). A failed tear-down followed by a failed `finish_workspace` leaves a
 workspace that no reclaim can finish.** Row: `AbandonedIsReclaimed`
 (`nocrash`).
 
