@@ -75,6 +75,11 @@ pub struct LandingRow {
     pub pushed_at: Option<Timestamp>,
     /// That push's operation.
     pub push_operation_id: Option<String>,
+    /// The landing id of its stack's head in the request that made it
+    /// (R3.10); `None` for a change landed alone.
+    pub stack: Option<String>,
+    /// Its place in that stack, from 0 at the bottom.
+    pub stack_position: Option<u32>,
 }
 
 /// One change of a landing, as `landing_changes` holds it.
@@ -145,7 +150,8 @@ pub struct LandingFilter {
 const COLUMNS: &str = "repo_id, id, destination, destination_before, destination_after, outcome,
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
-     remote_token_name, created_at, finished_at, batch_id, history, pushed_at, push_operation_id";
+     remote_token_name, created_at, finished_at, batch_id, history, pushed_at, push_operation_id,
+     stack, stack_position";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
      landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
@@ -179,6 +185,10 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
         history: row.get(23)?,
         pushed_at: row.get(24)?,
         push_operation_id: row.get(25)?,
+        stack: row.get(26)?,
+        stack_position: row
+            .get::<_, Option<i64>>(27)?
+            .and_then(|position| u32::try_from(position).ok()),
     })
 }
 
@@ -211,7 +221,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
         ),
         params![
             row.repo_id,
@@ -240,6 +250,8 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.history,
             row.pushed_at,
             row.push_operation_id,
+            row.stack,
+            row.stack_position.map(i64::from),
         ],
     )?;
     Ok(())
@@ -312,6 +324,22 @@ impl Db {
         })
     }
 
+    /// Writes every landing of `landings` and its changes in one
+    /// transaction (R3.10: a stack's landings are seen together or not at
+    /// all).
+    pub fn write_landings(
+        &self,
+        landings: &[(LandingRow, Vec<LandingChangeRow>)],
+    ) -> Result<(), DbError> {
+        self.in_transaction(|tx| {
+            for (row, changes) in landings {
+                write_landing_in(tx, row)?;
+                write_changes_in(tx, row.repo_id, &row.id, changes)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Finishes a landing: writes `row` and its `changes`, and for a landed
     /// one pins `pins` (`(change, evidence id)`, linked to the change at
     /// `commit`), and keeps `policy` (`(sha256, bytes)`), in one
@@ -368,6 +396,24 @@ impl Db {
                 "UPDATE landings SET attempts = attempts + 1, finished_at = ?3
                  WHERE repo_id = ?1 AND id = ?2",
                 params![repo, id, at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Records landing `id` as the change at `position` of the stack whose
+    /// head's landing is `stack` (R3.10).
+    pub fn set_landing_stack(
+        &self,
+        repo: RepoId,
+        id: &str,
+        stack: &str,
+        position: u32,
+    ) -> Result<(), DbError> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE landings SET stack = ?3, stack_position = ?4 WHERE repo_id = ?1 AND id = ?2",
+                params![repo, id, stack, i64::from(position)],
             )?;
             Ok(())
         })
@@ -453,6 +499,19 @@ impl Db {
             )?
             .into_iter()
             .next())
+    }
+
+    /// The landings one `LandChange` made for a stack whose head's landing
+    /// is `stack` (R3.10), bottom first.
+    pub fn landings_of_stack(
+        &self,
+        repo: RepoId,
+        stack: &str,
+    ) -> Result<Vec<StoredLanding>, DbError> {
+        self.landings_where(
+            "WHERE repo_id = ?1 AND stack = ?2 ORDER BY stack_position, created_at, id",
+            &[&repo, &stack],
+        )
     }
 
     /// Every queued landing of `repo`, oldest first.

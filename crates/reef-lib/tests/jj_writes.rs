@@ -1511,3 +1511,203 @@ async fn projects_summaries_and_refuses_empties() {
     assert!(matches!(refused, LandError::Empty(_)), "{refused:?}");
     assert_eq!(fx.op(), op);
 }
+
+// R3.10 tests 1 and 2: a stack is its head's ancestors not on the
+// destination, parents first; a chain lands a member on the members below
+// it, and leaves out a member whose parent it left out.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stack through every read and its landing"
+)]
+async fn stacks_resolve_and_land_as_chains() {
+    use jj_lib::object_id::ObjectId;
+    use reef_lib::jj::land::{self, LandError, LandPlan, LandTarget, PlannedMember};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1\n2\n3\n")], "base").await;
+    let bottom = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("b", "b")],
+        "bottom",
+    )
+    .await;
+    let middle = new_commit(
+        &mut tx,
+        &[&bottom],
+        &[("a", "1\n2\n3\n"), ("b", "b"), ("c", "c")],
+        "middle",
+    )
+    .await;
+    let top = new_commit(
+        &mut tx,
+        &[&middle],
+        &[("a", "1\n2\n3\n"), ("b", "b"), ("c", "c"), ("d", "d")],
+        "top",
+    )
+    .await;
+    // A side branch merged at the top of a second stack.
+    let side = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("s", "s")], "side").await;
+    let merge = new_commit(
+        &mut tx,
+        &[&bottom, &side],
+        &[("a", "1\n2\n3\n"), ("b", "b"), ("s", "s")],
+        "merge",
+    )
+    .await;
+    // The destination moves on, touching none of the stack's paths.
+    let moved = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("e", "e")],
+        "moved",
+    )
+    .await;
+    bookmark(&mut tx, "main", &base);
+    fx.commit(tx, "setup").await;
+    let target = |commit: &Commit| LandTarget {
+        change: hex_change(commit),
+        commit: hex(commit),
+        bookmark: "main".to_owned(),
+    };
+
+    let stack = land::stack(&fx.head(), &hex(&top), &hex(&base))
+        .await
+        .unwrap();
+    let commits: Vec<_> = stack.iter().map(|member| member.commit.clone()).collect();
+    assert_eq!(commits, [hex(&bottom), hex(&middle), hex(&top)]);
+    assert_eq!(stack[1].parents, [hex(&bottom)]);
+    let merged = land::stack(&fx.head(), &hex(&merge), &hex(&base))
+        .await
+        .unwrap();
+    assert_eq!(merged.len(), 3);
+    assert_eq!(merged.last().unwrap().commit, hex(&merge), "parents first");
+    assert!(
+        land::stack(&fx.head(), &hex(&base), &hex(&base))
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing above the destination"
+    );
+
+    // Alone, a change above an unlanded parent is refused; above the
+    // members below it, it previews.
+    let alone = land::preview(&fx.head(), &target(&top)).await.unwrap_err();
+    assert!(
+        matches!(alone, LandError::UnlandedParents { .. }),
+        "{alone:?}"
+    );
+    let above = land::preview_above(
+        &fx.head(),
+        &[target(&bottom), target(&middle)],
+        &target(&top),
+    )
+    .await
+    .unwrap();
+    assert!(!above.rebased, "a fast-forward on the members below");
+    assert_eq!(
+        above.landed_tree,
+        top.tree_ids().as_resolved().map(ObjectId::hex)
+    );
+
+    // A chain of the stack on the destination: every member a fast-forward.
+    let targets = [target(&bottom), target(&middle), target(&top)];
+    let chain = land::preview_chain(&fx.head(), "main", &targets)
+        .await
+        .unwrap();
+    assert!(
+        chain
+            .members
+            .iter()
+            .all(|member| member.included && !member.rebased)
+    );
+
+    // On a moved destination, each member is rebased onto the one below.
+    let mut tx = fx.tx();
+    bookmark(&mut tx, "main", &moved);
+    fx.commit(tx, "main moved").await;
+    let chain = land::preview_chain(&fx.head(), "main", &targets)
+        .await
+        .unwrap();
+    assert!(
+        chain
+            .members
+            .iter()
+            .all(|member| member.included && member.rebased)
+    );
+    let plan = LandPlan {
+        bookmark: "main".to_owned(),
+        destination: hex(&moved),
+        members: targets
+            .iter()
+            .zip(&chain.members)
+            .map(|(target, member)| PlannedMember {
+                target: target.clone(),
+                tree: member.tree.clone(),
+                summary: None,
+            })
+            .collect(),
+        trials: Vec::new(),
+    };
+    let landed = fx
+        .repo
+        .land_chain(&plan, &meta(OpKind::Land))
+        .await
+        .unwrap();
+    let head = fx.get(&landed.members[2].commit).await;
+    assert_eq!(head.change_id(), top.change_id());
+    let parent = fx.get(&landed.members[1].commit).await;
+    assert_eq!(head.parent_ids(), [parent.id().clone()]);
+    assert_eq!(parent.change_id(), middle.change_id());
+}
+
+// R3.10: a chain leaves out a member whose parent it left out.
+#[tokio::test]
+async fn a_chain_leaves_out_a_child_of_a_member_left_out() {
+    use reef_lib::jj::land::{self, LandTarget};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1\n2\n3\n")], "base").await;
+    let first = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("c", "x")],
+        "first",
+    )
+    .await;
+    let clash = new_commit(
+        &mut tx,
+        &[&base],
+        &[("a", "1\n2\n3\n"), ("c", "y")],
+        "clash",
+    )
+    .await;
+    let child = new_commit(
+        &mut tx,
+        &[&clash],
+        &[("a", "1\n2\n3\n"), ("c", "y"), ("d", "d")],
+        "child",
+    )
+    .await;
+    bookmark(&mut tx, "main", &base);
+    fx.commit(tx, "setup").await;
+    let target = |commit: &Commit| LandTarget {
+        change: hex_change(commit),
+        commit: hex(commit),
+        bookmark: "main".to_owned(),
+    };
+    let chain = land::preview_chain(
+        &fx.head(),
+        "main",
+        &[target(&first), target(&clash), target(&child)],
+    )
+    .await
+    .unwrap();
+    let included: Vec<bool> = chain.members.iter().map(|member| member.included).collect();
+    assert_eq!(included, [true, false, false]);
+    assert_eq!(chain.members[1].conflicts, ["c"]);
+    assert_eq!(chain.members[2].parent_excluded, Some(hex(&clash)));
+}

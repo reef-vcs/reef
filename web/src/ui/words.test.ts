@@ -28,6 +28,28 @@ describe("operationSentence for transitions", () => {
     expect(operationSentence({ ...base, transitions })).toBe("returned a proposal from the queue");
   });
 
+  // R3.10: a stack's transitions in one operation.
+  it("names a stack", () => {
+    const of = (from: LifecycleState, to: LifecycleState) =>
+      [
+        { from, to },
+        { from, to },
+        { from, to },
+      ] as unknown as NonNullable<Parameters<typeof operationSentence>[0]["transitions"]>;
+    expect(
+      operationSentence({
+        ...base,
+        transitions: of(LifecycleState.DRAFT, LifecycleState.PROPOSED),
+      }),
+    ).toBe("proposed a stack of 3 changes");
+    expect(
+      operationSentence({
+        ...base,
+        transitions: of(LifecycleState.PROPOSED, LifecycleState.QUEUED),
+      }),
+    ).toBe("queued 3 changes");
+  });
+
   it("names a landing", () => {
     expect(
       operationSentence({ kind: OperationKind.LAND, snapshotKind: SnapshotKind.UNSPECIFIED }),

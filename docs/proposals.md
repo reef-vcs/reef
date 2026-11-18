@@ -21,9 +21,9 @@ Testing, batching and bisecting are what the landing pipeline does to a queued c
 ## Moving a change
 
 ```
-reef propose [REV] [-m TEXT] [--to BOOKMARK]       # draft, withdrawn or declined -> proposed
-reef proposal withdraw [REV] [-m TEXT]             # proposed or queued -> withdrawn
-reef proposal decline REV [-m TEXT]                # proposed or queued -> declined
+reef propose [REV] [-m TEXT] [--to BOOKMARK]       # draft, withdrawn or declined -> proposed, with its stack
+reef proposal withdraw [REV] [-m TEXT] [--stack]   # proposed or queued -> withdrawn
+reef proposal decline REV [-m TEXT] [--stack]      # proposed or queued -> declined
 reef proposal supersede REV --by REV [-m TEXT]     # proposed or queued -> superseded
 reef proposal list [--state STATE]...              # proposed and queued, newest first
 reef proposal show [REV]                           # the state and every transition
@@ -33,6 +33,7 @@ reef proposal show [REV]                           # the state and every transit
 
 - **Rounds.** Proposing a withdrawn or declined change opens a new round of the same proposal: same change id, `round` one more than any before (rounds never repeat, even after an undo back to draft). Comments and history stay with the change. The round belongs to whoever opened it; updating its commit does not change that.
 - **Amending a proposal** keeps it proposed. Reads show `amended` while the change's commit is not the one recorded; `reef propose` again records the new commit, which is how an agent says "ready again" after addressing review. Evidence and sign-offs are on trees, so an amendment does not inherit the old tree's.
+- **Stacks.** `reef propose` proposes the change and every change below it not yet on the destination and not yet proposed at its commit, in one operation, for one destination ([ADR 0078](adr/0078-stacks.md)); `--only` proposes the change alone. `withdraw` and `decline` with `--stack` take every change below it in review too. A change below that cannot be proposed (empty, conflicted, divergent, landed) refuses the whole request and is named. `reef proposal show` lists the changes below it with their states. One `reef undo` of the operation reverts every change's transition.
 - **Nothing to do.** A transition to the state a change is in, with nothing different, records nothing and succeeds, so a retry is safe.
 - **What cannot be proposed**: an immutable change (it has landed), an empty one (a workspace's `@` is often a fresh empty change: you may mean `@-`), a conflicted one, or one commit of a divergent change.
 - **Abandoning** a proposed or queued change is refused until it is withdrawn.
@@ -68,4 +69,4 @@ or, over MCP, `wait_for_operations` with kind `transition` and the change. Kind 
 
 ## What later tickets add
 
-R3.10 proposes a stack in one operation; R3.11 returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one; R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 and R3.33 show proposals and transitions; R4.07 publishes them to a store.
+R3.11 carries the proposals of a stack's changes across a rewrite of the ones below, and returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one; R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 and R3.33 show proposals and transitions; R4.07 publishes them to a store.

@@ -94,7 +94,7 @@ attempts = 5
 checks = "batch"                           # batch | proposal; default batch
 batch_max = 8                              # 1 to 32; default 8
 batch_wait = "0s"                          # "0s" to "10m"; default "0s"
-alone = ["migrations/**"]                  # changes touching these land in a batch of their own
+alone = ["migrations/**"]                  # changes touching these land in a batch of their own (a stack: with its stack)
 push = "origin"                            # push each landing to this git remote's branch of the same name (R3.17); no default
 
 [history]                                  # how landed changes are written on this branch (R3.16)
@@ -150,6 +150,10 @@ These tables are evaluated by Reef itself, not compiled to CEL, so their results
 
 - **`[landing] push`** (R3.17): the git remote, by name (letters, digits, `.`, `_`, `-`; never a URL, never `git`), that each landing onto this branch is pushed to, fast forward onto the branch of the same name ([landing](landing.md#pushing-landed-history)). It is read at the head being pushed, so the landing that adds it is pushed, and the landing that removes it is the last.
 - **`[[signoff]]`** and **`builtin:owners`**: a sign-off is evidence on the change's tree of one of `kinds` (default `signoff`), `pass`, from a bound key with actor `human` certified for a `person` identity in `groups` or `identities`, with at least `presence`; `count` distinct identities are needed. Self-exclusion does not apply: a person signs off their own agents' work. Sign with `reef evidence add --kind signoff --result pass --actor human` today; R3.09 and R3.31 will sign from the proposal view, and R3.43 adds verified presence. A sign-off is on one exact tree; carrying it across a later edit is R3.15's.
+
+### Sign-offs on a stack
+
+When a stack lands (R3.10, [landing](landing.md#stacks)), the sign-offs on the submitted tree of a change count for every change below it in the stack being landed: the kinds `[owners]` and each `[[signoff]]` name, verified as any evidence is, added to the lower change's `evidence`. A reviewer reads a stack as one diff from the destination to its top, so signing off the top accepts the stack, and signing off a change in the middle accepts the prefix up to it: the gate lands that prefix and blocks the rest. Only sign-offs reach down. A `[[require]]` rule's evidence stays on each change's own tree (and a batch's tested tree), since a stack whose top passes says nothing about a prefix that does not build. A change below that is amended rebases the changes above it, which takes their sign-offs away.
 
 ## Free rules
 

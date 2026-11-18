@@ -31,6 +31,7 @@ use tracing::Instrument as _;
 
 use futures::FutureExt as _;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
+use reef_lib::jj::land;
 use reef_lib::jj::lifecycle::{
     self as jj_lifecycle, LifecycleState, TransitionCause, TransitionRecord,
 };
@@ -169,7 +170,21 @@ pub enum LifecycleError {
     Empty {
         /// The change.
         change: String,
+        /// Whether it is below the revision in its stack (R3.10), rather
+        /// than the revision itself.
+        below: bool,
     },
+    /// A stack of more than [`land::MAX_STACK`] changes (R3.10).
+    #[error("the stack has more than {max} changes")]
+    StackTooLarge {
+        /// Its changes, counted to one past the bound.
+        size: usize,
+        /// The bound.
+        max: usize,
+    },
+    /// `stack` with a transition that applies to one change (R3.10).
+    #[error("a stack is proposed, withdrawn or declined, not superseded")]
+    StackNotAllowed,
     /// A proposal of a conflicted change.
     #[error("change {change} has conflicts")]
     Conflicted {
@@ -274,12 +289,14 @@ impl Classify for LifecycleError {
             | Self::TargetRequired
             | Self::InvalidReason
             | Self::InvalidDestination { .. }
-            | Self::SupersededByRequired => ErrorKind::InvalidArgument,
+            | Self::SupersededByRequired
+            | Self::StackNotAllowed => ErrorKind::InvalidArgument,
             Self::NotAllowed { .. }
             | Self::ExpectedState { .. }
             | Self::NoDestination
             | Self::InvalidSupersededBy { .. }
             | Self::Empty { .. }
+            | Self::StackTooLarge { .. }
             | Self::Conflicted { .. }
             | Self::Divergent { .. }
             | Self::InReview { .. } => ErrorKind::Conflict,
@@ -315,8 +332,18 @@ impl Advise for LifecycleError {
             Self::NoDestination => Some(Advice::hint(
                 "Create a `main` bookmark, or name the bookmark it is for with `--to`.",
             )),
+            Self::Empty {
+                change,
+                below: true,
+            } => Some(Advice::run(
+                "An empty change below it in its stack has nothing to propose; abandon it, or propose the revision alone with --only.",
+                ["reef", "abandon", change.as_str()],
+            )),
             Self::Empty { .. } => Some(Advice::hint(
                 "A workspace's `@` is often a fresh empty change: did you mean `@-`?",
+            )),
+            Self::StackTooLarge { .. } => Some(Advice::hint(
+                "Land the lower part of the stack first (`reef propose <rev>` and `reef land <rev>` on a change lower down), or propose the revision alone with --only.",
             )),
             Self::Conflicted { change } => Some(Advice::run(
                 "Resolve the conflicts first; landing refuses a conflicted change. Its sides, where each came from and who wrote it:",
@@ -373,7 +400,14 @@ impl LifecycleError {
                 reason::INVALID_SUPERSEDED_BY,
                 vec![("superseded_by", superseded_by.clone())],
             ),
-            Self::Empty { change } => (reason::CHANGE_EMPTY, vec![("change_id", change.clone())]),
+            Self::Empty { change, .. } => {
+                (reason::CHANGE_EMPTY, vec![("change_id", change.clone())])
+            }
+            Self::StackTooLarge { size, max } => (
+                reason::STACK_TOO_LARGE,
+                vec![("size", size.to_string()), ("max", max.to_string())],
+            ),
+            Self::StackNotAllowed => (reason::STACK_NOT_ALLOWED, Vec::new()),
             Self::Conflicted { change } => (
                 reason::CHANGE_CONFLICTED,
                 vec![("change_id", change.clone())],
@@ -625,6 +659,22 @@ pub(crate) async fn record_daemon_transition(
     record(state, repo, vec![Planned { row, owner: None }], meta).await
 }
 
+/// Records `rows` (daemon transitions: the landing service's enqueue of a
+/// stack, R3.10) in one operation described by `meta`; the caller holds
+/// the repository's create lock shared and its lifecycle lock.
+pub(crate) async fn record_daemon_transitions(
+    state: &AppState,
+    repo: RepoId,
+    rows: Vec<TransitionRow>,
+    meta: OpMeta,
+) -> Result<Recorded, LifecycleError> {
+    let planned = rows
+        .into_iter()
+        .map(|row| Planned { row, owner: None })
+        .collect();
+    record(state, repo, planned, meta).await
+}
+
 /// Commits the pending `row` with `op_id`, which ended at `recorded_at`,
 /// and updates its change's `lifecycle` row: R3.09's last step, for an
 /// operation another path wrote (the landing service's land, R3.13). The
@@ -677,6 +727,8 @@ pub struct TransitionRequest {
     pub agent: Option<String>,
     /// The remote token, `(id, name)`.
     pub remote: Option<(String, String)>,
+    /// Apply to every change of the revision's stack (R3.10).
+    pub stack: bool,
 }
 
 /// What [`transition`] did.
@@ -686,6 +738,8 @@ pub struct TransitionOutcome {
     pub lifecycle: Option<LifecycleRow>,
     /// The transition recorded; `None` for a no-op.
     pub transition: Option<TransitionRow>,
+    /// Every transition recorded, bottom of the stack first (R3.10).
+    pub transitions: Vec<TransitionRow>,
     /// The operation; `None` for a no-op.
     pub op_id: Option<OperationIdHex>,
     /// The change, at the head the checks read; `None` for a recorded
@@ -694,6 +748,7 @@ pub struct TransitionOutcome {
 }
 
 /// What a transition's checks found on the repository thread.
+#[derive(Clone)]
 struct Facts {
     /// The change; `None` for one with no visible commit, named by its id.
     info: Option<ChangeInfo>,
@@ -727,6 +782,9 @@ fn check_request(request: &TransitionRequest) -> Result<(), LifecycleError> {
     }
     if request.remote.is_some() && request.to == LifecycleState::Declined {
         return Err(LifecycleError::RemoteHuman);
+    }
+    if request.stack && request.to == LifecycleState::Superseded {
+        return Err(LifecycleError::StackNotAllowed);
     }
     Ok(())
 }
@@ -826,7 +884,6 @@ async fn transition_inner(
         Err(error) => return Err(error),
     };
     let change = facts.change.clone();
-    let commit = facts.commit.clone();
     let current = state.db.lifecycle_row(repo, &change)?;
     let from = state_of_row(current.as_ref());
     if let Some(expected) = request.expected_state
@@ -859,10 +916,125 @@ async fn transition_inner(
         }
         None => facts.destination.clone(),
     };
+    let members = if request.stack
+        && let Some(info) = &facts.info
+    {
+        let bookmark = destination
+            .clone()
+            .or_else(|| current.as_ref().and_then(|row| row.destination.clone()));
+        let head = info.commit_id.clone();
+        let user_email = request.user_email.clone();
+        let root = request.root.clone();
+        let mut below = handle
+            .call_async(move |head_repo| {
+                async move { stack_below(head_repo, &head, bookmark, &user_email, &root).await }
+                    .boxed_local()
+            })
+            .await??;
+        below.push(facts.clone());
+        below
+    } else {
+        vec![facts.clone()]
+    };
+    let mut planned = Vec::with_capacity(members.len());
+    for member in &members {
+        let is_head = member.change == change;
+        let existing = if is_head {
+            current.clone()
+        } else {
+            state.db.lifecycle_row(repo, &member.change)?
+        };
+        let decided = plan_member(
+            state,
+            &request,
+            member,
+            existing.as_ref(),
+            destination.as_ref(),
+            !is_head,
+        )?;
+        planned.extend(decided.map(|row| Planned { row, owner: None }));
+    }
+    if planned.is_empty() {
+        return Ok(TransitionOutcome {
+            lifecycle: current,
+            transition: None,
+            transitions: Vec::new(),
+            op_id: None,
+            change: facts.info,
+        });
+    }
+    let verb = planned.last().map_or("propose", |plan| {
+        verb(
+            plan.row.from_state.parse().unwrap_or(LifecycleState::Draft),
+            request.to,
+        )
+    });
+    let mut description = oplog::transition_description(verb, &change);
+    if planned.len() > 1 {
+        description = format!("{description} (stack of {})", planned.len());
+    }
+    let mut meta = OpMeta::new(OpKind::Transition, description);
+    meta.workspace = request.workspace.as_ref().map(|record| record.id.as_hex());
+    meta.agent = request.agent.clone().or_else(|| {
+        request
+            .workspace
+            .as_ref()
+            .map(|record| record.owner.clone())
+    });
+    let recorded = record(state, repo, planned, meta).await?;
+    let lifecycle = state.db.lifecycle_row(repo, &change)?;
+    tracing::info!(
+        change_id = %change,
+        from = from.as_str(),
+        transitions = recorded.rows.len(),
+        op_id = %recorded.op_id,
+        "lifecycle transition recorded"
+    );
+    Ok(TransitionOutcome {
+        lifecycle,
+        transition: recorded
+            .rows
+            .iter()
+            .find(|row| row.change_id == change)
+            .cloned(),
+        transitions: recorded.rows,
+        op_id: Some(recorded.op_id),
+        change: facts.info,
+    })
+}
+
+/// The transition `request` makes of `member`, whose row is `current`, or
+/// `None` when it makes none: a no-op, or a stack member the transition
+/// skips (R3.10: a stack proposal skips queued members, a withdrawal or
+/// decline those not in review). `below` is true for a stack member other
+/// than the revision.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the checks in their order, then the row"
+)]
+fn plan_member(
+    state: &AppState,
+    request: &TransitionRequest,
+    member: &Facts,
+    current: Option<&LifecycleRow>,
+    destination: Option<&String>,
+    below: bool,
+) -> Result<Option<TransitionRow>, LifecycleError> {
+    let change = member.change.clone();
+    let from = state_of_row(current);
+    if request.stack {
+        let skipped = match request.to {
+            LifecycleState::Proposed => from == LifecycleState::Queued,
+            _ => !matches!(from, LifecycleState::Proposed | LifecycleState::Queued),
+        };
+        if skipped && (below || request.to != LifecycleState::Proposed) {
+            return Ok(None);
+        }
+    }
     let noop = request.to == from
         && !(request.to == LifecycleState::Proposed
-            && current.as_ref().is_some_and(|row| {
-                row.commit_id != commit || row.destination.as_deref() != destination.as_deref()
+            && current.is_some_and(|row| {
+                row.commit_id != member.commit || row.destination.as_ref() != destination
             }));
     if request.to != from && !allowed(from, request.to) {
         return Err(LifecycleError::NotAllowed {
@@ -874,26 +1046,19 @@ async fn transition_inner(
     if let Some((token, _)) = &request.remote {
         let first_proposal =
             request.to == LifecycleState::Proposed && from == LifecycleState::Draft;
-        let owner = current
-            .as_ref()
-            .and_then(|row| row.proposed_by_token.as_deref());
+        let owner = current.and_then(|row| row.proposed_by_token.as_deref());
         if !first_proposal && owner != Some(token.as_str()) {
             return Err(LifecycleError::RemoteNotOwned { change });
         }
     }
     if noop {
-        return Ok(TransitionOutcome {
-            lifecycle: current,
-            transition: None,
-            op_id: None,
-            change: facts.info,
-        });
+        return Ok(None);
     }
     if request.to == LifecycleState::Proposed
-        && let Some(info) = &facts.info
+        && let Some(info) = &member.info
     {
         if info.empty {
-            return Err(LifecycleError::Empty { change });
+            return Err(LifecycleError::Empty { change, below });
         }
         if info.conflict {
             return Err(LifecycleError::Conflicted { change });
@@ -902,12 +1067,13 @@ async fn transition_inner(
             return Err(LifecycleError::Divergent { change });
         }
     }
+    let repo = request.repo;
     // A new round is one more than any before, so rounds never repeat, even
     // after an undo back to draft.
     let round = if request.to == LifecycleState::Proposed && from != LifecycleState::Proposed {
         state.db.max_round(repo, &change)? + 1
     } else {
-        current.as_ref().map_or(0, |row| row.round)
+        current.map_or(0, |row| row.round)
     };
     let (agent, remote_name) = match request.agent.as_deref() {
         Some(marked) => {
@@ -925,23 +1091,23 @@ async fn transition_inner(
             Actor::Human
         })
     };
-    let (identity_id, identity_name, session_id) = identity_of(state, &request);
-    let row = TransitionRow {
+    let (identity_id, identity_name, session_id) = identity_of(state, request);
+    Ok(Some(TransitionRow {
         repo_id: repo,
         id: crate::identity::new_id("trn_"),
         seq: None,
         committed: false,
-        change_id: change.clone(),
-        commit_id: commit,
+        change_id: change,
+        commit_id: member.commit.clone(),
         from_state: from.as_str().to_owned(),
         to_state: request.to.as_str().to_owned(),
         cause: TransitionCause::Request.as_str().to_owned(),
         round,
         reason: Some(request.reason.clone()).filter(|reason| !reason.is_empty()),
-        superseded_by: facts.superseded_by.as_ref().map(ToString::to_string),
+        superseded_by: member.superseded_by.as_ref().map(ToString::to_string),
         destination: destination
-            .clone()
-            .or_else(|| current.as_ref().and_then(|row| row.destination.clone())),
+            .cloned()
+            .or_else(|| current.and_then(|row| row.destination.clone())),
         undoes_operation_id: None,
         undoes_transition_id: None,
         operation_id: None,
@@ -959,32 +1125,60 @@ async fn transition_inner(
             .or(remote_name),
         created_at: Timestamp::now(),
         recorded_at: None,
+    }))
+}
+
+/// The changes of `head`'s stack below it onto `bookmark` (else
+/// `trunk()`'s), bottom first, described (R3.10). An immutable member is
+/// refused as an immutable revision is.
+async fn stack_below(
+    head_repo: &mut crate::repo::RepoHead,
+    head: &reef_lib::jj::CommitIdHex,
+    bookmark: Option<String>,
+    user_email: &str,
+    root: &std::path::Path,
+) -> Result<Vec<Facts>, LifecycleError> {
+    let repo = head_repo.repo.readonly();
+    let bookmark = bookmark
+        .filter(|name| jj_lifecycle::local_bookmark_exists(&repo, name))
+        .or_else(|| revset::trunk(&repo).map(|trunk| trunk.bookmark))
+        .ok_or(LifecycleError::NoDestination)?;
+    let destination = land::destination_head(&repo, &bookmark).map_err(stack_error)?;
+    let members = land::stack(&repo, head, &destination)
+        .await
+        .map_err(stack_error)?;
+    let scope = RevsetScope {
+        workspace: None,
+        user_email,
+        root,
     };
-    let mut meta = OpMeta::new(
-        OpKind::Transition,
-        oplog::transition_description(verb(from, request.to), &change),
-    );
-    meta.workspace = request.workspace.as_ref().map(|record| record.id.as_hex());
-    meta.agent = request.agent.clone().or_else(|| {
-        request
-            .workspace
-            .as_ref()
-            .map(|record| record.owner.clone())
-    });
-    let recorded = record(state, repo, vec![Planned { row, owner: None }], meta).await?;
-    let lifecycle = state.db.lifecycle_row(repo, &change)?;
-    tracing::info!(
-        change_id = %change,
-        from = from.as_str(),
-        op_id = %recorded.op_id,
-        "lifecycle transition recorded"
-    );
-    Ok(TransitionOutcome {
-        lifecycle,
-        transition: recorded.rows.into_iter().next(),
-        op_id: Some(recorded.op_id),
-        change: facts.info,
-    })
+    let describer = Describer::new(&repo, &scope)?;
+    let mut below = Vec::with_capacity(members.len());
+    for member in members.iter().filter(|member| &member.commit != head) {
+        let info = describer.describe(&member.commit).await?;
+        if info.immutable {
+            return Err(RewriteError::Immutable(info.commit_id).into());
+        }
+        below.push(Facts {
+            change: info.change_id.to_string(),
+            commit: info.commit_id.to_string(),
+            info: Some(info),
+            superseded_by: None,
+            destination: None,
+        });
+    }
+    Ok(below)
+}
+
+/// A stack read's failure as a lifecycle error.
+fn stack_error(error: land::LandError) -> LifecycleError {
+    match error {
+        land::LandError::StackTooLarge { size, max } => LifecycleError::StackTooLarge { size, max },
+        land::LandError::DestinationNotFound(destination) => {
+            LifecycleError::InvalidDestination { destination }
+        }
+        other => LifecycleError::Revision(RevisionError::Other(Box::new(other))),
+    }
 }
 
 /// A transition's checks on the repository thread.
@@ -1675,7 +1869,10 @@ mod tests {
             },
             LifecycleError::Empty {
                 change: "ab".into(),
+                below: false,
             },
+            LifecycleError::StackTooLarge { size: 33, max: 32 },
+            LifecycleError::StackNotAllowed,
             LifecycleError::Conflicted {
                 change: "ab".into(),
             },

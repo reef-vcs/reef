@@ -102,6 +102,14 @@
       "description": "Push a change to a branch on the repository's git remote, snapshotting its workspace first; publishing it again updates the branch. Returns {publication, operation, next}: next opens the pull request on a known host."
     },
     {
+      "name": "propose_change",
+      "description": "Propose a change and the unproposed changes below it (only: it alone). Returns {change, lifecycle, operation_id, transitions}."
+    },
+    {
+      "name": "land_change",
+      "description": "Land a proposed change and those below it, waiting up to 2 minutes; a refusal is a result. Returns {id, outcome, reason, blocking, stack}."
+    },
+    {
       "name": "push_landed",
       "description": "Push a landing destination's landed history to the git remote its policy names, fast forward only (a no-op when up to date). Returns {state, reason, hint, next}: is landed work on the remote."
     },

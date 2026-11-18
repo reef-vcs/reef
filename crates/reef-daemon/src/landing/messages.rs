@@ -44,6 +44,7 @@ pub fn reason_message(text: Option<&str>) -> v1::LandingReason {
         Some(Reason::Checks) => v1::LandingReason::Checks,
         Some(Reason::Unavailable) => v1::LandingReason::Unavailable,
         Some(Reason::Empty) => v1::LandingReason::Empty,
+        Some(Reason::Alone) => v1::LandingReason::Alone,
         None => v1::LandingReason::Unspecified,
     }
 }
@@ -164,6 +165,7 @@ pub fn landing_message(landing: &StoredLanding, whole: bool) -> v1::Landing {
         created_at: Some(timestamp(row.created_at)),
         finished_at: row.finished_at.map(timestamp),
         batch_id: row.batch_id.clone().unwrap_or_default(),
+        stack: row.stack.clone().unwrap_or_default(),
         push: landing_push(row, None),
         // Only a landed landing landed under a `[history]` table.
         history: row

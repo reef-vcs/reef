@@ -344,6 +344,7 @@ impl ChangeService for ChangesHandler {
                 actor: crate::lifecycle::messages::actor_of(request.actor),
                 agent: agent.clone(),
                 remote,
+                stack: request.stack,
             },
         )
         .await
@@ -385,6 +386,11 @@ impl ChangeService for ChangesHandler {
             operation,
             snapshot,
             change,
+            transitions: outcome
+                .transitions
+                .iter()
+                .map(crate::lifecycle::messages::transition_message)
+                .collect(),
         }))
     }
 

@@ -24,7 +24,7 @@ pub mod messages;
 pub(crate) mod push;
 mod worker;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -145,6 +145,9 @@ pub enum Reason {
     /// The change would land with nothing in it: the destination, or an
     /// earlier change of its batch, already has its edits (R3.16).
     Empty,
+    /// The change edits a policy file above the bottom of its stack
+    /// (R3.10): it lands on its own, after the changes below it.
+    Alone,
 }
 
 impl Reason {
@@ -161,6 +164,7 @@ impl Reason {
             Reason::Checks => "checks",
             Reason::Unavailable => "unavailable",
             Reason::Empty => "empty",
+            Reason::Alone => "alone",
         }
     }
 
@@ -177,6 +181,7 @@ impl Reason {
             Reason::Checks,
             Reason::Unavailable,
             Reason::Empty,
+            Reason::Alone,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == text)
@@ -194,6 +199,9 @@ pub enum LandingError {
         change: String,
         /// Its state.
         state: LifecycleState,
+        /// The head of the stack being landed, when the change is below it
+        /// (R3.10): proposing the head proposes it.
+        head: Option<String>,
     },
     /// The proposal's commit is not the change's visible one.
     #[error("change {change} moved from {commit}, the proposed commit, to {visible}")]
@@ -204,6 +212,9 @@ pub enum LandingError {
         commit: String,
         /// The visible commit.
         visible: String,
+        /// The head of the stack being landed, when the change is below it
+        /// (R3.10).
+        head: Option<String>,
     },
     /// The destination is a remote bookmark.
     #[error("{0:?} is not a local bookmark; the landing service lands on local bookmarks")]
@@ -217,6 +228,26 @@ pub enum LandingError {
     /// The repository's queue is full.
     #[error("{MAX_QUEUED} changes are already queued in this repository")]
     QueueFull,
+    /// The change's stack has more than [`land::MAX_STACK`] changes (R3.10).
+    #[error("the stack has more than {max} changes")]
+    StackTooLarge {
+        /// Its changes, counted to one past the bound.
+        size: usize,
+        /// The bound.
+        max: usize,
+    },
+    /// A change of the stack is proposed for another destination (R3.10).
+    #[error(
+        "change {change}, below it in its stack, is proposed for {destination}, not {expected}"
+    )]
+    StackDestinationMismatch {
+        /// The member.
+        change: String,
+        /// Its destination.
+        destination: String,
+        /// The head's.
+        expected: String,
+    },
     /// A wait over [`MAX_WAIT`].
     #[error("wait_ms is at most {}", MAX_WAIT.as_millis())]
     InvalidWait,
@@ -276,6 +307,8 @@ impl Classify for LandingError {
             | Self::DestinationNotLocal(_)
             | Self::DestinationNotFound(_)
             | Self::DestinationConflicted(_)
+            | Self::StackTooLarge { .. }
+            | Self::StackDestinationMismatch { .. }
             | Self::IdentityUnset { .. } => ErrorKind::Conflict,
             Self::QueueFull => ErrorKind::Unavailable,
             Self::InvalidWait | Self::Selector => ErrorKind::InvalidArgument,
@@ -295,17 +328,26 @@ impl Classify for LandingError {
 impl Advise for LandingError {
     fn advice(&self) -> Option<Advice> {
         match self {
-            Self::NotProposed { change, state }
-                if *state == LifecycleState::Draft
-                    || *state == LifecycleState::Withdrawn
-                    || *state == LifecycleState::Declined =>
+            Self::NotProposed {
+                change,
+                state,
+                head,
+            } if *state == LifecycleState::Draft
+                || *state == LifecycleState::Withdrawn
+                || *state == LifecycleState::Declined =>
             {
-                Some(Advice::run(
-                    "Propose it first; proposing is the request to land.",
-                    ["reef", "propose", change.as_str()],
-                ))
+                Some(match head {
+                    Some(head) => Advice::run(
+                        "A change below it in its stack is not proposed; proposing the head proposes the stack.",
+                        ["reef", "propose", head.as_str()],
+                    ),
+                    None => Advice::run(
+                        "Propose it first; proposing is the request to land.",
+                        ["reef", "propose", change.as_str()],
+                    ),
+                })
             }
-            Self::NotProposed { change, state } if *state == LifecycleState::Queued => {
+            Self::NotProposed { change, state, .. } if *state == LifecycleState::Queued => {
                 Some(Advice::run(
                     "It is already queued; follow its landing.",
                     ["reef", "landing", "show", change.as_str()],
@@ -314,9 +356,13 @@ impl Advise for LandingError {
             Self::NotProposed { .. } => Some(Advice::hint(
                 "A landed or superseded change is final; make a new change instead.",
             )),
-            Self::Amended { change, .. } => Some(Advice::run(
+            Self::Amended { change, head, .. } => Some(Advice::run(
                 "The change moved since it was proposed; propose it again to record the new commit, then land it.",
-                ["reef", "propose", change.as_str()],
+                [
+                    "reef",
+                    "propose",
+                    head.as_deref().unwrap_or(change.as_str()),
+                ],
             )),
             Self::DestinationNotLocal(name) => {
                 let local = name.split('@').next().unwrap_or(name);
@@ -329,6 +375,12 @@ impl Advise for LandingError {
             )),
             Self::DestinationConflicted(name) => Some(Advice::hint(format!(
                 "Resolve the bookmark first: `jj bookmark set {name} -r <commit>`."
+            ))),
+            Self::StackTooLarge { .. } => Some(Advice::hint(
+                "Land the lower part of the stack first: `reef land <rev>` on a change lower down.",
+            )),
+            Self::StackDestinationMismatch { expected, .. } => Some(Advice::hint(format!(
+                "Propose the stack for one destination: `reef propose <rev> --to {expected}` on the head."
             ))),
             Self::QueueFull => Some(Advice::run(
                 "Wait for queued landings to finish.",
@@ -359,7 +411,7 @@ impl LandingError {
     pub(crate) fn reason(&self) -> Option<(&'static str, Vec<(&'static str, String)>)> {
         use reef_api::error as reason;
         Some(match self {
-            Self::NotProposed { change, state } => (
+            Self::NotProposed { change, state, .. } => (
                 reason::NOT_PROPOSED,
                 vec![
                     ("change_id", change.clone()),
@@ -370,6 +422,7 @@ impl LandingError {
                 change,
                 commit,
                 visible,
+                ..
             } => (
                 reason::PROPOSAL_AMENDED,
                 vec![
@@ -391,6 +444,21 @@ impl LandingError {
                 vec![("destination", name.clone())],
             ),
             Self::QueueFull => (reason::QUEUE_FULL, vec![("max", MAX_QUEUED.to_string())]),
+            Self::StackTooLarge { size, max } => (
+                reason::STACK_TOO_LARGE,
+                vec![("size", size.to_string()), ("max", max.to_string())],
+            ),
+            Self::StackDestinationMismatch {
+                change,
+                destination,
+                ..
+            } => (
+                reason::STACK_DESTINATION_MISMATCH,
+                vec![
+                    ("change_id", change.clone()),
+                    ("destination", destination.clone()),
+                ],
+            ),
             Self::IdentityUnset { destination, .. } => (
                 reason::IDENTITY_UNSET,
                 vec![("destination", destination.clone())],
@@ -456,6 +524,9 @@ pub struct LandRequest {
 pub struct LandOutcome {
     /// The landing as it was when the wait ended.
     pub landing: StoredLanding,
+    /// The landings of the other changes of its stack, bottom first, as
+    /// they were when the wait ended (R3.10).
+    pub stack: Vec<StoredLanding>,
     /// The enqueue operation, when this call queued the change.
     pub enqueue: Option<OperationIdHex>,
     /// The change, as the request resolved it.
@@ -507,11 +578,18 @@ pub(crate) struct Judged {
 /// input from a batch's chain instead of the change's own preview, the
 /// `batch` input, and the tree whose evidence the input carries instead of
 /// the change's own (a batch's tested tree).
+///
+/// For a change of a stack (R3.10, ADR 0078): `below`, the changes landing
+/// before it, which its preview rebases first and among which its parents
+/// may be; and `above`, the submitted trees of the changes above it in the
+/// stack being landed, whose sign-offs count for it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct JudgeContext {
     pub(crate) landing: Option<reef_policy::input::Landing>,
     pub(crate) batch: reef_policy::Batch,
     pub(crate) evidence_tree: Option<String>,
+    pub(crate) below: Vec<LandTarget>,
+    pub(crate) above: Vec<String>,
 }
 
 /// What judging a change found.
@@ -553,16 +631,8 @@ struct Read {
 }
 
 /// Judges `target`: the preview at the destination's head, then the policy
-/// there over the queued commit (R3.13). Reads only.
-pub(crate) async fn judge(
-    state: &AppState,
-    repo: RepoId,
-    target: &LandTarget,
-) -> Result<Verdict, LandingError> {
-    judge_with(state, repo, target, &JudgeContext::default()).await
-}
-
-/// [`judge`], seeing what `context` says besides the change (R3.14).
+/// there over the queued commit (R3.13), seeing what `context` says besides
+/// the change (R3.10, R3.14). Reads only.
 #[expect(clippy::too_many_lines, reason = "the reads, then the evaluation")]
 pub(crate) async fn judge_with(
     state: &AppState,
@@ -573,11 +643,12 @@ pub(crate) async fn judge_with(
     let handle = state.manager.handle(repo)?;
     let read = {
         let target = target.clone();
+        let below = context.below.clone();
         handle
             .call_async(move |head| {
                 async move {
                     let repo = head.refresh().await?;
-                    let preview = land::preview(&repo, &target).await;
+                    let preview = land::preview_above(&repo, &below, &target).await;
                     let Ok(found) = &preview else {
                         return Ok::<_, LandingError>(Read {
                             preview,
@@ -646,7 +717,7 @@ pub(crate) async fn judge_with(
         .clone_into(&mut change.change.state);
     let paths = change.change.paths.clone();
     let evidence_tree = context.evidence_tree.as_ref().or(change.tree_id.as_ref());
-    let evidence = match evidence_tree {
+    let mut evidence = match evidence_tree {
         Some(tree) => policy_input::read_evidence(state, repo, tree)
             .await
             .map_err(|status| LandingError::Input(status.message().to_owned()))?,
@@ -656,6 +727,14 @@ pub(crate) async fn judge_with(
             invalid: Vec::new(),
         },
     };
+    if !context.above.is_empty() {
+        let signoffs = signoffs_above(state, repo, read.policy.as_ref(), &context.above).await?;
+        for found in signoffs {
+            if !evidence.evidence.iter().any(|known| known.id == found.id) {
+                evidence.evidence.push(found);
+            }
+        }
+    }
     let (provenance, provenance_ignored) =
         policy_input::read_provenance(state, repo, &change.change.id)
             .await
@@ -719,6 +798,39 @@ pub(crate) async fn judge_with(
         judged: Some(judged),
         problem: None,
     })
+}
+
+/// The sign-offs on `trees`, the submitted trees of the changes above one
+/// in its stack (R3.10): the verified evidence of a kind `policy` counts as
+/// a sign-off. A reviewer reads a stack as one diff, so accepting a change
+/// accepts the changes below it.
+async fn signoffs_above(
+    state: &AppState,
+    repo: RepoId,
+    policy: Option<&policy_input::PolicyFile>,
+    trees: &[String],
+) -> Result<Vec<reef_policy::input::Evidence>, LandingError> {
+    use crate::policy::Loaded;
+    let Some(Ok(bytes)) = policy.map(|file| &file.bytes) else {
+        return Ok(Vec::new());
+    };
+    let loaded = state.policy.load(bytes);
+    let Loaded::Policy(policy) = &*loaded else {
+        return Ok(Vec::new());
+    };
+    let kinds = policy.signoff_kinds();
+    let mut found = Vec::new();
+    for tree in trees {
+        let read = policy_input::read_evidence(state, repo, tree)
+            .await
+            .map_err(|status| LandingError::Input(status.message().to_owned()))?;
+        found.extend(
+            read.evidence
+                .into_iter()
+                .filter(|evidence| kinds.contains(evidence.kind.as_str())),
+        );
+    }
+    Ok(found)
 }
 
 /// `proposed` as the input's `proposed_policy`, through `policies`' cache.
@@ -844,7 +956,7 @@ fn refusal(error: LandError) -> Result<Verdict, LandingError> {
             destination(DestinationProblem::AlreadyThere, error.to_string())
         }
         error @ LandError::Amended { .. } => block(Reason::Amended, error.to_string()),
-        error @ LandError::UnlandedParents { .. } => {
+        error @ (LandError::UnlandedParents { .. } | LandError::ParentExcluded { .. }) => {
             block(Reason::UnlandedParents, error.to_string())
         }
         error @ (LandError::Conflicted(_) | LandError::RebaseConflicts) => {
@@ -995,6 +1107,8 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         history: None,
         pushed_at: None,
         push_operation_id: None,
+        stack: None,
+        stack_position: None,
     }
 }
 
@@ -1103,7 +1217,10 @@ pub async fn land_change(
             let outcome = gate(&task_state, request).await?;
             // Woken here, so a caller that goes away cannot leave a queued
             // change with no worker.
-            if outcome.landing.row.outcome == Outcome::Queued.as_str() {
+            if std::iter::once(&outcome.landing)
+                .chain(&outcome.stack)
+                .any(|landing| landing.row.outcome == Outcome::Queued.as_str())
+            {
                 worker::wake(&task_state, outcome.landing.row.repo_id);
             }
             Ok::<_, LandingError>(outcome)
@@ -1112,8 +1229,13 @@ pub async fn land_change(
     )
     .await
     .map_err(|_| LandingError::Thread(RepoThreadError::Panicked { id: repo }))??;
+    let deadline = started + wait;
+    for member in &mut outcome.stack {
+        if member.row.outcome == Outcome::Queued.as_str() {
+            *member = wait_for(state, repo, &member.row.id, deadline).await?;
+        }
+    }
     if outcome.landing.row.outcome == Outcome::Queued.as_str() {
-        let deadline = started + wait;
         outcome.landing = wait_for(state, repo, &outcome.landing.row.id, deadline).await?;
     }
     Ok(outcome)
@@ -1140,7 +1262,73 @@ async fn wait_for(
     }
 }
 
-/// The gate: the checks, the judgment, and the enqueue.
+/// One change of the stack a request lands (R3.10), before judging.
+struct Slot {
+    target: LandTarget,
+    /// Its submitted tree.
+    tree: Option<String>,
+    /// Its commit's parents.
+    parents: Vec<CommitIdHex>,
+    /// Its open landing, when an earlier request queued it.
+    open: Option<StoredLanding>,
+}
+
+/// What the gate decided for one change of the stack.
+enum Decided {
+    /// Queued by an earlier request.
+    Open(Box<StoredLanding>),
+    /// It passed: it is queued now, with this row.
+    Pass {
+        target: LandTarget,
+        row: Box<(LandingRow, Vec<LandingChangeRow>)>,
+    },
+    /// It is refused, with this row (`None` until written, for a change
+    /// landed alone, whose row may count one more attempt on an earlier
+    /// one).
+    Block {
+        target: LandTarget,
+        row: Box<(LandingRow, Vec<LandingChangeRow>)>,
+    },
+}
+
+/// Whether `paths` touch a policy file, which lands on its own (R3.14).
+fn touches_policy(paths: &[String]) -> bool {
+    paths.iter().any(|path| {
+        reef_policy::POLICY_FILES
+            .iter()
+            .any(|file| path.eq_ignore_ascii_case(file))
+    })
+}
+
+/// For each of `slots`, the indexes of the slots that are its ancestors,
+/// from the parent edges (R3.10): which changes a sign-off reaches.
+fn ancestors_of(slots: &[Slot]) -> Vec<HashSet<usize>> {
+    let index: HashMap<&CommitIdHex, usize> = slots
+        .iter()
+        .enumerate()
+        .map(|(at, slot)| (&slot.target.commit, at))
+        .collect();
+    let mut ancestors: Vec<HashSet<usize>> = Vec::with_capacity(slots.len());
+    // Parents first, so each parent's set is complete when read.
+    for slot in slots {
+        let mut mine = HashSet::new();
+        for parent in &slot.parents {
+            if let Some(&at) = index.get(parent) {
+                mine.insert(at);
+                if let Some(theirs) = ancestors.get(at) {
+                    mine.extend(theirs.iter().copied());
+                }
+            }
+        }
+        ancestors.push(mine);
+    }
+    ancestors
+}
+
+/// The gate: the checks, the judgment, and the enqueue, for the change and
+/// the changes of its stack below it (R3.10): judged in order, each rebased
+/// onto the ones below, the passing prefix queued in one operation and the
+/// rest blocked.
 #[expect(clippy::too_many_lines, reason = "the gate's steps in order")]
 async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, LandingError> {
     let repo = request.repo;
@@ -1161,16 +1349,13 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
     if current == LifecycleState::Queued
         && let Some(open) = state.db.open_landing_of(repo, &change)?
     {
-        return Ok(LandOutcome {
-            landing: open,
-            enqueue: None,
-            change: Some(info),
-        });
+        return queued_outcome(state, repo, open, info);
     }
     let Some(row) = row.filter(|_| current == LifecycleState::Proposed) else {
         return Err(LandingError::NotProposed {
             change,
             state: current,
+            head: None,
         });
     };
     if row.commit_id != commit.as_str() {
@@ -1178,67 +1363,166 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
             change,
             commit: row.commit_id,
             visible: commit.as_str().to_owned(),
+            head: None,
         });
     }
     let destination = row.destination.clone().unwrap_or_default();
     if destination.contains('@') {
         return Err(LandingError::DestinationNotLocal(destination));
     }
-    let target = LandTarget {
-        change: info.change_id.clone(),
-        commit: commit.clone(),
-        bookmark: destination.clone(),
-    };
+    let slots = stack_slots(state, repo, &info, &destination).await?;
+    let ancestors = ancestors_of(&slots);
     let who = requester(state, &request);
-    let verdict = judge(state, repo, &target).await?;
-    let judged = match verdict {
-        Verdict::Block {
-            problem: Some(DestinationProblem::Missing),
-            ..
-        } => return Err(LandingError::DestinationNotFound(destination)),
-        Verdict::Block {
-            problem: Some(DestinationProblem::Conflicted),
-            ..
-        } => return Err(LandingError::DestinationConflicted(destination)),
-        Verdict::Block {
-            reason: Reason::Amended,
-            ..
-        } => {
-            // The change moved between the gate's read and its preview.
-            return Err(LandingError::Amended {
-                change,
-                commit: commit.as_str().to_owned(),
-                visible: "(moved during the request)".to_owned(),
-            });
+    let stacked = slots.len() > 1;
+    let head_id = crate::identity::new_id("lnd_");
+    let base = Timestamp::now();
+
+    // Judge in order; the first refusal stops the prefix.
+    let mut decided = Vec::with_capacity(slots.len());
+    let mut below: Vec<LandTarget> = Vec::new();
+    let mut stop: Option<String> = None;
+    let mut pushing = false;
+    for (index, slot) in slots.iter().enumerate() {
+        let short: String = slot.target.change.as_str().chars().take(12).collect();
+        let context = JudgeContext {
+            below: below.clone(),
+            // Only the changes above it that have it as an ancestor: a
+            // reviewer of those read its diff.
+            above: slots
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| ancestors[*at].contains(&index))
+                .filter_map(|(_, above)| above.tree.clone())
+                .collect(),
+            ..JudgeContext::default()
+        };
+        let mut row = new_row(repo, &destination, &who);
+        row.created_at = Timestamp(base.0 + i64::try_from(index).unwrap_or(0));
+        if index + 1 == slots.len() {
+            row.id.clone_from(&head_id);
         }
-        Verdict::Block {
-            reason,
-            message,
-            preview,
-            judged,
-            destination: head,
-            ..
-        } => {
-            let landing = blocked(
-                state,
-                repo,
-                &target,
-                &who,
-                (reason, message),
-                (preview.as_ref(), judged.as_deref(), head),
-                info.tree_id.clone(),
-            )?;
-            return Ok(LandOutcome {
-                landing,
-                enqueue: None,
-                change: Some(info),
-            });
+        if stacked {
+            row.stack = Some(head_id.clone());
+            row.stack_position = Some(u32::try_from(index).unwrap_or(u32::MAX));
         }
-        Verdict::Allow(judged) => judged,
-    };
+        if let Some(open) = &slot.open {
+            // Queued by an earlier request. A change to a policy file still
+            // lands on its own (S-210): the changes above it wait.
+            if stop.is_none()
+                && index + 1 < slots.len()
+                && let Some(paths) = paths_of(state, repo, &slot.target, &context).await?
+                && touches_policy(&paths)
+            {
+                stop = Some(format!(
+                    "change {short} below it changes a policy file and lands on its own first"
+                ));
+            }
+            below.push(slot.target.clone());
+            decided.push(Decided::Open(Box::new(open.clone())));
+            continue;
+        }
+        if let Some(why) = &stop {
+            Outcome::Blocked.as_str().clone_into(&mut row.outcome);
+            row.reason = Some(Reason::UnlandedParents.as_str().to_owned());
+            row.message = Some(why.clone());
+            row.finished_at = Some(row.created_at);
+            let change = change_row(&slot.target, slot.tree.clone(), None, None);
+            decided.push(Decided::Block {
+                target: slot.target.clone(),
+                row: Box::new((row, vec![change])),
+            });
+            continue;
+        }
+        match judge_with(state, repo, &slot.target, &context).await? {
+            Verdict::Block {
+                problem: Some(DestinationProblem::Missing),
+                ..
+            } => return Err(LandingError::DestinationNotFound(destination)),
+            Verdict::Block {
+                problem: Some(DestinationProblem::Conflicted),
+                ..
+            } => return Err(LandingError::DestinationConflicted(destination)),
+            Verdict::Block {
+                reason: Reason::Amended,
+                ..
+            } => {
+                // The change moved between the gate's read and its preview.
+                return Err(LandingError::Amended {
+                    change: slot.target.change.as_str().to_owned(),
+                    commit: slot.target.commit.as_str().to_owned(),
+                    visible: "(moved during the request)".to_owned(),
+                    head: stacked.then(|| change.clone()),
+                });
+            }
+            Verdict::Block {
+                reason,
+                message,
+                preview,
+                judged,
+                destination: head,
+                ..
+            } => {
+                stop = Some(format!(
+                    "change {short} below it was blocked: {}",
+                    reason.as_str()
+                ));
+                blocked_row(&mut row, (reason, message), judged.as_deref(), head);
+                let change = change_row(
+                    &slot.target,
+                    slot.tree.clone(),
+                    preview.as_ref(),
+                    judged.as_deref(),
+                );
+                decided.push(Decided::Block {
+                    target: slot.target.clone(),
+                    row: Box::new((row, vec![change])),
+                });
+            }
+            Verdict::Allow(judged) => {
+                let policy_change = touches_policy(&judged.paths);
+                if policy_change && !below.is_empty() {
+                    stop = Some(format!(
+                        "change {short} below it changes a policy file and lands on its own"
+                    ));
+                    let head = Some(judged.preview.destination.as_str().to_owned());
+                    blocked_row(
+                        &mut row,
+                        (
+                            Reason::Alone,
+                            "it changes reef-policy.toml or reef-checks.toml, which lands on its own: land the changes below it first".to_owned(),
+                        ),
+                        Some(&judged),
+                        head,
+                    );
+                    let change = change_row(&slot.target, slot.tree.clone(), None, Some(&judged));
+                    decided.push(Decided::Block {
+                        target: slot.target.clone(),
+                        row: Box::new((row, vec![change])),
+                    });
+                    continue;
+                }
+                if policy_change {
+                    stop = Some(format!(
+                        "change {short} below it changes a policy file and lands on its own first"
+                    ));
+                }
+                pushing |= pushes(state, &judged.policy);
+                row.destination_before = Some(judged.preview.destination.as_str().to_owned());
+                row.policy_commit = Some(judged.policy.commit.clone());
+                row.policy_blob.clone_from(&judged.policy.blob);
+                row.policy_sha256.clone_from(&judged.policy.sha256);
+                let change = change_row(&slot.target, slot.tree.clone(), None, Some(&judged));
+                below.push(slot.target.clone());
+                decided.push(Decided::Pass {
+                    target: slot.target.clone(),
+                    row: Box::new((row, vec![change])),
+                });
+            }
+        }
+    }
     // A destination pushed to a git remote takes no landing while the
     // daemon's identity is the default (R3.17): it would reach the host.
-    if state.config.identity_is_default() && pushes(state, &judged.policy) {
+    if pushing && state.config.identity_is_default() {
         return Err(LandingError::IdentityUnset {
             destination,
             email: state.config.identity.email.clone(),
@@ -1246,97 +1530,375 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
         });
     }
 
-    // Queue it: the row must still be proposed at the commit judged.
-    let create_lock = state.manager.repo_lock(repo);
-    let _shared = create_lock.read().await;
-    let lifecycle_lock = state.lifecycle.lock(repo);
-    let _held = lifecycle_lock.lock().await;
-    let row = state.db.lifecycle_row(repo, &change)?.filter(|row| {
-        row.state == LifecycleState::Proposed.as_str() && row.commit_id == commit.as_str()
-    });
-    let Some(row) = row else {
-        // Another request queued it meanwhile: answer with its landing.
-        if let Some(open) = state.db.open_landing_of(repo, &change)? {
-            return Ok(LandOutcome {
-                landing: open,
-                enqueue: None,
-                change: Some(info),
-            });
-        }
-        let now = state.db.lifecycle_row(repo, &change)?;
-        return Err(LandingError::NotProposed {
-            change,
-            state: now
-                .and_then(|row| row.state.parse().ok())
-                .unwrap_or(LifecycleState::Draft),
+    // A change landed alone and refused may count one more attempt on its
+    // latest identical row (S-125); a stack's rows are the request's own.
+    if !stacked && let Some(Decided::Block { target, row }) = decided.last() {
+        let (row, changes) = &**row;
+        let landing = blocked(state, repo, target, row, &changes[0])?;
+        return Ok(LandOutcome {
+            landing,
+            stack: Vec::new(),
+            enqueue: None,
+            change: Some(info),
         });
-    };
-    if state.db.queued_landing_count(repo)? >= MAX_QUEUED {
-        return Err(LandingError::QueueFull);
     }
-    let transition = transition_row(
-        repo,
-        &change,
-        commit.as_str(),
-        LifecycleState::Proposed,
-        LifecycleState::Queued,
-        row.round,
-        &destination,
-        None,
-        &who,
-        Actor::parse(who.actor.as_deref().unwrap_or("agent")),
-    );
-    let mut meta = OpMeta::new(
-        OpKind::Transition,
-        oplog::transition_description("queue", &change),
-    );
-    meta.workspace = request.workspace.as_ref().map(|record| record.id.as_hex());
-    meta.agent.clone_from(&who.marked);
-    let recorded =
-        crate::lifecycle::record_daemon_transition(state, repo, transition, meta).await?;
-    let mut landing_row = new_row(repo, &destination, &who);
-    landing_row.destination_before = Some(judged.preview.destination.as_str().to_owned());
-    landing_row.policy_commit = Some(judged.policy.commit.clone());
-    landing_row.policy_blob.clone_from(&judged.policy.blob);
-    landing_row.policy_sha256.clone_from(&judged.policy.sha256);
-    landing_row.enqueue_operation_id = Some(recorded.op_id.to_string());
-    let changes = vec![change_row(
-        &target,
-        info.tree_id.clone(),
-        None,
-        Some(&judged),
-    )];
-    state.db.write_landing(&landing_row, &changes)?;
-    tracing::info!(change_id = %change, landing_id = %landing_row.id, op_id = %recorded.op_id, "queued for landing");
-    let landing = state
-        .db
-        .landing(repo, &landing_row.id)?
-        .ok_or_else(|| LandingError::NotFound(landing_row.id.clone()))?;
+    let (enqueue, mut written) = enqueue(state, &request, &who, &destination, decided).await?;
+    let landing = written
+        .pop()
+        .ok_or_else(|| LandingError::Input("no change to land".to_owned()))?;
     Ok(LandOutcome {
         landing,
-        enqueue: Some(recorded.op_id),
+        stack: written,
+        enqueue,
         change: Some(info),
     })
 }
 
-/// Records a blocked landing, or counts one more attempt on the change's
-/// latest identical one (S-125).
+/// `row` as a landing the gate refused for `reason`.
+fn blocked_row(
+    row: &mut LandingRow,
+    (reason, message): (Reason, String),
+    judged: Option<&Judged>,
+    head: Option<String>,
+) {
+    Outcome::Blocked.as_str().clone_into(&mut row.outcome);
+    row.reason = Some(reason.as_str().to_owned());
+    row.message = Some(message);
+    row.destination_before = head;
+    if let Some(judged) = judged {
+        row.policy_commit = Some(judged.policy.commit.clone());
+        row.policy_blob.clone_from(&judged.policy.blob);
+        row.policy_sha256.clone_from(&judged.policy.sha256);
+    }
+    row.finished_at = Some(row.created_at);
+}
+
+/// The paths an earlier request's queued change touches, judged as the
+/// gate judges (R3.10: whether it changes a policy file); `None` when the
+/// judgment stopped before reading them.
+async fn paths_of(
+    state: &AppState,
+    repo: RepoId,
+    target: &LandTarget,
+    context: &JudgeContext,
+) -> Result<Option<Vec<String>>, LandingError> {
+    Ok(match judge_with(state, repo, target, context).await? {
+        Verdict::Allow(judged)
+        | Verdict::Block {
+            judged: Some(judged),
+            ..
+        } => Some(judged.paths),
+        Verdict::Block { .. } => None,
+    })
+}
+
+/// The answer for a change already queued: its open landing and the other
+/// landings of the request that queued it.
+fn queued_outcome(
+    state: &AppState,
+    repo: RepoId,
+    open: StoredLanding,
+    info: ChangeInfo,
+) -> Result<LandOutcome, LandingError> {
+    let stack = match &open.row.stack {
+        Some(stack) => state
+            .db
+            .landings_of_stack(repo, stack)?
+            .into_iter()
+            .filter(|member| member.row.id != open.row.id)
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(LandOutcome {
+        landing: open,
+        stack,
+        enqueue: None,
+        change: Some(info),
+    })
+}
+
+/// `info`'s stack onto `destination`'s head (R3.10), read on the
+/// repository thread.
+async fn read_stack(
+    state: &AppState,
+    repo: RepoId,
+    info: &ChangeInfo,
+    destination: &str,
+) -> Result<Vec<land::StackMember>, LandingError> {
+    let handle = state.manager.handle(repo)?;
+    let found = {
+        let bookmark = destination.to_owned();
+        let head = info.commit_id.clone();
+        handle
+            .call_async(move |repo_head| {
+                async move {
+                    let repo = repo_head.refresh().await?;
+                    let found = match land::destination_head(&repo, &bookmark) {
+                        Ok(onto) => land::stack(&repo, &head, &onto).await,
+                        Err(error) => Err(error),
+                    };
+                    Ok::<_, LandingError>(found)
+                }
+                .boxed_local()
+            })
+            .await??
+    };
+    match found {
+        Ok(members) => Ok(members),
+        Err(LandError::DestinationNotFound(_)) => {
+            Err(LandingError::DestinationNotFound(destination.to_owned()))
+        }
+        Err(LandError::DestinationConflicted(_)) => {
+            Err(LandingError::DestinationConflicted(destination.to_owned()))
+        }
+        Err(LandError::StackTooLarge { size, max }) => {
+            Err(LandingError::StackTooLarge { size, max })
+        }
+        Err(error) => Err(LandingError::Input(ErrorChain(&error).to_string())),
+    }
+}
+
+/// The changes `info`'s stack lands onto `destination` (R3.10), bottom
+/// first, the head last: each below the head must be proposed for the same
+/// destination at its visible commit, or queued at it.
+async fn stack_slots(
+    state: &AppState,
+    repo: RepoId,
+    info: &ChangeInfo,
+    destination: &str,
+) -> Result<Vec<Slot>, LandingError> {
+    let members = read_stack(state, repo, info, destination).await?;
+    let target = |change: &ChangeIdHex, commit: &CommitIdHex| LandTarget {
+        change: change.clone(),
+        commit: commit.clone(),
+        bookmark: destination.to_owned(),
+    };
+    let head = Some(info.change_id.as_str().to_owned());
+    let mut slots = Vec::with_capacity(members.len().max(1));
+    for member in members
+        .iter()
+        .filter(|member| member.commit != info.commit_id)
+    {
+        let change = member.change.as_str().to_owned();
+        let row = state.db.lifecycle_row(repo, &change)?;
+        let current = row
+            .as_ref()
+            .and_then(|row| row.state.parse().ok())
+            .unwrap_or(LifecycleState::Draft);
+        let amended = |commit: String| LandingError::Amended {
+            change: change.clone(),
+            commit,
+            visible: member.commit.as_str().to_owned(),
+            head: head.clone(),
+        };
+        let open = match (current, row) {
+            (LifecycleState::Queued, _) => match state.db.open_landing_of(repo, &change)? {
+                Some(open) => {
+                    let queued = open
+                        .changes
+                        .first()
+                        .map(|first| first.queued_commit.clone())
+                        .unwrap_or_default();
+                    if queued != member.commit.as_str() {
+                        return Err(amended(queued));
+                    }
+                    Some(open)
+                }
+                None => {
+                    return Err(LandingError::NotProposed {
+                        change,
+                        state: current,
+                        head,
+                    });
+                }
+            },
+            (LifecycleState::Proposed, Some(row)) => {
+                if row.commit_id != member.commit.as_str() {
+                    return Err(amended(row.commit_id));
+                }
+                let proposed_for = row.destination.unwrap_or_default();
+                if proposed_for != destination {
+                    return Err(LandingError::StackDestinationMismatch {
+                        change,
+                        destination: proposed_for,
+                        expected: destination.to_owned(),
+                    });
+                }
+                None
+            }
+            _ => {
+                return Err(LandingError::NotProposed {
+                    change,
+                    state: current,
+                    head,
+                });
+            }
+        };
+        slots.push(Slot {
+            target: target(&member.change, &member.commit),
+            tree: member.tree.clone(),
+            parents: member.parents.clone(),
+            open,
+        });
+    }
+    let parents = members
+        .iter()
+        .find(|member| member.commit == info.commit_id)
+        .map(|member| member.parents.clone())
+        .unwrap_or_default();
+    slots.push(Slot {
+        target: target(&info.change_id, &info.commit_id),
+        tree: info.tree_id.clone(),
+        parents,
+        open: None,
+    });
+    Ok(slots)
+}
+
+/// `decided` read again under the lifecycle lock (R3.10): a change another
+/// request queued meanwhile is answered with that landing.
+fn recheck(
+    state: &AppState,
+    repo: RepoId,
+    decided: Vec<Decided>,
+) -> Result<Vec<Decided>, LandingError> {
+    let mut checked = Vec::with_capacity(decided.len());
+    for decision in decided {
+        checked.push(match decision {
+            Decided::Pass { target, row } => {
+                let change = target.change.as_str();
+                let now = state.db.lifecycle_row(repo, change)?;
+                let proposed = now.as_ref().is_some_and(|now| {
+                    now.state == LifecycleState::Proposed.as_str()
+                        && now.commit_id == target.commit.as_str()
+                });
+                if proposed {
+                    Decided::Pass { target, row }
+                } else if let Some(open) = state.db.open_landing_of(repo, change)? {
+                    Decided::Open(Box::new(open))
+                } else {
+                    return Err(LandingError::NotProposed {
+                        change: change.to_owned(),
+                        state: now
+                            .and_then(|row| row.state.parse().ok())
+                            .unwrap_or(LifecycleState::Draft),
+                        head: None,
+                    });
+                }
+            }
+            other => other,
+        });
+    }
+    Ok(checked)
+}
+
+/// Queues the changes `decided` passes, in one operation (R3.10), and
+/// writes every new row of the request in one transaction, under the
+/// lifecycle lock, so the worker never sees part of a stack. A change
+/// another request queued meanwhile is answered with that landing.
+async fn enqueue(
+    state: &AppState,
+    request: &LandRequest,
+    who: &Requester,
+    destination: &str,
+    decided: Vec<Decided>,
+) -> Result<(Option<OperationIdHex>, Vec<StoredLanding>), LandingError> {
+    let repo = request.repo;
+    let create_lock = state.manager.repo_lock(repo);
+    let _shared = create_lock.read().await;
+    let lifecycle_lock = state.lifecycle.lock(repo);
+    let _held = lifecycle_lock.lock().await;
+    // Read again under the lock: another request may have queued a change.
+    let checked = recheck(state, repo, decided)?;
+    let passes: Vec<&LandTarget> = checked
+        .iter()
+        .filter_map(|decision| match decision {
+            Decided::Pass { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect();
+    let mut op = None;
+    if let Some(last) = passes.last() {
+        if state.db.queued_landing_count(repo)? + passes.len() as u64 > MAX_QUEUED {
+            return Err(LandingError::QueueFull);
+        }
+        let mut rows = Vec::with_capacity(passes.len());
+        for target in &passes {
+            let change = target.change.as_str();
+            let round = state
+                .db
+                .lifecycle_row(repo, change)?
+                .map_or(0, |row| row.round);
+            rows.push(transition_row(
+                repo,
+                change,
+                target.commit.as_str(),
+                LifecycleState::Proposed,
+                LifecycleState::Queued,
+                round,
+                destination,
+                None,
+                who,
+                Actor::parse(who.actor.as_deref().unwrap_or("agent")),
+            ));
+        }
+        let mut description = oplog::transition_description("queue", last.change.as_str());
+        if rows.len() > 1 {
+            description = format!("{description} (stack of {})", rows.len());
+        }
+        let mut meta = OpMeta::new(OpKind::Transition, description);
+        meta.workspace = request.workspace.as_ref().map(|record| record.id.as_hex());
+        meta.agent.clone_from(&who.marked);
+        let recorded = crate::lifecycle::record_daemon_transitions(state, repo, rows, meta).await?;
+        op = Some(recorded.op_id);
+    }
+    let mut fresh: Vec<(LandingRow, Vec<LandingChangeRow>)> = Vec::new();
+    let mut ids: Vec<String> = Vec::with_capacity(checked.len());
+    for decision in checked {
+        match decision {
+            Decided::Open(open) => ids.push(open.row.id.clone()),
+            Decided::Pass { row, .. } | Decided::Block { row, .. } => {
+                let (mut row, changes) = *row;
+                if row.outcome == Outcome::Queued.as_str() {
+                    row.enqueue_operation_id = op.as_ref().map(ToString::to_string);
+                }
+                ids.push(row.id.clone());
+                fresh.push((row, changes));
+            }
+        }
+    }
+    state.db.write_landings(&fresh)?;
+    if let Some(op) = &op {
+        tracing::info!(repo = %repo, op_id = %op, queued = fresh.iter().filter(|(row, _)| row.outcome == Outcome::Queued.as_str()).count(), "queued for landing");
+    }
+    let mut written = Vec::with_capacity(ids.len());
+    for id in ids {
+        written.push(
+            state
+                .db
+                .landing(repo, &id)?
+                .ok_or_else(|| LandingError::NotFound(id.clone()))?,
+        );
+    }
+    Ok((op, written))
+}
+
+/// Records the blocked landing `row` of a change landed alone, or counts
+/// one more attempt on the change's latest identical one (S-125).
 fn blocked(
     state: &AppState,
     repo: RepoId,
     target: &LandTarget,
-    who: &Requester,
-    (reason, message): (Reason, String),
-    (preview, judged, head): (Option<&Preview>, Option<&Judged>, Option<String>),
-    queued_tree: Option<String>,
+    row: &LandingRow,
+    change: &LandingChangeRow,
 ) -> Result<StoredLanding, LandingError> {
-    let change = change_row(target, queued_tree, preview, judged);
     let now = Timestamp::now();
     if let Some(latest) = state.db.latest_landing_of(repo, target.change.as_str())?
         && latest.row.outcome == Outcome::Blocked.as_str()
-        && latest.row.reason.as_deref() == Some(reason.as_str())
-        && latest.row.policy_sha256.as_deref()
-            == judged.and_then(|judged| judged.policy.sha256.as_deref())
+        && latest.row.reason == row.reason
+        && latest.row.message == row.message
+        && latest.row.policy_sha256 == row.policy_sha256
+        && latest.row.stack.is_none()
         && latest.changes.first().is_some_and(|first| {
             first.queued_commit == change.queued_commit
                 && first.evaluation_sha256 == change.evaluation_sha256
@@ -1349,21 +1911,8 @@ fn blocked(
             .landing(repo, &latest.row.id)?
             .ok_or_else(|| LandingError::NotFound(latest.row.id.clone()));
     }
-    let mut row = new_row(repo, &target.bookmark, who);
-    Outcome::Blocked.as_str().clone_into(&mut row.outcome);
-    row.reason = Some(reason.as_str().to_owned());
-    row.message = Some(message);
-    row.destination_before = head;
-    if let Some(judged) = judged {
-        row.policy_commit = Some(judged.policy.commit.clone());
-        row.policy_blob.clone_from(&judged.policy.blob);
-        row.policy_sha256.clone_from(&judged.policy.sha256);
-    }
-    row.finished_at = Some(now);
-    state
-        .db
-        .write_landing(&row, std::slice::from_ref(&change))?;
-    tracing::info!(change_id = %target.change, landing_id = %row.id, reason = reason.as_str(), "landing blocked at the gate");
+    state.db.write_landing(row, std::slice::from_ref(change))?;
+    tracing::info!(change_id = %target.change, landing_id = %row.id, reason = row.reason.as_deref().unwrap_or_default(), "landing blocked at the gate");
     state
         .db
         .landing(repo, &row.id)?
