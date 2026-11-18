@@ -365,7 +365,11 @@ async fn a_panicked_job_reopens_the_repository() {
         .reports;
     assert_eq!(reports.len(), 1);
     assert!(reports[0].jj_error.is_empty(), "{}", reports[0].jj_error);
-    assert_eq!(handle.generation(), 2, "the second panic reopens it again");
+    assert_eq!(
+        handle.generation(),
+        3,
+        "the second panic reopens it again, and GC once more (#289)"
+    );
 }
 
 // 12d: rename detection without the guard (R2.02). A diff restricted to

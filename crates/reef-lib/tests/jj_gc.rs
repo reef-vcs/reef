@@ -10,6 +10,7 @@
     reason = "test helpers outside #[test] fns; a panic is the failure report"
 )]
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant, SystemTime};
@@ -31,8 +32,8 @@ use reef_lib::jj::settings::{
 };
 use reef_lib::jj::workspace::StartPoint;
 use reef_lib::jj::{
-    AbandonBlocked, CHECKOUT_LOCK_WAIT, CheckoutMove, CheckoutOutcome, CommitIdHex, OperationIdHex,
-    Repo,
+    AbandonBlocked, CHECKOUT_LOCK_WAIT, CheckoutMove, CheckoutOutcome, CommitIdHex, GcError,
+    OperationIdHex, Repo,
 };
 use tempfile::TempDir;
 
@@ -368,10 +369,7 @@ async fn missing_git_fails_after_the_operation_store() {
     past_this_second().await;
 
     let error = repo.gc(SystemTime::now()).await.unwrap_err();
-    assert!(
-        matches!(error, reef_lib::jj::GcError::Backend(_)),
-        "{error:?}"
-    );
+    assert!(matches!(error, GcError::Backend(_)), "{error:?}");
     assert_eq!(
         repo.op_log(100).await.unwrap().len(),
         2,
@@ -782,4 +780,111 @@ fn jj_cli_is_supported(version: &str) -> bool {
         return false;
     };
     major == lib_major && (minor == lib_minor || minor + 1 == lib_minor)
+}
+
+/// Runs `git` on the repository's git directory; `None` when it fails.
+fn git(root: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(root.join(".jj/repo/store/git"))
+        .args(args)
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+}
+
+/// The tree a commit on disk names, read without reading the tree.
+fn tree_of(root: &Path, commit: &CommitIdHex) -> String {
+    let body = git(root, &["cat-file", "-p", commit.as_str()]).expect("the commit is on disk");
+    body.lines()
+        .next()
+        .and_then(|line| line.strip_prefix("tree "))
+        .expect("a tree line")
+        .to_owned()
+}
+
+/// Issue #289: a tree GC prunes, written again by the same loaded repo,
+/// must reach the disk. The loaded store remembered the pack the first GC
+/// wrote, so it skipped the write and the new commit named a missing tree.
+#[tokio::test]
+async fn a_tree_gc_pruned_is_written_again() {
+    let (_dir, mut repo) = init().await;
+    let root = repo.workspace_root().to_owned();
+    let (c1, _c2) = two_snapshots(&mut repo).await;
+    repo.gc(keep()).await.unwrap();
+    let tree = tree_of(&root, &c1);
+    assert!(git(&root, &["cat-file", "-e", &tree]).is_some());
+
+    write(&root, "a.txt", "third version\n");
+    repo.snapshot("three").await.unwrap();
+    past_this_second().await;
+    repo.gc(SystemTime::now()).await.unwrap();
+    assert!(!has_commit(&repo, &c1).await, "the second GC prunes c1");
+    assert!(git(&root, &["cat-file", "-e", &tree]).is_none());
+
+    write(&root, "a.txt", &"first version\n".repeat(1000));
+    let again = repo.snapshot("first again").await.unwrap().wc_commit;
+    assert_eq!(tree_of(&root, &again), tree, "the same tree as c1's");
+    assert!(
+        git(&root, &["cat-file", "-e", &tree]).is_some(),
+        "the snapshot's tree is on disk"
+    );
+}
+
+/// `settings()` with `git` replaced by a script that runs it and then
+/// fails, so `git gc` collects and still reports an error.
+fn settings_with_failing_git(dir: &Path) -> UserSettings {
+    let script = dir.join("git-that-fails");
+    std::fs::write(&script, "#!/bin/sh\ngit \"$@\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = settings().config().clone();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
+            &format!(
+                "{} = {:?}",
+                reef_lib::jj::settings::GIT_EXECUTABLE_KEY,
+                script.display().to_string()
+            ),
+        )
+        .unwrap(),
+    );
+    UserSettings::from_config_and_home_dir(config, None).unwrap()
+}
+
+/// Issue #289 after a `git gc` that pruned and then failed: the [`Repo`] is
+/// reopened all the same, so the pruned tree is written again.
+#[tokio::test]
+async fn a_failed_git_gc_still_reopens_the_store() {
+    let (_dir, mut repo) = init().await;
+    let root = repo.workspace_root().to_owned();
+    let (c1, _c2) = two_snapshots(&mut repo).await;
+    repo.gc(keep()).await.unwrap();
+    let tree = tree_of(&root, &c1);
+    write(&root, "a.txt", "third version\n");
+    repo.snapshot("three").await.unwrap();
+    past_this_second().await;
+
+    let scripts = tempfile::tempdir().unwrap();
+    let mut repo = Repo::open(&root, &settings_with_failing_git(scripts.path()))
+        .await
+        .unwrap();
+    // A write loads the pack holding c1's tree into the new store.
+    write(&root, "a.txt", "fourth version\n");
+    repo.snapshot("four").await.unwrap();
+    past_this_second().await;
+    let failed = repo.gc(SystemTime::now()).await;
+    assert!(matches!(failed, Err(GcError::Backend(_))), "{failed:?}");
+    assert!(git(&root, &["cat-file", "-e", &tree]).is_none(), "pruned");
+
+    write(&root, "a.txt", &"first version\n".repeat(1000));
+    let again = repo.snapshot("first again").await.unwrap().wc_commit;
+    assert_eq!(tree_of(&root, &again), tree);
+    assert!(
+        git(&root, &["cat-file", "-e", &tree]).is_some(),
+        "the snapshot's tree is on disk"
+    );
 }

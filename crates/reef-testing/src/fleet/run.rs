@@ -589,10 +589,10 @@ fn scenario_inner(ctx: &Ctx<'_>, spec: &RepoSpec, repo: &mut RepoReport) -> Resu
             .collect();
         mark(&mut phases, "release", release_start);
         let gc_start = millis(epoch.elapsed());
-        // `--limit both`'s first scenario keeps its objects: a `ws gc`
-        // between two scenarios on one repository left the second's
-        // identical trees unwritten (a pruned tree a commit still names),
-        // and the off run only provides G8's reference.
+        // `--limit both`'s first scenario keeps its objects, so the gated
+        // second writes what the published runs did (they predate the #289
+        // fix, which made a `ws gc` here safe); the off run only provides
+        // G8's reference.
         let gc_now = !(config.limits == LimitMode::Both && ctx.limit == Toggle::Off);
         if gc_now
             && let Err(e) = ctx.reef_ok(

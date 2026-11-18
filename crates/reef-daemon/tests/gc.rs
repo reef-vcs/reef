@@ -1302,3 +1302,66 @@ fn jj_cli_is_supported(version: &str) -> bool {
     };
     major == lib_major && (minor == lib_minor || minor + 1 == lib_minor)
 }
+
+/// Runs `git` on the repository's object database on disk, rather than a
+/// loaded store; `None` when it fails.
+fn git(root: &Path, args: &[&str]) -> Option<String> {
+    let git_dir = if root.join(".git").exists() {
+        root.join(".git")
+    } else {
+        root.join(".jj/repo/store/git")
+    };
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(args)
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+}
+
+const PRUNED: &str = "content a GC prunes, then written again\n";
+
+// Issue #289 in one workspace that outlives two GCs: the first packs its
+// tree, the second prunes it once the workspace has moved on, and the
+// workspace then writes that tree again through the handle it held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_writes_again_a_tree_gc_pruned() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    write(&ws, "same.txt", PRUNED);
+    let first = snapshot(&daemon, &repo, &ws).await;
+    let tree = git(&repo.root, &["rev-parse", &format!("{first}^{{tree}}")]).unwrap();
+    let blob = git(&repo.root, &["rev-parse", &format!("{first}:same.txt")]).unwrap();
+    past_this_second().await;
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+
+    write(&ws, "same.txt", "moved on\n");
+    snapshot(&daemon, &repo, &ws).await;
+    write(&ws, "same.txt", "and again\n");
+    snapshot(&daemon, &repo, &ws).await;
+    past_this_second().await;
+    let report = gc(&daemon, &repo, false).await;
+    assert_eq!(report.jj_error, "", "{report:?}");
+    for object in [&tree, &blob] {
+        assert!(
+            git(&repo.root, &["cat-file", "-e", object]).is_none(),
+            "GC pruned {object}"
+        );
+    }
+
+    write(&ws, "same.txt", PRUNED);
+    let commit = snapshot(&daemon, &repo, &ws).await;
+    let again = git(&repo.root, &["cat-file", "-p", &commit]).unwrap();
+    assert!(again.starts_with(&format!("tree {tree}\n")), "{again}");
+    for object in [&tree, &blob] {
+        assert!(
+            git(&repo.root, &["cat-file", "-e", object]).is_some(),
+            "{object} is on disk again"
+        );
+    }
+}

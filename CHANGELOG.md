@@ -142,6 +142,7 @@ All notable changes to Reef. The format follows [Keep a Changelog](https://keepa
 
 ### Fixed
 
+- A long-running daemon no longer corrupts a repository when an agent writes again what GC pruned (#289). `git gc` rewrote the packs the daemon had loaded, and the daemon kept believing the pruned objects were there: writing the same tree again (reverting a file, re-applying a patch) skipped the write, and the new commit named a tree missing from disk, so the next `git gc` failed with `bad tree object`. After GC the daemon now reopens the repository, and every workspace reopens it at its next snapshot.
 - A change's lifecycle no longer lags its operation (#293): a read made while a transition is being written, such as an observed landing that has already moved its workspaces onto new changes, waits up to five seconds for the transition's record instead of showing the change in its old state (`GetChange`, `ListChanges`, `GetStatus`, `ListProposals` and every other read that returns a change's lifecycle).
 - A workspace whose change landed by an observed landing (a merge on the host and a fetch, a bookmark moved by hand) or a tag no longer amends the landed commit on its next snapshot, moving `main` past every gate (#248, S-178): the daemon gives it a new empty change in the landing's operation, and a snapshot never rewrites a commit on `trunk()` or under a tag.
 

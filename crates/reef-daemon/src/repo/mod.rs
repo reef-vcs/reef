@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::LocalBoxFuture;
 use reef_lib::error::{Classify, ErrorKind};
-use reef_lib::jj::{CheckedTrees, OpenError, ReadonlyRepo, Repo, UserSettings};
+use reef_lib::jj::{CheckedTrees, GcError, GcOutcome, OpenError, ReadonlyRepo, Repo, UserSettings};
 use tokio::sync::oneshot;
 
 use crate::model::{RepoId, RepositoryRecord};
@@ -48,10 +48,11 @@ pub struct RepoHead {
     /// Trees [`Repo::check_tree_names`] found readable (RX.01).
     pub checked_trees: CheckedTrees,
     dirty: bool,
-    /// A job panicked: reopen the repository rather than reload it.
-    reopen: bool,
-    /// How many times the repository was reopened; shared with every
-    /// [`RepoHandle`].
+    /// Why the next reload opens the repository afresh rather than
+    /// reloading it, if it does.
+    reopen: Option<Reopen>,
+    /// How many times the repository was reopened on a new store; shared
+    /// with every [`RepoHandle`].
     generation: Arc<AtomicU64>,
     /// Told after every job that moved the head (R2.09).
     events: Option<Arc<OpEvents>>,
@@ -64,16 +65,17 @@ impl RepoHead {
     }
 
     /// Reloads [`RepoHead::repo`] at the head operation; after a panicked
-    /// job, opens the repository afresh instead.
+    /// job, or a GC that left the store stale, opens the repository afresh
+    /// instead.
     pub async fn reload(&mut self) -> Result<(), OpenError> {
-        if self.reopen {
-            // The panic may have poisoned a lock in jj-lib's store (its git
-            // backend's mutex, RX.01), which a reload keeps: a new store
-            // has none.
+        if let Some(reason) = self.reopen {
+            // A reload keeps the store, and with it a lock a panic poisoned
+            // (its git backend's mutex, RX.01) or the pack indexes a GC's
+            // `git gc` replaced (#289). A new store has neither.
             self.repo = Repo::open(&self.root, &self.settings).await?;
-            self.reopen = false;
+            self.reopen = None;
             self.generation.fetch_add(1, Ordering::Relaxed);
-            tracing::info!(repo = %self.id, "repository reopened after a panicked job");
+            tracing::info!(repo = %self.id, reason = reason.as_str(), "repository reopened");
         } else {
             self.repo.reload_at_head().await?;
         }
@@ -81,32 +83,48 @@ impl RepoHead {
         Ok(())
     }
 
-    /// How many times [`RepoHead::reload`] has reopened the repository
-    /// after a panicked job. A [`Repo`] opened from [`RepoHead::repo`]
-    /// shares its store, so one opened at an earlier generation may hold a
-    /// store the panic poisoned (#63).
+    /// How many times the repository has been reopened on a new store,
+    /// after a panicked job (#63) or a GC (#289). A [`Repo`] opened from
+    /// [`RepoHead::repo`] shares its store, so one opened at an earlier
+    /// generation may hold a store a panic poisoned, or one that skips
+    /// writing an object `git gc` pruned.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
 
-    /// Whether a job panicked and the reopen after it has not succeeded
-    /// yet; [`RepoHead::refresh`] retries it.
+    /// Whether a job panicked or a GC left the store stale, and the reopen
+    /// after it has not succeeded yet; [`RepoHead::refresh`] retries it.
     pub fn reopen_pending(&self) -> bool {
-        self.reopen
+        self.reopen.is_some()
     }
 
     /// Records that the current job panicked: the thread reopens the
     /// repository when it returns.
     pub(super) fn note_panicked(&mut self) {
         self.dirty = true;
-        self.reopen = true;
+        self.reopen = Some(Reopen::Panicked);
+    }
+
+    /// Records how the current job's GC of [`RepoHead::repo`] ended.
+    /// [`Repo::gc_with`] reopens it on a new store once `git gc` has run
+    /// (#289); when it did not (the GC failed, or the reopen did), the
+    /// thread reopens it when the job returns. Either way the generation
+    /// moves, and the workspaces' handles, opened on the old store,
+    /// reopen at their next scan.
+    pub fn note_gc(&mut self, outcome: &Result<GcOutcome, GcError>) {
+        if matches!(outcome, Ok(outcome) if outcome.reopened) {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.dirty = true;
+            self.reopen = Some(Reopen::Gc);
+        }
     }
 
     /// The repository at head, reloading first if anything (the `jj` CLI,
     /// another process) has written an operation since the last load.
     /// Clears a pending reload either way.
     pub async fn refresh(&mut self) -> Result<Arc<ReadonlyRepo>, OpenError> {
-        if self.dirty {
+        if self.dirty || self.reopen.is_some() {
             self.reload().await?;
         } else {
             self.repo.reload_if_moved().await?;
@@ -120,7 +138,7 @@ impl RepoHead {
     /// [`RepoHead::refresh`].
     pub fn adopt(&mut self, repo: Arc<ReadonlyRepo>) {
         self.repo.set_head(repo);
-        self.dirty = false;
+        self.dirty = self.reopen.is_some();
     }
 
     /// Records that the current job committed an operation, possibly
@@ -156,6 +174,22 @@ impl RepoHead {
             && self.position() != *before
         {
             events.moved(self.id, self.readonly());
+        }
+    }
+}
+
+/// Why [`RepoHead::reload`] opens the repository afresh.
+#[derive(Clone, Copy, Debug)]
+enum Reopen {
+    Panicked,
+    Gc,
+}
+
+impl Reopen {
+    fn as_str(self) -> &'static str {
+        match self {
+            Reopen::Panicked => "panicked_job",
+            Reopen::Gc => "gc",
         }
     }
 }

@@ -435,7 +435,10 @@ impl Repo {
         }
     }
 
-    async fn open_unlogged(path: &Path, settings: &UserSettings) -> Result<Self, OpenError> {
+    pub(crate) async fn open_unlogged(
+        path: &Path,
+        settings: &UserSettings,
+    ) -> Result<Self, OpenError> {
         let absolute = std::path::absolute(path).map_err(|source| OpenError::CurrentDir {
             path: path.to_owned(),
             source,

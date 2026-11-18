@@ -293,6 +293,7 @@ async fn gc_job(
                         }
                     })
                     .await;
+                head.note_gc(&outcome);
                 drop(rewrite);
                 let after = measure_blocking(&dirs);
                 (before, after, outcome, rebind_failures, head.readonly())

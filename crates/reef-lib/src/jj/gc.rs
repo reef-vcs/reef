@@ -76,6 +76,10 @@ pub struct GcOutcome {
     /// by old id; empty when nothing was abandoned. Indexes that name
     /// operations map their ids through it (R2.16).
     pub rewritten: Vec<(OperationIdHex, OperationIdHex)>,
+    /// Whether the [`Repo`] was reopened on a new store after `git gc`.
+    /// When that failed (logged), it still answers from the packs `git gc`
+    /// replaced, and must be reopened before it writes (#289).
+    pub reopened: bool,
 }
 
 /// What [`Repo::gc`] did with one of the user's jj workspaces.
@@ -144,6 +148,18 @@ impl fmt::Display for AbandonBlocked {
             ),
         }
     }
+}
+
+/// How far [`Repo::gc_with`] got, which decides how it reloads the
+/// [`Repo`] afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// Nothing GC wrote has changed what the loaded head reads.
+    Start,
+    /// The op heads moved: reload at the new head.
+    OpHeadsMoved,
+    /// `git gc` ran: reopen on a new store (#289).
+    GitGc,
 }
 
 /// Failure of [`Repo::gc`].
@@ -259,6 +275,14 @@ impl Repo {
     /// the op heads move fails, this [`Repo`] is still reloaded at the new
     /// head (best effort) before the error returns; a failed move of a
     /// user's workspace ([`GcError::Checkout`]) skips the collection.
+    ///
+    /// Once `git gc` has run, this [`Repo`] is reopened on a new store,
+    /// whether or not it succeeded: the old store keeps answering from the
+    /// packs `git gc` replaced, so it skips writing an object `git gc`
+    /// pruned, and a commit naming that object is corrupt (#289). A GC
+    /// whose reopen failed still succeeds, with
+    /// [`GcOutcome::reopened`] false. Every other [`Repo`] opened on the
+    /// old store ([`Repo::open_workspace`]) must be reopened by the caller.
     pub async fn gc(&mut self, keep_newer: SystemTime) -> Result<GcOutcome, GcError> {
         self.gc_with(keep_newer, &mut |_, _| {}).await
     }
@@ -274,18 +298,31 @@ impl Repo {
         keep_newer: SystemTime,
         abandoned: &mut dyn FnMut(&OperationIdHex, &OperationIdHex),
     ) -> Result<GcOutcome, GcError> {
-        let mut moved = false;
-        let result = self.gc_unlogged(keep_newer, abandoned, &mut moved).await;
-        if result.is_err() && moved {
-            match self.repo.loader().load_at_head(None).await {
-                Ok(repo) => self.repo = repo,
-                Err(error) => tracing::error!(
-                    error = %ErrorChain(&error),
-                    "cannot reload at the new head after a failed GC"
-                ),
+        let mut reached = Reached::Start;
+        let result = self.gc_unlogged(keep_newer, abandoned, &mut reached).await;
+        let reloaded = self.reload_after(reached).await;
+        let outcome = match (result, reloaded) {
+            (Ok(mut outcome), reloaded) => {
+                if let Err(error) = &reloaded {
+                    tracing::error!(
+                        error = %ErrorChain(error),
+                        "cannot reopen the repository after git gc; it must be reopened before it writes"
+                    );
+                }
+                outcome.reopened = reloaded.is_ok();
+                outcome
             }
-        }
-        let outcome = result.inspect_err(|error| crate::log_failure!(error))?;
+            (Err(error), reloaded) => {
+                if let Err(reload) = reloaded {
+                    tracing::error!(
+                        error = %ErrorChain(&reload),
+                        "cannot reload the repository after a failed GC"
+                    );
+                }
+                crate::log_failure!(&error);
+                return Err(error);
+            }
+        };
         if let Some(blocked) = &outcome.abandon_blocked {
             tracing::warn!("no operations were abandoned: {blocked}");
         }
@@ -299,11 +336,26 @@ impl Repo {
         Ok(outcome)
     }
 
+    /// Leaves this [`Repo`] loadable after a GC that got as far as
+    /// `reached`.
+    async fn reload_after(&mut self, reached: Reached) -> Result<(), GcError> {
+        match reached {
+            Reached::Start => {}
+            Reached::OpHeadsMoved => self.repo = self.repo.loader().load_at_head(None).await?,
+            Reached::GitGc => {
+                let root = self.workspace_root().to_owned();
+                let settings = self.workspace.settings().clone();
+                *self = Self::open_unlogged(&root, &settings).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn gc_unlogged(
         &mut self,
         keep_newer: SystemTime,
         abandoned: &mut dyn FnMut(&OperationIdHex, &OperationIdHex),
-        moved: &mut bool,
+        reached: &mut Reached,
     ) -> Result<GcOutcome, GcError> {
         let loader = self.repo.loader().clone();
         let Holding {
@@ -334,7 +386,7 @@ impl Repo {
                 .op_heads_store()
                 .update_op_heads(&[head.id().clone()], &new_head)
                 .await?;
-            *moved = true;
+            *reached = Reached::OpHeadsMoved;
             failed = self.move_checkouts(&held, &reparented.rewritten, &new_head, &mut checkouts);
             operations_abandoned = reparented.unreachable_count;
             tracing::debug!(
@@ -356,7 +408,7 @@ impl Repo {
         }
         // Releases the locks.
         let places: Vec<CheckoutPlace> = held.into_iter().map(CheckoutPlace::from).collect();
-        if *moved {
+        if *reached == Reached::OpHeadsMoved {
             abandoned(
                 &OperationIdHex::of(head.id()),
                 &OperationIdHex::of(&new_head),
@@ -388,6 +440,7 @@ impl Repo {
         );
 
         let git_gc_start = Instant::now();
+        *reached = Reached::GitGc;
         self.git_gc(keep_newer).await?;
         let mut rewritten: Vec<(OperationIdHex, OperationIdHex)> = rewritten
             .unwrap_or_default()
@@ -403,6 +456,7 @@ impl Repo {
             checkouts,
             abandon_blocked,
             rewritten,
+            reopened: false,
         })
     }
 
