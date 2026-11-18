@@ -30,7 +30,7 @@ Terminal == {"released", "reclaimed"}
 EndState(p) == IF p = "tick" THEN "reclaimed" ELSE "released"
 
 \* Steps of Manager::reclaim (workspace/reclaim.rs) run with the scan lock.
-Pipeline == {"goback", "check", "begin", "final", "forget", "teardown", "finish"}
+Pipeline == {"retry", "check", "begin", "final", "forget", "teardown", "finish"}
 
 VARIABLES
     up,          \* the daemon is running
@@ -47,7 +47,7 @@ VARIABLES
     stateDir,    \* its working-copy state directory exists
     jjws,        \* the jj workspace reef-<id> exists in the view
     pc,          \* where each Proc is
-    wentBack,    \* lock_for_reclaim's went_back, per reclaimer
+    leftReleasing, \* lock_for_reclaim's left_releasing, per reclaimer
     hb,          \* a heartbeat in flight: "idle", or stamped while the
                  \* lease was "fresh" (live) or "stale" (past)
     client,      \* the lease holder is still running
@@ -58,7 +58,7 @@ entry == <<loaded, mem, handle, tracked>>
 disk == <<dir, stateDir, jjws>>
 env == <<hb, client, paused>>
 budgets == <<failLeft, crashLeft, quiesceLeft>>
-vars == <<up, dbState, lease, entry, lock, disk, pc, wentBack, env, budgets>>
+vars == <<up, dbState, lease, entry, lock, disk, pc, leftReleasing, env, budgets>>
 
 TypeOK ==
     /\ up \in BOOLEAN /\ loaded \in BOOLEAN /\ handle \in BOOLEAN
@@ -68,8 +68,9 @@ TypeOK ==
     /\ mem \in {"active", "releasing"} \cup Terminal
     /\ lease \in {"live", "past", "ended"}
     /\ lock \in {"free"} \cup Procs
-    /\ pc \in [Procs -> {"idle", "entry", "waitlock", "wwait", "wsnap"} \cup Pipeline]
-    /\ wentBack \in [Reclaimers -> BOOLEAN]
+    /\ pc \in [Procs -> {"idle", "entry", "waitlock", "missing", "mfinish",
+                          "wwait", "wsnap"} \cup Pipeline]
+    /\ leftReleasing \in [Reclaimers -> BOOLEAN]
     /\ hb \in {"idle", "fresh", "stale"}
     /\ failLeft \in 0..MaxFailures /\ crashLeft \in 0..MaxCrashes
     /\ quiesceLeft \in 0..MaxQuiesces
@@ -81,7 +82,7 @@ Init ==
     /\ lock = "free"
     /\ dir = TRUE /\ stateDir = TRUE /\ jjws = TRUE
     /\ pc = [p \in Procs |-> "idle"]
-    /\ wentBack = [p \in Reclaimers |-> FALSE]
+    /\ leftReleasing = [p \in Reclaimers |-> FALSE]
     /\ hb = "idle" /\ client = TRUE /\ paused = FALSE
     /\ failLeft = MaxFailures /\ crashLeft = MaxCrashes
     /\ quiesceLeft = MaxQuiesces
@@ -107,58 +108,69 @@ NoHeartbeatInFlight == hb = "idle"
 TickList ==
     /\ up /\ ~paused /\ pc["tick"] = "idle" /\ lease = "past"
     /\ Goto("tick", "entry")
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, leftReleasing, env, budgets>>
 
 \* `reef ws release`. Its holder usually runs it, but anyone may.
 ReleaseCall ==
     /\ up /\ pc["release"] = "idle"
     /\ Goto("release", "entry")
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, leftReleasing, env, budgets>>
 
-\* loaded_entry(id, true), then lock_for_reclaim's first state read: a
-\* `releasing` entry gets try_lock (refused if held), an `active` one waits.
-\* No entry: NotActive or NotLoaded.
+\* An unfinished row with no entry and no directory: a start's
+\* reclaim_missing could not record its end.
+MissingRow == ~loaded /\ ~dir /\ dbState \in {"active", "releasing"}
+
+\* Manager::reclaim's self.entry(id), then lock_for_reclaim's first state
+\* read: a `releasing` entry gets try_lock (refused if held), an `active`
+\* one waits. No entry: reclaim_unloaded's NotActive or NotLoaded, unless
+\* MissingRow.
 Entry(p) ==
-    /\ pc[p] = "entry"
+    /\ pc[p] = "entry" /\ ~MissingRow
     /\ IF ~loaded \/ mem \in Terminal
-         THEN Goto(p, "idle") /\ UNCHANGED <<lock, wentBack>>
+         THEN Goto(p, "idle") /\ UNCHANGED <<lock, leftReleasing>>
        ELSE IF mem = "releasing"
          THEN IF lock = "free"
-                THEN lock' = p /\ wentBack' = [wentBack EXCEPT ![p] = TRUE]
-                     /\ Goto(p, "goback")
-                ELSE Goto(p, "idle") /\ UNCHANGED <<lock, wentBack>>
-       ELSE Goto(p, "waitlock") /\ UNCHANGED <<lock, wentBack>>
+                THEN lock' = p /\ leftReleasing' = [leftReleasing EXCEPT ![p] = TRUE]
+                     /\ Goto(p, "retry")
+                ELSE Goto(p, "idle") /\ UNCHANGED <<lock, leftReleasing>>
+       ELSE Goto(p, "waitlock") /\ UNCHANGED <<lock, leftReleasing>>
     /\ UNCHANGED <<up, dbState, lease, entry, disk, env, budgets>>
 
-\* scan_lock.lock().await returns; went_back = state is `releasing`.
+\* scan_lock.lock().await returns; left_releasing = state is `releasing`.
 WaitLock(p) ==
     /\ pc[p] = "waitlock" /\ lock = "free"
     /\ lock' = p
-    /\ wentBack' = [wentBack EXCEPT ![p] = (mem = "releasing")]
-    /\ Goto(p, IF mem = "releasing" THEN "goback" ELSE "check")
+    /\ leftReleasing' = [leftReleasing EXCEPT ![p] = (mem = "releasing")]
+    /\ Goto(p, IF mem = "releasing" THEN "retry" ELSE "check")
     /\ UNCHANGED <<up, dbState, lease, entry, disk, env, budgets>>
 
-\* finish_going_back (#229): set_workspace_state(active), then the record.
-\* Its `?` returns the error with the scan lock dropped.
-GoBack(p) ==
-    /\ pc[p] = "goback"
-    /\ \/ Fail /\ Exit(p) /\ UNCHANGED <<dbState, mem>>
-       \/ dbState' = "active" /\ mem' = "active" /\ Goto(p, "check")
-          /\ UNCHANGED <<lock, failLeft>>
-    /\ UNCHANGED <<up, lease, loaded, handle, tracked, disk, wentBack, env,
-                   crashLeft, quiesceLeft>>
+\* left_releasing: an earlier reclaim left the workspace `releasing`, and
+\* this one finishes it, writing nothing first. jj_workspace_exists reads
+\* on the repository thread whether that reclaim got past its forget; its
+\* `?` returns the error with the scan lock dropped. Then straight to the
+\* final snapshot: the workspace is already `releasing` and untracked, so
+\* no begin_reclaim, which would refuse it.
+Retry(p) ==
+    /\ pc[p] = "retry" /\ ~paused
+    /\ \/ Fail /\ Exit(p)
+       \/ Goto(p, "final") /\ UNCHANGED <<lock, failLeft>>
+    /\ UNCHANGED <<up, dbState, lease, entry, disk, leftReleasing, env, crashLeft,
+                   quiesceLeft>>
+
+\* The retry found the jj workspace gone (jj_workspace_exists): nothing
+\* changes it while this reclaim holds the scan lock.
+Forgotten(p) == leftReleasing[p] /\ ~jjws
 
 \* `if record.state != WorkspaceState::Active` -> NotActive.
 Check(p) ==
     /\ pc[p] = "check"
     /\ IF mem = "active" THEN Goto(p, "begin") /\ UNCHANGED lock ELSE Exit(p)
-    /\ UNCHANGED <<up, dbState, lease, entry, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, disk, leftReleasing, env, budgets>>
 
 \* Step 1: db.begin_reclaim(id, expired_by), one UPDATE: active ->
 \* releasing, and for an expiry only while the lease is unended and past
 \* its grace. Then the record and scheduler.untrack, with no await between.
-\* Refused: track again if went_back, return LeaseNotExpired / NotActive.
-\* A SQLite error returns through `?` without tracking.
+\* Refused: LeaseNotExpired / NotActive. A SQLite error returns through `?`.
 BeginOk(p) == dbState = "active" /\ (p = "release" \/ lease = "past")
 
 Begin(p) ==
@@ -167,10 +179,8 @@ Begin(p) ==
        \/ BeginOk(p)
           /\ dbState' = "releasing" /\ mem' = "releasing" /\ tracked' = FALSE
           /\ Goto(p, "final") /\ UNCHANGED <<lock, failLeft>>
-       \/ ~BeginOk(p)
-          /\ tracked' = (tracked \/ wentBack[p])
-          /\ Exit(p) /\ UNCHANGED <<dbState, mem, failLeft>>
-    /\ UNCHANGED <<up, lease, loaded, handle, disk, wentBack, env, crashLeft,
+       \/ ~BeginOk(p) /\ Exit(p) /\ UNCHANGED <<dbState, mem, tracked, failLeft>>
+    /\ UNCHANGED <<up, lease, loaded, handle, disk, leftReleasing, env, crashLeft,
                    quiesceLeft>>
 
 -----------------------------------------------------------------------------
@@ -186,31 +196,38 @@ RollBack(cost) ==
     \/ failLeft > cost /\ failLeft' = failLeft - cost - 1
        /\ UNCHANGED <<dbState, mem, tracked>>
 
-\* Steps 2-3, final_snapshot: none if the root is gone. Otherwise
+\* Steps 2-3, final_snapshot: none if the root is gone, or if the jj
+\* workspace is (Forgotten), with nothing to record into. Otherwise
 \* snapshot_locked, on the repository thread (a quiesce pauses it), which
 \* fails with NotLoaded when the entry has no jj handle (run_snapshot,
 \* workspace/snapshot.rs). A failure (neither caller here forces) rolls
 \* back and returns.
 Final(p) ==
     /\ pc[p] = "final" /\ ~paused /\ NoHeartbeatInFlight
-    /\ \/ ~dir /\ Goto(p, "forget")
+    /\ \/ (~dir \/ Forgotten(p)) /\ Goto(p, "forget")
           /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
-       \/ dir /\ handle /\ Goto(p, "forget")
+       \/ dir /\ ~Forgotten(p) /\ handle /\ Goto(p, "forget")
           /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
-       \/ dir /\ handle /\ RollBack(1) /\ Exit(p)
-       \/ dir /\ ~handle /\ RollBack(0) /\ Exit(p)
-    /\ UNCHANGED <<up, lease, loaded, handle, disk, wentBack, env, crashLeft,
+       \/ dir /\ ~Forgotten(p) /\ handle /\ RollBack(1) /\ Exit(p)
+       \/ dir /\ ~Forgotten(p) /\ ~handle /\ RollBack(0) /\ Exit(p)
+    /\ UNCHANGED <<up, lease, loaded, handle, disk, leftReleasing, env, crashLeft,
                    quiesceLeft>>
 
 \* Step 4, forget: forget_jj_workspace (NoSuchWorkspace is success) on the
-\* repository thread, then entry.jj.take(). A failure rolls back and
-\* returns.
+\* repository thread, skipped when Forgotten, then entry.jj.take(). A
+\* failure rolls back and returns, or, with the root gone, only returns.
 Forget(p) ==
-    /\ pc[p] = "forget" /\ ~paused /\ NoHeartbeatInFlight
-    /\ \/ jjws' = FALSE /\ handle' = FALSE /\ Goto(p, "teardown")
+    /\ pc[p] = "forget" /\ NoHeartbeatInFlight
+    /\ \/ Forgotten(p) /\ handle' = FALSE /\ Goto(p, "teardown")
+          /\ UNCHANGED <<jjws, dbState, mem, tracked, lock, failLeft>>
+       \/ ~Forgotten(p) /\ ~paused /\ jjws' = FALSE /\ handle' = FALSE
+          /\ Goto(p, "teardown")
           /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
-       \/ RollBack(1) /\ Exit(p) /\ UNCHANGED <<jjws, handle>>
-    /\ UNCHANGED <<up, lease, loaded, dir, stateDir, wentBack, env, crashLeft,
+       \/ ~Forgotten(p) /\ ~paused /\ dir /\ RollBack(1) /\ Exit(p)
+          /\ UNCHANGED <<jjws, handle>>
+       \/ ~Forgotten(p) /\ ~paused /\ ~dir /\ Fail /\ Exit(p)
+          /\ UNCHANGED <<jjws, handle, dbState, mem, tracked>>
+    /\ UNCHANGED <<up, lease, loaded, dir, stateDir, leftReleasing, env, crashLeft,
                    quiesceLeft>>
 
 \* Step 4, tear_down then remove_state_dir. A failed tear-down is only
@@ -222,7 +239,7 @@ TearDown(p) ==
        \/ Fail /\ UNCHANGED dir
     /\ stateDir' = FALSE
     /\ Goto(p, "finish")
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, jjws, wentBack, env,
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, jjws, leftReleasing, env,
                    crashLeft, quiesceLeft>>
 
 \* Step 4, db.finish_workspace: one transaction ending the lease and
@@ -234,12 +251,48 @@ Finish(p) ==
        \/ dbState' = EndState(p) /\ lease' = "ended" /\ mem' = EndState(p)
           /\ loaded' = FALSE /\ UNCHANGED failLeft
     /\ Exit(p)
-    /\ UNCHANGED <<up, handle, tracked, disk, wentBack, env, crashLeft,
+    /\ UNCHANGED <<up, handle, tracked, disk, leftReleasing, env, crashLeft,
                    quiesceLeft>>
 
+\* reclaim_unloaded: Manager::reclaim with no entry, for a MissingRow whose
+\* repository is open (and no restore pending). There is no scan lock to
+\* take. An `active` row first goes through Manager::begin_reclaim, as in
+\* Begin; a `releasing` one goes on.
+MissingBegin(p) ==
+    /\ pc[p] = "entry" /\ MissingRow
+    /\ IF dbState = "active"
+         THEN \/ Fail /\ Goto(p, "idle") /\ UNCHANGED dbState
+              \/ BeginOk(p) /\ dbState' = "releasing" /\ Goto(p, "missing")
+                 /\ UNCHANGED failLeft
+              \/ ~BeginOk(p) /\ Goto(p, "idle") /\ UNCHANGED <<dbState, failLeft>>
+       ELSE Goto(p, "missing") /\ UNCHANGED <<dbState, failLeft>>
+    /\ UNCHANGED <<up, lease, entry, lock, disk, leftReleasing, env, crashLeft,
+                   quiesceLeft>>
+
+\* Then reclaim_missing, as at start but for this reclaim's reason:
+\* forget_jj_workspace, whose failure is only logged, and remove_state_dir.
+MissingForget(p) ==
+    /\ pc[p] = "missing" /\ ~paused
+    /\ Goto(p, "mfinish") /\ stateDir' = FALSE
+    /\ \/ jjws' = FALSE /\ UNCHANGED failLeft
+       \/ Fail /\ UNCHANGED jjws
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, dir, leftReleasing, env,
+                   crashLeft, quiesceLeft>>
+
+\* Then finish_workspace, whose error is returned. A row another reclaim
+\* finished meanwhile is a conflict, which writes nothing.
+MissingFinish(p) ==
+    /\ pc[p] = "mfinish" /\ Goto(p, "idle")
+    /\ IF dbState = "releasing"
+         THEN \/ dbState' = EndState(p) /\ lease' = "ended" /\ UNCHANGED failLeft
+              \/ Fail /\ UNCHANGED <<dbState, lease>>
+       ELSE UNCHANGED <<dbState, lease, failLeft>>
+    /\ UNCHANGED <<up, entry, lock, disk, leftReleasing, env, crashLeft, quiesceLeft>>
+
 Reclaim(p) ==
-    \/ Entry(p) \/ WaitLock(p) \/ GoBack(p) \/ Check(p) \/ Begin(p)
+    \/ Entry(p) \/ WaitLock(p) \/ Retry(p) \/ Check(p) \/ Begin(p)
     \/ Final(p) \/ Forget(p) \/ TearDown(p) \/ Finish(p)
+    \/ MissingBegin(p) \/ MissingForget(p) \/ MissingFinish(p)
 
 -----------------------------------------------------------------------------
 (* Watcher snapshots: Manager::scheduled_snapshot (workspace/snapshot.rs) *)
@@ -247,7 +300,7 @@ Reclaim(p) ==
 WatchStart ==
     /\ up /\ loaded /\ tracked /\ pc["watcher"] = "idle"
     /\ Goto("watcher", "wwait")
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, leftReleasing, env, budgets>>
 
 \* Under the scan lock: skipped unless the record is `active` and not paused.
 WatchLock ==
@@ -255,13 +308,13 @@ WatchLock ==
     /\ IF mem = "active" /\ ~paused
          THEN lock' = "watcher" /\ Goto("watcher", "wsnap")
          ELSE Goto("watcher", "idle") /\ UNCHANGED lock
-    /\ UNCHANGED <<up, dbState, lease, entry, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, disk, leftReleasing, env, budgets>>
 
 \* The snapshot runs (it fails, logged at debug, without a jj handle).
 WatchSnap ==
     /\ pc["watcher"] = "wsnap"
     /\ Exit("watcher")
-    /\ UNCHANGED <<up, dbState, lease, entry, disk, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, lease, entry, disk, leftReleasing, env, budgets>>
 
 -----------------------------------------------------------------------------
 (* Leases and time *)
@@ -273,7 +326,7 @@ WatchSnap ==
 HbStart ==
     /\ up /\ client /\ ~paused /\ hb = "idle" /\ lease # "ended"
     /\ hb' = IF lease = "live" THEN "fresh" ELSE "stale"
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, wentBack, client,
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, leftReleasing, client,
                    paused, budgets>>
 
 \* db.renew_lease: renews only an `active` workspace's unended lease not
@@ -283,18 +336,18 @@ HbCommit ==
     /\ lease' = IF dbState = "active" /\ lease # "ended" /\ hb = "fresh"
                   THEN "live" ELSE lease
     /\ hb' = "idle"
-    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, wentBack, client, paused,
+    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, leftReleasing, client, paused,
                    budgets>>
 
 \* The clock passes expires_at + grace with no renewal.
 Expire ==
     /\ lease = "live" /\ lease' = "past"
-    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, wentBack, env, budgets>>
+    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, leftReleasing, env, budgets>>
 
 \* The holder exits for good.
 ClientStops ==
     /\ client /\ client' = FALSE
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, wentBack, hb,
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, leftReleasing, hb,
                    paused, budgets>>
 
 \* quiesce: pause_all snapshots, pause_ticks (a tick already running goes
@@ -302,7 +355,7 @@ ClientStops ==
 Quiesce ==
     /\ up /\ ~paused /\ quiesceLeft > 0
     /\ paused' = TRUE /\ quiesceLeft' = quiesceLeft - 1
-    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, wentBack, hb,
+    /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, pc, leftReleasing, hb,
                    client, failLeft, crashLeft>>
 
 \* resume (or auto_resume): extend_after_pause moves every unended lease's
@@ -311,7 +364,7 @@ Resume ==
     /\ up /\ paused
     /\ paused' = FALSE
     /\ lease' = IF lease = "past" THEN "live" ELSE lease
-    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, wentBack, hb, client,
+    /\ UNCHANGED <<up, dbState, entry, lock, disk, pc, leftReleasing, hb, client,
                    budgets>>
 
 -----------------------------------------------------------------------------
@@ -323,17 +376,17 @@ Crash ==
     /\ up' = FALSE /\ loaded' = FALSE /\ handle' = FALSE /\ tracked' = FALSE
     /\ lock' = "free"
     /\ pc' = [p \in Procs |-> "idle"]
-    /\ wentBack' = [p \in Reclaimers |-> FALSE]
+    /\ leftReleasing' = [p \in Reclaimers |-> FALSE]
     /\ hb' = "idle" /\ paused' = FALSE
     /\ UNCHANGED <<dbState, lease, mem, disk, client, failLeft, quiesceLeft>>
 
 \* bring_up (daemon.rs): apply_restart_grace, then Manager::load_active
-\* (workspace/manager.rs). A `releasing` row is set `active`; if that
-\* write fails, load_active returns the error, which bring_up logs before
-\* serving anyway. A missing directory goes to reclaim_missing, which logs
-\* and goes on past a failed forget or finish_workspace and removes the
-\* state directory. Otherwise the entry is loaded and tracked, with a jj
-\* handle when reopen finds the state directory.
+\* (workspace/manager.rs), which writes nothing for a row it loads. A
+\* missing directory goes to reclaim_missing, which logs and goes on past
+\* a failed forget or finish_workspace and removes the state directory.
+\* Otherwise the entry is loaded in the row's state, tracked if `active`,
+\* with a jj handle when reopen finds the state directory. A `releasing`
+\* one is left for the next reclaim, which retries it.
 StartLease == IF lease = "past" THEN "live" ELSE lease
 
 Start ==
@@ -341,23 +394,21 @@ Start ==
     /\ IF dbState \notin {"active", "releasing"}
          THEN lease' = StartLease
               /\ UNCHANGED <<dbState, entry, disk, failLeft>>
-       ELSE \/ dbState = "releasing" /\ Fail /\ lease' = StartLease
-               /\ UNCHANGED <<dbState, entry, disk>>
-            \/ dir /\ dbState' = "active" /\ lease' = StartLease
-               /\ loaded' = TRUE /\ mem' = "active" /\ handle' = stateDir
-               /\ tracked' = TRUE
-               /\ UNCHANGED <<disk, failLeft>>
+       ELSE \/ dir /\ lease' = StartLease
+               /\ loaded' = TRUE /\ mem' = dbState /\ handle' = stateDir
+               /\ tracked' = (dbState = "active")
+               /\ UNCHANGED <<dbState, disk, failLeft>>
             \/ ~dir /\ stateDir' = FALSE /\ UNCHANGED entry
                /\ \/ jjws' = FALSE /\ dbState' = "reclaimed" /\ lease' = "ended"
                      /\ UNCHANGED failLeft
                   \/ Fail /\ UNCHANGED jjws
                      /\ dbState' = "reclaimed" /\ lease' = "ended"
                   \/ Fail /\ jjws' = FALSE
-                     /\ dbState' = "active" /\ lease' = StartLease
+                     /\ UNCHANGED dbState /\ lease' = StartLease
                   \/ failLeft > 1 /\ failLeft' = failLeft - 2 /\ UNCHANGED jjws
-                     /\ dbState' = "active" /\ lease' = StartLease
+                     /\ UNCHANGED dbState /\ lease' = StartLease
                /\ UNCHANGED dir
-    /\ UNCHANGED <<lock, pc, wentBack, env, crashLeft, quiesceLeft>>
+    /\ UNCHANGED <<lock, pc, leftReleasing, env, crashLeft, quiesceLeft>>
 
 -----------------------------------------------------------------------------
 

@@ -667,6 +667,15 @@ impl Repo {
         names
     }
 
+    /// Whether the workspace `name` has a working-copy commit in the loaded
+    /// view, which `jj workspace forget` removes.
+    pub fn has_workspace(&self, name: &str) -> bool {
+        self.repo
+            .view()
+            .get_wc_commit_id(&WorkspaceNameBuf::from(name))
+            .is_some()
+    }
+
     /// The parents of the commit with this full id, in order.
     pub async fn commit_parents(
         &self,

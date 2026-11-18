@@ -163,7 +163,12 @@ echo
 echo "With every fix in fixes/ applied:"
 fixed_dir=$out/fixed
 mkdir -p "$fixed_dir"
-if ! apply "$here/WorkspaceRelease.tla" "$fixed_dir/WorkspaceRelease.tla" "$here"/fixes/*.fix; then
+shopt -s nullglob
+fixes=("$here"/fixes/*.fix)
+shopt -u nullglob
+if [[ ${#fixes[@]} -eq 0 ]]; then
+    echo "  none: no open findings"
+elif ! apply "$here/WorkspaceRelease.tla" "$fixed_dir/WorkspaceRelease.tla" "${fixes[@]}"; then
     echo "  a fix no longer applies; update it (see the skill)"
     status=1
 else
@@ -196,7 +201,7 @@ if $mutants; then
             '$1 == p && $3 == s && $4 == "fail" { print "yes" }' "$here/expected.tsv")
         edits=("$file")
         if [[ $base_fails == yes ]]; then
-            edits=("$here"/fixes/*.fix "$file")
+            edits=("${fixes[@]}" "$file")
             name="$name (on fixed)"
         fi
         if ! apply "$here/WorkspaceRelease.tla" "$dir/WorkspaceRelease.tla" "${edits[@]}" 2>"$dir/apply.err"; then

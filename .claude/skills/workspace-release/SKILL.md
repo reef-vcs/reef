@@ -77,7 +77,8 @@ The script does three things:
 2. **With every fix applied:** for each row expected to `fail`, it runs the
    check again on the model with every edit in `fixes/` applied, and compares
    the outcome with the `fixed` column. A row that fails on a known finding
-   could otherwise hide a new violation of the same property.
+   could otherwise hide a new violation of the same property. With no open
+   findings, `fixes/` is empty or absent, and this step prints `none`.
 3. **With `--mutants`:** it applies each mutant in `mutants/` and expects the
    property the mutant names to fail. If that property already fails on the
    model, it applies the mutant on top of the fixes.
@@ -104,7 +105,7 @@ Run it when a change touches any of the covered code below.
   works there because the repository is colocated.
 
   ```sh
-  git log --oneline ce9dc7b9..HEAD -- \
+  git log --oneline a1fb611d..HEAD -- \
     crates/reef-daemon/src/workspace/reclaim.rs crates/reef-daemon/src/workspace/manager.rs \
     crates/reef-daemon/src/workspace/snapshot.rs crates/reef-daemon/src/snapshot/ \
     crates/reef-daemon/src/lease/mod.rs crates/reef-daemon/src/db/workspaces.rs \
@@ -112,6 +113,9 @@ Run it when a change touches any of the covered code below.
     crates/reef-daemon/src/maintenance/quiesce.rs \
     crates/reef-daemon/src/service/workspaces.rs crates/reef-daemon/src/daemon.rs
   ```
+
+  The first commit it lists is the fix for F1 to F5 (#311 to #315), which
+  the model already describes.
 
 - **For pending edits in a Reef workspace** (no `.git` there): run
   `reef diff` from inside the workspace. In the root checkout, use
@@ -122,21 +126,24 @@ it changes one of the functions in the coverage record.
 
 ## Coverage record
 
-Last confirmed against the code at **`ce9dc7b9`** (main, "R3.17: degraded
-landing to a git remote (#309)"; full id
-`ce9dc7b9c06fe059270e807ff0a7d3f1fc677c0f`). Each model action names its code
-in a comment. Paths are under `crates/reef-daemon/src/`.
+Last confirmed against the code at **`a1fb611d`** (main, "Formal check of
+the workspace release path (TLA+) (#310)"; full id
+`a1fb611d89db8acea9887ce1b615e92141ff54f0`) with the fix for F1 to F5
+(#311 to #315) on top. Each model action names its code in a comment. Paths
+are under `crates/reef-daemon/src/`.
 
 | Code | Model |
 |---|---|
-| `workspace/reclaim.rs` `Manager::reclaim` (and its `entry.jj.take()`) | `Check`, `Begin`, `Final`, `Forget`, `TearDown`, `Finish` |
-| `workspace/reclaim.rs` `lock_for_reclaim`, `finish_going_back` | `Entry`, `WaitLock`, `GoBack` |
+| `workspace/reclaim.rs` `Manager::reclaim` (and its `entry.jj.take()`) | `Check`, `Retry`, `Begin`, `Final`, `Forget`, `TearDown`, `Finish` |
+| `workspace/reclaim.rs` `lock_for_reclaim`, `Manager::begin_reclaim` | `Entry`, `WaitLock`, `Begin`, `MissingBegin` |
+| `workspace/reclaim.rs` `reclaim_unloaded` | `MissingRow`, `MissingBegin`, `MissingForget`, `MissingFinish` |
 | `workspace/reclaim.rs` `final_snapshot`, `forget`, `tear_down`, `back_to_active` | `Final`, `Forget`, `TearDown`, `RollBack` |
-| `workspace/manager.rs` `loaded_entry`, `load_active`, `reopen`, `reclaim_missing`, `forget_jj_workspace`, `remove_state_dir` | `Entry`, `Start`, `Forget`, `TearDown` |
+| `workspace/manager.rs` `load_active`, `reopen`, `reclaim_missing`, `forget_jj_workspace`, `remove_state_dir` | `Start`, `MissingForget`, `MissingFinish`, `Forget`, `TearDown` |
+| `workspace/manager.rs` `jj_workspace_exists` (`reef_lib` `Repo::has_workspace`) | `Retry`, `Forgotten` |
 | `workspace/snapshot.rs` `scheduled_snapshot`, `run_snapshot` (`NotLoaded` without a jj handle) | `WatchStart`, `WatchLock`, `WatchSnap`, `Final` |
 | `snapshot/` the scheduler's `track`, `untrack`, `is_paused`, `pause_all` | `tracked`, `Begin`, `RollBack`, `Start`, `WatchLock` |
 | `lease/mod.rs` `heartbeat`, `tick_once`, `apply_restart_grace`, `pause_ticks`, `extend_after_pause` | `HbStart`, `HbCommit`, `TickList`, `Start`, `Quiesce`, `Resume` |
-| `db/workspaces.rs` `set_workspace_state`, `begin_reclaim`, `finish_workspace` | `GoBack`, `Begin`, `Finish`, `RollBack`, `Start` |
+| `db/workspaces.rs` `set_workspace_state`, `begin_reclaim`, `finish_workspace` | `Begin`, `MissingBegin`, `Finish`, `MissingFinish`, `RollBack`, `Start` |
 | `db/leases.rs` `renew_lease`, `leases_expired_before`, `extend_all_active_leases_to` | `HbCommit`, `TickList`, `Resume`, `Start` |
 | `model/mod.rs` `WorkspaceState::can_become` | the state values the actions allow |
 | `maintenance/quiesce.rs` `quiesce`, `resume` | `Quiesce`, `Resume` |
@@ -234,88 +241,26 @@ show what else fails once the finding is gone.
 
 ## Findings on the code at the sync commit
 
-These are the `fail` rows in `expected.tsv`. Each needs at least one failed
-SQLite write, a failed tear-down, or a daemon death, and some need more than
-one of these. They are rare. They matter because when one happens, only a
-restart or a person's command gets the workspace out, as before #229.
+None open: every row of `expected.tsv` passes. The first run found five,
+each needing a failed SQLite write, a failed tear-down or a daemon death.
+They are fixed, and `crates/reef-daemon/tests/leases.rs` reproduces each one
+with a trigger that fails the write:
 
-**F1 (#311). A retried release can roll a torn-down workspace back to `active`.**
-Rows: `ActiveHasDirectory`, `ActiveHasJjWorkspace`, `ActiveIsTracked`.
-
-1. A release forgets the jj workspace and tears down the directory, then
-   `finish_workspace` fails. The workspace stays `releasing`.
-2. The next reclaim of it, a `reef ws release` or an expiry tick, takes the
-   scan lock. `finish_going_back` writes `active`.
-3. One of these follows, and the reclaim returns with the workspace
-   `active`:
-   - `begin_reclaim` errors. This needs the write in step 2 to succeed and
-     the very next write to fail.
-   - `begin_reclaim` refuses an expiry, because a quiesce's `resume`
-     extended the lease between the tick's `leases_expired_before` and this
-     `begin_reclaim`.
-   - The pipeline runs again, skips the final snapshot (no root), and then
-     `forget_jj_workspace` fails with an error other than `NoSuchWorkspace`.
-     `back_to_active` writes `active`.
-
-Result: the workspace is `active` in the row and in memory, and heartbeats
-renew it. It has no directory, no jj workspace and no jj handle, so its
-watcher snapshots fail, logged only at debug level. It is also untracked
-when `begin_reclaim` errored. A later release or expiry does finish it.
-
-The cause is that a retry publishes `active` without knowing whether an
-earlier attempt got past the forget. `fixes/F1.fix` keeps such a workspace
-`releasing` instead.
-
-**F2 (#312). A daemon death after the forget brings the workspace back `active`
-without its jj workspace.** Row: `ActiveHasJjWorkspace` (`crash`).
-
-1. A release forgets the jj workspace.
-2. The daemon dies before the tear-down.
-3. At start, `load_active` sets the `releasing` row to `active`. The
-   directory and the state directory still exist, so the workspace is loaded
-   and tracked.
-
-The model assumes `reopen` gets a jj handle. What snapshots of the workspace
-then do is untested, so finding out needs a test against the real daemon.
-
-**F3 (#313). A failed `finish_workspace` in `reclaim_missing` strands the workspace
-until the next restart.** Rows: `ActiveHasDirectory`, `AbandonedIsReclaimed`
-(`crash`). This needs a daemon death and a failed write.
-
-1. The daemon dies after the tear-down.
-2. At start, `load_active` finds the directory missing and calls
-   `reclaim_missing`.
-3. There, `finish_workspace` fails, which is only logged.
-
-The row stays `active`, but the workspace is never loaded, so every expiry
-tick gets `NotLoaded` for it. The code's comment at
-`workspace/manager.rs` `reclaim_missing` accepts this ("the next start
-retries").
-
-**F4 (#314). A failed write in `load_active` strands a `releasing` workspace until
-the next restart.** Row: `ReleasingResolves` (`crash`). This needs a daemon
-death and a failed write.
-
-1. The daemon dies during a release.
-2. At start, `load_active`'s `set_workspace_state(Active)` fails. Its `?`
-   returns, which also skips loading every workspace after this one, and
-   `bring_up` only logs the error and serves.
-3. The row stays `releasing` and unloaded. Every tick and every release gets
-   `NotActive` for it.
-
-**F5 (#315). A failed tear-down followed by a failed `finish_workspace` leaves a
-workspace that no reclaim can finish.** Row: `AbandonedIsReclaimed`
-(`nocrash`).
-
-1. A release forgets the jj workspace (`entry.jj.take()`), the tear-down
-   fails and leaves the directory, and `remove_state_dir` runs.
-2. `finish_workspace` fails.
-3. Every later reclaim takes the final snapshot of the directory. That fails
-   with `NotLoaded`, because there is no jj handle, and `back_to_active` sets
-   `final-snapshot-failed`. This repeats on every tick.
-
-A restart does not help, because `reopen` cannot find the state directory.
-Only a release with `--skip-final-snapshot` finishes it.
+- **F1 (#311).** A retried release set a workspace that an earlier attempt
+  had torn down back to `active`. A reclaim that finds the workspace left
+  `releasing` now finishes it without writing `active` first (`Retry`).
+- **F2 (#312).** A daemon death after the forget brought the workspace back
+  `active` without its jj workspace. The retry now reads whether the jj
+  workspace survived and, if not, skips the final snapshot and the forget
+  (`Forgotten`).
+- **F3 (#313).** A failed `finish_workspace` in a start's `reclaim_missing`
+  stranded the workspace until the next restart. A reclaim with no entry
+  now ends such a row (`MissingBegin`, `MissingForget`, `MissingFinish`).
+- **F4 (#314).** A failed write in `load_active` stranded a `releasing`
+  workspace and skipped loading the rest. `load_active` now writes nothing
+  for a `releasing` row and loads it, untracked, for the next reclaim.
+- **F5 (#315).** A failed tear-down and a failed `finish_workspace` left a
+  workspace that every reclaim failed to snapshot. Fixed with F2.
 
 ## What the model leaves out
 

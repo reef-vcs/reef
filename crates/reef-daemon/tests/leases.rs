@@ -33,7 +33,7 @@ use reef_daemon::error::detail_of;
 use reef_daemon::model::{LeaseEnd, ReclaimReason, ReclaimRecord, WorkspaceId, WorkspaceState};
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::oplog::OpEntry;
-use reef_lib::jj::{CommitIdHex, Repo};
+use reef_lib::jj::{CommitIdHex, OpKind, OpMeta, Repo};
 use reef_testing::synth::Preset;
 
 const OWNER: &str = "tester@host";
@@ -712,4 +712,258 @@ async fn shutdown_snapshots_dirty_workspaces() {
         .unwrap()
         .expect("the lease survives");
     assert_eq!(lease.id.as_hex(), lease_id(&ws));
+}
+
+// The release path's findings from the TLA+ model (#311-#315,
+// formal/workspace-release). Each needs a write that fails, which a
+// trigger makes happen; the expiry tick is off so only the test reclaims.
+
+/// A workspace's move to `released` or `reclaimed`: `finish_workspace`.
+const ENDING: &str = "NEW.state IN ('released', 'reclaimed')";
+/// `begin_reclaim`.
+const BEGINNING: &str = "OLD.state = 'active' AND NEW.state = 'releasing'";
+/// A `releasing` workspace set back to `active`.
+const REACTIVATING: &str = "OLD.state = 'releasing' AND NEW.state = 'active'";
+
+/// [`fixture_on_plain_directories`] with the expiry tick off, and the
+/// restart grace and maximum it needs to be valid.
+async fn fixture_without_ticks() -> (TestDaemon, SyntheticRepo) {
+    fixture_with(|config| {
+        configure(config);
+        let lease = &mut config.file.lease;
+        lease.tick = Duration::from_hours(1);
+        lease.restart_grace = lease.tick;
+        lease.max = lease.tick;
+        if cfg!(target_os = "linux") {
+            config.file.workspace.backend = BackendChoice::Named(BackendKind::Copy);
+        }
+    })
+    .await
+}
+
+/// Makes every change of a workspace's state that matches `when` fail, as a
+/// full disk fails SQLite writes, until [`allow_writes`] with `name`.
+fn fail_writes(db: &Path, name: &str, when: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER {name} BEFORE UPDATE OF state ON workspaces WHEN {when}
+         BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+    ))
+    .unwrap();
+}
+
+fn allow_writes(db: &Path, name: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+}
+
+async fn release(daemon: &TestDaemon, ws: &Workspace) -> Result<(), ClientError> {
+    daemon
+        .client
+        .release_workspace("", &ws.id, true, false)
+        .await
+        .map(drop)
+}
+
+/// Whether the repository's view has `ws`'s jj workspace.
+async fn has_jj_workspace(root: &Path, ws: &Workspace) -> bool {
+    open(root)
+        .await
+        .workspace_commit(&id_of(ws).jj_workspace_name())
+        .is_some()
+}
+
+/// Forgets `ws`'s jj workspace from outside the daemon, as its release
+/// does.
+async fn forget_jj_workspace(root: &Path, ws: &Workspace) {
+    let mut repo = open(root).await;
+    let name = id_of(ws).jj_workspace_name();
+    tokio::task::spawn_blocking(move || {
+        let meta = OpMeta::new(OpKind::ReleaseWorkspace, "test: forget");
+        pollster::block_on(repo.forget_workspace(&name, &meta)).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Asserts `ws` ended `released` by one reclaim with no final snapshot, its
+/// directory, state directory and jj workspace gone, and returns that
+/// reclaim's detail.
+async fn assert_released_without_snapshot(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    ws: &Workspace,
+) -> String {
+    let inspected = inspect(&daemon.client, ws).await;
+    assert_eq!(inspected.state(), v1::WorkspaceState::Released);
+    assert_eq!(
+        inspected.lease.unwrap().end_reason(),
+        LeaseEndReason::Released
+    );
+    let reclaims = reclaims_of(daemon, ws);
+    assert_eq!(reclaims.len(), 1, "{reclaims:?}");
+    assert_eq!(reclaims[0].reason, ReclaimReason::Released);
+    assert!(!reclaims[0].snapshot_taken);
+    assert!(!Path::new(&ws.path).exists(), "torn down");
+    assert!(!state_dir_of(daemon, repo, ws).exists());
+    assert!(!has_jj_workspace(&repo.root, ws).await);
+    reclaims[0].detail.clone().unwrap_or_default()
+}
+
+// #311 (F1): a release forgot the jj workspace and tore the directory
+// down, then could not record the end, leaving the workspace `releasing`.
+// The retry set it back to `active`, then failed at begin_reclaim:
+// `active`, with neither directory nor jj workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_release_never_reactivates_a_torn_down_workspace() {
+    let (daemon, repo) = fixture_without_ticks().await;
+    let ws = create_with(&daemon, &repo, 10_000).await;
+    let db = daemon.config.paths.db.clone();
+    fail_writes(&db, "fail_ending", ENDING);
+    release(&daemon, &ws).await.unwrap_err();
+    allow_writes(&db, "fail_ending");
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Releasing
+    );
+    assert!(!Path::new(&ws.path).exists(), "torn down");
+
+    fail_writes(&db, "fail_beginning", BEGINNING);
+    let retried = release(&daemon, &ws).await;
+    let state = inspect(&daemon.client, &ws).await.state();
+    assert_ne!(
+        state,
+        v1::WorkspaceState::Active,
+        "active without its directory: {retried:?}"
+    );
+    retried.unwrap();
+    let detail = assert_released_without_snapshot(&daemon, &repo, &ws).await;
+    assert!(detail.contains("workspace root missing"), "{detail}");
+}
+
+// #315 (F5): a release forgot the jj workspace, its tear-down failed and
+// left the directory, and recording the end failed. Every later reclaim
+// then tried a final snapshot with no jj workspace to record it, failed,
+// and put the workspace back to `active` with `final-snapshot-failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn forgotten_workspace_whose_tear_down_failed_is_released() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipped: root ignores directory permissions");
+        return;
+    }
+    let (daemon, repo) = fixture_without_ticks().await;
+    let ws = create_with(&daemon, &repo, 10_000).await;
+    let root = Path::new(&ws.path);
+    let parent = root.parent().unwrap();
+    let db = daemon.config.paths.db.clone();
+    fail_writes(&db, "fail_ending", ENDING);
+    // The tear-down renames the directory within its parent.
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let released = release(&daemon, &ws).await;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    allow_writes(&db, "fail_ending");
+    released.unwrap_err();
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Releasing
+    );
+    assert!(root.is_dir(), "the tear-down failed");
+    assert!(!has_jj_workspace(&repo.root, &ws).await);
+
+    release(&daemon, &ws).await.unwrap();
+    let detail = assert_released_without_snapshot(&daemon, &repo, &ws).await;
+    assert!(
+        detail.contains("jj workspace already forgotten"),
+        "{detail}"
+    );
+}
+
+// #312 (F2): the daemon stopped after a release forgot the jj workspace and
+// before its tear-down. The next start set the workspace back to `active`
+// with no jj workspace. It now stays `releasing` until a reclaim ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_after_the_forget_does_not_reactivate() {
+    let (daemon, repo) = fixture_without_ticks().await;
+    let ws = create_with(&daemon, &repo, 10_000).await;
+    daemon
+        .handle
+        .state()
+        .manager
+        .strand_releasing(id_of(&ws))
+        .await
+        .unwrap();
+    forget_jj_workspace(&repo.root, &ws).await;
+
+    let daemon = daemon.restart().await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Releasing
+    );
+    release(&daemon, &ws).await.unwrap();
+    let detail = assert_released_without_snapshot(&daemon, &repo, &ws).await;
+    assert!(
+        detail.contains("jj workspace already forgotten"),
+        "{detail}"
+    );
+}
+
+// #314 (F4): at start, a failed write setting an interrupted release's
+// workspace back to `active` stopped loading it and every workspace after
+// it, until the next restart. The start no longer writes there.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_write_at_start_strands_nothing() {
+    let (daemon, repo) = fixture_without_ticks().await;
+    let stranded = create_with(&daemon, &repo, 10_000).await;
+    let other = create_with(&daemon, &repo, 10_000).await;
+    daemon
+        .handle
+        .state()
+        .manager
+        .strand_releasing(id_of(&stranded))
+        .await
+        .unwrap();
+    let stopped = daemon.stop_keeping().await;
+    fail_writes(&stopped.config.paths.db, "fail_reactivating", REACTIVATING);
+    let daemon = stopped.start().await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    allow_writes(&daemon.config.paths.db, "fail_reactivating");
+
+    daemon
+        .client
+        .snapshot_workspace("", &other.id, "")
+        .await
+        .expect("the workspace after it is loaded");
+    release(&daemon, &stranded).await.unwrap();
+    let reclaims = reclaims_of(&daemon, &stranded);
+    assert_eq!(reclaims.len(), 1, "{reclaims:?}");
+    assert!(reclaims[0].snapshot_taken, "its jj workspace was intact");
+    assert_eq!(
+        inspect(&daemon.client, &stranded).await.state(),
+        v1::WorkspaceState::Released
+    );
+}
+
+// #313 (F3): at start, a workspace's directory was missing and recording
+// its reclaim failed. Nothing loaded it, so every reclaim of it failed as
+// `NotLoaded` until the next restart. A reclaim now ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_reclaim_of_a_missing_directory_is_retried() {
+    let (daemon, repo) = fixture_without_ticks().await;
+    let ws = create_with(&daemon, &repo, 10_000).await;
+    let stopped = daemon.stop_keeping().await;
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fail_writes(&stopped.config.paths.db, "fail_ending", ENDING);
+    let daemon = stopped.start().await;
+    allow_writes(&daemon.config.paths.db, "fail_ending");
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Active
+    );
+
+    release(&daemon, &ws).await.unwrap();
+    let detail = assert_released_without_snapshot(&daemon, &repo, &ws).await;
+    assert!(detail.contains("workspace root missing"), "{detail}");
 }

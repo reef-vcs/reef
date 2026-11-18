@@ -1,0 +1,17 @@
+# breaks: ActiveHasDirectory INVARIANT nocrash
+# code: workspace/reclaim.rs puts a workspace an earlier reclaim left
+# `releasing` back to `active` before reclaiming it again (#229's
+# finish_going_back, #311): when begin_reclaim then fails, a workspace
+# torn down by the earlier reclaim is `active`.
+<<<
+    /\ \/ Fail /\ Exit(p)
+       \/ Goto(p, "final") /\ UNCHANGED <<lock, failLeft>>
+    /\ UNCHANGED <<up, dbState, lease, entry, disk, leftReleasing, env, crashLeft,
+                   quiesceLeft>>
+===
+    /\ \/ Fail /\ Exit(p) /\ UNCHANGED <<dbState, mem>>
+       \/ dbState' = "active" /\ mem' = "active" /\ Goto(p, "check")
+          /\ UNCHANGED <<lock, failLeft>>
+    /\ UNCHANGED <<up, lease, loaded, handle, tracked, disk, leftReleasing, env,
+                   crashLeft, quiesceLeft>>
+>>>
