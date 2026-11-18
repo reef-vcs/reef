@@ -417,6 +417,24 @@ async fn outputs_match_their_schemas() {
         )
         .await;
 
+    // An overlap (#263): another workspace changes `notes.txt` too, so
+    // `status`, `ws inspect` and `here` carry `overlaps`.
+    let other = script.json(&root, &["ws", "create"]).await;
+    std::fs::write(
+        PathBuf::from(text(&other["path"])).join("notes.txt"),
+        "other\n",
+    )
+    .unwrap();
+    script
+        .run(&root, &["ws", "snapshot", &text(&other["id"])])
+        .await;
+    let inspected = script.json(&root, &["ws", "inspect", &a_id]).await;
+    assert_eq!(
+        inspected["overlaps"][0]["workspace_id"], other["id"],
+        "{inspected}"
+    );
+    script.both(&root, &["ws", "inspect", &a_id]).await;
+
     // The VCS commands, inside the workspace.
     script.both(&a_dir, &["status"]).await;
     script.both(&a_dir, &["log"]).await;

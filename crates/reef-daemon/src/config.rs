@@ -198,6 +198,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
         &["enabled", "listen", "names", "tls_cert", "tls_key"],
     ),
     ("status_index", &["enabled", "sync_timeout"]),
+    ("overlaps", &["max_age"]),
     (
         "build",
         &["limit", "jobs", "nice", "make_jobserver", "cargo_config"],
@@ -297,6 +298,8 @@ pub struct FileConfig {
     pub remote: RemoteSection,
     /// `[status_index]`.
     pub status_index: StatusIndexSection,
+    /// `[overlaps]` (#263).
+    pub overlaps: OverlapsSection,
     /// `[build]` (#271).
     pub build: BuildSection,
 }
@@ -1262,6 +1265,27 @@ impl Default for StatusIndexSection {
         Self {
             enabled: true,
             sync_timeout: Duration::from_secs(1),
+        }
+    }
+}
+
+/// `[overlaps]`: which other open changes a workspace's status names as
+/// changing its paths (#263, ADR 0079).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OverlapsSection {
+    /// How recently an open change no active workspace is on must have
+    /// been written to count: a released workspace's unlanded change, the
+    /// root checkout's, a fetched one. Active workspaces' changes always
+    /// count. Default 7 days; `0s` counts active workspaces' only.
+    #[serde(with = "duration")]
+    pub max_age: Duration,
+}
+
+impl Default for OverlapsSection {
+    fn default() -> Self {
+        Self {
+            max_age: Duration::from_hours(24 * 7),
         }
     }
 }
@@ -2263,6 +2287,7 @@ impl Config {
                     ("sync_timeout", d(f.status_index.sync_timeout)),
                 ],
             ),
+            ("overlaps", vec![("max_age", d(f.overlaps.max_age))]),
             (
                 "build",
                 vec![

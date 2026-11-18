@@ -430,6 +430,57 @@ pub struct Workspace {
     /// Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk: Option<WorkspaceDisk>,
+    /// Other open changes that change paths its change changes, at most
+    /// 10, newest written first (#263): set by `status`, `ws inspect` and
+    /// `here`. Absent when there are none, and elsewhere.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overlaps: Vec<Overlap>,
+    /// Such changes, in all; absent when none.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub overlap_count: u32,
+}
+
+/// Another open change that changes a path a workspace's change changes
+/// (#263). A path whose content there equals trunk's is not counted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Overlap {
+    /// The other change, in hex.
+    pub change_id: String,
+    /// The same change id in jj's reverse hex, as `reef diff -r` takes it.
+    pub change_id_reverse_hex: String,
+    /// Its commit, as read.
+    pub commit_id: String,
+    /// A Reef workspace on that change: an active one, else the newest
+    /// released one; `null` when no Reef workspace has been on it.
+    pub workspace_id: Option<String>,
+    /// That workspace's owner; with no workspace, the commit author's
+    /// email.
+    pub owner: String,
+    /// Whether an active workspace is on it now.
+    pub active: bool,
+    /// The paths both changes change, in path order, at most 10.
+    pub paths: Vec<String>,
+    /// Such paths, in all.
+    pub path_count: u32,
+    /// When the other change was last written: its commit's committer
+    /// time.
+    pub written_at: Option<String>,
+}
+
+impl From<&v1::Overlap> for Overlap {
+    fn from(overlap: &v1::Overlap) -> Self {
+        Self {
+            change_id: overlap.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&overlap.change_id),
+            commit_id: overlap.commit_id.clone(),
+            workspace_id: text(&overlap.workspace_id),
+            owner: overlap.owner.clone(),
+            active: overlap.active,
+            paths: overlap.paths.clone(),
+            path_count: overlap.path_count,
+            written_at: time(overlap.written_at.as_ref()),
+        }
+    }
 }
 
 /// What a workspace's directory costs on disk, as of `measured_at`
@@ -705,6 +756,8 @@ impl From<&v1::Workspace> for Workspace {
                 .map(|session| Box::new(ProvenanceSession::from(session))),
             behind_trunk: ws.behind_trunk,
             disk: ws.disk.as_deref().map(WorkspaceDisk::from),
+            overlaps: ws.overlaps.iter().map(Overlap::from).collect(),
+            overlap_count: ws.overlap_count,
         }
     }
 }

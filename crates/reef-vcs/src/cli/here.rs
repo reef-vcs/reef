@@ -166,7 +166,11 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), Cl
 fn inside(ws: &v1::Workspace, in_run: bool, held: bool, disk: Option<&DiskStatus>) -> Inside {
     let mut workspace = Workspace::from(ws);
     let disk = disk.filter(|disk| disk.level != "ok").cloned();
-    let (hint, next) = advise_with_disk(&workspace, in_run, held, disk.as_ref());
+    let (mut hint, next) = advise_with_disk(&workspace, in_run, held, disk.as_ref());
+    if let Some(overlap) = overlap_hint(&workspace) {
+        hint.push(' ');
+        hint.push_str(&overlap);
+    }
     if disk.is_none() {
         workspace.disk = None;
     }
@@ -183,6 +187,26 @@ fn inside(ws: &v1::Workspace, in_run: bool, held: bool, disk: Option<&DiskStatus
         hint,
         next,
     }
+}
+
+/// The sentence `hint` gains when another open change changes this
+/// workspace's paths, naming the newest.
+fn overlap_hint(ws: &Workspace) -> Option<String> {
+    let first = ws.overlaps.first()?;
+    let mut who = super::render::overlap_who(first);
+    if let Some(initial) = who.get_mut(0..1) {
+        initial.make_ascii_uppercase();
+    }
+    let path = first.paths.first().map_or("-", String::as_str);
+    let change = super::render::overlap_change(first);
+    let others = match ws.overlap_count.saturating_sub(1) {
+        0 => String::new(),
+        1 => ", and 1 other change overlaps (`reef status` lists them)".to_owned(),
+        n => format!(", and {n} other changes overlap (`reef status` lists them)"),
+    };
+    Some(format!(
+        "{who} also changes {path}; `reef diff -r {change}` shows its change{others}. Conflicts do not block, so carry on or coordinate."
+    ))
 }
 
 /// [`advise`], with the disk's word where it matters (#272): a `low` disk
@@ -514,6 +538,17 @@ impl TextRender for Inside {
         if let Some(push) = &self.push {
             pairs.push(("push", push.text()));
         }
+        if let Some(first) = ws.overlaps.first() {
+            let mut line = super::render::overlap_line(first);
+            match ws.overlap_count.saturating_sub(1) {
+                0 => {}
+                1 => line.push_str(" (+1 more change)"),
+                more => {
+                    let _ = write!(line, " (+{more} more changes)");
+                }
+            }
+            pairs.push(("overlaps", line));
+        }
         pairs.push(("hint", self.hint.clone()));
         if !self.next.is_empty() {
             pairs.push(("next", shell_line(&self.next)));
@@ -646,11 +681,49 @@ mod tests {
         assert!(outside(Path::new("/srcx"), &repos).repo.is_none());
     }
 
+    fn overlap(workspace_id: Option<&str>, active: bool) -> reef_client::json::Overlap {
+        reef_client::json::Overlap {
+            change_id: "4567".into(),
+            change_id_reverse_hex: "vutsrqponmlkjihg".into(),
+            commit_id: "ef01".into(),
+            workspace_id: workspace_id.map(str::to_owned),
+            owner: "bot-1".into(),
+            active,
+            paths: vec!["src/lib.rs".into(), "src/main.rs".into()],
+            path_count: 2,
+            written_at: None,
+        }
+    }
+
+    #[test]
+    fn an_overlap_adds_a_hint_sentence_and_keeps_next() {
+        let mut ws = workspace("active", Some("active"));
+        let (plain, next) = advise(&ws, false, false);
+        assert_eq!(overlap_hint(&ws), None);
+        ws.overlaps = vec![overlap(Some("1111222233334444"), true)];
+        ws.overlap_count = 3;
+        assert_eq!(
+            overlap_hint(&ws).unwrap(),
+            "Workspace 1111222233334444 (bot-1) also changes src/lib.rs; `reef diff -r vutsrqponmlk` shows its change, and 2 other changes overlap (`reef status` lists them). Conflicts do not block, so carry on or coordinate."
+        );
+        ws.overlaps = vec![overlap(None, false)];
+        ws.overlap_count = 1;
+        assert!(
+            overlap_hint(&ws)
+                .unwrap()
+                .starts_with("Change vutsrqponmlk by bot-1 also changes src/lib.rs;")
+        );
+        // `next` is the workspace's own, overlaps or not.
+        assert_eq!(advise(&ws, false, false), (plain, next));
+    }
+
     #[test]
     fn text_fits_twelve_lines() {
         let mut ws = workspace("active", Some("active"));
         ws.divergent = true;
         ws.attention = Some("store-missing".into());
+        ws.overlaps = vec![overlap(Some("1111222233334444"), false)];
+        ws.overlap_count = 2;
         let (hint, next) = advise(&ws, false, false);
         let here = Inside {
             in_workspace: true,
@@ -682,6 +755,10 @@ mod tests {
         );
         assert!(
             text.contains("push:          main is not pushed to origin/main: diverged"),
+            "{text}"
+        );
+        assert!(
+            text.contains("overlaps:      Also changing src/lib.rs (+1 more): released workspace 1111222233334444 (bot-1); reef diff -r vutsrqponmlk (+1 more change)"),
             "{text}"
         );
     }

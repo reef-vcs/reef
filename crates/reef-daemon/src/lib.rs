@@ -33,6 +33,7 @@ pub mod logging;
 pub mod maintenance;
 pub mod model;
 pub mod offline;
+pub mod overlap;
 pub mod policy;
 pub mod presence;
 pub mod provenance;

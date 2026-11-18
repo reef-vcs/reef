@@ -550,6 +550,18 @@ A page re-matches the whole diff's definitions, and that costs less than the 200
 REEF_BENCH_PRESET=large cargo bench -p reef-daemon --features testing --bench status
 ```
 
+**Overlaps (#263, 2026-11-18).** Every status at head now reads the other open changes on the workspace's paths ([ADR 0079](adr/0079-overlaps.md)). Measured on `large` on the M2 Max, `main` (`b68efa3f`) and the branch run alternately three times each, release builds, while another agent's builds ran on the machine. The table gives each row's criterion median per run. One `main` run was taken under heavy load (its `walk` was 265 ms against 162 to 164 in the others) and is left out of the `main` column; it is in the PR.
+
+| `status/large/…` | `main`, 2 runs | #263, 3 runs | Gate |
+| --- | ---: | ---: | --- |
+| `index_clean` | 12.2, 12.3 ms | 11.9, 12.1, 12.1 ms | < 15 ms |
+| `index_one_edit` | 83.5, 85.2 ms | 83.6, 85.4, 87.2 ms | < 100 ms |
+| `index_100_edits` | 93.6, 94.3 ms | 93.5, 94.8, 95.8 ms | < 250 ms |
+| `skip_snapshot` | 8.2, 8.3 ms | 8.3, 8.6, 11.0 ms | recorded |
+| `index_clean_open_changes`: `index_clean` with 20 other workspaces' open changes sharing a path, each named | none | 12.0, 12.2, 28.7 ms | recorded; < 15 ms expected |
+
+No row moved by more than its run-to-run spread. With nothing to find, a status's overlap work is one revset over the mutable commits. With 20 overlapping changes and a warm cache, it is a cache lookup and two tree lookups per change, and two of three runs were within 0.3 ms of `index_clean`. The 28.7 ms run came in the same run as the 11.0 ms `skip_snapshot` and a 231 ms `walk_one_edit`, both high, so the machine was loaded then.
+
 
 ## Evidence (R3.01)
 

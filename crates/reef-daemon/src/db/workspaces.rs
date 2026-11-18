@@ -280,6 +280,30 @@ impl Db {
         })
     }
 
+    /// `repo`'s workspaces on any of `change_ids` (hex), in any state,
+    /// newest first.
+    pub fn workspaces_on_changes(
+        &self,
+        repo: RepoId,
+        change_ids: &[&str],
+    ) -> Result<Vec<WorkspaceRecord>, DbError> {
+        if change_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|conn| {
+            let placeholders = vec!["?"; change_ids.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM workspaces
+                 WHERE repo_id = ? AND change_id IN ({placeholders})
+                 ORDER BY created_at DESC, id DESC"
+            ))?;
+            let args = std::iter::once(Value::from(repo.as_hex()))
+                .chain(change_ids.iter().map(|id| Value::from((*id).to_owned())));
+            stmt.query_map(rusqlite::params_from_iter(args), from_row)?
+                .collect()
+        })
+    }
+
     /// Moves a workspace to `state`. [`DbError::Conflict`] if the lifecycle
     /// does not allow the move (see [`WorkspaceState::can_become`]).
     pub fn set_workspace_state(

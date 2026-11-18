@@ -18,6 +18,7 @@ use reef_lib::jj::diff::{self, DiffBase, DiffFormat, DiffOptions};
 use reef_lib::jj::effects::OpEffects;
 use reef_lib::jj::log::{self, Describer};
 use reef_lib::jj::oplog::{self, OpEntry};
+use reef_lib::jj::overlap::Found;
 use reef_lib::jj::revset;
 use tonic::{Request, Response, Status};
 
@@ -78,6 +79,8 @@ struct Read {
     /// The working copies in the view read at an operation; `None` at
     /// head.
     copies: Option<Vec<CopyAt>>,
+    /// Other open changes on the workspace's paths, at head (#263).
+    overlaps: Found,
 }
 
 struct WorkspaceRead {
@@ -131,6 +134,7 @@ impl StatusService for StatusHandler {
         let reads = Arc::clone(&state.reads);
         let (stop, _guard) = state.reads.stop();
         let read_target = target.clone();
+        let job_state = Arc::clone(state);
         let read = state
             .reads
             .run(&target.handle, move || async move {
@@ -227,6 +231,14 @@ impl StatusService for StatusHandler {
                 } else {
                     None
                 };
+                let overlaps = if at || target.jj_workspace.is_none() {
+                    Found::default()
+                } else {
+                    crate::overlap::find(&job_state, target.repo.id, repo, &scope, &|| {
+                        stop.requested()
+                    })
+                    .await
+                };
                 Ok::<_, Status>(Read {
                     at: op_id(repo),
                     trunk,
@@ -237,6 +249,7 @@ impl StatusService for StatusHandler {
                     last,
                     workspace,
                     copies,
+                    overlaps,
                 })
             })
             .await
@@ -328,12 +341,16 @@ impl StatusService for StatusHandler {
                     .inspect(record.id, false, false, None)
                     .await
                     .map_err(status)?;
-                let workspace = listed(
+                let mut workspace = listed(
                     state,
                     Some(target.repo.id),
                     &[(inspected.record.clone(), inspected.lease.clone())],
                 )?
                 .pop();
+                if let Some(workspace) = workspace.as_mut() {
+                    (workspace.overlaps, workspace.overlap_count) =
+                        crate::overlap::messages(state, target.repo.id, read.overlaps);
+                }
                 let (source, walk_reason) = match &snapshot {
                     Some(taken) => taken.status_source(),
                     None => (

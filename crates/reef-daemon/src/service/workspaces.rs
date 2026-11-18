@@ -631,9 +631,12 @@ impl WorkspaceService for WorkspacesService {
             &mut workspace,
         );
         if let Some(workspace) = workspace.first_mut() {
-            workspace.behind_trunk =
-                crate::rebase::behind_trunk(&self.state, record.repo_id, &workspace.commit_id)
-                    .await;
+            let (behind, (overlaps, count)) = tokio::join!(
+                crate::rebase::behind_trunk(&self.state, record.repo_id, &workspace.commit_id),
+                crate::overlap::of_workspace(&self.state, &inspected.record),
+            );
+            workspace.behind_trunk = behind;
+            (workspace.overlaps, workspace.overlap_count) = (overlaps, count);
         }
         Ok(Response::new(GetWorkspaceResponse {
             workspace: workspace.pop(),

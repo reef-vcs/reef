@@ -12,7 +12,10 @@
 //! - `index_one_edit`: one file appended just before the call, so its event
 //!   may still be in flight: a snapshot of that path;
 //! - `index_100_edits`: 100 files appended before the call;
-//! - `skip_snapshot`: `skip_snapshot`, the floor.
+//! - `skip_snapshot`: `skip_snapshot`, the floor;
+//! - `index_clean_open_changes`: `index_clean` with 20 other workspaces'
+//!   open changes sharing a path with this one, each named as an overlap
+//!   (#263).
 //!
 //! An `index_*` call that answers other than `index` panics: that is Phase
 //! 2's "without a tree walk", checked on every run. Results are in
@@ -40,6 +43,9 @@ use reef_daemon::config::WatcherBackend;
 use reef_daemon::testing::TestDaemon;
 use reef_testing::synth::Preset;
 
+/// Other workspaces' open changes in `index_clean_open_changes` (#263).
+const OPEN_CHANGES: usize = 20;
+
 fn preset() -> (Preset, &'static str) {
     match std::env::var("REEF_BENCH_PRESET").as_deref() {
         Ok("small") => (Preset::Small, "small"),
@@ -51,7 +57,7 @@ fn preset() -> (Preset, &'static str) {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "the fixture and six benches over one workspace"
+    reason = "the fixture and seven benches over one workspace"
 )]
 fn bench(c: &mut Criterion) {
     let (preset, name) = preset();
@@ -194,6 +200,42 @@ fn bench(c: &mut Criterion) {
                 let answer = status(true);
                 total += begun.elapsed();
                 assert_eq!(answer.source(), StatusSource::LastSnapshot);
+            }
+            total
+        });
+    });
+    // Other workspaces with open changes on a path this one changes
+    // (#263): every status reads their overlaps, from a warm cache.
+    std::fs::write(root.join("bench-shared.txt"), "mine\n").unwrap();
+    for n in 0..OPEN_CHANGES {
+        let other = rt
+            .block_on(daemon.client.create_workspace(CreateWorkspaceRequest {
+                repo: repo.id.clone(),
+                owner: format!("bench-{n}@reef"),
+                ..CreateWorkspaceRequest::default()
+            }))
+            .unwrap()
+            .workspace
+            .unwrap();
+        std::fs::write(
+            Path::new(&other.path).join("bench-shared.txt"),
+            format!("{n}\n"),
+        )
+        .unwrap();
+        rt.block_on(daemon.client.snapshot_workspace("", &other.id, ""))
+            .unwrap();
+    }
+    settle();
+    group.bench_function("index_clean_open_changes", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let begun = Instant::now();
+                let answer = status(false);
+                total += begun.elapsed();
+                index(&answer, "index_clean_open_changes");
+                let workspace = answer.workspace.as_ref().unwrap();
+                assert_eq!(workspace.overlap_count as usize, OPEN_CHANGES);
             }
             total
         });

@@ -170,6 +170,8 @@ pub struct AppState {
     pub assignments: Arc<crate::assign::Assignments>,
     /// The machine-wide build limit (#271).
     pub build: Arc<crate::build::BuildLimit>,
+    /// Changed paths by commit, for overlaps (#263).
+    pub overlaps: reef_lib::jj::overlap::PathCache,
 }
 
 impl fmt::Debug for AppState {
@@ -481,6 +483,7 @@ impl Daemon {
             comments: Arc::new(crate::comments::Comments::default()),
             assignments: Arc::new(crate::assign::Assignments::default()),
             build,
+            overlaps: reef_lib::jj::overlap::PathCache::default(),
         });
 
         // Before any snapshot can run (R2.10).

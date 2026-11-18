@@ -148,6 +148,16 @@ pub async fn trunk_ahead(repo: &ReadonlyRepo) -> Result<Option<Trunk>, jj_lib::i
     }))
 }
 
+/// Where trunk has landed: [`trunk_ahead`] when the local bookmark lags
+/// `origin`'s, else [`trunk`]. Reef's `immutable_heads()` is `trunk() |
+/// tags()`, so commits between the two are landed yet `mutable()`.
+pub async fn landed_trunk(repo: &ReadonlyRepo) -> Result<Option<Trunk>, jj_lib::index::IndexError> {
+    Ok(match trunk_ahead(repo).await? {
+        Some(ahead) => Some(ahead),
+        None => trunk(repo),
+    })
+}
+
 /// What makes a commit immutable: the head of `immutable()` it is under.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImmutableHead {
