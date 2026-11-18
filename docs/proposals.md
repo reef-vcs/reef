@@ -55,6 +55,8 @@ Reasons are untrusted text: up to 4 KiB, with no control characters but newline 
 
 ## Following a proposal
 
+After `reef propose`, the daemon asks executors for the checks the change lacks and, where the destination's policy says `[landing] automatic = true`, lands it once policy allows ([landing](landing.md#automatic-landing)). `reef proposal show` prints what it is doing (`automatic: waiting test`, the jobs, and the command to run next), `reef proposal list` has an `AUTOMATIC` column, and `reef land` waits for the checks and lands.
+
 Every transition is an operation of kind `transition` in the operation log, with the transition in `Operation.transitions`. An agent waits for its proposal's fate without polling:
 
 ```

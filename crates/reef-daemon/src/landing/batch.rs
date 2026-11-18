@@ -165,6 +165,7 @@ impl Member {
             evidence_tree,
             below: self.below.clone(),
             above: self.above.clone(),
+            policy: None,
         }
     }
 }
@@ -255,14 +256,14 @@ enum Trial {
 }
 
 /// What a member's tested evaluation says.
-enum Checked {
+pub(crate) enum Checked {
     Passed,
     Failed(Vec<Need>),
     Missing(Vec<Need>),
 }
 
 /// The `[[require]]` results of `evaluation`.
-fn checked(evaluation: &Evaluation) -> Checked {
+pub(crate) fn checked(evaluation: &Evaluation) -> Checked {
     let mut failed = Vec::new();
     let mut missing = Vec::new();
     for rule in &evaluation.rules {
@@ -1318,6 +1319,71 @@ async fn check(
     Ok(None)
 }
 
+/// Where and how [`submit_needs`] asks: a tree, by revision.
+pub(crate) struct Ask<'a> {
+    pub(crate) repo: RepoId,
+    pub(crate) tree: &'a str,
+    pub(crate) commit: &'a str,
+    pub(crate) change: &'a str,
+    pub(crate) priority: i32,
+    pub(crate) queue_timeout: Option<Duration>,
+}
+
+/// The jobs `missing` needs, grouped as an executor claims them: one per
+/// kind with its targets, and one per kind for its whole check, since an
+/// executor claims only a job whose kinds are all its own.
+pub(crate) fn job_groups(missing: &[Need]) -> Vec<(String, Vec<String>)> {
+    let mut groups: BTreeMap<(String, bool), BTreeSet<String>> = BTreeMap::new();
+    for need in missing {
+        let whole = need.target.is_empty();
+        let targets = groups.entry((need.kind.clone(), whole)).or_default();
+        if !whole {
+            targets.insert(need.target.clone());
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((kind, _), targets)| (kind, targets.into_iter().collect()))
+        .collect()
+}
+
+/// What the executor answered for one kind's job: the job and whether it
+/// is new, or why not.
+pub(crate) type Submitted = Result<(crate::db::JobRow, bool), crate::executor::ExecutorError>;
+
+/// Submits the jobs `missing` needs on `ask`'s tree, by revision, as the
+/// landing service (R3.14's batches, R3.45's proposals). The executor
+/// returns an identical open job instead of queueing another.
+pub(crate) fn submit_needs(
+    state: &AppState,
+    ask: &Ask<'_>,
+    missing: &[Need],
+) -> Vec<(String, Submitted)> {
+    job_groups(missing)
+        .into_iter()
+        .map(|(kind, targets)| {
+            let job = NewJob {
+                repo_id: ask.repo,
+                tree_id: ask.tree.to_owned(),
+                commit_id: Some(ask.commit.to_owned()),
+                change_id: Some(ask.change.to_owned()),
+                kinds: vec![kind.clone()],
+                targets,
+                requirements: Vec::new(),
+                wall_time: None,
+                cpu_time: None,
+                priority: ask.priority,
+                queue_timeout: ask.queue_timeout,
+                duplicate: false,
+                agent: Some(AGENT.to_owned()),
+                token: None,
+            };
+            let submitted = state.executor.submit(&job);
+            (kind, submitted)
+        })
+        .collect()
+}
+
 /// Asks the executor for `missing` on trial `index`'s tree (prefix `k`):
 /// the trial commit first, then one job per kind. Returns the job ids.
 async fn request(
@@ -1330,35 +1396,17 @@ async fn request(
 ) -> Result<Vec<String>, LandingError> {
     let tree = batch.stored.trials[index].tree.clone();
     let (commit, change) = trial_commit(state, repo, batch, index, k).await?;
-    // One job per kind with its targets, and one per kind for its whole
-    // check: an executor claims only a job whose kinds are all its own.
-    let mut groups: BTreeMap<(String, bool), BTreeSet<String>> = BTreeMap::new();
-    for need in missing {
-        let whole = need.target.is_empty();
-        let targets = groups.entry((need.kind.clone(), whole)).or_default();
-        if !whole {
-            targets.insert(need.target.clone());
-        }
-    }
+    let asked = Ask {
+        repo,
+        tree: &tree,
+        commit: &commit,
+        change: &change,
+        priority: BATCH_PRIORITY,
+        queue_timeout: Some(BATCH_QUEUE_TIMEOUT),
+    };
     let mut ids = Vec::new();
-    for ((kind, _), targets) in groups {
-        let job = NewJob {
-            repo_id: repo,
-            tree_id: tree.clone(),
-            commit_id: Some(commit.clone()),
-            change_id: Some(change.clone()),
-            kinds: vec![kind.clone()],
-            targets: targets.into_iter().collect(),
-            requirements: Vec::new(),
-            wall_time: None,
-            cpu_time: None,
-            priority: BATCH_PRIORITY,
-            queue_timeout: Some(BATCH_QUEUE_TIMEOUT),
-            duplicate: false,
-            agent: Some(AGENT.to_owned()),
-            token: None,
-        };
-        match state.executor.submit(&job) {
+    for (kind, submitted) in submit_needs(state, &asked, missing) {
+        match submitted {
             Ok((row, _)) => ids.push(row.id),
             Err(error) => {
                 tracing::warn!(repo = %repo, batch_id = %batch.id(), kind, error = %ErrorChain(&error), "cannot ask the executor for a batch's evidence");

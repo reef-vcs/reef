@@ -146,7 +146,8 @@ const TRANSITION_COLUMNS: &str = "repo_id, id, seq, status, change_id, commit_id
      undoes_transition_id, operation_id, operation_collected, agent, actor, identity_id,
      identity_name, session_id, remote_token, remote_token_name, created_at, recorded_at";
 
-const LIFECYCLE_COLUMNS: &str = "repo_id, change_id, state, round, commit_id, destination,
+pub(super) const LIFECYCLE_COLUMNS: &str =
+    "repo_id, change_id, state, round, commit_id, destination,
      superseded_by, transition_id, proposed_by_agent, proposed_by_token, updated_at";
 
 fn small(value: i64) -> u32 {
@@ -184,7 +185,7 @@ fn transition_from_row(row: &Row<'_>) -> rusqlite::Result<TransitionRow> {
     })
 }
 
-fn lifecycle_from_row(row: &Row<'_>) -> rusqlite::Result<LifecycleRow> {
+pub(super) fn lifecycle_from_row(row: &Row<'_>) -> rusqlite::Result<LifecycleRow> {
     Ok(LifecycleRow {
         repo_id: row.get(0)?,
         change_id: row.get(1)?,

@@ -88,6 +88,8 @@ When done, propose the change again (reef propose), or run reef comment fail cmt
 
 **When the session has ended**, the instruction stays pending until it is taken, cancelled or expires. Any agent asked to pick it up runs `reef comment next --take --change <change>`. Restarting a session that has ended is a runner's job; R3.46's webhooks will wake one.
 
+**The daemon's own instructions.** On a destination that lands automatically ([landing](landing.md#automatic-landing)), when a change comes back for a reason its author can fix (a check failed, it conflicts, it changed after it was proposed), the daemon writes one instruction to the session that proposed it: author `reef-landing`, actor `daemon`, no identity, already `pending` (there is no estimate to confirm: it sends an agent back to its own proposal). Its text is a fixed template with ids, the reason and the policy's check names, never a check's output (S-228). At most one per change, commit and text, and none while one of the daemon's is unfinished on the change (S-229).
+
 ## Trust
 
 - On the socket, one uid is one trust domain ([threat model](threat-model.md)): any caller writes, confirms, cancels and takes instructions, and an agent can instruct another agent. The record says who, and as what actor, as declared (S-159).

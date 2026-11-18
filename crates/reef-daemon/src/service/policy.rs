@@ -957,6 +957,72 @@ fn evaluate(state: &AppState, bytes: Option<&[u8]>, input: &Input) -> Evaluation
     }
 }
 
+/// `EvaluatePolicy` with `stack` (R3.45, #328): the gate's judgment of the
+/// revision's stack, with no write and no check of proposals. Each
+/// judgment takes its own evaluation turn, so none is held here.
+async fn evaluate_stack(
+    state: &Arc<AppState>,
+    request: EvaluatePolicyRequest,
+    agent: Option<String>,
+) -> Result<Response<EvaluatePolicyResponse>, Status> {
+    let target = target(state, &request.repo, &request.workspace)?;
+    let revision = match request.revision.trim() {
+        "" if target.workspace.is_some() => "@".to_owned(),
+        text => text.to_owned(),
+    };
+    if !request.skip_snapshot {
+        let needed = uses_working_copy(state, &target, vec![revision.clone()]).await?;
+        snapshot_first(state, &target, needed, Instant::now(), agent.clone()).await?;
+    }
+    let destination = match request.policy_revision.trim() {
+        "" => {
+            let head = state.reads.current(&target.handle).await.map_err(status)?;
+            revset::trunk(&head).map_or_else(|| "main".to_owned(), |trunk| trunk.bookmark)
+        }
+        text => text.to_owned(),
+    };
+    if destination.contains('@') {
+        return Err(status(crate::landing::LandingError::DestinationNotLocal(
+            destination,
+        )));
+    }
+    let land = crate::landing::LandRequest {
+        repo: target.repo.id,
+        workspace: target.workspace.clone(),
+        user_email: target.user_email.clone(),
+        root: target.repo.root.clone(),
+        revision,
+        expected_commit: String::new(),
+        wait: std::time::Duration::ZERO,
+        actor: None,
+        agent,
+        remote: None,
+        automatic_key: None,
+    };
+    let policy = (!request.policy.is_empty()).then(|| request.policy.clone());
+    let decided = crate::landing::judge_stack(state, &land, &destination, policy)
+        .await
+        .map_err(status)?;
+    let mut members = Vec::with_capacity(decided.len());
+    let mut prefix = 0u32;
+    let mut stopped = false;
+    for (position, decision) in decided.iter().enumerate() {
+        let member = crate::landing::member_evaluation(decision, position);
+        if member.passes && !stopped {
+            prefix += 1;
+        } else {
+            stopped = true;
+        }
+        members.push(member);
+    }
+    let evaluation = members.last().and_then(|member| member.evaluation.clone());
+    Ok(Response::new(EvaluatePolicyResponse {
+        evaluation,
+        members,
+        prefix,
+    }))
+}
+
 #[tonic::async_trait]
 impl PolicyService for PolicyHandler {
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -978,6 +1044,9 @@ impl PolicyService for PolicyHandler {
             }));
         }
         let state = &self.state;
+        if request.stack {
+            return evaluate_stack(state, request, agent).await;
+        }
         // Owned, and moved into the blocking task below: a caller that goes
         // away does not free the turn while its evaluation still runs.
         let turn = Arc::clone(&state.policy.turns)
@@ -1110,6 +1179,8 @@ impl PolicyService for PolicyHandler {
         .map_err(|error| task(&error))?;
         Ok(Response::new(EvaluatePolicyResponse {
             evaluation: Some(evaluation),
+            members: Vec::new(),
+            prefix: 0,
         }))
     }
 

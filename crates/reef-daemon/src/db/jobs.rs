@@ -222,7 +222,8 @@ pub enum JobCursor {
     Queue(i32, Timestamp, String),
 }
 
-const COLUMNS: &str = "repo_id, id, protocol, tree_id, commit_id, change_id, kinds, targets,
+pub(super) const COLUMNS: &str =
+    "repo_id, id, protocol, tree_id, commit_id, change_id, kinds, targets,
      requirements, spec_digest, wall_time_ms, cpu_time_ms, priority, state, outcome, end_reason,
      message, attempt, max_attempts, submitted_at, queue_expires_at, requested_by_agent,
      requested_by_token, claim_digest, claimed_at, lease_ms, lease_expires_at, deadline_at,
@@ -257,7 +258,7 @@ fn small(value: i64) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
 
-fn from_row(row: &Row<'_>) -> rusqlite::Result<JobRow> {
+pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<JobRow> {
     let executor = text_at(row, 28)?.map(|name| ExecutorColumns {
         name,
         version: String::new(),

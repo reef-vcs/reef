@@ -643,6 +643,10 @@ async fn record(
     }
     // Instructions a re-proposal finishes or a final state cancels (R3.12).
     state.comments.note_transitions(repo, &rows);
+    // Their stacks are judged again for automatic landing (R3.45).
+    state
+        .automatic
+        .mark(repo, rows.iter().map(|row| row.change_id.clone()));
     Ok(Recorded { op_id, rows })
 }
 
@@ -692,6 +696,9 @@ pub(crate) fn commit_written_transition(
         .db
         .commit_transition(repo, &row.id, op_id, recorded_at, &update)?;
     state.comments.note_transitions(repo, committed.as_slice());
+    state
+        .automatic
+        .mark(repo, committed.iter().map(|row| row.change_id.clone()));
     Ok(committed)
 }
 

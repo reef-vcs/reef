@@ -72,6 +72,12 @@ service LandingService {
   // is the revision's own; `stack` holds the others, and the wait ends when
   // every queued one has finished.
   //
+  // A change waiting for evidence the automatic service asked executors for
+  // (R3.45, AUTOMATIC_STATE_WAITING) is judged once that evidence is in:
+  // the call waits for it first, within `wait_ms`, and when the wait ends
+  // with the jobs still open it returns `waiting` and no `landing`, having
+  // recorded nothing.
+  //
   // Errors: the revision reasons of ChangeService for `revision`;
   // EXPECTED_COMMIT_MISMATCH; FAILED_PRECONDITION with reason NOT_PROPOSED
   // (metadata `change_id`, `state`; the revision or a member of its stack),
@@ -626,6 +632,10 @@ message LandChangeResponse {
   Change change = 5;
   // The landings of the other changes of its stack, bottom first (R3.10).
   repeated Landing stack = 6;
+  // Set, with no `landing`, when the change still waits for the evidence
+  // the automatic service asked executors for as the wait ends (R3.45): it
+  // was not judged, and nothing was recorded.
+  AutomaticStatus waiting = 7;
 }
 
 // The landing to read.

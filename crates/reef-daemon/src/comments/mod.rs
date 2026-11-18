@@ -953,7 +953,11 @@ fn check_create(request: &CreateRequest) -> Result<Kind, CommentError> {
     let bounded = request
         .ceilings
         .is_some_and(|ceilings| ceilings.max_check_wall_ms > 0 || ceilings.max_agent_wall_ms > 0);
-    if request.confirm && (kind == Kind::Note || !bounded) {
+    // The daemon's own instructions (R3.45) are confirmed as written: the
+    // estimate protects a person paying for new work, and these send an
+    // agent back to its own proposal.
+    let daemon = request.actor == Some(Actor::Daemon);
+    if request.confirm && (kind == Kind::Note || !bounded) && !daemon {
         return Err(CommentError::CeilingsRequired);
     }
     if let Some(anchor) = &request.anchor {
@@ -1103,8 +1107,12 @@ async fn create_inner(
             Actor::Human
         })
     };
-    let (identity_id, identity_name, session_id) =
-        crate::lifecycle::identity_for(state, request.workspace.as_ref(), request.remote.as_ref());
+    // The daemon writes as itself (R3.45): no person's identity.
+    let (identity_id, identity_name, session_id) = if request.actor == Some(Actor::Daemon) {
+        (None, None, None)
+    } else {
+        crate::lifecycle::identity_for(state, request.workspace.as_ref(), request.remote.as_ref())
+    };
     let now = Timestamp::now();
     let id = crate::identity::new_id("cmt_");
     let mut confirm_refused = None;
@@ -1114,7 +1122,9 @@ async fn create_inner(
             .clone()
             .or_else(|| facts.info.tree_id.clone());
         let estimate = estimate(state, repo, &change, tree.as_deref(), target.as_ref())?;
-        let initial = if request.confirm {
+        let initial = if request.actor == Some(Actor::Daemon) {
+            State::Pending
+        } else if request.confirm {
             let ceilings = request.ceilings.unwrap_or_default();
             match ceiling_refusal(&estimate, &ceilings) {
                 None => State::Pending,

@@ -526,6 +526,11 @@ async fn run_repo(
             )
         }
     };
+    // Pruned evidence and artifacts change what policy sees, outside the
+    // automatic service's keys (R3.45).
+    if !dry_run && (retention.evidence_removed > 0 || retention.artifacts_collected > 0) {
+        state.automatic.mark_all(id);
+    }
 
     // 8.
     let (provenance, provenance_error) =

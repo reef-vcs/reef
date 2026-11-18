@@ -307,6 +307,9 @@ pub struct Proposal<'a> {
     lifecycle: Option<Lifecycle<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proposed_by: Option<&'a str>,
+    /// What the automatic service is doing about it (R3.45).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic: Option<AutomaticStatus<'a>>,
 }
 
 impl<'a> From<&'a json::Proposal> for Proposal<'a> {
@@ -315,6 +318,35 @@ impl<'a> From<&'a json::Proposal> for Proposal<'a> {
             change_id_reverse_hex: &proposal.change_id_reverse_hex,
             lifecycle: proposal.lifecycle.as_ref().and_then(Lifecycle::of),
             proposed_by: proposal.proposed_by.as_deref(),
+            automatic: proposal.automatic.as_ref().map(AutomaticStatus::from),
+        }
+    }
+}
+
+/// What the automatic service is doing about a proposal (R3.45). Always
+/// `state` and `message`; `job_ids`, `landing_id` and `next` when set.
+/// Dropped: `missing` (the message names it), `reason`, `evaluated_at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.AutomaticStatus")]
+pub struct AutomaticStatus<'a> {
+    state: &'a str,
+    message: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    job_ids: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    landing_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    next: &'a [String],
+}
+
+impl<'a> From<&'a json::AutomaticStatus> for AutomaticStatus<'a> {
+    fn from(status: &'a json::AutomaticStatus) -> Self {
+        Self {
+            state: &status.state,
+            message: &status.message,
+            job_ids: &status.job_ids,
+            landing_id: status.landing_id.as_deref(),
+            next: &status.next,
         }
     }
 }
@@ -370,6 +402,9 @@ pub struct ProposalHistory<'a> {
     /// The changes below it in its stack (R3.10).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stack: Vec<Change<'a>>,
+    /// What the automatic service is doing about it (R3.45).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic: Option<AutomaticStatus<'a>>,
 }
 
 impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
@@ -382,6 +417,7 @@ impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
                 .map(ChangeTransition::from)
                 .collect(),
             stack: history.stack.iter().map(Change::from).collect(),
+            automatic: history.automatic.as_ref().map(AutomaticStatus::from),
         }
     }
 }

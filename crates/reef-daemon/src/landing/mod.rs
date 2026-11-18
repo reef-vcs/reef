@@ -18,8 +18,10 @@
 //! `land_batch` takes a list so that stacks (R3.10) and batches (R3.14)
 //! widen it; this ticket lands one change per landing.
 
+mod automatic;
 mod batch;
 mod history;
+mod instruct;
 pub mod messages;
 pub(crate) mod push;
 mod worker;
@@ -29,6 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
+use reef_api::v1;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::land::{self, LandError, LandTarget, Preview};
 use reef_lib::jj::lifecycle::{LifecycleState, TransitionCause};
@@ -48,6 +51,11 @@ use crate::repo::RepoThreadError;
 use crate::service::policy as policy_input;
 use crate::workspace::ManagerError;
 
+pub(crate) use automatic::start as start_automatic;
+pub use automatic::{
+    Automatic, MAX_OPEN_JOBS as AUTOMATIC_MAX_OPEN_JOBS, PER_PASS as AUTOMATIC_PER_PASS,
+    PROPOSAL_PRIORITY, State as AutomaticState, Status as AutomaticStatus,
+};
 pub use batch::{AGENT as BATCH_AGENT, BATCH_PRIORITY, BATCH_QUEUE_TIMEOUT, MAX_TRIAL_ATTEMPTS};
 pub use push::Pushes;
 pub(crate) use worker::operation_end;
@@ -517,6 +525,9 @@ pub struct LandRequest {
     pub agent: Option<String>,
     /// The remote token, `(id, name)`.
     pub remote: Option<(String, String)>,
+    /// The automatic service's evaluation key, when it is the one asking
+    /// (R3.45): stored on the rows it queues.
+    pub automatic_key: Option<String>,
 }
 
 /// What [`land_change`] did.
@@ -590,6 +601,9 @@ pub(crate) struct JudgeContext {
     pub(crate) evidence_tree: Option<String>,
     pub(crate) below: Vec<LandTarget>,
     pub(crate) above: Vec<String>,
+    /// A policy file's bytes to judge with instead of the destination's
+    /// (R3.45: `EvaluatePolicy` over a stack with `policy`).
+    pub(crate) policy: Option<Vec<u8>>,
 }
 
 /// What judging a change found.
@@ -727,8 +741,15 @@ pub(crate) async fn judge_with(
             invalid: Vec::new(),
         },
     };
+    let policy_file = match &context.policy {
+        Some(bytes) => Some(policy_input::PolicyFile {
+            blob_id: String::new(),
+            bytes: Ok(bytes.clone()),
+        }),
+        None => read.policy,
+    };
     if !context.above.is_empty() {
-        let signoffs = signoffs_above(state, repo, read.policy.as_ref(), &context.above).await?;
+        let signoffs = signoffs_above(state, repo, policy_file.as_ref(), &context.above).await?;
         for found in signoffs {
             if !evidence.evidence.iter().any(|known| known.id == found.id) {
                 evidence.evidence.push(found);
@@ -745,7 +766,6 @@ pub(crate) async fn judge_with(
         .clone()
         .unwrap_or_else(|| policy_input::landing_input(&target.bookmark, &preview));
     let batch = context.batch.clone();
-    let policy_file = read.policy;
     let turn = Arc::clone(&state.policy.turns)
         .acquire_owned()
         .await
@@ -1109,6 +1129,7 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         push_operation_id: None,
         stack: None,
         stack_position: None,
+        automatic_key: None,
     }
 }
 
@@ -1197,18 +1218,56 @@ async fn resolve(
     Ok(describer.describe(&resolved.commit_id).await?)
 }
 
-/// Asks for a landing; see the module docs. Runs as its own task, so a
-/// caller that stops waiting cannot cut it between its enqueue's operation
-/// and its row.
+/// What [`land_change`] answers.
+#[derive(Debug)]
+pub enum Landed {
+    /// The gate judged it: the landing, as the wait left it.
+    Judged(Box<LandOutcome>),
+    /// It still waits for evidence the automatic service asked for (R3.45):
+    /// nothing was judged or recorded.
+    Waiting {
+        /// Its automatic status.
+        status: Box<AutomaticStatus>,
+        /// The change, as the request resolved it.
+        change: Box<ChangeInfo>,
+    },
+}
+
+/// Asks for a landing; see the module docs. A change waiting for evidence
+/// the automatic service asked executors for is judged once that evidence
+/// is in, within the wait (R3.45). Runs as its own task, so a caller that
+/// stops waiting cannot cut it between its enqueue's operation and its row.
 pub async fn land_change(
     state: &Arc<AppState>,
     request: LandRequest,
-) -> Result<LandOutcome, LandingError> {
+) -> Result<Landed, LandingError> {
     if request.wait > MAX_WAIT {
         return Err(LandingError::InvalidWait);
     }
     let started = Instant::now();
     let wait = request.wait;
+    let info = {
+        let request = request.clone();
+        state
+            .manager
+            .handle(request.repo)?
+            .call_async(move |head| async move { resolve(head, &request).await }.boxed_local())
+            .await??
+    };
+    if let Some(status) = automatic::wait_for_evidence(
+        state,
+        request.repo,
+        info.change_id.as_str(),
+        started + wait,
+        !wait.is_zero(),
+    )
+    .await
+    {
+        return Ok(Landed::Waiting {
+            status: Box::new(status),
+            change: Box::new(info),
+        });
+    }
     let task_state = Arc::clone(state);
     let repo = request.repo;
     let span = tracing::Span::current();
@@ -1238,7 +1297,7 @@ pub async fn land_change(
     if outcome.landing.row.outcome == Outcome::Queued.as_str() {
         outcome.landing = wait_for(state, repo, &outcome.landing.row.id, deadline).await?;
     }
-    Ok(outcome)
+    Ok(Landed::Judged(Box::new(outcome)))
 }
 
 /// Waits until landing `id` is no longer queued, or `deadline`.
@@ -1263,24 +1322,25 @@ async fn wait_for(
 }
 
 /// One change of the stack a request lands (R3.10), before judging.
-struct Slot {
-    target: LandTarget,
+pub(crate) struct Slot {
+    pub(crate) target: LandTarget,
     /// Its submitted tree.
-    tree: Option<String>,
+    pub(crate) tree: Option<String>,
     /// Its commit's parents.
-    parents: Vec<CommitIdHex>,
+    pub(crate) parents: Vec<CommitIdHex>,
     /// Its open landing, when an earlier request queued it.
-    open: Option<StoredLanding>,
+    pub(crate) open: Option<StoredLanding>,
 }
 
 /// What the gate decided for one change of the stack.
-enum Decided {
+pub(crate) enum Decided {
     /// Queued by an earlier request.
     Open(Box<StoredLanding>),
     /// It passed: it is queued now, with this row.
     Pass {
         target: LandTarget,
         row: Box<(LandingRow, Vec<LandingChangeRow>)>,
+        judged: Box<Judged>,
     },
     /// It is refused, with this row (`None` until written, for a change
     /// landed alone, whose row may count one more attempt on an earlier
@@ -1288,6 +1348,8 @@ enum Decided {
     Block {
         target: LandTarget,
         row: Box<(LandingRow, Vec<LandingChangeRow>)>,
+        /// What was judged, when the policy ran.
+        judged: Option<Box<Judged>>,
     },
 }
 
@@ -1325,12 +1387,35 @@ fn ancestors_of(slots: &[Slot]) -> Vec<HashSet<usize>> {
     ancestors
 }
 
-/// The gate: the checks, the judgment, and the enqueue, for the change and
-/// the changes of its stack below it (R3.10): judged in order, each rebased
-/// onto the ones below, the passing prefix queued in one operation and the
-/// rest blocked.
-#[expect(clippy::too_many_lines, reason = "the gate's steps in order")]
-async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, LandingError> {
+/// What the gate judged for a request, before it writes anything (R3.45:
+/// the automatic service acts on the same judgment).
+pub(crate) struct Judgment {
+    /// The change the request named, the stack's head.
+    pub(crate) info: ChangeInfo,
+    /// Its proposal's destination.
+    pub(crate) destination: String,
+    /// Whether the stack has more than the head.
+    pub(crate) stacked: bool,
+    /// Each change of the stack, bottom first.
+    pub(crate) decided: Vec<Decided>,
+    /// Whether the policy that judged them pushes (R3.17).
+    pub(crate) pushing: bool,
+    who: Requester,
+}
+
+/// What [`decide`] found.
+pub(crate) enum Gate {
+    /// The change is queued already: the answer, as the gate gives it.
+    Queued(Box<LandOutcome>),
+    /// The judgment.
+    Judged(Box<Judgment>),
+}
+
+/// The gate's checks and judgment, with no write: the change must be
+/// proposed at its visible commit, and its stack below it (R3.10) proposed
+/// for the same destination; each is judged in order, rebased onto the ones
+/// below ([`judge_slots`]).
+pub(crate) async fn decide(state: &AppState, request: &LandRequest) -> Result<Gate, LandingError> {
     let repo = request.repo;
     let handle = state.manager.handle(repo)?;
     let info = {
@@ -1349,7 +1434,9 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
     if current == LifecycleState::Queued
         && let Some(open) = state.db.open_landing_of(repo, &change)?
     {
-        return queued_outcome(state, repo, open, info);
+        return Ok(Gate::Queued(Box::new(queued_outcome(
+            state, repo, open, info,
+        )?)));
     }
     let Some(row) = row.filter(|_| current == LifecycleState::Proposed) else {
         return Err(LandingError::NotProposed {
@@ -1371,8 +1458,48 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
         return Err(LandingError::DestinationNotLocal(destination));
     }
     let slots = stack_slots(state, repo, &info, &destination).await?;
-    let ancestors = ancestors_of(&slots);
-    let who = requester(state, &request);
+    let who = requester(state, request);
+    let (decided, pushing) = judge_slots(
+        state,
+        repo,
+        &slots,
+        &destination,
+        &who,
+        &JudgeContext::default(),
+    )
+    .await?;
+    Ok(Gate::Judged(Box::new(Judgment {
+        info,
+        stacked: slots.len() > 1,
+        destination,
+        decided,
+        pushing,
+        who,
+    })))
+}
+
+/// Judges `slots`, a stack bottom first, as the gate does (R3.10): each
+/// rebased onto the ones below, sign-offs from the changes above that
+/// descend from it counted, the first refusal stopping the prefix and the
+/// changes above it `unlanded_parents`, a policy-file change ending the
+/// prefix. `context` adds what every judgment sees (R3.45: a policy file's
+/// bytes for `EvaluatePolicy`). Reads only. Returns the decisions, with
+/// rows not yet written, and whether the policy pushes.
+#[expect(clippy::too_many_lines, reason = "the gate's judgment in order")]
+pub(crate) async fn judge_slots(
+    state: &AppState,
+    repo: RepoId,
+    slots: &[Slot],
+    destination: &str,
+    who: &Requester,
+    context: &JudgeContext,
+) -> Result<(Vec<Decided>, bool), LandingError> {
+    let base_context = context;
+    let change = slots
+        .last()
+        .map(|slot| slot.target.change.as_str().to_owned())
+        .unwrap_or_default();
+    let ancestors = ancestors_of(slots);
     let stacked = slots.len() > 1;
     let head_id = crate::identity::new_id("lnd_");
     let base = Timestamp::now();
@@ -1394,9 +1521,9 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
                 .filter(|(at, _)| ancestors[*at].contains(&index))
                 .filter_map(|(_, above)| above.tree.clone())
                 .collect(),
-            ..JudgeContext::default()
+            ..base_context.clone()
         };
-        let mut row = new_row(repo, &destination, &who);
+        let mut row = new_row(repo, destination, who);
         row.created_at = Timestamp(base.0 + i64::try_from(index).unwrap_or(0));
         if index + 1 == slots.len() {
             row.id.clone_from(&head_id);
@@ -1430,6 +1557,7 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
             decided.push(Decided::Block {
                 target: slot.target.clone(),
                 row: Box::new((row, vec![change])),
+                judged: None,
             });
             continue;
         }
@@ -1437,11 +1565,11 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
             Verdict::Block {
                 problem: Some(DestinationProblem::Missing),
                 ..
-            } => return Err(LandingError::DestinationNotFound(destination)),
+            } => return Err(LandingError::DestinationNotFound(destination.to_owned())),
             Verdict::Block {
                 problem: Some(DestinationProblem::Conflicted),
                 ..
-            } => return Err(LandingError::DestinationConflicted(destination)),
+            } => return Err(LandingError::DestinationConflicted(destination.to_owned())),
             Verdict::Block {
                 reason: Reason::Amended,
                 ..
@@ -1476,6 +1604,7 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
                 decided.push(Decided::Block {
                     target: slot.target.clone(),
                     row: Box::new((row, vec![change])),
+                    judged,
                 });
             }
             Verdict::Allow(judged) => {
@@ -1498,6 +1627,7 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
                     decided.push(Decided::Block {
                         target: slot.target.clone(),
                         row: Box::new((row, vec![change])),
+                        judged: Some(judged),
                     });
                     continue;
                 }
@@ -1516,7 +1646,43 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
                 decided.push(Decided::Pass {
                     target: slot.target.clone(),
                     row: Box::new((row, vec![change])),
+                    judged,
                 });
+            }
+        }
+    }
+    Ok((decided, pushing))
+}
+
+/// The gate: [`decide`], then its writes: a refusal of a change landed alone
+/// is a blocked row, and a stack's passing prefix is queued in one operation
+/// with the rest blocked.
+async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, LandingError> {
+    match decide(state, &request).await? {
+        Gate::Queued(outcome) => Ok(*outcome),
+        Gate::Judged(judgment) => write(state, request, *judgment).await,
+    }
+}
+
+/// The gate's writes for `judgment` (R3.45: also the automatic service's).
+pub(crate) async fn write(
+    state: &AppState,
+    request: LandRequest,
+    judgment: Judgment,
+) -> Result<LandOutcome, LandingError> {
+    let Judgment {
+        info,
+        destination,
+        stacked,
+        mut decided,
+        pushing,
+        who,
+    } = judgment;
+    let repo = request.repo;
+    if let Some(key) = &request.automatic_key {
+        for decision in &mut decided {
+            if let Decided::Pass { row, .. } = decision {
+                row.0.automatic_key = Some(key.clone());
             }
         }
     }
@@ -1532,7 +1698,7 @@ async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, Lan
 
     // A change landed alone and refused may count one more attempt on its
     // latest identical row (S-125); a stack's rows are the request's own.
-    if !stacked && let Some(Decided::Block { target, row }) = decided.last() {
+    if !stacked && let Some(Decided::Block { target, row, .. }) = decided.last() {
         let (row, changes) = &**row;
         let landing = blocked(state, repo, target, row, &changes[0])?;
         return Ok(LandOutcome {
@@ -1755,6 +1921,59 @@ async fn stack_slots(
     Ok(slots)
 }
 
+/// `revision`'s stack onto `destination`, judged as the gate would, with
+/// no check of its changes' proposals (R3.45, #328: `EvaluatePolicy` over a
+/// stack). Reads only.
+pub(crate) async fn judge_stack(
+    state: &AppState,
+    request: &LandRequest,
+    destination: &str,
+    policy: Option<Vec<u8>>,
+) -> Result<Vec<Decided>, LandingError> {
+    let repo = request.repo;
+    let info = {
+        let request = request.clone();
+        state
+            .manager
+            .handle(repo)?
+            .call_async(move |head| async move { resolve(head, &request).await }.boxed_local())
+            .await??
+    };
+    let members = read_stack(state, repo, &info, destination).await?;
+    let mut slots: Vec<Slot> = members
+        .into_iter()
+        .map(|member| Slot {
+            target: LandTarget {
+                change: member.change,
+                commit: member.commit,
+                bookmark: destination.to_owned(),
+            },
+            tree: member.tree,
+            parents: member.parents,
+            open: None,
+        })
+        .collect();
+    if slots.is_empty() {
+        slots.push(Slot {
+            target: LandTarget {
+                change: info.change_id.clone(),
+                commit: info.commit_id.clone(),
+                bookmark: destination.to_owned(),
+            },
+            tree: info.tree_id.clone(),
+            parents: Vec::new(),
+            open: None,
+        });
+    }
+    let who = requester(state, request);
+    let context = JudgeContext {
+        policy,
+        ..JudgeContext::default()
+    };
+    let (decided, _) = judge_slots(state, repo, &slots, destination, &who, &context).await?;
+    Ok(decided)
+}
+
 /// `decided` read again under the lifecycle lock (R3.10): a change another
 /// request queued meanwhile is answered with that landing.
 fn recheck(
@@ -1765,7 +1984,11 @@ fn recheck(
     let mut checked = Vec::with_capacity(decided.len());
     for decision in decided {
         checked.push(match decision {
-            Decided::Pass { target, row } => {
+            Decided::Pass {
+                target,
+                row,
+                judged,
+            } => {
                 let change = target.change.as_str();
                 let now = state.db.lifecycle_row(repo, change)?;
                 let proposed = now.as_ref().is_some_and(|now| {
@@ -1773,7 +1996,11 @@ fn recheck(
                         && now.commit_id == target.commit.as_str()
                 });
                 if proposed {
-                    Decided::Pass { target, row }
+                    Decided::Pass {
+                        target,
+                        row,
+                        judged,
+                    }
                 } else if let Some(open) = state.db.open_landing_of(repo, change)? {
                     Decided::Open(Box::new(open))
                 } else {
@@ -1968,5 +2195,54 @@ impl Landings {
                 true
             }
         }
+    }
+}
+
+/// One change of a stack as `EvaluatePolicy` reports it (R3.45, #328).
+pub(crate) fn member_evaluation(decision: &Decided, position: usize) -> v1::StackMemberEvaluation {
+    let position = u32::try_from(position).unwrap_or(u32::MAX);
+    match decision {
+        Decided::Open(open) => {
+            let first = open.changes.first();
+            v1::StackMemberEvaluation {
+                change_id: first
+                    .map(|change| change.change_id.clone())
+                    .unwrap_or_default(),
+                commit_id: first
+                    .map(|change| change.queued_commit.clone())
+                    .unwrap_or_default(),
+                position,
+                passes: true,
+                reason: String::new(),
+                message: format!("queued already (landing {})", open.row.id),
+                evaluation: None,
+            }
+        }
+        Decided::Pass { target, judged, .. } => v1::StackMemberEvaluation {
+            change_id: target.change.as_str().to_owned(),
+            commit_id: target.commit.as_str().to_owned(),
+            position,
+            passes: true,
+            reason: String::new(),
+            message: "allowed".to_owned(),
+            evaluation: Some(crate::service::policy::evaluation_message(
+                &judged.evaluation,
+            )),
+        },
+        Decided::Block {
+            target,
+            row,
+            judged,
+        } => v1::StackMemberEvaluation {
+            change_id: target.change.as_str().to_owned(),
+            commit_id: target.commit.as_str().to_owned(),
+            position,
+            passes: false,
+            reason: row.0.reason.clone().unwrap_or_default(),
+            message: row.0.message.clone().unwrap_or_default(),
+            evaluation: judged
+                .as_ref()
+                .map(|judged| crate::service::policy::evaluation_message(&judged.evaluation)),
+        },
     }
 }
