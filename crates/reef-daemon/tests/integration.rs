@@ -461,7 +461,9 @@ async fn two_workspaces_on_one_change() {
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_killed_mid_snapshot_recovers() {
     let (mut daemon, repo) = fixture().await;
-    let ws = create_with(&daemon.client, &repo, None, 0).await;
+    // A round outlasts the default 3 s lease on a loaded machine, and an
+    // expiry would reclaim the workspace under the test (#101).
+    let ws = create_with(&daemon.client, &repo, None, 600_000).await;
     let lease = ws.lease.clone().unwrap().id;
     let root = PathBuf::from(&ws.path);
     let files: Vec<String> = tracked_files(&root).into_iter().take(500).collect();
