@@ -1,0 +1,17 @@
+# breaks: ReleasingResolves PROPERTY nocrash
+# code: workspace/reclaim.rs lock_for_reclaim refuses a `releasing` entry and
+# never calls finish_going_back, as before #229 (5cad4b1d): a workspace a
+# failed back_to_active left `releasing` stays so until a restart.
+<<<
+         THEN IF lock = "free"
+                THEN lock' = p /\ wentBack' = [wentBack EXCEPT ![p] = TRUE]
+                     /\ Goto(p, "goback")
+                ELSE Goto(p, "idle") /\ UNCHANGED <<lock, wentBack>>
+===
+         THEN Goto(p, "idle") /\ UNCHANGED <<lock, wentBack>>
+>>>
+<<<
+    /\ Goto(p, IF mem = "releasing" THEN "goback" ELSE "check")
+===
+    /\ Goto(p, "check")
+>>>

@@ -1,0 +1,8 @@
+# breaks: PipelineHoldsLock INVARIANT nocrash
+# code: workspace/reclaim.rs lock_for_reclaim goes on with a `releasing`
+# entry without try_lock, so it runs beside the reclaim in flight.
+<<<
+                THEN lock' = p /\ wentBack' = [wentBack EXCEPT ![p] = TRUE]
+===
+                THEN UNCHANGED lock /\ wentBack' = [wentBack EXCEPT ![p] = TRUE]
+>>>

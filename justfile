@@ -243,6 +243,12 @@ tokens-check:
     cargo build -p reef-vcs -p reef-daemon
     cargo nextest run -p reef-testing --features tokenizers --test tokens --run-ignored all
 
+# Model-checks how a workspace's life ends (TLA+, formal/workspace-release); needs Java or Docker.
+# `just formal --mutants` also proves each property can fail. See
+# .claude/skills/workspace-release/SKILL.md.
+formal *ARGS:
+    formal/workspace-release/check.sh {{ARGS}}
+
 # Every relative link in the repository's Markdown resolves (R1.24).
 doc-links:
     scripts/doc-links.sh

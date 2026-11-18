@@ -1,0 +1,7 @@
+# breaks: LeaseEndsWithWorkspace INVARIANT nocrash
+# code: db/workspaces.rs finish_workspace stops ending the workspace's lease.
+<<<
+       \/ dbState' = EndState(p) /\ lease' = "ended" /\ mem' = EndState(p)
+===
+       \/ dbState' = EndState(p) /\ lease' = lease /\ mem' = EndState(p)
+>>>

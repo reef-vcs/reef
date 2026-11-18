@@ -1,0 +1,8 @@
+# breaks: NoRenewalWhileReleasing PROPERTY nocrash
+# code: db/leases.rs renew_lease stops checking the workspace's state, so a
+# heartbeat renews a lease whose workspace is being released.
+<<<
+    /\ lease' = IF dbState = "active" /\ lease # "ended" /\ hb = "fresh"
+===
+    /\ lease' = IF lease # "ended" /\ hb = "fresh"
+>>>

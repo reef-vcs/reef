@@ -1,0 +1,17 @@
+# fixes: F2 F5
+# final_snapshot skips a workspace whose jj workspace is already forgotten
+# (an earlier pipeline got past its forget): there is no working copy to
+# record into, so neither a NotLoaded error nor a rollback to `active`.
+<<<
+       \/ dir /\ handle /\ Goto(p, "forget")
+          /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
+       \/ dir /\ handle /\ RollBack(1) /\ Exit(p)
+       \/ dir /\ ~handle /\ RollBack(0) /\ Exit(p)
+===
+       \/ dir /\ ~jjws /\ Goto(p, "forget")
+          /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
+       \/ dir /\ jjws /\ handle /\ Goto(p, "forget")
+          /\ UNCHANGED <<dbState, mem, tracked, lock, failLeft>>
+       \/ dir /\ jjws /\ handle /\ RollBack(1) /\ Exit(p)
+       \/ dir /\ jjws /\ ~handle /\ RollBack(0) /\ Exit(p)
+>>>

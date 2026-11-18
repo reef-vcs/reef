@@ -1,0 +1,9 @@
+# breaks: WatcherOnlyOnActive INVARIANT nocrash
+# code: workspace/snapshot.rs scheduled_snapshot drops its
+# `state != Active` check under the scan lock: a watcher snapshot queued
+# before a release runs after it.
+<<<
+    /\ IF mem = "active" /\ ~paused
+===
+    /\ IF ~paused
+>>>
