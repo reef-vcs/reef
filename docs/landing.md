@@ -87,13 +87,28 @@ Nothing is locked while checks run. Every few seconds, and whenever a job change
 | `interrupted` | The daemon stopped; the next batch forms from the queue. |
 | `busy` | The destination moved under three batches in a row. |
 
-A change whose parents have not landed is refused (`unlanded_parents`): land the parent first. Stacks land together with R3.10.
+## Stacks
+
+A change lands with its stack: the change and its ancestors not yet on the destination, which are jj's parent edges and stored nowhere ([ADR 0078](adr/0078-stacks.md)). At most 32 changes land as one stack (`STACK_TOO_LARGE`).
+
+```
+reef propose [REV]             # REV and the changes below it, in one operation (--only: REV alone)
+reef land [REV]                # REV's stack, the passing prefix first
+```
+
+- **Every change below must be proposed** for the same destination at its visible commit, or already queued; otherwise `reef land` refuses the request and names the change (`NOT_PROPOSED`, `PROPOSAL_AMENDED` or `STACK_DESTINATION_MISMATCH`), and `reef propose` on the head proposes them.
+- **The gate judges the changes in order**, each as rebased onto the ones below it. The changes before the first one it refuses are queued, in one operation; that one is `blocked` with its reason, and the changes above it `blocked` with `unlanded_parents`, naming it. A change to `reef-policy.toml` or `reef-checks.toml` lands on its own: at the bottom it is queued and the rest wait for it; above the bottom it is `blocked` with `alone`, after the changes below it are queued.
+- **A stack lands in one land operation**, one commit per change. Its queued changes join a batch together, even past `batch_max` when they are the batch's first; a change on an `[landing] alone` path makes the stack a batch of its own. A change returned from a batch (refused when judged again, conflicting with the batch's earlier changes, or the culprit of a bisect) takes the queued changes above it with it, `unlanded_parents`. This is how a stack lands as a prefix when a later change fails.
+- **A sign-off on a change accepts the changes below it**: a reviewer reads a stack as one diff, so accepting a prefix is signing off its top change ([policy](policy.md#sign-offs-on-a-stack)).
+- **After a prefix lands**, the changes above it were rebased (or summarized) with it, so their proposals read `amended`: fix the change named, `reef propose` the head again, and land it.
+
+`reef land` prints a line per change below the head; it exits 0 only when the head landed, which means its whole stack did. MCP agents call `propose_change` and `land_change`, which waits up to two minutes and returns the landing, with `stack`, as a result even when it was refused.
 
 ## What lands on the destination
 
 The destination is the published history: what `jj log` and git show, what R3.17 will push and R4.16 export. The working history is the operation log, which keeps every snapshot of every change. The landed history projection decides what each landed change looks like on the destination ([ADR 0075](adr/0075-landed-history-projection.md)):
 
-- **One commit per change**, with its change id and the tree that was judged and tested. A change already is the squash of its working history: every snapshot rewrote the same change, and the change lands as its last commit. A batch lands one commit per change, in chain order. Squashing a stack into one commit comes with stacks (R3.10).
+- **One commit per change**, with its change id and the tree that was judged and tested. A change already is the squash of its working history: every snapshot rewrote the same change, and the change lands as its last commit. A batch lands one commit per change, in chain order, and so does a stack: squashing a stack into one commit is not built, since the history index, bisect and revert all follow change ids ([ADR 0078](adr/0078-stacks.md)).
 - **The description, by policy.** The destination's `reef-policy.toml` says how it is written:
 
 ```toml
@@ -139,7 +154,7 @@ A summarized change is a new commit even for a fast-forward (same change, tree a
 | --- | --- |
 | `policy` | The evaluation says which rules blocked and what they lack: add the evidence or sign-off, then land again. |
 | `conflicted` | Rebase the change onto the destination yourself, resolve, propose again. |
-| `unlanded_parents` | Land the parent first. |
+| `unlanded_parents` | A change below it in its stack did not land (the message names it): fix that one, `reef propose` the stack again, land again. |
 | `amended` | The change moved since it was proposed: `reef propose` again. |
 | `destination` | The bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`. |
 | `busy` | The bookmark moved three times while the landing tried: land again. |
@@ -147,6 +162,7 @@ A summarized change is a new commit even for a fast-forward (same change, tree a
 | `checks` | A required check failed on the batch's tree with this change and passed without it: fix it, propose again, land again. `reef landing batch` shows the trees and the failed checks. |
 | `unavailable` | No executor gave a verdict on the batch's tree: land again, run an executor, or set `[landing] checks = "proposal"` (above). |
 | `empty` | Its edits are already on the destination: withdraw the proposal (`reef proposal withdraw`), or abandon the change. |
+| `alone` | It changes a policy file above the bottom of its stack: once the changes below it land, propose it again and land it on its own. |
 
 `reef land` exits 0 when the change landed (or was queued, with `--no-wait`), 5 when it was blocked or dequeued (reason `LANDING_BLOCKED` or `LANDING_DEQUEUED`, with what to do in `hint`), and 6 when it is still queued as the wait ends (`LANDING_PENDING`).
 

@@ -291,6 +291,21 @@ impl Policy {
     pub fn history(&self) -> &HistorySettings {
         &self.history
     }
+
+    /// The evidence kinds that count as a sign-off: `[owners]`' and every
+    /// `[[signoff]]`'s. A stack's sign-offs reach the changes below them
+    /// (R3.10, ADR 0078).
+    pub fn signoff_kinds(&self) -> BTreeSet<&str> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Signoff(signoff) => Some(signoff),
+                _ => None,
+            })
+            .chain(std::iter::once(&self.owners))
+            .flat_map(|signoff| signoff.kinds.iter().map(String::as_str))
+            .collect()
+    }
 }
 
 /// `[history] message`: how a landed change's description is written on

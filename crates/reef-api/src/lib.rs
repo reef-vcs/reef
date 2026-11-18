@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 35;
+pub const API_REVISION: u32 = 36;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -152,8 +152,12 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.17: `ListPushes`, `PushLanded`, `PushState`, `DestinationPush`,
     // `LandingPush`, `Landing.push` and `GetDaemonStatusResponse.pushes_attention`.
     "36292a201e06ed0ba4cf5d73e0ea99f1ade4bee94dd030651e14a86f62294a2f",
+    // R3.10: `TransitionChangeRequest.stack`, `TransitionChangeResponse.transitions`,
+    // `LANDING_REASON_ALONE`, `Landing.stack`, `LandChangeResponse.stack` and
+    // `GetLandingResponse.stack`.
+    "b547f32e95e583201cfa176e2c6c3fb15c9b50f5cdd9f3f49ff2fecddb17eb99",
     // #263: `Workspace.overlaps`, `Workspace.overlap_count` and `Overlap`.
-    "390afd90d319e24ad525a548a41c7b3668f4f291f2db350392b91676ba0cc885",
+    "82c552cdb7c818d428b29c91eab94eb4f63fdc113ddd8218d5fe4c8e84e071c3",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -736,6 +740,14 @@ pub mod error {
     pub const QUEUE_FULL: &str = "QUEUE_FULL";
     /// `LandChange.wait_ms` over 600,000 (R3.13). Metadata: `max`.
     pub const INVALID_WAIT: &str = "INVALID_WAIT";
+    /// A stack of more than 32 changes (R3.10): `TransitionChange` with
+    /// `stack`, or `LandChange`. Metadata: `size`, `max`.
+    pub const STACK_TOO_LARGE: &str = "STACK_TOO_LARGE";
+    /// `TransitionChange` with `stack` and SUPERSEDED (R3.10).
+    pub const STACK_NOT_ALLOWED: &str = "STACK_NOT_ALLOWED";
+    /// `LandChange` of a stack with a member proposed for another
+    /// destination (R3.10). Metadata: `change_id`, `destination`.
+    pub const STACK_DESTINATION_MISMATCH: &str = "STACK_DESTINATION_MISMATCH";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";

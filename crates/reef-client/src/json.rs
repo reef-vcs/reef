@@ -2201,6 +2201,10 @@ pub struct Transitioned {
     pub operation_id: Option<String>,
     /// The snapshot taken first, if it recorded one.
     pub snapshot_operation_id: Option<String>,
+    /// Every transition the operation recorded, bottom of the stack first
+    /// (R3.10): the change's own and those below it it proposed, withdrew
+    /// or declined with it.
+    pub transitions: Vec<ChangeTransition>,
 }
 
 impl From<&v1::TransitionChangeResponse> for Transitioned {
@@ -2211,6 +2215,11 @@ impl From<&v1::TransitionChangeResponse> for Transitioned {
             transition: response.transition.as_ref().map(ChangeTransition::from),
             operation_id: operation_id(response.operation.as_ref()),
             snapshot_operation_id: operation_id(response.snapshot.as_ref()),
+            transitions: response
+                .transitions
+                .iter()
+                .map(ChangeTransition::from)
+                .collect(),
         }
     }
 }
@@ -2258,6 +2267,9 @@ pub struct ProposalHistory {
     pub change: Change,
     /// Newest first.
     pub transitions: Vec<ChangeTransition>,
+    /// The changes below it in its stack, bottom first (R3.10): its
+    /// ancestors not yet on its destination, which land with it.
+    pub stack: Vec<Change>,
 }
 
 impl From<&v1::Change> for Change {

@@ -320,8 +320,10 @@ impl<'a> From<&'a json::Proposal> for Proposal<'a> {
 }
 
 /// What a transition recorded (R3.09). Always `change`; `lifecycle` when
-/// recorded; `operation_id` when one was recorded. Dropped: `transition`
-/// (the lifecycle's state and round say it), `snapshot_operation_id`.
+/// recorded; `operation_id` when one was recorded; `transitions` when it
+/// recorded a stack's: more than one, or one below an unchanged change
+/// (R3.10). Dropped: `transition` (the
+/// lifecycle's state and round say it), `snapshot_operation_id`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Transitioned")]
 pub struct Transitioned<'a> {
@@ -330,6 +332,9 @@ pub struct Transitioned<'a> {
     lifecycle: Option<Lifecycle<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<&'a str>,
+    /// For a stack's transition, every change's (R3.10).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    transitions: Vec<ChangeTransition<'a>>,
 }
 
 impl<'a> From<&'a json::Transitioned> for Transitioned<'a> {
@@ -338,18 +343,33 @@ impl<'a> From<&'a json::Transitioned> for Transitioned<'a> {
             change: Change::from(&transitioned.change),
             lifecycle: transitioned.lifecycle.as_ref().and_then(Lifecycle::of),
             operation_id: transitioned.operation_id.as_deref(),
+            transitions: if transitioned.transitions.len() > 1
+                || (transitioned.transition.is_none() && !transitioned.transitions.is_empty())
+            {
+                transitioned
+                    .transitions
+                    .iter()
+                    .map(ChangeTransition::from)
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
 
-/// `reef proposal show` (R3.09): the change as [`Change`], and its
-/// transitions as [`ChangeTransition`], newest first.
+/// `reef proposal show` (R3.09): the change as [`Change`], its
+/// transitions as [`ChangeTransition`], newest first, and the changes below
+/// it in its stack as [`Change`], bottom first (R3.10).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.ProposalHistory")]
 pub struct ProposalHistory<'a> {
     change: Change<'a>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     transitions: Vec<ChangeTransition<'a>>,
+    /// The changes below it in its stack (R3.10).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stack: Vec<Change<'a>>,
 }
 
 impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
@@ -361,6 +381,7 @@ impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
                 .iter()
                 .map(ChangeTransition::from)
                 .collect(),
+            stack: history.stack.iter().map(Change::from).collect(),
         }
     }
 }

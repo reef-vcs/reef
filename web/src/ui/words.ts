@@ -43,6 +43,14 @@ const TRANSITIONS: Partial<Record<LifecycleState, string>> = {
   [LifecycleState.SUPERSEDED]: "superseded a change",
 };
 
+/** A transition of several changes of a stack in one operation (R3.10). */
+const STACKS: Partial<Record<LifecycleState, (count: number) => string>> = {
+  [LifecycleState.PROPOSED]: (count) => `proposed a stack of ${count} changes`,
+  [LifecycleState.QUEUED]: (count) => `queued ${plural(count, "change")}`,
+  [LifecycleState.DECLINED]: (count) => `declined a stack of ${count} changes`,
+  [LifecycleState.WITHDRAWN]: (count) => `withdrew a stack of ${count} changes`,
+};
+
 /** A comment operation's first event (R3.12), by the event's own name. */
 const COMMENT_EVENTS: Record<string, string> = {
   comment: "commented on a change",
@@ -79,6 +87,9 @@ export function operationSentence(operation: WithTransition): string {
     if (to === LifecycleState.PROPOSED && first?.from === LifecycleState.QUEUED) {
       return "returned a proposal from the queue";
     }
+    // A stack's transitions share one operation (R3.10).
+    const count = operation.transitions?.length ?? 0;
+    if (count > 1 && to !== undefined && STACKS[to]) return STACKS[to](count);
     if (to !== undefined && TRANSITIONS[to]) return TRANSITIONS[to];
   }
   // A batch lands several changes in one operation (R3.14).

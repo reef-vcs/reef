@@ -476,6 +476,28 @@ pub(super) const TOOLS: &[ToolDef] = &[
         call: publish_change,
     },
     ToolDef {
+        name: "propose_change",
+        title: "Propose change",
+        rpc: "/reef.api.v1.ChangeService/TransitionChange",
+        description: "Propose a change and the unproposed changes below it (only: it alone). Returns {change, lifecycle, operation_id, transitions}.",
+        destructive: false,
+        idempotent: false,
+        schema: schema::<args::ProposeChange>,
+        output: output::<brief::Transitioned<'static>>,
+        call: propose_change,
+    },
+    ToolDef {
+        name: "land_change",
+        title: "Land change",
+        rpc: "/reef.api.v1.LandingService/LandChange",
+        description: "Land a proposed change and those below it, waiting up to 2 minutes; a refusal is a result. Returns {id, outcome, reason, blocking, stack}.",
+        destructive: false,
+        idempotent: false,
+        schema: schema::<args::LandChange>,
+        output: output::<crate::cli::land::BriefLanding<'static>>,
+        call: land_change,
+    },
+    ToolDef {
         name: "push_landed",
         title: "Push landed history",
         rpc: "/reef.api.v1.LandingService/PushLanded",
@@ -700,10 +722,6 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity oidc` (R3.42)",
     ),
     (
-        "/reef.api.v1.ChangeService/TransitionChange",
-        "an agent runs `reef propose` and `reef proposal`, then `reef land`; tools/list is at its budget (#116)",
-    ),
-    (
         "/reef.api.v1.ChangeService/ListProposals",
         "an agent runs `reef proposal list`; wait_for_operations with kind transition follows a proposal",
     ),
@@ -742,10 +760,6 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
         "/reef.api.v1.PolicyService/EvaluatePolicy",
         "an agent runs `reef policy eval`; `reef land` reports it; tools/list is at its budget (#116)",
-    ),
-    (
-        "/reef.api.v1.LandingService/LandChange",
-        "an agent runs `reef land` after `reef propose`; wait_for_operations with kind land follows it; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.LandingService/GetLanding",
@@ -1412,6 +1426,51 @@ tool!(publish_change, args::PublishChange, |call, args| {
     to_value(&brief::Published::from(&published))
 });
 
+tool!(propose_change, args::ProposeChange, |call, args| {
+    let ctx = call.ctx;
+    let scope = call
+        .scope(args.repo.as_ref(), args.workspace.as_ref())
+        .await?;
+    let response = Box::pin(
+        ctx.call(ctx.client.transition_change(v1::TransitionChangeRequest {
+            repo: scope.repo_id.clone(),
+            workspace: scope.workspace_id(),
+            revision: at(args.revision),
+            to: v1::LifecycleState::Proposed.into(),
+            stack: !args.only.unwrap_or(false),
+            ..v1::TransitionChangeRequest::default()
+        })),
+    )
+    .await?;
+    let transitioned = json::Transitioned::from(&response);
+    to_value(&brief::Transitioned::from(&transitioned))
+});
+
+tool!(land_change, args::LandChange, |call, args| {
+    let ctx = call.ctx;
+    let scope = call
+        .scope(args.repo.as_ref(), args.workspace.as_ref())
+        .await?;
+    let response = Box::pin(ctx.call_within(
+        LAND_WAIT + ctx.timeout,
+        ctx.client.land_change(v1::LandChangeRequest {
+            repo: scope.repo_id.clone(),
+            workspace: scope.workspace_id(),
+            revision: at(args.revision),
+            wait_ms: u32::try_from(LAND_WAIT.as_millis()).unwrap_or(u32::MAX),
+            ..v1::LandChangeRequest::default()
+        }),
+    ))
+    .await?;
+    let landing = crate::cli::land::landing_with_stack(&response);
+    to_value(&crate::cli::land::BriefLanding::of(&landing))
+});
+
+/// How long `land_change` waits for its landing: `reef land`'s default.
+/// Calling it again on a queued change returns the same landing and waits
+/// again.
+const LAND_WAIT: std::time::Duration = std::time::Duration::from_mins(2);
+
 tool!(push_landed, args::PushLanded, |call, args| {
     let ctx = call.ctx;
     let scope = call.scope(args.repo.as_ref(), None).await?;
@@ -1746,7 +1805,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 26);
     }
 
     #[test]

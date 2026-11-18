@@ -236,7 +236,7 @@ reef ws run -- sh -c 'echo x >> README.md; sleep 3; reef status'   # in two term
 
 ## Departures in the implementation
 
-- **API revision 35, not 36.** `API_DIGESTS` must have one entry per revision, and R3.10 (35) had not merged when this branch was cut. Whichever of the two merges second takes 36 on rebase.
+- **API revision 36, as planned.** R3.10 merged first with 35, and this branch took 36 when it merged `main` in.
 - **The workspace's own paths come from the path cache, not from status's diff.** `diff_page` detects copies, so a rename's source path is missing from its files; status and `GetWorkspace` would then disagree. Both read the cache, which costs one tree diff per new `@` commit and none when there is no candidate.
 - **"Active" is a `reef-<id>` working copy on the change in the view, whose workspace the database says is active.** The view alone would count a force-released workspace whose jj forget failed; the database alone can lag the view (a row's change id is as of its last snapshot). Owners are looked up by workspace id for live ones and by change id for the rest.
 - **Two candidate rules the brief missed** (found in review): commits on `main@origin` past a lagging local `main` are landed though Reef's `mutable()` holds them, so they are left out and the landed check compares with that remote bookmark; and working copies are read before the other candidates, so the 1,000 cap never cuts an active workspace's change.

@@ -42,8 +42,8 @@ pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
 };
 pub use format::{
-    Checks, Diagnostic, HistorySettings, LandingSettings, Message, Policy, Tier, TrailerSet,
-    VERSION, valid_remote_name,
+    Checks, Diagnostic, HistorySettings, LandingSettings, Message, POLICY_FILES, Policy, Tier,
+    TrailerSet, VERSION, valid_remote_name,
 };
 pub use input::{Batch, Case, ConflictInput, Input};
 

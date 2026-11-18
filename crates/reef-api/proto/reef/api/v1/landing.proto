@@ -62,12 +62,24 @@ service LandingService {
   // any write token may ask: proposing a change is the request to land it,
   // and policy decides.
   //
+  // A change lands with its stack (R3.10, ADR 0078): every ancestor not yet
+  // on the destination, each of which must be proposed for the same
+  // destination or queued. The members are judged in order, each rebased
+  // onto the ones below it; those before the first refused are queued in
+  // one operation, the first refused is BLOCKED with its reason (ALONE for
+  // a change to a policy file above the bottom), and the rest are BLOCKED
+  // with UNLANDED_PARENTS. A stack lands in one land operation. `landing`
+  // is the revision's own; `stack` holds the others, and the wait ends when
+  // every queued one has finished.
+  //
   // Errors: the revision reasons of ChangeService for `revision`;
   // EXPECTED_COMMIT_MISMATCH; FAILED_PRECONDITION with reason NOT_PROPOSED
-  // (metadata `change_id`, `state`), PROPOSAL_AMENDED (metadata
-  // `change_id`, `commit_id`, `visible_commit_id`), DESTINATION_NOT_LOCAL,
-  // DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED (metadata
-  // `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
+  // (metadata `change_id`, `state`; the revision or a member of its stack),
+  // PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
+  // `visible_commit_id`), STACK_DESTINATION_MISMATCH (metadata `change_id`,
+  // `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
+  // DESTINATION_NOT_LOCAL, DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED
+  // (metadata `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
   // `max`); INVALID_ARGUMENT with reason INVALID_WAIT (metadata `max`); a
   // failed snapshot's own error, with reason SNAPSHOT_FAILED (metadata
   // `workspace_id`).
@@ -190,6 +202,9 @@ enum LandingReason {
   // batch), the change has nothing left to land: its edits are already
   // there (R3.16). Withdraw or abandon it.
   LANDING_REASON_EMPTY = 10;
+  // The change edits reef-policy.toml or reef-checks.toml above the bottom
+  // of its stack (R3.10): it lands on its own, after the changes below it.
+  LANDING_REASON_ALONE = 11;
 }
 
 // One change of a landing.
@@ -302,6 +317,9 @@ message Landing {
   // Whether its landed commit reached the destination's git remote
   // (R3.17); unset unless it landed onto a destination that pushes.
   LandingPush push = 22;
+  // The landing id of the stack's head in the request that made this one
+  // (R3.10); empty for a change landed alone.
+  string stack = 23;
 }
 
 // Whether a destination's landed history is on its git remote (R3.17).
@@ -606,6 +624,8 @@ message LandChangeResponse {
   Operation snapshot = 4;
   // The change afterwards.
   Change change = 5;
+  // The landings of the other changes of its stack, bottom first (R3.10).
+  repeated Landing stack = 6;
 }
 
 // The landing to read.
@@ -626,6 +646,9 @@ message GetLandingResponse {
   Landing landing = 1;
   // The policy text its evaluation ran, when asked and known.
   string policy = 2;
+  // The other landings the same request made for its stack, bottom first
+  // (R3.10).
+  repeated Landing stack = 3;
 }
 
 // Which landings to list.

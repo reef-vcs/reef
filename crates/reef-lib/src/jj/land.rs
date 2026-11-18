@@ -25,7 +25,7 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefName;
 use jj_lib::repo::{CheckOutCommitError, MutableRepo};
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
-use jj_lib::revset::RevsetExpression;
+use jj_lib::revset::{ResolvedRevsetExpression, RevsetExpression};
 use jj_lib::rewrite::{
     CommitRewriter, RebaseOptions, RewriteRefsOptions, merge_commit_trees, rebase_commit,
 };
@@ -35,6 +35,8 @@ use super::oplog::OpMeta;
 use super::repo::{ChangeIdHex, CommitIdHex, OperationIdHex, Repo};
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
+/// The most changes a stack has (R3.10): R3.14's largest batch.
+pub const MAX_STACK: usize = 32;
 /// The most conflicted paths a preview lists.
 pub const MAX_CONFLICT_PATHS: usize = 100;
 /// The most overlapping paths a preview lists.
@@ -141,6 +143,23 @@ pub enum LandError {
         /// The first parent not on the destination.
         parent: CommitIdHex,
     },
+    /// A change below the commit in its chain cannot land (R3.10): it
+    /// conflicts with the chain, or would land empty.
+    #[error("commit {commit} cannot land: {parent}, a change below it in this chain, does not")]
+    ParentExcluded {
+        /// The commit.
+        commit: CommitIdHex,
+        /// The change below it that does not land.
+        parent: CommitIdHex,
+    },
+    /// A stack has more than [`MAX_STACK`] changes (R3.10).
+    #[error("the stack has {size} changes; at most {max} land together")]
+    StackTooLarge {
+        /// Its changes, counted up to one past the bound.
+        size: usize,
+        /// [`MAX_STACK`].
+        max: usize,
+    },
     /// The commit itself has conflicts.
     #[error("commit {0} has conflicts")]
     Conflicted(CommitIdHex),
@@ -196,6 +215,8 @@ impl Classify for LandError {
             | LandError::DestinationMoved { .. }
             | LandError::Amended { .. }
             | LandError::UnlandedParents { .. }
+            | LandError::ParentExcluded { .. }
+            | LandError::StackTooLarge { .. }
             | LandError::Conflicted(_)
             | LandError::AlreadyOnDestination(_)
             | LandError::RebaseConflicts
@@ -222,11 +243,12 @@ pub fn destination_head(repo: &ReadonlyRepo, bookmark: &str) -> Result<CommitIdH
 
 /// The commit `target` names, checked: it is its change's only visible
 /// commit and has no conflict, and each parent is an ancestor of
-/// `destination`.
+/// `destination` or one of `below`, the commits landing before it (R3.10).
 async fn checked_commit(
     repo: &ReadonlyRepo,
     target: &LandTarget,
     destination: &CommitIdHex,
+    below: &[CommitId],
 ) -> Result<Commit, LandError> {
     let amended = || LandError::Amended {
         change: target.change.clone(),
@@ -263,7 +285,7 @@ async fn checked_commit(
         return Err(LandError::AlreadyOnDestination(target.commit.clone()));
     }
     for parent in commit.parent_ids() {
-        if !repo.index().is_ancestor(parent, &destination_id).await? {
+        if !below.contains(parent) && !repo.index().is_ancestor(parent, &destination_id).await? {
             return Err(LandError::UnlandedParents {
                 commit: target.commit.clone(),
                 parent: CommitIdHex::of(parent),
@@ -287,18 +309,17 @@ async fn changed(from: &MergedTree, to: &MergedTree) -> (BTreeSet<String>, bool)
     (paths, false)
 }
 
-/// The rebase of `commit` onto `destination` in `mut_repo`, or `commit`
-/// itself when `destination` is its only parent.
+/// The rebase of `commit` onto `onto` in `mut_repo`, or `commit` itself
+/// when `onto` is its only parent.
 async fn rebased(
     mut_repo: &mut MutableRepo,
     commit: &Commit,
-    destination: &CommitIdHex,
+    onto: &CommitId,
 ) -> Result<(Commit, bool), LandError> {
-    let destination_id = destination.to_id();
-    if commit.parent_ids() == [destination_id.clone()] {
+    if commit.parent_ids() == std::slice::from_ref(onto) {
         return Ok((commit.clone(), false));
     }
-    let new = rebase_commit(mut_repo, commit.clone(), vec![destination_id]).await?;
+    let new = rebase_commit(mut_repo, commit.clone(), vec![onto.clone()]).await?;
     Ok((new, true))
 }
 
@@ -306,9 +327,40 @@ async fn rebased(
 /// module docs. Writes the rebased commit's objects to the store, but no
 /// operation.
 pub async fn preview(repo: &Arc<ReadonlyRepo>, target: &LandTarget) -> Result<Preview, LandError> {
+    preview_above(repo, &[], target).await
+}
+
+/// [`preview`] of `target` landing after `below`, the changes of its stack
+/// under it in order (R3.10): each of them rebased onto the previous, the
+/// first onto the destination's head, then `target` onto the last. A
+/// parent of `target` may be one of `below`. A change of `below` that
+/// conflicts with the chain or would land empty refuses the preview with
+/// [`LandError::ParentExcluded`]: the gate judged it already, so only a
+/// destination that moved between the two gets here.
+pub async fn preview_above(
+    repo: &Arc<ReadonlyRepo>,
+    below: &[LandTarget],
+    target: &LandTarget,
+) -> Result<Preview, LandError> {
     let destination = destination_head(repo, &target.bookmark)?;
-    let commit = checked_commit(repo, target, &destination).await?;
-    preview_onto(repo, &commit, destination).await
+    let mut tx = repo.start_transaction();
+    let mut tip = repo.store().get_commit_async(&destination.to_id()).await?;
+    let mut earlier: Vec<CommitId> = Vec::with_capacity(below.len());
+    for member in below {
+        let commit = checked_commit(repo, member, &destination, &earlier).await?;
+        let (landed, rebased) = rebased(tx.repo_mut(), &commit, tip.id()).await?;
+        if landed.has_conflict() || (rebased && landed.tree_ids() == tip.tree_ids()) {
+            return Err(LandError::ParentExcluded {
+                commit: target.commit.clone(),
+                parent: member.commit.clone(),
+            });
+        }
+        earlier.push(commit.id().clone());
+        tip = landed;
+    }
+    let commit = checked_commit(repo, target, &destination, &earlier).await?;
+    drop(tx);
+    preview_onto(repo, &commit, &tip, destination).await
 }
 
 /// What landing `commit` on `destination` would do, with none of
@@ -336,16 +388,20 @@ pub async fn preview_commit(
             empty: false,
         });
     }
-    preview_onto(repo, &commit, destination.clone()).await
+    let head = repo.store().get_commit_async(&destination.to_id()).await?;
+    preview_onto(repo, &commit, &head, destination.clone()).await
 }
 
+/// What landing `commit` on `tip` would do: `tip` is the destination's head
+/// `destination`, or the last change of its stack landing before it.
 async fn preview_onto(
     repo: &Arc<ReadonlyRepo>,
     commit: &Commit,
+    tip: &Commit,
     destination: CommitIdHex,
 ) -> Result<Preview, LandError> {
     let mut tx = repo.start_transaction();
-    let (landed, rebased) = rebased(tx.repo_mut(), commit, &destination).await?;
+    let (landed, rebased) = rebased(tx.repo_mut(), commit, tip.id()).await?;
     let mut conflicts = Vec::new();
     let mut conflicts_total = 0usize;
     let landed_tree = landed.tree();
@@ -358,7 +414,7 @@ async fn preview_onto(
             }
         }
     }
-    let head = repo.store().get_commit_async(&destination.to_id()).await?;
+    let head = tip;
     let empty = rebased && !landed.has_conflict() && landed.tree_ids() == head.tree_ids();
     let (overlap, overlap_total) = if rebased {
         let parents: Vec<Commit> = {
@@ -414,6 +470,9 @@ pub struct ChainMember {
     pub overlap: Vec<String>,
     /// How many there are.
     pub overlap_total: usize,
+    /// The earlier member, a parent of it, that the chain left out (R3.10):
+    /// it is left out too.
+    pub parent_excluded: Option<CommitIdHex>,
 }
 
 /// A chain of changes rebased one on another onto a bookmark's head, as
@@ -429,8 +488,10 @@ pub struct ChainPreview {
 /// What landing `targets` together on their bookmark (all the same) would
 /// do: each rebased onto the previous included one, the first onto the
 /// bookmark's head. A target that conflicts with the chain is left out and
-/// the chain goes on without it. Each target is checked as [`preview`]
-/// checks it. Writes objects to the store, but no operation.
+/// the chain goes on without it, as is one whose parent is a target left
+/// out (R3.10). Each target is checked as [`preview`] checks it, a parent
+/// being allowed among the earlier targets. Writes objects to the store,
+/// but no operation.
 pub async fn preview_chain(
     repo: &Arc<ReadonlyRepo>,
     bookmark: &str,
@@ -440,8 +501,30 @@ pub async fn preview_chain(
     let mut tx = repo.start_transaction();
     let mut tip = repo.store().get_commit_async(&destination.to_id()).await?;
     let mut members = Vec::with_capacity(targets.len());
+    let mut earlier: Vec<CommitId> = Vec::with_capacity(targets.len());
+    let mut excluded: Vec<CommitId> = Vec::new();
     for target in targets {
-        let commit = checked_commit(repo, target, &destination).await?;
+        let commit = checked_commit(repo, target, &destination, &earlier).await?;
+        earlier.push(commit.id().clone());
+        if let Some(parent) = commit
+            .parent_ids()
+            .iter()
+            .find(|parent| excluded.contains(parent))
+        {
+            excluded.push(commit.id().clone());
+            members.push(ChainMember {
+                included: false,
+                empty: false,
+                rebased: true,
+                tree: None,
+                conflicts: Vec::new(),
+                conflicts_total: 0,
+                overlap: Vec::new(),
+                overlap_total: 0,
+                parent_excluded: Some(CommitIdHex::of(parent)),
+            });
+            continue;
+        }
         let rebased = commit.parent_ids() != [tip.id().clone()];
         let landed = if rebased {
             rebase_commit(tx.repo_mut(), commit.clone(), vec![tip.id().clone()]).await?
@@ -450,6 +533,7 @@ pub async fn preview_chain(
         };
         if landed.has_conflict() {
             let (conflicts, conflicts_total) = conflicted_paths(&landed).await;
+            excluded.push(commit.id().clone());
             members.push(ChainMember {
                 included: false,
                 empty: false,
@@ -459,10 +543,12 @@ pub async fn preview_chain(
                 conflicts_total,
                 overlap: Vec::new(),
                 overlap_total: 0,
+                parent_excluded: None,
             });
             continue;
         }
         if rebased && landed.tree_ids() == tip.tree_ids() {
+            excluded.push(commit.id().clone());
             members.push(ChainMember {
                 included: false,
                 empty: true,
@@ -472,6 +558,7 @@ pub async fn preview_chain(
                 conflicts_total: 0,
                 overlap: Vec::new(),
                 overlap_total: 0,
+                parent_excluded: None,
             });
             continue;
         }
@@ -489,6 +576,7 @@ pub async fn preview_chain(
             conflicts_total: 0,
             overlap,
             overlap_total,
+            parent_excluded: None,
         });
         tip = landed;
     }
@@ -646,6 +734,70 @@ pub async fn visible_change(
     }
 }
 
+/// The parents of `commit` (R3.10: a batch groups queued changes by them);
+/// `None` for a commit the store does not have.
+pub async fn parents(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+) -> Result<Option<Vec<CommitIdHex>>, LandError> {
+    match repo.store().get_commit_async(&commit.to_id()).await {
+        Ok(commit) => Ok(Some(
+            commit.parent_ids().iter().map(CommitIdHex::of).collect(),
+        )),
+        Err(BackendError::ObjectNotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// One change of a stack (R3.10), as [`stack`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMember {
+    /// The change.
+    pub change: ChangeIdHex,
+    /// Its visible commit.
+    pub commit: CommitIdHex,
+    /// Its commit's parents.
+    pub parents: Vec<CommitIdHex>,
+    /// Its tree's git id, when it has a single one.
+    pub tree: Option<String>,
+}
+
+/// The stack of `head` onto `destination` (R3.10): `head` and every
+/// ancestor not in `::destination`, parents first. Its dependency edges are
+/// jj's parent edges, so nothing but the graph says what a stack is. Empty
+/// when `head` is already on the destination; refused past [`MAX_STACK`].
+pub async fn stack(
+    repo: &ReadonlyRepo,
+    head: &CommitIdHex,
+    destination: &CommitIdHex,
+) -> Result<Vec<StackMember>, LandError> {
+    let expression = ResolvedRevsetExpression::commits(vec![destination.to_id()])
+        .range(&ResolvedRevsetExpression::commits(vec![head.to_id()]));
+    let revset = expression
+        .evaluate(repo)
+        .map_err(|error| LandError::Resolve(error.to_string()))?;
+    let mut stream = revset.stream();
+    let mut members = Vec::new();
+    while let Some(id) = stream.next().await {
+        let id = id.map_err(|error| LandError::Resolve(error.to_string()))?;
+        if members.len() == MAX_STACK {
+            return Err(LandError::StackTooLarge {
+                size: MAX_STACK + 1,
+                max: MAX_STACK,
+            });
+        }
+        let commit = repo.store().get_commit_async(&id).await?;
+        members.push(StackMember {
+            change: ChangeIdHex::of(commit.change_id()),
+            commit: CommitIdHex::of(&id),
+            parents: commit.parent_ids().iter().map(CommitIdHex::of).collect(),
+            tree: commit.tree_ids().as_resolved().map(ObjectId::hex),
+        });
+    }
+    members.reverse();
+    Ok(members)
+}
+
 impl Repo {
     /// Writes a trial commit for a batch (R3.14): a new change on
     /// `destination` whose tree is `tree`, described `description`, in one
@@ -772,8 +924,10 @@ impl Repo {
             .get_commit_async(&plan.destination.to_id())
             .await?;
         let mut pairs: Vec<(Commit, Commit, bool, bool)> = Vec::with_capacity(plan.members.len());
+        let mut earlier: Vec<CommitId> = Vec::with_capacity(plan.members.len());
         for member in &plan.members {
-            let commit = checked_commit(&repo, &member.target, &plan.destination).await?;
+            let commit = checked_commit(&repo, &member.target, &plan.destination, &earlier).await?;
+            earlier.push(commit.id().clone());
             let (landed, rebased, summarized) =
                 project(tx.repo_mut(), &commit, &tip, member.summary.as_ref()).await?;
             let tree = landed.tree_ids().as_resolved().map(ObjectId::hex);

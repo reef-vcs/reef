@@ -34,7 +34,7 @@ const MAX_WAIT: Duration = Duration::from_mins(10);
 /// `reef land`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct LandArgs {
-    /// The proposed change to land.
+    /// The proposed change to land, with the proposed changes below it.
     #[arg(value_name = "REV", default_value = "@")]
     revision: String,
     /// Refuse unless the revision still names this commit (a full id).
@@ -290,6 +290,52 @@ impl LandingPush {
     }
 }
 
+/// Another change's landing in the same request for its stack (R3.10).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct StackLanding {
+    /// `lnd_` and 16 hex digits.
+    pub(crate) id: String,
+    /// The change, in hex.
+    pub(crate) change_id: String,
+    /// The same, in jj's reverse hex.
+    pub(crate) change_id_reverse_hex: String,
+    /// As [`Landing::outcome`].
+    pub(crate) outcome: String,
+    /// As [`Landing::reason`].
+    pub(crate) reason: Option<String>,
+    /// More about the reason.
+    pub(crate) message: Option<String>,
+    /// The commit now on the destination; `null` unless it landed.
+    pub(crate) landed_commit_id: Option<String>,
+}
+
+impl StackLanding {
+    fn of(message: &v1::Landing) -> StackLanding {
+        let change = message.changes.first();
+        let change_id = change
+            .map(|change| change.change_id.clone())
+            .unwrap_or_default();
+        StackLanding {
+            id: message.id.clone(),
+            change_id_reverse_hex: reverse_hex(&change_id),
+            change_id,
+            outcome: word(message.outcome().as_str_name(), "LANDING_OUTCOME_").unwrap_or_default(),
+            reason: word(message.reason().as_str_name(), "LANDING_REASON_"),
+            message: some(&message.message),
+            landed_commit_id: change.and_then(|change| some(&change.landed_commit_id)),
+        }
+    }
+
+    /// `xyz landed`, or `xyz blocked (policy)`.
+    fn text(&self) -> String {
+        let outcome = match &self.reason {
+            Some(reason) => format!("{} ({reason})", self.outcome),
+            None => self.outcome.clone(),
+        };
+        format!("{} {outcome}", short(&self.change_id_reverse_hex))
+    }
+}
+
 /// One landing (`reef land`, `reef landing show`, each of `reef landing
 /// list`).
 #[derive(Debug, Serialize, JsonSchema)]
@@ -306,10 +352,16 @@ pub(crate) struct Landing {
     pub(crate) outcome: String,
     /// For blocked and dequeued: `policy`, `conflicted`, `unlanded_parents`,
     /// `amended`, `destination`, `busy`, `failed`, `checks`,
-    /// `unavailable` or `empty`.
+    /// `unavailable`, `empty` or `alone`.
     pub(crate) reason: Option<String>,
     /// The batch it is, or was last, in (R3.14).
     pub(crate) batch_id: Option<String>,
+    /// The landing of its stack's head in the request that made it (R3.10);
+    /// `null` for a change landed alone.
+    pub(crate) stack_id: Option<String>,
+    /// With `reef land` and `reef landing show`, the other landings of that
+    /// request, bottom first (R3.10).
+    pub(crate) stack: Vec<StackLanding>,
     /// How it wrote its changes on the destination (R3.16); `null` until
     /// it lands.
     pub(crate) history: Option<LandingHistory>,
@@ -360,6 +412,25 @@ pub(crate) struct BriefLanding<'a> {
     push: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocking: Vec<&'a str>,
+    /// More about the reason (R3.10: which change of the stack stopped it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+    /// Unless it landed, the command to run next.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    next: Vec<String>,
+    /// The other changes of its stack, bottom first (R3.10).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stack: Vec<BriefStackLanding<'a>>,
+}
+
+/// The brief view of another change's landing in a stack (R3.10).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct BriefStackLanding<'a> {
+    id: &'a str,
+    change_id_reverse_hex: &'a str,
+    outcome: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 impl<'a> BriefLanding<'a> {
@@ -377,6 +448,22 @@ impl<'a> BriefLanding<'a> {
                 .flat_map(|evaluation| evaluation.rules.iter())
                 .filter(|rule| matches!(rule.status, Status::Unsatisfied | Status::Error))
                 .map(|rule| rule.name.as_str())
+                .collect(),
+            message: landing.message.as_deref(),
+            next: if landing.outcome == "landed" {
+                Vec::new()
+            } else {
+                advice_for(landing).next
+            },
+            stack: landing
+                .stack
+                .iter()
+                .map(|member| BriefStackLanding {
+                    id: &member.id,
+                    change_id_reverse_hex: &member.change_id_reverse_hex,
+                    outcome: &member.outcome,
+                    reason: member.reason.as_deref(),
+                })
                 .collect(),
         }
     }
@@ -401,6 +488,8 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
         outcome: word(message.outcome().as_str_name(), "LANDING_OUTCOME_").unwrap_or_default(),
         reason: word(message.reason().as_str_name(), "LANDING_REASON_"),
         batch_id: some(&message.batch_id),
+        stack_id: some(&message.stack),
+        stack: Vec::new(),
         history: message.history.as_ref().map(|history| LandingHistory {
             message: history.message.clone(),
             trailers: history.trailers.clone(),
@@ -466,6 +555,14 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
     }
 }
 
+/// A `LandChange` response's landing, with the other landings of its stack
+/// (R3.10).
+pub(crate) fn landing_with_stack(response: &v1::LandChangeResponse) -> Landing {
+    let mut landing = landing_of(&response.landing.clone().unwrap_or_default());
+    landing.stack = response.stack.iter().map(StackLanding::of).collect();
+    landing
+}
+
 /// `reef land`.
 pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
@@ -493,7 +590,7 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
     let response = Box::pin(ctx.call_within(wait + ctx.timeout, ctx.client.land_change(request)))
         .await
         .map_err(|error| advice.refine(error))?;
-    let landing = landing_of(&response.landing.unwrap_or_default());
+    let landing = landing_with_stack(&response);
     let refused = match landing.outcome.as_str() {
         "blocked" | "dequeued" => Some((
             ErrorKind::Conflict,
@@ -520,8 +617,8 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
         }
         return Ok(());
     };
-    let message = match reason {
-        reef_api::error::LANDING_PENDING => format!(
+    let message = if reason == reef_api::error::LANDING_PENDING {
+        format!(
             "landing {} is still queued after {}{}",
             landing.id,
             humantime::format_duration(wait),
@@ -530,13 +627,24 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
                 .as_deref()
                 .map(|batch| format!(", in batch {batch} (`reef landing batch {batch}`)"))
                 .unwrap_or_default()
-        ),
-        _ => format!(
-            "landing {} was {}: {}",
+        )
+    } else {
+        let landed = landing
+            .stack
+            .iter()
+            .filter(|member| member.outcome == "landed")
+            .count();
+        let below = match landed {
+            0 => String::new(),
+            1 => "; 1 change below it in its stack landed".to_owned(),
+            n => format!("; {n} changes below it in its stack landed"),
+        };
+        format!(
+            "landing {} was {}: {}{below}",
             landing.id,
             landing.outcome,
             landing.message.clone().unwrap_or_default()
-        ),
+        )
     };
     Err(CliError::Precheck {
         kind,
@@ -594,7 +702,8 @@ fn next_words(landing: &Landing) -> String {
             "Rebasing onto {} conflicts: rebase the change yourself (`reef rebase --onto {}`), resolve the conflict it shows, propose it again, then land.",
             landing.destination, landing.destination
         ),
-        Some("unlanded_parents") => "A parent of the change has not landed: land it first.".to_owned(),
+        Some("unlanded_parents") => "A change below it in its stack did not land (its landing names it): fix that one, propose the stack again (`reef propose`), then land it again.".to_owned(),
+        Some("alone") => "It changes reef-policy.toml or reef-checks.toml, which lands on its own: once the changes below it have landed, propose it again (`reef propose`) and land it.".to_owned(),
         Some("amended") => "The change moved since it was proposed: `reef propose` it again, then land.".to_owned(),
         Some("destination") => "The destination bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`.".to_owned(),
         Some("busy") => "The destination kept moving: land again.".to_owned(),
@@ -709,6 +818,7 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
         .await
         .map_err(|error| advice.refine(error))?;
     let mut landing = landing_of(&response.landing.unwrap_or_default());
+    landing.stack = response.stack.iter().map(StackLanding::of).collect();
     if args.policy {
         landing.policy = Some(response.policy);
     }
@@ -729,6 +839,9 @@ impl TextRender for Landing {
             ),
             ("destination", self.destination.clone()),
         ];
+        for member in &self.stack {
+            pairs.push(("below", member.text()));
+        }
         if let Some(after) = &self.destination_after {
             pairs.push(("now at", short(after)));
         } else if let Some(before) = &self.destination_before {
