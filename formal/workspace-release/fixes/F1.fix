@@ -1,0 +1,27 @@
+# fixes: F1
+# A reclaim that finds a workspace an earlier one left `releasing` never
+# publishes `active` once that earlier one got past its forget:
+# finish_going_back keeps the row `releasing`, begin_reclaim accepts a
+# `releasing` row the reclaim went back for (with no expiry check), and a
+# failed forget of a jj workspace that is already gone leaves the
+# workspace `releasing` for the next reclaim instead of rolling back.
+<<<
+    /\ \/ Fail /\ Exit(p) /\ UNCHANGED <<dbState, mem>>
+       \/ dbState' = "active" /\ mem' = "active" /\ Goto(p, "check")
+          /\ UNCHANGED <<lock, failLeft>>
+===
+    /\ Goto(p, "begin") /\ UNCHANGED <<dbState, mem, lock, failLeft>>
+>>>
+<<<
+BeginOk(p) == dbState = "active" /\ (p = "release" \/ lease = "past")
+===
+BeginOk(p) == \/ dbState = "active" /\ (p = "release" \/ lease = "past")
+              \/ dbState = "releasing" /\ wentBack[p]
+>>>
+<<<
+       \/ RollBack(1) /\ Exit(p) /\ UNCHANGED <<jjws, handle>>
+===
+       \/ jjws /\ RollBack(1) /\ Exit(p) /\ UNCHANGED <<jjws, handle>>
+       \/ ~jjws /\ Fail /\ Exit(p)
+          /\ UNCHANGED <<jjws, handle, dbState, mem, tracked>>
+>>>

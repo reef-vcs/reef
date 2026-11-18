@@ -1,0 +1,8 @@
+# breaks: ExpiryHonorsRenewal PROPERTY nocrash
+# code: db/workspaces.rs begin_reclaim drops the `expired_by` EXISTS clause:
+# a heartbeat that renewed the lease after the tick listed it no longer wins.
+<<<
+BeginOk(p) == dbState = "active" /\ (p = "release" \/ lease = "past")
+===
+BeginOk(p) == dbState = "active"
+>>>

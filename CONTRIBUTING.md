@@ -24,6 +24,8 @@ just ci      # everything CI runs, in CI order
 
 `just ci` also lints the installer with [ShellCheck](https://www.shellcheck.net) (`brew install shellcheck` or `apt-get install shellcheck`).
 
+`just formal` model-checks how a workspace's life ends (release, lease expiry, crash and restart) with TLA+. It needs Java or Docker, and CI does not run it; the [workspace-release skill](.claude/skills/workspace-release/SKILL.md) says when to run it and how to read the result.
+
 The reference executor's sandbox tests (`cargo nextest run -p reef-executor`) need [bubblewrap](https://github.com/containers/bubblewrap) on Linux (`apt-get install bubblewrap`; on Ubuntu 24.04 and later also the AppArmor note in [docs/executor.md](docs/executor.md#linux-bubblewrap)). On macOS they use `sandbox-exec`, which refuses to run inside another sandbox: run them from a plain terminal, not from inside a sandboxed tool. Where the sandbox cannot apply, those tests run their checks unsandboxed and say so; `REEF_EXECUTOR_TESTS_REQUIRE_SANDBOX=1` makes that a failure, as CI does.
 
 [jj](https://github.com/jj-vcs/jj) is optional. One test, `open_repo_created_by_jj_cli` in `crates/reef-lib/tests/jj_spike.rs`, uses the `jj` binary and skips itself when `jj` is not on `PATH`.

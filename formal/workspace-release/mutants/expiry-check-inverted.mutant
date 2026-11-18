@@ -1,0 +1,9 @@
+# breaks: AbandonedIsReclaimed PROPERTY nocrash
+# code: db/workspaces.rs begin_reclaim's expiry comparison flipped
+# (`expires_at + grace_ms > ?2`): an expiry reclaim is refused exactly when
+# the lease is past its grace, so an abandoned workspace is never reclaimed.
+<<<
+(p = "release" \/ lease = "past")
+===
+(p = "release" \/ lease = "live")
+>>>

@@ -1,0 +1,10 @@
+# breaks: EntryMatchesRow INVARIANT nocrash
+# code: workspace/reclaim.rs back_to_active updates the record before
+# set_workspace_state and keeps it when the write fails.
+<<<
+    \/ failLeft > cost /\ failLeft' = failLeft - cost - 1
+       /\ UNCHANGED <<dbState, mem, tracked>>
+===
+    \/ failLeft > cost /\ failLeft' = failLeft - cost - 1
+       /\ mem' = "active" /\ UNCHANGED <<dbState, tracked>>
+>>>
