@@ -80,6 +80,9 @@ pub struct LandingRow {
     pub stack: Option<String>,
     /// Its place in that stack, from 0 at the bottom.
     pub stack_position: Option<u32>,
+    /// The evaluation key the automatic service queued it under (R3.45);
+    /// `None` for a landing a client asked for.
+    pub automatic_key: Option<String>,
 }
 
 /// One change of a landing, as `landing_changes` holds it.
@@ -151,7 +154,7 @@ const COLUMNS: &str = "repo_id, id, destination, destination_before, destination
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
      remote_token_name, created_at, finished_at, batch_id, history, pushed_at, push_operation_id,
-     stack, stack_position";
+     stack, stack_position, automatic_key";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
      landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
@@ -189,6 +192,7 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
         stack_position: row
             .get::<_, Option<i64>>(27)?
             .and_then(|position| u32::try_from(position).ok()),
+        automatic_key: row.get(28)?,
     })
 }
 
@@ -221,7 +225,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)"
         ),
         params![
             row.repo_id,
@@ -252,6 +256,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.push_operation_id,
             row.stack,
             row.stack_position.map(i64::from),
+            row.automatic_key,
         ],
     )?;
     Ok(())
@@ -419,7 +424,7 @@ impl Db {
         })
     }
 
-    fn landings_where(
+    pub(super) fn landings_where(
         &self,
         tail: &str,
         args: &[&dyn rusqlite::ToSql],

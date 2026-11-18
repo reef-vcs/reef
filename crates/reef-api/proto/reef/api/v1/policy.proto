@@ -290,12 +290,45 @@ message EvaluatePolicyRequest {
   bool skip_snapshot = 7;
   // Fill `input_json`.
   bool include_input = 8;
+  // Judge the revision's stack as LandChange's gate would (R3.45, #328):
+  // the revision and its ancestors not yet on the destination, at most 32,
+  // bottom first, each previewed rebased onto the ones below it, sign-offs
+  // from the changes above counted, the first refusal ending the prefix.
+  // The destination is the local bookmark `policy_revision` names, or the
+  // trunk bookmark when it is empty. The changes need not be proposed.
+  bool stack = 9;
 }
 
 // The policy's decision.
 message EvaluatePolicyResponse {
-  // The evaluation.
+  // The evaluation; with `stack`, the revision's own, as judged in its
+  // stack (unset when the stack's prefix ended below it).
   PolicyEvaluation evaluation = 1;
+  // With `stack`: every change of the stack, bottom first.
+  repeated StackMemberEvaluation members = 2;
+  // With `stack`: how many changes, from the bottom, landing would queue
+  // now.
+  uint32 prefix = 3;
+}
+
+// One change of a stack, as the gate would judge it (R3.45, #328).
+message StackMemberEvaluation {
+  // The change, in hex.
+  string change_id = 1;
+  // Its commit.
+  string commit_id = 2;
+  // Its place in the stack, from 0 at the bottom.
+  uint32 position = 3;
+  // Whether it would be queued.
+  bool passes = 4;
+  // Why not: a landing reason such as `policy`, `conflicted`, `alone` or
+  // `unlanded_parents`; empty when it passes.
+  string reason = 5;
+  // What the gate would say.
+  string message = 6;
+  // The policy's evaluation; unset when the judgment stopped before the
+  // policy ran (a conflict, a change below it refused).
+  PolicyEvaluation evaluation = 7;
 }
 
 // How a landing's decision under the proposed policy compares with its

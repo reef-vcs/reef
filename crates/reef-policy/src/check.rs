@@ -215,6 +215,8 @@ pub(crate) struct Problem {
 #[derive(Debug)]
 pub(crate) struct Checked {
     pub(crate) problems: Vec<Problem>,
+    /// The input variables the expression reads.
+    pub(crate) reads: std::collections::BTreeSet<&'static str>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) nodes: usize,
 }
@@ -227,6 +229,7 @@ pub(crate) fn check(expr: &IdedExpr, scope: Scope) -> Checked {
         bound: Vec::new(),
         problems: Vec::new(),
         nodes: 0,
+        reads: std::collections::BTreeSet::new(),
     };
     checker.walk(expr);
     if checker.nodes > MAX_NODES {
@@ -243,6 +246,7 @@ pub(crate) fn check(expr: &IdedExpr, scope: Scope) -> Checked {
     }
     Checked {
         problems: checker.problems,
+        reads: checker.reads,
         nodes: checker.nodes,
     }
 }
@@ -253,6 +257,7 @@ struct Checker {
     bound: Vec<(String, Shape)>,
     problems: Vec<Problem>,
     nodes: usize,
+    reads: std::collections::BTreeSet<&'static str>,
 }
 
 impl Checker {
@@ -359,8 +364,9 @@ impl Checker {
         if let Some((_, shape)) = self.bound.iter().rev().find(|(bound, _)| bound == name) {
             return shape.clone();
         }
-        if let Some((_, shape, _)) = self.variables.iter().find(|(var, _, _)| *var == name) {
-            return (*shape).clone();
+        if let Some(&(var, shape, _)) = self.variables.iter().find(|(var, _, _)| *var == name) {
+            self.reads.insert(var);
+            return shape.clone();
         }
         if TYPE_NAMES.contains(&name) {
             return Shape::Any;

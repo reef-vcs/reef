@@ -49,7 +49,7 @@ const STEP_WORDS: Record<ChangeStep, string> = {
   [ChangeStep.DESCRIBE]: "describe the change",
   [ChangeStep.PROPOSE]: "propose the change",
   [ChangeStep.LAND]: "land the proposal",
-  [ChangeStep.WAIT]: "wait: it is queued to land",
+  [ChangeStep.WAIT]: "wait: the landing service lands it",
   [ChangeStep.REVISE]: "revise it: the proposal was declined",
   [ChangeStep.PUBLISH]: "publish it for review, or release the workspace",
   [ChangeStep.DONE]: "none: the change has landed, was superseded, or is on trunk",

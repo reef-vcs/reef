@@ -23,7 +23,7 @@
 //! move forward (`Executor::advance`, with the `testing` feature) so that
 //! no test sleeps for a lease.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -524,6 +524,10 @@ pub struct Executor {
     /// a claim, a completion, an expiry, a cancellation (R3.14's batches
     /// wait on it).
     changed: Notify,
+    /// The repositories whose jobs changed since the automatic service last
+    /// looked (R3.45), and its wake-up, which keeps a permit.
+    touched: Mutex<HashSet<crate::model::RepoId>>,
+    touched_notify: Notify,
     /// Waiting claims by remote token.
     waiting: Mutex<HashMap<String, usize>>,
 }
@@ -547,6 +551,8 @@ impl Executor {
             queued: Notify::new(),
             timer: Notify::new(),
             changed: Notify::new(),
+            touched: Mutex::new(HashSet::new()),
+            touched_notify: Notify::new(),
             waiting: Mutex::new(HashMap::new()),
         }
     }
@@ -555,6 +561,17 @@ impl Executor {
     /// with `notified()` before reading, then wait.
     pub fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    /// Signalled, with a stored permit, when a job of some repository
+    /// changed; [`Executor::take_touched`] says which (R3.45).
+    pub fn touched(&self) -> &Notify {
+        &self.touched_notify
+    }
+
+    /// The repositories whose jobs changed since the last call.
+    pub fn take_touched(&self) -> HashSet<crate::model::RepoId> {
+        std::mem::take(&mut *self.touched.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The configuration.
@@ -712,6 +729,11 @@ impl Executor {
         }
         self.timer.notify_one();
         self.changed.notify_waiters();
+        self.touched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(job.repo_id);
+        self.touched_notify.notify_one();
     }
 
     /// Claims the best matching queued job for `claimant`, waiting up to

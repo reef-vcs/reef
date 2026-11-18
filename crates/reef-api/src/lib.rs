@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 37;
+pub const API_REVISION: u32 = 38;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -158,9 +158,14 @@ pub const API_DIGESTS: &[&str] = &[
     "b547f32e95e583201cfa176e2c6c3fb15c9b50f5cdd9f3f49ff2fecddb17eb99",
     // #263: `Workspace.overlaps`, `Workspace.overlap_count` and `Overlap`.
     "82c552cdb7c818d428b29c91eab94eb4f63fdc113ddd8218d5fe4c8e84e071c3",
+    // R3.45: `AutomaticState`, `AutomaticStatus`, `ProposalEntry.automatic`,
+    // `LandChangeResponse.waiting`, `EvaluatePolicyRequest.stack`,
+    // `EvaluatePolicyResponse.members` and `prefix`, and
+    // `StackMemberEvaluation`.
+    "03a743505f570622058cb72e96a9208735bffd40f729b15f458ae646e4e9bb0c",
     // #262: `ChangeStep`, `Workspace.step`, `Workspace.lifecycle`,
     // `Workspace.conflicted_path_count` and `GetWorkspaceRequest.sync_first`.
-    "29cf3b1e7a21977a5c3b815a68cf5caea0e955fe2c0308f9d568eb4aff946c3b",
+    "09a5de186cba0dafbdece039e519e076a8d8a0f25ce309bdde3ecb7482a54a19",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

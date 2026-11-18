@@ -62,6 +62,14 @@ impl Provenance {
         let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
         let mut session_id = None;
         let recorded = self.record_locked(&mut held, commit, &mut session_id);
+        if recorded.is_ok() {
+            self.touched
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .repos
+                .insert(commit.at.repo_id);
+            self.touched_notify.notify_one();
+        }
         if let Err(ProvenanceError::Ended(_)) = &recorded {
             tracing::debug!(
                 target: "reef_daemon::provenance",

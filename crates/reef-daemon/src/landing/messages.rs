@@ -432,3 +432,33 @@ pub fn fill_pushes<'a>(
         message.push = landing_push(row, push);
     }
 }
+
+/// The automatic service's status of a proposal (R3.45).
+pub fn automatic_message(status: &super::AutomaticStatus) -> v1::AutomaticStatus {
+    use super::AutomaticState as State;
+    let state = match status.state {
+        State::Off => v1::AutomaticState::Off,
+        State::Pending => v1::AutomaticState::Pending,
+        State::Waiting => v1::AutomaticState::Waiting,
+        State::Ready => v1::AutomaticState::Ready,
+        State::Queued => v1::AutomaticState::Queued,
+        State::Needs => v1::AutomaticState::Needs,
+        State::NoExecutor => v1::AutomaticState::NoExecutor,
+        State::Returned => v1::AutomaticState::Returned,
+    };
+    v1::AutomaticStatus {
+        state: state.into(),
+        message: status.message.clone(),
+        missing: status
+            .missing
+            .iter()
+            .map(crate::service::policy::need_message)
+            .collect(),
+        missing_total: u32::try_from(status.missing_total).unwrap_or(u32::MAX),
+        job_ids: status.jobs.clone(),
+        landing_id: status.landing_id.clone().unwrap_or_default(),
+        reason: status.reason.clone().unwrap_or_default(),
+        next: status.next.clone(),
+        evaluated_at: Some(timestamp(status.evaluated_at)),
+    }
+}

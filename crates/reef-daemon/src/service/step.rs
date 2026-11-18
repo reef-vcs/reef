@@ -5,8 +5,9 @@
 //! The facts are read at head, in one job on the repository's read thread:
 //! the working-copy commit, how many paths it changes against its parents,
 //! how many are conflicted, and whether the repository lands through
-//! proposals. The lifecycle is then filled as every read fills it, and
-//! [`step`] decides.
+//! proposals. The lifecycle is then filled as every read fills it, the
+//! automatic service's status (R3.45) says whether a proposal's destination
+//! lands it with no request, and [`step`] decides.
 
 use std::sync::Arc;
 
@@ -93,8 +94,15 @@ pub(crate) async fn of_workspace(
             .has_lifecycle(repo)
             .inspect_err(|error| warn(error))
             .unwrap_or(false);
+    let automatic = lifecycle.state() == LifecycleState::Proposed
+        && state
+            .automatic
+            .status(repo, &change.change_id)
+            .is_some_and(|status| status.automatic);
     Some(Stepped {
-        step: step(&change, &lifecycle, changed, conflicted, proposals),
+        step: step(
+            &change, &lifecycle, changed, conflicted, proposals, automatic,
+        ),
         lifecycle,
         changed_file_count: changed,
         conflicted_path_count: conflicted,
@@ -153,13 +161,15 @@ async fn read_facts(
 
 /// The step table (ADR 0080, `docs/proposals.md`): the first row that
 /// matches. `proposals` is whether the repository lands through
-/// proposals.
+/// proposals; `automatic`, whether a proposal's destination lands it with
+/// no request (`[landing] automatic = true`, R3.45).
 pub(crate) fn step(
     change: &v1::Change,
     lifecycle: &v1::ChangeLifecycle,
     changed: u32,
     conflicted: u32,
     proposals: bool,
+    automatic: bool,
 ) -> ChangeStep {
     if change.conflict || conflicted > 0 {
         return ChangeStep::Resolve;
@@ -167,6 +177,7 @@ pub(crate) fn step(
     match lifecycle.state() {
         LifecycleState::Queued => return ChangeStep::Wait,
         LifecycleState::Proposed if lifecycle.amended => return ChangeStep::Propose,
+        LifecycleState::Proposed if automatic => return ChangeStep::Wait,
         LifecycleState::Proposed => return ChangeStep::Land,
         LifecycleState::Declined => return ChangeStep::Revise,
         LifecycleState::Landed | LifecycleState::Superseded => return ChangeStep::Done,
@@ -209,7 +220,11 @@ mod tests {
     /// One row per line of the step table.
     #[test]
     fn each_row_of_the_table() {
-        let draft = lifecycle(LifecycleState::Draft, false);
+        use ChangeStep as Step;
+        use LifecycleState as State;
+        let at = |state| lifecycle(state, false);
+        let draft = at(State::Draft);
+        let amended = lifecycle(State::Proposed, true);
         let described = change("Fix the parser\n", false);
         let blank = change("  \n", false);
         let empty = change("", true);
@@ -221,76 +236,80 @@ mod tests {
             immutable: true,
             ..described.clone()
         };
-        let rows: [(&v1::Change, v1::ChangeLifecycle, u32, u32, bool, ChangeStep); 14] = [
-            (&conflicted, draft.clone(), 3, 1, true, ChangeStep::Resolve),
-            (&described, draft.clone(), 3, 2, false, ChangeStep::Resolve),
+        // (change, lifecycle, changed, conflicted, proposals, automatic, step)
+        let rows = [
+            (&conflicted, draft.clone(), 3, 1, true, false, Step::Resolve),
+            (&described, draft.clone(), 3, 2, false, false, Step::Resolve),
+            (&described, at(State::Queued), 3, 0, true, false, Step::Wait),
             (
                 &described,
-                lifecycle(LifecycleState::Queued, false),
+                amended.clone(),
                 3,
                 0,
                 true,
-                ChangeStep::Wait,
+                false,
+                Step::Propose,
             ),
+            (&described, amended, 3, 0, true, true, Step::Propose),
             (
                 &described,
-                lifecycle(LifecycleState::Proposed, true),
+                at(State::Proposed),
                 3,
                 0,
                 true,
-                ChangeStep::Propose,
+                true,
+                Step::Wait,
             ),
             (
                 &described,
-                lifecycle(LifecycleState::Proposed, false),
+                at(State::Proposed),
                 3,
                 0,
                 true,
-                ChangeStep::Land,
+                false,
+                Step::Land,
             ),
             (
                 &described,
-                lifecycle(LifecycleState::Declined, false),
+                at(State::Declined),
                 3,
                 0,
                 true,
-                ChangeStep::Revise,
+                false,
+                Step::Revise,
             ),
+            (&described, at(State::Landed), 3, 0, true, false, Step::Done),
             (
                 &described,
-                lifecycle(LifecycleState::Landed, false),
+                at(State::Superseded),
                 3,
                 0,
                 true,
-                ChangeStep::Done,
+                false,
+                Step::Done,
             ),
+            (&landed, draft.clone(), 3, 0, false, false, Step::Done),
+            (&empty, draft.clone(), 0, 0, true, false, Step::Work),
+            (&blank, draft.clone(), 3, 0, true, false, Step::Describe),
+            (&described, draft.clone(), 3, 0, true, false, Step::Propose),
             (
                 &described,
-                lifecycle(LifecycleState::Superseded, false),
+                at(State::Withdrawn),
                 3,
                 0,
                 true,
-                ChangeStep::Done,
+                false,
+                Step::Propose,
             ),
-            (&landed, draft.clone(), 3, 0, false, ChangeStep::Done),
-            (&empty, draft.clone(), 0, 0, true, ChangeStep::Work),
-            (&blank, draft.clone(), 3, 0, true, ChangeStep::Describe),
-            (&described, draft.clone(), 3, 0, true, ChangeStep::Propose),
-            (
-                &described,
-                lifecycle(LifecycleState::Withdrawn, false),
-                3,
-                0,
-                true,
-                ChangeStep::Propose,
-            ),
-            (&described, draft, 3, 0, false, ChangeStep::Publish),
+            (&described, draft, 3, 0, false, false, Step::Publish),
         ];
-        for (change, lifecycle, changed, conflicted, proposals, expected) in rows {
+        for (change, lifecycle, changed, conflicted, proposals, automatic, expected) in rows {
             assert_eq!(
-                step(change, &lifecycle, changed, conflicted, proposals),
+                step(
+                    change, &lifecycle, changed, conflicted, proposals, automatic
+                ),
                 expected,
-                "{change:?} {lifecycle:?} {changed} {conflicted} {proposals}"
+                "{change:?} {lifecycle:?} {changed} {conflicted} {proposals} {automatic}"
             );
         }
     }

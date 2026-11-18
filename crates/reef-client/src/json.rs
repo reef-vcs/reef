@@ -2290,6 +2290,9 @@ pub struct Proposal {
     pub change: Option<Change>,
     /// The agent of its latest proposal.
     pub proposed_by: Option<String>,
+    /// What the automatic service is doing about it (R3.45); `null` when
+    /// it is not proposed, or not looked at yet.
+    pub automatic: Option<AutomaticStatus>,
 }
 
 impl From<&v1::ProposalEntry> for Proposal {
@@ -2300,6 +2303,91 @@ impl From<&v1::ProposalEntry> for Proposal {
             lifecycle: entry.lifecycle.as_ref().map(ChangeLifecycle::from),
             change: entry.change.as_ref().map(Change::from),
             proposed_by: text(&entry.proposed_by),
+            automatic: entry.automatic.as_ref().map(AutomaticStatus::from),
+        }
+    }
+}
+
+/// What the automatic service is doing about a proposal (R3.45,
+/// `docs/landing.md` "Automatic landing").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct AutomaticStatus {
+    /// `off`, `pending`, `waiting`, `ready`, `queued`, `needs`,
+    /// `no_executor` or `returned`.
+    pub state: String,
+    /// What the gate said, or what it waits for.
+    pub message: String,
+    /// `waiting`: the pairs asked for; `needs`: the failed pairs and the
+    /// missing evidence and sign-offs; at most 20.
+    pub missing: Vec<AutomaticNeed>,
+    /// How many there are.
+    pub missing_total: u32,
+    /// The jobs it waits on.
+    pub job_ids: Vec<String>,
+    /// Its landing, when queued or returned.
+    pub landing_id: Option<String>,
+    /// The gate's or the landing's reason, such as `policy` or `checks`.
+    pub reason: Option<String>,
+    /// A command that shows or fixes it, as an argv.
+    pub next: Vec<String>,
+    /// When it was judged.
+    pub evaluated_at: Option<String>,
+}
+
+/// One evidence pair an automatic status names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct AutomaticNeed {
+    /// The evidence kind.
+    pub kind: String,
+    /// The target; `null` for the whole check.
+    pub target: Option<String>,
+    /// For a failed pair, the failing evidence.
+    pub evidence_ids: Vec<String>,
+}
+
+impl From<&v1::AutomaticStatus> for AutomaticStatus {
+    fn from(status: &v1::AutomaticStatus) -> Self {
+        Self {
+            state: status
+                .state()
+                .as_str_name()
+                .trim_start_matches("AUTOMATIC_STATE_")
+                .to_ascii_lowercase(),
+            message: status.message.clone(),
+            missing: status
+                .missing
+                .iter()
+                .map(|need| AutomaticNeed {
+                    kind: need.kind.clone(),
+                    target: text(&need.target),
+                    evidence_ids: need.evidence_ids.clone(),
+                })
+                .collect(),
+            missing_total: status.missing_total,
+            job_ids: status.job_ids.clone(),
+            landing_id: text(&status.landing_id),
+            reason: text(&status.reason),
+            next: status.next.clone(),
+            evaluated_at: status.evaluated_at.as_ref().map(rfc3339),
+        }
+    }
+}
+
+impl AutomaticStatus {
+    /// The status in a few words: `waiting test`, `needs signoff`.
+    pub fn words(&self) -> String {
+        let kinds: Vec<&str> = self.missing.iter().map(|need| need.kind.as_str()).collect();
+        let mut kinds = kinds;
+        kinds.dedup();
+        match self.state.as_str() {
+            "waiting" | "needs" if !kinds.is_empty() => {
+                format!("{} {}", self.state, kinds.join(","))
+            }
+            "needs" | "returned" => match &self.reason {
+                Some(reason) => format!("{} {reason}", self.state),
+                None => self.state.clone(),
+            },
+            _ => self.state.clone(),
         }
     }
 }
@@ -2314,6 +2402,9 @@ pub struct ProposalHistory {
     /// The changes below it in its stack, bottom first (R3.10): its
     /// ancestors not yet on its destination, which land with it.
     pub stack: Vec<Change>,
+    /// What the automatic service is doing about it (R3.45); `null` when
+    /// it is not proposed.
+    pub automatic: Option<AutomaticStatus>,
 }
 
 /// `description`'s first line that is not blank, without its newline,

@@ -12,7 +12,7 @@ The issue asks for three things: `here`'s `hint` and `next` follow the change's 
 
 ### What was verified while writing this ticket
 
-Reef at `f72d0cd7`: API revision 36, schema 21, ADR 0079 the latest, threat rows to S-215. R3.45 runs in parallel with revision 38, schema 23, ADR 0081 and S-221 to S-229. This brief holds **API revision 37**, **schema 22**, **ADR 0080** and **S-216 to S-220**, and uses **API revision 37**, **ADR 0080** and **S-216** ("Answers applied"): no migration.
+Reef at `f72d0cd7`: API revision 36, schema 21, ADR 0079 the latest, threat rows to S-215. R3.45 runs in parallel with revision 38, schema 23, ADR 0081 and S-221 to S-229. This brief held **API revision 37**, **schema 22**, **ADR 0080** and **S-216 to S-220**, and uses **API revision 38** (R3.45 merged first with 37), **ADR 0080** and **S-216** ("Answers applied"): no migration.
 
 - **#327's cause** (reproduced 3 of 3 on the installed daemon at `f72d0cd7`, in a throwaway workspace): a file written, then `reef describe -m` at once; the commit the describe returned did not have the file each time, and had the files of the earlier rounds. The workspace converged a second or two later, when the watcher's snapshot added the file to a new commit of the same change. The cause is in two places that agree with each other: `DescribeChange`'s contract says "Never snapshots, as it changes no tree" (`changes.proto`), and `Manager::rewrite` step 3 skips the snapshot for `Write::Describe` (`workspace/rewrite.rs`). The service, `ChangeHandler::describe_change` (`service/changes.rs`), has no `uses_working_copy` + `snapshot_first` step, which `TransitionChange` (`reef propose`) and `PublishChange` (`reef publish -m`) both have. So it is not the watcher's quiet window racing a snapshot: no snapshot runs at all, and whatever the watcher has not yet recorded (its debounce) is missing from the described commit. The watcher's events are kept while the rewrite pauses it (`Scheduler::pause`), so nothing is lost on disk; what is wrong is the commit the describe names and returns, which a script then proposes, publishes or passes as `--expected-commit`.
 - **The cost of the fix.** `snapshot_first` goes through the status index (R2.23): with nothing changed since the last scan it takes no snapshot; otherwise it snapshots the changed paths alone. Measured on this repository (M2 Max, warm daemon, idle workspace, CLI wall time, median of 15): `reef status` 12.2 ms, `reef status --no-snapshot` 10.1 ms, so the index sync costs about 2 ms when clean. An explicit snapshot after one write: 120 to 160 ms (a walk), which the index avoids.
@@ -243,7 +243,7 @@ reef ws run -- sh -c 'reef here; echo x > a.txt; reef here; reef describe -m "x"
 
 - **The step lags a write the watcher has not reported** past `[status_index] sync_timeout`: the index then walks (`walk_reason` not synced), slower but right.
 - **Track from `trunk()` alone**: a repository whose policy lives only on a non-trunk destination reads `publish` until its first proposal is recorded. Rare, and the first `reef propose` fixes it.
-- **R3.45 merges first**: a proposed change in a repository with `[landing] automatic = true` lands without `reef land`. `next` stays `reef land`, which is harmless (it lands now or reports), and the follow-up below makes it `wait`.
+- **R3.45 merged first**: a proposed change in a repository with `[landing] automatic = true` lands without `reef land`. The merge adds the `wait` arm below; until the automatic service has judged a new proposal, the step reads `land`, which is harmless (`reef land` waits for the same checks, then lands or reports).
 
 ## Choices this brief made, and why
 
@@ -257,7 +257,7 @@ reef ws run -- sh -c 'reef here; echo x > a.txt; reef here; reef describe -m "x"
 
 ## What later tickets inherit
 
-- **R3.45**: when the destination's policy has `[landing] automatic = true`, step `land` renders `wait` (`next` the `op watch`). One match arm in `here.rs`; whichever of the two merges second adds it.
+- **R3.45** (merged first, so this PR adds it): when the destination's policy has `[landing] automatic = true`, a proposed change's step is `wait` (`next` the `op watch`), not `land`. One arm in the daemon's `step()`, read from the automatic service's status for the change (`Status.automatic`), so `GetWorkspace` evaluates no policy.
 - **A daemon-side step** if MCP agents need it: `step()` is pure and moves as is.
 - **#123's other views** follow `brief::Here`.
 
@@ -278,21 +278,21 @@ None: #262 and #327 are not `dev-phases.md` rows.
 
 ## Decisions for the user
 
-**Answered 2026-11-18.** Questions 2, 3, 4 and 6 as recommended. **Question 1 changed**: the daemon computes the step and returns it with `GetWorkspace` (API revision 37), because many agents reach Reef only through MCP or an SDK. **Question 5 changed**: ADR 0025's guide budget rises by about 100 bytes, with the reason in the ADR, instead of trimming elsewhere; if the guide's growth makes `state-own` more expensive, the PR says so. **Added**: piped `reef status` gets a trimmed brief view (about 20 KB in an idle workspace here, mostly trunk's pull-request description repeated as the parent), measured before and after. "Answers applied" below replaces decisions 1, 3, 6 and 9 where they differ. The recommendations as they were put:
+**Answered 2026-11-18.** Questions 2, 3, 4 and 6 as recommended. **Question 1 changed**: the daemon computes the step and returns it with `GetWorkspace` (API revision 38), because many agents reach Reef only through MCP or an SDK. **Question 5 changed**: ADR 0025's guide budget rises by about 100 bytes, with the reason in the ADR, instead of trimming elsewhere; if the guide's growth makes `state-own` more expensive, the PR says so. **Added**: piped `reef status` gets a trimmed brief view (about 20 KB in an idle workspace here, mostly trunk's pull-request description repeated as the parent), measured before and after. "Answers applied" below replaces decisions 1, 3, 6 and 9 where they differ. The recommendations as they were put:
 
-1. **Where the lifecycle is computed.** *Recommended*: in `reef here` only. *Alternative (chosen)*: the daemon serves it with `GetWorkspace` (API revision 37).
+1. **Where the lifecycle is computed.** *Recommended*: in `reef here` only. *Alternative (chosen)*: the daemon serves it with `GetWorkspace` (API revision 38).
 2. **A described change in a repository without proposals.** *Recommended (chosen)*: `next` stays `reef ws release`; the hint names `reef publish`.
 3. **A proposed change.** *Recommended (chosen)*: `next` is `reef land`; no policy evaluation in `here`.
 4. **A declined change.** *Recommended (chosen)*: "declined in round N", `next` `reef proposal show`; no reviewer text in `hint` or `next`.
 5. **The guide.** *Recommended*: fit the current budgets by trimming. *Alternative (chosen)*: raise ADR 0025's budget by about 100 bytes.
 6. **MCP parity.** *Recommended (chosen)*: one sentence in the MCP server's instructions.
-7. **Numbers.** Now API revision 37, ADR 0080, S-216; schema 22 and S-217 to S-220 unused.
+7. **Numbers.** Now API revision 38 (R3.45 merged first with 37), ADR 0080, S-216; schema 22 and S-217 to S-220 unused.
 
 ## Answers applied
 
 These replace decisions 1, 3, 6 and 9 where they differ; the step table (decision 2) and the `hint`/`next` table (decision 4) stand.
 
-**The API (revision 37, ADR 0080).** `lifecycle.proto` gains `enum ChangeStep` (`UNSPECIFIED`, `WORK`, `RESOLVE`, `DESCRIBE`, `PROPOSE`, `LAND`, `WAIT`, `REVISE`, `PUBLISH`, `DONE`). `Workspace` gains `step = 27` (`ChangeStep`), `lifecycle = 28` (the change's `ChangeLifecycle` at head) and `conflicted_path_count = 29`, and `GetWorkspace` also fills `changed_file_count` (20). All four are set by `GetWorkspace` for an active workspace and left unset elsewhere and at an operation, as `behind_trunk` is. `GetWorkspaceRequest` gains `sync_first = 6`: sync through the status index first (R2.23), as `GetStatus` does, so the step covers what is on disk; no snapshot when nothing changed since the last scan, else a snapshot of the changed paths, in `snapshot`. Ignored with `snapshot_first`; INVALID_ARGUMENT with `at_operation`.
+**The API (revision 38, ADR 0080).** `lifecycle.proto` gains `enum ChangeStep` (`UNSPECIFIED`, `WORK`, `RESOLVE`, `DESCRIBE`, `PROPOSE`, `LAND`, `WAIT`, `REVISE`, `PUBLISH`, `DONE`). `Workspace` gains `step = 27` (`ChangeStep`), `lifecycle = 28` (the change's `ChangeLifecycle` at head) and `conflicted_path_count = 29`, and `GetWorkspace` also fills `changed_file_count` (20). All four are set by `GetWorkspace` for an active workspace and left unset elsewhere and at an operation, as `behind_trunk` is. `GetWorkspaceRequest` gains `sync_first = 6`: sync through the status index first (R2.23), as `GetStatus` does, so the step covers what is on disk; no snapshot when nothing changed since the last scan, else a snapshot of the changed paths, in `snapshot`. Ignored with `snapshot_first`; INVALID_ARGUMENT with `at_operation`.
 
 **The computation, in the daemon.** `crate::lifecycle::step`: the facts (decision 2's `Change` and `Track`) read in one job on the repository's read thread at head, from the workspace's commit: the commit described, the changed-path count against its parents (the summary diff `GetStatus` uses), the conflicted-path count, `reef-policy.toml` in `trunk()`'s tree, and whether the repository has any `lifecycle` row; then the lifecycle filled as every read fills it; then the pure `step()`. Joined with `behind_trunk` and the overlaps in `get_workspace`, so it adds its own latency to theirs rather than after them. A failure leaves the four fields unset, logged, as the overlaps are.
 

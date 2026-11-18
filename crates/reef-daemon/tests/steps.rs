@@ -2,7 +2,8 @@
 //! `GetWorkspace` with `sync_first` reads the files on disk, and the step
 //! follows the change from nothing changed to proposed, amended and
 //! declined, in a repository that lands through proposals (a policy at
-//! `trunk()`, or a recorded proposal) and in one that does not.
+//! `trunk()`, or a recorded proposal) and in one that does not; a proposal
+//! onto a destination that lands automatically (R3.45) waits.
 
 #![allow(
     clippy::unwrap_used,
@@ -11,17 +12,39 @@
 )]
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use reef_api::v1::{
-    self, ChangeStep as Step, CreateWorkspaceRequest, DescribeChangeRequest, EditFilesRequest,
-    FileEdit, GetWorkspaceRequest, LifecycleState as State, TransitionChangeRequest,
-    edit_files_request, file_edit,
+    self, ChangeStep as Step, CreateIdentityRequest, CreateWorkspaceRequest, DescribeChangeRequest,
+    EditFilesRequest, FileEdit, GetWorkspaceRequest, LifecycleState as State,
+    TransitionChangeRequest, edit_files_request, file_edit,
 };
 use reef_daemon::client::Client;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
 use reef_testing::synth::Preset;
 
 const POLICY: &str = "version = 1\n";
+
+/// A policy that lands automatically and requires a `test` check from
+/// alice's executors, which no executor runs here, so a proposal stays
+/// proposed.
+const AUTOMATIC: &str = r#"version = 1
+
+[owners]
+identities = ["alice"]
+
+[attestors.local]
+identities = ["alice"]
+actors = ["executor"]
+
+[[require]]
+name = "tests"
+kinds = ["test"]
+attestors = ["local"]
+
+[landing]
+automatic = true
+"#;
 
 /// Automatic snapshots off, so only `sync_first` can record a write.
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
@@ -122,15 +145,15 @@ async fn set_bookmark(repo: &SyntheticRepo, name: &str, commit: &str) {
     .unwrap();
 }
 
-/// A `main` bookmark on a new commit holding `path`.
-async fn main_with(client: &Client, repo: &SyntheticRepo, path: &str) -> String {
+/// A `main` bookmark on a new commit holding `path`, with `text`.
+async fn main_with(client: &Client, repo: &SyntheticRepo, path: &str, text: &str) -> String {
     let main = client
         .edit_files(EditFilesRequest {
             repo: repo.id.clone(),
             target: Some(edit_files_request::Target::NewOn("root()".to_owned())),
             edits: vec![FileEdit {
                 path: path.to_owned(),
-                action: Some(file_edit::Action::Content(POLICY.as_bytes().to_vec())),
+                action: Some(file_edit::Action::Content(text.as_bytes().to_vec())),
                 executable: None,
             }],
             ..EditFilesRequest::default()
@@ -185,7 +208,7 @@ async fn without_proposals_the_step_ends_at_publish() {
 async fn a_policy_at_trunk_walks_the_proposal() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
-    let main = main_with(client, &repo, "reef-policy.toml").await;
+    let main = main_with(client, &repo, "reef-policy.toml", POLICY).await;
     let ws = create(client, &repo, Some(&main)).await;
     write(&ws, "a.txt", "a\n");
     assert_eq!(read(client, &ws).await.step(), Step::Describe);
@@ -219,7 +242,7 @@ async fn a_policy_at_trunk_walks_the_proposal() {
 async fn a_recorded_proposal_is_enough() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
-    let main = main_with(client, &repo, "README.md").await;
+    let main = main_with(client, &repo, "README.md", POLICY).await;
     let first = create(client, &repo, Some(&main)).await;
     write(&first, "one.txt", "one\n");
     describe(client, &first, "One").await;
@@ -248,5 +271,51 @@ async fn a_recorded_proposal_is_enough() {
         .unwrap();
     assert_eq!(gone.step(), Step::Unspecified);
     assert!(gone.lifecycle.is_none());
+    daemon.stop().await;
+}
+
+/// R3.45: the daemon lands a proposal onto a destination whose policy says
+/// `automatic = true` with no request, so its step is `wait`, not `land`,
+/// once the automatic service has judged it. An amendment still asks for a
+/// new proposal.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automatic_destination_waits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    client
+        .create_identity(CreateIdentityRequest {
+            name: "alice".to_owned(),
+            kind: v1::IdentityKind::Person.into(),
+            ..CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let main = main_with(client, &repo, "reef-policy.toml", AUTOMATIC).await;
+    let ws = create(client, &repo, Some(&main)).await;
+    write(&ws, "a.txt", "a\n");
+    describe(client, &ws, "Add a.txt").await;
+    assert_eq!(read(client, &ws).await.step(), Step::Propose);
+
+    transition(client, &ws, State::Proposed).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let waiting = loop {
+        let proposed = read(client, &ws).await;
+        if proposed.step() == Step::Wait {
+            break proposed;
+        }
+        assert_eq!(
+            proposed.step(),
+            Step::Land,
+            "judged yet or not: {proposed:#?}"
+        );
+        assert!(Instant::now() < deadline, "never waited: {proposed:#?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(waiting.lifecycle.unwrap().state(), State::Proposed);
+
+    write(&ws, "a.txt", "a2\n");
+    let amended = read(client, &ws).await;
+    assert_eq!(amended.step(), Step::Propose);
+    assert!(amended.lifecycle.unwrap().amended);
     daemon.stop().await;
 }

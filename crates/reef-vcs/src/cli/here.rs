@@ -508,11 +508,15 @@ fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<St
             argv(&["reef", "propose"]),
         ),
         Some("land") => (
-            format!("Proposed for {destination}. `reef land` lands it if the policy allows, or says what is missing (`reef policy eval` previews)."),
+            format!("Proposed for {destination}. `reef land` waits for any checks the daemon asked for, then lands it if the policy allows, or says what is missing (`reef policy eval` previews)."),
             argv(&["reef", "land"]),
         ),
         Some("wait") => (
-            format!("Queued to land on {destination}: the landing service lands it. Wait for the landing."),
+            if lifecycle.is_some_and(|lifecycle| lifecycle.state == "proposed") {
+                format!("Proposed for {destination}, which lands automatically: the daemon asks for its checks and lands it once the policy allows (`reef proposal show` says what it waits for). Wait for the landing.")
+            } else {
+                format!("Queued to land on {destination}: the landing service lands it. Wait for the landing.")
+            },
             argv(&[
                 "reef",
                 "op",
@@ -940,7 +944,10 @@ mod tests {
     fn each_step_names_its_next() {
         use v1::{ChangeStep as Step, LifecycleState as State};
         let release = ["reef", "ws", "release", "0123456789abcdef"].map(str::to_owned);
-        let cases: [(Step, State, bool, &[&str], &str); 11] = [
+        let watch: Vec<&str> = "reef op watch --kind transition --change zy --follow --count 1"
+            .split(' ')
+            .collect();
+        let cases: [(Step, State, bool, &[&str], &str); 12] = [
             (Step::Work, State::Draft, false, &[], "Work here"),
             (
                 Step::Resolve,
@@ -988,19 +995,15 @@ mod tests {
                 Step::Wait,
                 State::Queued,
                 false,
-                &[
-                    "reef",
-                    "op",
-                    "watch",
-                    "--kind",
-                    "transition",
-                    "--change",
-                    "zy",
-                    "--follow",
-                    "--count",
-                    "1",
-                ],
+                watch.as_slice(),
                 "Queued to land on `main`",
+            ),
+            (
+                Step::Wait,
+                State::Proposed,
+                false,
+                watch.as_slice(),
+                "which lands automatically",
             ),
             (
                 Step::Revise,
@@ -1065,6 +1068,7 @@ mod tests {
         for (step, state) in [
             (Step::Land, State::Proposed),
             (Step::Wait, State::Queued),
+            (Step::Wait, State::Proposed),
             (Step::Revise, State::Declined),
             (Step::Done, State::Landed),
         ] {

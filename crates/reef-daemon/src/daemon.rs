@@ -162,6 +162,8 @@ pub struct AppState {
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
     /// The landing service's workers and waiters (R3.13).
     pub landings: crate::landing::Landings,
+    /// Automatic landing and evidence requests (R3.45).
+    pub automatic: crate::landing::Automatic,
     /// The landing push workers (R3.17).
     pub pushes: crate::landing::Pushes,
     /// Comment locks and the instruction sweep's queue (R3.12).
@@ -479,6 +481,7 @@ impl Daemon {
             policy: Arc::new(crate::policy::Policies::default()),
             lifecycle: Arc::new(crate::lifecycle::Lifecycle::default()),
             landings: crate::landing::Landings::default(),
+            automatic: crate::landing::Automatic::default(),
             pushes: crate::landing::Pushes::default(),
             comments: Arc::new(crate::comments::Comments::default()),
             assignments: Arc::new(crate::assign::Assignments::default()),
@@ -514,6 +517,8 @@ impl Daemon {
         crate::lifecycle::observe::start(&state);
         // Queued landings resume (R3.13).
         crate::landing::start(&state);
+        // Open proposals are judged again, and land when they may (R3.45).
+        crate::landing::start_automatic(&state);
         // Instructions made moot by transitions, and expired ones (R3.12).
         crate::comments::start(&state);
         // Resolver assignments follow the log (R3.27).

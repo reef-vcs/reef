@@ -21,6 +21,7 @@ Separately, `DescribeChange` never snapshotted (#327). A file written just befor
    | the commit has conflicts | `resolve` |
    | queued | `wait` |
    | proposed, amended since | `propose` |
+   | proposed, onto a destination whose policy lands automatically | `wait` |
    | proposed | `land` |
    | declined | `revise` |
    | landed, superseded, or immutable | `done` |
@@ -34,8 +35,8 @@ Separately, `DescribeChange` never snapshotted (#327). A file written just befor
 5. **`reef here` renders.** Health comes first, in the order it had: lost lease, divergence, attention, grace, low disk. Then conflicts. Then being behind trunk, but only while a rebase fits the step (not proposed, queued, declined or done). Then missing dependencies and a warning disk. The step comes last. Its `hint` and `next` per step:
    - `describe`: `reef describe -m`, a prefix like `ws run --`, since the text is the agent's.
    - `propose`: `reef propose`.
-   - `land`: `reef land`, which lands it or reports what is missing.
-   - `wait`: `reef op watch --kind transition --change <id> --follow`.
+   - `land`: `reef land`, which waits for any checks the daemon asked for, then lands it or reports what is missing.
+   - `wait`: `reef op watch --kind transition --change <id> --follow`. A proposed change's hint says the daemon lands it and that `reef proposal show` says what it waits for.
    - `revise`: `reef proposal show`.
    - `resolve`: `reef conflict show`.
    - `publish`, `done` and `work`: release, or nothing inside `ws run` or a held workspace.
@@ -50,7 +51,7 @@ Separately, `DescribeChange` never snapshotted (#327). A file written just befor
 - `GetWorkspace` does one more read job at head: a summary diff of the working copy against its parents, a conflicted-path scan, one tree lookup in `trunk()` and one indexed row check. It runs alongside `behind_trunk` and the overlaps.
 - `reef here` may record a snapshot operation, which it never did before.
 - The step is for the workspace's own change. `reef propose` and `reef land` take the stack below it themselves ([0078](0078-stacks.md)).
-- When the destination's policy lands automatically (R3.45), `land` should read `wait`. That adds one row to the table.
+- When the destination's policy lands automatically (R3.45, [0081](0081-automatic-landing.md)), a proposed change reads `wait`: the daemon lands it with no command. The step reads the automatic service's status for the change, which records whether its destination lands automatically, so `GetWorkspace` evaluates no policy. Until the service has judged a new proposal (a moment after `reef propose`, or after a daemon start), the step reads `land`, and `reef land` then waits for the same checks.
 
 ## Alternatives considered
 

@@ -37,6 +37,7 @@ import "google/protobuf/timestamp.proto";
 import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/policy.proto";
 
 // The log, and reading and rewriting changes.
 service ChangeService {
@@ -479,6 +480,60 @@ message ProposalEntry {
   Change change = 3;
   // The agent that recorded its latest proposal; empty for none.
   string proposed_by = 4;
+  // What the automatic service is doing about it (R3.45); unset when it is
+  // not proposed, or the daemon has not looked at it yet.
+  AutomaticStatus automatic = 5;
+}
+
+// Where an open proposal stands with the automatic service (R3.45,
+// docs/landing.md "Automatic landing").
+enum AutomaticState {
+  // Not set: never a state the daemon returns.
+  AUTOMATIC_STATE_UNSPECIFIED = 0;
+  // Its destination's policy neither asks executors for evidence nor lands
+  // automatically, or it has no valid policy: `reef land` lands it.
+  AUTOMATIC_STATE_OFF = 1;
+  // Not judged since the daemon started or since it changed.
+  AUTOMATIC_STATE_PENDING = 2;
+  // Evidence it lacks was asked for, and the jobs are open.
+  AUTOMATIC_STATE_WAITING = 3;
+  // The gate allows it, and its destination does not land automatically.
+  AUTOMATIC_STATE_READY = 4;
+  // It is queued for landing.
+  AUTOMATIC_STATE_QUEUED = 5;
+  // Something no job provides blocks it: a sign-off, a failed check, a
+  // rule, a conflict, a change of its stack; `message` says what.
+  AUTOMATIC_STATE_NEEDS = 6;
+  // The jobs it needs expired with no executor claiming them, and none has
+  // claimed a job of the repository since.
+  AUTOMATIC_STATE_NO_EXECUTOR = 7;
+  // A landing the service queued came back, and nothing it is judged on
+  // has changed since; it is not queued again until something does.
+  AUTOMATIC_STATE_RETURNED = 8;
+}
+
+// What the automatic service is doing about one proposal (R3.45).
+message AutomaticStatus {
+  // Where it stands.
+  AutomaticState state = 1;
+  // What the gate said, or what it waits for.
+  string message = 2;
+  // WAITING: the pairs asked for; NEEDS: the failed pairs and the missing
+  // evidence and sign-offs; at most 20.
+  repeated PolicyEvidenceNeed missing = 3;
+  // How many there are; more than `missing` holds when it was cut.
+  uint32 missing_total = 4;
+  // The jobs it waits on.
+  repeated string job_ids = 5;
+  // QUEUED and RETURNED: its landing.
+  string landing_id = 6;
+  // NEEDS and RETURNED: the gate's or the landing's reason, such as
+  // `policy`, `conflicted` or `checks`.
+  string reason = 7;
+  // A command line that shows or fixes it, as an argv; empty for none.
+  repeated string next = 8;
+  // When it was judged.
+  google.protobuf.Timestamp evaluated_at = 9;
 }
 
 // A page of recorded lifecycles.

@@ -736,6 +736,8 @@ impl EvidenceService for EvidenceHandler {
             .db
             .add_evidence(&key, &row, link.as_ref(), &digests)
             .map_err(status)?;
+        // A proposal on this tree may land now, or need less (R3.45).
+        state.automatic.wake(repo_id);
         tracing::info!(
             evidence_id = %verified.id,
             key_id = %key.id,
