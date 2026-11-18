@@ -28,6 +28,8 @@ pub(crate) struct Stepped {
     pub(crate) lifecycle: v1::ChangeLifecycle,
     pub(crate) changed_file_count: u32,
     pub(crate) conflicted_path_count: u32,
+    /// With step `AWAIT_HELP`, the help request it waits on (R3.32).
+    pub(crate) help_request_id: Option<String>,
 }
 
 /// The facts [`step`] reads, besides the change's lifecycle.
@@ -101,10 +103,42 @@ pub(crate) async fn of_workspace(
             .is_some_and(|status| {
                 status.lands_unasked(&lifecycle.destination, &lifecycle.commit_id)
             });
+    // A help request this workspace's session asked on its change, open or
+    // with an answer no session took yet (R3.32). Another session's help
+    // request leaves this workspace's step alone.
+    let session = state
+        .db
+        .live_provenance_session(&record.id.as_hex())
+        .inspect_err(|error| warn(error))
+        .ok()
+        .flatten();
+    let help_request_id = session
+        .and_then(|session| {
+            state
+                .db
+                .awaited_help_request(
+                    repo,
+                    &change.change_id,
+                    session.declared.client_session.as_deref(),
+                    &session.session_id,
+                )
+                .inspect_err(|error| warn(error))
+                .ok()
+                .flatten()
+        })
+        .map(|row| row.id);
+    let next = step(
+        &change,
+        &lifecycle,
+        changed,
+        conflicted,
+        proposals,
+        automatic,
+        help_request_id.is_some(),
+    );
     Some(Stepped {
-        step: step(
-            &change, &lifecycle, changed, conflicted, proposals, automatic,
-        ),
+        help_request_id: help_request_id.filter(|_| next == ChangeStep::AwaitHelp),
+        step: next,
         lifecycle,
         changed_file_count: changed,
         conflicted_path_count: conflicted,
@@ -165,7 +199,9 @@ async fn read_facts(
 /// matches. `proposals` is whether the repository lands through
 /// proposals; `automatic`, whether the automatic service will land a
 /// proposal with no request (R3.45): its destination says
-/// `[landing] automatic = true` and the service has not given up on it.
+/// `[landing] automatic = true` and the service has not given up on it;
+/// `awaiting_help`, whether the change has an open help request or an
+/// untaken answer to one (R3.32), which outranks every row but done.
 pub(crate) fn step(
     change: &v1::Change,
     lifecycle: &v1::ChangeLifecycle,
@@ -173,7 +209,15 @@ pub(crate) fn step(
     conflicted: u32,
     proposals: bool,
     automatic: bool,
+    awaiting_help: bool,
 ) -> ChangeStep {
+    let final_state = matches!(
+        lifecycle.state(),
+        LifecycleState::Landed | LifecycleState::Superseded
+    );
+    if awaiting_help && !change.immutable && !final_state {
+        return ChangeStep::AwaitHelp;
+    }
     if change.conflict || conflicted > 0 {
         return ChangeStep::Resolve;
     }
@@ -309,10 +353,43 @@ mod tests {
         for (change, lifecycle, changed, conflicted, proposals, automatic, expected) in rows {
             assert_eq!(
                 step(
-                    change, &lifecycle, changed, conflicted, proposals, automatic
+                    change, &lifecycle, changed, conflicted, proposals, automatic, false
                 ),
                 expected,
                 "{change:?} {lifecycle:?} {changed} {conflicted} {proposals} {automatic}"
+            );
+        }
+    }
+
+    /// An open help request (R3.32) outranks every row but done: a
+    /// conflicted, proposed or draft change waits for the answer; a landed
+    /// or immutable one is done.
+    #[test]
+    fn help_outranks_every_row_but_done() {
+        use ChangeStep as Step;
+        use LifecycleState as State;
+        let described = change("Fix the parser", false);
+        let conflicted = v1::Change {
+            conflict: true,
+            ..described.clone()
+        };
+        let immutable = v1::Change {
+            immutable: true,
+            ..described.clone()
+        };
+        let at = |state| lifecycle(state, false);
+        for (change, lifecycle, expected) in [
+            (&conflicted, at(State::Draft), Step::AwaitHelp),
+            (&described, at(State::Proposed), Step::AwaitHelp),
+            (&described, at(State::Queued), Step::AwaitHelp),
+            (&described, at(State::Landed), Step::Done),
+            (&described, at(State::Superseded), Step::Done),
+            (&immutable, at(State::Draft), Step::Done),
+        ] {
+            assert_eq!(
+                step(change, &lifecycle, 3, 0, true, true, true),
+                expected,
+                "{change:?} {lifecycle:?}"
             );
         }
     }

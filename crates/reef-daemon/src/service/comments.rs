@@ -11,6 +11,7 @@ use reef_api::v1::{
     self, ClaimInstructionRequest, ClaimInstructionResponse, CreateCommentRequest,
     CreateCommentResponse, GetCommentRequest, GetCommentResponse, ListCommentsRequest,
     ListCommentsResponse, OperationKind, UpdateInstructionRequest, UpdateInstructionResponse,
+    WithdrawHelpRequestRequest, WithdrawHelpRequestResponse,
 };
 use reef_lib::jj::{ChangeIdHex, CommitIdHex};
 use tonic::{Request, Response, Status};
@@ -19,7 +20,10 @@ use super::convert::Written;
 use super::page::PageRequest;
 use super::reading::{Target, bad_token, snapshot_first, target, uses_working_copy};
 use super::written_operation;
-use crate::comments::messages::{channel_of, comment_message, kind_of, state_of};
+use crate::comments::help::WithdrawRequest;
+use crate::comments::messages::{
+    channel_of, comment_message, help_input_of, help_state_of, kind_of, state_of,
+};
 use crate::comments::{
     Anchor, Ceilings, ClaimRequest, CommentError, CreateRequest, MAX_REPLIES, UpdateRequest,
 };
@@ -50,8 +54,9 @@ fn millis(at: &prost_types::Timestamp) -> i64 {
         .saturating_add(i64::from(at.nanos) / 1_000_000)
 }
 
-/// `rows` as messages, each instruction with its target's last sighting and
-/// each anchored comment with whether its file changed since.
+/// `rows` as messages, each instruction with its target's last sighting,
+/// each anchored comment with whether its file changed since, and each help
+/// request about a conflict with whether that conflict moved.
 pub(super) async fn messages(
     state: &AppState,
     target: &Target,
@@ -69,6 +74,42 @@ pub(super) async fn messages(
         {
             items.push((change, commit, path.clone()));
             anchored.push(index);
+        }
+    }
+    let mut conflicted = Vec::new();
+    let mut asked = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if row
+            .help
+            .as_ref()
+            .is_some_and(|columns| columns.conflict_id.is_some())
+            && let Ok(change) = row.change_id.parse::<ChangeIdHex>()
+        {
+            conflicted.push(change);
+            asked.push(index);
+        }
+    }
+    let mut moved = vec![false; rows.len()];
+    if !conflicted.is_empty() {
+        let found = async {
+            let head = state.reads.current(&target.handle).await.ok()?;
+            state
+                .reads
+                .run(&target.handle, move || async move {
+                    reef_lib::jj::assignment::current_conflict_ids(&head, &conflicted).await
+                })
+                .await
+                .ok()
+        }
+        .await;
+        if let Some(found) = found {
+            for (index, now) in asked.into_iter().zip(found) {
+                let then = rows[index]
+                    .help
+                    .as_ref()
+                    .and_then(|columns| columns.conflict_id.as_deref());
+                moved[index] = now.as_deref() != then;
+            }
         }
     }
     let mut outdated = vec![false; rows.len()];
@@ -102,7 +143,7 @@ pub(super) async fn messages(
                         state.db.client_session_last_seen(session).ok().flatten()
                     })
                 });
-            comment_message(row, last_seen, outdated[index])
+            comment_message(row, last_seen, outdated[index], moved[index])
         })
         .collect()
 }
@@ -170,6 +211,8 @@ impl CommentService for CommentHandler {
                 ceilings,
                 agent: agent.clone(),
                 remote,
+                help: help_input_of(request.help.as_ref()),
+                client_session: request.client_session.clone(),
             },
         )
         .await
@@ -271,10 +314,18 @@ impl CommentService for CommentHandler {
             })?;
             states.push(state.as_str().to_owned());
         }
+        let mut help_states = Vec::new();
+        for value in &request.help_states {
+            let help = help_state_of(*value).ok_or_else(|| {
+                Status::invalid_argument(format!("{value} is not a help request state"))
+            })?;
+            help_states.push(help.as_str().to_owned());
+        }
         let filter = CommentFilter {
             changes,
             kinds,
             states,
+            help_states,
             client_session: Some(request.client_session.trim().to_owned())
                 .filter(|session| !session.is_empty()),
             created_after: request
@@ -419,6 +470,57 @@ impl CommentService for CommentHandler {
             None => None,
         };
         Ok(Response::new(ClaimInstructionResponse {
+            comment,
+            operation,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo))]
+    async fn withdraw_help_request(
+        &self,
+        request: Request<WithdrawHelpRequestRequest>,
+    ) -> Result<Response<WithdrawHelpRequestResponse>, Status> {
+        let (agent, remote) = caller(&request)?;
+        let request = request.into_inner();
+        let state = &self.state;
+        let target = target(state, &request.repo, &request.workspace)?;
+        let outcome = crate::comments::help::withdraw(
+            state,
+            WithdrawRequest {
+                repo: target.repo.id,
+                id: request.id.clone(),
+                summary: request.summary.clone(),
+                workspace: target.workspace.clone(),
+                agent: agent.clone(),
+                remote,
+            },
+        )
+        .await
+        .map_err(status)?;
+        let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
+        let owner = target
+            .workspace
+            .as_ref()
+            .map(|record| record.owner.as_str());
+        let operation = written_operation(
+            state,
+            target.repo.id,
+            outcome.op_id.as_ref().map(ToString::to_string).as_deref(),
+            Written {
+                kind: OperationKind::Comment,
+                snapshot: None,
+                workspace: workspace_id.as_deref(),
+                agent: agent.as_deref().or(owner).unwrap_or_default(),
+            },
+        )
+        .await?;
+        let comment = match &outcome.comment {
+            Some(row) => messages(state, &target, std::slice::from_ref(row))
+                .await
+                .pop(),
+            None => None,
+        };
+        Ok(Response::new(WithdrawHelpRequestResponse {
             comment,
             operation,
         }))

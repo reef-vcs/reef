@@ -85,8 +85,17 @@ describe("operationSentence for comments", () => {
     ["claim", "took an instruction"],
     ["finish", "finished an instruction"],
     ["cancel", "cancelled an instruction"],
+    ["ask", "asked for help"],
+    ["withdraw", "withdrew a help request"],
+    ["reopen", "reopened a help request"],
   ])("%s", (event, sentence) => {
     expect(operationSentence({ ...base, comments: [{ event }] })).toBe(sentence);
+  });
+
+  // R3.32: an answer's operation writes the instruction, then answers.
+  it("names an answer over its instruction", () => {
+    const comments = [{ event: "instruct" }, { event: "answer" }];
+    expect(operationSentence({ ...base, comments })).toBe("answered a help request");
   });
 
   it("falls back without an event", () => {

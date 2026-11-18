@@ -64,6 +64,10 @@ enum ChangeStep {
   CHANGE_STEP_PUBLISH = 8;
   // Landed, superseded or otherwise immutable: nothing is left to do.
   CHANGE_STEP_DONE = 9;
+  // The workspace's session asked a help request on the change (R3.32) that
+  // is open, or whose answer no session has taken: wait for the answer
+  // (`reef comment next --wait`).
+  CHANGE_STEP_AWAIT_HELP = 10;
 }
 
 // Why a transition was recorded.

@@ -436,6 +436,8 @@ message Workspace {
   ChangeLifecycle lifecycle = 28;
   // Conflicted paths in its working-copy commit; set where `step` is.
   uint32 conflicted_path_count = 29;
+  // With step AWAIT_HELP: the help request it waits on (R3.32).
+  string help_request_id = 30;
 }
 
 // Another open change that changes a path a workspace's change changes

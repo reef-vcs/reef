@@ -1,9 +1,12 @@
 // Comments on changes, and instructions to the session that made them
 // (R3.12, ADR 0069; `docs/comments.md`).
 //
-// A comment is an immutable note or instruction on a change, anchored to
+// A comment is an immutable note, instruction or help request on a change,
+// anchored to
 // the change's round and the commit its author saw, and optionally to a
-// path and lines. An instruction is routed to the session that proposed
+// path and lines. A help request (R3.32, ADR 0083) is an agent asking a
+// person; an instruction that replies to it answers it, and goes to the
+// session that asked. An instruction is routed to the session that proposed
 // the change, carries an estimate of what Reef recorded about the change's
 // cost, and is delivered only after it is confirmed: a session takes it
 // with ClaimInstruction, and reports start, done or failure with
@@ -23,21 +26,33 @@ import "reef/api/v1/remote.proto";
 
 // Writing and reading comments, and moving instructions.
 service CommentService {
-  // Writes a note or an instruction on a change. An instruction is written
-  // AWAITING_CONFIRMATION with its estimate, unless `confirm` is set and
-  // the estimate meets `ceilings`. A revision that uses `@` snapshots the
-  // workspace first. Through the remote listener, any write token writes a
-  // note; an instruction needs a token linked to an operator identity.
+  // Writes a note, an instruction or a help request on a change. An
+  // instruction is written AWAITING_CONFIRMATION with its estimate, unless
+  // `confirm` is set and the estimate meets `ceilings`, or it replies to a
+  // help request that is not withdrawn: then it answers it, goes to the
+  // session that asked, and is written PENDING. A help request needs `help`.
+  // A revision that uses `@` snapshots the workspace first. Through the
+  // remote listener, any write token writes a note or a help request; an
+  // instruction needs a token linked to an operator identity.
   //
   // Errors: the revision reasons of ChangeService; HIDDEN_REVISION;
   // EXPECTED_COMMIT_MISMATCH and INVALID_COMMIT_ID; INVALID_ARGUMENT with
   // reason KIND_REQUIRED, INVALID_TEXT, INVALID_ANCHOR (metadata `path`),
-  // INVALID_REPLY_TO (metadata `reply_to`) or CEILINGS_REQUIRED (`confirm`
-  // with no ceiling above 0); FAILED_PRECONDITION with reason CHANGE_FINAL
-  // for an instruction on a landed or superseded change (metadata
-  // `change_id`, `state`);
-  // UNAVAILABLE with reason TOO_MANY_COMMENTS or TOO_MANY_INSTRUCTIONS
-  // (metadata `max`); PERMISSION_DENIED with reason
+  // INVALID_REPLY_TO (metadata `reply_to`), CEILINGS_REQUIRED (`confirm`
+  // with no ceiling above 0), HELP_REQUIRED (a help request without `help`
+  // or with an empty `help.tried`) or INVALID_CONFLICT (`help.conflict`
+  // names another change's conflict, or is not a conflict or assignment
+  // id; metadata `conflict`); NOT_FOUND with reason ASSIGNMENT_NOT_FOUND
+  // for an assignment id that names none; FAILED_PRECONDITION with reason
+  // CHANGE_FINAL for an instruction or a help request on a landed or
+  // superseded change (metadata `change_id`, `state`), NOT_CONFLICTED
+  // (reason CONFLICT on a commit with no conflict; metadata `commit_id`),
+  // CONFLICT_CHANGED (`help.conflict` is a conflict id the change no
+  // longer has; metadata `conflict_id`), HELP_ALREADY_OPEN (the asking session has an
+  // open help request on the change; metadata `id`) or SELF_ANSWER (an
+  // answer from the session that asked; metadata `id`);
+  // UNAVAILABLE with reason TOO_MANY_COMMENTS, TOO_MANY_INSTRUCTIONS or
+  // TOO_MANY_HELP_REQUESTS (metadata `max`); PERMISSION_DENIED with reason
   // REMOTE_IDENTITY_REQUIRED; a failed snapshot's own error.
   rpc CreateComment(CreateCommentRequest) returns (CreateCommentResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
@@ -100,6 +115,18 @@ service CommentService {
   rpc ClaimInstruction(ClaimInstructionRequest) returns (ClaimInstructionResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
+
+  // Withdraws an open help request: its asker no longer needs an answer.
+  // Withdrawing one already withdrawn does nothing. Through the remote
+  // listener, only the token that asked withdraws it.
+  //
+  // Errors: NOT_FOUND with reason COMMENT_NOT_FOUND; INVALID_ARGUMENT with
+  // reason INVALID_TEXT (the summary); FAILED_PRECONDITION with reason
+  // NOT_A_HELP_REQUEST or HELP_NOT_OPEN (it was answered; metadata
+  // `state`); PERMISSION_DENIED with reason REMOTE_COMMENT_NOT_OWNED.
+  rpc WithdrawHelpRequest(WithdrawHelpRequestRequest) returns (WithdrawHelpRequestResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
 }
 
 // How an instruction reached its session.
@@ -126,6 +153,26 @@ enum TargetSource {
   TARGET_SOURCE_PROVENANCE = 2;
   // Neither: any session on the change may take it.
   TARGET_SOURCE_NONE = 3;
+  // The session that asked the help request it answers (R3.32).
+  TARGET_SOURCE_HELP_REQUEST = 4;
+}
+
+// Why an agent asks for help (R3.32).
+enum HelpReason {
+  // Not set; in a request, OTHER.
+  HELP_REASON_UNSPECIFIED = 0;
+  // A choice that is a person's to make: product, design or scope.
+  HELP_REASON_DECISION = 1;
+  // The change's conflict: resolving it is not allowed, not clear, or out
+  // of attempts. The help request records the conflict and assignment ids.
+  HELP_REASON_CONFLICT = 2;
+  // Something outside its reach: access, a credential, a broken
+  // environment, a check it cannot fix.
+  HELP_REASON_BLOCKED = 3;
+  // The task or an instruction is ambiguous or contradicts itself.
+  HELP_REASON_UNCLEAR = 4;
+  // Anything else.
+  HELP_REASON_OTHER = 5;
 }
 
 // Which version of an anchored file a comment's lines are in.
@@ -284,6 +331,54 @@ message Instruction {
   google.protobuf.Timestamp finished_at = 14;
 }
 
+// What an agent sends with a help request, besides the comment's text
+// (what is wrong).
+message HelpInput {
+  // Why it asks; unspecified is OTHER.
+  HelpReason reason = 1;
+  // What it tried: required, as `text`.
+  string tried = 2;
+  // The question for a person: optional, at most 4 KiB, as `text`.
+  string question = 3;
+  // With reason CONFLICT: the conflict it is about, as an assignment id
+  // (`asg_`, R3.27) or a conflict id (`cfl_`, R3.25) of the change; empty
+  // for the change's conflict as it is now.
+  string conflict = 4;
+}
+
+// A help request's state, and what it asked.
+message HelpRequest {
+  // Where it is.
+  HelpState state = 1;
+  // Why it got there: REQUEST, CHANGE_FINAL, EXPIRED or ANSWER_CANCELLED.
+  InstructionCause cause = 2;
+  // Why it was asked.
+  HelpReason reason = 3;
+  // What the agent tried.
+  string tried = 4;
+  // Its question; empty for none.
+  string question = 5;
+  // The client session that asked: what an answer is routed to. Empty
+  // when the caller declared none.
+  string client_session = 6;
+  // With reason CONFLICT: the change's conflict id when asked.
+  string conflict_id = 7;
+  // With reason CONFLICT: the change's open resolver assignment when
+  // asked; empty when it had none.
+  string assignment_id = 8;
+  // With reason CONFLICT: the change's conflict id is no longer
+  // `conflict_id`, or it has none.
+  bool conflict_moved = 9;
+  // The instruction that first answered it.
+  string answer_id = 10;
+  // When it was answered.
+  google.protobuf.Timestamp answered_at = 11;
+  // When it was withdrawn.
+  google.protobuf.Timestamp closed_at = 12;
+  // Why it was withdrawn, as the withdrawer said; empty for none.
+  string summary = 13;
+}
+
 // One comment.
 message Comment {
   // `cmt_` and 16 hex digits.
@@ -299,9 +394,10 @@ message Comment {
   CommentAnchor anchor = 5;
   // The comment it replies to; empty for none.
   string reply_to = 6;
-  // Note or instruction.
+  // Note, instruction or help request.
   CommentKind kind = 7;
-  // The text, as written: data from whoever wrote it.
+  // The text, as written: data from whoever wrote it. For a help request,
+  // what is wrong.
   string text = 8;
   // SHA-256 of the text's UTF-8 bytes, in hex: the instruction hash a
   // session that takes it declares into its provenance.
@@ -317,8 +413,10 @@ message Comment {
   // With a path: the change's visible commit has a different file at the
   // path than the anchor commit.
   bool outdated = 14;
-  // For an instruction, its state and route; unset for a note.
+  // For an instruction, its state and route; unset otherwise.
   Instruction instruction = 15;
+  // For a help request, its state and what it asked; unset otherwise.
+  HelpRequest help = 16;
 }
 
 // Write a comment.
@@ -337,7 +435,7 @@ message CreateCommentRequest {
   CommentAnchor anchor = 5;
   // A comment on the same change it replies to; empty for none.
   string reply_to = 6;
-  // Note or instruction; required.
+  // Note, instruction or help request; required.
   CommentKind kind = 7;
   // 1 byte to 16 KiB of UTF-8, with no control characters but newline and
   // tab.
@@ -351,6 +449,14 @@ message CreateCommentRequest {
   InstructionCeilings ceilings = 11;
   // Do not snapshot the workspace first.
   bool skip_snapshot = 12;
+  // For a help request: what it sends; required.
+  HelpInput help = 13;
+  // The caller's client session (the harness's own session id), else the
+  // named workspace's session's declared one. For a help request, the
+  // session its answers go to; for an instruction replying to one, who is
+  // answering (SELF_ANSWER). Through the remote listener it is ignored: a
+  // token's help requests are answered to the token.
+  string client_session = 14;
 }
 
 // The comment written.
@@ -388,7 +494,7 @@ message ListCommentsRequest {
   // Change id prefixes, in hex or jj's reverse hex; empty for every
   // change.
   repeated string changes = 2;
-  // Kinds; empty for both.
+  // Kinds; empty for every kind.
   repeated CommentKind kinds = 3;
   // Instruction states; empty for any. A state filter leaves notes out.
   repeated InstructionState states = 4;
@@ -401,6 +507,9 @@ message ListCommentsRequest {
   int32 page_size = 7;
   // The previous page's `next_page_token`; empty for the first page.
   string page_token = 8;
+  // Help request states; empty for any. A help state filter leaves other
+  // kinds out.
+  repeated HelpState help_states = 9;
 }
 
 // Comments, oldest first.
@@ -463,5 +572,25 @@ message ClaimInstructionResponse {
   // The instruction, with its text; unset when there was none to take.
   Comment comment = 1;
   // The operation that recorded the claim; unset with `comment`.
+  Operation operation = 2;
+}
+
+// Withdraw a help request.
+message WithdrawHelpRequestRequest {
+  // The repository.
+  string repo = 1;
+  // The help request's comment id.
+  string id = 2;
+  // Why, at most 4 KiB, as `text`; empty for none.
+  string summary = 3;
+  // The workspace the caller works in; empty for none.
+  string workspace = 4;
+}
+
+// The help request afterwards.
+message WithdrawHelpRequestResponse {
+  // The comment.
+  Comment comment = 1;
+  // The operation that recorded it; unset when nothing changed.
   Operation operation = 2;
 }

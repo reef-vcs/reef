@@ -93,3 +93,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0079](0079-overlaps.md) | Overlaps from open changes' paths | accepted |
 | [0080](0080-here-walks-the-lifecycle.md) | `reef here` walks the change's lifecycle | accepted |
 | [0081](0081-automatic-landing.md) | Automatic landing and evidence requests | accepted |
+| [0083](0083-help-requests.md) | Help requests from agents | accepted |

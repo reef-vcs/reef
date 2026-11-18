@@ -155,7 +155,7 @@ The daemon keeps a status for every proposal, judged again whenever something th
 | `waiting` | Checks it lacks were asked of executors; the jobs are open. | `reef land` waits for them |
 | `ready` | Policy allows it now, and the destination does not land automatically. | `reef land` |
 | `queued` | Queued, by `reef land` or automatically. | `reef landing show` |
-| `needs` | Something no job provides blocks it: a sign-off, a failed check, a rule, a conflict, a change of its stack. The message says what. | its `next` |
+| `needs` | Something no job provides blocks it: a sign-off, a failed check, a rule, a conflict, a change of its stack, or a help request its author asked and nobody answered yet (reason `help`, R3.32; the whole stack waits). The message says what. | its `next` |
 | `no_executor` | Its jobs expired with no executor claiming them. | `reef executor run` |
 | `returned` | Its automatic landing came back (`checks`, `conflicted`, ...), and nothing changed since. | its `next` |
 

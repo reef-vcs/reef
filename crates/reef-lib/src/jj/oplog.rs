@@ -614,7 +614,7 @@ const IMPORT_REFS: &str = "reef: import git refs";
 const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
-const WRITES: [(&str, OpKind); 27] = [
+const WRITES: [(&str, OpKind); 31] = [
     (DESCRIBE_PREFIX, OpKind::Describe),
     (ABANDON_PREFIX, OpKind::Abandon),
     (REVERT_PREFIX, OpKind::Undo),
@@ -636,6 +636,10 @@ const WRITES: [(&str, OpKind); 27] = [
     ("reef: finish comment ", OpKind::Comment),
     ("reef: cancel comment ", OpKind::Comment),
     ("reef: release comment ", OpKind::Comment),
+    ("reef: ask comment ", OpKind::Comment),
+    ("reef: answer comment ", OpKind::Comment),
+    ("reef: withdraw comment ", OpKind::Comment),
+    ("reef: reopen comment ", OpKind::Comment),
     (TEST_BATCH_PREFIX, OpKind::Batch),
     (END_BATCH_PREFIX, OpKind::Batch),
     (PUBLISH_PREFIX, OpKind::Publish),

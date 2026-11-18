@@ -47,7 +47,10 @@ pub(crate) enum Rule {
     /// claim that takes another session's, need a token linked to an
     /// operator identity; confirm and cancel need the token that wrote it,
     /// the later moves the token that claimed it, and a claim without
-    /// taking the token that proposed the change.
+    /// taking the token that proposed the change. A help request (R3.32) is
+    /// written by any token and withdrawn by the token that asked; an answer
+    /// is an instruction, and is claimed without taking by the token that
+    /// asked.
     Comment,
     /// Refused to every remote caller (#258): a publish runs the user's git
     /// credentials, which a remote token must never reach. The handler
@@ -122,6 +125,10 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     ),
     (
         "/reef.api.v1.CommentService/ClaimInstruction",
+        Rule::Comment,
+    ),
+    (
+        "/reef.api.v1.CommentService/WithdrawHelpRequest",
         Rule::Comment,
     ),
     // A claim and a release name a workspace the caller's token created

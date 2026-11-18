@@ -210,6 +210,7 @@ names_schema! {
     disk_level_name_schema = disk_level_name, false;
     instruction_state_name_schema_or_null = instruction_state_name, true;
     instruction_cause_name_schema_or_null = instruction_cause_name, true;
+    help_state_name_schema_or_null = help_state_name, true;
     operation_kind_name_schema_or_null = operation_kind_name, true;
     presence_kind_schema = presence_kind, false;
     snapshot_kind_name_schema = snapshot_kind_name, false;
@@ -441,8 +442,8 @@ pub struct Workspace {
     pub overlap_count: u32,
     /// What its change needs next to be finished (#262, ADR 0080): `work`,
     /// `resolve`, `describe`, `propose`, `land`, `wait`, `revise`,
-    /// `publish` or `done`. Set by `ws inspect` and `here` for an active
-    /// workspace; absent elsewhere.
+    /// `publish`, `done` or `await_help` (R3.32). Set by `ws inspect` and
+    /// `here` for an active workspace; absent elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "change_step_name_schema_or_null")]
     pub step: Option<String>,
@@ -453,6 +454,9 @@ pub struct Workspace {
     /// none.
     #[serde(skip_serializing_if = "is_zero_u32")]
     pub conflicted_path_count: u32,
+    /// With step `await_help`: the help request it waits on (R3.32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help_request_id: Option<String>,
 }
 
 /// Another open change that changes a path a workspace's change changes
@@ -779,6 +783,7 @@ impl From<&v1::Workspace> for Workspace {
                 .as_deref()
                 .map(|lifecycle| Box::new(ChangeLifecycle::from(lifecycle))),
             conflicted_path_count: ws.conflicted_path_count,
+            help_request_id: text(&ws.help_request_id),
         }
     }
 }
@@ -1726,6 +1731,7 @@ pub fn change_step_name(step: i32) -> Option<&'static str> {
         Ok(v1::ChangeStep::Revise) => "revise",
         Ok(v1::ChangeStep::Publish) => "publish",
         Ok(v1::ChangeStep::Done) => "done",
+        Ok(v1::ChangeStep::AwaitHelp) => "await_help",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1751,12 +1757,14 @@ pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
     Some(name)
 }
 
-/// A comment's kind (R3.12): `note` or `instruction`; `None` when unset.
+/// A comment's kind (R3.12): `note`, `instruction` or `help_request`
+/// (R3.32); `None` when unset.
 pub fn comment_kind_name(kind: i32) -> Option<&'static str> {
     let name = match v1::CommentKind::try_from(kind) {
         Ok(v1::CommentKind::Unspecified) => return None,
         Ok(v1::CommentKind::Note) => "note",
         Ok(v1::CommentKind::Instruction) => "instruction",
+        Ok(v1::CommentKind::HelpRequest) => "help_request",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1780,8 +1788,9 @@ pub fn instruction_state_name(state: i32) -> Option<&'static str> {
     Some(name)
 }
 
-/// Why an instruction moved (R3.12): `request`, `reproposed`,
-/// `change_final` or `expired`; `None` when unset.
+/// Why an instruction or a help request moved (R3.12, R3.32): `request`,
+/// `reproposed`, `change_final`, `expired` or `answer_cancelled`; `None`
+/// when unset.
 pub fn instruction_cause_name(cause: i32) -> Option<&'static str> {
     let name = match v1::InstructionCause::try_from(cause) {
         Ok(v1::InstructionCause::Unspecified) => return None,
@@ -1789,6 +1798,35 @@ pub fn instruction_cause_name(cause: i32) -> Option<&'static str> {
         Ok(v1::InstructionCause::Reproposed) => "reproposed",
         Ok(v1::InstructionCause::ChangeFinal) => "change_final",
         Ok(v1::InstructionCause::Expired) => "expired",
+        Ok(v1::InstructionCause::AnswerCancelled) => "answer_cancelled",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A help request's state (R3.32): `open`, `answered` or `withdrawn`;
+/// `None` when unset.
+pub fn help_state_name(state: i32) -> Option<&'static str> {
+    let name = match v1::HelpState::try_from(state) {
+        Ok(v1::HelpState::Unspecified) => return None,
+        Ok(v1::HelpState::Open) => "open",
+        Ok(v1::HelpState::Answered) => "answered",
+        Ok(v1::HelpState::Withdrawn) => "withdrawn",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// Why an agent asked for help (R3.32): `decision`, `conflict`,
+/// `blocked`, `unclear` or `other`; `None` when unset.
+pub fn help_reason_name(reason: i32) -> Option<&'static str> {
+    let name = match v1::HelpReason::try_from(reason) {
+        Ok(v1::HelpReason::Unspecified) => return None,
+        Ok(v1::HelpReason::Decision) => "decision",
+        Ok(v1::HelpReason::Conflict) => "conflict",
+        Ok(v1::HelpReason::Blocked) => "blocked",
+        Ok(v1::HelpReason::Unclear) => "unclear",
+        Ok(v1::HelpReason::Other) => "other",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -2547,11 +2585,12 @@ pub struct CommentEvent {
     pub change_id_reverse_hex: String,
     /// The change's proposal round when the comment was written.
     pub round: u32,
-    /// `note` or `instruction`.
+    /// `note`, `instruction` or `help_request`.
     #[schemars(schema_with = "comment_kind_name_schema_or_null")]
     pub kind: Option<String>,
     /// `comment`, `instruct`, `confirm`, `claim`, `start`, `finish`,
-    /// `cancel` or `release`.
+    /// `cancel` or `release`; for a help request (R3.32), `ask`, `answer`,
+    /// `withdraw` or `reopen`.
     pub event: String,
     /// An instruction's state before.
     #[schemars(schema_with = "instruction_state_name_schema_or_null")]
@@ -2562,6 +2601,14 @@ pub struct CommentEvent {
     /// Why.
     #[schemars(schema_with = "instruction_cause_name_schema_or_null")]
     pub cause: Option<String>,
+    /// A help request's state before (R3.32); absent for other events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "help_state_name_schema_or_null")]
+    pub help_from: Option<String>,
+    /// A help request's state after; absent for other events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "help_state_name_schema_or_null")]
+    pub help_to: Option<String>,
 }
 
 impl From<&v1::CommentEvent> for CommentEvent {
@@ -2577,6 +2624,8 @@ impl From<&v1::CommentEvent> for CommentEvent {
             from: name(instruction_state_name(event.from)),
             to: name(instruction_state_name(event.to)),
             cause: name(instruction_cause_name(event.cause)),
+            help_from: name(help_state_name(event.help_from)),
+            help_to: name(help_state_name(event.help_to)),
         }
     }
 }

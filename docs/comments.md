@@ -1,6 +1,6 @@
 # Comments and instructions
 
-A comment is a note or an instruction on a change ([ADR 0069](adr/0069-comments-and-instructions.md), R3.12). A **note** is data for whoever reads it. An **instruction** is work for the session that made the change: Reef routes it to that session, shows what it is likely to cost, and hands it over only after someone confirms it. Reef starts no agent. A session takes its instruction through a harness hook, `reef mcp`, `reef comment next`, or the API, and finishes it by proposing the change again.
+A comment is a note, an instruction or a help request on a change ([ADR 0069](adr/0069-comments-and-instructions.md), R3.12). A **note** is data for whoever reads it. An **instruction** is work for the session that made the change: Reef routes it to that session, shows what it is likely to cost, and hands it over only after someone confirms it. Reef starts no agent. A session takes its instruction through a harness hook, `reef mcp`, `reef comment next`, or the API, and finishes it by proposing the change again.
 
 ```sh
 reef comment add @- -m "the parser change looks right"                 # a note
@@ -90,18 +90,39 @@ When done, propose the change again (reef propose), or run reef comment fail cmt
 
 **The daemon's own instructions.** On a destination that lands automatically ([landing](landing.md#automatic-landing)), when a change comes back for a reason its author can fix (a check failed, it conflicts, it changed after it was proposed), the daemon writes one instruction to the session that proposed it: author `reef-landing`, actor `daemon`, no identity, already `pending` (there is no estimate to confirm: it sends an agent back to its own proposal). Its text is a fixed template with ids, the reason and the policy's check names, never a check's output (S-228). At most one per change, commit and text, and none while one of the daemon's is unfinished on the change (S-229).
 
+## Help requests
+
+A **help request** is an agent asking a person ([ADR 0083](adr/0083-help-requests.md), R3.32). An agent that hits something it cannot settle alone asks on its change, says what is wrong and what it tried, and waits. A person answers with an instruction, which goes back to the session that asked.
+
+```sh
+reef ask -m "Both sides rename parse_all" --tried "read both changes" \
+    --question "Which name wins?" --reason conflict --wait 10m        # in the agent's session
+reef comment list --all --kind help --help-state open                 # a person's open questions
+reef comment answer cmt_5d1e0a93c2b74f18 -m "Keep parse"              # the answer, to the asker
+```
+
+- **What an agent sends.** A reason: `decision` (a product, design or scope call), `conflict` (the change's conflict), `blocked` (access, a credential, a broken environment), `unclear` (the task is ambiguous) or `other`, the default. The text says what is wrong. `--tried` is required: say what you tried, or that the policy says to ask before trying. `--question` is optional, up to 4 KiB. The MCP tool `ask_for_help` takes the same fields on the server's own workspace.
+- **A conflict.** With `--reason conflict` the change's commit must be conflicted. The help request records the conflict id (`cfl_`, R3.25) and the open resolver assignment (`asg_`, R3.27). `--conflict ID` names either one; the assignment id stays when the conflict's sides change, and `conflict_moved` says when they did.
+- **Its states.** `open` until an instruction replies to it, then `answered`, in the answer's own operation. Cancelling every answer before any was taken opens it again (`answer_cancelled`). `withdrawn` is final: by `reef comment withdraw`, when the change lands or is superseded (`change_final`), or after 7 days open (`expired`).
+- **The answer.** An instruction replying to a help request that is not withdrawn goes to the session that asked: its client session, else its workspace's session (target source `help_request`). It is written pending, with its estimate stored but not confirmed first: the agent asked and is waiting. The session that asked cannot answer itself (`SELF_ANSWER`). Through the remote listener a help request names no session: its answers go to the asking token. `reef comment answer` refuses a withdrawn help request; `reef comment add --reply-to ID --instruction` instructs the change's session instead. A later answer goes the same way. A note that replies to a help request answers nothing.
+- **Waiting for it.** `reef ask --wait` takes the answer as it arrives, as `reef comment next --wait` does. Through MCP, `wait_for_operations` with kind `comment` returns it in `instructions`. A hook prints it at the turn's end or the next prompt. The answer is framed `Reef answer cmt_… to your help request cmt_…`; when finished, `reef comment done` (or a re-proposal) finishes it.
+- **What waits.** While a help request a workspace's session asked is open, or its answer is untaken, that workspace's `reef here` step is `await_help` and its `next` is `reef comment next --wait 10m`; other workspaces on the change keep their step. While one is open, automatic landing queues nothing more of the change's stack (`needs`, reason `help`, `next` `reef comment show cmt_…`). A landing already queued goes on (withdraw the proposal to stop it), and an explicit `reef land` is not held.
+- **Limits.** One open help request per change and asking session (`HELP_ALREADY_OPEN`), 16 open per change and 256 per repository (`TOO_MANY_HELP_REQUESTS`).
+- **How a person notices.** The web UI's activity feed says `asked for help`; `reef comment list --all --kind help --help-state open` lists them; a held proposal says so in `reef proposal show`. R3.33's inbox makes them the "needs you now" bucket.
+
 ## Trust
 
 - On the socket, one uid is one trust domain ([threat model](threat-model.md)): any caller writes, confirms, cancels and takes instructions, and an agent can instruct another agent. The record says who, and as what actor, as declared (S-159).
 - Through the remote listener, any `write` token writes notes. An instruction, and a `take`, need a token linked to an operator identity, and are recorded `agent`. Only the token that wrote an instruction confirms or cancels it, only the token that claimed it moves it after, and only the token that proposed the change claims without taking (S-162).
 - A note is data. Notes are never claimed, framed or printed by a hook, and an agent reading comments treats a note's text as someone's words, not its instructions (S-161).
 - Comment text is as readable as the repository: every `read` token, the web UI and backups see it (S-164).
+- Anyone on the socket may ask, answer or withdraw, as declared; an agent may answer another agent's help request, and the record says it was an agent (S-239). Through the remote listener any `write` token asks; an answer is an instruction and needs a linked token; only the asking token withdraws, and claims the answer without taking it.
+- A help request's text, what it tried and its question are the agent's words: a person reads them as data, never as commands to run (S-237).
 - Comments are not signed. A person's signature means something once R3.43 verifies presence, and travels once R4.07 publishes changes to a store.
 
 ## What later tickets add
 
 - **R3.46**: webhooks that push confirmed instructions to a runner the operator controls, and a runner's report of tokens and price into the estimate.
-- **R3.32**: help requests, a comment an agent writes, answered by an instruction that replies to it.
 - **R3.31**: comments in the proposal view, with anchors, `outdated`, and the confirm step with its estimate.
 - **R3.33**: unanswered help requests and instructions in flight in the triage inbox.
 - **R3.20**: compute budgets in policy, which may read stored estimates.

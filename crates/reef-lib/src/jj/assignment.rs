@@ -246,6 +246,29 @@ pub async fn visible_commit(
     }))
 }
 
+/// Each change's conflict id now: the conflict of its first visible
+/// commit, or `None` when it has no visible commit, no conflict, or the
+/// read fails (R3.32's `conflict_moved`).
+pub async fn current_conflict_ids(
+    repo: &ReadonlyRepo,
+    changes: &[ChangeIdHex],
+) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(changes.len());
+    for change in changes {
+        let id = match visible_commit(repo, change).await {
+            Ok(Some(visible)) if visible.conflicted => {
+                conflict::read(repo, &visible.commit, &conflict::ReadOptions::default())
+                    .await
+                    .ok()
+                    .map(|object| object.id)
+            }
+            _ => None,
+        };
+        out.push(id);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -88,23 +88,19 @@ async fn deliver(log: &Log<'_>, operations: &[v1::Operation]) -> Vec<Delivered> 
             if !crate::cli::comment::confirmed_event(event) {
                 continue;
             }
-            let claimed = log
-                .ctx
-                .call(
-                    log.ctx
-                        .client
-                        .claim_instruction(v1::ClaimInstructionRequest {
-                            repo: log.repo.clone(),
-                            client_session: session.clone(),
-                            comment_id: event.comment_id.clone(),
-                            // DELIVERED: a call cancelled before its result
-                            // reaches the model leaves one that can be
-                            // released.
-                            channel: v1::DeliveryChannel::Mcp.into(),
-                            ..v1::ClaimInstructionRequest::default()
-                        }),
-                )
-                .await;
+            let claimed = Box::pin(log.ctx.call(log.ctx.client.claim_instruction(
+                v1::ClaimInstructionRequest {
+                    repo: log.repo.clone(),
+                    client_session: session.clone(),
+                    comment_id: event.comment_id.clone(),
+                    // DELIVERED: a call cancelled before its result
+                    // reaches the model leaves one that can be
+                    // released.
+                    channel: v1::DeliveryChannel::Mcp.into(),
+                    ..v1::ClaimInstructionRequest::default()
+                },
+            )))
+            .await;
             match claimed {
                 Ok(response) => {
                     if let Some(comment) = response.comment {

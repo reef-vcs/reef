@@ -454,7 +454,7 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
 /// rebase makes a proposal amended and a queued change cannot move.
 fn behind_and_rebase_fits(ws: &Workspace) -> bool {
     let fits = match ws.step.as_deref() {
-        Some("land" | "wait" | "revise" | "done" | "resolve") => false,
+        Some("land" | "wait" | "revise" | "done" | "resolve" | "await_help") => false,
         Some("propose") => ws
             .lifecycle
             .as_ref()
@@ -476,6 +476,7 @@ fn files(count: u32) -> String {
 /// workspace whose health asks for nothing first. Only Reef's own words,
 /// ids, counts and bookmark names go into `hint` and `next`: never a
 /// description, a reason or a comment (S-216).
+#[expect(clippy::too_many_lines, reason = "an arm per step of the table")]
 fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
     let argv =
         |words: &[&str]| -> Vec<String> { words.iter().map(|word| (*word).to_owned()).collect() };
@@ -536,6 +537,21 @@ fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<St
                 "1",
                 "--for",
                 WAIT_FOR_SECONDS,
+            ]),
+        ),
+        Some("await_help") => (
+            format!(
+                "You asked a person for help ({}); the answer comes back as an instruction for this session. Wait for it, then do what it says.",
+                ws.help_request_id.as_deref().unwrap_or("a help request")
+            ),
+            argv(&[
+                "reef",
+                "comment",
+                "next",
+                "--wait",
+                "10m",
+                "--change",
+                &ws.change_id_reverse_hex,
             ]),
         ),
         Some("revise") => (
@@ -929,6 +945,11 @@ mod tests {
             changed_file_count: Some(3),
             conflicted_path_count: u32::from(step == v1::ChangeStep::Resolve) * 2,
             step: step.into(),
+            help_request_id: if step == v1::ChangeStep::AwaitHelp {
+                "cmt_0123456789abcdef".into()
+            } else {
+                String::new()
+            },
             lifecycle: Some(Box::new(v1::ChangeLifecycle {
                 state: state.into(),
                 recorded: state != v1::LifecycleState::Draft,
@@ -949,13 +970,17 @@ mod tests {
     /// #262's acceptance: each step's `next`, in a plain workspace, in
     /// `ws run`, and held.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "a row per step of the table")]
     fn each_step_names_its_next() {
         use v1::{ChangeStep as Step, LifecycleState as State};
         let release = ["reef", "ws", "release", "0123456789abcdef"].map(str::to_owned);
         let watch: Vec<&str> = "reef op watch --kind transition --change zy --count 1 --for 120"
             .split(' ')
             .collect();
-        let cases: [(Step, State, bool, &[&str], &str); 12] = [
+        let await_help: Vec<&str> = "reef comment next --wait 10m --change zy"
+            .split(' ')
+            .collect();
+        let cases: [(Step, State, bool, &[&str], &str); 13] = [
             (Step::Work, State::Draft, false, &[], "Work here"),
             (
                 Step::Resolve,
@@ -1022,6 +1047,13 @@ mod tests {
             ),
             (Step::Publish, State::Draft, false, &[], "`reef publish`"),
             (Step::Done, State::Landed, false, &[], "landed on `main`"),
+            (
+                Step::AwaitHelp,
+                State::Proposed,
+                false,
+                await_help.as_slice(),
+                "asked a person for help (cmt_0123456789abcdef)",
+            ),
         ];
         for (step, state, amended, next, said) in cases {
             let ws = stepped(step, state, amended);

@@ -1006,3 +1006,116 @@ async fn retention_deletes_old_closed_assignments() {
     );
     daemon.stop().await;
 }
+
+// R3.32 test 3: a help request about a change's conflict records its
+// conflict id and open assignment, by the change's conflict or by either id;
+// a clean change, a stale conflict id and another change's assignment are
+// refused; `conflict_moved` says when the sides changed since.
+#[tokio::test]
+async fn help_request_names_a_conflict() {
+    use v1::{CommentKind, CreateCommentRequest, GetCommentRequest, HelpInput, HelpReason};
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo).await;
+    let assignment = the_one(client, &repo.id).await;
+    let ask = |revision: &str, session: &str, conflict: &str| CreateCommentRequest {
+        repo: repo.id.clone(),
+        revision: revision.to_owned(),
+        kind: CommentKind::HelpRequest.into(),
+        text: "Both sides rename the same function.".to_owned(),
+        help: Some(HelpInput {
+            reason: HelpReason::Conflict.into(),
+            tried: "nothing: the policy says ask first".to_owned(),
+            question: "Which name wins?".to_owned(),
+            conflict: conflict.to_owned(),
+        }),
+        client_session: session.to_owned(),
+        ..CreateCommentRequest::default()
+    };
+    let reason_of = |error: reef_daemon::client::ClientError| match error {
+        reef_daemon::client::ClientError::Rpc { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    // The change's conflict as it is now.
+    let asked = client
+        .create_comment(ask(&s.rebased, "s1", ""))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let help = asked.help.clone().unwrap();
+    assert_eq!(help.reason(), HelpReason::Conflict);
+    assert_eq!(help.conflict_id, assignment.conflict_id);
+    assert_eq!(help.assignment_id, assignment.id);
+    assert!(!help.conflict_moved);
+    // By the assignment id, and by the conflict id.
+    for (session, named) in [
+        ("s2", assignment.id.as_str()),
+        ("s3", &assignment.conflict_id),
+    ] {
+        let named = client
+            .create_comment(ask(&s.rebased, session, named))
+            .await
+            .unwrap()
+            .comment
+            .unwrap();
+        let help = named.help.unwrap();
+        assert_eq!(help.assignment_id, assignment.id, "{session}");
+        assert_eq!(help.conflict_id, assignment.conflict_id, "{session}");
+    }
+    // A conflict id the change does not have now; an assignment that names
+    // none; one of another change; a clean change.
+    let a_commit = client
+        .get_workspace(v1::GetWorkspaceRequest {
+            repo: repo.id.clone(),
+            workspace: s.a.id.clone(),
+            ..v1::GetWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap()
+        .commit_id;
+    for (revision, named, why) in [
+        (
+            s.rebased.as_str(),
+            "cfl_00000000000000000000000000000000",
+            "CONFLICT_CHANGED",
+        ),
+        (
+            s.rebased.as_str(),
+            "asg_0000000000000000",
+            "ASSIGNMENT_NOT_FOUND",
+        ),
+        (a_commit.as_str(), assignment.id.as_str(), "NOT_CONFLICTED"),
+        (a_commit.as_str(), "", "NOT_CONFLICTED"),
+    ] {
+        let error = client
+            .create_comment(ask(revision, "s4", named))
+            .await
+            .unwrap_err();
+        assert_eq!(reason_of(error), why, "{revision} {named}");
+    }
+
+    // b resolves the file: the conflict the help request named is gone.
+    std::fs::write(
+        Path::new(&s.b.path).join("conflict.txt"),
+        "one\nboth\nthree\n",
+    )
+    .unwrap();
+    client.snapshot_workspace("", &s.b.id, "").await.unwrap();
+    let read = client
+        .get_comment(GetCommentRequest {
+            repo: repo.id.clone(),
+            id: asked.id.clone(),
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let help = read.help.unwrap();
+    assert!(help.conflict_moved);
+    assert_eq!(help.assignment_id, assignment.id, "the assignment id stays");
+    daemon.stop().await;
+}

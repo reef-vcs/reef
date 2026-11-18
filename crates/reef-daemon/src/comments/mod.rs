@@ -1,7 +1,8 @@
 //! Comments on changes, and instructions to the session that made them
 //! (R3.12, ADR 0069; `docs/comments.md`).
 //!
-//! A comment is an immutable note or instruction on a change. Every write
+//! A comment is an immutable note, instruction or help request on a
+//! change. Every write
 //! is recorded the way R3.09 records a transition: pending rows in
 //! `comments` and `comment_events`, then a jj operation whose
 //! `reef.comment` attribute carries the events (ids and states, never the
@@ -15,7 +16,9 @@
 //! starts no agent. A re-proposal of the change finishes the instructions
 //! delivered before it, a final change cancels unconfirmed and pending
 //! ones ([`after_transitions`]), and instructions left untouched for 7 days
-//! expire ([`expire`]). Every write of a repository runs under its comment
+//! expire ([`expire`]). A help request ([`help`], R3.32) is an agent asking
+//! a person; an instruction replying to it is routed to the session that
+//! asked and written pending. Every write of a repository runs under its comment
 //! lock, taken after the create lock shared and never with the lifecycle
 //! lock held.
 
@@ -46,6 +49,7 @@ use crate::model::{RepoId, Timestamp, WorkspaceRecord};
 use crate::repo::RepoThreadError;
 use crate::workspace::ManagerError;
 
+pub mod help;
 pub mod messages;
 
 /// A comment's text, at most this many bytes.
@@ -79,6 +83,8 @@ pub enum Kind {
     Note,
     /// Work for the change's session.
     Instruction,
+    /// An agent asking a person (R3.32).
+    HelpRequest,
 }
 
 impl Kind {
@@ -87,6 +93,7 @@ impl Kind {
         match self {
             Kind::Note => "note",
             Kind::Instruction => "instruction",
+            Kind::HelpRequest => "help_request",
         }
     }
 }
@@ -366,6 +373,66 @@ pub enum CommentError {
     /// The operation could not be written.
     #[error("record the comment")]
     Record(#[source] JjRecordError),
+    /// A help request without what it sends, or without what it tried.
+    #[error("a help request says what the agent tried")]
+    HelpRequired,
+    /// A named conflict that is not one of the change's.
+    #[error("{conflict:?} is not an assignment or conflict id of this change")]
+    InvalidConflict {
+        /// What it named.
+        conflict: String,
+    },
+    /// An assignment id that names none.
+    #[error("no resolver assignment {assignment}")]
+    AssignmentNotFound {
+        /// The id.
+        assignment: String,
+    },
+    /// Reason CONFLICT on a commit with no conflict.
+    #[error("commit {commit} has no conflict")]
+    NotConflicted {
+        /// The commit.
+        commit: String,
+    },
+    /// A conflict id the change no longer has.
+    #[error("the change's conflict is now {conflict_id}")]
+    ConflictChanged {
+        /// The conflict id now.
+        conflict_id: String,
+    },
+    /// The asking session has an open help request on the change.
+    #[error("help request {id} on this change is still open")]
+    HelpAlreadyOpen {
+        /// The open one.
+        id: String,
+    },
+    /// An answer from the session that asked.
+    #[error("help request {id} was asked by this session; a person answers it")]
+    SelfAnswer {
+        /// The help request.
+        id: String,
+    },
+    /// A help request move of another kind of comment.
+    #[error("comment {id} is not a help request")]
+    NotAHelpRequest {
+        /// The id.
+        id: String,
+    },
+    /// A withdrawal of a help request that was answered.
+    #[error("the help request is {state}, not open")]
+    HelpNotOpen {
+        /// Its state.
+        state: String,
+    },
+    /// Too many open help requests.
+    #[error("{max} help requests are open already")]
+    TooManyHelpRequests {
+        /// The limit.
+        max: u64,
+    },
+    /// The change's conflict could not be read.
+    #[error("read the change's conflict")]
+    Conflict(#[source] reef_lib::jj::conflict::ConflictError),
     /// The database failed.
     #[error("read or write comment rows")]
     Db(#[source] DbError),
@@ -405,16 +472,25 @@ impl Classify for CommentError {
             | Self::InvalidAnchor { .. }
             | Self::InvalidReplyTo { .. }
             | Self::CeilingsRequired
-            | Self::StateRequired => ErrorKind::InvalidArgument,
-            Self::NotFound { .. } => ErrorKind::NotFound,
+            | Self::StateRequired
+            | Self::HelpRequired
+            | Self::InvalidConflict { .. } => ErrorKind::InvalidArgument,
+            Self::NotFound { .. } | Self::AssignmentNotFound { .. } => ErrorKind::NotFound,
             Self::NotAnInstruction { .. }
             | Self::NotAllowed { .. }
             | Self::ExpectedState { .. }
             | Self::FinalChange { .. }
-            | Self::ClaimScopeRequired => ErrorKind::Conflict,
-            Self::TooManyComments { .. } | Self::TooManyInstructions { .. } => {
-                ErrorKind::Unavailable
-            }
+            | Self::ClaimScopeRequired
+            | Self::NotConflicted { .. }
+            | Self::ConflictChanged { .. }
+            | Self::HelpAlreadyOpen { .. }
+            | Self::SelfAnswer { .. }
+            | Self::NotAHelpRequest { .. }
+            | Self::HelpNotOpen { .. } => ErrorKind::Conflict,
+            Self::TooManyComments { .. }
+            | Self::TooManyInstructions { .. }
+            | Self::TooManyHelpRequests { .. } => ErrorKind::Unavailable,
+            Self::Conflict(error) => error.kind(),
             Self::RemoteIdentityRequired | Self::RemoteNotOwned { .. } => {
                 ErrorKind::PermissionDenied
             }
@@ -475,6 +551,30 @@ impl CommentError {
             Self::RemoteNotOwned { id } => {
                 (reason::REMOTE_COMMENT_NOT_OWNED, vec![("id", id.clone())])
             }
+            Self::HelpRequired => (reason::HELP_REQUIRED, Vec::new()),
+            Self::InvalidConflict { conflict } => (
+                reason::INVALID_CONFLICT,
+                vec![("conflict", conflict.clone())],
+            ),
+            Self::AssignmentNotFound { assignment } => (
+                reason::ASSIGNMENT_NOT_FOUND,
+                vec![("assignment", assignment.clone())],
+            ),
+            Self::NotConflicted { commit } => {
+                (reason::NOT_CONFLICTED, vec![("commit_id", commit.clone())])
+            }
+            Self::ConflictChanged { conflict_id } => (
+                reason::CONFLICT_CHANGED,
+                vec![("conflict_id", conflict_id.clone())],
+            ),
+            Self::HelpAlreadyOpen { id } => (reason::HELP_ALREADY_OPEN, vec![("id", id.clone())]),
+            Self::SelfAnswer { id } => (reason::SELF_ANSWER, vec![("id", id.clone())]),
+            Self::NotAHelpRequest { id } => (reason::NOT_A_HELP_REQUEST, vec![("id", id.clone())]),
+            Self::HelpNotOpen { state } => (reason::HELP_NOT_OPEN, vec![("state", state.clone())]),
+            Self::TooManyHelpRequests { max } => (
+                reason::TOO_MANY_HELP_REQUESTS,
+                vec![("max", max.to_string())],
+            ),
             _ => return None,
         })
     }
@@ -511,7 +611,31 @@ impl Advise for CommentError {
                 "Use a remote token linked to an operator identity (`reef remote token create --identity`).",
             )),
             Self::RemoteNotOwned { .. } => Some(Advice::hint(
-                "Through the remote listener, only the token that wrote an instruction confirms or cancels it, only the token that claimed it moves it after, and only the token that proposed a change claims its instructions without taking them.",
+                "Through the remote listener, only the token that wrote an instruction confirms or cancels it, only the token that claimed it moves it after, only the token that proposed a change claims its instructions without taking them, and only the token that asked withdraws a help request.",
+            )),
+            Self::HelpRequired => Some(Advice::hint(
+                "Say what is wrong (-m), what you tried (--tried), and optionally the question for a person (--question).",
+            )),
+            Self::NotConflicted { .. } => Some(Advice::hint(
+                "Ask with another reason; reason conflict is for a change whose commit has a conflict.",
+            )),
+            Self::ConflictChanged { conflict_id } => Some(Advice::hint(format!(
+                "Read the conflict again (`reef conflict show`); it is {conflict_id} now. Name its assignment id instead, which stays."
+            ))),
+            Self::HelpAlreadyOpen { id } => Some(Advice::run(
+                format!(
+                    "Wait for the answer to {id}, or withdraw it (`reef comment withdraw {id}`) and ask again."
+                ),
+                ["reef", "comment", "next", "--wait", "10m"],
+            )),
+            Self::SelfAnswer { .. } => Some(Advice::hint(
+                "A help request is answered by someone else: a person, or another agent's session.",
+            )),
+            Self::HelpNotOpen { .. } => Some(Advice::hint(
+                "It was answered: take the answer with `reef comment next`, or cancel the answer with `reef comment cancel <id>`.",
+            )),
+            Self::TooManyHelpRequests { .. } => Some(Advice::hint(
+                "Withdraw help requests that no longer need an answer (`reef comment withdraw <id>`).",
             )),
             _ => None,
         }
@@ -748,6 +872,11 @@ pub struct CreateRequest {
     pub agent: Option<String>,
     /// The remote token, `(id, name)`.
     pub remote: Option<(String, String)>,
+    /// For a help request, what it sends.
+    pub help: Option<help::HelpInput>,
+    /// The caller's client session: for a help request, the session an
+    /// answer goes to; for an answer, who is answering. Empty for none.
+    pub client_session: String,
 }
 
 /// What [`create`] wrote.
@@ -782,6 +911,8 @@ impl Planned {
             from: event.from_state.clone().unwrap_or_default(),
             to: event.to_state.clone().unwrap_or_default(),
             cause: event.cause.clone(),
+            help_from: event.help_from.clone().unwrap_or_default(),
+            help_to: event.help_to.clone().unwrap_or_default(),
         }
     }
 }
@@ -879,6 +1010,8 @@ struct Facts {
     info: ChangeInfo,
     /// The tree of the change's recorded proposal commit, when it has one.
     proposal_tree: Option<String>,
+    /// For a help request with reason CONFLICT, the commit's conflict id.
+    conflict_id: Option<String>,
 }
 
 /// A comment's checks on the repository thread: the revision, the expected
@@ -936,9 +1069,29 @@ async fn resolve(
             }
         }
     }
+    let asks_about_conflict = request.kind == Some(Kind::HelpRequest)
+        && request.help.as_ref().is_some_and(|help| {
+            help.reason == help::Reason::Conflict || !help.conflict.trim().is_empty()
+        });
+    let conflict_id = if asks_about_conflict {
+        // Without files: only the id is wanted, which every file's id makes.
+        let options = reef_lib::jj::conflict::ReadOptions::default();
+        match reef_lib::jj::conflict::read(&repo, &info.commit_id, &options).await {
+            Ok(object) => Some(object.id),
+            Err(reef_lib::jj::conflict::ConflictError::NotConflicted { commit_id }) => {
+                return Err(CommentError::NotConflicted {
+                    commit: commit_id.to_string(),
+                });
+            }
+            Err(error) => return Err(CommentError::Conflict(error)),
+        }
+    } else {
+        None
+    };
     Ok(Facts {
         info,
         proposal_tree: None,
+        conflict_id,
     })
 }
 
@@ -947,6 +1100,9 @@ fn check_create(request: &CreateRequest) -> Result<Kind, CommentError> {
     let kind = request.kind.ok_or(CommentError::KindRequired)?;
     if !valid_text(&request.text, MAX_TEXT_BYTES, true) {
         return Err(CommentError::InvalidText);
+    }
+    if kind == Kind::HelpRequest {
+        help::check_input(request.help.as_ref())?;
     }
     // A one-call confirmation needs at least one ceiling that bounds
     // something: 0 means no bound, and an empty set would confirm anything.
@@ -957,7 +1113,7 @@ fn check_create(request: &CreateRequest) -> Result<Kind, CommentError> {
     // estimate protects a person paying for new work, and these send an
     // agent back to its own proposal.
     let daemon = request.actor == Some(Actor::Daemon);
-    if request.confirm && (kind == Kind::Note || !bounded) && !daemon {
+    if request.confirm && (kind != Kind::Instruction || !bounded) && !daemon {
         return Err(CommentError::CeilingsRequired);
     }
     if let Some(anchor) = &request.anchor {
@@ -1041,24 +1197,82 @@ async fn create_inner(
         };
     let change = facts.info.change_id.to_string();
     let commit = facts.info.commit_id.to_string();
+    // An instruction replying to a help request that is not withdrawn
+    // answers it (R3.32).
+    let mut answering: Option<CommentRow> = None;
     if !request.reply_to.trim().is_empty() {
-        let parent = state.db.comment(repo, request.reply_to.trim())?;
-        if parent.is_none_or(|parent| parent.change_id != change) {
-            return Err(CommentError::InvalidReplyTo {
+        let parent = state
+            .db
+            .comment(repo, request.reply_to.trim())?
+            .filter(|parent| parent.change_id == change)
+            .ok_or_else(|| CommentError::InvalidReplyTo {
                 reply_to: request.reply_to.clone(),
-            });
+            })?;
+        let live_help = parent
+            .help
+            .as_ref()
+            .is_some_and(|columns| columns.state != help::HelpState::Withdrawn.as_str());
+        if kind == Kind::Instruction && live_help {
+            answering = Some(parent);
         }
+    }
+    // The daemon writes as itself (R3.45): no person's identity.
+    let (identity_id, identity_name, session_id) = if request.actor == Some(Actor::Daemon) {
+        (None, None, None)
+    } else {
+        crate::lifecycle::identity_for(state, request.workspace.as_ref(), request.remote.as_ref())
+    };
+    // Through the remote listener a token names no session to route
+    // answers to: its answers are its own (S-240).
+    let client_session = if request.actor == Some(Actor::Daemon) || request.remote.is_some() {
+        None
+    } else {
+        help::asking_client_session(state, &request.client_session, request.workspace.as_ref())
+    };
+    if let Some(asked) = &answering
+        && help::is_self_answer(
+            asked,
+            client_session.as_deref(),
+            session_id.as_deref(),
+            request.remote.as_ref().map(|(token, _)| token.as_str()),
+        )
+    {
+        return Err(CommentError::SelfAnswer {
+            id: asked.id.clone(),
+        });
     }
     if state.db.comment_count(repo, &change)? >= MAX_COMMENTS_PER_CHANGE {
         return Err(CommentError::TooManyComments {
             max: MAX_COMMENTS_PER_CHANGE,
         });
     }
-    let target = if kind == Kind::Instruction {
-        target(state, repo, &change)?
-    } else {
-        None
+    let target = match (&kind, &answering) {
+        (Kind::Instruction, Some(asked)) => help::answer_target(state, asked),
+        (Kind::Instruction, None) => target(state, repo, &change)?,
+        _ => None,
     };
+    if kind == Kind::HelpRequest {
+        let (by_change, by_repo, mine) = state.db.open_help_counts(
+            repo,
+            &change,
+            client_session.as_deref(),
+            session_id.as_deref(),
+            request.remote.as_ref().map(|(token, _)| token.as_str()),
+        )?;
+        if let Some(id) = mine {
+            return Err(CommentError::HelpAlreadyOpen { id });
+        }
+        if by_change >= help::MAX_OPEN_PER_CHANGE {
+            return Err(CommentError::TooManyHelpRequests {
+                max: help::MAX_OPEN_PER_CHANGE,
+            });
+        }
+        if by_repo >= help::MAX_OPEN_PER_REPO {
+            return Err(CommentError::TooManyHelpRequests {
+                max: help::MAX_OPEN_PER_REPO,
+            });
+        }
+    }
     if kind == Kind::Instruction {
         let session = target.as_ref().map(|target| {
             target
@@ -1082,7 +1296,7 @@ async fn create_inner(
         }
     }
     let lifecycle = state.db.lifecycle_row(repo, &change)?;
-    if kind == Kind::Instruction {
+    if kind != Kind::Note {
         let recorded = lifecycle
             .as_ref()
             .map(|row| row.state.clone())
@@ -1107,12 +1321,6 @@ async fn create_inner(
             Actor::Human
         })
     };
-    // The daemon writes as itself (R3.45): no person's identity.
-    let (identity_id, identity_name, session_id) = if request.actor == Some(Actor::Daemon) {
-        (None, None, None)
-    } else {
-        crate::lifecycle::identity_for(state, request.workspace.as_ref(), request.remote.as_ref())
-    };
     let now = Timestamp::now();
     let id = crate::identity::new_id("cmt_");
     let mut confirm_refused = None;
@@ -1122,7 +1330,9 @@ async fn create_inner(
             .clone()
             .or_else(|| facts.info.tree_id.clone());
         let estimate = estimate(state, repo, &change, tree.as_deref(), target.as_ref())?;
-        let initial = if request.actor == Some(Actor::Daemon) {
+        // An answer is confirmed as written, as the daemon's own are: the
+        // agent asked and is waiting for it.
+        let initial = if request.actor == Some(Actor::Daemon) || answering.is_some() {
             State::Pending
         } else if request.confirm {
             let ceilings = request.ceilings.unwrap_or_default();
@@ -1145,23 +1355,45 @@ async fn create_inner(
                 .as_ref()
                 .map_or("none", |target| target.source)
                 .to_owned(),
-            target_session_id: target.as_ref().map(|target| target.session_id.clone()),
+            target_session_id: target
+                .as_ref()
+                .map(|target| target.session_id.clone())
+                .filter(|id| !id.is_empty()),
             target_client_session: target
                 .as_ref()
                 .and_then(|target| target.client_session.clone()),
             target_harness: target.as_ref().and_then(|target| target.harness.clone()),
             target_agent: target.as_ref().and_then(|target| target.agent.clone()),
-            target_workspace_id: target.as_ref().map(|target| target.workspace_id.clone()),
+            target_workspace_id: target
+                .as_ref()
+                .map(|target| target.workspace_id.clone())
+                .filter(|id| !id.is_empty()),
             ..InstructionColumns::default()
         })
     } else {
         None
     };
-    let to_state = instruction.as_ref().map(|columns| columns.state.clone());
-    let event_name = if kind == Kind::Note {
-        "comment"
+    let help_columns = if kind == Kind::HelpRequest {
+        let input = help::check_input(request.help.as_ref())?;
+        let conflict = match &facts.conflict_id {
+            Some(current) => Some(help::conflict_reference(
+                state,
+                repo,
+                &change,
+                current,
+                &input.conflict,
+            )?),
+            None => None,
+        };
+        Some(help::columns(&input, client_session.clone(), conflict))
     } else {
-        "instruct"
+        None
+    };
+    let to_state = instruction.as_ref().map(|columns| columns.state.clone());
+    let event_name = match kind {
+        Kind::Note => "comment",
+        Kind::Instruction => "instruct",
+        Kind::HelpRequest => "ask",
     };
     let anchor = request.anchor.clone();
     let comment = CommentRow {
@@ -1202,6 +1434,7 @@ async fn create_inner(
         operation_collected: false,
         recorded_at: None,
         instruction,
+        help: help_columns,
         updated_at: now,
     };
     let event = CommentEventRow {
@@ -1217,9 +1450,37 @@ async fn create_inner(
         actor: actor.as_str().to_owned(),
         identity_id,
         remote_token: request.remote.as_ref().map(|(id, _)| id.clone()),
+        help_to: (kind == Kind::HelpRequest).then(|| help::HelpState::Open.as_str().to_owned()),
         created_at: now,
         ..CommentEventRow::blank(repo)
     };
+    // The first answer moves its help request in the same operation, so no
+    // reader sees an answer to a help request still open.
+    let answer_move = answering
+        .as_ref()
+        .filter(|asked| {
+            asked
+                .help
+                .as_ref()
+                .is_some_and(|columns| columns.state == help::HelpState::Open.as_str())
+        })
+        .map(|asked| {
+            let base = CommentEventRow {
+                agent: event.agent.clone(),
+                actor: event.actor.clone(),
+                identity_id: event.identity_id.clone(),
+                remote_token: event.remote_token.clone(),
+                help_answer_id: Some(id.clone()),
+                ..CommentEventRow::blank(repo)
+            };
+            help::move_event(
+                asked,
+                help::HelpState::Open,
+                help::HelpState::Answered,
+                "request",
+                base,
+            )
+        });
     let mut meta = OpMeta::new(
         OpKind::Comment,
         jj_comments::comment_description(event_name, &id, &change),
@@ -1231,18 +1492,19 @@ async fn create_inner(
             .as_ref()
             .map(|record| record.owner.clone())
     });
-    let (op_id, _) = record(
-        state,
-        repo,
-        vec![Planned {
-            event,
-            comment: Some(comment),
-            kind: kind.as_str(),
-            round,
-        }],
-        meta,
-    )
-    .await?;
+    let mut planned = vec![Planned {
+        event,
+        comment: Some(comment),
+        kind: kind.as_str(),
+        round,
+    }];
+    planned.extend(answer_move);
+    let (op_id, _) = record(state, repo, planned, meta).await?;
+    if kind == Kind::HelpRequest || answering.is_some() {
+        // An open help request holds automatic landing (R3.45): judge the
+        // change again.
+        state.automatic.mark(repo, [change.clone()]);
+    }
     let comment = state
         .db
         .comment(repo, &id)?
@@ -1403,18 +1665,32 @@ async fn update_inner(
             .as_ref()
             .map(|record| record.owner.clone())
     });
-    let (op_id, _) = record(
-        state,
-        repo,
-        vec![Planned {
-            event,
-            comment: None,
-            kind: "instruction",
-            round: comment.round,
-        }],
-        meta,
-    )
-    .await?;
+    // Cancelling the only answer to a help request before it was delivered
+    // leaves the help request unanswered: it opens again, in this operation.
+    let reopen = if to == State::Cancelled {
+        let base = CommentEventRow {
+            agent: event.agent.clone(),
+            actor: event.actor.clone(),
+            identity_id: event.identity_id.clone(),
+            remote_token: event.remote_token.clone(),
+            ..CommentEventRow::blank(repo)
+        };
+        help::reopen_on_cancel(state, &comment, &base)?
+    } else {
+        None
+    };
+    let reopened = reopen.is_some();
+    let mut planned = vec![Planned {
+        event,
+        comment: None,
+        kind: "instruction",
+        round: comment.round,
+    }];
+    planned.extend(reopen);
+    let (op_id, _) = record(state, repo, planned, meta).await?;
+    if reopened {
+        state.automatic.mark(repo, [comment.change_id.clone()]);
+    }
     Ok(MoveOutcome {
         comment: state.db.comment(repo, &id)?,
         op_id: Some(op_id),
@@ -1552,12 +1828,25 @@ async fn claim_inner(state: &AppState, request: ClaimRequest) -> Result<MoveOutc
         workspace_id: request.workspace.as_ref().map(|record| record.id.as_hex()),
         change_id: change.clone(),
         take: request.take,
+        asker_token: request.remote.as_ref().map(|(token, _)| token.clone()),
     };
     let Some(found) = state.db.claimable_instruction(repo, &query)? else {
         return Ok(MoveOutcome::default());
     };
     let Some(columns) = &found.instruction else {
         return Ok(MoveOutcome::default());
+    };
+    // An answer to a help request asked remotely is the asking token's.
+    let asked_token = if columns.target_source == "help_request" {
+        match found.reply_to.as_deref() {
+            Some(parent) => state
+                .db
+                .comment(repo, parent)?
+                .and_then(|asked| asked.remote_token),
+            None => None,
+        }
+    } else {
+        None
     };
     let own = columns
         .target_client_session
@@ -1566,15 +1855,22 @@ async fn claim_inner(state: &AppState, request: ClaimRequest) -> Result<MoveOutc
         || (columns.target_client_session.is_none()
             && columns.target_workspace_id.is_some()
             && columns.target_workspace_id == query.workspace_id)
-        || columns.target_source == "none";
+        || columns.target_source == "none"
+        || (asked_token.is_some() && asked_token == query.asker_token);
     if let Some((token, _)) = &request.remote
         && !request.take
     {
-        let proposer = state
-            .db
-            .lifecycle_row(repo, &found.change_id)?
-            .and_then(|row| row.proposed_by_token);
-        if proposer.as_deref() != Some(token.as_str()) {
+        // An answer belongs to the token that asked; any other instruction
+        // to the token that proposed the change.
+        let owner = if columns.target_source == "help_request" {
+            asked_token.clone()
+        } else {
+            state
+                .db
+                .lifecycle_row(repo, &found.change_id)?
+                .and_then(|row| row.proposed_by_token)
+        };
+        if owner.as_deref() != Some(token.as_str()) {
             return Err(CommentError::RemoteNotOwned {
                 id: found.id.clone(),
             });
@@ -1772,6 +2068,20 @@ pub async fn after_transitions(
                     ));
                 }
             }
+            for asked in state.db.help_requests_of_change(
+                repo,
+                &row.change_id,
+                &[help::HelpState::Open.as_str()],
+            )? {
+                if seen.insert(asked.id.clone()) {
+                    planned.extend(help::daemon_move(
+                        &asked,
+                        help::HelpState::Withdrawn,
+                        "change_final",
+                        Some(&row.id),
+                    ));
+                }
+            }
         }
     }
     record_daemon(state, repo, planned).await
@@ -1807,6 +2117,14 @@ pub async fn reconcile(state: &AppState) -> Result<usize, CommentError> {
             };
             planned.push(daemon_event(&comment, from, to, cause, Some(&transition)));
         }
+        for (asked, transition) in state.db.moot_help_requests(repo)? {
+            planned.extend(help::daemon_move(
+                &asked,
+                help::HelpState::Withdrawn,
+                "change_final",
+                Some(&transition),
+            ));
+        }
         moved += planned.len();
         if let Err(error) = record_daemon(state, repo, planned).await {
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot reconcile instructions");
@@ -1828,6 +2146,9 @@ pub async fn expire(state: &AppState, now: Timestamp) -> Result<usize, CommentEr
     for comment in untouched {
         by_repo.entry(comment.repo_id).or_default().push(comment);
     }
+    for asked in state.db.stale_help_requests(cutoff, EXPIRE_BATCH)? {
+        by_repo.entry(asked.repo_id).or_default().push(asked);
+    }
     let mut ended = 0;
     for (repo, comments) in by_repo {
         if state.repos.get(repo).is_none() {
@@ -1838,11 +2159,27 @@ pub async fn expire(state: &AppState, now: Timestamp) -> Result<usize, CommentEr
         let comment_lock = state.comments.lock(repo);
         let _held = comment_lock.lock().await;
         let mut planned = Vec::new();
+        // Changes whose help request expired: automatic landing judges them
+        // again once it is recorded.
+        let mut released: Vec<String> = Vec::new();
         for comment in comments {
             // Read again under the lock: a move since the query wins.
             let Some(current) = state.db.comment(repo, &comment.id)? else {
                 continue;
             };
+            if let Some(columns) = &current.help {
+                // An open help request nobody answered withdraws (R3.32).
+                if columns.state == help::HelpState::Open.as_str() && current.updated_at < cutoff {
+                    planned.extend(help::daemon_move(
+                        &current,
+                        help::HelpState::Withdrawn,
+                        "expired",
+                        None,
+                    ));
+                    released.push(current.change_id.clone());
+                }
+                continue;
+            }
             let Some(from) = current
                 .instruction
                 .as_ref()
@@ -1859,10 +2196,24 @@ pub async fn expire(state: &AppState, now: Timestamp) -> Result<usize, CommentEr
                 State::Cancelled
             };
             planned.push(daemon_event(&current, from, to, "expired", None));
+            // An answer that expired before anyone took it leaves its help
+            // request unanswered, as a cancelled one does (R3.32).
+            if to == State::Cancelled {
+                let base = CommentEventRow {
+                    actor: Actor::Daemon.as_str().to_owned(),
+                    ..CommentEventRow::blank(repo)
+                };
+                if let Some(reopen) = help::reopen_on_cancel(state, &current, &base)? {
+                    planned.push(reopen);
+                    released.push(current.change_id.clone());
+                }
+            }
         }
         ended += planned.len();
         if let Err(error) = record_daemon(state, repo, planned).await {
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot expire instructions");
+        } else if !released.is_empty() {
+            state.automatic.mark(repo, released);
         }
     }
     Ok(ended)
