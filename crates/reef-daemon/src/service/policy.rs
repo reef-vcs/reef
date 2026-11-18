@@ -1002,6 +1002,10 @@ impl PolicyService for PolicyHandler {
             let needed = uses_working_copy(state, &target, texts).await?;
             snapshot_first(state, &target, needed, Instant::now(), agent).await?;
         }
+        // The landing preview below writes objects through `head`'s store;
+        // GC, which replaces the store, waits for it (#289).
+        let create_lock = state.manager.repo_lock(target.repo.id);
+        let _no_gc = create_lock.read().await;
         let head = state.reads.current(&target.handle).await.map_err(status)?;
         let reads = Arc::clone(&state.reads);
         let read_target = target.clone();

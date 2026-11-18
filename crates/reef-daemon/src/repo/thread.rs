@@ -86,7 +86,7 @@ impl RepoThread {
                     repo,
                     checked_trees: CheckedTrees::default(),
                     dirty: false,
-                    reopen: false,
+                    reopen: None,
                     generation: shared,
                     events,
                 };

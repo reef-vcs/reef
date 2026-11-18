@@ -442,7 +442,11 @@ async fn run_repo(
                 ..JjStep::default()
             }
         }
-        Some(handle) => manager.gc_jj(id, handle, keep_newer).await,
+        Some(handle) => {
+            let jj = manager.gc_jj(id, handle, keep_newer).await;
+            state.reads.clear(id);
+            jj
+        }
     };
     match (&jj.error, trigger) {
         (None, _) => {}
