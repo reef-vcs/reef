@@ -10,13 +10,17 @@ reef landing list [--outcome OUTCOME]...   # newest first
 reef landing show [ID|REV] [--policy]      # one landing, its evaluation in full
 reef landing batches [--open]              # batches, newest first
 reef landing batch [ID|REV]                # one batch: its members and the trees it tested
+reef proposal show [REV]                   # what the daemon is doing about a proposal
+reef policy eval --stack [-r REV]          # what landing a stack would do now
 ```
+
+Nobody has to run `reef land`: the daemon asks executors for the checks a proposal lacks, and lands it once policy allows when the destination's policy says `[landing] automatic = true` ([below](#automatic-landing), [ADR 0081](adr/0081-automatic-landing.md)).
 
 `reef policy eval` answers beforehand what a landing would decide now: it previews the landing onto `trunk()` (or `--policy-revision`) and shows the policy the same input.
 
 ## What happens
 
-1. **The gate.** The change must be proposed, at the commit its proposal recorded (`reef propose` again after an edit). Its destination must be a local bookmark that exists and is not conflicted. The gate previews the landing at the bookmark's head and evaluates the policy there over the recorded commit. Anything but `allow` is a landing with outcome `blocked`; the change stays proposed. A retry with nothing new counts on the same record (`attempts`).
+1. **The gate.** A change still waiting for checks the daemon asked executors for ([below](#automatic-landing)) is judged once they finish, within the wait. The change must be proposed, at the commit its proposal recorded (`reef propose` again after an edit). Its destination must be a local bookmark that exists and is not conflicted. The gate previews the landing at the bookmark's head and evaluates the policy there over the recorded commit. Anything but `allow` is a landing with outcome `blocked`; the change stays proposed. A retry with nothing new counts on the same record (`attempts`).
 2. **The queue.** A change the gate allows is queued (the `queued` state, recorded by the daemon), and the repository's landing worker lands queued changes one at a time, oldest first. At most 1,000 changes are queued per repository.
 3. **The batch.** The worker takes queued changes for one destination together (below), judges each again at the bookmark's head (the destination may have moved, and its policy with it), and rebases them one on another onto it. Under `checks = "batch"`, the required checks must also pass on the tree the batch lands as: the executor is asked for whatever evidence that tree lacks.
 4. **The landing.** In one operation: rebases the changes onto the head (none for a change already on it), writes each one's description as the destination's `[history]` table says (below), gives every workspace sitting on a landed change a new empty change on top, moves the bookmark to the last landed commit, and records each change `landed`. If something stops a change, it returns to `proposed` with a reason.
@@ -139,6 +143,32 @@ A summarized change is a new commit even for a fast-forward (same change, tree a
 **Nothing left to land.** A change whose edits the destination already has would land as an empty commit; it returns to `proposed` with reason `empty` instead, at the gate or from its batch. One whose edits an earlier change of its batch makes stays queued for the next batch, which returns it `empty` once those edits have landed. Withdraw it, or abandon it.
 
 **The working history stays reachable** through the operation log: the land operation records each queued commit as the predecessor of the commit that replaced it, so `reef show <commit> --at-operation <the operation before the land>` and `reef diff --from <queued commit> --to <landed commit>` read the original while GC keeps the operation (`gc.undo_window`, 7 days by default). After that the landing record keeps the queued and landed commits and trees, whether the change was summarized and the `[history]` it landed under; the change keeps its change id, and its provenance and pinned evidence are kept for good.
+
+## Automatic landing
+
+The daemon keeps a status for every proposal, judged again whenever something the gate reads changes: the change, its stack, the evidence on their trees, its provenance, or `reef-policy.toml` on the destination. A destination that only moves on judges nothing again, unless its policy reads `landing` or `batch`. `reef proposal show` and `reef proposal list` print it:
+
+| Status | Means | Next |
+| --- | --- | --- |
+| `off` | The destination asks executors for nothing (`checks = "proposal"`) and does not land automatically, or has no valid policy. | `reef land` |
+| `pending` | Not judged yet. | wait |
+| `waiting` | Checks it lacks were asked of executors; the jobs are open. | `reef land` waits for them |
+| `ready` | Policy allows it now, and the destination does not land automatically. | `reef land` |
+| `queued` | Queued, by `reef land` or automatically. | `reef landing show` |
+| `needs` | Something no job provides blocks it: a sign-off, a failed check, a rule, a conflict, a change of its stack. The message says what. | its `next` |
+| `no_executor` | Its jobs expired with no executor claiming them. | `reef executor run` |
+| `returned` | Its automatic landing came back (`checks`, `conflicted`, ...), and nothing changed since. | its `next` |
+
+**Checks are asked for.** Under `[landing] checks = "batch"` (the default), the daemon asks executors for every `[[require]]` pair a proposal lacks on its own tree, one job per kind, by revision, at priority 500 (a batch's jobs are 1,000), as `reef-landing`. Two proposals on one tree, a batch on the same tree, and `reef job submit` share one job. A job that ends with no verdict is asked for once more; after a second, the pair is for a person (`reef job submit`). At most 32 of these jobs are open per repository. While no executor answers for a kind (a job of it expired unclaimed, and none has been claimed since), the daemon keeps one job of that kind open in the repository, for the first executor that starts to claim, and the other proposals read `no_executor`. When a proposal is withdrawn or amended, its jobs that no other open proposal or batch needs are cancelled if no executor has claimed them yet.
+
+**Landing with no command.** With `automatic = true` in the destination's `[landing]` table, a proposal the gate allows is queued as `reef land` would queue it, and lands through the same batches and checks. A stack waits while the first change that does not pass is only waiting for its checks, and lands its passing prefix when that change is blocked for good. A landing that comes back is queued again only when the change, its evidence or the policy changes; `busy` is tried again after a minute, up to three times, and `unavailable` once an executor claims a job again.
+
+```toml
+[landing]
+automatic = true    # default false
+```
+
+**The agent is told.** On an automatic destination, when a change comes back for a reason its author can fix (a check failed on its tree, its batch's checks failed with it, it conflicts, it changed after it was proposed, its edits are already there), the daemon writes one instruction ([comments](comments.md)) to the session that proposed it, from a fixed template: what happened, the ids to look at, and what to run. Its author is `reef-landing`. It never quotes a check's output.
 
 ## Outcomes and reasons
 

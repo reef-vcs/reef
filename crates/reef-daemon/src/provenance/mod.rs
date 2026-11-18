@@ -216,6 +216,15 @@ pub enum FailAt {
     Insert = 3,
 }
 
+/// What changed for the automatic service since it last looked (R3.45).
+#[derive(Debug, Default)]
+pub(crate) struct Touched {
+    /// Repositories with a new provenance record.
+    pub(crate) repos: std::collections::HashSet<crate::model::RepoId>,
+    /// Whether a key, session or identity was revoked.
+    pub(crate) revoked: bool,
+}
+
 /// The daemon's provenance state, in `AppState` and the workspace manager.
 pub struct Provenance {
     pub(crate) db: Arc<Db>,
@@ -230,6 +239,12 @@ pub struct Provenance {
     /// Test hook: a held key's life instead of `[session_keys]
     /// max_lifetime`.
     lifetime: Mutex<Option<Duration>>,
+    /// The repositories with a new record, or every one after a
+    /// revocation (key statuses changed, which no evaluation key sees),
+    /// since R3.45's automatic service last looked; and its wake-up, which
+    /// keeps a permit.
+    pub(crate) touched: Mutex<Touched>,
+    pub(crate) touched_notify: tokio::sync::Notify,
 }
 
 impl std::fmt::Debug for Provenance {
@@ -254,6 +269,8 @@ impl Provenance {
             held: Mutex::new(HashMap::new()),
             fail_at: AtomicU8::new(FailAt::Nothing as u8),
             lifetime: Mutex::new(None),
+            touched: Mutex::new(Touched::default()),
+            touched_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -291,6 +308,11 @@ impl Provenance {
     /// stand. Keys it does not cover are kept, so a revocation does not make
     /// every live workspace issue a new key.
     pub fn revoked(&self, scope: &Revoked) {
+        self.touched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .revoked = true;
+        self.touched_notify.notify_one();
         let held: Vec<Arc<Mutex<Held>>> = self
             .held
             .lock()

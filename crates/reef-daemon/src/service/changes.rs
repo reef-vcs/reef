@@ -478,6 +478,10 @@ impl ChangeService for ChangesHandler {
                 lifecycle: Some(lifecycle),
                 change,
                 proposed_by: row.proposed_by_agent.clone().unwrap_or_default(),
+                automatic: (row.state == "proposed" || row.state == "queued")
+                    .then(|| state.automatic.status(target.repo.id, &row.change_id))
+                    .flatten()
+                    .map(|status| crate::landing::messages::automatic_message(&status)),
             });
         }
         Ok(Response::new(ListProposalsResponse {

@@ -140,6 +140,7 @@ struct RawLanding {
     #[serde(default)]
     alone: List,
     push: Option<Text>,
+    automatic: Option<Spanned<toml::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -279,9 +280,17 @@ pub struct Policy {
     pub(crate) conflicts: Conflicts,
     pub(crate) landing: LandingSettings,
     pub(crate) history: HistorySettings,
+    pub(crate) reads_destination: bool,
 }
 
 impl Policy {
+    /// Whether any of its expressions reads the `landing` or `batch`
+    /// input, which follow the destination's head: a decision under it can
+    /// change when the destination moves (R3.45, ADR 0081).
+    pub fn reads_destination(&self) -> bool {
+        self.reads_destination
+    }
+
     /// The `[landing]` table, or its defaults (R3.14, ADR 0067).
     pub fn landing(&self) -> &LandingSettings {
         &self.landing
@@ -451,6 +460,9 @@ pub struct LandingSettings {
     /// landing, onto the branch of the destination's own name (R3.17, ADR
     /// 0077); `None` when the destination does not push.
     pub push: Option<String>,
+    /// Whether the landing service queues, with no request, a proposal
+    /// onto this destination that the gate allows (R3.45, ADR 0081).
+    pub automatic: bool,
 }
 
 impl Default for LandingSettings {
@@ -461,6 +473,7 @@ impl Default for LandingSettings {
             batch_wait: std::time::Duration::ZERO,
             alone: Patterns::empty(),
             push: None,
+            automatic: false,
         }
     }
 }
@@ -793,6 +806,8 @@ struct Loader<'a> {
     source: Source<'a>,
     diagnostics: Vec<Diagnostic>,
     entries: usize,
+    /// Whether an expression reads `landing` or `batch` (R3.45).
+    reads_destination: bool,
 }
 
 impl Loader<'_> {
@@ -918,6 +933,10 @@ impl Loader<'_> {
         };
         let mut parsed = parsed;
         let checked = check::check(&parsed.ast, scope);
+        self.reads_destination |= checked
+            .reads
+            .iter()
+            .any(|name| matches!(*name, "landing" | "batch"));
         if checked.problems.is_empty() {
             env::rewrite_matches(&mut parsed.ast);
             Some(Expression {
@@ -1218,6 +1237,7 @@ impl Policy {
             source,
             diagnostics: Vec::new(),
             entries: 0,
+            reads_destination: false,
         };
         let policy = loader.load(&raw, text);
         if loader.diagnostics.is_empty() {
@@ -1679,6 +1699,7 @@ impl Loader<'_> {
             conflicts,
             landing,
             history,
+            reads_destination: self.reads_destination,
         }
     }
 
@@ -1801,6 +1822,17 @@ impl Loader<'_> {
                         push.get_ref()
                     ),
                 );
+            }
+        }
+        if let Some(automatic) = &raw.automatic {
+            match automatic.get_ref() {
+                toml::Value::Boolean(value) => settings.automatic = *value,
+                other => self.at(
+                    "landing",
+                    "automatic",
+                    automatic.span().start,
+                    format!("{other} is not true or false"),
+                ),
             }
         }
         settings
@@ -2164,7 +2196,17 @@ message = "every commit of the change has a signed, bound provenance record"
             &with("[landing]\nbatch_wait = \"soon\"\n"),
             "is not a duration",
         );
-        one(&with("[landing]\nautomatic = true\n"), "unknown field");
+        assert!(!landing.automatic);
+        let automatic = Policy::load(with("[landing]\nautomatic = true\n").as_bytes()).unwrap();
+        assert!(automatic.landing().automatic);
+        one(
+            &with("[landing]\nautomatic = \"yes\"\n"),
+            "is not true or false",
+        );
+        one(
+            &with("[landing]\nautomatic_later = true\n"),
+            "unknown field",
+        );
         assert_eq!(landing.push, None);
         let pushing = Policy::load(with("[landing]\npush = \"origin\"\n").as_bytes()).unwrap();
         assert_eq!(pushing.landing().push.as_deref(), Some("origin"));
@@ -2182,6 +2224,33 @@ message = "every commit of the change has a signed, bound provenance record"
             );
         }
         one(&with("[landing]\nalone = [\"a/[\"]\n"), "pattern \"a/[\"");
+    }
+
+    #[test]
+    fn reads_destination() {
+        assert!(
+            !Policy::load(crate::starter("o").as_bytes())
+                .unwrap()
+                .reads_destination()
+        );
+        let landing = "[[rule]]\nname = \"ff\"\nexpr = '!landing.rebased'\n";
+        assert!(
+            Policy::load(with(landing).as_bytes())
+                .unwrap()
+                .reads_destination()
+        );
+        let batch = "[[rule]]\nname = \"small\"\nexpr = 'batch.size <= 4'\n";
+        assert!(
+            Policy::load(with(batch).as_bytes())
+                .unwrap()
+                .reads_destination()
+        );
+        let change = "[[rule]]\nname = \"desc\"\nexpr = 'change.description != \"\"'\n";
+        assert!(
+            !Policy::load(with(change).as_bytes())
+                .unwrap()
+                .reads_destination()
+        );
     }
 
     #[test]

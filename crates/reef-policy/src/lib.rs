@@ -144,7 +144,8 @@ actors = ["executor"]
 # identity_kinds = ["ci"]
 # when = 'e.artifacts.exists(a, a.state == "stored")'
 
-# Every change needs passing `test` evidence (`reef job submit --kind test`).
+# Every change needs passing `test` evidence. The daemon asks an executor
+# (`reef executor run`) for it when the change is proposed.
 [[require]]
 name = "tests"
 kinds = ["test"]
@@ -174,6 +175,9 @@ checks = "batch"
 # Push each landing to this git remote, onto the branch of the same name, fast
 # forward only (docs/landing.md "Pushing landed history").
 # push = "origin"
+# Land a proposal as soon as this policy allows it, with nobody running
+# `reef land` (docs/landing.md "Automatic landing").
+# automatic = true
 
 # How landed changes are written on this branch (docs/landing.md). "summary"
 # keeps each change's description, removes Reef-* trailers from it, and adds

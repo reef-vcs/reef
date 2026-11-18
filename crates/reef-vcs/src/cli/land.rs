@@ -348,7 +348,9 @@ pub(crate) struct Landing {
     pub(crate) destination_before: Option<String>,
     /// Its head after a landing.
     pub(crate) destination_after: Option<String>,
-    /// `blocked`, `queued`, `landed`, `dequeued` or `cancelled`.
+    /// `blocked`, `queued`, `landed`, `dequeued` or `cancelled`; `waiting`
+    /// when the change still waits for evidence the daemon asked executors
+    /// for, and nothing was recorded (R3.45).
     pub(crate) outcome: String,
     /// For blocked and dequeued: `policy`, `conflicted`, `unlanded_parents`,
     /// `amended`, `destination`, `busy`, `failed`, `checks`,
@@ -560,6 +562,12 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
 pub(crate) fn landing_with_stack(response: &v1::LandChangeResponse) -> Landing {
     let mut landing = landing_of(&response.landing.clone().unwrap_or_default());
     landing.stack = response.stack.iter().map(StackLanding::of).collect();
+    // Still waiting for evidence the daemon asked for (R3.45): no landing
+    // was recorded, and the status says what it waits for.
+    if let Some(waiting) = &response.waiting {
+        "waiting".clone_into(&mut landing.outcome);
+        landing.message = Some(waiting.message.clone());
+    }
     landing
 }
 
@@ -590,6 +598,11 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
     let response = Box::pin(ctx.call_within(wait + ctx.timeout, ctx.client.land_change(request)))
         .await
         .map_err(|error| advice.refine(error))?;
+    // Still waiting for evidence the daemon asked executors for (R3.45):
+    // nothing was judged or recorded.
+    if let Some(waiting) = &response.waiting {
+        return Err(still_waiting(&args.revision, wait, waiting));
+    }
     let landing = landing_with_stack(&response);
     let refused = match landing.outcome.as_str() {
         "blocked" | "dequeued" => Some((
@@ -652,6 +665,30 @@ pub(crate) async fn land(ctx: &Ctx, args: LandArgs) -> Result<(), CliError> {
         message,
         advice: advice_for(&landing),
     })
+}
+
+/// `reef land`'s error for a change still waiting, as the wait ends, for
+/// evidence the daemon asked executors for (R3.45): exit 6, nothing
+/// recorded.
+fn still_waiting(revision: &str, wait: Duration, waiting: &v1::AutomaticStatus) -> CliError {
+    let jobs = if waiting.job_ids.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", waiting.job_ids.join(", "))
+    };
+    CliError::Precheck {
+        kind: ErrorKind::Unavailable,
+        reason: reef_api::error::LANDING_PENDING,
+        message: format!(
+            "{revision} still waits for evidence the daemon asked executors for after {}: {}{jobs}",
+            humantime::format_duration(wait),
+            waiting.message
+        ),
+        advice: Advice::run(
+            "It is judged once the checks finish; run it again to keep waiting, or `reef proposal show` to follow it.",
+            ["reef", "land", revision],
+        ),
+    }
 }
 
 /// What to do about a landing that did not land, with the command to run

@@ -89,10 +89,28 @@ impl LandingService for LandingHandler {
                 actor: crate::lifecycle::messages::actor_of(request.actor),
                 agent: agent.clone(),
                 remote,
+                automatic_key: None,
             },
         )
         .await
         .map_err(status)?;
+        let outcome = match outcome {
+            crate::landing::Landed::Judged(outcome) => *outcome,
+            crate::landing::Landed::Waiting { status, change } => {
+                let mut change = Some(convert::change(&change));
+                crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None)
+                    .await;
+                return Ok(Response::new(LandChangeResponse {
+                    landing: None,
+                    enqueue: None,
+                    operation: None,
+                    snapshot,
+                    change,
+                    stack: Vec::new(),
+                    waiting: Some(crate::landing::messages::automatic_message(&status)),
+                }));
+            }
+        };
         let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
         let owner = target
             .workspace
@@ -176,6 +194,7 @@ impl LandingService for LandingHandler {
             snapshot,
             change,
             stack,
+            waiting: None,
         }))
     }
 

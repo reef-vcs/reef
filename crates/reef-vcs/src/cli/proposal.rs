@@ -9,7 +9,9 @@ use std::io::{self, Write};
 
 use reef_api::v1::{self, ListProposalsRequest, ListTransitionsRequest, TransitionChangeRequest};
 use reef_client::brief;
-use reef_client::json::{ChangeTransition, Proposal, ProposalHistory, Transitioned};
+use reef_client::json::{
+    AutomaticStatus, ChangeTransition, Proposal, ProposalHistory, Transitioned,
+};
 
 use super::advice::AdviceCtx;
 use super::changes::short;
@@ -299,9 +301,10 @@ async fn transition(
             short(&transitioned.change.change_id_reverse_hex)
         ));
     } else if to == v1::LifecycleState::Proposed {
-        ctx.out.note(
-            "reef: `reef land` when the policy allows it; `reef policy eval` says what it lacks.",
-        );
+        let id = short(&transitioned.change.change_id_reverse_hex);
+        ctx.out.note(&format!(
+            "reef: the daemon asks executors for the checks it lacks; it lands with no command where the destination's policy says `automatic = true`, else `reef land {id}` waits for the checks and lands it; `reef proposal show {id}` says what it waits for."
+        ));
     }
     Ok(())
 }
@@ -372,6 +375,7 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
         .await
         .map_err(|error| advice.refine(error))?;
     let stack = stack_below(ctx, &scope.repo_id, &change).await;
+    let automatic = automatic_of(ctx, &scope.repo_id, &change.change_id).await;
     let history = ProposalHistory {
         change: reef_client::json::Change::from(&change),
         transitions: transitions
@@ -381,8 +385,31 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
             .map(ChangeTransition::from)
             .collect(),
         stack,
+        automatic,
     };
     ctx.out.object_with(&history, brief::ProposalHistory::from)
+}
+
+/// What the automatic service is doing about `change` (R3.45); `None`
+/// when it is not proposed, or the read fails: context, not the answer.
+async fn automatic_of(ctx: &Ctx, repo: &str, change: &str) -> Option<AutomaticStatus> {
+    let listed = ctx
+        .call(ctx.client.list_proposals(
+            ListProposalsRequest {
+                repo: repo.to_owned(),
+                changes: vec![change.to_owned()],
+                ..ListProposalsRequest::default()
+            },
+            10,
+        ))
+        .await
+        .ok()?;
+    listed
+        .items
+        .iter()
+        .find(|entry| entry.change_id == change)
+        .and_then(|entry| entry.automatic.as_ref())
+        .map(AutomaticStatus::from)
 }
 
 /// The changes below `change` in its stack, bottom first (R3.10): its
@@ -522,6 +549,21 @@ impl TextRender for ProposalHistory {
                 format!("{} {state}", short(&below.change_id_reverse_hex)),
             ));
         }
+        if let Some(automatic) = &self.automatic {
+            pairs.push(("automatic", automatic.words()));
+            if !automatic.message.is_empty() {
+                pairs.push(("why", automatic.message.clone()));
+            }
+            if !automatic.job_ids.is_empty() {
+                pairs.push(("jobs", automatic.job_ids.join(", ")));
+            }
+            if let Some(landing) = &automatic.landing_id {
+                pairs.push(("landing", landing.clone()));
+            }
+            if !automatic.next.is_empty() {
+                pairs.push(("next", automatic.next.join(" ")));
+            }
+        }
         block(w, &pairs)?;
         if !self.transitions.is_empty() {
             writeln!(w)?;
@@ -534,13 +576,23 @@ impl TextRender for ProposalHistory {
 }
 
 impl TextRow for Proposal {
-    const HEADER: &'static [&'static str] = &["CHANGE", "STATE", "BY", "UPDATED", "DESCRIPTION"];
+    const HEADER: &'static [&'static str] = &[
+        "CHANGE",
+        "STATE",
+        "AUTOMATIC",
+        "BY",
+        "UPDATED",
+        "DESCRIPTION",
+    ];
 
     fn row(&self) -> Vec<String> {
         let lifecycle = self.lifecycle.as_ref();
         vec![
             short(&self.change_id_reverse_hex),
             lifecycle.map_or_else(|| "-".to_owned(), lifecycle_words),
+            self.automatic
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), AutomaticStatus::words),
             self.proposed_by.clone().unwrap_or_else(|| "-".to_owned()),
             lifecycle
                 .and_then(|lifecycle| lifecycle.last.as_ref())

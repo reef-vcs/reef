@@ -177,6 +177,9 @@ struct LandingTable {
     /// The git remote (a remote's name, never a URL) each landing is
     /// pushed to, fast-forward onto the branch of the destination's name.
     push: Option<String>,
+    /// Queue a proposal the gate allows with no request (R3.45); default
+    /// false.
+    automatic: Option<bool>,
 }
 
 #[allow(dead_code)]

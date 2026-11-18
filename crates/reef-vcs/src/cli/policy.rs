@@ -84,6 +84,9 @@ struct EvalArgs {
     /// Exit 5 unless the decision is allow.
     #[arg(long)]
     require_allow: bool,
+    /// Judge the change's stack as `reef land` would: each change not yet on the destination, bottom first; --policy-revision names the destination bookmark.
+    #[arg(long, conflicts_with = "input_json")]
+    stack: bool,
     #[command(flatten)]
     scope: ScopeArgs,
 }
@@ -217,6 +220,55 @@ pub(crate) struct PolicyEvaluated {
     /// With `--input-json`, the input the policy saw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) input_json: Option<serde_json::Value>,
+    /// With `--stack` (R3.45): every change of the stack as `reef land`
+    /// would judge it, bottom first. The evaluation above is the
+    /// revision's own, or the first refused change's when the stack stops
+    /// below it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stack: Option<StackEvaluated>,
+}
+
+/// The stack `EvaluatePolicy` judged (R3.45).
+fn stack_of(response: &v1::EvaluatePolicyResponse) -> StackEvaluated {
+    StackEvaluated {
+        prefix: response.prefix,
+        members: response
+            .members
+            .iter()
+            .map(|member| StackMember {
+                change_id_reverse_hex: reef_client::json::reverse_hex(&member.change_id),
+                commit_id: member.commit_id.clone(),
+                passes: member.passes,
+                reason: (!member.reason.is_empty()).then(|| member.reason.clone()),
+                message: member.message.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// `reef policy eval --stack`: a stack as the gate would judge it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct StackEvaluated {
+    /// How many changes, from the bottom, landing would queue now.
+    pub(crate) prefix: u32,
+    /// Each change, bottom first.
+    pub(crate) members: Vec<StackMember>,
+}
+
+/// One change of a judged stack.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct StackMember {
+    /// The change, in jj's reverse hex.
+    pub(crate) change_id_reverse_hex: String,
+    /// Its commit.
+    pub(crate) commit_id: String,
+    /// Whether landing would queue it.
+    pub(crate) passes: bool,
+    /// Why not: `policy`, `conflicted`, `alone`, `unlanded_parents` and the
+    /// other landing reasons; `null` when it passes.
+    pub(crate) reason: Option<String>,
+    /// What the gate would say.
+    pub(crate) message: String,
 }
 
 /// What `reef policy init` prints.
@@ -388,6 +440,21 @@ impl TextRender for PolicyCheck {
 
 impl TextRender for PolicyEvaluated {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        if let Some(stack) = &self.stack {
+            writeln!(
+                w,
+                "stack: {} of {} would be queued",
+                stack.prefix,
+                stack.members.len()
+            )?;
+            for member in &stack.members {
+                let verdict = match &member.reason {
+                    None => "allow".to_owned(),
+                    Some(reason) => format!("{reason}: {}", member.message),
+                };
+                writeln!(w, "  {} {verdict}", short(&member.change_id_reverse_hex))?;
+            }
+        }
         writeln!(w, "decision: {}", decision_word(self.evaluation.decision))?;
         let source = &self.source;
         if source.from_request {
@@ -693,10 +760,23 @@ async fn eval(ctx: &Ctx, args: EvalArgs) -> Result<(), CliError> {
             policy_revision: args.policy_revision.clone().unwrap_or_default(),
             policy,
             include_input: args.input_json,
+            stack: args.stack,
             ..EvaluatePolicyRequest::default()
         }))
         .await?;
-    let message = response.evaluation.unwrap_or_default();
+    let stack = args.stack.then(|| stack_of(&response));
+    // Above a refused change the revision is not judged: the refused
+    // change's evaluation is the one to read.
+    let message = response
+        .evaluation
+        .or_else(|| {
+            response
+                .members
+                .iter()
+                .find(|member| !member.passes)
+                .and_then(|member| member.evaluation.clone())
+        })
+        .unwrap_or_default();
     let source = message.source.clone().unwrap_or_default();
     let evaluated = PolicyEvaluated {
         source: PolicySource {
@@ -719,6 +799,7 @@ async fn eval(ctx: &Ctx, args: EvalArgs) -> Result<(), CliError> {
         input_json: (!message.input_json.is_empty())
             .then(|| serde_json::from_str(&message.input_json).ok())
             .flatten(),
+        stack,
     };
     let refused = args.require_allow && evaluated.evaluation.decision != Decision::Allow;
     // Refused, JSON gets the error document alone, as every failure's; text
