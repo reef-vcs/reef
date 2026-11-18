@@ -51,7 +51,8 @@ fn is_zero(value: &u32) -> bool {
 /// `created_at`, `last_snapshot_at`, `last_snapshot_op`, `lease`,
 /// `watcher`, `watch_state`, `local_snapshot_count`, `stores`; `ws inspect
 /// <id>` has them. `disk` only while the disk level is not `ok` (#272), as
-/// [`Disk`].
+/// [`Disk`]. `overlaps` and `overlap_count` when there are any (#263), as
+/// [`Overlap`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Workspace")]
 pub struct Workspace<'a> {
@@ -69,6 +70,40 @@ pub struct Workspace<'a> {
     changed_file_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk: Option<Disk>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    overlaps: Vec<Overlap<'a>>,
+    #[serde(skip_serializing_if = "is_zero")]
+    overlap_count: u32,
+}
+
+/// Another open change on the same paths (#263). Always
+/// `change_id_reverse_hex`, `owner`, `paths` and `path_count`;
+/// `workspace_id` and `active` when set. Dropped: `change_id`, `commit_id`,
+/// `written_at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "brief.Overlap")]
+pub struct Overlap<'a> {
+    change_id_reverse_hex: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<&'a str>,
+    owner: &'a str,
+    #[serde(skip_serializing_if = "is_false")]
+    active: bool,
+    paths: &'a [String],
+    path_count: u32,
+}
+
+impl<'a> From<&'a json::Overlap> for Overlap<'a> {
+    fn from(overlap: &'a json::Overlap) -> Self {
+        Self {
+            change_id_reverse_hex: &overlap.change_id_reverse_hex,
+            workspace_id: overlap.workspace_id.as_deref(),
+            owner: &overlap.owner,
+            active: overlap.active,
+            paths: &overlap.paths,
+            path_count: overlap.path_count,
+        }
+    }
 }
 
 /// A workspace's disk figure, while the disk level is not `ok` (#272):
@@ -123,6 +158,8 @@ impl<'a> From<&'a json::Workspace> for Workspace<'a> {
             attention: ws.attention.as_deref(),
             changed_file_count: ws.changed_file_count,
             disk: None,
+            overlaps: ws.overlaps.iter().map(Overlap::from).collect(),
+            overlap_count: ws.overlap_count,
         }
     }
 }
@@ -741,6 +778,26 @@ mod tests {
             provenance: None,
             behind_trunk: None,
             disk: None,
+            overlaps: Vec::new(),
+            overlap_count: 0,
+        }
+    }
+
+    fn overlapping(full: &json::Workspace) -> json::Workspace {
+        json::Workspace {
+            overlaps: vec![json::Overlap {
+                change_id: "4567".into(),
+                change_id_reverse_hex: "vuts".into(),
+                commit_id: "ef01".into(),
+                workspace_id: Some("00000000000000bb".into()),
+                owner: "bot-1".into(),
+                active: true,
+                paths: vec!["src/lib.rs".into()],
+                path_count: 1,
+                written_at: Some("2026-11-18T00:00:00.000Z".into()),
+            }],
+            overlap_count: 1,
+            ..full.clone()
         }
     }
 
@@ -960,6 +1017,21 @@ mod tests {
     }
 
     #[test]
+    fn brief_workspace_names_overlaps_only_when_there_are_some() {
+        let full = full_workspace("00000000000000aa", "r1");
+        // No overlap, no bytes (#263).
+        assert!(
+            !serde_json::to_string(&Workspace::from(&full))
+                .unwrap()
+                .contains("overlap")
+        );
+        assert_eq!(
+            serde_json::to_string(&Workspace::from(&overlapping(&full))).unwrap(),
+            r#"{"id":"00000000000000aa","owner":"bot-0","changed_file_count":3,"overlaps":[{"change_id_reverse_hex":"vuts","workspace_id":"00000000000000bb","owner":"bot-1","active":true,"paths":["src/lib.rs"],"path_count":1}],"overlap_count":1}"#
+        );
+    }
+
+    #[test]
     fn brief_lists_name_the_repository_only_across_several() {
         let one = [
             full_workspace("00000000000000aa", "r1"),
@@ -1135,7 +1207,8 @@ mod tests {
             attention: Some("divergent".into()),
             ..workspace.clone()
         };
-        for ws in [&workspace, &flagged] {
+        let overlapped = overlapping(&workspace);
+        for ws in [&workspace, &flagged, &overlapped] {
             assert_subset(&value(&Workspace::from(ws)), &value(ws), "workspace");
         }
         let two = [

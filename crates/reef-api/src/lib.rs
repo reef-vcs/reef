@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 34;
+pub const API_REVISION: u32 = 35;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -152,6 +152,8 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.17: `ListPushes`, `PushLanded`, `PushState`, `DestinationPush`,
     // `LandingPush`, `Landing.push` and `GetDaemonStatusResponse.pushes_attention`.
     "36292a201e06ed0ba4cf5d73e0ea99f1ade4bee94dd030651e14a86f62294a2f",
+    // #263: `Workspace.overlaps`, `Workspace.overlap_count` and `Overlap`.
+    "390afd90d319e24ad525a548a41c7b3668f4f291f2db350392b91676ba0cc885",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

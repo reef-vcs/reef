@@ -416,6 +416,38 @@ message Workspace {
   // active workspace (all zero until its first walk, as at create); unset
   // otherwise and at an operation.
   WorkspaceDisk disk = 24;
+  // Other open changes that change paths this workspace's change changes,
+  // at most 10, newest written first (#263, ADR 0079): active workspaces'
+  // changes, and other open changes written within `[overlaps] max_age`;
+  // never the workspace's own change, its ancestors or its descendants.
+  // Set by GetStatus at head and GetWorkspace; empty elsewhere, at an
+  // operation, and when there are none.
+  repeated Overlap overlaps = 25;
+  // Such changes, in all.
+  uint32 overlap_count = 26;
+}
+
+// Another open change that changes a path a workspace's change changes
+// (#263, ADR 0079). A path whose content in that change equals `trunk()`'s
+// is not counted: the change adds nothing there.
+message Overlap {
+  // The other change, in hex.
+  string change_id = 1;
+  // Its commit, as read.
+  string commit_id = 2;
+  // A Reef workspace on that change: an active one, else the newest
+  // released one; empty when no Reef workspace has been on it.
+  string workspace_id = 3;
+  // That workspace's owner; with no workspace, the commit author's email.
+  string owner = 4;
+  // Whether an active workspace is on it now.
+  bool active = 5;
+  // The paths both changes change, in path order, at most 10.
+  repeated string paths = 6;
+  // Such paths, in all.
+  uint32 path_count = 7;
+  // When the other change was last written: its commit's committer time.
+  google.protobuf.Timestamp written_at = 8;
 }
 
 // What a workspace's directory costs on disk, as of `measured_at` (#272).

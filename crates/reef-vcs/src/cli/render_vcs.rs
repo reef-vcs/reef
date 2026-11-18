@@ -176,6 +176,11 @@ impl TextRender for RepoStatus {
                     }
                 )?;
             }
+            if let Some(workspace) = &ws.workspace {
+                for line in super::render::overlap_lines(workspace) {
+                    writeln!(w, "{line}")?;
+                }
+            }
         }
         if let Some(repo) = &self.repository {
             writeln!(w, "Repository {} at {}", repo.id, repo.root)?;

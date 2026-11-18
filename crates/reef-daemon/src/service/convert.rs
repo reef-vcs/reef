@@ -37,7 +37,7 @@ pub(crate) fn timestamp(time: Timestamp) -> prost_types::Timestamp {
 }
 
 /// A [`SystemTime`] as a `google.protobuf.Timestamp`, to the millisecond.
-pub(super) fn system_timestamp(time: SystemTime) -> prost_types::Timestamp {
+pub(crate) fn system_timestamp(time: SystemTime) -> prost_types::Timestamp {
     let millis = match time.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
         Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
@@ -271,6 +271,9 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             // Set by GetWorkspace and GetStatus for one workspace (#259).
             behind_trunk: None,
             disk: None,
+            // Set by GetStatus at head and GetWorkspace (#263).
+            overlaps: Vec::new(),
+            overlap_count: 0,
         }
     }
 }

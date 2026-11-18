@@ -30,6 +30,7 @@ pub mod lifecycle;
 pub mod log;
 pub mod materialize;
 pub mod oplog;
+pub mod overlap;
 pub mod projection;
 pub mod push;
 pub mod rebase;

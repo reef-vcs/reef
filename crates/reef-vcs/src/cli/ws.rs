@@ -249,7 +249,7 @@ impl Args {
 pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCode, CliError> {
     let done = match args.command {
         WsCommand::Provider(args) => Box::pin(provider::run(ctx, global, args)).await,
-        WsCommand::Run(args) => return ws_run::run(ctx, global, args).await,
+        WsCommand::Run(args) => return Box::pin(ws_run::run(ctx, global, args)).await,
         WsCommand::Gc { repo, dry_run } => return gc(ctx, repo.as_deref(), dry_run).await,
         WsCommand::Create(args) => create(ctx, global, args).await,
         WsCommand::List {

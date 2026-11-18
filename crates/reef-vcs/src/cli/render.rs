@@ -286,6 +286,59 @@ fn disk_line(disk: &reef_client::json::WorkspaceDisk) -> String {
     line
 }
 
+/// Overlaps a text form lists at most (#263); the rest are counted.
+pub(crate) const OVERLAP_LINES: usize = 3;
+
+/// An overlap's change as text shows it: the first 12 characters of its
+/// reverse hex, as `here` shows the workspace's own.
+pub(crate) fn overlap_change(overlap: &reef_client::json::Overlap) -> String {
+    overlap.change_id_reverse_hex.chars().take(12).collect()
+}
+
+/// Who is on an overlapping change: `workspace <id> (<owner>)`,
+/// `released workspace <id> (<owner>)`, or `change <change> by <author>`.
+pub(crate) fn overlap_who(overlap: &reef_client::json::Overlap) -> String {
+    let change = overlap_change(overlap);
+    match &overlap.workspace_id {
+        Some(id) if overlap.active => format!("workspace {id} ({})", overlap.owner),
+        Some(id) => format!("released workspace {id} ({})", overlap.owner),
+        None => format!("change {change} by {}", overlap.owner),
+    }
+}
+
+/// An overlap's line: `Also changing src/lib.rs (+2 more): workspace
+/// 1111222233334444 (claude@host); reef diff -r kxyzpqrsxxxx`.
+pub(crate) fn overlap_line(overlap: &reef_client::json::Overlap) -> String {
+    let change = overlap_change(overlap);
+    let first = overlap.paths.first().map_or("-", String::as_str);
+    let more = (overlap.path_count as usize).saturating_sub(1);
+    let more = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Also changing {first}{more}: {}; reef diff -r {change}",
+        overlap_who(overlap)
+    )
+}
+
+/// The overlap lines a text form prints: at most [`OVERLAP_LINES`], then
+/// `... and N more changing the same paths`.
+pub(crate) fn overlap_lines(ws: &Workspace) -> Vec<String> {
+    let mut lines: Vec<String> = ws
+        .overlaps
+        .iter()
+        .take(OVERLAP_LINES)
+        .map(overlap_line)
+        .collect();
+    let more = (ws.overlap_count as usize).saturating_sub(lines.len());
+    if more > 0 {
+        lines.push(format!("... and {more} more changing the same paths"));
+    }
+    lines
+}
+
 /// One line for a disk level that is not `ok` (#272), as `ws list` prints
 /// it on stderr: `reef: disk low: 18 GiB free (floor 24 GiB); new
 /// workspaces are refused; next: reef ws release <id>`.
@@ -389,6 +442,9 @@ impl TextRender for Inspected {
             ),
         ));
         block(w, &pairs)?;
+        for line in overlap_lines(&self.workspace) {
+            writeln!(w, "{line}")?;
+        }
         if !self.recent_snapshots.is_empty() {
             writeln!(w, "recent_snapshots:")?;
             for snapshot in &self.recent_snapshots {
@@ -631,6 +687,42 @@ impl TextRender for GcReports {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlaps_print_three_lines_then_a_count() {
+        let overlap = |n: u32, workspace: Option<&str>, active: bool| reef_client::json::Overlap {
+            change_id: String::new(),
+            change_id_reverse_hex: format!("{n}zyxwvutsrqponmlk"),
+            commit_id: String::new(),
+            workspace_id: workspace.map(str::to_owned),
+            owner: format!("bot-{n}"),
+            active,
+            paths: vec!["src/lib.rs".into()],
+            path_count: n,
+            written_at: None,
+        };
+        let ws = Workspace {
+            overlaps: vec![
+                overlap(1, Some("1111222233334444"), true),
+                overlap(2, Some("5555666677778888"), false),
+                overlap(3, None, false),
+                overlap(4, None, false),
+            ],
+            overlap_count: 5,
+            ..Workspace::from(&reef_api::v1::Workspace::default())
+        };
+        assert_eq!(
+            overlap_lines(&ws),
+            [
+                "Also changing src/lib.rs: workspace 1111222233334444 (bot-1); reef diff -r 1zyxwvutsrqp",
+                "Also changing src/lib.rs (+1 more): released workspace 5555666677778888 (bot-2); reef diff -r 2zyxwvutsrqp",
+                "Also changing src/lib.rs (+2 more): change 3zyxwvutsrqp by bot-3; reef diff -r 3zyxwvutsrqp",
+                "... and 2 more changing the same paths",
+            ]
+        );
+        let none = Workspace::from(&reef_api::v1::Workspace::default());
+        assert_eq!(overlap_lines(&none), Vec::<String>::new());
+    }
 
     #[test]
     fn sizes_use_binary_units() {

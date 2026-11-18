@@ -234,6 +234,18 @@ reef ws run -- sh -c 'echo x >> README.md; sleep 3; reef status'   # in two term
 - **The symbol follow-up**: `Overlap` grows a symbol verdict.
 - **The event follow-up**: the same computation on the write path.
 
+## Departures in the implementation
+
+- **API revision 35, not 36.** `API_DIGESTS` must have one entry per revision, and R3.10 (35) had not merged when this branch was cut. Whichever of the two merges second takes 36 on rebase.
+- **The workspace's own paths come from the path cache, not from status's diff.** `diff_page` detects copies, so a rename's source path is missing from its files; status and `GetWorkspace` would then disagree. Both read the cache, which costs one tree diff per new `@` commit and none when there is no candidate.
+- **"Active" is a `reef-<id>` working copy on the change in the view, whose workspace the database says is active.** The view alone would count a force-released workspace whose jj forget failed; the database alone can lag the view (a row's change id is as of its last snapshot). Owners are looked up by workspace id for live ones and by change id for the rest.
+- **Two candidate rules the brief missed** (found in review): commits on `main@origin` past a lagging local `main` are landed though Reef's `mutable()` holds them, so they are left out and the landed check compares with that remote bookmark; and working copies are read before the other candidates, so the 1,000 cap never cuts an active workspace's change.
+- **A workspace whose change is empty reads no candidate**, the common `reef here` in a fresh workspace.
+- **The jj work is one function in `reef-lib`** (`jj::overlap::find`, with `PathCache`), and `reef-daemon/src/overlap.rs` only applies `max_age`, attributes and converts. Paths are kept as `RepoPathBuf` in jj's component order, since string order would put `a.rs` before `a/b`.
+- **`MAX_CHANGED_PATHS` is its own constant** (10,000, the history index's number), not moved out of `history/touch.rs`.
+- **Three `Box::pin`s in `reef-vcs`** (`hook.rs`, `presence.rs`, `ws.rs`): `v1::Workspace` grew by a `Vec` and a `u32`, which took three futures past clippy's `large_futures` limit.
+- **One threat-model row per risk, S-214 and S-215**, as planned. The `[overlaps]` section is documented in `config.rs` and `reef config`. The agent guide is unchanged: it is 6 bytes under its 1,750-byte budget (`cli::no_args_prints_guide_and_exits_zero`), and `status` and `here` explain an overlap where it appears (the text lines, `here`'s hint).
+
 ## Departures from dev-phases.md
 
 None: #263 is not a `dev-phases.md` row, and R3.36's row is unchanged.

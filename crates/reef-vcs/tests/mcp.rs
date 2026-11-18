@@ -469,6 +469,28 @@ async fn a_restarted_server_takes_over() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn get_status_names_an_overlap() {
+    let (daemon, repo) = fixture().await;
+    let mut root = server(&daemon, &repo.root).await;
+    let a = create(&mut root).await;
+    let b = create(&mut root).await;
+    write(&a, "shared.txt", "a\n");
+    write(&b, "shared.txt", "b\n");
+    root.ok("snapshot_workspace", json!({"workspace": id(&b)}))
+        .await;
+    let mut in_a = server(&daemon, &path(&a)).await;
+    let status = in_a.ok("get_status", json!({})).await;
+    let workspace = &status["workspace_status"]["workspace"];
+    assert_eq!(
+        workspace["overlaps"][0]["workspace_id"],
+        json!(id(&b)),
+        "{status}"
+    );
+    assert_eq!(workspace["overlaps"][0]["paths"], json!(["shared.txt"]));
+    assert_eq!(workspace["overlap_count"], 1);
+}
+
 // 9
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one fixture, every read tool")]

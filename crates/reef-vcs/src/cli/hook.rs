@@ -82,7 +82,7 @@ pub(crate) async fn run(global: &Global, args: Args) -> Result<(), CliError> {
         no_autostart: true,
         ..global.clone()
     };
-    match tokio::time::timeout(DEADLINE, hook(&global, args)).await {
+    match tokio::time::timeout(DEADLINE, Box::pin(hook(&global, args))).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::debug!(target: "reef", %error, "presence hook"),
         Err(_) => tracing::debug!(target: "reef", "presence hook: out of time"),

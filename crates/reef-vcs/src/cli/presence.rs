@@ -180,7 +180,7 @@ impl From<KindArg> for v1::PresenceKind {
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     match args.command {
         PresenceCommand::Watch(args) => watch(ctx, args).await,
-        PresenceCommand::Report(args) => report(ctx, args).await,
+        PresenceCommand::Report(args) => Box::pin(report(ctx, args)).await,
         PresenceCommand::Clear(args) => clear(ctx, args).await,
         PresenceCommand::Hook(_) => Ok(()),
     }
