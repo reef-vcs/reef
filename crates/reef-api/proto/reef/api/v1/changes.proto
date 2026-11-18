@@ -59,8 +59,11 @@ service ChangeService {
   // The author stays; the committer becomes the daemon's identity, now. A
   // description already equal (after the trailing newline is added) records
   // no operation: `operation` is unset and `change` is the current commit.
-  // Never snapshots, as it changes no tree; workspaces on the commit or its
-  // descendants are held still while it writes (ADR 0031). One commit of a
+  // When `revision` uses `@`, the workspace is snapshotted first, through
+  // the status index as reads are (#327), so the commit described holds
+  // every file written before the call; the write itself changes no tree,
+  // and workspaces on the commit or its descendants are held still while
+  // it writes (ADR 0031). One commit of a
   // divergent change, named by commit id, may be described; the change
   // stays divergent.
   //
@@ -71,7 +74,8 @@ service ChangeService {
   // reason EXPECTED_COMMIT_MISMATCH (metadata `expected_commit_id`,
   // `commit_id`), IMMUTABLE_REVISION or HIDDEN_REVISION (metadata
   // `commit_id`), IDENTITY_UNSET or SIGNOFF_WITHOUT_DESCRIPTION (`signoff`
-  // and `reset_author`, #258), or for a `workspace` that is not active.
+  // and `reset_author`, #258), SNAPSHOT_FAILED (metadata `workspace_id`),
+  // or for a `workspace` that is not active.
   rpc DescribeChange(DescribeChangeRequest) returns (DescribeChangeResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }

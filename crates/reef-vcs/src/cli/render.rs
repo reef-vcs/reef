@@ -411,6 +411,14 @@ fn disk_status_line(disk: Option<&reef_client::json::DiskStatus>) -> String {
 impl TextRender for Inspected {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let mut pairs = workspace_pairs(&self.workspace);
+        if let Some(step) = &self.workspace.step {
+            // #262: what the change needs next, as `reef here` names it.
+            let files = match self.workspace.changed_file_count.unwrap_or(0) {
+                1 => "1 changed file".to_owned(),
+                n => format!("{n} changed files"),
+            };
+            pairs.push(("step", format!("{step} ({files})")));
+        }
         pairs.push((
             "disk_usage",
             self.disk_usage.map_or_else(

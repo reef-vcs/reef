@@ -143,6 +143,7 @@ async fn inspect(daemon: &TestDaemon, ws: &str) -> v1::Workspace {
             snapshot_first: false,
             skip_disk_usage: true,
             at_operation: String::new(),
+            sync_first: false,
         })
         .await
         .unwrap()

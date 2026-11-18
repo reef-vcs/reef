@@ -446,6 +446,7 @@ async fn enclosing_workspace(ctx: &Ctx, repo: &RepoArg) -> Result<Option<v1::Wor
         snapshot_first: true,
         skip_disk_usage: true,
         at_operation: String::new(),
+        sync_first: false,
     };
     match ctx.call(ctx.client.get_workspace(request)).await {
         Ok(response) => {

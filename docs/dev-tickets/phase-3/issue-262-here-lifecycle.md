@@ -261,6 +261,17 @@ reef ws run -- sh -c 'reef here; echo x > a.txt; reef here; reef describe -m "x"
 - **A daemon-side step** if MCP agents need it: `step()` is pure and moves as is.
 - **#123's other views** follow `brief::Here`.
 
+## Departures in the implementation
+
+- **The step's read lives in `service/step.rs`**, not `crate::lifecycle::step`: it describes the commit through the service layer's `convert::change`, which is private to `service`. The pure `step()` and its table test are there too.
+- **`reef here` makes two reads**, `GetWorkspace` with `sync_first` (or `snapshot_first` with `--snapshot`) and `ListPushes`, as before; the probes and `GetStatus` of decision 3 were for the CLI-only design.
+- **MCP `get_workspace` always passes `sync_first`**, so its `step` covers what is on disk, as `here`'s does.
+- **`reef --help` is unchanged.** `propose land conflict` do not fit its 512 bytes (511 used) by rewording alone, and the answers kept ADR 0051's budget.
+- **`json::Change.subject` is in every change's full JSON**, not only in `status`, since a brief key must be a key of the full document (ADR 0045); only `status`'s trunk and parents use it in brief form.
+- **The guide's Changes paragraph** no longer says that `reef publish`'s `next` opens the pull request (publish's own output says so); it names `reef here`'s `next`, `propose`, `land`, `publish`, `rebase` and `conflict show`. 1,864 bytes, long part 1,845.
+- **Tests.** The lifecycle path end to end is `reef-daemon/tests/steps.rs` (no policy, a policy at trunk, a recorded proposal), and the CLI test covers `work`, `describe` and `publish` and the brief view. Conflicts, queued and landed are covered by the step table and `here`'s unit tests, not an integration test.
+- **The web UI** shows "Next step" on a workspace's page.
+
 ## Departures from dev-phases.md
 
 None: #262 and #327 are not `dev-phases.md` rows.

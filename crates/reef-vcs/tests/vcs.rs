@@ -1107,12 +1107,12 @@ async fn divergence_is_shown() {
 
     let a_commit = in_a["commit_id"].as_str().unwrap();
     ok(&daemon, &path(&b), &["abandon", a_commit]).await;
-    let here = ok(&daemon, &path(&b), &["here"]).await;
+    let here = ok(&daemon, &path(&b), &["-o", "json", "here"]).await;
     assert_eq!(here["divergent"], false, "{here}");
-    assert_eq!(
-        strings(&here["next"]),
-        ["reef", "ws", "release", b.id.as_str()]
-    );
+    // No longer divergent, b's change has its file and no description:
+    // its next step is to describe it (#262).
+    assert_eq!(here["step"], "describe", "{here}");
+    assert_eq!(strings(&here["next"]), ["reef", "describe", "-m"]);
     let status = ok(&daemon, &repo.root, &["-o", "json", "status"]).await;
     assert_eq!(
         status["repository_status"]["divergent_change_ids"],

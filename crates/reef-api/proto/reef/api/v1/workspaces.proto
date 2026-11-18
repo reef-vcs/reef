@@ -14,6 +14,7 @@ package reef.api.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/provenance.proto";
@@ -394,9 +395,9 @@ message Workspace {
   WatchState watch_state = 19;
   // How many paths its working-copy commit changes against its parents,
   // merged, as GetStatus counts them, as of the last snapshot (issue #114).
-  // Set only by ListWorkspaces with `changed_file_counts`, for active and
-  // releasing workspaces; unset otherwise, and when the count could not be
-  // read.
+  // Set by ListWorkspaces with `changed_file_counts`, for active and
+  // releasing workspaces, and by GetWorkspace with `step` (#262); unset
+  // otherwise, and when the count could not be read.
   optional uint32 changed_file_count = 20;
   // The remote token that created it (R2.08); empty if created over the
   // socket.
@@ -425,6 +426,16 @@ message Workspace {
   repeated Overlap overlaps = 25;
   // Such changes, in all.
   uint32 overlap_count = 26;
+  // What its change needs next to be finished (#262, ADR 0080), read at
+  // head from its working-copy commit. Set by GetWorkspace for an active
+  // workspace, with `lifecycle`, `conflicted_path_count` and
+  // `changed_file_count`; unspecified elsewhere, at an operation, and when
+  // it could not be read.
+  ChangeStep step = 27;
+  // Its change's lifecycle at head (R3.09); set where `step` is.
+  ChangeLifecycle lifecycle = 28;
+  // Conflicted paths in its working-copy commit; set where `step` is.
+  uint32 conflicted_path_count = 29;
 }
 
 // Another open change that changes a path a workspace's change changes
@@ -752,8 +763,16 @@ message GetWorkspaceRequest {
   // The workspace as it was at this operation (R2.12), as ListWorkspaces
   // lists it then; NOT_FOUND with reason WORKING_COPY_NOT_FOUND when that
   // operation's view has no working copy for it. Cannot be combined with
-  // `snapshot_first`. An operation id or unique prefix; empty for now.
+  // `snapshot_first` or `sync_first`. An operation id or unique prefix;
+  // empty for now.
   string at_operation = 5;
+  // Sync through the status index first (R2.23), as GetStatus does, so
+  // `Workspace.step` and `changed_file_count` cover the files on disk: no
+  // snapshot when nothing changed since the last scan, else a snapshot of
+  // the changed paths, returned in `snapshot`. Ignored with
+  // `snapshot_first`; INVALID_ARGUMENT with `at_operation`. A sync that
+  // fails is logged and the read answers from the last snapshot (#262).
+  bool sync_first = 6;
 }
 
 // One workspace.

@@ -318,6 +318,7 @@ async fn inspect_at(
         snapshot_first: false,
         skip_disk_usage: true,
         at_operation: String::new(),
+        sync_first: false,
     };
     let (repo_id, at_operation) = if at.at.is_some() {
         let now = ctx.call(ctx.client.get_workspace(request.clone())).await?;

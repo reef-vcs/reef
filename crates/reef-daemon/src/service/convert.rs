@@ -274,6 +274,10 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             // Set by GetStatus at head and GetWorkspace (#263).
             overlaps: Vec::new(),
             overlap_count: 0,
+            // Set by GetWorkspace for an active workspace (#262).
+            step: v1::ChangeStep::Unspecified.into(),
+            lifecycle: None,
+            conflicted_path_count: 0,
         }
     }
 }

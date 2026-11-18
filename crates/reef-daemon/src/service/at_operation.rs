@@ -106,7 +106,8 @@ impl Advise for ReplayError {
                 "at_operation needs repo: an operation belongs to one repository.".to_owned()
             }
             Self::SnapshotFirst => {
-                "A read at an operation never snapshots; drop snapshot_first.".to_owned()
+                "A read at an operation never snapshots; drop snapshot_first and sync_first."
+                    .to_owned()
             }
         }))
     }

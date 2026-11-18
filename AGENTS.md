@@ -10,7 +10,7 @@ Work lands as a jj change; nothing is lost when a workspace is released.
 From inside the repository:
 
     reef ws run -- <command>   # new workspace, run there, release it
-    reef here                  # where am I, and what next
+    reef here                  # where am I, and the next step to finish
 
 The first command in a repository registers it (adding jj beside git).
 Output is JSON when piped; errors carry `hint` and `next`, a command to run.

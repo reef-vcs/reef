@@ -380,6 +380,67 @@ async fn describe_holds_snapshots_off() {
     daemon.stop().await;
 }
 
+/// #327: a file written just before a describe of `@` is in the commit
+/// the describe names, though no automatic snapshot has run; a describe
+/// of a revision without `@` snapshots nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_right_after_a_write_has_the_write() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let ws = create(client, &repo, "writer@test").await;
+    write(&ws, "fresh.txt", "fresh\n");
+    let described = client
+        .describe_change(describe(&ws, "@", "with the write", ""))
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    assert_eq!(
+        file_at(&repo.root, &described.commit_id, "fresh.txt").await,
+        Some("fresh\n".to_owned())
+    );
+    assert_eq!(described.description, "with the write\n");
+    assert_eq!(get(client, &repo, &ws).await.commit_id, described.commit_id);
+    assert_eq!(divergent_commits(client, &ws).await, 0);
+
+    // A commit read before a write the watcher has not recorded is no
+    // longer the change's: the snapshot moves it.
+    write(&ws, "later.txt", "later\n");
+    let stale = client
+        .describe_change(describe(&ws, "@", "x", &described.commit_id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&stale),
+        (
+            Code::FailedPrecondition,
+            "EXPECTED_COMMIT_MISMATCH".to_owned()
+        )
+    );
+
+    // Not `@`: an unrecorded edit stays unrecorded. (The refused describe
+    // above did record `later.txt`.)
+    write(&ws, "unrecorded.txt", "unrecorded\n");
+    let before = get(client, &repo, &ws).await.commit_id;
+    let trunk_side = create(client, &repo, "other@test").await;
+    client
+        .describe_change(describe(&trunk_side, &ws.change_id, "by id", ""))
+        .await
+        .unwrap();
+    let after = change(client, &ws, "@").await;
+    assert_eq!(after.description, "by id\n");
+    assert_eq!(
+        file_at(&repo.root, &after.commit_id, "later.txt").await,
+        Some("later\n".to_owned())
+    );
+    assert_eq!(
+        file_at(&repo.root, &after.commit_id, "unrecorded.txt").await,
+        None
+    );
+    assert_ne!(after.commit_id, before);
+    daemon.stop().await;
+}
+
 // 10
 #[tokio::test(flavor = "multi_thread")]
 async fn abandon_change() {

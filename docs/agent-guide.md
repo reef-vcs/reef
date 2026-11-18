@@ -7,7 +7,7 @@ Work lands as a jj change; nothing is lost when a workspace is released.
 From inside the repository:
 
     reef ws run -- <command>   # new workspace, run there, release it
-    reef here                  # where am I, and what next
+    reef here                  # where am I, and the next step to finish
 
 The first command in a repository registers it (adding jj beside git).
 Output is JSON when piped; errors carry `hint` and `next`, a command to run.
@@ -38,6 +38,6 @@ Errors: `{"error": {kind, reason, message, hint, next, metadata}}`. Exit 0 ok,
 ## Changes
 
 `reef status`, `log`, `show`, `diff`, `describe -m <text>`, `undo <op>` (`op log`).
-Revisions are jj revsets. `reef rebase` brings a change onto the newest trunk;
-`reef publish -m <text>` pushes it to a git branch, and its `next` opens the
-pull request.
+Revisions are jj revsets. To finish, follow `reef here`'s `next`: describe it, then
+`reef propose` and `reef land` where a policy lands changes, else `reef publish` to a git
+branch. `reef rebase` brings it onto trunk; `reef conflict show` explains a conflict.

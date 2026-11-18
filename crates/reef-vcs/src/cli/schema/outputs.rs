@@ -96,6 +96,13 @@ fn here(generator: &mut SchemaGenerator) -> Schema {
     json_schema!({ "oneOf": [inside, outside] })
 }
 
+/// `reef here`'s brief form: the view of `Inside`, or `Outside` whole.
+fn here_brief(generator: &mut SchemaGenerator) -> Schema {
+    let inside = generator.subschema_for::<here::BriefInside<'static>>();
+    let outside = generator.subschema_for::<here::Outside>();
+    json_schema!({ "oneOf": [inside, outside] })
+}
+
 /// `reef init`: what it wrote, or with `--print` the section it would.
 fn init(generator: &mut SchemaGenerator) -> Schema {
     let wrote = generator.subschema_for::<init::InitJson>();
@@ -236,7 +243,7 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         result_on_failure: true,
         ..row(&["ws", "gc"], list::<GcReport>)
     },
-    row(&["here"], here),
+    view(&["here"], here, here_brief),
     view(
         &["status"],
         object::<RepoStatus>,

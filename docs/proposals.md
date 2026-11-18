@@ -55,6 +55,8 @@ Reasons are untrusted text: up to 4 KiB, with no control characters but newline 
 
 ## Following a proposal
 
+`reef here` names what a workspace's change needs next, and `GetWorkspace` returns it as `Workspace.step` ([ADR 0080](adr/0080-here-walks-the-lifecycle.md)): `describe` it, `propose` it, `land` it, `wait` while it is queued, `revise` it after a decline, `resolve` its conflicts, `publish` it where nothing lands through proposals, or `done`. A repository lands through proposals when `trunk()` has a `reef-policy.toml` or any change of it was ever proposed.
+
 Every transition is an operation of kind `transition` in the operation log, with the transition in `Operation.transitions`. An agent waits for its proposal's fate without polling:
 
 ```

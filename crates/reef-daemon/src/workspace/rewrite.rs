@@ -18,7 +18,8 @@
 //!    lock taken, in workspace id order, as GC does.
 //! 3. Snapshot (abandon, undo and edit): each locked workspace, so no
 //!    unsnapshotted edit is overwritten. A failure stops the write before
-//!    anything is written. Describe changes no tree and takes none.
+//!    anything is written. Describe changes no tree and takes none: its
+//!    service has already synced a workspace whose `@` it names (#327).
 //! 4. Write, on the repository thread: resolve and check again, then one
 //!    operation with the request's [`OpMeta`].
 //! 5. Follow: every Reef workspace the write moved to another commit of its

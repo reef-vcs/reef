@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-26
 - Ticket: R2.03
-- Amended by: [0039](0039-carrying-edits-through-a-write.md), [0040](0040-gc-and-the-users-jj-workspaces.md)
+- Amended by: [0039](0039-carrying-edits-through-a-write.md), [0040](0040-gc-and-the-users-jj-workspaces.md), [0080](0080-here-walks-the-lifecycle.md) (a describe of `@` syncs the workspace through the status index first, #327)
 
 ## Context
 
