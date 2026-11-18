@@ -3,7 +3,9 @@
 //! follows the change from nothing changed to proposed, amended and
 //! declined, in a repository that lands through proposals (a policy at
 //! `trunk()`, or a recorded proposal) and in one that does not; a proposal
-//! onto a destination that lands automatically (R3.45) waits.
+//! onto a destination that lands automatically (R3.45) waits while the
+//! automatic service works toward landing it, and reads `land` once it
+//! gives up or where the destination lands on request.
 
 #![allow(
     clippy::unwrap_used,
@@ -15,9 +17,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use reef_api::v1::{
-    self, ChangeStep as Step, CreateIdentityRequest, CreateWorkspaceRequest, DescribeChangeRequest,
-    EditFilesRequest, FileEdit, GetWorkspaceRequest, LifecycleState as State,
-    TransitionChangeRequest, edit_files_request, file_edit,
+    self, AutomaticState, ChangeStep as Step, CreateIdentityRequest, CreateWorkspaceRequest,
+    DescribeChangeRequest, EditFilesRequest, FileEdit, GetWorkspaceRequest,
+    LifecycleState as State, ListProposalsRequest, TransitionChangeRequest, edit_files_request,
+    file_edit,
 };
 use reef_daemon::client::Client;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
@@ -25,10 +28,12 @@ use reef_testing::synth::Preset;
 
 const POLICY: &str = "version = 1\n";
 
-/// A policy that lands automatically and requires a `test` check from
-/// alice's executors, which no executor runs here, so a proposal stays
-/// proposed.
-const AUTOMATIC: &str = r#"version = 1
+/// A policy that requires a `test` check from alice's executors, which no
+/// executor runs here, so a proposal stays proposed; `landing` is its
+/// `[landing]` table.
+fn requiring_tests(landing: &str) -> String {
+    format!(
+        r#"version = 1
 
 [owners]
 identities = ["alice"]
@@ -43,8 +48,10 @@ kinds = ["test"]
 attestors = ["local"]
 
 [landing]
-automatic = true
-"#;
+{landing}
+"#
+    )
+}
 
 /// Automatic snapshots off, so only `sync_first` can record a write.
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
@@ -274,14 +281,9 @@ async fn a_recorded_proposal_is_enough() {
     daemon.stop().await;
 }
 
-/// R3.45: the daemon lands a proposal onto a destination whose policy says
-/// `automatic = true` with no request, so its step is `wait`, not `land`,
-/// once the automatic service has judged it. An amendment still asks for a
-/// new proposal.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_automatic_destination_waits() {
-    let (daemon, repo) = fixture().await;
-    let client = &daemon.client;
+/// A workspace's change, described and proposed for `main`, whose policy
+/// is `policy`; alice exists.
+async fn proposed_under(client: &Client, repo: &SyntheticRepo, policy: &str) -> v1::Workspace {
     client
         .create_identity(CreateIdentityRequest {
             name: "alice".to_owned(),
@@ -290,32 +292,103 @@ async fn an_automatic_destination_waits() {
         })
         .await
         .unwrap();
-    let main = main_with(client, &repo, "reef-policy.toml", AUTOMATIC).await;
-    let ws = create(client, &repo, Some(&main)).await;
+    let main = main_with(client, repo, "reef-policy.toml", policy).await;
+    let ws = create(client, repo, Some(&main)).await;
     write(&ws, "a.txt", "a\n");
     describe(client, &ws, "Add a.txt").await;
     assert_eq!(read(client, &ws).await.step(), Step::Propose);
-
     transition(client, &ws, State::Proposed).await;
+    ws
+}
+
+/// Waits until the automatic service reports `state` for the workspace's
+/// change: its pass has seen the proposal, so the step reads its status.
+async fn automatic_until(
+    client: &Client,
+    repo: &SyntheticRepo,
+    ws: &v1::Workspace,
+    state: AutomaticState,
+) -> v1::AutomaticStatus {
+    let change = read(client, ws).await.change_id;
     let deadline = Instant::now() + Duration::from_secs(60);
-    let waiting = loop {
-        let proposed = read(client, &ws).await;
-        if proposed.step() == Step::Wait {
-            break proposed;
+    loop {
+        let found = client
+            .list_proposals(
+                ListProposalsRequest {
+                    repo: repo.id.clone(),
+                    changes: vec![change.clone()],
+                    ..ListProposalsRequest::default()
+                },
+                10,
+            )
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|entry| entry.change_id == change)
+            .and_then(|entry| entry.automatic);
+        if let Some(found) = &found
+            && found.state() == state
+        {
+            return found.clone();
         }
-        assert_eq!(
-            proposed.step(),
-            Step::Land,
-            "judged yet or not: {proposed:#?}"
-        );
-        assert!(Instant::now() < deadline, "never waited: {proposed:#?}");
+        assert!(Instant::now() < deadline, "never {state:?}: {found:#?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    }
+}
+
+/// R3.45: the daemon lands a proposal onto a destination whose policy says
+/// `automatic = true` with no request, so while the automatic service
+/// waits for its checks its step is `wait`, not `land`. An amendment still
+/// asks for a new proposal.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automatic_destination_waits() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let ws = proposed_under(client, &repo, &requiring_tests("automatic = true")).await;
+    automatic_until(client, &repo, &ws, AutomaticState::Waiting).await;
+    let waiting = read(client, &ws).await;
+    assert_eq!(waiting.step(), Step::Wait, "{waiting:#?}");
     assert_eq!(waiting.lifecycle.unwrap().state(), State::Proposed);
 
     write(&ws, "a.txt", "a2\n");
     let amended = read(client, &ws).await;
     assert_eq!(amended.step(), Step::Propose);
     assert!(amended.lifecycle.unwrap().amended);
+    daemon.stop().await;
+}
+
+/// A proposal the automatic service has given up on stays proposed, and
+/// no transition comes: under `checks = "proposal"` it asks no executor
+/// for the missing check, so it needs one. Its step is `land`, which
+/// reports what is missing, never `wait`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automatic_destination_that_needs_evidence_lands() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let ws = proposed_under(
+        client,
+        &repo,
+        &requiring_tests("automatic = true\nchecks = \"proposal\""),
+    )
+    .await;
+    let needs = automatic_until(client, &repo, &ws, AutomaticState::Needs).await;
+    assert_eq!(needs.reason, "policy");
+    let proposed = read(client, &ws).await;
+    assert_eq!(proposed.step(), Step::Land, "{proposed:#?}");
+    daemon.stop().await;
+}
+
+/// Under the default `checks = "batch"`, the service asks for the missing
+/// check of a destination that lands on request too, but lands nothing:
+/// the step is `land`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_on_request_destination_lands_while_its_checks_run() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let ws = proposed_under(client, &repo, &requiring_tests("")).await;
+    automatic_until(client, &repo, &ws, AutomaticState::Waiting).await;
+    let proposed = read(client, &ws).await;
+    assert_eq!(proposed.step(), Step::Land, "{proposed:#?}");
     daemon.stop().await;
 }

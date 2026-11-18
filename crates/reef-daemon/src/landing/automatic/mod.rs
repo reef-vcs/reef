@@ -152,8 +152,9 @@ pub struct Status {
     pub evaluated_at: Timestamp,
     /// The commit its proposal recorded.
     pub commit: String,
-    /// Whether its destination's policy says `[landing] automatic = true`,
-    /// so it lands with no request: `reef here`'s step is `wait` (#262).
+    /// The bookmark it is proposed for.
+    pub destination: String,
+    /// Whether that destination's policy says `[landing] automatic = true`.
     pub automatic: bool,
     /// The key it was judged under.
     key: String,
@@ -180,12 +181,26 @@ impl Status {
             next: Vec::new(),
             evaluated_at: Timestamp::now(),
             commit: commit.to_owned(),
+            destination: String::new(),
             automatic: false,
             key: String::new(),
             sensitive: false,
             retry_at: None,
             tree: None,
         }
+    }
+
+    /// Whether the service will land the proposal of `commit` onto
+    /// `destination` with no request (#262: `reef here`'s step is then
+    /// `wait`). Only while it may still act: once it needs something, a
+    /// landing returned, or no executor claims, nothing lands until someone
+    /// acts. A status from an earlier proposal of the change, onto another
+    /// destination or of another commit, says nothing about this one.
+    pub fn lands_unasked(&self, destination: &str, commit: &str) -> bool {
+        self.automatic
+            && self.destination == destination
+            && self.commit == commit
+            && matches!(self.state, State::Pending | State::Waiting | State::Queued)
     }
 
     fn with_missing(mut self, needs: Vec<Need>) -> Status {
@@ -634,8 +649,14 @@ async fn pass(state: &Arc<AppState>, repo: RepoId) -> Result<bool, String> {
     let mut judged = 0usize;
     let mut more = false;
     let mut budget = Budget::new(state, repo, &proposals);
+    // Each proposal's destination, and whether it lands automatically.
+    let mut onto: HashMap<&str, (&str, bool)> = HashMap::new();
     for destination in &destinations {
         let settings = settings(state, destination.policy.as_ref());
+        let automatic = settings.is_some_and(|s| s.automatic);
+        for change in destination.stacks.keys() {
+            onto.insert(change, (&destination.name, automatic));
+        }
         let blob = destination
             .policy
             .as_ref()
@@ -736,15 +757,10 @@ async fn pass(state: &Arc<AppState>, repo: RepoId) -> Result<bool, String> {
             .entry(row.change_id.clone())
             .or_insert_with(|| Status::new(State::Pending, &row.commit_id));
     }
-    let automatic: HashSet<&String> = destinations
-        .iter()
-        .filter(|destination| {
-            settings(state, destination.policy.as_ref()).is_some_and(|s| s.automatic)
-        })
-        .flat_map(|destination| destination.stacks.keys())
-        .collect();
     for (change, status) in &mut statuses {
-        status.automatic = automatic.contains(change);
+        let (destination, automatic) = onto.get(change.as_str()).copied().unwrap_or_default();
+        destination.clone_into(&mut status.destination);
+        status.automatic = automatic;
     }
     let instruct: Vec<(String, Status)> = statuses
         .iter()
@@ -918,5 +934,41 @@ pub(crate) async fn wait_for_evidence(
             return None;
         }
         let _ = tokio::time::timeout(deadline - now, changed).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lands_unasked_only_while_the_service_may_act_on_this_proposal() {
+        let status = |state, automatic| Status {
+            destination: "main".to_owned(),
+            automatic,
+            ..Status::new(state, "c1")
+        };
+        for state in [State::Pending, State::Waiting, State::Queued] {
+            assert!(status(state, true).lands_unasked("main", "c1"), "{state:?}");
+            assert!(
+                !status(state, false).lands_unasked("main", "c1"),
+                "{state:?} on request"
+            );
+        }
+        for state in [
+            State::Off,
+            State::Ready,
+            State::Needs,
+            State::NoExecutor,
+            State::Returned,
+        ] {
+            assert!(
+                !status(state, true).lands_unasked("main", "c1"),
+                "{state:?}"
+            );
+        }
+        let waiting = status(State::Waiting, true);
+        assert!(!waiting.lands_unasked("other", "c1"), "another destination");
+        assert!(!waiting.lands_unasked("main", "c2"), "another commit");
     }
 }

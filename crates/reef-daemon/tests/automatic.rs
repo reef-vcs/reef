@@ -4,7 +4,8 @@
 //! keys that keep a moving destination from judging anything again; a
 //! stack waiting for its first unpassed change's evidence; a returned
 //! landing not queued again; `reef land` waiting for requested evidence;
-//! the daemon's instruction to the proposing session; and `EvaluatePolicy`
+//! the daemon's instruction to the proposing session, and none where the
+//! destination lands on request; and `EvaluatePolicy`
 //! over a stack (#328).
 //!
 //! An in-test executor claims `test` jobs with alice's executor key, which
@@ -705,6 +706,33 @@ async fn failed_check_instructs_once() {
             .len(),
         1
     );
+    executor.stop().await;
+}
+
+// 14. Only a destination that lands automatically tells the session: one
+// that lands on request leaves a failed check for `reef land` to report.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_check_on_request_instructs_nobody() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo, &policy("")).await;
+    let executor = Executor::start(client, &repo.id, trusted_key(client).await);
+    let change = commit_on(client, &repo.id, &main.commit_id, &[("bad.txt", "bad\n")]).await;
+    propose(client, &repo.id, &change).await;
+    let needs = status_until(client, &repo.id, &change, AutomaticState::Needs).await;
+    assert_eq!(needs.reason, "policy");
+    // Passes run one at a time, so once another pass judges, the one that
+    // judged it has sent whatever it sends.
+    let state = daemon.handle.state();
+    let judged = state.automatic.evaluations();
+    state.automatic.mark_all(state.repos.ids()[0]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while state.automatic.evaluations() == judged {
+        assert!(std::time::Instant::now() < deadline, "never judged again");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let told = instructions(client, &repo.id, &change.change_id).await;
+    assert!(told.is_empty(), "{told:#?}");
     executor.stop().await;
 }
 

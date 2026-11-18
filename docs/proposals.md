@@ -57,7 +57,7 @@ Reasons are untrusted text: up to 4 KiB, with no control characters but newline 
 
 After `reef propose`, the daemon asks executors for the checks the change lacks and, where the destination's policy says `[landing] automatic = true`, lands it once policy allows ([landing](landing.md#automatic-landing)). `reef proposal show` prints what it is doing (`automatic: waiting test`, the jobs, and the command to run next), `reef proposal list` has an `AUTOMATIC` column, and `reef land` waits for the checks and lands.
 
-`reef here` names what a workspace's change needs next, and `GetWorkspace` returns it as `Workspace.step` ([ADR 0080](adr/0080-here-walks-the-lifecycle.md)): `describe` it, `propose` it, `land` it, `wait` while it is queued or while its destination lands it automatically, `revise` it after a decline, `resolve` its conflicts, `publish` it where nothing lands through proposals, or `done`. A repository lands through proposals when `trunk()` has a `reef-policy.toml` or any change of it was ever proposed.
+`reef here` names what a workspace's change needs next, and `GetWorkspace` returns it as `Workspace.step` ([ADR 0080](adr/0080-here-walks-the-lifecycle.md)): `describe` it, `propose` it, `land` it, `wait` while it is queued or while the daemon works toward landing it automatically, `revise` it after a decline, `resolve` its conflicts, `publish` it where nothing lands through proposals, or `done`. A repository lands through proposals when `trunk()` has a `reef-policy.toml` or any change of it was ever proposed.
 
 Every transition is an operation of kind `transition` in the operation log, with the transition in `Operation.transitions`. An agent waits for its proposal's fate without polling:
 

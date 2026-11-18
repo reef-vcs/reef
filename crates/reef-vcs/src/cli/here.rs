@@ -27,6 +27,10 @@ const OP_WIDTH: usize = 12;
 /// Change ids are shown by this many characters of their reverse hex.
 const CHANGE_WIDTH: usize = 12;
 
+/// How long the `wait` step's watch waits for a transition before the
+/// agent reads `reef here` again: `reef land`'s default wait.
+const WAIT_FOR_SECONDS: &str = "120";
+
 /// `reef here`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
@@ -512,11 +516,14 @@ fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<St
             argv(&["reef", "land"]),
         ),
         Some("wait") => (
-            if lifecycle.is_some_and(|lifecycle| lifecycle.state == "proposed") {
-                format!("Proposed for {destination}, which lands automatically: the daemon asks for its checks and lands it once the policy allows (`reef proposal show` says what it waits for). Wait for the landing.")
-            } else {
-                format!("Queued to land on {destination}: the landing service lands it. Wait for the landing.")
-            },
+            format!(
+                "{} Wait for its next transition, at most {WAIT_FOR_SECONDS} s, then run `reef here` again.",
+                if lifecycle.is_some_and(|lifecycle| lifecycle.state == "proposed") {
+                    format!("Proposed for {destination}, which lands automatically: the daemon asks for its checks and lands it once the policy allows (`reef proposal show` says what it waits for).")
+                } else {
+                    format!("Queued to land on {destination}: the landing service lands it.")
+                }
+            ),
             argv(&[
                 "reef",
                 "op",
@@ -525,9 +532,10 @@ fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<St
                 "transition",
                 "--change",
                 &ws.change_id_reverse_hex,
-                "--follow",
                 "--count",
                 "1",
+                "--for",
+                WAIT_FOR_SECONDS,
             ]),
         ),
         Some("revise") => (
@@ -944,7 +952,7 @@ mod tests {
     fn each_step_names_its_next() {
         use v1::{ChangeStep as Step, LifecycleState as State};
         let release = ["reef", "ws", "release", "0123456789abcdef"].map(str::to_owned);
-        let watch: Vec<&str> = "reef op watch --kind transition --change zy --follow --count 1"
+        let watch: Vec<&str> = "reef op watch --kind transition --change zy --count 1 --for 120"
             .split(' ')
             .collect();
         let cases: [(Step, State, bool, &[&str], &str); 12] = [

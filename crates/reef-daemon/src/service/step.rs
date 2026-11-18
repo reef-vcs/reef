@@ -6,8 +6,8 @@
 //! the working-copy commit, how many paths it changes against its parents,
 //! how many are conflicted, and whether the repository lands through
 //! proposals. The lifecycle is then filled as every read fills it, the
-//! automatic service's status (R3.45) says whether a proposal's destination
-//! lands it with no request, and [`step`] decides.
+//! automatic service's status (R3.45) says whether the service will land a
+//! proposal with no request, and [`step`] decides.
 
 use std::sync::Arc;
 
@@ -98,7 +98,9 @@ pub(crate) async fn of_workspace(
         && state
             .automatic
             .status(repo, &change.change_id)
-            .is_some_and(|status| status.automatic);
+            .is_some_and(|status| {
+                status.lands_unasked(&lifecycle.destination, &lifecycle.commit_id)
+            });
     Some(Stepped {
         step: step(
             &change, &lifecycle, changed, conflicted, proposals, automatic,
@@ -161,8 +163,9 @@ async fn read_facts(
 
 /// The step table (ADR 0080, `docs/proposals.md`): the first row that
 /// matches. `proposals` is whether the repository lands through
-/// proposals; `automatic`, whether a proposal's destination lands it with
-/// no request (`[landing] automatic = true`, R3.45).
+/// proposals; `automatic`, whether the automatic service will land a
+/// proposal with no request (R3.45): its destination says
+/// `[landing] automatic = true` and the service has not given up on it.
 pub(crate) fn step(
     change: &v1::Change,
     lifecycle: &v1::ChangeLifecycle,

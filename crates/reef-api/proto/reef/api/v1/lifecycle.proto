@@ -50,11 +50,12 @@ enum ChangeStep {
   // Described and not in review (a draft, withdrawn), or proposed and
   // amended since: propose it.
   CHANGE_STEP_PROPOSE = 4;
-  // Proposed at its current commit, onto a destination that lands on
-  // request: land it, which the policy judges.
+  // Proposed at its current commit, and not landing with no request: land
+  // it, which the policy judges, or which reports what is missing.
   CHANGE_STEP_LAND = 5;
   // Queued, or proposed onto a destination whose policy lands
-  // automatically (R3.45): the landing service lands it; wait.
+  // automatically (R3.45) while the daemon still works toward landing it
+  // (its automatic status pending, waiting or queued): wait.
   CHANGE_STEP_WAIT = 6;
   // Declined: read the reason, revise, and propose again.
   CHANGE_STEP_REVISE = 7;
