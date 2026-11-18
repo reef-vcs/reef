@@ -142,6 +142,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .boxed(".reef.api.v1.Workspace.provenance")
         // #272: likewise the disk figure and the disk status.
         .boxed(".reef.api.v1.Workspace.disk")
+        // #262: likewise a lifecycle, which carries its last transition whole.
+        .boxed(".reef.api.v1.Workspace.lifecycle")
         .boxed(".reef.api.v1.GetDaemonStatusResponse.disk")
         .boxed(".reef.api.v1.GetWorkspaceResponse.disk_status")
         .boxed(".reef.api.v1.ListWorkspacesResponse.disk_status")

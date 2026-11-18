@@ -3,6 +3,7 @@
 // until that answers; at an operation, `GetWorkspace` at it, without disk.
 // All text is plain text: nothing from the API is rendered as HTML.
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
+import { ChangeStep } from "../gen/reef/api/v1/lifecycle_pb";
 import type { Presence } from "../gen/reef/api/v1/presence_pb";
 import {
   Backend,
@@ -39,6 +40,20 @@ import {
   type LeaseView,
 } from "./fleet-rows";
 import { smartlogHref } from "./smartlog-route";
+
+/** What the workspace's change needs next (#262, ADR 0080), in people's words. */
+const STEP_WORDS: Record<ChangeStep, string> = {
+  [ChangeStep.UNSPECIFIED]: "unknown",
+  [ChangeStep.WORK]: "work; nothing has changed yet",
+  [ChangeStep.RESOLVE]: "resolve its conflicts",
+  [ChangeStep.DESCRIBE]: "describe the change",
+  [ChangeStep.PROPOSE]: "propose the change",
+  [ChangeStep.LAND]: "land the proposal",
+  [ChangeStep.WAIT]: "wait: the landing service lands it",
+  [ChangeStep.REVISE]: "revise it: the proposal was declined",
+  [ChangeStep.PUBLISH]: "publish it for review, or release the workspace",
+  [ChangeStep.DONE]: "none: the change has landed, was superseded, or is on trunk",
+};
 
 const PATHS_SHOWN = 20;
 const ENDINGS_SHOWN = 10;
@@ -347,6 +362,9 @@ export function WorkspaceDetail({
           <p>
             {String(response.snapshotCount)} in all, {String(workspace.localSnapshotCount)} local.
           </p>
+          {response.workspace && response.workspace.step !== ChangeStep.UNSPECIFIED && (
+            <p>Next step: {STEP_WORDS[response.workspace.step]}.</p>
+          )}
           {(response.workspace?.behindTrunk ?? 0) > 0 && (
             <p>
               Behind trunk by {String(response.workspace?.behindTrunk)}{" "}

@@ -976,6 +976,7 @@ impl Client {
             snapshot_first,
             skip_disk_usage: false,
             at_operation: String::new(),
+            sync_first: false,
         })
         .await
     }

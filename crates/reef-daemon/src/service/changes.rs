@@ -246,6 +246,7 @@ impl ChangeService for ChangesHandler {
         &self,
         request: Request<DescribeChangeRequest>,
     ) -> Result<Response<DescribeChangeResponse>, Status> {
+        let arrived = Instant::now();
         let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let target = target(&self.state, &request.repo, &request.workspace)?;
@@ -262,6 +263,11 @@ impl ChangeService for ChangesHandler {
                 &context,
             ));
         }
+        // #327: the commit described is the one on disk, as for propose
+        // and publish; the rewrite itself takes no snapshot (ADR 0031).
+        let needed =
+            uses_working_copy(&self.state, &target, vec![request.revision.clone()]).await?;
+        snapshot_first(&self.state, &target, needed, arrived, agent.clone()).await?;
         let write = Write::Describe {
             revision: request.revision,
             description: request.description,

@@ -69,6 +69,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | #271 | [issue-271-build-limit.md](issue-271-build-limit.md) | M | #264, R1.21, R2.26, #260 | #273 (clone-store builds run under the pool); RX.06's G5 to G8; R3.20 (reads the limit) |
 | #272 | [issue-272-disk-accounting.md](issue-272-disk-accounting.md) | M | #264, R1.02, R1.20, R2.20, #260 | #274 (eviction by its figures and budget); G1, G2 and G4 of RX.06's fleet gate |
 | #263 | [issue-263-overlaps.md](issue-263-overlaps.md) | M | R2.02, R2.23, #114, #259 | R3.36 (reads the same overlap computation); symbol-level matching and an overlap event (follow-ups) |
+| #262, #327 | [issue-262-here-lifecycle.md](issue-262-here-lifecycle.md) | M | R1.26, R2.23, #114, R3.09, R3.10, R3.13, #258, #259, R3.25, #263 | R3.45 (`here` waits instead of landing where landing is automatic); #123's other brief views |
 | RX.02 | not yet briefed (Security review of evidence and identity) | L | Phase 3 (cross-cutting) | none listed |
 | RX.03 | not yet briefed (Opt-in telemetry) | M | Phase 3 (cross-cutting) | none listed |
 

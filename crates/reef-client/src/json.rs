@@ -199,6 +199,7 @@ names_schema! {
     lease_state_schema = lease_state, false;
     lifecycle_state_name_schema = lifecycle_state_name_or_unknown, false;
     lifecycle_state_name_schema_or_null = lifecycle_state_name, true;
+    change_step_name_schema_or_null = change_step_name, true;
     transition_actor_name_schema_or_null = transition_actor_name, true;
     assignment_state_name_schema_or_null = assignment_state_name, true;
     publication_update_name_schema_or_null = publication_update_name, true;
@@ -438,6 +439,20 @@ pub struct Workspace {
     /// Such changes, in all; absent when none.
     #[serde(skip_serializing_if = "is_zero_u32")]
     pub overlap_count: u32,
+    /// What its change needs next to be finished (#262, ADR 0080): `work`,
+    /// `resolve`, `describe`, `propose`, `land`, `wait`, `revise`,
+    /// `publish` or `done`. Set by `ws inspect` and `here` for an active
+    /// workspace; absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "change_step_name_schema_or_null")]
+    pub step: Option<String>,
+    /// Its change's lifecycle (R3.09), where `step` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Box<ChangeLifecycle>>,
+    /// Conflicted paths in its change, where `step` is set; absent when
+    /// none.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub conflicted_path_count: u32,
 }
 
 /// Another open change that changes a path a workspace's change changes
@@ -758,6 +773,12 @@ impl From<&v1::Workspace> for Workspace {
             disk: ws.disk.as_deref().map(WorkspaceDisk::from),
             overlaps: ws.overlaps.iter().map(Overlap::from).collect(),
             overlap_count: ws.overlap_count,
+            step: change_step_name(ws.step).map(str::to_owned),
+            lifecycle: ws
+                .lifecycle
+                .as_deref()
+                .map(|lifecycle| Box::new(ChangeLifecycle::from(lifecycle))),
+            conflicted_path_count: ws.conflicted_path_count,
         }
     }
 }
@@ -1691,6 +1712,25 @@ pub fn lifecycle_state_name(state: i32) -> Option<&'static str> {
     Some(name)
 }
 
+/// A change's next step (#262): `work`, `resolve`, `describe`, `propose`,
+/// `land`, `wait`, `revise`, `publish` or `done`; `None` when unset.
+pub fn change_step_name(step: i32) -> Option<&'static str> {
+    let name = match v1::ChangeStep::try_from(step) {
+        Ok(v1::ChangeStep::Unspecified) => return None,
+        Ok(v1::ChangeStep::Work) => "work",
+        Ok(v1::ChangeStep::Resolve) => "resolve",
+        Ok(v1::ChangeStep::Describe) => "describe",
+        Ok(v1::ChangeStep::Propose) => "propose",
+        Ok(v1::ChangeStep::Land) => "land",
+        Ok(v1::ChangeStep::Wait) => "wait",
+        Ok(v1::ChangeStep::Revise) => "revise",
+        Ok(v1::ChangeStep::Publish) => "publish",
+        Ok(v1::ChangeStep::Done) => "done",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
 /// [`lifecycle_state_name`], with `unknown` for unset.
 pub fn lifecycle_state_name_or_unknown(state: i32) -> &'static str {
     lifecycle_state_name(state).unwrap_or(UNKNOWN)
@@ -2037,6 +2077,10 @@ pub struct Change {
     pub parent_change_ids: Vec<String>,
     /// Its description, verbatim.
     pub description: String,
+    /// The description's first line, as `git log --oneline` shows it;
+    /// empty when there is none (#262: what brief views keep of a change
+    /// that is not the reader's own).
+    pub subject: String,
     /// Its author.
     pub author: Option<Signature>,
     /// Its committer.
@@ -2363,6 +2407,15 @@ pub struct ProposalHistory {
     pub automatic: Option<AutomaticStatus>,
 }
 
+/// `description`'s first line that is not blank, without its newline,
+/// as git takes a subject.
+pub fn subject(description: &str) -> &str {
+    description
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+}
+
 impl From<&v1::Change> for Change {
     fn from(change: &v1::Change) -> Self {
         Self {
@@ -2372,6 +2425,7 @@ impl From<&v1::Change> for Change {
             parent_commit_ids: change.parent_commit_ids.clone(),
             parent_change_ids: change.parent_change_ids.clone(),
             description: change.description.clone(),
+            subject: subject(&change.description).to_owned(),
             author: change.author.as_ref().map(Signature::from),
             committer: change.committer.as_ref().map(Signature::from),
             tree_id: text(&change.tree_id),

@@ -580,6 +580,7 @@ impl WorkspaceService for WorkspacesService {
         &self,
         request: Request<GetWorkspaceRequest>,
     ) -> Result<Response<GetWorkspaceResponse>, Status> {
+        let arrived = std::time::Instant::now();
         let agent = super::caller_of(&request)?;
         let request = request.into_inner();
         let manager = &self.state.manager;
@@ -588,11 +589,28 @@ impl WorkspaceService for WorkspacesService {
             .map_err(status)?;
         record_ids(record.repo_id, record.id);
         if !request.at_operation.trim().is_empty() {
-            if request.snapshot_first {
+            if request.snapshot_first || request.sync_first {
                 return Err(status(ReplayError::SnapshotFirst));
             }
             return self.get_workspace_at(record, &request.at_operation).await;
         }
+        // #262: the step covers what is on disk, through the status index.
+        // A sync that fails (an unmounted overlay, a full disk) leaves the
+        // last snapshot's answer, whose health fields say what is wrong.
+        let synced = if request.sync_first && !request.snapshot_first {
+            let target = super::reading::target(&self.state, "", &record.id.as_hex())?;
+            match super::reading::snapshot_first(&self.state, &target, true, arrived, agent.clone())
+                .await
+            {
+                Ok(taken) => taken.operation,
+                Err(error) => {
+                    tracing::warn!(workspace_id = %record.id, error = %error.message(), "cannot sync the workspace before reading it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let workspace_id = record.id.as_hex();
         let inspected = manager
             .inspect(
@@ -614,7 +632,8 @@ impl WorkspaceService for WorkspacesService {
                 agent: agent.as_deref().unwrap_or(&record.owner),
             },
         )
-        .await?;
+        .await?
+        .or(synced);
         let mut workspace = vec![Workspace::from(WorkspaceView {
             record: &inspected.record,
             lease: self.lease_message(inspected.lease.as_ref(), Timestamp::now()),
@@ -631,12 +650,19 @@ impl WorkspaceService for WorkspacesService {
             &mut workspace,
         );
         if let Some(workspace) = workspace.first_mut() {
-            let (behind, (overlaps, count)) = tokio::join!(
+            let (behind, (overlaps, count), stepped) = tokio::join!(
                 crate::rebase::behind_trunk(&self.state, record.repo_id, &workspace.commit_id),
                 crate::overlap::of_workspace(&self.state, &inspected.record),
+                super::step::of_workspace(&self.state, &inspected.record),
             );
             workspace.behind_trunk = behind;
             (workspace.overlaps, workspace.overlap_count) = (overlaps, count);
+            if let Some(stepped) = stepped {
+                workspace.set_step(stepped.step);
+                workspace.lifecycle = Some(Box::new(stepped.lifecycle));
+                workspace.changed_file_count = Some(stepped.changed_file_count);
+                workspace.conflicted_path_count = stepped.conflicted_path_count;
+            }
         }
         Ok(Response::new(GetWorkspaceResponse {
             workspace: workspace.pop(),

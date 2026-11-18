@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-22
 - Ticket: R1.26
-- Amended by: [0045](0045-brief-json-by-default.md), [0051](0051-task-first-help.md)
+- Amended by: [0045](0045-brief-json-by-default.md), [0051](0051-task-first-help.md), [0080](0080-here-walks-the-lifecycle.md) (`here` syncs through the status index and names the change's next step; the guide's budgets are 1,900 and 1,850 bytes)
 
 ## Context
 
@@ -53,4 +53,4 @@ Two smaller defaults come with the contract:
 - **Hints in messages only.** Rejected: that is the regex principle 8 forbids, and the messages are for humans and logs. An argv field can be run without parsing.
 - **A tokenizer dependency to budget the guide in tokens.** Rejected: build weight for one test, and tied to one model's tokenizer. Four bytes per token is the usual estimate for English and shell text, and RX.07 measures real token counts end to end. (Measured at #122, the guide's 1,566 bytes were 434 `o200k` and 648 Anthropic tokens; [0051](0051-task-first-help.md) states the budget in bytes only.)
 - **`here` exiting 3 outside a workspace.** Rejected: "not in one" is the answer to the question, and an agent that treats any non-zero exit as failure would stop instead of reading `next`.
-- **`here` snapshotting first, as `ws inspect` does.** Rejected: `here` must be cheap enough to call before every step, and it must have no side effects. A snapshot records an operation. `--snapshot` opts in.
+- **`here` snapshotting first, as `ws inspect` does.** Rejected: `here` must be cheap enough to call before every step, and it must have no side effects. A snapshot records an operation. `--snapshot` opts in. (Since [0080](0080-here-walks-the-lifecycle.md), `here` syncs through the status index: no snapshot when nothing changed, else one of the changed paths only, because the change's next step depends on the files just written.)

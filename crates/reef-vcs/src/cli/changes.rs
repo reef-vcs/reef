@@ -207,6 +207,7 @@ pub(crate) async fn workspace_after(ctx: &Ctx, id: Option<&str>) -> Option<Works
             snapshot_first: false,
             skip_disk_usage: true,
             at_operation: String::new(),
+            sync_first: false,
         }))
         .await;
     match read {

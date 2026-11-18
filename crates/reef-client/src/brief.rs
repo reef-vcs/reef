@@ -190,8 +190,10 @@ pub fn workspaces_with_repo(list: &[json::Workspace]) -> Vec<Workspace<'_>> {
 /// `divergent`, since then the change id names more than one commit; the
 /// description and flags when set. Dropped: `change_id`,
 /// `parent_commit_ids`, `parent_change_ids`, `author`, `committer`,
-/// `tree_id`, `jj_workspaces`. `lifecycle` only when a transition was
-/// recorded (R3.09), as [`Lifecycle`].
+/// `tree_id`, `jj_workspaces`, and `subject`, except in
+/// [`Change::summary`], which keeps `subject` and drops `description`.
+/// `lifecycle` only when a transition was recorded (R3.09), as
+/// [`Lifecycle`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(rename = "brief.Change")]
 #[expect(clippy::struct_excessive_bools, reason = "the full type's flags")]
@@ -202,6 +204,8 @@ pub struct Change<'a> {
     commit_id: Option<&'a str>,
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    subject: &'a str,
     #[serde(skip_serializing_if = "is_false")]
     empty: bool,
     #[serde(skip_serializing_if = "is_false")]
@@ -422,12 +426,26 @@ impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
     }
 }
 
+impl<'a> Change<'a> {
+    /// A change that is not the reader's own, such as trunk or a parent in
+    /// a status (#262): its `subject` instead of its `description`, which a
+    /// squash-merged pull request can make kilobytes long.
+    pub fn summary(change: &'a json::Change) -> Self {
+        Self {
+            description: "",
+            subject: &change.subject,
+            ..Self::from(change)
+        }
+    }
+}
+
 impl<'a> From<&'a json::Change> for Change<'a> {
     fn from(change: &'a json::Change) -> Self {
         Self {
             change_id_reverse_hex: &change.change_id_reverse_hex,
             commit_id: change.divergent.then_some(change.commit_id.as_str()),
             description: &change.description,
+            subject: "",
             empty: change.empty,
             conflict: change.conflict,
             divergent: change.divergent,
@@ -633,7 +651,7 @@ pub struct RepositoryStatus<'a> {
 impl<'a> From<&'a json::RepositoryStatus> for RepositoryStatus<'a> {
     fn from(status: &'a json::RepositoryStatus) -> Self {
         Self {
-            trunk: status.trunk.as_ref().map(Change::from),
+            trunk: status.trunk.as_ref().map(Change::summary),
             trunk_bookmark: status.trunk_bookmark.as_deref(),
             active_workspace_count: status.active_workspace_count,
             head_count: status.head_count,
@@ -685,7 +703,7 @@ impl<'a> From<&'a json::WorkspaceStatus> for WorkspaceStatus<'a> {
         Self {
             workspace: status.workspace.as_ref().map(Workspace::from),
             working_copy: status.working_copy.as_ref().map(Change::from),
-            parents: status.parents.iter().map(Change::from).collect(),
+            parents: status.parents.iter().map(Change::summary).collect(),
             changed_files: status.changed_files.iter().map(FileChange::from).collect(),
             changed_file_count: status.changed_file_count,
             conflicted_paths: &status.conflicted_paths,
@@ -837,6 +855,9 @@ mod tests {
             disk: None,
             overlaps: Vec::new(),
             overlap_count: 0,
+            step: None,
+            lifecycle: None,
+            conflicted_path_count: 0,
         }
     }
 
@@ -874,6 +895,7 @@ mod tests {
             parent_commit_ids: vec!["ef01".into()],
             parent_change_ids: vec!["4567".into()],
             description: description.into(),
+            subject: json::subject(description).to_owned(),
             author: Some(signature()),
             committer: Some(signature()),
             tree_id: Some("9999".into()),
@@ -985,7 +1007,9 @@ mod tests {
                     ..full_workspace("00000000000000aa", "r1")
                 }),
                 working_copy: Some(full_change("")),
-                parents: vec![full_change("the parent")],
+                parents: vec![full_change(
+                    "the parent\n\nA body a squash merge makes long.\n",
+                )],
                 changed_files: vec![file_change("m.rs", "modified", Some("file"), Some("file"))],
                 changed_file_count: 0,
                 conflicted_paths: Vec::new(),
@@ -1238,11 +1262,15 @@ mod tests {
         assert_eq!(repo["active_workspace_count"], 1);
         assert_eq!(repo["head_count"], 1);
         assert_eq!(repo["trunk_bookmark"], "main");
-        assert_eq!(repo["trunk"]["description"], "trunk");
+        // #262: trunk and the parents keep their subject, not a
+        // description that a squash merge can make kilobytes long.
+        assert_eq!(repo["trunk"]["subject"], "trunk");
+        assert!(repo["trunk"].get("description").is_none(), "{brief}");
         let ws = &brief["workspace_status"];
         assert_eq!(ws["source"], "index");
         assert_eq!(ws["changed_file_count"], 0);
-        assert_eq!(ws["parents"][0]["description"], "the parent");
+        assert_eq!(ws["parents"][0]["subject"], "the parent");
+        assert!(ws["parents"][0].get("description").is_none(), "{brief}");
         assert_eq!(
             ws["workspace"],
             json!({"id": "00000000000000aa", "owner": "bot-0"})

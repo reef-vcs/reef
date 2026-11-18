@@ -1717,8 +1717,8 @@ fn no_args_prints_guide_and_exits_zero() {
     output.clone().assert().success();
     let text = stdout(&output);
     assert!(text.starts_with("# Reef\n"), "{text}");
-    // The long form's budget (`cli/guide.rs`), 1,750 since #259.
-    assert!(text.len() <= 1750, "{} bytes", text.len());
+    // The long form's budget (`cli/guide.rs`), 1,850 since #262.
+    assert!(text.len() <= 1850, "{} bytes", text.len());
     assert!(!text.contains("reef:long"), "{text}");
     assert!(text.contains("reef ws run -- <command>"), "{text}");
     for args in [&["guide"][..], &["agent-guide"], &["gui"]] {
@@ -2356,10 +2356,10 @@ async fn here_by_path() {
     let path = PathBuf::from(created["path"].as_str().unwrap());
     let inside = first_entry(&path, true);
 
-    let value = json(&run(reef_at(&daemon, &inside), &["here"]).await);
+    let value = json(&run(reef_at(&daemon, &inside), &["-o", "json", "here"]).await);
     assert_eq!(value["in_workspace"], true, "{value}");
     assert_eq!(value["id"], id, "{value}");
-    // No snapshot without --snapshot, and no disk walk.
+    // Nothing written: the sync records no snapshot, and no disk walk.
     assert_eq!(
         value["last_snapshot_op"], created["last_snapshot_op"],
         "{value}"
@@ -2370,18 +2370,57 @@ async fn here_by_path() {
         serde_json::json!(["reef", "ws", "release", id])
     );
 
+    assert_eq!(value["step"], "work", "{value}");
+
     std::fs::write(inside.join("new-file"), "edit\n").unwrap();
-    let value = json(&run(reef_at(&daemon, &inside), &["here", "--snapshot"]).await);
+    let value = json(
+        &run(
+            reef_at(&daemon, &inside),
+            &["-o", "json", "here", "--snapshot"],
+        )
+        .await,
+    );
     assert!(value["last_snapshot_op"].is_string(), "{value}");
+    // #262: the change's next step follows the files on disk.
+    assert_eq!(value["step"], "describe", "{value}");
+    assert_eq!(value["changed_file_count"], 1, "{value}");
+    assert_eq!(value["next"], serde_json::json!(["reef", "describe", "-m"]));
 
     let output = run(reef_at(&daemon, &path), &["-o", "text", "here"]).await;
     output.clone().assert().success();
     let text = stdout(&output);
     assert!(text.lines().count() <= 12, "{text}");
+    assert!(text.contains(", 1 file changed, step describe"), "{text}");
     assert!(
-        text.ends_with(&format!("next:          reef ws release {id}\n")),
+        text.ends_with("next:          reef describe -m\n"),
         "{text}"
     );
+
+    // Described in a repository with no policy and no proposal: publish
+    // is named, and `next` is the release.
+    std::fs::write(inside.join("second-file"), "edit\n").unwrap();
+    json(
+        &run(
+            reef_at(&daemon, &inside),
+            &["describe", "-m", "Add two files"],
+        )
+        .await,
+    );
+    let value = json(&run(reef_at(&daemon, &inside), &["here"]).await);
+    assert_eq!(value["step"], "publish", "{value}");
+    assert_eq!(value["changed_file_count"], 2, "{value}");
+    assert!(
+        value["hint"].as_str().unwrap().contains("reef publish"),
+        "{value}"
+    );
+    assert_eq!(
+        value["next"],
+        serde_json::json!(["reef", "ws", "release", id])
+    );
+    let brief = run(reef_at(&daemon, &inside), &["-o", "brief", "here"]).await;
+    let brief = json(&brief);
+    assert_eq!(brief["step"], "publish", "{brief}");
+    assert!(brief.get("lease").is_none(), "{brief}");
 
     // Released: the directory is gone, and REEF_WORKSPACE still answers.
     json(&run(reef(&daemon), &["ws", "release", id]).await);

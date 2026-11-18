@@ -44,6 +44,7 @@ pub(crate) mod convert;
 pub(crate) mod op_filter;
 pub(crate) mod reading;
 mod rebase;
+pub(crate) mod step;
 
 /// An entry kind as `reef.api.v1.EntryType` names it, for error metadata
 /// (R2.04).

@@ -91,4 +91,5 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0077](0077-pushing-landed-history.md) | Pushing landed history to a git remote | accepted |
 | [0078](0078-stacks.md) | Stacks | accepted |
 | [0079](0079-overlaps.md) | Overlaps from open changes' paths | accepted |
+| [0080](0080-here-walks-the-lifecycle.md) | `reef here` walks the change's lifecycle | accepted |
 | [0081](0081-automatic-landing.md) | Automatic landing and evidence requests | accepted |

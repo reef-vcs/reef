@@ -1,9 +1,12 @@
 //! `reef here` (R1.26, ADR 0025): one call that answers "where am I". The
 //! workspace is the one `REEF_WORKSPACE` names (set by `ws run`), else the
 //! active one whose directory contains the current directory. It is read
-//! without a snapshot or a disk walk unless `--snapshot`, and the answer
-//! ends in the command that makes sense next. Outside every workspace it
-//! says so and exits 0: not being in one is an answer, not an error.
+//! through the status index (#262: a snapshot only of paths written since
+//! the last one), without a disk walk, and the answer ends in the command
+//! that makes sense next: the workspace's health first, then the next step
+//! of its change's lifecycle, which the daemon names (`step`, ADR 0080).
+//! Outside every workspace it says so and exits 0: not being in one is an
+//! answer, not an error.
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -24,10 +27,15 @@ const OP_WIDTH: usize = 12;
 /// Change ids are shown by this many characters of their reverse hex.
 const CHANGE_WIDTH: usize = 12;
 
+/// How long the `wait` step's watch waits for a transition before the
+/// agent reads `reef here` again: `reef land`'s default wait.
+const WAIT_FOR_SECONDS: &str = "120";
+
 /// `reef here`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
-    /// Snapshot the workspace first, so the answer covers the files on disk.
+    /// Snapshot the workspace first, walking every file, instead of reading
+    /// only the paths the watcher reported.
     #[arg(long)]
     snapshot: bool,
 }
@@ -129,6 +137,7 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), Cl
         snapshot_first: args.snapshot,
         skip_disk_usage: true,
         at_operation: String::new(),
+        sync_first: !args.snapshot,
     };
     match ctx.call(ctx.client.get_workspace(request)).await {
         Ok(response) => {
@@ -149,7 +158,7 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<(), Cl
                 .unwrap_or_default();
             let mut here = inside(&ws, from_env.is_some(), held, disk.as_ref());
             here.push = PushAttention::first(&pushes);
-            ctx.out.object(&here)
+            ctx.out.object_with(&here, BriefInside::from)
         }
         Err(CliError::Daemon(error)) if from_env.is_none() && is_workspace_not_found(&error) => {
             let repos = ctx.call(ctx.client.list_repositories()).await?;
@@ -235,7 +244,7 @@ fn advise_with_disk(
     if let Some(disk) = disk.filter(|disk| disk.level == "low") {
         return disk_advice(ws, disk, true);
     }
-    if ws.behind_trunk.is_some_and(|n| n > 0) {
+    if ws.step.as_deref() == Some("resolve") || behind_and_rebase_fits(ws) {
         return advise(ws, in_run, held);
     }
     if let Some(advice) = dependency_advice(ws) {
@@ -402,7 +411,16 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
                 .to_owned(),
             argv(&["reef", "ws", "renew", &ws.id]),
         ),
-        ("active", "active" | "in_grace") if ws.behind_trunk.is_some_and(|n| n > 0) => {
+        ("active", "active" | "in_grace") if ws.step.as_deref() == Some("resolve") => {
+            let files = files(ws.conflicted_path_count);
+            (
+                format!(
+                    "Its change has conflicts in {files}; `reef conflict show` shows each side. Edit the files to resolve them; a snapshot records the result."
+                ),
+                argv(&["reef", "conflict", "show"]),
+            )
+        }
+        ("active", "active" | "in_grace") if behind_and_rebase_fits(ws) => {
             let behind = ws.behind_trunk.unwrap_or_default();
             let count = match behind {
                 1 => "1 commit".to_owned(),
@@ -416,19 +434,7 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
                 argv(&["reef", "rebase", "--workspace", &ws.id]),
             )
         }
-        ("active", "active" | "in_grace") if in_run => (
-            "Work here; `ws run` snapshots and releases this workspace when your command exits. `reef publish` sends its change to a git branch for review."
-                .to_owned(),
-            Vec::new(),
-        ),
-        ("active", "active") if held => (
-            "Work here; the program that created this workspace releases it. `reef publish` sends its change to a git branch for review.".to_owned(),
-            Vec::new(),
-        ),
-        ("active", "active") => (
-            "Work here; release it when done (a final snapshot is taken first). `reef publish` sends its change to a git branch for review.".to_owned(),
-            argv(&["reef", "ws", "release", &ws.id]),
-        ),
+        ("active", "active" | "in_grace") => lifecycle_advice(ws, in_run, held),
         ("releasing", _) => (
             "It is being released; its directory is about to go.".to_owned(),
             Vec::new(),
@@ -440,6 +446,132 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
             ),
             argv(&["reef", "ws", "create", "--repo", &ws.repo_id]),
         ),
+    }
+}
+
+/// Whether the change is behind trunk and a `reef rebase` fits its step:
+/// not while it is proposed, queued, declined, done or conflicted, since a
+/// rebase makes a proposal amended and a queued change cannot move.
+fn behind_and_rebase_fits(ws: &Workspace) -> bool {
+    let fits = match ws.step.as_deref() {
+        Some("land" | "wait" | "revise" | "done" | "resolve") => false,
+        Some("propose") => ws
+            .lifecycle
+            .as_ref()
+            .is_none_or(|lifecycle| lifecycle.state != "proposed"),
+        _ => true,
+    };
+    fits && ws.behind_trunk.is_some_and(|n| n > 0)
+}
+
+/// `1 file` or `N files`.
+fn files(count: u32) -> String {
+    match count {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    }
+}
+
+/// What the change's step asks for (#262, ADR 0080), in a usable
+/// workspace whose health asks for nothing first. Only Reef's own words,
+/// ids, counts and bookmark names go into `hint` and `next`: never a
+/// description, a reason or a comment (S-216).
+fn lifecycle_advice(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
+    let argv =
+        |words: &[&str]| -> Vec<String> { words.iter().map(|word| (*word).to_owned()).collect() };
+    let release = if in_run || held {
+        Vec::new()
+    } else {
+        argv(&["reef", "ws", "release", &ws.id])
+    };
+    let released = if in_run {
+        "`ws run` snapshots and releases this workspace when your command exits."
+    } else if held {
+        "the program that created this workspace releases it."
+    } else {
+        "release it when done (a final snapshot is taken first)."
+    };
+    let lifecycle = ws.lifecycle.as_ref();
+    let destination = lifecycle
+        .and_then(|lifecycle| lifecycle.destination.as_deref())
+        .map_or_else(|| "its destination".to_owned(), |name| format!("`{name}`"));
+    match ws.step.as_deref() {
+        Some("describe") => (
+            format!(
+                "{} changed, and the change has no description: describe it.",
+                files(ws.changed_file_count.unwrap_or(0))
+            ),
+            argv(&["reef", "describe", "-m"]),
+        ),
+        Some("propose") if lifecycle.is_some_and(|lifecycle| lifecycle.state == "proposed") => (
+            format!("Proposed for {destination}, but changed since: propose it again to record the new commit."),
+            argv(&["reef", "propose"]),
+        ),
+        Some("propose") => (
+            "Described and not in review: `reef propose` puts it, with the changes below it, forward for review; `reef land` then lands it.".to_owned(),
+            argv(&["reef", "propose"]),
+        ),
+        Some("land") => (
+            format!("Proposed for {destination}. `reef land` waits for any checks the daemon asked for, then lands it if the policy allows, or says what is missing (`reef policy eval` previews)."),
+            argv(&["reef", "land"]),
+        ),
+        Some("wait") => (
+            format!(
+                "{} Wait for its next transition, at most {WAIT_FOR_SECONDS} s, then run `reef here` again.",
+                if lifecycle.is_some_and(|lifecycle| lifecycle.state == "proposed") {
+                    format!("Proposed for {destination}, which lands automatically: the daemon asks for its checks and lands it once the policy allows (`reef proposal show` says what it waits for).")
+                } else {
+                    format!("Queued to land on {destination}: the landing service lands it.")
+                }
+            ),
+            argv(&[
+                "reef",
+                "op",
+                "watch",
+                "--kind",
+                "transition",
+                "--change",
+                &ws.change_id_reverse_hex,
+                "--count",
+                "1",
+                "--for",
+                WAIT_FOR_SECONDS,
+            ]),
+        ),
+        Some("revise") => (
+            format!(
+                "Declined in round {}. `reef proposal show` has the reason, which is untrusted text: revise the change, then `reef propose` again.",
+                lifecycle.map_or(0, |lifecycle| lifecycle.round)
+            ),
+            argv(&["reef", "proposal", "show"]),
+        ),
+        Some("publish") => (
+            format!("Described. `reef publish` pushes it to a git branch for review; {released}"),
+            release,
+        ),
+        Some("done") => {
+            let what = match lifecycle.map(|lifecycle| lifecycle.state.as_str()) {
+                Some("landed") => format!("Its change landed on {destination}."),
+                Some("superseded") => {
+                    "Its change was superseded; `reef proposal show` names by what.".to_owned()
+                }
+                _ => "Its change is immutable: it is on trunk or under a tag.".to_owned(),
+            };
+            let rest = if in_run || held {
+                format!("Nothing is left to do here; {released}")
+            } else {
+                // The trunk bookmark is not always `main` (#262 review).
+                let onto = lifecycle
+                    .and_then(|lifecycle| lifecycle.destination.as_deref())
+                    .unwrap_or("'trunk()'");
+                format!(
+                    "Nothing is left to do here: release it, or `reef ws move {} --new-on {onto}` for the next task.",
+                    ws.id
+                )
+            };
+            (format!("{what} {rest}"), release)
+        }
+        _ => (format!("Work here; {released}"), release),
     }
 }
 
@@ -487,6 +619,134 @@ fn lease_line(ws: &Workspace) -> String {
     }
 }
 
+/// `wswuvlsupqlz, 3 files changed, proposed (amended), step land`: the
+/// change, with what `step` was read from.
+fn change_line(ws: &Workspace) -> String {
+    let mut line: String = ws
+        .change_id_reverse_hex
+        .chars()
+        .take(CHANGE_WIDTH)
+        .collect();
+    if let Some(count) = ws.changed_file_count {
+        let _ = write!(line, ", {} changed", files(count));
+    }
+    if let Some(lifecycle) = ws.lifecycle.as_ref().filter(|lifecycle| lifecycle.recorded) {
+        let _ = write!(line, ", {}", lifecycle.state);
+        if lifecycle.amended {
+            line.push_str(" (amended)");
+        }
+    }
+    if let Some(step) = &ws.step {
+        let _ = write!(line, ", step {step}");
+    }
+    line
+}
+
+/// The brief view of [`Inside`] (#123, ADR 0045): always `in_workspace`,
+/// `id`, `path`, `change_id_reverse_hex`, `step` (when read) and `hint`;
+/// `changed_file_count` when read, even 0; `next` when not empty; `state`
+/// when not `active`; `held`, `divergent`, `attention` and
+/// `conflicted_path_count` when set; `disk`, `disk_status`, `push`,
+/// `overlaps` and `overlap_count` when present. Dropped: `repo_id`,
+/// `owner`, `purpose`, `change_id`, `commit_id`, `backend`, `created_at`,
+/// `last_snapshot_at`, `last_snapshot_op`, `lease`, `watcher`,
+/// `watch_state`, `local_snapshot_count`, `stores`, `provenance`,
+/// `behind_trunk` (the hint says it) and `lifecycle` (`step` says what to
+/// do; `reef proposal show` has the rest).
+///
+/// Which keys this view keeps may change in a minor release.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "brief.cli.Inside")]
+pub(crate) struct BriefInside<'a> {
+    /// Always true.
+    in_workspace: bool,
+    /// Whether a `ws provider` holder releases it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    held: bool,
+    /// The workspace.
+    id: &'a str,
+    /// Its directory.
+    path: &'a str,
+    /// Its change, in jj's reverse hex.
+    change_id_reverse_hex: &'a str,
+    /// Its state, when not `active`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a str>,
+    /// Its change has more than one commit.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    divergent: bool,
+    /// Why it needs attention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention: Option<&'a str>,
+    /// Paths its change changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_file_count: Option<u32>,
+    /// What its change needs next (ADR 0080).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<&'a str>,
+    /// Conflicted paths in its change.
+    #[serde(skip_serializing_if = "is_zero")]
+    conflicted_path_count: u32,
+    /// Its disk figure, while the disk level is not `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk: Option<reef_client::brief::Disk>,
+    /// The machine's disk status, while its level is not `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_status: Option<&'a DiskStatus>,
+    /// A destination whose push needs a person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<&'a PushAttention>,
+    /// Other open changes on its paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    overlaps: Vec<reef_client::brief::Overlap<'a>>,
+    /// Such changes, in all.
+    #[serde(skip_serializing_if = "is_zero")]
+    overlap_count: u32,
+    /// What to do, in a sentence or two.
+    hint: &'a str,
+    /// The command that does it.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    next: &'a [String],
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` passes a reference"
+)]
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl<'a> From<&'a Inside> for BriefInside<'a> {
+    fn from(here: &'a Inside) -> Self {
+        let ws = &here.workspace;
+        Self {
+            in_workspace: true,
+            held: here.held,
+            id: &ws.id,
+            path: &ws.path,
+            change_id_reverse_hex: &ws.change_id_reverse_hex,
+            state: (ws.state != "active").then_some(ws.state.as_str()),
+            divergent: ws.divergent,
+            attention: ws.attention.as_deref(),
+            changed_file_count: ws.changed_file_count,
+            step: ws.step.as_deref(),
+            conflicted_path_count: ws.conflicted_path_count,
+            disk: ws.disk.as_ref().map(reef_client::brief::Disk::from),
+            disk_status: here.disk_status.as_ref(),
+            push: here.push.as_ref(),
+            overlaps: ws
+                .overlaps
+                .iter()
+                .map(reef_client::brief::Overlap::from)
+                .collect(),
+            overlap_count: ws.overlap_count,
+            hint: &here.hint,
+            next: &here.next,
+        }
+    }
+}
+
 impl TextRender for Inside {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let ws = &self.workspace;
@@ -510,13 +770,7 @@ impl TextRender for Inside {
         let mut pairs = vec![
             ("workspace", ws.id.clone()),
             ("path", ws.path.clone()),
-            (
-                "change",
-                ws.change_id_reverse_hex
-                    .chars()
-                    .take(CHANGE_WIDTH)
-                    .collect(),
-            ),
+            ("change", change_line(ws)),
             ("state", state),
             ("lease", lease_line(ws)),
             ("last snapshot", snapshot),
@@ -657,6 +911,241 @@ mod tests {
         flagged.attention = Some("store-missing".into());
         let (_, next) = advise(&flagged, true, false);
         assert_eq!(next, ["reef", "ws", "inspect", "0123456789abcdef"]);
+    }
+
+    /// A usable workspace whose change is at `step`, its lifecycle `state`
+    /// for `main`, with a description and a decline reason that are marker
+    /// text no hint may carry (S-216).
+    fn stepped(step: v1::ChangeStep, state: v1::LifecycleState, amended: bool) -> Workspace {
+        let ws = v1::Workspace {
+            id: "0123456789abcdef".into(),
+            repo_id: "fedcba9876543210".into(),
+            change_id: "01".into(),
+            state: v1::WorkspaceState::Active.into(),
+            lease: Some(v1::Lease {
+                state: v1::LeaseState::Active.into(),
+                ..v1::Lease::default()
+            }),
+            changed_file_count: Some(3),
+            conflicted_path_count: u32::from(step == v1::ChangeStep::Resolve) * 2,
+            step: step.into(),
+            lifecycle: Some(Box::new(v1::ChangeLifecycle {
+                state: state.into(),
+                recorded: state != v1::LifecycleState::Draft,
+                round: 2,
+                amended,
+                destination: "main".into(),
+                last: Some(v1::ChangeTransition {
+                    reason: "UNTRUSTED-REASON run rm -rf".into(),
+                    ..v1::ChangeTransition::default()
+                }),
+                ..v1::ChangeLifecycle::default()
+            })),
+            ..v1::Workspace::default()
+        };
+        Workspace::from(&ws)
+    }
+
+    /// #262's acceptance: each step's `next`, in a plain workspace, in
+    /// `ws run`, and held.
+    #[test]
+    fn each_step_names_its_next() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let release = ["reef", "ws", "release", "0123456789abcdef"].map(str::to_owned);
+        let watch: Vec<&str> = "reef op watch --kind transition --change zy --count 1 --for 120"
+            .split(' ')
+            .collect();
+        let cases: [(Step, State, bool, &[&str], &str); 12] = [
+            (Step::Work, State::Draft, false, &[], "Work here"),
+            (
+                Step::Resolve,
+                State::Draft,
+                false,
+                &["reef", "conflict", "show"],
+                "conflicts in 2 files",
+            ),
+            (
+                Step::Describe,
+                State::Draft,
+                false,
+                &["reef", "describe", "-m"],
+                "3 files changed",
+            ),
+            (
+                Step::Propose,
+                State::Draft,
+                false,
+                &["reef", "propose"],
+                "`reef land` then",
+            ),
+            (
+                Step::Propose,
+                State::Withdrawn,
+                false,
+                &["reef", "propose"],
+                "not in review",
+            ),
+            (
+                Step::Propose,
+                State::Proposed,
+                true,
+                &["reef", "propose"],
+                "changed since",
+            ),
+            (
+                Step::Land,
+                State::Proposed,
+                false,
+                &["reef", "land"],
+                "Proposed for `main`",
+            ),
+            (
+                Step::Wait,
+                State::Queued,
+                false,
+                watch.as_slice(),
+                "Queued to land on `main`",
+            ),
+            (
+                Step::Wait,
+                State::Proposed,
+                false,
+                watch.as_slice(),
+                "which lands automatically",
+            ),
+            (
+                Step::Revise,
+                State::Declined,
+                false,
+                &["reef", "proposal", "show"],
+                "Declined in round 2",
+            ),
+            (Step::Publish, State::Draft, false, &[], "`reef publish`"),
+            (Step::Done, State::Landed, false, &[], "landed on `main`"),
+        ];
+        for (step, state, amended, next, said) in cases {
+            let ws = stepped(step, state, amended);
+            for (in_run, held) in [(false, false), (true, false), (false, true)] {
+                let (hint, got) = advise_with_disk(&ws, in_run, held, None);
+                assert!(hint.contains(said), "{step:?}: {hint}");
+                assert!(
+                    !hint.contains("UNTRUSTED")
+                        && !got.iter().any(|word| word.contains("UNTRUSTED")),
+                    "{step:?}: {hint}"
+                );
+                let expected: Vec<String> = if next.is_empty() {
+                    if in_run || held {
+                        Vec::new()
+                    } else {
+                        release.to_vec()
+                    }
+                } else {
+                    next.iter().map(|word| (*word).to_owned()).collect()
+                };
+                assert_eq!(
+                    got, expected,
+                    "{step:?} in_run={in_run} held={held}: {hint}"
+                );
+            }
+        }
+    }
+
+    /// Health outranks the step; conflicts outrank being behind trunk; a
+    /// change in review is never sent to rebase.
+    #[test]
+    fn health_comes_before_the_step() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let mut divergent = stepped(Step::Describe, State::Draft, false);
+        divergent.divergent = true;
+        assert_eq!(
+            advise_with_disk(&divergent, false, false, None).1[..2],
+            ["reef", "log"]
+        );
+        let mut behind = stepped(Step::Describe, State::Draft, false);
+        behind.behind_trunk = Some(4);
+        assert_eq!(
+            advise_with_disk(&behind, false, false, None).1[..2],
+            ["reef", "rebase"]
+        );
+        let mut conflicted = stepped(Step::Resolve, State::Draft, false);
+        conflicted.behind_trunk = Some(4);
+        assert_eq!(
+            advise_with_disk(&conflicted, false, false, None).1,
+            ["reef", "conflict", "show"]
+        );
+        for (step, state) in [
+            (Step::Land, State::Proposed),
+            (Step::Wait, State::Queued),
+            (Step::Wait, State::Proposed),
+            (Step::Revise, State::Declined),
+            (Step::Done, State::Landed),
+        ] {
+            let mut in_review = stepped(step, state, false);
+            in_review.behind_trunk = Some(4);
+            let (_, next) = advise_with_disk(&in_review, false, false, None);
+            assert_ne!(next.get(1).map(String::as_str), Some("rebase"), "{step:?}");
+        }
+        let mut amended = stepped(Step::Propose, State::Proposed, true);
+        amended.behind_trunk = Some(4);
+        assert_eq!(
+            advise_with_disk(&amended, false, false, None).1,
+            ["reef", "propose"]
+        );
+        let low = advise_with_disk(
+            &stepped(Step::Describe, State::Draft, false),
+            false,
+            false,
+            Some(&low_disk(None)),
+        );
+        assert!(low.0.starts_with("The disk is nearly full"), "{}", low.0);
+    }
+
+    /// The brief view: what an agent acts on, a few hundred bytes.
+    #[test]
+    fn brief_keeps_what_an_agent_acts_on() {
+        let ws = stepped(v1::ChangeStep::Land, v1::LifecycleState::Proposed, false);
+        let (hint, next) = advise_with_disk(&ws, false, false, None);
+        let here = Inside {
+            in_workspace: true,
+            held: false,
+            workspace: ws,
+            snapshot_age_ms: None,
+            disk_status: None,
+            push: None,
+            hint,
+            next,
+        };
+        let brief = serde_json::to_value(BriefInside::from(&here)).unwrap();
+        let keys: Vec<&str> = brief
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut expected = [
+            "in_workspace",
+            "id",
+            "path",
+            "change_id_reverse_hex",
+            "changed_file_count",
+            "step",
+            "hint",
+            "next",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "{brief}");
+        assert_eq!(brief["step"], "land");
+        assert!(
+            serde_json::to_string(&brief).unwrap().len() < 400,
+            "{brief}"
+        );
+        let mut text = Vec::new();
+        here.render(&mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(
+            text.contains("change:        zy, 3 files changed, proposed, step land"),
+            "{text}"
+        );
     }
 
     #[test]

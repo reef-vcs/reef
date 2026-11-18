@@ -254,6 +254,7 @@ async fn lookup(ctx: &Ctx, repo: String, workspace: String) -> Result<v1::Worksp
             snapshot_first: false,
             skip_disk_usage: true,
             at_operation: String::new(),
+            sync_first: false,
         }))
         .await?;
     response.workspace.ok_or_else(|| missing("workspace"))

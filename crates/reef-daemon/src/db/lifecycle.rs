@@ -360,6 +360,19 @@ impl Db {
         })
     }
 
+    /// Whether `repo` has any `lifecycle` row: some change of it was ever
+    /// proposed (#262's test for a repository that lands through
+    /// proposals).
+    pub fn has_lifecycle(&self, repo: RepoId) -> Result<bool, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lifecycle WHERE repo_id = ?1)",
+                params![repo],
+                |row| row.get(0),
+            )
+        })
+    }
+
     /// The `lifecycle` row of `change`, if it has one.
     pub fn lifecycle_row(
         &self,

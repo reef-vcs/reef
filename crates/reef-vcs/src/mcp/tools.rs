@@ -975,6 +975,8 @@ tool!(get_workspace, args::GetWorkspace, |call, args| {
             snapshot_first: args.snapshot_first.unwrap_or(false),
             skip_disk_usage: !args.disk_usage.unwrap_or(false),
             at_operation: String::new(),
+            // `step` covers the files on disk (#262).
+            sync_first: true,
         }))
         .await?;
     to_value(&Inspected::from_response(&response).ok_or_else(|| missing("workspace"))?)
