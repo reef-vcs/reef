@@ -16,6 +16,7 @@ use reef_lib::jj::{
     CommitIdHex, ForgetWorkspaceError, OpKind, OperationIdHex, ReadonlyRepo, UserSettings,
 };
 
+use super::reclaim::ending;
 use super::{CarrySlot, Inspected, ManagerError, ReadSnapshot, WorkspaceEntry, op_meta};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
@@ -23,8 +24,8 @@ use crate::config::Config;
 use crate::db::{Db, DbError, META_REMATERIALIZE_PENDING};
 use crate::lease::LeaseManager;
 use crate::model::{
-    LeaseEnd, LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp,
-    WatcherKind, WorkspaceId, WorkspaceRecord, WorkspaceState,
+    LeaseRecord, ReclaimReason, ReclaimRecord, RepoId, RepositoryRecord, Timestamp, WatcherKind,
+    WorkspaceId, WorkspaceRecord, WorkspaceState,
 };
 use crate::presence::PresenceHub;
 use crate::repo::{Registered, RepoHandle, RepoRegistry};
@@ -631,14 +632,17 @@ impl Manager {
         })
     }
 
-    /// Loads every `active` workspace at daemon start (a `releasing` one,
-    /// whose release was interrupted, goes back to `active` first): reopens
-    /// its jj handle on its repository's thread and re-selects its backend
-    /// by the stored name, without probing. A workspace whose directory is
-    /// gone is reclaimed (`reclaims.detail` = "directory missing at start"),
-    /// since nothing can be snapshotted. One whose jj handle cannot be
-    /// reopened is loaded without it ([`ManagerError::NotLoaded`] for
-    /// snapshots; a release without a final snapshot removes it).
+    /// Loads every `active` and `releasing` workspace at daemon start:
+    /// reopens its jj handle on its repository's thread and re-selects its
+    /// backend by the stored name, without probing. A `releasing` one, whose
+    /// release the daemon died in, is loaded as it is, untracked, and the
+    /// next reclaim of it finishes it ([`Manager::reclaim`]): it may be past
+    /// its forget (#312), so it does not go back to `active`. A workspace
+    /// whose directory is gone is reclaimed (`reclaims.detail` = "directory
+    /// missing at start"), since nothing can be snapshotted; if that cannot
+    /// be recorded, the next reclaim of it retries. One whose jj handle
+    /// cannot be reopened is loaded without it ([`ManagerError::NotLoaded`]
+    /// for snapshots; a release without a final snapshot removes it).
     /// Workspaces of a repository that failed to open are skipped. Returns
     /// how many were loaded.
     ///
@@ -658,10 +662,9 @@ impl Manager {
         let mut loaded = 0;
         for mut record in rows {
             let id = record.id;
-            if record.state == WorkspaceState::Releasing {
-                tracing::warn!(workspace_id = %id, "release was interrupted; workspace is active again");
-                self.db.set_workspace_state(id, WorkspaceState::Active)?;
-                record.state = WorkspaceState::Active;
+            let releasing = record.state == WorkspaceState::Releasing;
+            if releasing {
+                tracing::warn!(workspace_id = %id, "release was interrupted; the next reclaim of the workspace finishes it");
             }
             let Some(handle) = self.repos.get(record.repo_id) else {
                 tracing::error!(
@@ -684,7 +687,18 @@ impl Manager {
                     continue;
                 }
             } else if missing {
-                self.reclaim_missing(&record, &handle).await;
+                if let Err(error) = self
+                    .reclaim_missing(
+                        &record,
+                        &handle,
+                        ReclaimReason::Gc,
+                        DIRECTORY_MISSING,
+                        &record.owner,
+                    )
+                    .await
+                {
+                    tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
+                }
                 continue;
             }
             let kind = match record.backend.parse::<BackendKind>() {
@@ -728,7 +742,9 @@ impl Manager {
                 carry: CarrySlot::default(),
             };
             self.insert_entry(id, Arc::new(entry));
-            self.scheduler.track(id, TrackReason::Loaded).await;
+            if !releasing {
+                self.scheduler.track(id, TrackReason::Loaded).await;
+            }
             // Writes while the daemon was down are unknown (#272).
             self.disk.track(id, true);
             loaded += 1;
@@ -850,49 +866,57 @@ impl Manager {
         Ok(head)
     }
 
-    /// Reclaims a workspace whose directory is gone: forgets its jj
-    /// workspace, removes its state directory, ends its lease, and logs the
-    /// reclaim. Failures are logged; the next start retries what is left.
-    async fn reclaim_missing(&self, record: &WorkspaceRecord, handle: &RepoHandle) {
+    /// Reclaims a workspace whose directory is gone, for `reason`: forgets
+    /// its jj workspace as `agent` (a failure is logged), removes its state
+    /// directory, then ends its lease and logs the reclaim with `detail`.
+    /// Returns the operation that forgot the jj workspace, if any. If the
+    /// end cannot be recorded, the row stays as it was, and the next reclaim
+    /// of it, or the next start, retries.
+    pub(super) async fn reclaim_missing(
+        &self,
+        record: &WorkspaceRecord,
+        handle: &RepoHandle,
+        reason: ReclaimReason,
+        detail: &str,
+        agent: &str,
+    ) -> Result<Option<String>, ManagerError> {
         let id = record.id;
         tracing::error!(
             workspace_id = %id,
             path = %record.path.display(),
             "workspace directory is missing; reclaiming it"
         );
-        if let Err(error) = forget_jj_workspace(
+        let release_op_id = forget_jj_workspace(
             handle,
             id,
             "reef: release workspace {id} (directory missing)",
-            &record.owner,
+            agent,
         )
         .await
-        {
+        .unwrap_or_else(|error| {
             tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot forget the jj workspace");
-        }
+            None
+        });
         remove_state_dir(&record.state_dir).await;
+        let (state, lease_end) = ending(reason);
         let reclaim = ReclaimRecord {
             id: 0,
             repo_id: record.repo_id,
             workspace_id: id,
-            reason: ReclaimReason::Gc,
+            reason,
             final_op_id: None,
             snapshot_taken: false,
             freed_bytes: None,
             at: Timestamp::now(),
-            detail: Some(DIRECTORY_MISSING.to_owned()),
+            detail: Some(detail.to_owned()),
         };
-        if let Err(error) =
-            self.db
-                .finish_workspace(id, WorkspaceState::Reclaimed, LeaseEnd::Expired, &reclaim)
-        {
-            tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
-        }
+        self.db.finish_workspace(id, state, lease_end, &reclaim)?;
         self.disk.forget(id);
         self.presence.end_workspace(id);
         if let Some(provenance) = self.provenance.get() {
             provenance.end(id);
         }
+        Ok(release_op_id)
     }
 }
 
@@ -941,6 +965,24 @@ pub(super) async fn forget_jj_workspace(
         Err(ForgetWorkspaceError::NoSuchWorkspace(_)) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether the jj workspace `reef-<id>` is in the repository's view at
+/// head, read on the repository thread.
+pub(super) async fn jj_workspace_exists(
+    handle: &RepoHandle,
+    id: WorkspaceId,
+) -> Result<bool, ManagerError> {
+    let name = id.jj_workspace_name();
+    handle
+        .call_async(move |head| {
+            async move {
+                head.refresh().await?;
+                Ok::<_, ManagerError>(head.repo.has_workspace(&name))
+            }
+            .boxed_local()
+        })
+        .await?
 }
 
 /// Removes a workspace's working-copy state directory, tolerating one that

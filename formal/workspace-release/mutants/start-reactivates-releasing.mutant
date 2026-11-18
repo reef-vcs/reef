@@ -1,0 +1,14 @@
+# breaks: ActiveHasJjWorkspace INVARIANT crash
+# code: workspace/manager.rs load_active sets a `releasing` row `active`
+# again (#312): a release the daemon died in after its forget comes back
+# `active` without its jj workspace.
+<<<
+               /\ loaded' = TRUE /\ mem' = dbState /\ handle' = stateDir
+               /\ tracked' = (dbState = "active")
+               /\ UNCHANGED <<dbState, disk, failLeft>>
+===
+               /\ dbState' = "active"
+               /\ loaded' = TRUE /\ mem' = "active" /\ handle' = stateDir
+               /\ tracked' = TRUE
+               /\ UNCHANGED <<disk, failLeft>>
+>>>

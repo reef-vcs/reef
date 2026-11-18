@@ -1,0 +1,9 @@
+# breaks: ActiveIsTracked INVARIANT nocrash
+# code: workspace/reclaim.rs back_to_active stops calling scheduler.track:
+# a release that failed and went back to `active` is no longer
+# snapshotted.
+<<<
+       /\ dbState' = "active" /\ mem' = "active" /\ tracked' = TRUE
+===
+       /\ dbState' = "active" /\ mem' = "active" /\ UNCHANGED tracked
+>>>

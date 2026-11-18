@@ -1,6 +1,6 @@
 # One TLC run per row. `expected` is the outcome on the model of the code
 # at the sync commit in .claude/skills/workspace-release/SKILL.md; a fail
-# names the findings (F1-F5 there) that explain it. `fixed` is the outcome
+# names the open findings there that explain it. `fixed` is the outcome
 # with every fix in fixes/ applied, checked for rows expected to fail, so a
 # known finding cannot hide a new violation. Change a row only with the
 # code change or model fix that changes the outcome.
@@ -9,23 +9,23 @@ TypeOK	INVARIANT	nocrash	pass	-	-
 PipelineHoldsLock	INVARIANT	nocrash	pass	-	-
 EntryMatchesRow	INVARIANT	nocrash	pass	-	-
 LeaseEndsWithWorkspace	INVARIANT	nocrash	pass	-	-
-ActiveHasDirectory	INVARIANT	nocrash	fail	pass	F1
-ActiveHasJjWorkspace	INVARIANT	nocrash	fail	pass	F1
-ActiveIsTracked	INVARIANT	nocrash	fail	pass	F1
+ActiveHasDirectory	INVARIANT	nocrash	pass	-	-
+ActiveHasJjWorkspace	INVARIANT	nocrash	pass	-	-
+ActiveIsTracked	INVARIANT	nocrash	pass	-	-
 WatcherOnlyOnActive	INVARIANT	nocrash	pass	-	-
 ExpiryHonorsRenewal	PROPERTY	nocrash	pass	-	-
 NoRenewalWhileReleasing	PROPERTY	nocrash	pass	-	-
 ReleasingResolves	PROPERTY	nocrash	pass	-	-
-AbandonedIsReclaimed	PROPERTY	nocrash	fail	pass	F5
+AbandonedIsReclaimed	PROPERTY	nocrash	pass	-	-
 TypeOK	INVARIANT	crash	pass	-	-
 PipelineHoldsLock	INVARIANT	crash	pass	-	-
 EntryMatchesRow	INVARIANT	crash	pass	-	-
 LeaseEndsWithWorkspace	INVARIANT	crash	pass	-	-
-ActiveHasDirectory	INVARIANT	crash	fail	pass	F1,F3
-ActiveHasJjWorkspace	INVARIANT	crash	fail	pass	F1,F2
-ActiveIsTracked	INVARIANT	crash	fail	pass	F1
+ActiveHasDirectory	INVARIANT	crash	pass	-	-
+ActiveHasJjWorkspace	INVARIANT	crash	pass	-	-
+ActiveIsTracked	INVARIANT	crash	pass	-	-
 WatcherOnlyOnActive	INVARIANT	crash	pass	-	-
 ExpiryHonorsRenewal	PROPERTY	crash	pass	-	-
 NoRenewalWhileReleasing	PROPERTY	crash	pass	-	-
-ReleasingResolves	PROPERTY	crash	fail	pass	F4
-AbandonedIsReclaimed	PROPERTY	crash	fail	pass	F3
+ReleasingResolves	PROPERTY	crash	pass	-	-
+AbandonedIsReclaimed	PROPERTY	crash	pass	-	-
