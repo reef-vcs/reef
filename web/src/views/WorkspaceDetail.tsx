@@ -53,6 +53,7 @@ const STEP_WORDS: Record<ChangeStep, string> = {
   [ChangeStep.REVISE]: "revise it: the proposal was declined",
   [ChangeStep.PUBLISH]: "publish it for review, or release the workspace",
   [ChangeStep.DONE]: "none: the change has landed, was superseded, or is on trunk",
+  [ChangeStep.ASK]: "ask a person: its conflict waits for their go-ahead",
 };
 
 const PATHS_SHOWN = 20;

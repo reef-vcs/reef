@@ -411,6 +411,13 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
                 .to_owned(),
             argv(&["reef", "ws", "renew", &ws.id]),
         ),
+        ("active", "active" | "in_grace") if ws.step.as_deref() == Some("ask") => (
+            format!(
+                "Its change's conflict waits for a person before anyone resolves it: its policy tier is `ask`, or its attempts are used. Do not edit the conflicted files. Ask a person; they run `reef conflict allow {change}` to let you go on, or take it over. `reef conflict assignment {change}` says which.",
+                change = ws.change_id_reverse_hex
+            ),
+            argv(&["reef", "conflict", "assignment", &ws.change_id_reverse_hex]),
+        ),
         ("active", "active" | "in_grace") if ws.step.as_deref() == Some("resolve") => {
             let files = files(ws.conflicted_path_count);
             (
@@ -454,7 +461,7 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
 /// rebase makes a proposal amended and a queued change cannot move.
 fn behind_and_rebase_fits(ws: &Workspace) -> bool {
     let fits = match ws.step.as_deref() {
-        Some("land" | "wait" | "revise" | "done" | "resolve") => false,
+        Some("land" | "wait" | "revise" | "done" | "resolve" | "ask") => false,
         Some("propose") => ws
             .lifecycle
             .as_ref()
@@ -1047,6 +1054,21 @@ mod tests {
                     "{step:?} in_run={in_run} held={held}: {hint}"
                 );
             }
+        }
+    }
+
+    /// R3.28: a conflict that waits for a person names its assignment,
+    /// held or not, and is never sent to rebase.
+    #[test]
+    fn a_blocked_conflict_says_ask() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let mut ws = stepped(Step::Ask, State::Draft, false);
+        ws.behind_trunk = Some(4);
+        for (in_run, held) in [(false, false), (true, false), (false, true)] {
+            let (hint, next) = advise_with_disk(&ws, in_run, held, None);
+            assert!(hint.contains("waits for a person"), "{hint}");
+            assert!(hint.contains("reef conflict allow zy"), "{hint}");
+            assert_eq!(next, ["reef", "conflict", "assignment", "zy"]);
         }
     }
 

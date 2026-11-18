@@ -111,7 +111,8 @@ pub(crate) fn summary(
 }
 
 /// `Name <email>` (or the name alone) for each person whose sign-off a
-/// satisfied `[[signoff]]` rule or `builtin:owners` counted in
+/// satisfied `[[signoff]]` rule, `builtin:owners` or `builtin:resolution`
+/// (R3.28) counted in
 /// `evaluation`, sorted, at most [`MAX_REVIEWERS`].
 fn reviewers(db: &Db, evaluation: &Evaluation) -> Result<Vec<String>, DbError> {
     let mut names: Vec<&str> = evaluation
@@ -120,7 +121,8 @@ fn reviewers(db: &Db, evaluation: &Evaluation) -> Result<Vec<String>, DbError> {
         .filter(|rule| rule.status == Status::Satisfied)
         .filter(|rule| {
             rule.kind == RuleKind::Signoff
-                || (rule.kind == RuleKind::Builtin && rule.name == "builtin:owners")
+                || (rule.kind == RuleKind::Builtin
+                    && matches!(rule.name.as_str(), "builtin:owners" | "builtin:resolution"))
         })
         .filter_map(|rule| rule.signoff.as_ref())
         .flat_map(|signoff| signoff.signed_by.iter().map(String::as_str))

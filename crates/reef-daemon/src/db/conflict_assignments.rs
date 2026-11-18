@@ -46,6 +46,29 @@ impl OwnerColumns {
     }
 }
 
+/// What policy gave an assignment's conflict (R3.28): its tier and attempt
+/// cap, and what they were looked up from. All `None` until looked up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TierColumns {
+    /// `land`, `approve` or `ask`.
+    pub tier: Option<String>,
+    /// The policy's attempts.
+    pub cap: Option<u32>,
+    /// The `[[conflicts.rule]]` that decided; `None` for the defaults.
+    pub rule: Option<u32>,
+    /// The conflict id it was looked up for.
+    pub conflict_id: Option<String>,
+    /// `trunk()`'s commit the policy was read at.
+    pub policy_commit: Option<String>,
+    /// The policy's SHA-256; `None` when there was no policy.
+    pub policy_sha256: Option<String>,
+    /// Why the tier is `ask` by failure: an invalid policy, or a lookup
+    /// that failed.
+    pub error: Option<String>,
+    /// When.
+    pub at: Option<Timestamp>,
+}
+
 /// One row of `conflict_assignments`. States, reasons and kinds are their
 /// column texts (`crate::assign`'s names).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +117,18 @@ pub struct AssignmentRow {
     pub closed_commit_id: Option<String>,
     /// The session whose record names `closed_commit_id`.
     pub resolved_session_id: Option<String>,
+    /// Its tier and attempt cap (R3.28).
+    pub tier: TierColumns,
+    /// Resolution attempts started.
+    pub attempts: u32,
+    /// Attempts people granted past the cap.
+    pub granted: u32,
+    /// The person identity that gave the go-ahead.
+    pub go_ahead_identity_id: Option<String>,
+    /// When a person gave the go-ahead; `None` for none.
+    pub go_ahead_at: Option<Timestamp>,
+    /// Closed resolved: landing the change needs a person's sign-off.
+    pub approval: bool,
 }
 
 /// One row of `conflict_assignment_events`.
@@ -155,13 +190,15 @@ pub struct AssignmentFilter {
 }
 
 /// The states that are open.
-pub const OPEN_ASSIGNMENT_STATES: [&str; 4] = ["assigned", "queued", "taken", "unowned"];
+pub const OPEN_ASSIGNMENT_STATES: [&str; 5] = ["assigned", "queued", "taken", "unowned", "blocked"];
 
 const COLUMNS: &str = "repo_id, id, change_id, kind, commit_id, conflict_id, first_conflict_id, \
      introduced, files_total, state, reason, owner_session_id, owner_workspace_id, \
      owner_workspace_owner, owner_identity_id, owner_actor, owner_agent, owner_client_session, \
      owner_ended_at, priority, queued_at, claims, events, opened_at, updated_at, \
-     conflict_changed_at, closed_at, closed_commit_id, resolved_session_id";
+     conflict_changed_at, closed_at, closed_commit_id, resolved_session_id, tier, attempt_cap, \
+     tier_rule, tier_conflict_id, tier_policy_commit, tier_policy_sha256, tier_error, tier_at, \
+     attempts, granted, go_ahead_identity_id, go_ahead_at, approval";
 
 const EVENT_COLUMNS: &str = "repo_id, id, seq, assignment_id, change_id, conflict_id, from_state, \
      to_state, reason, owner_session_id, owner_workspace_id, owner_workspace_owner, \
@@ -178,6 +215,13 @@ fn time_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Timestamp>> {
 
 fn u32_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<u32> {
     Ok(u32::try_from(integer_at(row, idx)?.max(0)).unwrap_or(u32::MAX))
+}
+
+fn optional_u32_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<u32>> {
+    Ok(match row.get::<_, rusqlite::types::Value>(idx)? {
+        rusqlite::types::Value::Integer(n) => Some(u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
+        _ => None,
+    })
 }
 
 fn owner_at(row: &Row<'_>, first: usize) -> rusqlite::Result<OwnerColumns> {
@@ -217,6 +261,21 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<AssignmentRow> {
         closed_at: time_at(row, 26)?,
         closed_commit_id: text_at(row, 27)?,
         resolved_session_id: text_at(row, 28)?,
+        tier: TierColumns {
+            tier: text_at(row, 29)?,
+            cap: optional_u32_at(row, 30)?,
+            rule: optional_u32_at(row, 31)?,
+            conflict_id: text_at(row, 32)?,
+            policy_commit: text_at(row, 33)?,
+            policy_sha256: text_at(row, 34)?,
+            error: text_at(row, 35)?,
+            at: time_at(row, 36)?,
+        },
+        attempts: u32_at(row, 37)?,
+        granted: u32_at(row, 38)?,
+        go_ahead_identity_id: text_at(row, 39)?,
+        go_ahead_at: time_at(row, 40)?,
+        approval: integer_at(row, 41)? != 0,
     })
 }
 
@@ -249,11 +308,13 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<AssignmentEventRow> {
 /// than replacing it.
 fn upsert_in(tx: &Transaction<'_>, row: &AssignmentRow) -> rusqlite::Result<()> {
     let o = &row.owner;
+    let t = &row.tier;
     tx.execute(
         &format!(
             "INSERT INTO conflict_assignments({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
+                     ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+                     ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42)
              ON CONFLICT(repo_id, id) DO UPDATE SET
                commit_id = excluded.commit_id, conflict_id = excluded.conflict_id,
                introduced = excluded.introduced, files_total = excluded.files_total,
@@ -268,7 +329,14 @@ fn upsert_in(tx: &Transaction<'_>, row: &AssignmentRow) -> rusqlite::Result<()> 
                queued_at = excluded.queued_at, claims = excluded.claims, events = excluded.events,
                updated_at = excluded.updated_at, conflict_changed_at = excluded.conflict_changed_at,
                closed_at = excluded.closed_at, closed_commit_id = excluded.closed_commit_id,
-               resolved_session_id = excluded.resolved_session_id"
+               resolved_session_id = excluded.resolved_session_id, tier = excluded.tier,
+               attempt_cap = excluded.attempt_cap, tier_rule = excluded.tier_rule,
+               tier_conflict_id = excluded.tier_conflict_id,
+               tier_policy_commit = excluded.tier_policy_commit,
+               tier_policy_sha256 = excluded.tier_policy_sha256, tier_error = excluded.tier_error,
+               tier_at = excluded.tier_at, attempts = excluded.attempts, granted = excluded.granted,
+               go_ahead_identity_id = excluded.go_ahead_identity_id,
+               go_ahead_at = excluded.go_ahead_at, approval = excluded.approval"
         ),
         params![
             row.repo_id,
@@ -300,6 +368,19 @@ fn upsert_in(tx: &Transaction<'_>, row: &AssignmentRow) -> rusqlite::Result<()> 
             row.closed_at,
             row.closed_commit_id,
             row.resolved_session_id,
+            t.tier,
+            t.cap,
+            t.rule,
+            t.conflict_id,
+            t.policy_commit,
+            t.policy_sha256,
+            t.error,
+            t.at,
+            row.attempts,
+            row.granted,
+            row.go_ahead_identity_id,
+            row.go_ahead_at,
+            row.approval,
         ],
     )?;
     Ok(())
@@ -365,7 +446,7 @@ fn filter_sql(repo: RepoId, filter: &AssignmentFilter) -> (String, Vec<rusqlite:
     );
     values.extend(states.into_iter().map(Value::Text));
     if let Some(workspace) = &filter.workspace_id {
-        sql.push_str(" AND owner_workspace_id = ? AND state = 'assigned'");
+        sql.push_str(" AND owner_workspace_id = ? AND state IN ('assigned', 'blocked')");
         values.push(Value::Text(workspace.clone()));
     }
     if !filter.change_prefixes.is_empty() {
@@ -569,6 +650,24 @@ impl Db {
         })
     }
 
+    /// `change`'s assignments closed resolved, oldest first: the conflicts
+    /// it resolved (R3.28).
+    pub fn resolutions_of(
+        &self,
+        repo: RepoId,
+        change: &str,
+    ) -> Result<Vec<AssignmentRow>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM conflict_assignments
+                 WHERE repo_id = ?1 AND change_id = ?2 AND closed_at IS NOT NULL
+                   AND reason = 'resolved'
+                 ORDER BY closed_at, id"
+            ))?;
+            stmt.query_map(params![repo, change], from_row)?.collect()
+        })
+    }
+
     /// The head of `repo`'s resolver queue.
     pub fn queue_head(&self, repo: RepoId) -> Result<Option<AssignmentRow>, DbError> {
         self.with(|conn| {
@@ -638,13 +737,15 @@ impl Db {
         self.with(|conn| {
             let count: i64 = conn.query_row(
                 "SELECT count(*) FROM conflict_assignments
-                 WHERE owner_workspace_id = ?1 AND closed_at IS NULL AND state = 'assigned'",
+                 WHERE owner_workspace_id = ?1 AND closed_at IS NULL
+                   AND state IN ('assigned', 'blocked')",
                 [workspace_id],
                 |row| row.get(0),
             )?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {COLUMNS} FROM conflict_assignments
-                 WHERE owner_workspace_id = ?1 AND closed_at IS NULL AND state = 'assigned'
+                 WHERE owner_workspace_id = ?1 AND closed_at IS NULL
+                   AND state IN ('assigned', 'blocked')
                  ORDER BY updated_at DESC, id LIMIT ?2"
             ))?;
             let rows = stmt
@@ -684,24 +785,55 @@ impl Db {
         })
     }
 
+    /// Up to `limit` of `repo`'s resolutions closed before `before` whose
+    /// landing needs a person's sign-off (R3.28): `(id, change)`, oldest
+    /// first.
+    pub fn resolutions_awaiting_approval(
+        &self,
+        repo: RepoId,
+        before: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, change_id FROM conflict_assignments
+                 WHERE repo_id = ?1 AND closed_at IS NOT NULL AND closed_at < ?2 AND approval = 1
+                 ORDER BY closed_at, id LIMIT ?3",
+            )?;
+            stmt.query_map(
+                params![repo, before, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect()
+        })
+    }
+
     /// Deletes `repo`'s assignments closed before `before`, with their
-    /// events; how many assignments.
+    /// events, except resolutions awaiting approval (R3.28) not named in
+    /// `released`; how many assignments.
     pub fn delete_closed_assignments(
         &self,
         repo: RepoId,
         before: Timestamp,
+        released: &[String],
     ) -> Result<u64, DbError> {
+        let released = serde_json::to_string(released).unwrap_or_else(|_| "[]".to_owned());
         self.in_transaction(|tx| {
+            let doomed = "SELECT id FROM conflict_assignments
+                 WHERE repo_id = ?1 AND closed_at IS NOT NULL AND closed_at < ?2
+                   AND (approval = 0 OR id IN (SELECT value FROM json_each(?3)))";
             tx.execute(
-                "DELETE FROM conflict_assignment_events WHERE repo_id = ?1 AND assignment_id IN
-                   (SELECT id FROM conflict_assignments
-                    WHERE repo_id = ?1 AND closed_at IS NOT NULL AND closed_at < ?2)",
-                params![repo, before],
+                &format!(
+                    "DELETE FROM conflict_assignment_events WHERE repo_id = ?1 AND assignment_id IN
+                       ({doomed})"
+                ),
+                params![repo, before, released],
             )?;
             let deleted = tx.execute(
-                "DELETE FROM conflict_assignments
-                 WHERE repo_id = ?1 AND closed_at IS NOT NULL AND closed_at < ?2",
-                params![repo, before],
+                &format!(
+                    "DELETE FROM conflict_assignments WHERE repo_id = ?1 AND id IN ({doomed})"
+                ),
+                params![repo, before, released],
             )?;
             Ok(u64::try_from(deleted).unwrap_or(0))
         })
@@ -756,6 +888,12 @@ mod tests {
             closed_at: None,
             closed_commit_id: None,
             resolved_session_id: None,
+            tier: TierColumns::default(),
+            attempts: 0,
+            granted: 0,
+            go_ahead_identity_id: None,
+            go_ahead_at: None,
+            approval: false,
         }
     }
 
@@ -829,7 +967,8 @@ mod tests {
             Some("asg_a".to_owned())
         );
         assert_eq!(
-            db.delete_closed_assignments(repo, Timestamp(101)).unwrap(),
+            db.delete_closed_assignments(repo, Timestamp(101), &[])
+                .unwrap(),
             1
         );
         assert!(db.assignment(repo, "asg_a").unwrap().is_none());

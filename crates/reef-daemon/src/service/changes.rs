@@ -419,6 +419,11 @@ impl ChangeService for ChangesHandler {
         )
         .map_err(status)?;
         let target = target(state, &request.repo, "")?;
+        // Resolutions are read from the assignments (R3.28), brought up to
+        // date first, as every assignment read is.
+        if let Err(error) = crate::assign::look(state, target.repo.id).await {
+            tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot bring conflict assignments up to date");
+        }
         let mut states = Vec::new();
         for value in &request.states {
             let state = crate::lifecycle::messages::state_of(*value).ok_or_else(|| {
@@ -488,6 +493,13 @@ impl ChangeService for ChangesHandler {
                     .then(|| state.automatic.status(target.repo.id, &row.change_id))
                     .flatten()
                     .map(|status| crate::landing::messages::automatic_message(&status)),
+                resolutions: state
+                    .db
+                    .resolutions_of(target.repo.id, &row.change_id)
+                    .map_err(status)?
+                    .iter()
+                    .map(|resolved| crate::assign::messages::resolution_message(state, resolved))
+                    .collect(),
             });
         }
         Ok(Response::new(ListProposalsResponse {

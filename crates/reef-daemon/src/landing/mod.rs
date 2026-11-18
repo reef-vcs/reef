@@ -729,6 +729,14 @@ pub(crate) async fn judge_with(
     LifecycleState::Queued
         .as_str()
         .clone_into(&mut change.change.state);
+    change.change.resolutions = crate::assign::resolutions(
+        state,
+        repo,
+        &change.change.id,
+        &change.change.commit,
+        change.change.conflicted,
+    )
+    .map_err(|error| LandingError::Input(ErrorChain(&error).to_string()))?;
     let paths = change.change.paths.clone();
     let evidence_tree = context.evidence_tree.as_ref().or(change.tree_id.as_ref());
     let mut evidence = match evidence_tree {

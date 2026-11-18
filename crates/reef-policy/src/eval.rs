@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::check::shapes;
 use crate::cost::{self, MAX_EVALUATION_COST, MAX_EXPRESSION_COST, Sizes};
 use crate::env;
-use crate::format::{Attestor, Diagnostic, Entry, Expression, Policy, Presence, Require, Signoff};
+use crate::format::{
+    Attestor, Diagnostic, Entry, Expression, Members, Policy, Presence, Require, Signoff,
+};
+use crate::glob::{PathFilter, Patterns};
 use crate::input::{Evidence, Input};
 
 /// What a policy decides about a change.
@@ -216,6 +219,8 @@ pub struct InputSummary {
     pub provenance: i64,
     /// Whether the change is conflicted.
     pub conflicted: bool,
+    /// Conflicts the change resolved (R3.28).
+    pub resolutions: i64,
 }
 
 impl InputSummary {
@@ -229,6 +234,7 @@ impl InputSummary {
             evidence_ignored: input.evidence_ignored,
             provenance: len(input.provenance.len()),
             conflicted: input.change.conflicted,
+            resolutions: len(input.change.resolutions.len()),
         }
     }
 }
@@ -524,6 +530,7 @@ impl Policy {
         rules.push(self.description(&evaluator.input));
         rules.push(policy_file(&evaluator.input));
         rules.push(self.signoff(&mut evaluator, &self.owners, RuleKind::Builtin));
+        rules.push(resolution(&mut evaluator));
         for entry in &self.entries {
             let result = match entry {
                 Entry::Require(require) => self.require(&mut evaluator, require),
@@ -731,7 +738,9 @@ impl Policy {
         // Keep what can count: every object some set or sign-off rule
         // accepts, and the newest of the rest, so junk cannot push trusted
         // evidence out of view (S-94).
-        let signoffs: Vec<&Signoff> = std::iter::once(&self.owners)
+        let approvers = approvers();
+        let signoffs: Vec<&Signoff> = [&self.owners, &approvers]
+            .into_iter()
             .chain(self.entries.iter().filter_map(|entry| match entry {
                 Entry::Signoff(signoff) => Some(signoff),
                 _ => None,
@@ -984,68 +993,123 @@ impl Policy {
             Ok(false) => return RuleResult::new(&spec.name, kind, Status::NotApplicable),
             Ok(true) => {}
         }
-        let mut signers: BTreeMap<String, (String, String)> = BTreeMap::new();
-        for e in &evaluator.input.evidence {
-            if is_signoff(spec, e) {
-                let key = if e.key.identity_id.is_empty() {
-                    e.key.identity.clone()
-                } else {
-                    e.key.identity_id.clone()
-                };
-                let shown = if e.key.identity.is_empty() {
-                    e.key.identity_id.clone()
-                } else {
-                    e.key.identity.clone()
-                };
-                signers.entry(key).or_insert((shown, e.id.clone()));
-            }
-        }
-        let have = i64::try_from(signers.len()).unwrap_or(i64::MAX);
-        let mut signed_by: Vec<String> = signers.values().map(|(name, _)| name.clone()).collect();
-        signed_by.sort();
-        let mut result = RuleResult::new(
-            &spec.name,
-            kind,
-            if have >= spec.count {
-                Status::Satisfied
-            } else {
-                Status::Unsatisfied
-            },
-        )
-        .with_paths(&covered);
-        result.evidence_ids = signers.into_values().map(|(_, id)| id).collect();
-        result.evidence_ids.sort();
-        result.signoff = Some(SignoffNeed {
-            groups: spec.members.groups.clone(),
-            identities: spec.members.identities.clone(),
-            count: spec.count,
-            have,
-            signed_by,
-            presence: spec.presence.as_str().to_owned(),
-            kinds: spec.kinds.clone(),
-        });
-        if result.status == Status::Unsatisfied {
-            result.message = if spec.message.is_empty() {
-                let mut who: Vec<String> = spec.members.groups.clone();
-                who.extend(spec.members.identities.iter().cloned());
-                let what = if kind == RuleKind::Builtin {
-                    "a change to reef-policy.toml or reef-checks.toml needs"
-                } else {
-                    "needs"
-                };
-                format!(
-                    "{what} {} sign-off{} from {} ({} so far)",
-                    spec.count,
-                    if spec.count == 1 { "" } else { "s" },
-                    who.join(", "),
-                    have
-                )
-            } else {
-                spec.message.clone()
-            };
-        }
-        result
+        signed(evaluator, spec, kind, &covered)
     }
+}
+
+/// `spec`'s sign-offs on the tree, counted, as the result of a rule that
+/// applies to `covered`.
+fn signed(evaluator: &Evaluator, spec: &Signoff, kind: RuleKind, covered: &[String]) -> RuleResult {
+    let mut signers: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for e in &evaluator.input.evidence {
+        if is_signoff(spec, e) {
+            let key = if e.key.identity_id.is_empty() {
+                e.key.identity.clone()
+            } else {
+                e.key.identity_id.clone()
+            };
+            let shown = if e.key.identity.is_empty() {
+                e.key.identity_id.clone()
+            } else {
+                e.key.identity.clone()
+            };
+            signers.entry(key).or_insert((shown, e.id.clone()));
+        }
+    }
+    let have = i64::try_from(signers.len()).unwrap_or(i64::MAX);
+    let mut signed_by: Vec<String> = signers.values().map(|(name, _)| name.clone()).collect();
+    signed_by.sort();
+    let mut result = RuleResult::new(
+        &spec.name,
+        kind,
+        if have >= spec.count {
+            Status::Satisfied
+        } else {
+            Status::Unsatisfied
+        },
+    )
+    .with_paths(covered);
+    result.evidence_ids = signers.into_values().map(|(_, id)| id).collect();
+    result.evidence_ids.sort();
+    result.signoff = Some(SignoffNeed {
+        groups: spec.members.groups.clone(),
+        identities: spec.members.identities.clone(),
+        count: spec.count,
+        have,
+        signed_by,
+        presence: spec.presence.as_str().to_owned(),
+        kinds: spec.kinds.clone(),
+    });
+    if result.status == Status::Unsatisfied {
+        result.message = if spec.message.is_empty() {
+            let mut who: Vec<String> = spec.members.groups.clone();
+            who.extend(spec.members.identities.iter().cloned());
+            let what = if kind == RuleKind::Builtin {
+                "a change to reef-policy.toml or reef-checks.toml needs"
+            } else {
+                "needs"
+            };
+            format!(
+                "{what} {} sign-off{} from {} ({} so far)",
+                spec.count,
+                if spec.count == 1 { "" } else { "s" },
+                who.join(", "),
+                have
+            )
+        } else {
+            spec.message.clone()
+        };
+    }
+    result
+}
+
+/// Who approves a resolution (R3.28, `builtin:resolution`): any person,
+/// with a sign-off of the kind `[owners]` counts.
+fn approvers() -> Signoff {
+    Signoff {
+        name: "builtin:resolution".to_owned(),
+        filter: PathFilter {
+            paths: Patterns::empty(),
+            except: Patterns::empty(),
+        },
+        members: Members {
+            anyone: true,
+            ..Members::default()
+        },
+        count: 1,
+        presence: Presence::None,
+        kinds: vec!["signoff".to_owned()],
+        when: None,
+        message: String::new(),
+    }
+}
+
+/// `builtin:resolution` (R3.28): a change that resolved a conflict whose
+/// resolution needs approval (an `approve` or `ask` tier, or resolved past
+/// a block) lands only with a person's sign-off on its tree.
+fn resolution(evaluator: &mut Evaluator) -> RuleResult {
+    const NAME: &str = "builtin:resolution";
+    let needing: Vec<&crate::input::Resolution> = evaluator
+        .input
+        .change
+        .resolutions
+        .iter()
+        .filter(|resolution| resolution.approval)
+        .collect();
+    let Some(first) = needing.first() else {
+        return RuleResult::new(NAME, RuleKind::Builtin, Status::NotApplicable);
+    };
+    let what = match needing.as_slice() {
+        [_] => format!("conflict {} (tier {})", first.assignment, first.tier),
+        many => format!("{} conflicts ({} and others)", many.len(), first.assignment),
+    };
+    let mut result = signed(evaluator, &approvers(), RuleKind::Builtin, &[]);
+    if result.status == Status::Unsatisfied {
+        let have = result.signoff.as_ref().map_or(0, |need| need.have);
+        result.message =
+            format!("resolves {what}: needs a sign-off from a person on this tree ({have} so far)");
+    }
+    result
 }
 
 /// `builtin:policy-file`: a change's own new policy must load.

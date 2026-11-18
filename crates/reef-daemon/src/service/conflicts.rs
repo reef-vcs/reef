@@ -25,6 +25,7 @@ use reef_lib::jj::conflict::{
 use reef_lib::jj::diff;
 use reef_lib::jj::log::Describer;
 use reef_lib::jj::revset::{self, RevisionError};
+use reef_policy::input::{ConflictInput, ConflictSide};
 use tonic::{Request, Response, Status};
 
 use super::convert;
@@ -139,6 +140,116 @@ struct Read {
 
 /// A change and the commit its provenance summary is about.
 type ProvenanceKey = (String, String);
+
+/// The most conflicted paths a policy input lists (R3.28); a wider
+/// conflict's lookup fails, which is `ask`.
+const INPUT_FILES: usize = 10_000;
+
+/// A conflict read for its policy input (R3.28): every conflicted path, up
+/// to [`INPUT_FILES`], and each term's source.
+pub(crate) struct InputRead(Read);
+
+/// Reads the conflict at `commit` for its policy input. On the repository
+/// thread.
+pub(crate) async fn read_for_input(
+    repo: &reef_lib::jj::ReadonlyRepo,
+    scope: &revset::RevsetScope<'_>,
+    commit: &CommitIdHex,
+) -> Result<InputRead, Status> {
+    let options = ReadOptions {
+        paths: Vec::new(),
+        after: None,
+        limit: INPUT_FILES,
+    };
+    let object = conflict::read(repo, commit, &options)
+        .await
+        .map_err(status)?;
+    if object.more {
+        // A rule for a path past the cut would be skipped: fail the
+        // lookup, which is `ask`, rather than open.
+        return Err(Status::resource_exhausted(format!(
+            "the conflict has more than {INPUT_FILES} conflicted paths; its tier cannot be looked up"
+        )));
+    }
+    let sources = conflict::attribute(repo, commit, &object)
+        .await
+        .map_err(status)?;
+    let info = Describer::new(repo, scope)
+        .map_err(status)?
+        .describe(commit)
+        .await
+        .map_err(status)?;
+    Ok(InputRead(Read {
+        committed_at: info.committer.at,
+        change: convert::change(&info),
+        object,
+        sources,
+        hunks: HashMap::new(),
+    }))
+}
+
+/// The policy input of `read`, its sides' provenance read and verified.
+/// Blocking.
+pub(crate) fn input_of(
+    state: &AppState,
+    repo: RepoId,
+    read: InputRead,
+) -> Result<ConflictInput, DbError> {
+    let reads = vec![read.0];
+    let summaries = provenance_for(state, repo, &reads)?;
+    Ok(reads
+        .into_iter()
+        .next()
+        .map(|read| policy_input(&message(read, &summaries, false)))
+        .unwrap_or_default())
+}
+
+/// R3.07's conflict input from `conflict` (R3.28, one mapping for the
+/// daemon and `reef conflict show --policy-input`): its change, every
+/// conflicted path it lists, and per side its source's change and the
+/// identity, agent and actor of the side's newest provenance record that
+/// verifies, for a `verified` source only (empty otherwise, S-127).
+pub(crate) fn policy_input(conflict: &v1::Conflict) -> ConflictInput {
+    ConflictInput {
+        change_id: conflict
+            .change
+            .as_ref()
+            .map(|c| c.change_id.clone())
+            .unwrap_or_default(),
+        paths: conflict.files.iter().map(|f| f.path.clone()).collect(),
+        sides: conflict
+            .terms
+            .iter()
+            .filter(|term| term.role() == v1::ConflictTermRole::Side)
+            .map(|term| {
+                let verified = term
+                    .source
+                    .as_ref()
+                    .filter(|s| s.attribution() == v1::ConflictAttribution::Verified);
+                let latest = verified
+                    .and(term.provenance.as_ref())
+                    .and_then(|p| p.latest_record.as_ref());
+                let key = latest
+                    .and_then(|r| r.identity.as_ref())
+                    .and_then(|i| i.key.as_ref());
+                ConflictSide {
+                    change_id: verified.map(|s| s.change_id.clone()).unwrap_or_default(),
+                    identity: key.map(|k| k.identity.clone()).unwrap_or_default(),
+                    agent: latest.map(|r| r.agent.clone()).unwrap_or_default(),
+                    actor: key
+                        .map(|k| match k.actor() {
+                            v1::SessionActor::Human => "human",
+                            v1::SessionActor::Agent => "agent",
+                            v1::SessionActor::Executor => "executor",
+                            v1::SessionActor::Unspecified => "",
+                        })
+                        .unwrap_or_default()
+                        .to_owned(),
+                }
+            })
+            .collect(),
+    }
+}
 
 fn millis(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
@@ -700,8 +811,9 @@ impl ConflictService for ConflictHandler {
             limit,
         };
         let want_hunks = request.hunks;
+        let want_input = request.policy_input;
         let read_target = target.clone();
-        let (read, more, at, ended) = state
+        let (read, more, at, ended, input_read) = state
             .reads
             .run(&target.handle, move || async move {
                 let target = read_target;
@@ -766,6 +878,11 @@ impl ConflictService for ConflictHandler {
                 let describer = Describer::new(&repo, &target.scope()).map_err(status)?;
                 let info = describer.describe(&commit).await.map_err(status)?;
                 let more = object.more;
+                let input_read = if want_input {
+                    Some(read_for_input(&repo, &target.scope(), &commit).await?)
+                } else {
+                    None
+                };
                 Ok::<_, Status>((
                     Read {
                         committed_at: info.committer.at,
@@ -777,6 +894,7 @@ impl ConflictService for ConflictHandler {
                     more,
                     op_id(&repo),
                     op_end(&repo),
+                    input_read,
                 ))
             })
             .await
@@ -791,18 +909,24 @@ impl ConflictService for ConflictHandler {
             as_of,
         )
         .await;
-        let (read, summaries) = {
+        let (read, summaries, input) = {
             let state = Arc::clone(state);
             let repo = target.repo.id;
             tokio::task::spawn_blocking(move || {
                 let reads = vec![read];
                 let summaries = provenance_for(&state, repo, &reads);
-                (reads, summaries)
+                let input = input_read.map(|read| input_of(&state, repo, read));
+                (reads, summaries, input)
             })
             .await
             .map_err(|error| task(&error))?
         };
         let summaries = summaries.map_err(status)?;
+        let policy_input = match input.transpose().map_err(status)? {
+            Some(input) => serde_json::to_string(&serde_json::json!({ "conflict": input }))
+                .map_err(|error| status(ConflictReadError::Task(error.to_string())))?,
+            None => String::new(),
+        };
         let read = read
             .into_iter()
             .next()
@@ -835,6 +959,7 @@ impl ConflictService for ConflictHandler {
             conflict: Some(conflict),
             next_page_token,
             at_operation: at,
+            policy_input,
         }))
     }
 
@@ -876,5 +1001,91 @@ impl ConflictService for ConflictHandler {
         request: Request<v1::AssignConflictRequest>,
     ) -> Result<Response<v1::AssignConflictResponse>, Status> {
         super::assignments::assign(&self.state, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_input_takes_sides_and_paths() {
+        let record = v1::ProvenanceRecord {
+            agent: "bot".into(),
+            identity: Some(v1::KeyIdentity {
+                key: Some(v1::SessionKey {
+                    identity: "alice".into(),
+                    actor: v1::SessionActor::Human.into(),
+                    ..v1::SessionKey::default()
+                }),
+                ..v1::KeyIdentity::default()
+            }),
+            ..v1::ProvenanceRecord::default()
+        };
+        let side = |index: u32,
+                    change: &str,
+                    attribution: v1::ConflictAttribution,
+                    record: Option<v1::ProvenanceRecord>| v1::ConflictTerm {
+            index,
+            role: v1::ConflictTermRole::Side.into(),
+            source: Some(v1::ConflictSource {
+                change_id: change.into(),
+                attribution: attribution.into(),
+                ..v1::ConflictSource::default()
+            }),
+            provenance: record.map(|record| v1::ConflictSideProvenance {
+                latest_record: Some(record),
+                ..v1::ConflictSideProvenance::default()
+            }),
+            ..v1::ConflictTerm::default()
+        };
+        let conflict = v1::Conflict {
+            change: Some(v1::Change {
+                change_id: "c".into(),
+                ..v1::Change::default()
+            }),
+            terms: vec![
+                side(
+                    0,
+                    "a",
+                    v1::ConflictAttribution::Verified,
+                    Some(record.clone()),
+                ),
+                v1::ConflictTerm {
+                    index: 1,
+                    role: v1::ConflictTermRole::Base.into(),
+                    ..v1::ConflictTerm::default()
+                },
+                side(2, "b", v1::ConflictAttribution::Label, Some(record)),
+            ],
+            files: vec![v1::ConflictFile {
+                path: "docs/a.md".into(),
+                ..v1::ConflictFile::default()
+            }],
+            ..v1::Conflict::default()
+        };
+        let input = policy_input(&conflict);
+        assert_eq!(input.change_id, "c");
+        assert_eq!(input.paths, ["docs/a.md"]);
+        assert_eq!(input.sides.len(), 2);
+        assert_eq!(
+            (
+                input.sides[0].change_id.as_str(),
+                input.sides[0].identity.as_str(),
+                input.sides[0].agent.as_str(),
+                input.sides[0].actor.as_str()
+            ),
+            ("a", "alice", "bot", "human")
+        );
+        // A side only its label names says nothing.
+        assert_eq!(
+            (
+                input.sides[1].change_id.as_str(),
+                input.sides[1].identity.as_str(),
+                input.sides[1].agent.as_str(),
+                input.sides[1].actor.as_str()
+            ),
+            ("", "", "", "")
+        );
     }
 }

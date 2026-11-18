@@ -408,6 +408,20 @@ message ConflictAssignment {
   // daemon recorded that commit; empty otherwise (the jj CLI, or a rebase
   // that made the conflict go away).
   string resolved_session_id = 23;
+  // What policy gives its conflict (R3.28); unset until looked up.
+  ConflictTierDecision tier = 24;
+  // Resolution attempts started: each time a resolver was handed it (its
+  // default owner, a claim, an assignment, a reopen).
+  uint32 attempts = 25;
+  // Attempts allowed: the policy's cap plus what people granted.
+  uint32 attempt_limit = 26;
+  // The person identity that gave the go-ahead; empty for none.
+  string go_ahead_identity_id = 27;
+  // When a person gave the go-ahead; unset for none.
+  google.protobuf.Timestamp go_ahead_at = 28;
+  // Closed RESOLVED: landing the change needs a person's sign-off
+  // (`builtin:resolution`).
+  bool approval = 29;
 }
 
 // ListConflicts' request.
@@ -464,6 +478,9 @@ message GetConflictRequest {
   int32 page_size = 9;
   // The previous page's `next_page_token`.
   string page_token = 10;
+  // Also return the conflict as R3.07's policy input (R3.28), every
+  // conflicted path and each verified side, in `policy_input`.
+  bool policy_input = 11;
 }
 
 // GetConflict's response.
@@ -474,6 +491,9 @@ message GetConflictResponse {
   string next_page_token = 2;
   // The operation it was read at.
   string at_operation = 3;
+  // With `policy_input`: `{"conflict": ConflictInput}` as JSON, the input
+  // the daemon looks the conflict's tier up with.
+  string policy_input = 4;
 }
 
 // ListConflictAssignments' request.
@@ -590,6 +610,10 @@ message AssignConflictRequest {
     bool queue = 5;
     // A person takes it over, as the caller's identity.
     bool take = 6;
+    // A person's go-ahead (R3.28): a BLOCKED assignment goes to the owner
+    // it was kept for when that session is live, else to the queue; an
+    // assignment out of attempts gets `attempts` more (1 when unset).
+    bool allow = 11;
   }
   // From -100 to 100; unset to keep it.
   optional int32 priority = 7;
@@ -602,6 +626,10 @@ message AssignConflictRequest {
   // agent name and HUMAN otherwise. Through the remote listener it is
   // always AGENT.
   TransitionActor actor = 10;
+  // Attempts a person grants, 1 to 20 (R3.28): with `allow`, added when
+  // the assignment is out of attempts (1 when unset), or always when set.
+  // A person's assignment to a workspace or the queue is a go-ahead too.
+  optional uint32 attempts = 12;
 }
 
 // AssignConflict's response.

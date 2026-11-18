@@ -66,8 +66,9 @@
 //!    7's is.
 //! 10. **Conflict assignments** (R3.27, ADR 0068): assignments closed more
 //!     than 30 days ago (and before `keep_newer`), with their events
-//!     ([`crate::assign::sweep`]). Open ones are never touched. Not in a
-//!     dry run; a failure is logged.
+//!     ([`crate::assign::sweep`]), except a resolution awaiting a person's
+//!     sign-off whose change is visible and not landed (R3.28). Open ones
+//!     are never touched. Not in a dry run; a failure is logged.
 //!
 //! `keep_newer` is `now - max(gc.undo_window, backup.retention while the
 //! last backup is within it)` ([`keep_newer`]); every age cutoff uses it, so
@@ -552,10 +553,10 @@ async fn run_repo(
         };
 
     // 10. (after 9, below)
-    let sweep_assignments = || {
-        let db = Arc::clone(&state.db);
-        let keep = Timestamp::from(keep_newer);
-        tokio::task::spawn_blocking(move || crate::assign::sweep(&db, id, keep))
+    let sweep_assignments = || async {
+        Ok::<_, std::convert::Infallible>(
+            crate::assign::sweep(state, id, Timestamp::from(keep_newer)).await,
+        )
     };
 
     // 9.

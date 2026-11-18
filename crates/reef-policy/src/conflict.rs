@@ -97,6 +97,7 @@ mod tests {
                 change_id: "a".to_owned(),
                 identity: "alice".to_owned(),
                 agent: "bot".to_owned(),
+                actor: "agent".to_owned(),
             }],
         }
     }

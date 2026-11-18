@@ -4539,7 +4539,8 @@ async fn policy_cli() {
     .unwrap();
     let checked = json(&run(no_daemon(work.path()), &["-o", "json", "policy", "check"]).await);
     assert_eq!(checked["version"], 1);
-    assert_eq!(checked["rules"][5], "tests");
+    assert_eq!(checked["rules"][5], "builtin:resolution");
+    assert_eq!(checked["rules"][6], "tests");
     std::fs::write(
         work.path().join("bad.toml"),
         "version = 1\n[owners]\ngroups = [\"x\"]\n",

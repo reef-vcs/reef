@@ -34,6 +34,7 @@ syntax = "proto3";
 package reef.api.v1;
 
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/assignments.proto";
 import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
@@ -483,6 +484,8 @@ message ProposalEntry {
   // What the automatic service is doing about it (R3.45); unset when it is
   // not proposed, or the daemon has not looked at it yet.
   AutomaticStatus automatic = 5;
+  // The conflicts the change resolved (R3.28), oldest first.
+  repeated ConflictResolution resolutions = 6;
 }
 
 // Where an open proposal stands with the automatic service (R3.45,

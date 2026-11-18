@@ -8,7 +8,7 @@ use reef_lib::jj::oplog::OpEntry;
 
 use super::{KIND_TREE, Reason, State};
 use crate::daemon::AppState;
-use crate::db::{AssignmentEventRow, AssignmentRow, OwnerColumns};
+use crate::db::{AssignmentEventRow, AssignmentRow, OwnerColumns, TierColumns};
 use crate::model::Timestamp;
 
 fn time(at: Timestamp) -> prost_types::Timestamp {
@@ -26,6 +26,7 @@ pub fn state_message(text: &str) -> v1::ConflictAssignmentState {
         Some(State::Taken) => v1::ConflictAssignmentState::Taken,
         Some(State::Unowned) => v1::ConflictAssignmentState::Unowned,
         Some(State::Closed) => v1::ConflictAssignmentState::Closed,
+        Some(State::Blocked) => v1::ConflictAssignmentState::Blocked,
         None => v1::ConflictAssignmentState::Unspecified,
     }
 }
@@ -38,6 +39,7 @@ pub fn state_of(value: i32) -> Option<State> {
         v1::ConflictAssignmentState::Taken => Some(State::Taken),
         v1::ConflictAssignmentState::Unowned => Some(State::Unowned),
         v1::ConflictAssignmentState::Closed => Some(State::Closed),
+        v1::ConflictAssignmentState::Blocked => Some(State::Blocked),
         v1::ConflictAssignmentState::Unspecified => None,
     }
 }
@@ -61,8 +63,68 @@ pub fn reason_message(text: &str) -> v1::ConflictAssignmentReason {
         Some(Reason::Abandoned) => R::Abandoned,
         Some(Reason::Immutable) => R::Immutable,
         Some(Reason::Reopened) => R::Reopened,
+        Some(Reason::Ask) => R::Ask,
+        Some(Reason::Attempts) => R::Attempts,
+        Some(Reason::Allowed) => R::Allowed,
         None => R::Unspecified,
     }
+}
+
+/// A tier's message value.
+pub fn tier_value(text: Option<&str>) -> v1::ConflictTier {
+    match text.and_then(reef_policy::Tier::parse) {
+        Some(reef_policy::Tier::Land) => v1::ConflictTier::Land,
+        Some(reef_policy::Tier::Approve) => v1::ConflictTier::Approve,
+        Some(reef_policy::Tier::Ask) => v1::ConflictTier::Ask,
+        None => v1::ConflictTier::Unspecified,
+    }
+}
+
+/// `columns` as a message; `None` until looked up.
+fn tier_message(columns: &TierColumns) -> Option<v1::ConflictTierDecision> {
+    columns.tier.as_ref()?;
+    let mut message = v1::ConflictTierDecision {
+        attempts: columns.cap.unwrap_or_default(),
+        rule: columns.rule,
+        policy_commit: columns.policy_commit.clone().unwrap_or_default(),
+        policy_sha256: columns
+            .policy_sha256
+            .clone()
+            .filter(|key| !key.starts_with("blob:"))
+            .unwrap_or_default(),
+        error: columns.error.clone().unwrap_or_default(),
+        conflict_id: columns.conflict_id.clone().unwrap_or_default(),
+        looked_up_at: columns.at.map(time),
+        ..v1::ConflictTierDecision::default()
+    };
+    message.set_tier(tier_value(columns.tier.as_deref()));
+    Some(message)
+}
+
+/// `row`, closed resolved, as the resolution a proposal lists (R3.28).
+pub fn resolution_message(state: &AppState, row: &AssignmentRow) -> v1::ConflictResolution {
+    let session = row
+        .resolved_session_id
+        .as_deref()
+        .and_then(|id| state.db.provenance_session(id).ok().flatten());
+    let mut message = v1::ConflictResolution {
+        assignment_id: row.id.clone(),
+        conflicted_commit_id: row.commit_id.clone(),
+        resolved_commit_id: row.closed_commit_id.clone().unwrap_or_default(),
+        attempts: row.attempts,
+        attempt_limit: super::tier::limit(row),
+        approval: row.approval,
+        resolved_session_id: row.resolved_session_id.clone().unwrap_or_default(),
+        resolved_agent: session
+            .as_ref()
+            .and_then(|s| s.agent.clone())
+            .unwrap_or_default(),
+        resolved_actor: session.map(|s| s.actor).unwrap_or_default(),
+        resolved_at: row.closed_at.map(time),
+        ..v1::ConflictResolution::default()
+    };
+    message.set_tier(tier_value(row.tier.tier.as_deref()));
+    message
 }
 
 /// Identity names by id, read once per response.
@@ -143,6 +205,12 @@ pub fn assignment_message(
         closed_at: row.closed_at.map(time),
         closed_commit_id: row.closed_commit_id.clone().unwrap_or_default(),
         resolved_session_id: row.resolved_session_id.clone().unwrap_or_default(),
+        tier: tier_message(&row.tier),
+        attempts: row.attempts,
+        attempt_limit: super::tier::limit(row),
+        go_ahead_identity_id: row.go_ahead_identity_id.clone().unwrap_or_default(),
+        go_ahead_at: row.go_ahead_at.map(time),
+        approval: row.approval,
         ..v1::ConflictAssignment::default()
     };
     message.set_kind(if row.kind == KIND_TREE {

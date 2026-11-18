@@ -664,6 +664,16 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         object::<conflict_assign::AssignmentChanged>,
         object::<conflict_assign::BriefAssignment<'static>>,
     ),
+    OutputRow {
+        note: Some(
+            "a person only: from an agent it is an error (7, reason ALLOW_NEEDS_PERSON), and so through the remote listener (reason REMOTE_HUMAN_REQUIRED)",
+        ),
+        ..view(
+            &["conflict", "allow"],
+            object::<conflict_assign::AssignmentChanged>,
+            object::<conflict_assign::BriefAssignment<'static>>,
+        )
+    },
     row(
         &["evidence", "artifact", "upload"],
         list::<ArtifactUploaded>,

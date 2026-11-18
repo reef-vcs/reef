@@ -602,6 +602,15 @@ pub(super) async fn simulate(
             })
             .await
             .map_err(status)??;
+        let mut read = read;
+        read.change.resolutions = crate::assign::resolutions(
+            state,
+            repo_id,
+            &read.change.id,
+            &read.change.commit,
+            read.change.conflicted,
+        )
+        .map_err(status)?;
         let (evidence, evidence_ignored) = match &read.tree_id {
             Some(tree) => handler.evidence(repo_id, tree).await?,
             None => (Vec::new(), 0),

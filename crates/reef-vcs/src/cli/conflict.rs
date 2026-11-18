@@ -8,14 +8,15 @@
 //! source is only what jj's label, which any client writes, says.
 //!
 //! `show --policy-input` prints the conflict as R3.07's `ConflictInput`,
-//! for `reef policy check --input`: the seam R3.28 builds on. Who resolves
+//! as the daemon builds it to look the conflict's tier up (R3.28), for
+//! `reef policy check --input`. Who resolves
 //! each conflict is `conflict_assign`'s (R3.27).
 
 use std::io::{self, Write};
 
 use reef_api::v1::{self, GetConflictRequest, ListConflictsRequest};
 use reef_client::json::{self, reverse_hex};
-use reef_policy::input::{ConflictInput, ConflictSide};
+use reef_policy::input::ConflictInput;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -70,6 +71,9 @@ enum ConflictCommand {
     /// Take a conflict over yourself, as a person.
     #[command(after_help = "Example: reef conflict take asg_0123456789abcdef")]
     Take(super::conflict_assign::TakeArgs),
+    /// Let a conflict that waits for a person go on, as a person: its go-ahead, or more attempts.
+    #[command(after_help = "Example: reef conflict allow asg_0123456789abcdef --attempts 2")]
+    Allow(super::conflict_assign::AllowArgs),
 }
 
 /// `reef conflict list`.
@@ -776,7 +780,7 @@ impl TextRow for Conflict {
 
 /// What `show --policy-input` prints: an input `reef policy check --input`
 /// reads.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 struct PolicyInput {
     conflict: ConflictInput,
 }
@@ -785,45 +789,6 @@ impl TextRender for PolicyInput {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         writeln!(w, "{text}")
-    }
-}
-
-/// R3.07's conflict input from `conflict`: its change, every conflicted
-/// path, and per side its source's change and the identity and agent of
-/// the side's newest provenance record that verifies, for a `verified`
-/// source only (empty otherwise). R3.28 extends this mapping.
-pub(crate) fn policy_input(conflict: &v1::Conflict) -> ConflictInput {
-    ConflictInput {
-        change_id: conflict
-            .change
-            .as_ref()
-            .map(|c| c.change_id.clone())
-            .unwrap_or_default(),
-        paths: conflict.files.iter().map(|f| f.path.clone()).collect(),
-        sides: conflict
-            .terms
-            .iter()
-            .filter(|term| term.role() == v1::ConflictTermRole::Side)
-            .map(|term| {
-                // Only a verified side speaks: a label is anyone's (S-127).
-                let verified = term
-                    .source
-                    .as_ref()
-                    .filter(|s| s.attribution() == v1::ConflictAttribution::Verified);
-                let latest = verified
-                    .and(term.provenance.as_ref())
-                    .and_then(|p| p.latest_record.as_ref());
-                ConflictSide {
-                    change_id: verified.map(|s| s.change_id.clone()).unwrap_or_default(),
-                    identity: latest
-                        .and_then(|r| r.identity.as_ref())
-                        .and_then(|i| i.key.as_ref())
-                        .map(|k| k.identity.clone())
-                        .unwrap_or_default(),
-                    agent: latest.map(|r| r.agent.clone()).unwrap_or_default(),
-                }
-            })
-            .collect(),
     }
 }
 
@@ -839,6 +804,7 @@ pub(crate) async fn run(ctx: &Ctx, global: &super::Global, args: Args) -> Result
         ConflictCommand::Release(args) => Box::pin(assign::release(ctx, args)).await,
         ConflictCommand::Assign(args) => Box::pin(assign::assign(ctx, args)).await,
         ConflictCommand::Take(args) => Box::pin(assign::take(ctx, args)).await,
+        ConflictCommand::Allow(args) => Box::pin(assign::allow(ctx, args)).await,
     }
 }
 
@@ -881,15 +847,15 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
             revision,
             paths: args.paths,
             hunks: args.hunks,
+            policy_input: args.policy_input,
             ..GetConflictRequest::default()
         })))
         .await
         .map_err(|error| advice.refine(error))?;
     let conflict = found.conflict.unwrap_or_default();
     if args.policy_input {
-        let input = PolicyInput {
-            conflict: policy_input(&conflict),
-        };
+        let input: PolicyInput = serde_json::from_str(&found.policy_input)
+            .map_err(|_| super::repo::missing("policy input"))?;
         return ctx.out.object_with(&input, |input| input);
     }
     let shown = Conflict::from(&conflict);
@@ -925,83 +891,5 @@ mod tests {
         for n in 1..=5 {
             assert!(value_type_name(n).is_some_and(|name| name != json::UNKNOWN));
         }
-    }
-
-    #[test]
-    fn policy_input_takes_sides_and_paths() {
-        let record = v1::ProvenanceRecord {
-            agent: "bot".into(),
-            identity: Some(v1::KeyIdentity {
-                key: Some(v1::SessionKey {
-                    identity: "alice".into(),
-                    ..v1::SessionKey::default()
-                }),
-                ..v1::KeyIdentity::default()
-            }),
-            ..v1::ProvenanceRecord::default()
-        };
-        let side = |index: u32,
-                    change: &str,
-                    attribution: v1::ConflictAttribution,
-                    record: Option<v1::ProvenanceRecord>| v1::ConflictTerm {
-            index,
-            role: v1::ConflictTermRole::Side.into(),
-            source: Some(v1::ConflictSource {
-                change_id: change.into(),
-                attribution: attribution.into(),
-                ..v1::ConflictSource::default()
-            }),
-            provenance: record.map(|record| v1::ConflictSideProvenance {
-                latest_record: Some(record),
-                ..v1::ConflictSideProvenance::default()
-            }),
-            ..v1::ConflictTerm::default()
-        };
-        let conflict = v1::Conflict {
-            change: Some(v1::Change {
-                change_id: "c".into(),
-                ..v1::Change::default()
-            }),
-            terms: vec![
-                side(
-                    0,
-                    "a",
-                    v1::ConflictAttribution::Verified,
-                    Some(record.clone()),
-                ),
-                v1::ConflictTerm {
-                    index: 1,
-                    role: v1::ConflictTermRole::Base.into(),
-                    ..v1::ConflictTerm::default()
-                },
-                side(2, "b", v1::ConflictAttribution::Label, Some(record)),
-            ],
-            files: vec![v1::ConflictFile {
-                path: "docs/a.md".into(),
-                ..v1::ConflictFile::default()
-            }],
-            ..v1::Conflict::default()
-        };
-        let input = policy_input(&conflict);
-        assert_eq!(input.change_id, "c");
-        assert_eq!(input.paths, ["docs/a.md"]);
-        assert_eq!(input.sides.len(), 2);
-        assert_eq!(
-            (
-                input.sides[0].change_id.as_str(),
-                input.sides[0].identity.as_str(),
-                input.sides[0].agent.as_str()
-            ),
-            ("a", "alice", "bot")
-        );
-        // A side only its label names says nothing.
-        assert_eq!(
-            (
-                input.sides[1].change_id.as_str(),
-                input.sides[1].identity.as_str(),
-                input.sides[1].agent.as_str()
-            ),
-            ("", "", "")
-        );
     }
 }

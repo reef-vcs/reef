@@ -459,6 +459,7 @@ pub(super) async fn assign(
         }
         Some(v1::assign_conflict_request::Target::Queue(true)) => assign::Target::Queue,
         Some(v1::assign_conflict_request::Target::Take(true)) => assign::Target::Take,
+        Some(v1::assign_conflict_request::Target::Allow(true)) => assign::Target::Allow,
         _ => assign::Target::Priority,
     };
     let which = named(state, &target, &request.assignment, None).await?;
@@ -470,6 +471,7 @@ pub(super) async fn assign(
             expected: request.expected_conflict_id.trim(),
             target: &to,
             priority: request.priority,
+            attempts: request.attempts,
             reason: &request.reason,
         },
         &caller,

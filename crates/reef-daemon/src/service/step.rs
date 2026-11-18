@@ -94,6 +94,17 @@ pub(crate) async fn of_workspace(
             .has_lifecycle(repo)
             .inspect_err(|error| warn(error))
             .unwrap_or(false);
+    // R3.28: a conflict that waits for a person is the person's to move.
+    let blocked = (change.conflict || conflicted > 0)
+        && state
+            .db
+            .assignment_of_change(repo, &change.change_id)
+            .inspect_err(|error| warn(error))
+            .ok()
+            .flatten()
+            .is_some_and(|row| {
+                row.closed_at.is_none() && row.state == crate::assign::State::Blocked.as_str()
+            });
     let automatic = lifecycle.state() == LifecycleState::Proposed
         && state
             .automatic
@@ -103,7 +114,7 @@ pub(crate) async fn of_workspace(
             });
     Some(Stepped {
         step: step(
-            &change, &lifecycle, changed, conflicted, proposals, automatic,
+            &change, &lifecycle, changed, conflicted, proposals, automatic, blocked,
         ),
         lifecycle,
         changed_file_count: changed,
@@ -165,7 +176,8 @@ async fn read_facts(
 /// matches. `proposals` is whether the repository lands through
 /// proposals; `automatic`, whether the automatic service will land a
 /// proposal with no request (R3.45): its destination says
-/// `[landing] automatic = true` and the service has not given up on it.
+/// `[landing] automatic = true` and the service has not given up on it;
+/// `blocked`, whether the change's conflict waits for a person (R3.28).
 pub(crate) fn step(
     change: &v1::Change,
     lifecycle: &v1::ChangeLifecycle,
@@ -173,9 +185,14 @@ pub(crate) fn step(
     conflicted: u32,
     proposals: bool,
     automatic: bool,
+    blocked: bool,
 ) -> ChangeStep {
     if change.conflict || conflicted > 0 {
-        return ChangeStep::Resolve;
+        return if blocked {
+            ChangeStep::Ask
+        } else {
+            ChangeStep::Resolve
+        };
     }
     match lifecycle.state() {
         LifecycleState::Queued => return ChangeStep::Wait,
@@ -309,11 +326,30 @@ mod tests {
         for (change, lifecycle, changed, conflicted, proposals, automatic, expected) in rows {
             assert_eq!(
                 step(
-                    change, &lifecycle, changed, conflicted, proposals, automatic
+                    change, &lifecycle, changed, conflicted, proposals, automatic, false
                 ),
                 expected,
                 "{change:?} {lifecycle:?} {changed} {conflicted} {proposals} {automatic}"
             );
         }
+    }
+
+    /// R3.28: a conflict that waits for a person asks, and only a conflict.
+    #[test]
+    fn a_blocked_conflict_asks() {
+        let draft = lifecycle(LifecycleState::Draft, false);
+        let described = change("Fix the parser\n", false);
+        let conflicted = v1::Change {
+            conflict: true,
+            ..described.clone()
+        };
+        assert_eq!(
+            step(&conflicted, &draft, 3, 1, true, false, true),
+            ChangeStep::Ask
+        );
+        assert_eq!(
+            step(&described, &draft, 3, 0, true, false, true),
+            ChangeStep::Propose
+        );
     }
 }

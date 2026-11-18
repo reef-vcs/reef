@@ -42,8 +42,8 @@ pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
 };
 pub use format::{
-    Checks, Diagnostic, HistorySettings, LandingSettings, Message, POLICY_FILES, Policy, Tier,
-    TrailerSet, VERSION, valid_remote_name,
+    Checks, DEFAULT_ATTEMPTS, DEFAULT_TIER, Diagnostic, HistorySettings, LandingSettings, Message,
+    POLICY_FILES, Policy, Tier, TrailerSet, VERSION, valid_remote_name,
 };
 pub use input::{Batch, Case, ConflictInput, Input};
 
@@ -51,12 +51,13 @@ pub use input::{Batch, Case, ConflictInput, Input};
 pub const POLICY_PATH: &str = "reef-policy.toml";
 
 /// The built-in rules, in the order every evaluation reports them.
-pub const BUILTIN_RULES: [&str; 5] = [
+pub const BUILTIN_RULES: [&str; 6] = [
     "builtin:input",
     "builtin:conflicts",
     "builtin:description",
     "builtin:policy-file",
     "builtin:owners",
+    "builtin:resolution",
 ];
 
 /// The most touched paths (and files) a policy judges; a larger change is
@@ -203,6 +204,7 @@ mod tests {
                 "builtin:description",
                 "builtin:policy-file",
                 "builtin:owners",
+                "builtin:resolution",
                 "tests",
                 "keys"
             ]

@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 38;
+pub const API_REVISION: u32 = 39;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -166,6 +166,13 @@ pub const API_DIGESTS: &[&str] = &[
     // #262: `ChangeStep`, `Workspace.step`, `Workspace.lifecycle`,
     // `Workspace.conflicted_path_count` and `GetWorkspaceRequest.sync_first`.
     "09a5de186cba0dafbdece039e519e076a8d8a0f25ce309bdde3ecb7482a54a19",
+    // R3.28: `ConflictTier`, `ConflictTierDecision`, `ConflictResolution`,
+    // the BLOCKED state and ASK, ATTEMPTS and ALLOWED reasons, the tier
+    // fields of `ConflictAssignment`, `AssignConflictRequest.allow` and
+    // `attempts`, `GetConflictRequest.policy_input` and its response's,
+    // `ProposalEntry.resolutions`, `PolicyInputSummary.resolutions` and
+    // `CHANGE_STEP_ASK`.
+    "acb5566319e010513beec2fc78852fc1ce8eaa8bfe6a417a8c47bc4181605991",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -834,6 +841,17 @@ pub mod error {
     /// `AssignConflict` with `take` from an agent: a person takes a
     /// conflict over, an agent claims it (R3.27).
     pub const TAKE_NEEDS_PERSON: &str = "TAKE_NEEDS_PERSON";
+    /// A claim of, or an agent's assignment of, a conflict that waits for
+    /// a person (R3.28): its tier is `ask` with no go-ahead, or its
+    /// attempts are used up. Metadata: `assignment`, `blocked` (`ask` or
+    /// `attempts`), `attempts`, `limit`.
+    pub const ASSIGNMENT_BLOCKED: &str = "ASSIGNMENT_BLOCKED";
+    /// `AssignConflict` with `allow` or `attempts` from an agent: a person
+    /// gives the go-ahead (R3.28).
+    pub const ALLOW_NEEDS_PERSON: &str = "ALLOW_NEEDS_PERSON";
+    /// `AssignConflict.attempts` outside 1 to 20 (R3.28). Metadata: `min`,
+    /// `max`.
+    pub const INVALID_ATTEMPTS: &str = "INVALID_ATTEMPTS";
     /// An `expected_conflict_id` that is not the assignment's conflict
     /// (R3.27). Metadata: `conflict_id`.
     pub const CONFLICT_CHANGED: &str = "CONFLICT_CHANGED";

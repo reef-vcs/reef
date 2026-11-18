@@ -149,6 +149,50 @@ reef conflict assignment <id|revision>   # one, with its events
 
 Through the API, `ConflictService.ListConflictAssignments` and `GetConflictAssignment` (READ) read them; `ClaimConflict`, `ReleaseConflict` and `AssignConflict` (WRITE) change them. Each change is an event, and an operation of kind `conflict-assignment` announces it: `reef op watch`, `SubscribeOperations` and MCP's `wait_for_operations` see it, filtered by change or by the owner's workspace. Undo refuses these operations; release or assign instead. A `jj undo` in your own checkout right after a `jj rebase` that conflicted may undo the daemon's assignment operation, which changes nothing: use `jj op log` and `jj op revert <id>` to undo the rebase. A wide conflict's id changes at every snapshot of a partial resolution; its assignment records at most one `changed` event a minute. GC deletes a closed assignment, with its events, 30 days after it closed.
 
+## Tiers and attempts
+
+Policy decides how far an agent may go with a conflict on its own ([ADR 0082](adr/0082-resolution-tiers-and-attempts.md)). The `[conflicts]` table of the `reef-policy.toml` at `trunk()` gives each conflict a **tier** and an **attempt cap** ([policy](policy.md#conflict-tiers)):
+
+| Tier | Before resolving | Landing the resolution |
+| --- | --- | --- |
+| `land` | nothing | the policy's other rules, as for any change |
+| `approve` (the default) | nothing | also a person's sign-off on the resolved tree |
+| `ask` | a person's go-ahead | also a person's sign-off on the resolved tree |
+
+The daemon looks the tier up when an assignment opens, when its conflict id changes, and when the policy at `trunk()` changes, from the conflict's paths and each `verified` side's identity, agent and actor (`reef conflict show --policy-input` prints that input). No policy file gives the defaults, `approve` and 3 attempts. An invalid policy, a `trunk()` that cannot be read, a conflict wider than 10,000 paths, or a lookup that fails, gives `ask`, with the error on the assignment; a failed lookup is tried again a minute later. Under the same policy a conflict that narrows (its resolver fixed the files a strict rule covers first) keeps the strictest tier and the smallest cap it had: the resolver's own progress never lifts a requirement. A new tier never takes a conflict from the resolver working on it: it applies at the next hand-off and when the conflict goes, and only a person, or a new policy at `trunk()`, lets a blocked conflict go on.
+
+### Attempts
+
+An **attempt** is one resolver's turn. It starts when a resolver is handed the conflict: its default owner when the assignment opens or reopens (a resolution undone within 24 hours uses one), a claim, or an assignment to a workspace. The same agent carrying on is the same attempt: a follow to its other session, or its return to a conflict nobody claimed. A resolution that later fails its checks or is declined is ordinary work by then, not a conflict attempt. `attempts` counts them; `attempt_limit` is the cap plus what people granted.
+
+### Blocked: waiting for a person
+
+A conflict that may not start another attempt is `blocked`, with its reason:
+
+- `ask`: its tier is `ask` and no person gave the go-ahead. It is blocked from the start, with the owner it would have gone to kept, so that agent's `reef status` lists it and its `reef here` says `ask`.
+- `attempts`: its last attempt ended (the resolver released it, or its session ended past its grace) and the limit is reached. It goes here instead of the queue.
+
+A blocked conflict is out of the queue, an agent's claim or assignment of it is refused (`ASSIGNMENT_BLOCKED`), and `reef here` tells the agent on its change to ask a person and not to edit the conflicted files. Reef does not stop an agent writing its own workspace: a conflict resolved while blocked closes like any other, and its resolution lands only with a person's sign-off.
+
+A person moves it on:
+
+```sh
+reef conflict assignments --state blocked    # what waits for a person, and why
+reef conflict allow <id|revision>            # the go-ahead: to its owner if live, else the queue
+reef conflict allow <id> --attempts 2        # out of attempts: two more
+reef conflict take <id>                      # or take it over
+```
+
+The go-ahead is once per conflict and covers its attempts up to the limit; a repository that wants to be asked before every attempt writes `attempts = 1` on its `ask` rule. A person's `reef conflict assign --to` or `--queue` is a go-ahead too, and grants one attempt when none is left. `allow` and `--attempts` are refused to a caller that names an agent and through the remote listener.
+
+### Resolutions
+
+When an assignment closes `resolved`, the daemon records whether landing the change needs a person's sign-off: `approval`. It does when the resolver is not a person (the resolving session's actor is not `human`, and the conflict was not `taken`, or an agent's session wrote the resolution anyway) and the tier is not `land`, or the conflict was blocked when it was resolved. A resolution written outside Reef (the jj CLI) has no known resolver and is judged by its tier.
+
+A resolution is marked in the proposal flow: `reef proposal list` and `ListProposals` carry each resolution of the change (`ProposalEntry.resolutions`), and `reef proposal show` prints one line per resolution with its tier, attempts, whether it needs a sign-off, and the conflicted commit, which `reef conflict show -r <commit>` still reads for both sides and their provenance. Policy sees them as `change.resolutions`, and the built-in rule `builtin:resolution` blocks a change with a resolution that needs approval until a person's `signoff` is on its tree ([policy](policy.md#built-in-rules)). The gate also counts a resolution the daemon has not recorded yet: a change whose judged commit no longer carries the conflict while its assignment is still open is judged as the close will record it.
+
+A resolution moved into another change (the conflicted change abandoned and its content written anew, or squashed into another change) leaves no record; the new change is ordinary work under the policy's other rules.
+
 ## Limits
 
 | What | Limit |
@@ -169,4 +213,7 @@ Through the API, `ConflictService.ListConflictAssignments` and `GetConflictAssig
 | Events per assignment | 1,000 |
 | Grace before an ended owner's conflict is queued | 5 minutes |
 | Window in which the same conflict reopens its assignment | 24 hours |
-| Closed assignments kept | 30 days |
+| Closed assignments kept | 30 days; a resolution awaiting a person's sign-off, while its change is visible and not landed |
+| Tiers looked up again per look (a changed conflict or policy, or a lookup that failed a minute ago) | 64; new conflicts are always looked up |
+| Conflicted paths in a policy input | 10,000; a wider conflict is `ask` |
+| Attempts one grant adds | 1 to 20 |

@@ -409,6 +409,9 @@ pub struct ProposalHistory<'a> {
     /// What the automatic service is doing about it (R3.45).
     #[serde(skip_serializing_if = "Option::is_none")]
     automatic: Option<AutomaticStatus<'a>>,
+    /// The conflicts it resolved (R3.28), in full.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    resolutions: &'a [json::ConflictResolution],
 }
 
 impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
@@ -422,6 +425,7 @@ impl<'a> From<&'a json::ProposalHistory> for ProposalHistory<'a> {
                 .collect(),
             stack: history.stack.iter().map(Change::from).collect(),
             automatic: history.automatic.as_ref().map(AutomaticStatus::from),
+            resolutions: &history.resolutions,
         }
     }
 }
